@@ -90,12 +90,15 @@ export class MongoIndexCollector implements IndexCollector {
       .collection(collection)
       .aggregate([{ $indexStats: {} }])
       .toArray();
-    return indexStat.array().parse(raw).map((doc) => ({
-      indexName: doc.name,
-      host: doc.host,
-      ops: doc.accesses.ops,
-      since: doc.accesses.since.toISOString(),
-    }));
+    return indexStat
+      .array()
+      .parse(raw)
+      .map((doc) => ({
+        indexName: doc.name,
+        host: doc.host,
+        ops: doc.accesses.ops,
+        since: doc.accesses.since.toISOString(),
+      }));
   }
 
   async indexSizes(database: string, collection: string): Promise<Record<string, number>> {

@@ -5,6 +5,7 @@ dist/
 .turbo/
 .vite/
 coverage/
+graphify-out/
 *.log
 .env
 .env.*

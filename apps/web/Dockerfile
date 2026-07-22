@@ -12,4 +12,4 @@ ENV NODE_ENV=production
 # TODO: slim with `turbo prune --docker`; copying the full tree for now.
 COPY --from=build /app ./
 EXPOSE 3000
-CMD ["node", "apps/web/server-entry.mjs"]
+CMD ["node", "apps/web/.output/server/index.mjs"]

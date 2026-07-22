@@ -1,8 +1,8 @@
 import "reflect-metadata";
 import { NestFactory } from "@nestjs/core";
 import { FastifyAdapter, type NestFastifyApplication } from "@nestjs/platform-fastify";
-import { auth } from "./auth";
 import { AppModule } from "./app.module";
+import { auth } from "./auth";
 
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create<NestFastifyApplication>(AppModule, new FastifyAdapter());
@@ -19,7 +19,8 @@ async function bootstrap(): Promise<void> {
         if (typeof value === "string") headers.set(key, value);
         else if (Array.isArray(value)) for (const item of value) headers.append(key, item);
       }
-      const hasBody = request.method !== "GET" && request.method !== "HEAD" && request.body !== undefined;
+      const hasBody =
+        request.method !== "GET" && request.method !== "HEAD" && request.body !== undefined;
       const response = await auth.handler(
         new Request(url, {
           method: request.method,

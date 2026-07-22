@@ -21,7 +21,9 @@ function serializeSpec(spec: IndexSpec): Record<string, unknown> {
 function groupByIndex(usage: IndexUsageStat[]): Record<string, IndexUsageStat[]> {
   const grouped: Record<string, IndexUsageStat[]> = {};
   for (const stat of usage) {
-    (grouped[stat.indexName] ??= []).push(stat);
+    const bucket = grouped[stat.indexName] ?? [];
+    bucket.push(stat);
+    grouped[stat.indexName] = bucket;
   }
   return grouped;
 }

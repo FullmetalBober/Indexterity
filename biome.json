@@ -10,6 +10,7 @@
       "!**/.output",
       "!**/.nitro",
       "!**/.turbo",
+      "!**/graphify-out",
       "!**/drizzle",
       "!**/routeTree.gen.ts"
     ]
