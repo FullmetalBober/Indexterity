@@ -6,8 +6,9 @@ import { defineConfig } from "vite";
 
 export default defineConfig({
   server: { port: 3000, host: true },
-  // Internal packages ship CommonJS; let Vite transform them for SSR (dev + nitro).
-  ssr: { noExternal: [/^@repo\//, "@ts-rest/core"] },
+  // Bundle internal + CJS deps into the SSR output so nitro never has to trace
+  // them as externals (their exports maps break its dependency copy).
+  ssr: { noExternal: [/^@repo\//, "@ts-rest/core", "zod"] },
   plugins: [
     tanstackStart(),
     nitroV2Plugin(),
