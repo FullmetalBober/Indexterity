@@ -17,6 +17,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@repo/contracts": "*"
+    "@repo/contracts": "*",
+    "zod": "^3.25.76"
   }
 }

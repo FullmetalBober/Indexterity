@@ -10,7 +10,7 @@ import {
 import { MongoConnection } from "@repo/mongo";
 import { makeWorkerUtils, runOnce } from "graphile-worker";
 import { masterKeyBytes, requiredEnv } from "./env";
-import { taskList } from "./jobs/collect";
+import { taskList } from "./jobs/tasks";
 
 // One-shot demo: seed a demo Mongo + cluster row, enqueue collect, run it once,
 // print the snapshots written. Not part of the production flow.

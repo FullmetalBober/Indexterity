@@ -9,6 +9,7 @@
     "start": "node dist/main.js",
     "worker": "node -r @swc-node/register src/worker.ts",
     "collect:demo": "node -r @swc-node/register src/dev-collect.ts",
+    "classify:demo": "node -r @swc-node/register src/dev-classify.ts",
     "auth:demo": "node -r @swc-node/register src/dev-auth.ts",
     "typecheck": "tsc --noEmit"
   },

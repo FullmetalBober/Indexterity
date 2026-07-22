@@ -28,14 +28,6 @@ function groupByIndex(usage: IndexUsageStat[]): Record<string, IndexUsageStat[]>
   return grouped;
 }
 
-function clusterIdFromPayload(payload: unknown): string {
-  if (typeof payload === "object" && payload !== null && "clusterId" in payload) {
-    const value = payload.clusterId;
-    if (typeof value === "string") return value;
-  }
-  throw new Error("collect job payload missing string clusterId");
-}
-
 // Connect to a cluster's Mongo (unsealing its conn string), then snapshot every
 // index's spec + size + per-member usage into Postgres. Returns rows written.
 export async function collectCluster(clusterId: string): Promise<number> {
@@ -87,10 +79,3 @@ export async function collectCluster(clusterId: string): Promise<number> {
     await conn.close();
   }
 }
-
-// graphile-worker task registry (see worker.ts).
-export const taskList = {
-  collect: async (payload: unknown): Promise<void> => {
-    await collectCluster(clusterIdFromPayload(payload));
-  },
-};
