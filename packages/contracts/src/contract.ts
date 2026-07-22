@@ -1,6 +1,6 @@
 import { initContract } from "@ts-rest/core";
 import { z } from "zod";
-import { cluster, recommendation } from "./schemas";
+import { cluster, recommendation } from "./schemas.js";
 
 const c = initContract();
 

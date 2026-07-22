@@ -12,7 +12,8 @@
       "!**/.turbo",
       "!**/graphify-out",
       "!**/drizzle",
-      "!**/routeTree.gen.ts"
+      "!**/routeTree.gen.ts",
+      "!**/*.css"
     ]
   },
   "formatter": {
@@ -39,5 +40,15 @@
   "assist": {
     "enabled": true,
     "actions": { "source": { "organizeImports": "on" } }
-  }
+  },
+  "overrides": [
+    {
+      "includes": ["apps/api/**"],
+      "linter": {
+        "rules": {
+          "style": { "useImportType": "off" }
+        }
+      }
+    }
+  ]
 }
