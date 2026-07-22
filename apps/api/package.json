@@ -1,0 +1,36 @@
+{
+  "name": "@repo/api",
+  "version": "0.0.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "build": "swc src -d dist --strip-leading-paths",
+    "dev": "node --watch -r @swc-node/register src/main.ts",
+    "start": "node dist/main.js",
+    "worker": "node -r @swc-node/register src/worker.ts",
+    "collect:demo": "node -r @swc-node/register src/dev-collect.ts",
+    "auth:demo": "node -r @swc-node/register src/dev-auth.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@nestjs/common": "^11.1.28",
+    "@nestjs/config": "^4.0.4",
+    "@nestjs/core": "^11.1.28",
+    "@nestjs/platform-fastify": "^11.1.28",
+    "@repo/auth": "*",
+    "@repo/contracts": "*",
+    "@repo/core": "*",
+    "@repo/db": "*",
+    "@repo/mongo": "*",
+    "@ts-rest/core": "^3.52.1",
+    "@ts-rest/nest": "^3.52.1",
+    "graphile-worker": "^0.17.3",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2"
+  },
+  "devDependencies": {
+    "@swc-node/register": "^1.12.1",
+    "@swc/cli": "^0.8.1",
+    "@swc/core": "^1.15.46"
+  }
+}
