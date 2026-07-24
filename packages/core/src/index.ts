@@ -4,3 +4,4 @@ export * from "./redundancy";
 export * from "./regression";
 export * from "./safety";
 export * from "./types";
+export * from "./workload";

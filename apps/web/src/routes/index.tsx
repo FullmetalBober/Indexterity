@@ -44,10 +44,10 @@ export const Route = createFileRoute("/")({
   component: Home,
 });
 
-function badgeVariant(type: string): "secondary" | "destructive" | "default" {
+function badgeVariant(type: string): "secondary" | "destructive" | "default" | "outline" {
   if (type === "DROP_REDUNDANT") return "secondary";
   if (type === "DROP_UNUSED") return "destructive";
-  return "default";
+  return "outline"; // CREATE / UPDATE / MERGE (additive)
 }
 
 function Home() {

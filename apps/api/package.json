@@ -13,6 +13,7 @@
     "apply:demo": "node -r @swc-node/register src/dev-apply.ts",
     "schedule:demo": "node -r @swc-node/register src/dev-schedule.ts",
     "regression:demo": "node -r @swc-node/register src/dev-regression.ts",
+    "suggest:demo": "node -r @swc-node/register src/dev-suggest.ts",
     "auth:demo": "node -r @swc-node/register src/dev-auth.ts",
     "typecheck": "tsc --noEmit"
   },

@@ -1,4 +1,4 @@
-import type { IndexDirection, IndexKey, IndexSpec } from "@repo/core";
+import type { IndexDirection, IndexKey, IndexSpec, QueryShape } from "@repo/core";
 import { z } from "zod";
 import type { MongoConnection } from "./connection";
 
@@ -19,6 +19,7 @@ export interface IndexCollector {
     database: string,
     collection: string,
   ): Promise<{ ops: number; latencyMicros: number }>;
+  collectSlowQueries(database: string, collection: string): Promise<QueryShape[]>;
 }
 
 // Parse driver output at the boundary so nothing downstream sees `any`.
@@ -50,6 +51,13 @@ const latencyStatsDoc = z.object({
 });
 
 const collectionInfo = z.object({ name: z.string() });
+
+// system.profile entry (lenient — only field names are used downstream).
+const profileDoc = z.object({
+  ns: z.string(),
+  planSummary: z.string().optional(),
+  command: z.object({ filter: z.record(z.string(), z.unknown()).optional() }).optional(),
+});
 
 function normalizeDirection(direction: number | string): IndexDirection {
   if (direction === 1 || direction === -1) return direction;
@@ -137,5 +145,33 @@ export class MongoIndexCollector implements IndexCollector {
     if (first === undefined) return { ops: 0, latencyMicros: 0 };
     const parsed = latencyStatsDoc.parse(first);
     return { ops: parsed.latencyStats.reads.ops, latencyMicros: parsed.latencyStats.reads.latency };
+  }
+
+  // Read slow queries from system.profile and aggregate by filter-field shape.
+  // Requires profiler read access (the opt-in workload-analysis trust tier).
+  async collectSlowQueries(database: string, collection: string): Promise<QueryShape[]> {
+    const ns = `${database}.${collection}`;
+    const raw = await this.conn.db(database).collection("system.profile").find({ ns }).toArray();
+    const shapes = new Map<string, { fields: string[]; collscan: boolean; count: number }>();
+    for (const entry of profileDoc.array().parse(raw)) {
+      const filter = entry.command?.filter;
+      if (filter === undefined) continue;
+      const fields = Object.keys(filter).filter((field) => !field.startsWith("$"));
+      if (fields.length === 0) continue;
+      const key = fields.join(",");
+      const collscan = (entry.planSummary ?? "").includes("COLLSCAN");
+      const prev = shapes.get(key);
+      if (prev === undefined) {
+        shapes.set(key, { fields, collscan, count: 1 });
+      } else {
+        prev.count += 1;
+        prev.collscan = prev.collscan || collscan;
+      }
+    }
+    return [...shapes.values()].map((shape) => ({
+      filterFields: shape.fields,
+      collscan: shape.collscan,
+      count: shape.count,
+    }));
   }
 }

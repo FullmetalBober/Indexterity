@@ -164,6 +164,7 @@ export const recommendations = pgTable("recommendations", {
   hiddenAt: timestamp("hidden_at", { withTimezone: true }),
   baselineReadOps: bigint("baseline_read_ops", { mode: "number" }),
   baselineReadLatency: bigint("baseline_read_latency", { mode: "number" }),
+  targetSpec: jsonb("target_spec").$type<{ keys: string[]; retire: string[] }>(),
   createdAt,
   updatedAt,
 });
@@ -199,6 +200,7 @@ export const policies = pgTable("policies", {
     .unique()
     .references(() => clusters.id, { onDelete: "cascade" }),
   autoApply: boolean("auto_apply").notNull().default(false),
+  workloadAnalysis: boolean("workload_analysis").notNull().default(false),
   observeWindowDays: integer("observe_window_days").notNull().default(30),
   maxCollectionSizeBytes: bigint("max_collection_size_bytes", { mode: "number" }),
 });

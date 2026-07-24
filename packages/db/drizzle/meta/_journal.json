@@ -29,6 +29,13 @@
       "when": 1784894041908,
       "tag": "0003_even_king_cobra",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1784903631208,
+      "tag": "0004_condemned_cerise",
+      "breakpoints": true
     }
   ]
 }
