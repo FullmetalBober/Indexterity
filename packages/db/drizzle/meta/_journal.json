@@ -15,6 +15,13 @@
       "when": 1784734972249,
       "tag": "0001_black_liz_osborn",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1784892103877,
+      "tag": "0002_grey_scourge",
+      "breakpoints": true
     }
   ]
 }

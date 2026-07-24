@@ -1,4 +1,5 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useRouter } from "@tanstack/react-router";
+import { createServerFn } from "@tanstack/react-start";
 import { Badge } from "../components/ui/badge";
 import {
   Table,
@@ -9,6 +10,17 @@ import {
   TableRow,
 } from "../components/ui/table";
 import { api } from "../lib/api";
+
+// Runs on the web server (not the browser) — calls the api with no CORS.
+const approveRecommendation = createServerFn({ method: "POST" })
+  .validator((id: unknown): string => {
+    if (typeof id !== "string") throw new Error("id must be a string");
+    return id;
+  })
+  .handler(async ({ data }) => {
+    const result = await api.approveRecommendation({ params: { id: data }, body: {} });
+    return { ok: result.status === 200 };
+  });
 
 export const Route = createFileRoute("/")({
   // Runs on the server for the initial render — no CORS, data ready in the HTML.
@@ -31,7 +43,13 @@ function badgeVariant(type: string): "secondary" | "destructive" | "default" {
 
 function Home() {
   const { cluster, recommendations } = Route.useLoaderData();
+  const router = useRouter();
   const totalSaved = recommendations.reduce((sum, rec) => sum + rec.estimatedBytesSaved, 0);
+
+  async function onApprove(id: string) {
+    await approveRecommendation({ data: id });
+    await router.invalidate();
+  }
 
   return (
     <main className="mx-auto max-w-4xl p-8">
@@ -57,6 +75,7 @@ function Home() {
             <TableHead>Index</TableHead>
             <TableHead>Usage</TableHead>
             <TableHead>Rationale</TableHead>
+            <TableHead>Action</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -71,6 +90,21 @@ function Home() {
               <TableCell className="font-mono text-xs">{rec.indexName}</TableCell>
               <TableCell>{rec.usageClass ?? "—"}</TableCell>
               <TableCell className="text-muted-foreground">{rec.rationale}</TableCell>
+              <TableCell>
+                {rec.state === "PROPOSED" ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void onApprove(rec.id);
+                    }}
+                    className="rounded-md bg-primary px-2 py-1 text-primary-foreground text-xs"
+                  >
+                    Approve
+                  </button>
+                ) : (
+                  <span className="text-muted-foreground text-xs">{rec.state}</span>
+                )}
+              </TableCell>
             </TableRow>
           ))}
         </TableBody>

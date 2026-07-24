@@ -10,6 +10,7 @@
     "worker": "node -r @swc-node/register src/worker.ts",
     "collect:demo": "node -r @swc-node/register src/dev-collect.ts",
     "classify:demo": "node -r @swc-node/register src/dev-classify.ts",
+    "apply:demo": "node -r @swc-node/register src/dev-apply.ts",
     "auth:demo": "node -r @swc-node/register src/dev-auth.ts",
     "typecheck": "tsc --noEmit"
   },

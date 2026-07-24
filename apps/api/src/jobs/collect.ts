@@ -5,7 +5,7 @@ import { masterKeyBytes, requiredEnv } from "../env";
 
 const SYSTEM_DATABASES = new Set(["admin", "local", "config"]);
 
-function serializeSpec(spec: IndexSpec): Record<string, unknown> {
+export function serializeSpec(spec: IndexSpec): Record<string, unknown> {
   return {
     name: spec.name,
     keys: spec.keys.map((key) => ({ field: key.field, direction: key.direction })),

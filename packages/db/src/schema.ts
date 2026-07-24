@@ -161,6 +161,7 @@ export const recommendations = pgTable("recommendations", {
   indexName: text("index_name").notNull(),
   rationale: text("rationale").notNull(),
   estimatedBytesSaved: bigint("estimated_bytes_saved", { mode: "number" }).notNull().default(0),
+  hiddenAt: timestamp("hidden_at", { withTimezone: true }),
   createdAt,
   updatedAt,
 });

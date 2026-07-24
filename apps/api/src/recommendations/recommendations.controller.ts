@@ -1,6 +1,6 @@
 import { Controller } from "@nestjs/common";
 import { type Cluster, contract, type Recommendation } from "@repo/contracts";
-import { clusters, eq, recommendations } from "@repo/db";
+import { clusters, desc, eq, recommendations } from "@repo/db";
 import { TsRestHandler, tsRestHandler } from "@ts-rest/nest";
 import { DatabaseService } from "../db/database.service";
 
@@ -38,7 +38,7 @@ export class RecommendationsController {
   @TsRestHandler(contract.listClusters)
   listClusters() {
     return tsRestHandler(contract.listClusters, async () => {
-      const rows = await this.database.db.select().from(clusters);
+      const rows = await this.database.db.select().from(clusters).orderBy(desc(clusters.createdAt));
       return { status: 200, body: rows.map(toCluster) };
     });
   }
