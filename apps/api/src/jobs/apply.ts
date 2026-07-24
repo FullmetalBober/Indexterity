@@ -1,8 +1,7 @@
 import { actions, and, createDatabase, eq, recommendations } from "@repo/db";
-import { MongoIndexCollector, MongoIndexExecutor } from "@repo/mongo";
+import { MongoIndexCollector, MongoIndexExecutor, serializeSpec } from "@repo/mongo";
 import { requiredEnv } from "../env";
 import { openClusterMongo } from "./cluster-connection";
-import { serializeSpec } from "./collect";
 import { preflightDrop } from "./preflight";
 
 const DROP_TYPES = new Set(["DROP_UNUSED", "DROP_REDUNDANT", "MERGE"]);

@@ -11,6 +11,9 @@ export interface ClusterMongo {
 export async function openClusterMongo(db: Database, clusterId: string): Promise<ClusterMongo> {
   const [cluster] = await db.select().from(clusters).where(eq(clusters.id, clusterId)).limit(1);
   if (cluster === undefined) throw new Error(`cluster not found: ${clusterId}`);
+  if (cluster.sealedDek === null || cluster.sealedData === null) {
+    throw new Error(`cluster ${clusterId} has no stored credentials (agent mode)`);
+  }
   const connString = new TextDecoder().decode(
     await open(
       { dek: cluster.sealedDek, data: cluster.sealedData },

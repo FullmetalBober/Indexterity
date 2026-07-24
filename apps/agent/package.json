@@ -1,0 +1,20 @@
+{
+  "name": "@repo/agent",
+  "version": "0.0.0",
+  "private": true,
+  "type": "commonjs",
+  "main": "./dist/main.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "node --watch -r @swc-node/register src/main.ts",
+    "start": "node dist/main.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@repo/mongo": "*"
+  },
+  "devDependencies": {
+    "@swc-node/register": "^1.12.1",
+    "@types/node": "^26.1.1"
+  }
+}

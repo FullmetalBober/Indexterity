@@ -36,6 +36,13 @@
       "when": 1784903631208,
       "tag": "0004_condemned_cerise",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1784905295349,
+      "tag": "0005_previous_black_cat",
+      "breakpoints": true
     }
   ]
 }

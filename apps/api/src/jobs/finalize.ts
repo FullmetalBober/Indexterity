@@ -1,9 +1,8 @@
 import { isRegression } from "@repo/core";
 import { actions, and, createDatabase, eq, policies, recommendations, roiMetrics } from "@repo/db";
-import { MongoIndexCollector, MongoIndexExecutor } from "@repo/mongo";
+import { MongoIndexCollector, MongoIndexExecutor, serializeSpec } from "@repo/mongo";
 import { requiredEnv } from "../env";
 import { openClusterMongo } from "./cluster-connection";
-import { serializeSpec } from "./collect";
 import { preflightDrop } from "./preflight";
 
 const DEFAULT_OBSERVE_DAYS = 30;
