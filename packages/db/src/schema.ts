@@ -202,6 +202,8 @@ export const policies = pgTable("policies", {
     .references(() => clusters.id, { onDelete: "cascade" }),
   autoApply: boolean("auto_apply").notNull().default(false),
   workloadAnalysis: boolean("workload_analysis").notNull().default(false),
+  // Auto-approve + build brand-new indexes on critical (large) collections.
+  instantCreate: boolean("instant_create").notNull().default(false),
   observeWindowDays: integer("observe_window_days").notNull().default(30),
   maxCollectionSizeBytes: bigint("max_collection_size_bytes", { mode: "number" }),
 });

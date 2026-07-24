@@ -1,0 +1,1 @@
+ALTER TABLE "policies" ADD COLUMN "instant_create" boolean DEFAULT false NOT NULL;
