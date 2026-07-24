@@ -2,6 +2,7 @@ import type { JobHelpers } from "graphile-worker";
 import { applyCluster } from "./apply";
 import { classifyCluster } from "./classify";
 import { collectCluster } from "./collect";
+import { applyCreatesForCluster } from "./create";
 import { dispatchToAllClusters } from "./dispatch";
 import { finalizeCluster } from "./finalize";
 import { clusterIdFromPayload } from "./payload";
@@ -23,7 +24,9 @@ export const taskList = {
     await suggestForCluster(clusterIdFromPayload(payload));
   },
   apply: async (payload: unknown): Promise<void> => {
-    await applyCluster(clusterIdFromPayload(payload));
+    const clusterId = clusterIdFromPayload(payload);
+    await applyCluster(clusterId);
+    await applyCreatesForCluster(clusterId);
   },
   finalize: async (payload: unknown): Promise<void> => {
     await finalizeCluster(clusterIdFromPayload(payload));
