@@ -54,19 +54,6 @@ export const recommendation = z.object({
 });
 export type Recommendation = z.infer<typeof recommendation>;
 
-// Payload an agent pushes to the control plane (index snapshots collected locally).
-export const snapshotInput = z.array(
-  z.object({
-    database: z.string(),
-    collection: z.string(),
-    indexName: z.string(),
-    spec: z.record(z.string(), z.unknown()),
-    sizeBytes: z.number().int().nonnegative(),
-    perMember: z.array(z.object({ member: z.string(), ops: z.number().int().nonnegative() })),
-  }),
-);
-export type SnapshotInput = z.infer<typeof snapshotInput>;
-
 export const clusterRoi = z.object({
   clusterId: z.string().uuid(),
   freedBytes: z.number().int().nonnegative(),

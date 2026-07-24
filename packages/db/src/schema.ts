@@ -129,11 +129,9 @@ export const clusters = pgTable("clusters", {
   name: text("name").notNull(),
   connectionMode: connectionMode("connection_mode").notNull().default("HOSTED_DIRECT"),
   demoMode: boolean("demo_mode").notNull().default(true),
-  // Hosted-direct: the control plane holds the sealed connection string.
-  // Agent mode: creds stay in the customer's agent; these are null + a token is set.
-  sealedDek: bytea("sealed_dek"),
-  sealedData: bytea("sealed_data"),
-  agentToken: text("agent_token").unique(),
+  // The control plane holds the cluster's connection string, envelope-encrypted.
+  sealedDek: bytea("sealed_dek").notNull(),
+  sealedData: bytea("sealed_data").notNull(),
   createdAt,
 });
 

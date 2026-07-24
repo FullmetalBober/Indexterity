@@ -26,6 +26,24 @@ export const contract = c.router({
     responses: { 200: clusterRoi },
     summary: "Realized ROI for a cluster (freed bytes, indexes dropped)",
   },
+  createCluster: {
+    method: "POST",
+    path: "/clusters",
+    body: z.object({ name: z.string().min(1), connectionString: z.string().min(1) }),
+    responses: { 200: cluster },
+    summary: "Connect a cluster; stores its connection string envelope-encrypted",
+  },
+  triggerCollect: {
+    method: "POST",
+    path: "/clusters/:clusterId/collect",
+    pathParams: z.object({ clusterId: z.string().uuid() }),
+    body: z.object({}),
+    responses: {
+      200: z.object({ snapshots: z.number().int(), recommendations: z.number().int() }),
+      404: z.object({ message: z.string() }),
+    },
+    summary: "Collect + classify a cluster now",
+  },
   approveRecommendation: {
     method: "POST",
     path: "/recommendations/:id/approve",

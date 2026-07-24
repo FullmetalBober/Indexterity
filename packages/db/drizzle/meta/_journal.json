@@ -43,6 +43,13 @@
       "when": 1784905295349,
       "tag": "0005_previous_black_cat",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1784906326309,
+      "tag": "0006_equal_speed",
+      "breakpoints": true
     }
   ]
 }
