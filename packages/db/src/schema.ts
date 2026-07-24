@@ -162,6 +162,8 @@ export const recommendations = pgTable("recommendations", {
   rationale: text("rationale").notNull(),
   estimatedBytesSaved: bigint("estimated_bytes_saved", { mode: "number" }).notNull().default(0),
   hiddenAt: timestamp("hidden_at", { withTimezone: true }),
+  baselineReadOps: bigint("baseline_read_ops", { mode: "number" }),
+  baselineReadLatency: bigint("baseline_read_latency", { mode: "number" }),
   createdAt,
   updatedAt,
 });

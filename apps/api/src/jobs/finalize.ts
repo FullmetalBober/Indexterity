@@ -1,3 +1,4 @@
+import { isRegression } from "@repo/core";
 import { actions, and, createDatabase, eq, policies, recommendations, roiMetrics } from "@repo/db";
 import { MongoIndexCollector, MongoIndexExecutor } from "@repo/mongo";
 import { requiredEnv } from "../env";
@@ -7,6 +8,7 @@ import { preflightDrop } from "./preflight";
 
 const DEFAULT_OBSERVE_DAYS = 30;
 const DAY_MS = 86_400_000;
+const REGRESSION_OPTIONS = { factor: 1.5, minWindowOps: 20 };
 
 // HIDDEN drops whose observe window has elapsed -> pre-flight -> drop -> DROPPED.
 // The drop is the only irreversible step. A failed pre-flight during observe
@@ -41,6 +43,26 @@ export async function finalizeCluster(clusterId: string): Promise<number> {
     let dropped = 0;
     let freedBytes = 0;
     for (const rec of due) {
+      // Regression gate: did hiding this index slow the collection's reads
+      // during observe? If so, un-hide and re-propose instead of dropping.
+      if (rec.baselineReadOps !== null && rec.baselineReadLatency !== null) {
+        const current = await collector.readLatency(rec.database, rec.collection);
+        const baseline = { ops: rec.baselineReadOps, latencyMicros: rec.baselineReadLatency };
+        if (isRegression(baseline, current, REGRESSION_OPTIONS)) {
+          await executor.unhide(rec.database, rec.collection, rec.indexName);
+          await db
+            .update(recommendations)
+            .set({ state: "PROPOSED", hiddenAt: null, updatedAt: new Date() })
+            .where(eq(recommendations.id, rec.id));
+          await db.insert(actions).values({
+            recommendationId: rec.id,
+            kind: "DROP",
+            actor: "system",
+            result: "aborted: read-latency regression during observe",
+          });
+          continue;
+        }
+      }
       const check = await preflightDrop(collector, rec);
       if (!check.safe) {
         if (check.spec !== null) {

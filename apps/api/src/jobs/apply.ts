@@ -42,9 +42,17 @@ export async function applyCluster(clusterId: string): Promise<number> {
         continue;
       }
       await executor.hide(rec.database, rec.collection, rec.indexName);
+      // Baseline read latency at hide time — the reference for regression checks.
+      const baseline = await collector.readLatency(rec.database, rec.collection);
       await db
         .update(recommendations)
-        .set({ state: "HIDDEN", hiddenAt: new Date(), updatedAt: new Date() })
+        .set({
+          state: "HIDDEN",
+          hiddenAt: new Date(),
+          baselineReadOps: baseline.ops,
+          baselineReadLatency: baseline.latencyMicros,
+          updatedAt: new Date(),
+        })
         .where(eq(recommendations.id, rec.id));
       await db.insert(actions).values({
         recommendationId: rec.id,

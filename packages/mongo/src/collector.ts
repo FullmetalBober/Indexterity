@@ -15,6 +15,10 @@ export interface IndexCollector {
   listIndexes(database: string, collection: string): Promise<IndexSpec[]>;
   collectUsage(database: string, collection: string): Promise<IndexUsageStat[]>;
   indexSizes(database: string, collection: string): Promise<Record<string, number>>;
+  readLatency(
+    database: string,
+    collection: string,
+  ): Promise<{ ops: number; latencyMicros: number }>;
 }
 
 // Parse driver output at the boundary so nothing downstream sees `any`.
@@ -37,6 +41,12 @@ const indexStat = z.object({
 
 const collStatsDoc = z.object({
   storageStats: z.object({ indexSizes: z.record(z.string(), z.coerce.number()) }),
+});
+
+const latencyStatsDoc = z.object({
+  latencyStats: z.object({
+    reads: z.object({ ops: z.coerce.number(), latency: z.coerce.number() }),
+  }),
 });
 
 const collectionInfo = z.object({ name: z.string() });
@@ -110,5 +120,22 @@ export class MongoIndexCollector implements IndexCollector {
     const first = raw[0];
     if (first === undefined) return {};
     return collStatsDoc.parse(first).storageStats.indexSizes;
+  }
+
+  // Cumulative read latency for the collection ($collStats latencyStats) — the
+  // regression signal during observe. No document data is read.
+  async readLatency(
+    database: string,
+    collection: string,
+  ): Promise<{ ops: number; latencyMicros: number }> {
+    const raw = await this.conn
+      .db(database)
+      .collection(collection)
+      .aggregate([{ $collStats: { latencyStats: {} } }])
+      .toArray();
+    const first = raw[0];
+    if (first === undefined) return { ops: 0, latencyMicros: 0 };
+    const parsed = latencyStatsDoc.parse(first);
+    return { ops: parsed.latencyStats.reads.ops, latencyMicros: parsed.latencyStats.reads.latency };
   }
 }
