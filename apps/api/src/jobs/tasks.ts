@@ -2,11 +2,12 @@ import type { JobHelpers } from "graphile-worker";
 import { applyCluster } from "./apply";
 import { classifyCluster } from "./classify";
 import { collectCluster } from "./collect";
+import { dispatchToAllClusters } from "./dispatch";
 import { finalizeCluster } from "./finalize";
 import { clusterIdFromPayload } from "./payload";
 
-// graphile-worker task registry. collect chains classify on fresh snapshots;
-// apply hides approved drops; finalize drops them once the observe window ends.
+// graphile-worker task registry. Per-cluster tasks (collect/classify/apply/
+// finalize) plus cron dispatchers that fan those out to every cluster.
 export const taskList = {
   collect: async (payload: unknown, helpers: JobHelpers): Promise<void> => {
     const clusterId = clusterIdFromPayload(payload);
@@ -21,5 +22,14 @@ export const taskList = {
   },
   finalize: async (payload: unknown): Promise<void> => {
     await finalizeCluster(clusterIdFromPayload(payload));
+  },
+  scheduleCollect: async (_payload: unknown, helpers: JobHelpers): Promise<void> => {
+    await dispatchToAllClusters("collect", helpers);
+  },
+  scheduleApply: async (_payload: unknown, helpers: JobHelpers): Promise<void> => {
+    await dispatchToAllClusters("apply", helpers);
+  },
+  scheduleFinalize: async (_payload: unknown, helpers: JobHelpers): Promise<void> => {
+    await dispatchToAllClusters("finalize", helpers);
   },
 };

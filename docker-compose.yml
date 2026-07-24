@@ -41,6 +41,10 @@ services:
       DATABASE_URL: postgres://mongo_optimizer:mongo_optimizer@postgres:5432/mongo_optimizer
       API_PORT: "3001"
       BETTER_AUTH_URL: http://localhost:3001
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET}
+      MASTER_KEY: ${MASTER_KEY}
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET}
     ports:
       - "3001:3001"
     volumes:
@@ -65,8 +69,25 @@ services:
     depends_on:
       - api
 
+  # Background worker: runs the cron schedule (collect/apply/finalize per cluster).
+  worker:
+    image: docker.io/library/node:24-slim
+    working_dir: /app
+    command: sh -c "npm install && npx turbo run build --filter=@repo/api^... && npm run worker -w @repo/api"
+    environment:
+      DATABASE_URL: postgres://mongo_optimizer:mongo_optimizer@postgres:5432/mongo_optimizer
+      MASTER_KEY: ${MASTER_KEY}
+      WORKER_CONCURRENCY: "2"
+    volumes:
+      - ./:/app
+      - worker_node_modules:/app/node_modules
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   pgdata:
   mongodata:
   api_node_modules:
   web_node_modules:
+  worker_node_modules:

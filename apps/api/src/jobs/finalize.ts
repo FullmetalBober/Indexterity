@@ -32,6 +32,8 @@ export async function finalizeCluster(clusterId: string): Promise<number> {
 
   const { conn, demoMode } = await openClusterMongo(db, clusterId);
   try {
+    // Demo/read-only clusters never execute writes.
+    if (demoMode) return 0;
     const collector = new MongoIndexCollector(conn);
     const executor = new MongoIndexExecutor(conn, demoMode);
     let dropped = 0;
