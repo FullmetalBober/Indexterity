@@ -8,13 +8,6 @@
     "dev": "node --watch -r @swc-node/register src/main.ts",
     "start": "node dist/main.js",
     "worker": "node -r @swc-node/register src/worker.ts",
-    "collect:demo": "node -r @swc-node/register src/dev-collect.ts",
-    "classify:demo": "node -r @swc-node/register src/dev-classify.ts",
-    "apply:demo": "node -r @swc-node/register src/dev-apply.ts",
-    "schedule:demo": "node -r @swc-node/register src/dev-schedule.ts",
-    "regression:demo": "node -r @swc-node/register src/dev-regression.ts",
-    "suggest:demo": "node -r @swc-node/register src/dev-suggest.ts",
-    "auth:demo": "node -r @swc-node/register src/dev-auth.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
