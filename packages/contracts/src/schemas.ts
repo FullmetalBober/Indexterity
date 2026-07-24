@@ -53,3 +53,10 @@ export const recommendation = z.object({
   createdAt: z.string(),
 });
 export type Recommendation = z.infer<typeof recommendation>;
+
+export const clusterRoi = z.object({
+  clusterId: z.string().uuid(),
+  freedBytes: z.number().int().nonnegative(),
+  indexesDropped: z.number().int().nonnegative(),
+});
+export type ClusterRoi = z.infer<typeof clusterRoi>;

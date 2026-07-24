@@ -28,9 +28,18 @@ export const Route = createFileRoute("/")({
     const clustersResult = await api.listClusters();
     const clusters = clustersResult.status === 200 ? clustersResult.body : [];
     const cluster = clusters[0] ?? null;
-    if (cluster === null) return { cluster, recommendations: [] };
-    const recResult = await api.listRecommendations({ params: { clusterId: cluster.id } });
-    return { cluster, recommendations: recResult.status === 200 ? recResult.body : [] };
+    if (cluster === null) {
+      return { cluster, recommendations: [], roi: { freedBytes: 0, indexesDropped: 0 } };
+    }
+    const [recResult, roiResult] = await Promise.all([
+      api.listRecommendations({ params: { clusterId: cluster.id } }),
+      api.getRoi({ params: { clusterId: cluster.id } }),
+    ]);
+    return {
+      cluster,
+      recommendations: recResult.status === 200 ? recResult.body : [],
+      roi: roiResult.status === 200 ? roiResult.body : { freedBytes: 0, indexesDropped: 0 },
+    };
   },
   component: Home,
 });
@@ -42,9 +51,10 @@ function badgeVariant(type: string): "secondary" | "destructive" | "default" {
 }
 
 function Home() {
-  const { cluster, recommendations } = Route.useLoaderData();
+  const { cluster, recommendations, roi } = Route.useLoaderData();
   const router = useRouter();
-  const totalSaved = recommendations.reduce((sum, rec) => sum + rec.estimatedBytesSaved, 0);
+  const proposed = recommendations.filter((rec) => rec.state === "PROPOSED");
+  const totalSaved = proposed.reduce((sum, rec) => sum + rec.estimatedBytesSaved, 0);
 
   async function onApprove(id: string) {
     await approveRecommendation({ data: id });
@@ -59,11 +69,16 @@ function Home() {
         {cluster?.demoMode ? " · demo (read-only)" : ""}
       </p>
 
-      <div className="mt-4 rounded-lg border p-4">
-        <div className="text-muted-foreground text-sm">Proposed reclaimable space</div>
-        <div className="font-semibold text-2xl">{(totalSaved / 1024).toFixed(0)} KB</div>
-        <div className="text-muted-foreground text-sm">
-          {recommendations.length} recommendations
+      <div className="mt-4 grid grid-cols-2 gap-4">
+        <div className="rounded-lg border p-4">
+          <div className="text-muted-foreground text-sm">Proposed reclaimable</div>
+          <div className="font-semibold text-2xl">{(totalSaved / 1024).toFixed(0)} KB</div>
+          <div className="text-muted-foreground text-sm">{proposed.length} recommendations</div>
+        </div>
+        <div className="rounded-lg border p-4">
+          <div className="text-muted-foreground text-sm">Reclaimed</div>
+          <div className="font-semibold text-2xl">{(roi.freedBytes / 1024).toFixed(0)} KB</div>
+          <div className="text-muted-foreground text-sm">{roi.indexesDropped} indexes dropped</div>
         </div>
       </div>
 

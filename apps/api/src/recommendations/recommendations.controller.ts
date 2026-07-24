@@ -1,6 +1,6 @@
 import { Controller } from "@nestjs/common";
 import { type Cluster, contract, type Recommendation } from "@repo/contracts";
-import { clusters, desc, eq, recommendations } from "@repo/db";
+import { clusters, desc, eq, recommendations, roiMetrics } from "@repo/db";
 import { TsRestHandler, tsRestHandler } from "@ts-rest/nest";
 import { DatabaseService } from "../db/database.service";
 
@@ -51,6 +51,19 @@ export class RecommendationsController {
         .from(recommendations)
         .where(eq(recommendations.clusterId, params.clusterId));
       return { status: 200, body: rows.map(toRecommendation) };
+    });
+  }
+
+  @TsRestHandler(contract.getRoi)
+  getRoi() {
+    return tsRestHandler(contract.getRoi, async ({ params }) => {
+      const rows = await this.database.db
+        .select()
+        .from(roiMetrics)
+        .where(eq(roiMetrics.clusterId, params.clusterId));
+      const freedBytes = rows.reduce((sum, row) => sum + row.freedBytes, 0);
+      const indexesDropped = rows.reduce((sum, row) => sum + row.indexCountDelta, 0);
+      return { status: 200, body: { clusterId: params.clusterId, freedBytes, indexesDropped } };
     });
   }
 

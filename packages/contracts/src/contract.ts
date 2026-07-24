@@ -1,6 +1,6 @@
 import { initContract } from "@ts-rest/core";
 import { z } from "zod";
-import { cluster, recommendation } from "./schemas.js";
+import { cluster, clusterRoi, recommendation } from "./schemas.js";
 
 const c = initContract();
 
@@ -18,6 +18,13 @@ export const contract = c.router({
     pathParams: z.object({ clusterId: z.string().uuid() }),
     responses: { 200: z.array(recommendation) },
     summary: "List recommendations for a cluster",
+  },
+  getRoi: {
+    method: "GET",
+    path: "/clusters/:clusterId/roi",
+    pathParams: z.object({ clusterId: z.string().uuid() }),
+    responses: { 200: clusterRoi },
+    summary: "Realized ROI for a cluster (freed bytes, indexes dropped)",
   },
   approveRecommendation: {
     method: "POST",

@@ -1,4 +1,4 @@
-import { actions, and, createDatabase, eq, policies, recommendations } from "@repo/db";
+import { actions, and, createDatabase, eq, policies, recommendations, roiMetrics } from "@repo/db";
 import { MongoIndexCollector, MongoIndexExecutor } from "@repo/mongo";
 import { requiredEnv } from "../env";
 import { openClusterMongo } from "./cluster-connection";
@@ -10,9 +10,11 @@ const DAY_MS = 86_400_000;
 
 // HIDDEN drops whose observe window has elapsed -> pre-flight -> drop -> DROPPED.
 // The drop is the only irreversible step. A failed pre-flight during observe
-// un-hides the index and re-proposes it (the reversible safety path).
+// un-hides the index and re-proposes it (the reversible safety path). Freed
+// bytes are recorded to roi_metrics for the dashboard headline.
 export async function finalizeCluster(clusterId: string): Promise<number> {
   const db = createDatabase(requiredEnv("DATABASE_URL"));
+  const periodStart = new Date();
   const [policy] = await db
     .select()
     .from(policies)
@@ -37,6 +39,7 @@ export async function finalizeCluster(clusterId: string): Promise<number> {
     const collector = new MongoIndexCollector(conn);
     const executor = new MongoIndexExecutor(conn, demoMode);
     let dropped = 0;
+    let freedBytes = 0;
     for (const rec of due) {
       const check = await preflightDrop(collector, rec);
       if (!check.safe) {
@@ -78,7 +81,17 @@ export async function finalizeCluster(clusterId: string): Promise<number> {
         result: "ok",
         rollbackToken: check.spec === null ? null : { spec: serializeSpec(check.spec) },
       });
+      freedBytes += rec.estimatedBytesSaved;
       dropped += 1;
+    }
+    if (dropped > 0) {
+      await db.insert(roiMetrics).values({
+        clusterId,
+        freedBytes,
+        indexCountDelta: dropped,
+        periodStart,
+        periodEnd: new Date(),
+      });
     }
     return dropped;
   } finally {
