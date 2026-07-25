@@ -2,7 +2,7 @@ import { Controller, Req, UnauthorizedException } from "@nestjs/common";
 import { type Cluster, contract, type Recommendation } from "@repo/contracts";
 import { TsRestHandler, tsRestHandler } from "@ts-rest/nest";
 import type { FastifyRequest } from "fastify";
-import { type LatencyReading, summarizeLatency } from "../analysis";
+import { type LatencyReading, monthlySavingsUsd, summarizeLatency } from "../analysis";
 import { auth } from "../auth";
 import { toWebHeaders } from "../auth/http";
 import { resolveOrgId } from "../auth/tenancy";
@@ -103,7 +103,7 @@ export class RecommendationsController {
       if (!(await this.ownsCluster(params.clusterId, orgId))) {
         return {
           status: 200,
-          body: { clusterId: params.clusterId, freedBytes: 0, indexesDropped: 0 },
+          body: { clusterId: params.clusterId, freedBytes: 0, indexesDropped: 0, estimatedMonthlyUsd: 0 },
         };
       }
       const rows = await this.database.db
@@ -112,7 +112,15 @@ export class RecommendationsController {
         .where(eq(roiMetrics.clusterId, params.clusterId));
       const freedBytes = rows.reduce((sum, row) => sum + row.freedBytes, 0);
       const indexesDropped = rows.reduce((sum, row) => sum + row.indexCountDelta, 0);
-      return { status: 200, body: { clusterId: params.clusterId, freedBytes, indexesDropped } };
+      const envRate = Number(process.env.STORAGE_USD_PER_GB_MONTH);
+      const estimatedMonthlyUsd = monthlySavingsUsd(
+        freedBytes,
+        Number.isFinite(envRate) && envRate > 0 ? envRate : undefined,
+      );
+      return {
+        status: 200,
+        body: { clusterId: params.clusterId, freedBytes, indexesDropped, estimatedMonthlyUsd },
+      };
     });
   }
 

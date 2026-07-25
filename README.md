@@ -16,7 +16,8 @@ regression check. Full design and decision log in
 3. **Decide** what to change with a pure analysis engine (see below).
 4. **Approve** on the dashboard, or let policy auto-apply.
 5. **Apply** safely: `hide → observe → drop` for removals, `build` for additions.
-6. **Prove ROI**: freed bytes, index-count delta, and a per-collection
+6. **Prove ROI**: freed bytes (and the **$/month** they cost, at
+   `STORAGE_USD_PER_GB_MONTH`), index-count delta, and a per-collection
    read/write **latency trend** (before/after), with a regression gate that
    aborts — and remembers — anything that slowed reads down.
 

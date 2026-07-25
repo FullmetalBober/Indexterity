@@ -58,6 +58,7 @@ export const clusterRoi = z.object({
   clusterId: z.string().uuid(),
   freedBytes: z.number().int().nonnegative(),
   indexesDropped: z.number().int().nonnegative(),
+  estimatedMonthlyUsd: z.number().nonnegative(),
 });
 export type ClusterRoi = z.infer<typeof clusterRoi>;
 

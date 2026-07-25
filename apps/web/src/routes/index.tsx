@@ -26,7 +26,7 @@ const loadDashboard = createServerFn({ method: "GET" }).handler(async () => {
       authed: true as const,
       cluster,
       recommendations: [],
-      roi: { freedBytes: 0, indexesDropped: 0 },
+      roi: { freedBytes: 0, indexesDropped: 0, estimatedMonthlyUsd: 0 },
       latency: { collections: [] },
     };
   }
@@ -39,7 +39,10 @@ const loadDashboard = createServerFn({ method: "GET" }).handler(async () => {
     authed: true as const,
     cluster,
     recommendations: recResult.status === 200 ? recResult.body : [],
-    roi: roiResult.status === 200 ? roiResult.body : { freedBytes: 0, indexesDropped: 0 },
+    roi:
+      roiResult.status === 200
+        ? roiResult.body
+        : { freedBytes: 0, indexesDropped: 0, estimatedMonthlyUsd: 0 },
     latency: latencyResult.status === 200 ? latencyResult.body : { collections: [] },
   };
 });
@@ -128,7 +131,9 @@ function Home() {
         <div className="rounded-lg border p-4">
           <div className="text-muted-foreground text-sm">Reclaimed</div>
           <div className="font-semibold text-2xl">{(roi.freedBytes / 1024).toFixed(0)} KB</div>
-          <div className="text-muted-foreground text-sm">{roi.indexesDropped} indexes dropped</div>
+          <div className="text-muted-foreground text-sm">
+            {roi.indexesDropped} indexes dropped · ${roi.estimatedMonthlyUsd.toFixed(2)}/mo
+          </div>
         </div>
       </div>
 
