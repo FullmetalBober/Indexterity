@@ -119,6 +119,15 @@ but never writes to your cluster.
   (If the connection's role can't read `config`, the collection is treated as
   unsharded — grant config read to enable shard-key protection.)
 
+## Auth & tenancy
+
+Every api endpoint requires a better-auth session and is scoped to the caller's
+org (one org per user, created on first sign-in). The dashboard is a BFF: it
+proxies `/api/auth` to the api so the session cookie lives on the web origin,
+then forwards that cookie to the api on every data call. Set `WEB_ORIGIN` (api)
+and `VITE_WEB_ORIGIN` (web) to the dashboard's public origin so better-auth
+trusts it as a request origin.
+
 ## Stack
 
 Turbo monorepo · NestJS + Fastify (api) · TanStack Start + shadcn (web) ·

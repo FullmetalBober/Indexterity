@@ -9,9 +9,12 @@ COPY . .
 RUN turbo prune @repo/web --docker
 
 FROM base AS builder
-# Vite inlines VITE_* at build time — set the control-plane URL per environment.
+# Vite inlines VITE_* at build time — set per environment. VITE_WEB_ORIGIN is this
+# app's own public origin (used as the Origin for auth requests to the api).
 ARG VITE_API_URL=http://localhost:3001
 ENV VITE_API_URL=$VITE_API_URL
+ARG VITE_WEB_ORIGIN=http://localhost:3000
+ENV VITE_WEB_ORIGIN=$VITE_WEB_ORIGIN
 COPY --from=pruner /app/out/json/ .
 RUN npm install
 COPY --from=pruner /app/out/full/ .

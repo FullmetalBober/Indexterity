@@ -6,6 +6,8 @@ export interface AuthConfig {
   readonly databaseUrl: string;
   readonly secret: string;
   readonly baseURL: string;
+  // Origins allowed to make auth requests (CSRF); include the web app's origin.
+  readonly trustedOrigins: readonly string[];
   readonly githubClientId: string;
   readonly githubClientSecret: string;
 }
@@ -17,6 +19,7 @@ export function createAuth(config: AuthConfig) {
     database: drizzleAdapter(db, { provider: "pg", schema }),
     secret: config.secret,
     baseURL: config.baseURL,
+    trustedOrigins: [...config.trustedOrigins],
     emailAndPassword: { enabled: true },
     socialProviders: {
       github: {

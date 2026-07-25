@@ -41,6 +41,7 @@ services:
       DATABASE_URL: postgres://mongo_optimizer:mongo_optimizer@postgres:5432/mongo_optimizer
       API_PORT: "3001"
       BETTER_AUTH_URL: http://localhost:3001
+      WEB_ORIGIN: http://localhost:3000
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET}
       MASTER_KEY: ${MASTER_KEY}
       GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID}
@@ -61,6 +62,7 @@ services:
     environment:
       WEB_PORT: "3000"
       VITE_API_URL: http://localhost:3001
+      VITE_WEB_ORIGIN: http://localhost:3000
     ports:
       - "3000:3000"
     volumes:
