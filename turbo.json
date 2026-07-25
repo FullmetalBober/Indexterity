@@ -9,6 +9,7 @@
     "typecheck": {
       "dependsOn": ["^build"]
     },
+    "test": {},
     "lint": {},
     "dev": {
       "cache": false,
