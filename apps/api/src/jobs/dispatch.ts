@@ -1,4 +1,4 @@
-import { clusters, createDatabase } from "@repo/db";
+import { clusters, createDatabase } from "../db";
 import type { JobHelpers } from "graphile-worker";
 import { requiredEnv } from "../env";
 

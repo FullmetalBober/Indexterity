@@ -1,5 +1,5 @@
-import { createAuth } from "@repo/auth";
-import { requiredEnv } from "./env";
+import { createAuth } from "./auth.config";
+import { requiredEnv } from "../env";
 
 // Single configured auth instance for the app (and the dev sign-up demo).
 export const auth = createAuth({

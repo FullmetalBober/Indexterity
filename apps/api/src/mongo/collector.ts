@@ -1,4 +1,4 @@
-import type { IndexDirection, IndexKey, IndexSpec, QueryShape } from "@repo/core";
+import type { IndexDirection, IndexKey, IndexSpec, QueryShape } from "../analysis";
 import { z } from "zod";
 import type { MongoConnection } from "./connection";
 

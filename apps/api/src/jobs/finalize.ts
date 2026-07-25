@@ -1,6 +1,6 @@
-import { isRegression } from "@repo/core";
-import { actions, and, createDatabase, eq, policies, recommendations, roiMetrics } from "@repo/db";
-import { MongoIndexCollector, MongoIndexExecutor, serializeSpec } from "@repo/mongo";
+import { isRegression } from "../analysis";
+import { actions, and, createDatabase, eq, policies, recommendations, roiMetrics } from "../db";
+import { MongoIndexCollector, MongoIndexExecutor, serializeSpec } from "../mongo";
 import { requiredEnv } from "../env";
 import { openClusterMongo } from "./cluster-connection";
 import { preflightDrop } from "./preflight";

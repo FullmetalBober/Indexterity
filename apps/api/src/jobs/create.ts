@@ -1,5 +1,5 @@
-import { actions, and, createDatabase, eq, inArray, recommendations } from "@repo/db";
-import { MongoIndexExecutor } from "@repo/mongo";
+import { actions, and, createDatabase, eq, inArray, recommendations } from "../db";
+import { MongoIndexExecutor } from "../mongo";
 import { requiredEnv } from "../env";
 import { openClusterMongo } from "./cluster-connection";
 

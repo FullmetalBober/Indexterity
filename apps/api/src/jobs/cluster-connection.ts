@@ -1,5 +1,5 @@
-import { clusters, type Database, envKeyProvider, eq, open } from "@repo/db";
-import { MongoConnection } from "@repo/mongo";
+import { clusters, type Database, envKeyProvider, eq, open } from "../db";
+import { MongoConnection } from "../mongo";
 import { masterKeyBytes } from "../env";
 
 export interface ClusterMongo {

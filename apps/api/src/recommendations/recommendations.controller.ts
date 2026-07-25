@@ -10,7 +10,7 @@ import {
   recommendations,
   roiMetrics,
   seal,
-} from "@repo/db";
+} from "../db";
 import { TsRestHandler, tsRestHandler } from "@ts-rest/nest";
 import { DatabaseService } from "../db/database.service";
 import { masterKeyBytes } from "../env";

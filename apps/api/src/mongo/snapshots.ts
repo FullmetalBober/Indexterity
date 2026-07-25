@@ -1,4 +1,4 @@
-import type { IndexSpec } from "@repo/core";
+import type { IndexSpec } from "../analysis";
 import { type IndexUsageStat, MongoIndexCollector } from "./collector";
 import type { MongoConnection } from "./connection";
 

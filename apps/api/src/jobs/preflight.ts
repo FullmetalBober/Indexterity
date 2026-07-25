@@ -1,5 +1,5 @@
-import { type IndexSpec, isNeverDrop, isRedundantPrefix } from "@repo/core";
-import type { IndexCollector } from "@repo/mongo";
+import { type IndexSpec, isNeverDrop, isRedundantPrefix } from "../analysis";
+import type { IndexCollector } from "../mongo";
 
 export interface PreflightResult {
   readonly safe: boolean;

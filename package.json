@@ -17,8 +17,8 @@
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "format": "biome format --write .",
-    "db:generate": "npm run db:generate -w @repo/db",
-    "db:migrate": "npm run db:migrate -w @repo/db"
+    "db:generate": "npm run db:generate -w @repo/api",
+    "db:migrate": "npm run db:migrate -w @repo/api"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.5",

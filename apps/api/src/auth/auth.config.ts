@@ -1,4 +1,4 @@
-import { createDatabase, schema } from "@repo/db";
+import { createDatabase, schema } from "../db";
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 

@@ -1,5 +1,5 @@
-import { actions, and, createDatabase, eq, recommendations } from "@repo/db";
-import { MongoIndexCollector, MongoIndexExecutor, serializeSpec } from "@repo/mongo";
+import { actions, and, createDatabase, eq, recommendations } from "../db";
+import { MongoIndexCollector, MongoIndexExecutor, serializeSpec } from "../mongo";
 import { requiredEnv } from "../env";
 import { openClusterMongo } from "./cluster-connection";
 import { preflightDrop } from "./preflight";

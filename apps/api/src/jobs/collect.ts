@@ -1,5 +1,5 @@
-import { createDatabase, indexSnapshots } from "@repo/db";
-import { collectSnapshots } from "@repo/mongo";
+import { createDatabase, indexSnapshots } from "../db";
+import { collectSnapshots } from "../mongo";
 import { requiredEnv } from "../env";
 import { openClusterMongo } from "./cluster-connection";
 

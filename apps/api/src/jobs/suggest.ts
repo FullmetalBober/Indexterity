@@ -1,6 +1,6 @@
-import { recommendCreates } from "@repo/core";
-import { and, createDatabase, eq, inArray, policies, recommendations } from "@repo/db";
-import { MongoIndexCollector } from "@repo/mongo";
+import { recommendCreates } from "../analysis";
+import { and, createDatabase, eq, inArray, policies, recommendations } from "../db";
+import { MongoIndexCollector } from "../mongo";
 import { requiredEnv } from "../env";
 import { openClusterMongo } from "./cluster-connection";
 import { applyCreatesForCluster } from "./create";
