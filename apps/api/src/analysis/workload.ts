@@ -2,11 +2,28 @@ import type { RecommendationType } from "@repo/contracts";
 import { isNeverDrop } from "./safety";
 import type { IndexSpec } from "./types";
 
-// A distinct query pattern from the profiler (filter field names only).
+// A distinct query pattern from the profiler, split for the ESR rule: equality
+// predicates, then sort fields, then range predicates.
 export interface QueryShape {
-  readonly filterFields: readonly string[];
+  readonly equality: readonly string[];
+  readonly sort: readonly string[];
+  readonly range: readonly string[];
   readonly collscan: boolean;
   readonly count: number;
+}
+
+// The ESR key: Equality fields first, then Sort, then Range — the order that lets
+// a single index serve the whole query. Deduped, first occurrence wins.
+export function esrFields(shape: QueryShape): string[] {
+  const ordered: string[] = [];
+  const seen = new Set<string>();
+  for (const field of [...shape.equality, ...shape.sort, ...shape.range]) {
+    if (!seen.has(field)) {
+      seen.add(field);
+      ordered.push(field);
+    }
+  }
+  return ordered;
 }
 
 export interface CreateCandidate {
@@ -48,7 +65,7 @@ export function recommendCreates(
   const seen = new Set<string>();
   for (const shape of shapes) {
     if (!shape.collscan || shape.count < options.minCount) continue;
-    const wanted = shape.filterFields;
+    const wanted = esrFields(shape);
     if (wanted.length === 0) continue;
     const wantedKey = wanted.join(",");
     if (seen.has(wantedKey)) continue;

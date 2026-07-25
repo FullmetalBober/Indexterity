@@ -76,8 +76,52 @@ const collectionInfo = z.object({ name: z.string() });
 const profileDoc = z.object({
   ns: z.string(),
   planSummary: z.string().optional(),
-  command: z.object({ filter: z.record(z.string(), z.unknown()).optional() }).optional(),
+  command: z
+    .object({
+      filter: z.record(z.string(), z.unknown()).optional(),
+      sort: z.record(z.string(), z.unknown()).optional(),
+    })
+    .optional(),
 });
+
+// Operators that produce a range (index-bound) scan rather than an equality match.
+const RANGE_OPS = new Set([
+  "$gt",
+  "$gte",
+  "$lt",
+  "$lte",
+  "$ne",
+  "$nin",
+  "$in",
+  "$exists",
+  "$regex",
+]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isRangePredicate(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return Object.keys(value).some((key) => RANGE_OPS.has(key));
+}
+
+// Split a filter's fields into equality vs range predicates (flattening $and).
+function collectPredicates(
+  filter: Record<string, unknown>,
+  equality: string[],
+  range: string[],
+): void {
+  for (const [field, value] of Object.entries(filter)) {
+    if (field === "$and" && Array.isArray(value)) {
+      for (const clause of value) if (isRecord(clause)) collectPredicates(clause, equality, range);
+      continue;
+    }
+    if (field.startsWith("$")) continue; // $or/$nor/… can't be served by one index
+    if (isRangePredicate(value)) range.push(field);
+    else equality.push(field);
+  }
+}
 
 function normalizeDirection(direction: number | string): IndexDirection {
   if (direction === 1 || direction === -1) return direction;
@@ -215,24 +259,32 @@ export class MongoIndexCollector implements IndexCollector {
   async collectSlowQueries(database: string, collection: string): Promise<QueryShape[]> {
     const ns = `${database}.${collection}`;
     const raw = await this.conn.db(database).collection("system.profile").find({ ns }).toArray();
-    const shapes = new Map<string, { fields: string[]; collscan: boolean; count: number }>();
+    const shapes = new Map<
+      string,
+      { equality: string[]; sort: string[]; range: string[]; collscan: boolean; count: number }
+    >();
     for (const entry of profileDoc.array().parse(raw)) {
       const filter = entry.command?.filter;
       if (filter === undefined) continue;
-      const fields = Object.keys(filter).filter((field) => !field.startsWith("$"));
-      if (fields.length === 0) continue;
-      const key = fields.join(",");
+      const equality: string[] = [];
+      const range: string[] = [];
+      collectPredicates(filter, equality, range);
+      const sort = entry.command?.sort === undefined ? [] : Object.keys(entry.command.sort);
+      if (equality.length === 0 && range.length === 0 && sort.length === 0) continue;
+      const key = `${equality.join(",")}|${sort.join(",")}|${range.join(",")}`;
       const collscan = (entry.planSummary ?? "").includes("COLLSCAN");
       const prev = shapes.get(key);
       if (prev === undefined) {
-        shapes.set(key, { fields, collscan, count: 1 });
+        shapes.set(key, { equality, sort, range, collscan, count: 1 });
       } else {
         prev.count += 1;
         prev.collscan = prev.collscan || collscan;
       }
     }
     return [...shapes.values()].map((shape) => ({
-      filterFields: shape.fields,
+      equality: shape.equality,
+      sort: shape.sort,
+      range: shape.range,
       collscan: shape.collscan,
       count: shape.count,
     }));

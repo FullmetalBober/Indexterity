@@ -44,7 +44,10 @@ describe("summarizeLatency", () => {
     expect(trend.readDeltaPct).toBeNull();
   });
   it("skips a window where ops did not advance", () => {
-    const trend = summarizeLatency([reading(100, 100_000, 0, 0, 0), reading(100, 100_000, 0, 0, 1)]);
+    const trend = summarizeLatency([
+      reading(100, 100_000, 0, 0, 0),
+      reading(100, 100_000, 0, 0, 1),
+    ]);
     expect(trend.currentReadMicros).toBeNull();
   });
 });
