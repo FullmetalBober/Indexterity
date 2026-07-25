@@ -60,3 +60,24 @@ export const clusterRoi = z.object({
   indexesDropped: z.number().int().nonnegative(),
 });
 export type ClusterRoi = z.infer<typeof clusterRoi>;
+
+// Per-collection read/write latency: current vs baseline windowed average (µs/op)
+// and the percent change. Negative delta = faster. Nulls when data is too sparse.
+export const latencySummary = z.object({
+  database: z.string(),
+  collection: z.string(),
+  samples: z.number().int(),
+  currentReadMicros: z.number().nullable(),
+  baselineReadMicros: z.number().nullable(),
+  readDeltaPct: z.number().nullable(),
+  currentWriteMicros: z.number().nullable(),
+  baselineWriteMicros: z.number().nullable(),
+  writeDeltaPct: z.number().nullable(),
+});
+export type LatencySummary = z.infer<typeof latencySummary>;
+
+export const clusterLatency = z.object({
+  clusterId: z.string().uuid(),
+  collections: z.array(latencySummary),
+});
+export type ClusterLatency = z.infer<typeof clusterLatency>;

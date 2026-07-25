@@ -16,8 +16,9 @@ regression check. Full design and decision log in
 3. **Decide** what to change with a pure analysis engine (see below).
 4. **Approve** on the dashboard, or let policy auto-apply.
 5. **Apply** safely: `hide → observe → drop` for removals, `build` for additions.
-6. **Prove ROI**: freed bytes and index-count delta, with a regression gate that
-   aborts anything that slowed reads down.
+6. **Prove ROI**: freed bytes, index-count delta, and a per-collection
+   read/write **latency trend** (before/after), with a regression gate that
+   aborts — and remembers — anything that slowed reads down.
 
 ## How it decides
 
@@ -80,7 +81,9 @@ APPROVED → pre-flight → hide (collMod hidden:true) → HIDDEN → observe �
 - At hide time the collection's **baseline read latency** is recorded.
 - `finalize` runs only after the window elapses and gates the drop three ways:
   1. **Regression** — if average read latency since hiding exceeds
-     `baseline × 1.5` (minimum 20 reads), un-hide and re-propose.
+     `baseline × 1.5` (minimum 20 reads), un-hide the index and park it in a
+     **cooldown** (escalating on each repeat) so the engine won't re-propose and
+     re-cycle it — that's the regression memory.
   2. **Pre-flight** — index now protected / covering index gone / index has fresh
      ops → un-hide and re-propose.
   3. Index already gone → mark `DROPPED`.

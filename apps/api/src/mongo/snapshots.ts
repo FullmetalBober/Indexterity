@@ -15,6 +15,20 @@ export interface CollectedSnapshot {
   readonly perMember: { member: string; ops: number }[];
 }
 
+export interface CollectedLatency {
+  readonly database: string;
+  readonly collection: string;
+  readonly readOps: number;
+  readonly readLatencyMicros: number;
+  readonly writeOps: number;
+  readonly writeLatencyMicros: number;
+}
+
+export interface CollectResult {
+  readonly snapshots: CollectedSnapshot[];
+  readonly latency: CollectedLatency[];
+}
+
 export function serializeSpec(spec: IndexSpec): Record<string, unknown> {
   return {
     name: spec.name,
@@ -38,18 +52,29 @@ function groupByIndex(usage: IndexUsageStat[]): Record<string, IndexUsageStat[]>
   return grouped;
 }
 
-// Collect every index's spec + size + per-member usage across a Mongo connection.
-export async function collectSnapshots(conn: MongoConnection): Promise<CollectedSnapshot[]> {
+// Collect every index's spec + size + per-member usage, plus per-collection
+// read/write latency, across a Mongo connection.
+export async function collectSnapshots(conn: MongoConnection): Promise<CollectResult> {
   const collector = new MongoIndexCollector(conn);
   const databases = (await conn.listDatabaseNames()).filter((name) => !SYSTEM_DATABASES.has(name));
   const snapshots: CollectedSnapshot[] = [];
+  const latency: CollectedLatency[] = [];
   for (const database of databases) {
     for (const collection of await collector.listCollectionNames(database)) {
-      const [specs, usage, sizes] = await Promise.all([
+      const [specs, usage, sizes, collLatency] = await Promise.all([
         collector.listIndexes(database, collection),
         collector.collectUsage(database, collection),
         collector.indexSizes(database, collection),
+        collector.collectionLatency(database, collection),
       ]);
+      latency.push({
+        database,
+        collection,
+        readOps: collLatency.reads.ops,
+        readLatencyMicros: collLatency.reads.latencyMicros,
+        writeOps: collLatency.writes.ops,
+        writeLatencyMicros: collLatency.writes.latencyMicros,
+      });
       const usageByIndex = groupByIndex(usage);
       for (const spec of specs) {
         snapshots.push({
@@ -66,5 +91,5 @@ export async function collectSnapshots(conn: MongoConnection): Promise<Collected
       }
     }
   }
-  return snapshots;
+  return { snapshots, latency };
 }

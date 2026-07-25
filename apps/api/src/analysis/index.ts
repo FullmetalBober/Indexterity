@@ -1,4 +1,5 @@
 export * from "./classify";
+export * from "./latency";
 export * from "./recommend";
 export * from "./redundancy";
 export * from "./regression";

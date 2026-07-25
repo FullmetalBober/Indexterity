@@ -64,6 +64,13 @@
       "when": 1784985508254,
       "tag": "0008_lumpy_franklin_richards",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1784986140048,
+      "tag": "0009_jittery_smasher",
+      "breakpoints": true
     }
   ]
 }

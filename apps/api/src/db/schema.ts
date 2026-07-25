@@ -236,3 +236,19 @@ export const indexCooldowns = pgTable(
     ),
   ],
 );
+
+// Per-collection read/write latency sampled each collect — a time series that
+// shows the app getting faster (or a build/drop regressing it).
+export const latencySamples = pgTable("latency_samples", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  clusterId: uuid("cluster_id")
+    .notNull()
+    .references(() => clusters.id, { onDelete: "cascade" }),
+  database: text("database").notNull(),
+  collection: text("collection").notNull(),
+  readOps: bigint("read_ops", { mode: "number" }).notNull(),
+  readLatencyMicros: bigint("read_latency_micros", { mode: "number" }).notNull(),
+  writeOps: bigint("write_ops", { mode: "number" }).notNull(),
+  writeLatencyMicros: bigint("write_latency_micros", { mode: "number" }).notNull(),
+  capturedAt: timestamp("captured_at", { withTimezone: true }).notNull().defaultNow(),
+});

@@ -1,6 +1,6 @@
 import { initContract } from "@ts-rest/core";
 import { z } from "zod";
-import { cluster, clusterRoi, recommendation } from "./schemas.js";
+import { cluster, clusterLatency, clusterRoi, recommendation } from "./schemas.js";
 
 const c = initContract();
 
@@ -25,6 +25,13 @@ export const contract = c.router({
     pathParams: z.object({ clusterId: z.string().uuid() }),
     responses: { 200: clusterRoi },
     summary: "Realized ROI for a cluster (freed bytes, indexes dropped)",
+  },
+  getLatency: {
+    method: "GET",
+    path: "/clusters/:clusterId/latency",
+    pathParams: z.object({ clusterId: z.string().uuid() }),
+    responses: { 200: clusterLatency },
+    summary: "Per-collection read/write latency trend (before/after)",
   },
   createCluster: {
     method: "POST",

@@ -29,16 +29,23 @@ export const Route = createFileRoute("/")({
     const clusters = clustersResult.status === 200 ? clustersResult.body : [];
     const cluster = clusters[0] ?? null;
     if (cluster === null) {
-      return { cluster, recommendations: [], roi: { freedBytes: 0, indexesDropped: 0 } };
+      return {
+        cluster,
+        recommendations: [],
+        roi: { freedBytes: 0, indexesDropped: 0 },
+        latency: { collections: [] },
+      };
     }
-    const [recResult, roiResult] = await Promise.all([
+    const [recResult, roiResult, latencyResult] = await Promise.all([
       api.listRecommendations({ params: { clusterId: cluster.id } }),
       api.getRoi({ params: { clusterId: cluster.id } }),
+      api.getLatency({ params: { clusterId: cluster.id } }),
     ]);
     return {
       cluster,
       recommendations: recResult.status === 200 ? recResult.body : [],
       roi: roiResult.status === 200 ? roiResult.body : { freedBytes: 0, indexesDropped: 0 },
+      latency: latencyResult.status === 200 ? latencyResult.body : { collections: [] },
     };
   },
   component: Home,
@@ -50,8 +57,23 @@ function badgeVariant(type: string): "secondary" | "destructive" | "default" | "
   return "outline"; // CREATE / UPDATE / MERGE (additive)
 }
 
+function fmtMicros(value: number | null): string {
+  return value === null ? "—" : `${Math.round(value)}`;
+}
+
+function DeltaCell({ pct }: { pct: number | null }) {
+  if (pct === null) return <span className="text-muted-foreground">—</span>;
+  const tone = pct < 0 ? "text-green-600" : pct > 0 ? "text-red-600" : "text-muted-foreground";
+  return (
+    <span className={tone}>
+      {pct > 0 ? "+" : ""}
+      {pct.toFixed(0)}%
+    </span>
+  );
+}
+
 function Home() {
-  const { cluster, recommendations, roi } = Route.useLoaderData();
+  const { cluster, recommendations, roi, latency } = Route.useLoaderData();
   const router = useRouter();
   const proposed = recommendations.filter((rec) => rec.state === "PROPOSED");
   const totalSaved = proposed.reduce((sum, rec) => sum + rec.estimatedBytesSaved, 0);
@@ -124,6 +146,43 @@ function Home() {
           ))}
         </TableBody>
       </Table>
+
+      {latency.collections.length > 0 ? (
+        <>
+          <h2 className="mt-8 font-semibold text-lg">Latency — µs per op</h2>
+          <p className="text-muted-foreground text-sm">
+            Current windowed average vs the first sample; negative Δ = faster.
+          </p>
+          <Table className="mt-2">
+            <TableHeader>
+              <TableRow>
+                <TableHead>Collection</TableHead>
+                <TableHead>Read µs</TableHead>
+                <TableHead>Read Δ</TableHead>
+                <TableHead>Write µs</TableHead>
+                <TableHead>Write Δ</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {latency.collections.map((coll) => (
+                <TableRow key={`${coll.database}.${coll.collection}`}>
+                  <TableCell className="font-mono text-xs">
+                    {coll.database}.{coll.collection}
+                  </TableCell>
+                  <TableCell>{fmtMicros(coll.currentReadMicros)}</TableCell>
+                  <TableCell>
+                    <DeltaCell pct={coll.readDeltaPct} />
+                  </TableCell>
+                  <TableCell>{fmtMicros(coll.currentWriteMicros)}</TableCell>
+                  <TableCell>
+                    <DeltaCell pct={coll.writeDeltaPct} />
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </>
+      ) : null}
     </main>
   );
 }
