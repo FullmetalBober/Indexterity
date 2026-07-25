@@ -1,8 +1,9 @@
-import type { IndexDirection, IndexKey, IndexSpec, QueryShape } from "../analysis";
 import { z } from "zod";
+import type { IndexDirection, IndexKey, IndexSpec, QueryShape } from "../analysis";
 import type { MongoConnection } from "./connection";
 
-// One index's usage on one replica-set member ($indexStats is per-member).
+// One index's usage on one replica-set member ($indexStats is per-member; on a
+// sharded cluster mongos merges every shard's members, tagged by host).
 export interface IndexUsageStat {
   readonly indexName: string;
   readonly host: string;
@@ -10,15 +11,23 @@ export interface IndexUsageStat {
   readonly since: string;
 }
 
+export interface LatencyPair {
+  readonly ops: number;
+  readonly latencyMicros: number;
+}
+
+export interface CollectionLatency {
+  readonly reads: LatencyPair;
+  readonly writes: LatencyPair;
+}
+
 export interface IndexCollector {
   listCollectionNames(database: string): Promise<string[]>;
   listIndexes(database: string, collection: string): Promise<IndexSpec[]>;
   collectUsage(database: string, collection: string): Promise<IndexUsageStat[]>;
   indexSizes(database: string, collection: string): Promise<Record<string, number>>;
-  readLatency(
-    database: string,
-    collection: string,
-  ): Promise<{ ops: number; latencyMicros: number }>;
+  readLatency(database: string, collection: string): Promise<LatencyPair>;
+  collectionLatency(database: string, collection: string): Promise<CollectionLatency>;
   collectSlowQueries(database: string, collection: string): Promise<QueryShape[]>;
 }
 
@@ -44,10 +53,21 @@ const collStatsDoc = z.object({
   storageStats: z.object({ indexSizes: z.record(z.string(), z.coerce.number()) }),
 });
 
+const latencyPair = z.object({ ops: z.coerce.number(), latency: z.coerce.number() });
 const latencyStatsDoc = z.object({
-  latencyStats: z.object({
-    reads: z.object({ ops: z.coerce.number(), latency: z.coerce.number() }),
-  }),
+  latencyStats: z.object({ reads: latencyPair, writes: latencyPair }),
+});
+
+// config.collections entry on a sharded cluster: `key` is the shard-key pattern.
+// _id is the "db.coll" namespace string (not an ObjectId), so the collection is
+// typed to let findOne filter on it.
+interface ConfigCollectionDoc {
+  _id: string;
+  key: Record<string, number | string>;
+  dropped?: boolean;
+}
+const shardCollectionDoc = z.object({
+  key: z.record(z.string(), z.union([z.number(), z.string()])),
 });
 
 const collectionInfo = z.object({ name: z.string() });
@@ -80,9 +100,15 @@ function toIndexSpec(desc: z.infer<typeof indexDescription>): IndexSpec {
     partial: desc.partialFilterExpression !== undefined,
     sparse: desc.sparse ?? false,
     hidden: desc.hidden ?? false,
-    // Shard-key detection needs config.collections; wired in a later pass.
     isShardKey: false,
   };
+}
+
+// The shard key must be a prefix of a backing index; Mongo forbids dropping the
+// last such index, so any index the shard key prefixes is treated as protected.
+function shardKeyIsPrefix(shardKey: readonly string[], indexFields: readonly string[]): boolean {
+  if (shardKey.length === 0 || shardKey.length > indexFields.length) return false;
+  return shardKey.every((field, i) => indexFields[i] === field);
 }
 
 export class MongoIndexCollector implements IndexCollector {
@@ -97,9 +123,33 @@ export class MongoIndexCollector implements IndexCollector {
       .filter((name) => !name.startsWith("system."));
   }
 
+  // The shard-key field order for a namespace, or null when the collection is
+  // unsharded (or the connection's role can't read config — treated as unsharded).
+  private async shardKeyFields(database: string, collection: string): Promise<string[] | null> {
+    try {
+      const raw = await this.conn
+        .db("config")
+        .collection<ConfigCollectionDoc>("collections")
+        .findOne({ _id: `${database}.${collection}`, dropped: { $ne: true } });
+      if (raw === null) return null;
+      return Object.keys(shardCollectionDoc.parse(raw).key);
+    } catch {
+      return null;
+    }
+  }
+
   async listIndexes(database: string, collection: string): Promise<IndexSpec[]> {
     const raw = await this.conn.db(database).collection(collection).indexes();
-    return indexDescription.array().parse(raw).map(toIndexSpec);
+    const specs = indexDescription.array().parse(raw).map(toIndexSpec);
+    const shardKey = await this.shardKeyFields(database, collection);
+    if (shardKey === null) return specs;
+    return specs.map((spec) => ({
+      ...spec,
+      isShardKey: shardKeyIsPrefix(
+        shardKey,
+        spec.keys.map((key) => key.field),
+      ),
+    }));
   }
 
   async collectUsage(database: string, collection: string): Promise<IndexUsageStat[]> {
@@ -119,32 +169,45 @@ export class MongoIndexCollector implements IndexCollector {
       }));
   }
 
+  // Sum index sizes across every $collStats doc — one per shard on a sharded
+  // collection, a single doc otherwise.
   async indexSizes(database: string, collection: string): Promise<Record<string, number>> {
     const raw = await this.conn
       .db(database)
       .collection(collection)
       .aggregate([{ $collStats: { storageStats: {} } }])
       .toArray();
-    const first = raw[0];
-    if (first === undefined) return {};
-    return collStatsDoc.parse(first).storageStats.indexSizes;
+    const totals: Record<string, number> = {};
+    for (const doc of collStatsDoc.array().parse(raw)) {
+      for (const [name, size] of Object.entries(doc.storageStats.indexSizes)) {
+        totals[name] = (totals[name] ?? 0) + size;
+      }
+    }
+    return totals;
   }
 
-  // Cumulative read latency for the collection ($collStats latencyStats) — the
-  // regression signal during observe. No document data is read.
-  async readLatency(
-    database: string,
-    collection: string,
-  ): Promise<{ ops: number; latencyMicros: number }> {
+  // Cumulative read + write latency for the collection ($collStats latencyStats),
+  // summed across every shard. The regression + ROI signal. No documents read.
+  async collectionLatency(database: string, collection: string): Promise<CollectionLatency> {
     const raw = await this.conn
       .db(database)
       .collection(collection)
       .aggregate([{ $collStats: { latencyStats: {} } }])
       .toArray();
-    const first = raw[0];
-    if (first === undefined) return { ops: 0, latencyMicros: 0 };
-    const parsed = latencyStatsDoc.parse(first);
-    return { ops: parsed.latencyStats.reads.ops, latencyMicros: parsed.latencyStats.reads.latency };
+    const reads = { ops: 0, latencyMicros: 0 };
+    const writes = { ops: 0, latencyMicros: 0 };
+    for (const doc of latencyStatsDoc.array().parse(raw)) {
+      reads.ops += doc.latencyStats.reads.ops;
+      reads.latencyMicros += doc.latencyStats.reads.latency;
+      writes.ops += doc.latencyStats.writes.ops;
+      writes.latencyMicros += doc.latencyStats.writes.latency;
+    }
+    return { reads, writes };
+  }
+
+  async readLatency(database: string, collection: string): Promise<LatencyPair> {
+    const { reads } = await this.collectionLatency(database, collection);
+    return reads;
   }
 
   // Read slow queries from system.profile and aggregate by filter-field shape.

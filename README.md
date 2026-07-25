@@ -106,12 +106,15 @@ but never writes to your cluster.
 
 ## Sharding & replication
 
-- **Replica sets — handled.** `$indexStats` is per-member; usage sums every
-  member, so an index used only on a secondary still counts as used. The driver
-  handles topology and read preference from the connection string.
-- **Sharded clusters — partial.** Usage sums across shards, but shard-key
-  detection and multi-shard size/latency aggregation are not yet complete. Not
-  recommended for production sharded collections.
+- **Replica sets.** `$indexStats` is per-member; usage sums every member, so an
+  index used only on a secondary still counts as used. The driver handles
+  topology and read preference from the connection string.
+- **Sharded clusters.** Point the app at the `mongos`. Usage (`$indexStats`),
+  index sizes and read/write latency (`$collStats`) are aggregated across every
+  shard, and each collection's shard key is read from `config.collections` so
+  any index the shard key prefixes is treated as protected and never dropped.
+  (If the connection's role can't read `config`, the collection is treated as
+  unsharded — grant config read to enable shard-key protection.)
 
 ## Stack
 
