@@ -1,6 +1,6 @@
-import { createDatabase, schema } from "../db";
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
+import { createDatabase, schema } from "../db";
 
 export interface AuthConfig {
   readonly databaseUrl: string;

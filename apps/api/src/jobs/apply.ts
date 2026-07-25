@@ -1,6 +1,6 @@
 import { actions, and, createDatabase, eq, recommendations } from "../db";
-import { MongoIndexCollector, MongoIndexExecutor, serializeSpec } from "../mongo";
 import { requiredEnv } from "../env";
+import { MongoIndexCollector, MongoIndexExecutor, serializeSpec } from "../mongo";
 import { openClusterMongo } from "./cluster-connection";
 import { preflightDrop } from "./preflight";
 

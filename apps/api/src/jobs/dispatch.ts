@@ -1,5 +1,5 @@
-import { clusters, createDatabase } from "../db";
 import type { JobHelpers } from "graphile-worker";
+import { clusters, createDatabase } from "../db";
 import { requiredEnv } from "../env";
 
 // Fan a per-cluster data-plane task out to every connected cluster.

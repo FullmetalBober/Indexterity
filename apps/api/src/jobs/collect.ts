@@ -1,6 +1,6 @@
 import { createDatabase, indexSnapshots } from "../db";
-import { collectSnapshots } from "../mongo";
 import { requiredEnv } from "../env";
+import { collectSnapshots } from "../mongo";
 import { openClusterMongo } from "./cluster-connection";
 
 // Collect index snapshots for a hosted-direct cluster into Postgres. (Agent-mode

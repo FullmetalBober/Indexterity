@@ -1,5 +1,6 @@
 import { Controller } from "@nestjs/common";
 import { type Cluster, contract, type Recommendation } from "@repo/contracts";
+import { TsRestHandler, tsRestHandler } from "@ts-rest/nest";
 import {
   clusters,
   type Database,
@@ -11,7 +12,6 @@ import {
   roiMetrics,
   seal,
 } from "../db";
-import { TsRestHandler, tsRestHandler } from "@ts-rest/nest";
 import { DatabaseService } from "../db/database.service";
 import { masterKeyBytes } from "../env";
 import { classifyCluster } from "../jobs/classify";

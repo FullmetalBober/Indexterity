@@ -1,6 +1,6 @@
 import { clusters, type Database, envKeyProvider, eq, open } from "../db";
-import { MongoConnection } from "../mongo";
 import { masterKeyBytes } from "../env";
+import { MongoConnection } from "../mongo";
 
 export interface ClusterMongo {
   readonly conn: MongoConnection;

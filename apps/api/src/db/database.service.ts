@@ -1,6 +1,6 @@
 import { Injectable } from "@nestjs/common";
-import { createDatabase, type Database } from "./client";
 import { requiredEnv } from "../env";
+import { createDatabase, type Database } from "./client";
 
 // Single shared Drizzle/Postgres connection for the control plane.
 @Injectable()
