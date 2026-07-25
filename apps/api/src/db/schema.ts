@@ -8,6 +8,7 @@ import {
   pgTable,
   text,
   timestamp,
+  unique,
   uuid,
 } from "drizzle-orm/pg-core";
 
@@ -207,3 +208,31 @@ export const policies = pgTable("policies", {
   observeWindowDays: integer("observe_window_days").notNull().default(30),
   maxCollectionSizeBytes: bigint("max_collection_size_bytes", { mode: "number" }),
 });
+
+// Regression memory: an index whose drop slowed reads during observe is parked
+// here so the engine won't re-propose it until `until`. Repeats escalate.
+export const indexCooldowns = pgTable(
+  "index_cooldowns",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    clusterId: uuid("cluster_id")
+      .notNull()
+      .references(() => clusters.id, { onDelete: "cascade" }),
+    database: text("database").notNull(),
+    collection: text("collection").notNull(),
+    indexName: text("index_name").notNull(),
+    reason: text("reason").notNull(),
+    regressionCount: integer("regression_count").notNull().default(1),
+    until: timestamp("until", { withTimezone: true }).notNull(),
+    createdAt,
+    updatedAt,
+  },
+  (table) => [
+    unique("index_cooldowns_target").on(
+      table.clusterId,
+      table.database,
+      table.collection,
+      table.indexName,
+    ),
+  ],
+);

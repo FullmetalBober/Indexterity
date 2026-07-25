@@ -57,6 +57,13 @@
       "when": 1784907200946,
       "tag": "0007_nasty_patch",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1784985508254,
+      "tag": "0008_lumpy_franklin_richards",
+      "breakpoints": true
     }
   ]
 }

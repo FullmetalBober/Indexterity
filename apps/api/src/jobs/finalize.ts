@@ -1,8 +1,9 @@
 import { isRegression } from "../analysis";
 import { actions, and, createDatabase, eq, policies, recommendations, roiMetrics } from "../db";
-import { MongoIndexCollector, MongoIndexExecutor, serializeSpec } from "../mongo";
 import { requiredEnv } from "../env";
+import { MongoIndexCollector, MongoIndexExecutor, serializeSpec } from "../mongo";
 import { openClusterMongo } from "./cluster-connection";
+import { recordRegression } from "./cooldowns";
 import { preflightDrop } from "./preflight";
 
 const DEFAULT_OBSERVE_DAYS = 30;
@@ -49,15 +50,28 @@ export async function finalizeCluster(clusterId: string): Promise<number> {
         const baseline = { ops: rec.baselineReadOps, latencyMicros: rec.baselineReadLatency };
         if (isRegression(baseline, current, REGRESSION_OPTIONS)) {
           await executor.unhide(rec.database, rec.collection, rec.indexName);
+          const until = await recordRegression(
+            db,
+            clusterId,
+            { database: rec.database, collection: rec.collection, indexName: rec.indexName },
+            observeDays,
+            "read-latency regression during observe",
+          );
+          const day = until.toISOString().slice(0, 10);
           await db
             .update(recommendations)
-            .set({ state: "PROPOSED", hiddenAt: null, updatedAt: new Date() })
+            .set({
+              state: "REJECTED",
+              hiddenAt: null,
+              rationale: `${rec.rationale} — auto-rejected: read-latency regression; cooling down until ${day}`,
+              updatedAt: new Date(),
+            })
             .where(eq(recommendations.id, rec.id));
           await db.insert(actions).values({
             recommendationId: rec.id,
             kind: "DROP",
             actor: "system",
-            result: "aborted: read-latency regression during observe",
+            result: `aborted + cooldown until ${day}: read-latency regression during observe`,
           });
           continue;
         }

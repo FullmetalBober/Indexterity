@@ -1,8 +1,9 @@
 import { recommendCreates } from "../analysis";
 import { and, createDatabase, eq, inArray, policies, recommendations } from "../db";
-import { MongoIndexCollector } from "../mongo";
 import { requiredEnv } from "../env";
+import { MongoIndexCollector } from "../mongo";
 import { openClusterMongo } from "./cluster-connection";
+import { activeCooldownKeys, cooldownKey } from "./cooldowns";
 import { applyCreatesForCluster } from "./create";
 
 const SYSTEM_DATABASES = new Set(["admin", "local", "config"]);
@@ -27,6 +28,7 @@ export async function suggestForCluster(clusterId: string): Promise<number> {
     .where(eq(policies.clusterId, clusterId))
     .limit(1);
   if (policy?.workloadAnalysis !== true) return 0;
+  const cooled = await activeCooldownKeys(db, clusterId);
 
   const { conn, demoMode } = await openClusterMongo(db, clusterId);
   let created = 0;
@@ -47,6 +49,8 @@ export async function suggestForCluster(clusterId: string): Promise<number> {
           collector.listIndexes(database, collection),
         ]);
         for (const candidate of recommendCreates(shapes, existing, WORKLOAD_OPTIONS)) {
+          const indexName = proposedName(candidate.keys);
+          if (cooled.has(cooldownKey(database, collection, indexName))) continue;
           const instant =
             candidate.type === "CREATE" && critical && policy.instantCreate && !demoMode;
           if (instant) instantApproved += 1;
@@ -56,7 +60,7 @@ export async function suggestForCluster(clusterId: string): Promise<number> {
             state: instant ? "APPROVED" : "PROPOSED",
             database,
             collection,
-            indexName: proposedName(candidate.keys),
+            indexName,
             rationale: instant
               ? `${candidate.rationale} (auto-approved: critical)`
               : candidate.rationale,
