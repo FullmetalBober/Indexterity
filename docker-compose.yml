@@ -34,7 +34,7 @@ services:
       retries: 10
 
   api:
-    image: docker.io/library/node:24-slim
+    image: docker.io/library/node:26-slim
     working_dir: /app
     command: sh -c "npm install && npx turbo run dev --filter=@repo/api"
     environment:
@@ -61,7 +61,7 @@ services:
         condition: service_healthy
 
   web:
-    image: docker.io/library/node:24-slim
+    image: docker.io/library/node:26-slim
     working_dir: /app
     command: sh -c "npm install && npx turbo run dev --filter=@repo/web"
     environment:
@@ -78,7 +78,7 @@ services:
 
   # Background worker: runs the cron schedule (collect/apply/finalize per cluster).
   worker:
-    image: docker.io/library/node:24-slim
+    image: docker.io/library/node:26-slim
     working_dir: /app
     command: sh -c "npm install && npx turbo run build --filter=@repo/api^... && npm run worker -w @repo/api"
     environment:

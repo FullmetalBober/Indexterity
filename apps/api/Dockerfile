@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # Separate image so the api (and worker) deploy independently. Build context = repo root.
-FROM docker.io/library/node:24-slim AS base
+FROM docker.io/library/node:26-slim AS base
 WORKDIR /app
 RUN npm install -g turbo@2.10.5
 
@@ -17,7 +17,7 @@ COPY --from=pruner /app/out/full/ .
 RUN turbo run build --filter=@repo/api
 RUN npm prune --omit=dev
 
-FROM docker.io/library/node:24-slim AS runtime
+FROM docker.io/library/node:26-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 COPY --from=builder /app .
