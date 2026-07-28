@@ -1,12 +1,14 @@
-import { type Database, eq, members, organizations } from "../db";
+import { and, asc, clusters, type Database, eq, members, organizations, sql } from "../db";
 
-// The caller's org. One org per user for now, created lazily on first
-// authenticated use so a fresh account always has somewhere to put its clusters.
+// The caller's active org: the oldest membership (deterministic when a user
+// belongs to several orgs), created lazily on first authenticated use so a
+// fresh account always has somewhere to put its clusters.
 export async function resolveOrgId(db: Database, userId: string): Promise<string> {
   const [membership] = await db
     .select({ orgId: members.orgId })
     .from(members)
     .where(eq(members.userId, userId))
+    .orderBy(asc(members.createdAt))
     .limit(1);
   if (membership !== undefined) return membership.orgId;
   const [org] = await db
@@ -16,4 +18,37 @@ export async function resolveOrgId(db: Database, userId: string): Promise<string
   if (org === undefined) throw new Error("failed to create organization");
   await db.insert(members).values({ orgId: org.id, userId, role: "owner" });
   return org.id;
+}
+
+// Join an org from an invite. If the caller's only org is the empty auto-created
+// shell (no clusters, sole member), it is dropped so the invited org becomes the
+// active one; otherwise the membership is added alongside (oldest stays active).
+export async function acceptOrgInvite(
+  db: Database,
+  userId: string,
+  orgId: string,
+  role: string,
+): Promise<"joined" | "already-member"> {
+  const [existing] = await db
+    .select({ id: members.id })
+    .from(members)
+    .where(and(eq(members.userId, userId), eq(members.orgId, orgId)))
+    .limit(1);
+  if (existing !== undefined) return "already-member";
+
+  const mine = await db.select().from(members).where(eq(members.userId, userId));
+  const only = mine.length === 1 ? mine[0] : undefined;
+  if (only !== undefined) {
+    const [clusterCount] = await db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(clusters)
+      .where(eq(clusters.orgId, only.orgId));
+    const shellMembers = await db.select().from(members).where(eq(members.orgId, only.orgId));
+    if ((clusterCount?.n ?? 0) === 0 && shellMembers.length === 1) {
+      // Cascade removes the shell membership too.
+      await db.delete(organizations).where(eq(organizations.id, only.orgId));
+    }
+  }
+  await db.insert(members).values({ orgId, userId, role });
+  return "joined";
 }

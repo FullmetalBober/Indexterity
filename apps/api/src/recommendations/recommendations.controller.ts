@@ -1,4 +1,4 @@
-import { Controller, Req, UnauthorizedException } from "@nestjs/common";
+import { Controller, Req } from "@nestjs/common";
 import { type Cluster, contract, type Recommendation } from "@repo/contracts";
 import { TsRestHandler, tsRestHandler } from "@ts-rest/nest";
 import type { FastifyRequest } from "fastify";
@@ -10,8 +10,7 @@ import {
   rebuildKeys,
   summarizeLatency,
 } from "../analysis";
-import { auth } from "../auth";
-import { toWebHeaders } from "../auth/http";
+import { requireUserId } from "../auth/session";
 import { resolveOrgId } from "../auth/tenancy";
 import {
   actions,
@@ -69,9 +68,7 @@ export class RecommendationsController {
 
   // Authn + tenancy: 401 without a valid session, else the caller's org id.
   private async resolveOrg(req: FastifyRequest): Promise<string> {
-    const session = await auth.api.getSession({ headers: toWebHeaders(req.headers) });
-    if (session === null) throw new UnauthorizedException();
-    return resolveOrgId(this.database.db, session.user.id);
+    return resolveOrgId(this.database.db, await requireUserId(req));
   }
 
   private async ownsCluster(clusterId: string, orgId: string): Promise<boolean> {

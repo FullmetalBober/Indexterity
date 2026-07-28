@@ -82,3 +82,28 @@ export const clusterLatency = z.object({
   collections: z.array(latencySummary),
 });
 export type ClusterLatency = z.infer<typeof clusterLatency>;
+
+export const orgMember = z.object({
+  userId: z.string(),
+  email: z.string(),
+  name: z.string(),
+  role: z.string(),
+});
+export type OrgMember = z.infer<typeof orgMember>;
+
+export const orgInfo = z.object({
+  id: z.string().uuid(),
+  name: z.string(),
+  members: z.array(orgMember),
+  pendingInvites: z.array(z.object({ email: z.string(), role: z.string(), expiresAt: z.string() })),
+});
+export type OrgInfo = z.infer<typeof orgInfo>;
+
+// Returned once at creation — the token is the bearer credential.
+export const createdInvite = z.object({
+  token: z.string(),
+  email: z.string(),
+  role: z.string(),
+  expiresAt: z.string(),
+});
+export type CreatedInvite = z.infer<typeof createdInvite>;

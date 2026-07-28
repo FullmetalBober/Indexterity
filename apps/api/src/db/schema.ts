@@ -121,6 +121,24 @@ export const members = pgTable("members", {
   createdAt,
 });
 
+// Pending invitations into an org. The token is the bearer credential (returned
+// once at creation); accepting adds the caller as a member and stamps acceptedAt.
+export const invites = pgTable("invites", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  orgId: uuid("org_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  email: text("email").notNull(),
+  role: text("role").notNull().default("member"),
+  token: text("token").notNull().unique(),
+  invitedBy: text("invited_by")
+    .notNull()
+    .references(() => user.id, { onDelete: "cascade" }),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  acceptedAt: timestamp("accepted_at", { withTimezone: true }),
+  createdAt,
+});
+
 // --- managed clusters ----------------------------------------------------
 export const clusters = pgTable("clusters", {
   id: uuid("id").defaultRandom().primaryKey(),

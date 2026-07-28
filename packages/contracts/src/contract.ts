@@ -1,6 +1,13 @@
 import { initContract } from "@ts-rest/core";
 import { z } from "zod";
-import { cluster, clusterLatency, clusterRoi, recommendation } from "./schemas.js";
+import {
+  cluster,
+  clusterLatency,
+  clusterRoi,
+  createdInvite,
+  orgInfo,
+  recommendation,
+} from "./schemas.js";
 
 const c = initContract();
 
@@ -70,5 +77,29 @@ export const contract = c.router({
       409: z.object({ message: z.string() }),
     },
     summary: "Undo a drop: rebuild the index from its rollback token",
+  },
+  getOrg: {
+    method: "GET",
+    path: "/org",
+    responses: { 200: orgInfo },
+    summary: "The caller's org: members and pending invites",
+  },
+  createInvite: {
+    method: "POST",
+    path: "/org/invites",
+    body: z.object({ email: z.string().email(), role: z.enum(["member", "owner"]) }),
+    responses: { 200: createdInvite },
+    summary: "Invite someone into the org; returns the one-time token",
+  },
+  acceptInvite: {
+    method: "POST",
+    path: "/invites/accept",
+    body: z.object({ token: z.string().min(1) }),
+    responses: {
+      200: z.object({ orgId: z.string().uuid(), orgName: z.string() }),
+      404: z.object({ message: z.string() }),
+      409: z.object({ message: z.string() }),
+    },
+    summary: "Join an org with an invite token",
   },
 });

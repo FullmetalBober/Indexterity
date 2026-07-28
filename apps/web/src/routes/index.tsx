@@ -15,10 +15,13 @@ import { signIn, signOut, signUp } from "../lib/auth";
 
 // Runs on the web server for every navigation; forwards the session cookie to the
 // api. A 401 means "not signed in" — the component shows the auth form instead.
+const EMPTY_ORG = { id: "", name: "", members: [], pendingInvites: [] };
+
 const loadDashboard = createServerFn({ method: "GET" }).handler(async () => {
   const api = serverApi();
-  const clustersResult = await api.listClusters();
+  const [clustersResult, orgResult] = await Promise.all([api.listClusters(), api.getOrg()]);
   if (clustersResult.status === 401) return { authed: false as const };
+  const org = orgResult.status === 200 ? orgResult.body : EMPTY_ORG;
   const clusters = clustersResult.status === 200 ? clustersResult.body : [];
   const cluster = clusters[0] ?? null;
   if (cluster === null) {
@@ -28,6 +31,7 @@ const loadDashboard = createServerFn({ method: "GET" }).handler(async () => {
       recommendations: [],
       roi: { freedBytes: 0, indexesDropped: 0, estimatedMonthlyUsd: 0 },
       latency: { collections: [] },
+      org,
     };
   }
   const [recResult, roiResult, latencyResult] = await Promise.all([
@@ -44,6 +48,7 @@ const loadDashboard = createServerFn({ method: "GET" }).handler(async () => {
         ? roiResult.body
         : { freedBytes: 0, indexesDropped: 0, estimatedMonthlyUsd: 0 },
     latency: latencyResult.status === 200 ? latencyResult.body : { collections: [] },
+    org,
   };
 });
 
@@ -65,6 +70,29 @@ const rollbackRecommendation = createServerFn({ method: "POST" })
   .handler(async ({ data }) => {
     const result = await serverApi().rollbackRecommendation({ params: { id: data }, body: {} });
     return { ok: result.status === 200 };
+  });
+
+const createInvite = createServerFn({ method: "POST" })
+  .validator((email: unknown): string => {
+    if (typeof email !== "string" || email.length === 0) throw new Error("email required");
+    return email;
+  })
+  .handler(async ({ data }) => {
+    const result = await serverApi().createInvite({ body: { email: data, role: "member" } });
+    if (result.status !== 200) return { token: null };
+    return { token: result.body.token };
+  });
+
+const acceptInvite = createServerFn({ method: "POST" })
+  .validator((token: unknown): string => {
+    if (typeof token !== "string" || token.length === 0) throw new Error("token required");
+    return token;
+  })
+  .handler(async ({ data }) => {
+    const result = await serverApi().acceptInvite({ body: { token: data } });
+    if (result.status === 200) return { ok: true, message: `joined ${result.body.orgName}` };
+    const message = result.status === 404 || result.status === 409 ? result.body.message : "failed";
+    return { ok: false, message };
   });
 
 export const Route = createFileRoute("/")({
@@ -99,7 +127,7 @@ function Home() {
 
   if (!data.authed) return <AuthForm onDone={() => router.invalidate()} />;
 
-  const { cluster, recommendations, roi, latency } = data;
+  const { cluster, recommendations, roi, latency, org } = data;
   const proposed = recommendations.filter((rec) => rec.state === "PROPOSED");
   const totalSaved = proposed.reduce((sum, rec) => sum + rec.estimatedBytesSaved, 0);
 
@@ -241,7 +269,96 @@ function Home() {
           </Table>
         </>
       ) : null}
+
+      <TeamSection org={org} onChanged={() => router.invalidate()} />
     </main>
+  );
+}
+
+interface TeamOrg {
+  readonly name: string;
+  readonly members: readonly { userId: string; email: string; name: string; role: string }[];
+  readonly pendingInvites: readonly { email: string; role: string; expiresAt: string }[];
+}
+
+function TeamSection({ org, onChanged }: { org: TeamOrg; onChanged: () => void }) {
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteToken, setInviteToken] = useState<string | null>(null);
+  const [acceptToken, setAcceptToken] = useState("");
+  const [acceptMessage, setAcceptMessage] = useState<string | null>(null);
+
+  async function onInvite() {
+    const result = await createInvite({ data: inviteEmail });
+    setInviteToken(result.token);
+    setInviteEmail("");
+    onChanged();
+  }
+
+  async function onAccept() {
+    const result = await acceptInvite({ data: acceptToken });
+    setAcceptMessage(result.message);
+    setAcceptToken("");
+    if (result.ok) onChanged();
+  }
+
+  return (
+    <section className="mt-8">
+      <h2 className="font-semibold text-lg">Team — {org.name}</h2>
+      <ul className="mt-2 space-y-1">
+        {org.members.map((member) => (
+          <li key={member.userId} className="text-sm">
+            {member.name} <span className="text-muted-foreground">({member.email})</span> ·{" "}
+            <span className="text-muted-foreground">{member.role}</span>
+          </li>
+        ))}
+        {org.pendingInvites.map((invite) => (
+          <li key={invite.email} className="text-muted-foreground text-sm">
+            {invite.email} · invited ({invite.role})
+          </li>
+        ))}
+      </ul>
+
+      <div className="mt-4 flex gap-2">
+        <input
+          className="rounded-md border px-3 py-1.5 text-sm"
+          type="email"
+          placeholder="teammate@company.com"
+          value={inviteEmail}
+          onChange={(event) => setInviteEmail(event.target.value)}
+        />
+        <button
+          type="button"
+          onClick={() => void onInvite()}
+          className="rounded-md bg-primary px-3 py-1.5 text-primary-foreground text-sm"
+        >
+          Invite
+        </button>
+      </div>
+      {inviteToken !== null ? (
+        <p className="mt-2 text-sm">
+          Share this token: <code className="rounded bg-muted px-1 font-mono">{inviteToken}</code>
+        </p>
+      ) : null}
+
+      <div className="mt-4 flex gap-2">
+        <input
+          className="rounded-md border px-3 py-1.5 font-mono text-sm"
+          placeholder="Paste an invite token"
+          value={acceptToken}
+          onChange={(event) => setAcceptToken(event.target.value)}
+        />
+        <button
+          type="button"
+          onClick={() => void onAccept()}
+          className="rounded-md border px-3 py-1.5 text-sm"
+        >
+          Join org
+        </button>
+      </div>
+      {acceptMessage !== null ? (
+        <p className="mt-2 text-muted-foreground text-sm">{acceptMessage}</p>
+      ) : null}
+    </section>
   );
 }
 
