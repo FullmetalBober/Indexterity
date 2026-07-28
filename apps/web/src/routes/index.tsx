@@ -272,7 +272,7 @@ function Home() {
     <main className="mx-auto max-w-4xl p-8">
       <div className="flex items-start justify-between">
         <div>
-          <h1 className="font-semibold text-2xl">mongo-optimizer</h1>
+          <h1 className="font-semibold text-2xl">Indexterity</h1>
           {cluster === null ? (
             <p className="mt-1 text-muted-foreground">No cluster connected</p>
           ) : (
@@ -750,7 +750,7 @@ function AuthForm({ onDone }: { onDone: () => void }) {
 
   return (
     <main className="mx-auto mt-24 max-w-sm p-8">
-      <h1 className="font-semibold text-2xl">mongo-optimizer</h1>
+      <h1 className="font-semibold text-2xl">Indexterity</h1>
       <p className="mt-1 text-muted-foreground">
         {mode === "in" ? "Sign in to your account" : "Create an account"}
       </p>

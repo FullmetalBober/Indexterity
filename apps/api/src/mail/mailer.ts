@@ -36,7 +36,7 @@ export async function sendMail(to: string, subject: string, text: string): Promi
   }
   const from = process.env.MAIL_FROM ?? process.env.SMTP_USER ?? "";
   try {
-    await transport.sendMail({ from: `mongo-optimizer <${from}>`, to, subject, text });
+    await transport.sendMail({ from: `Indexterity <${from}>`, to, subject, text });
     return true;
   } catch (error) {
     console.error(`mail send failed ("${subject}" to ${to}):`, error);

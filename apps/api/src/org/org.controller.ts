@@ -82,7 +82,7 @@ export class OrgController {
       // Best-effort: the token is also returned to the inviter to share manually.
       await sendMail(
         body.email,
-        `You're invited to ${org?.name ?? "an org"} on mongo-optimizer`,
+        `You're invited to ${org?.name ?? "an org"} on Indexterity`,
         `You've been invited to join "${org?.name ?? "an org"}" as ${body.role}.\n\n` +
           `Sign up (or sign in), then paste this invite token in the Team section:\n\n` +
           `${token}\n\nThe invite expires ${expiresAt.toISOString().slice(0, 10)}.`,

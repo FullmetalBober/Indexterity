@@ -18,6 +18,6 @@ export async function notifyClusterOwners(
   const clusterName = rows[0]?.clusterName ?? clusterId;
   for (const row of rows) {
     if (row.role !== "owner") continue;
-    await sendMail(row.email, `[mongo-optimizer] ${clusterName}: ${subject}`, text);
+    await sendMail(row.email, `[Indexterity] ${clusterName}: ${subject}`, text);
   }
 }

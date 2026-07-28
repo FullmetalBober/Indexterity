@@ -1,5 +1,5 @@
 {
-  "name": "mongo-optimizer",
+  "name": "indexterity",
   "version": "0.0.0",
   "private": true,
   "packageManager": "npm@11.6.2",

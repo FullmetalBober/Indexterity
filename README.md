@@ -1,6 +1,6 @@
-# mongo-optimizer
+# Indexterity
 
-SaaS that continuously watches MongoDB indexes and manages them safely — drop
+**Indexterity** — index dexterity for MongoDB. A SaaS that continuously watches MongoDB indexes and manages them safely — drop
 unused/redundant, merge overlapping, extend prefixes, create missing — and proves
 the result in hard numbers. Read-only by default; the one irreversible step (a
 drop) is gated behind an observe window, a double pre-flight, and a read-latency
