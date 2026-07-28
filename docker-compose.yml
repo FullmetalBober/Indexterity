@@ -3,7 +3,7 @@
 # native modules (musl/glibc) isolated from the host.
 services:
   postgres:
-    image: docker.io/library/postgres:17-alpine
+    image: docker.io/library/postgres:18-alpine
     restart: unless-stopped
     environment:
       POSTGRES_USER: mongo_optimizer
