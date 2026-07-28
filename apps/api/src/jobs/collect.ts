@@ -7,7 +7,7 @@ import { openClusterMongo } from "./cluster-connection";
 // cluster into Postgres.
 export async function collectCluster(clusterId: string): Promise<number> {
   const db = createDatabase(requiredEnv("DATABASE_URL"));
-  const { conn } = await openClusterMongo(db, clusterId);
+  const { conn, release } = await openClusterMongo(db, clusterId);
   try {
     const { snapshots, latency } = await collectSnapshots(conn);
     if (snapshots.length > 0) {
@@ -20,6 +20,6 @@ export async function collectCluster(clusterId: string): Promise<number> {
     }
     return snapshots.length;
   } finally {
-    await conn.close();
+    release();
   }
 }

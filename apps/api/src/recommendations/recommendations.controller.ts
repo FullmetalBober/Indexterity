@@ -286,7 +286,7 @@ export class RecommendationsController {
       if (keys === null) {
         return { status: 409, body: { message: "stored spec cannot be rebuilt automatically" } };
       }
-      const { conn, demoMode } = await openClusterMongo(this.database.db, rec.clusterId);
+      const { conn, demoMode, release } = await openClusterMongo(this.database.db, rec.clusterId);
       try {
         if (demoMode) {
           return { status: 409, body: { message: "cluster is in demo mode" } };
@@ -294,7 +294,7 @@ export class RecommendationsController {
         const executor = new MongoIndexExecutor(conn, demoMode);
         await executor.create(rec.database, rec.collection, keys, { name: indexName });
       } finally {
-        await conn.close();
+        release();
       }
       // The freed bytes are spent again — correct the ROI headline.
       await this.database.db.insert(roiMetrics).values({

@@ -1,13 +1,16 @@
 import { clusters, type Database, envKeyProvider, eq, open } from "../db";
 import { masterKeyBytes } from "../env";
-import { MongoConnection } from "../mongo";
+import type { MongoConnection } from "../mongo";
+import { acquireClusterConnection } from "./connection-pool";
 
 export interface ClusterMongo {
   readonly conn: MongoConnection;
   readonly demoMode: boolean;
+  // Return the connection to the pool — callers must not close it.
+  readonly release: () => void;
 }
 
-// Load a cluster, unseal its connection string, and open a Mongo connection.
+// Load a cluster, unseal its connection string, and lease a pooled connection.
 export async function openClusterMongo(db: Database, clusterId: string): Promise<ClusterMongo> {
   const [cluster] = await db.select().from(clusters).where(eq(clusters.id, clusterId)).limit(1);
   if (cluster === undefined) throw new Error(`cluster not found: ${clusterId}`);
@@ -17,7 +20,6 @@ export async function openClusterMongo(db: Database, clusterId: string): Promise
       envKeyProvider(masterKeyBytes()),
     ),
   );
-  const conn = new MongoConnection(connString);
-  await conn.connect();
-  return { conn, demoMode: cluster.demoMode };
+  const { conn, release } = await acquireClusterConnection(clusterId, connString);
+  return { conn, demoMode: cluster.demoMode, release };
 }

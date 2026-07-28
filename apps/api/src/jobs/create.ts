@@ -22,7 +22,7 @@ export async function applyCreatesForCluster(clusterId: string): Promise<number>
     );
   if (approved.length === 0) return 0;
 
-  const { conn, demoMode } = await openClusterMongo(db, clusterId);
+  const { conn, demoMode, release } = await openClusterMongo(db, clusterId);
   try {
     if (demoMode) return 0;
     const collector = new MongoIndexCollector(conn);
@@ -57,6 +57,6 @@ export async function applyCreatesForCluster(clusterId: string): Promise<number>
     }
     return built;
   } finally {
-    await conn.close();
+    release();
   }
 }

@@ -30,7 +30,7 @@ export async function suggestForCluster(clusterId: string): Promise<number> {
   if (policy?.workloadAnalysis !== true) return 0;
   const cooled = await activeCooldownKeys(db, clusterId);
 
-  const { conn, demoMode } = await openClusterMongo(db, clusterId);
+  const { conn, demoMode, release } = await openClusterMongo(db, clusterId);
   let created = 0;
   let instantApproved = 0;
   try {
@@ -82,7 +82,7 @@ export async function suggestForCluster(clusterId: string): Promise<number> {
     if (toInsert.length > 0) await db.insert(recommendations).values(toInsert);
     created = toInsert.length;
   } finally {
-    await conn.close();
+    release();
   }
   // Build the auto-approved critical creates now, without waiting for the scheduler.
   if (instantApproved > 0) await applyCreatesForCluster(clusterId);

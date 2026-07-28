@@ -17,7 +17,7 @@ export async function applyCluster(clusterId: string): Promise<number> {
     .where(and(eq(recommendations.clusterId, clusterId), eq(recommendations.state, "APPROVED")));
   if (approved.length === 0) return 0;
 
-  const { conn, demoMode } = await openClusterMongo(db, clusterId);
+  const { conn, demoMode, release } = await openClusterMongo(db, clusterId);
   try {
     // Demo/read-only clusters never execute writes.
     if (demoMode) return 0;
@@ -64,6 +64,6 @@ export async function applyCluster(clusterId: string): Promise<number> {
     }
     return hidden;
   } finally {
-    await conn.close();
+    release();
   }
 }
