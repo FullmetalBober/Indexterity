@@ -166,6 +166,11 @@ export const recommendations = pgTable("recommendations", {
   hiddenAt: timestamp("hidden_at", { withTimezone: true }),
   baselineReadOps: bigint("baseline_read_ops", { mode: "number" }),
   baselineReadLatency: bigint("baseline_read_latency", { mode: "number" }),
+  // Set when a CREATE/UPDATE/MERGE is built: the write-latency baseline for the
+  // post-build regression watch. Cleared once the index graduates the window.
+  builtAt: timestamp("built_at", { withTimezone: true }),
+  baselineWriteOps: bigint("baseline_write_ops", { mode: "number" }),
+  baselineWriteLatency: bigint("baseline_write_latency", { mode: "number" }),
   targetSpec: jsonb("target_spec").$type<{ keys: string[]; retire: string[] }>(),
   createdAt,
   updatedAt,

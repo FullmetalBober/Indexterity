@@ -1,5 +1,14 @@
 import { isRegression } from "../analysis";
-import { actions, and, createDatabase, eq, policies, recommendations, roiMetrics } from "../db";
+import {
+  actions,
+  and,
+  createDatabase,
+  eq,
+  inArray,
+  policies,
+  recommendations,
+  roiMetrics,
+} from "../db";
 import { requiredEnv } from "../env";
 import { MongoIndexCollector, MongoIndexExecutor, serializeSpec } from "../mongo";
 import { openClusterMongo } from "./cluster-connection";
@@ -32,7 +41,18 @@ export async function finalizeCluster(clusterId: string): Promise<number> {
   const due = hiddenRecs.filter(
     (rec) => rec.hiddenAt !== null && now - rec.hiddenAt.getTime() >= observeDays * DAY_MS,
   );
-  if (due.length === 0) return 0;
+  // Built indexes still under the post-build write watch.
+  const watched = await db
+    .select()
+    .from(recommendations)
+    .where(
+      and(
+        eq(recommendations.clusterId, clusterId),
+        eq(recommendations.state, "ACTIVE"),
+        inArray(recommendations.type, ["CREATE", "UPDATE", "MERGE"]),
+      ),
+    );
+  if (due.length === 0 && watched.length === 0) return 0;
 
   const { conn, demoMode } = await openClusterMongo(db, clusterId);
   try {
@@ -42,6 +62,51 @@ export async function finalizeCluster(clusterId: string): Promise<number> {
     const executor = new MongoIndexExecutor(conn, demoMode);
     let dropped = 0;
     let freedBytes = 0;
+
+    // Post-build watch: a freshly built index that slows the collection's writes
+    // gets dropped and cooled down; one that survives the window graduates.
+    for (const rec of watched) {
+      if (
+        rec.builtAt === null ||
+        rec.baselineWriteOps === null ||
+        rec.baselineWriteLatency === null
+      ) {
+        continue;
+      }
+      if (now - rec.builtAt.getTime() >= observeDays * DAY_MS) {
+        await db
+          .update(recommendations)
+          .set({ baselineWriteOps: null, baselineWriteLatency: null, updatedAt: new Date() })
+          .where(eq(recommendations.id, rec.id));
+        continue;
+      }
+      const { writes } = await collector.collectionLatency(rec.database, rec.collection);
+      const baseline = { ops: rec.baselineWriteOps, latencyMicros: rec.baselineWriteLatency };
+      if (!isRegression(baseline, writes, REGRESSION_OPTIONS)) continue;
+      await executor.drop(rec.database, rec.collection, rec.indexName);
+      const until = await recordRegression(
+        db,
+        clusterId,
+        { database: rec.database, collection: rec.collection, indexName: rec.indexName },
+        observeDays,
+        "write-latency regression after build",
+      );
+      const day = until.toISOString().slice(0, 10);
+      await db
+        .update(recommendations)
+        .set({
+          state: "ROLLED_BACK",
+          rationale: `${rec.rationale} — rolled back: write-latency regression; cooling down until ${day}`,
+          updatedAt: new Date(),
+        })
+        .where(eq(recommendations.id, rec.id));
+      await db.insert(actions).values({
+        recommendationId: rec.id,
+        kind: "DROP",
+        actor: "system",
+        result: `rolled back + cooldown until ${day}: write-latency regression after build`,
+      });
+    }
     for (const rec of due) {
       // Regression gate: did hiding this index slow the collection's reads
       // during observe? If so, un-hide and re-propose instead of dropping.

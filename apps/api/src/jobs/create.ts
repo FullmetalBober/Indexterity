@@ -1,11 +1,13 @@
 import { actions, and, createDatabase, eq, inArray, recommendations } from "../db";
 import { requiredEnv } from "../env";
-import { MongoIndexExecutor } from "../mongo";
+import { MongoIndexCollector, MongoIndexExecutor } from "../mongo";
 import { openClusterMongo } from "./cluster-connection";
 
 // APPROVED CREATE/UPDATE/MERGE -> build the index (executor.create) -> ACTIVE.
 // Retiring superseded indexes is left to the next classify pass, which sees them
 // as DROP_REDUNDANT and routes them through the safe hide -> observe -> drop path.
+// At build time the collection's write latency is recorded as the baseline for
+// the post-build regression watch (finalize drops the index if writes regress).
 export async function applyCreatesForCluster(clusterId: string): Promise<number> {
   const db = createDatabase(requiredEnv("DATABASE_URL"));
   const approved = await db
@@ -23,6 +25,7 @@ export async function applyCreatesForCluster(clusterId: string): Promise<number>
   const { conn, demoMode } = await openClusterMongo(db, clusterId);
   try {
     if (demoMode) return 0;
+    const collector = new MongoIndexCollector(conn);
     const executor = new MongoIndexExecutor(conn, demoMode);
     let built = 0;
     for (const rec of approved) {
@@ -31,9 +34,17 @@ export async function applyCreatesForCluster(clusterId: string): Promise<number>
       const keys: Record<string, 1 | -1> = {};
       for (const field of target.keys) keys[field] = 1;
       await executor.create(rec.database, rec.collection, keys, { name: rec.indexName });
+      // Write-latency baseline at build time — the reference for the post-build watch.
+      const { writes } = await collector.collectionLatency(rec.database, rec.collection);
       await db
         .update(recommendations)
-        .set({ state: "ACTIVE", updatedAt: new Date() })
+        .set({
+          state: "ACTIVE",
+          builtAt: new Date(),
+          baselineWriteOps: writes.ops,
+          baselineWriteLatency: writes.latencyMicros,
+          updatedAt: new Date(),
+        })
         .where(eq(recommendations.id, rec.id));
       await db.insert(actions).values({
         recommendationId: rec.id,
