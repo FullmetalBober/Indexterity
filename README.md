@@ -91,7 +91,15 @@ APPROVED → pre-flight → hide (collMod hidden:true) → HIDDEN → observe �
 - Only when all gates pass does it drop — the single irreversible step. Freed
   bytes are written to `roi_metrics`.
 
-**Additions** (`CREATE` / `UPDATE`): `APPROVED → build → ACTIVE`.
+**Additions** (`CREATE` / `UPDATE`): `APPROVED → build → ACTIVE`, then a
+**post-build write watch**: the collection's write latency is baselined at build
+time, and if writes regress past `baseline × 1.5` during the observe window the
+new index is dropped, cooled down, and the recommendation marked `ROLLED_BACK`.
+An index that survives the window graduates (the watch stops).
+
+**Undo**: a `DROPPED` recommendation can be rolled back from the dashboard — the
+index is rebuilt from the spec captured at drop time (`rollbackToken`) and the
+ROI headline is corrected back down.
 
 Every executed operation writes an **immutable `actions` row** (actor, result,
 rollback token). In **demo mode** (default on) the pipeline computes everything

@@ -59,4 +59,16 @@ export const contract = c.router({
     responses: { 200: recommendation, 404: z.object({ message: z.string() }) },
     summary: "Approve a recommendation, moving it into the apply pipeline",
   },
+  rollbackRecommendation: {
+    method: "POST",
+    path: "/recommendations/:id/rollback",
+    pathParams: z.object({ id: z.string().uuid() }),
+    body: z.object({}),
+    responses: {
+      200: recommendation,
+      404: z.object({ message: z.string() }),
+      409: z.object({ message: z.string() }),
+    },
+    summary: "Undo a drop: rebuild the index from its rollback token",
+  },
 });

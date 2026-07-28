@@ -57,6 +57,16 @@ const approveRecommendation = createServerFn({ method: "POST" })
     return { ok: result.status === 200 };
   });
 
+const rollbackRecommendation = createServerFn({ method: "POST" })
+  .validator((id: unknown): string => {
+    if (typeof id !== "string") throw new Error("id must be a string");
+    return id;
+  })
+  .handler(async ({ data }) => {
+    const result = await serverApi().rollbackRecommendation({ params: { id: data }, body: {} });
+    return { ok: result.status === 200 };
+  });
+
 export const Route = createFileRoute("/")({
   loader: () => loadDashboard(),
   component: Home,
@@ -95,6 +105,11 @@ function Home() {
 
   async function onApprove(id: string) {
     await approveRecommendation({ data: id });
+    await router.invalidate();
+  }
+
+  async function onUndo(id: string) {
+    await rollbackRecommendation({ data: id });
     await router.invalidate();
   }
 
@@ -170,6 +185,16 @@ function Home() {
                     className="rounded-md bg-primary px-2 py-1 text-primary-foreground text-xs"
                   >
                     Approve
+                  </button>
+                ) : rec.state === "DROPPED" ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void onUndo(rec.id);
+                    }}
+                    className="rounded-md border px-2 py-1 text-xs"
+                  >
+                    Undo
                   </button>
                 ) : (
                   <span className="text-muted-foreground text-xs">{rec.state}</span>
