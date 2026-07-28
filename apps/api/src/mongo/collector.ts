@@ -29,6 +29,8 @@ export interface IndexCollector {
   readLatency(database: string, collection: string): Promise<LatencyPair>;
   collectionLatency(database: string, collection: string): Promise<CollectionLatency>;
   collectSlowQueries(database: string, collection: string): Promise<QueryShape[]>;
+  collectQueryStats(database: string, collection: string): Promise<QueryShape[]>;
+  collectWorkload(database: string, collection: string): Promise<QueryShape[]>;
 }
 
 // Parse driver output at the boundary so nothing downstream sees `any`.
@@ -71,6 +73,24 @@ const shardCollectionDoc = z.object({
 });
 
 const collectionInfo = z.object({ name: z.string() });
+
+// One $queryStats entry (mongo 7+). Filters are shapified ({field: {$eq: "?number"}}),
+// metrics arrive as Longs the driver promotes. Lenient: entries for other command
+// shapes are skipped via safeParse.
+const queryStatsDoc = z.object({
+  key: z.object({
+    queryShape: z.object({
+      cmdNs: z.object({ db: z.string(), coll: z.string() }),
+      filter: z.record(z.string(), z.unknown()).optional(),
+      sort: z.record(z.string(), z.unknown()).optional(),
+    }),
+  }),
+  metrics: z.object({
+    execCount: z.coerce.number(),
+    keysExamined: z.object({ sum: z.coerce.number() }).optional(),
+    docsExamined: z.object({ sum: z.coerce.number() }).optional(),
+  }),
+});
 
 // system.profile entry (lenient — only field names are used downstream).
 const profileDoc = z.object({
@@ -288,5 +308,57 @@ export class MongoIndexCollector implements IndexCollector {
       collscan: shape.collscan,
       count: shape.count,
     }));
+  }
+
+  // Query shapes from $queryStats (mongo 7+): no profiler needed. COLLSCAN is
+  // inferred from zero keys examined alongside docs examined. Requires
+  // internalQueryStatsRateLimit > 0 on the server.
+  async collectQueryStats(database: string, collection: string): Promise<QueryShape[]> {
+    const raw = await this.conn
+      .db("admin")
+      .aggregate([{ $queryStats: {} }])
+      .toArray();
+    const shapes = new Map<
+      string,
+      { equality: string[]; sort: string[]; range: string[]; collscan: boolean; count: number }
+    >();
+    for (const doc of raw) {
+      const parsed = queryStatsDoc.safeParse(doc);
+      if (!parsed.success) continue;
+      const { key, metrics } = parsed.data;
+      if (key.queryShape.cmdNs.db !== database || key.queryShape.cmdNs.coll !== collection) {
+        continue;
+      }
+      const filter = key.queryShape.filter;
+      if (filter === undefined) continue;
+      const equality: string[] = [];
+      const range: string[] = [];
+      collectPredicates(filter, equality, range);
+      const sort = key.queryShape.sort === undefined ? [] : Object.keys(key.queryShape.sort);
+      if (equality.length === 0 && range.length === 0 && sort.length === 0) continue;
+      const collscan =
+        (metrics.keysExamined?.sum ?? 0) === 0 && (metrics.docsExamined?.sum ?? 0) > 0;
+      const mapKey = `${equality.join(",")}|${sort.join(",")}|${range.join(",")}`;
+      const prev = shapes.get(mapKey);
+      if (prev === undefined) {
+        shapes.set(mapKey, { equality, sort, range, collscan, count: metrics.execCount });
+      } else {
+        prev.count += metrics.execCount;
+        prev.collscan = prev.collscan || collscan;
+      }
+    }
+    return [...shapes.values()];
+  }
+
+  // Preferred workload source: $queryStats, falling back to the profiler when
+  // it is unavailable (mongo <7, disabled, missing permission) or empty.
+  async collectWorkload(database: string, collection: string): Promise<QueryShape[]> {
+    try {
+      const shapes = await this.collectQueryStats(database, collection);
+      if (shapes.length > 0) return shapes;
+    } catch {
+      // fall through to the profiler
+    }
+    return this.collectSlowQueries(database, collection);
   }
 }

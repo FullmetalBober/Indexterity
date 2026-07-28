@@ -45,7 +45,7 @@ export async function suggestForCluster(clusterId: string): Promise<number> {
         if (docCount < MIN_COLLECTION_DOCS) continue;
         const critical = docCount >= CRITICAL_COLLECTION_DOCS;
         const [shapes, existing] = await Promise.all([
-          collector.collectSlowQueries(database, collection),
+          collector.collectWorkload(database, collection),
           collector.listIndexes(database, collection),
         ]);
         for (const candidate of recommendCreates(shapes, existing, WORKLOAD_OPTIONS)) {
