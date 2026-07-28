@@ -17,17 +17,17 @@ export interface IndexExecutor {
   ): Promise<void>;
 }
 
-// Enforces demo/read-only mode structurally: every write throws unless the
-// cluster was explicitly taken out of demo mode (docs/architecture.md D11).
+// Enforces read-only mode structurally: every write throws unless the cluster
+// was explicitly switched to live mode (docs/architecture.md D11).
 export class MongoIndexExecutor implements IndexExecutor {
   constructor(
     private readonly conn: MongoConnection,
-    private readonly demoMode: boolean,
+    private readonly readOnly: boolean,
   ) {}
 
   private assertWritable(action: string): void {
-    if (this.demoMode) {
-      throw new Error(`Cluster is in demo mode; refusing to ${action}.`);
+    if (this.readOnly) {
+      throw new Error(`Cluster is read-only; refusing to ${action}.`);
     }
   }
 

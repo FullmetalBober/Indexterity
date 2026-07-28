@@ -1,12 +1,12 @@
-import { createDatabase, indexSnapshots, latencySamples } from "../db";
-import { requiredEnv } from "../env";
+import { indexSnapshots, latencySamples } from "../db";
 import { collectSnapshots } from "../mongo";
 import { openClusterMongo } from "./cluster-connection";
+import { jobDb } from "./db";
 
 // Collect index snapshots + per-collection read/write latency for a hosted-direct
 // cluster into Postgres.
 export async function collectCluster(clusterId: string): Promise<number> {
-  const db = createDatabase(requiredEnv("DATABASE_URL"));
+  const db = jobDb();
   const { conn, release } = await openClusterMongo(db, clusterId);
   try {
     const { snapshots, latency } = await collectSnapshots(conn);

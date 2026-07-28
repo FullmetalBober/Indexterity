@@ -34,7 +34,7 @@ export const cluster = z.object({
   id: z.string().uuid(),
   name: z.string(),
   connectionMode,
-  demoMode: z.boolean(),
+  readOnly: z.boolean(),
   createdAt: z.string(),
 });
 export type Cluster = z.infer<typeof cluster>;

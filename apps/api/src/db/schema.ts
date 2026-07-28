@@ -2,6 +2,7 @@ import {
   bigint,
   boolean,
   customType,
+  index,
   integer,
   jsonb,
   pgEnum,
@@ -147,65 +148,77 @@ export const clusters = pgTable("clusters", {
     .references(() => organizations.id, { onDelete: "cascade" }),
   name: text("name").notNull(),
   connectionMode: connectionMode("connection_mode").notNull().default("HOSTED_DIRECT"),
-  demoMode: boolean("demo_mode").notNull().default(true),
+  readOnly: boolean("read_only").notNull().default(true),
   // The control plane holds the cluster's connection string, envelope-encrypted.
   sealedDek: bytea("sealed_dek").notNull(),
   sealedData: bytea("sealed_data").notNull(),
   createdAt,
 });
 
-export const indexSnapshots = pgTable("index_snapshots", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  clusterId: uuid("cluster_id")
-    .notNull()
-    .references(() => clusters.id, { onDelete: "cascade" }),
-  database: text("database").notNull(),
-  collection: text("collection").notNull(),
-  indexName: text("index_name").notNull(),
-  spec: jsonb("spec").$type<Record<string, unknown>>().notNull(),
-  sizeBytes: bigint("size_bytes", { mode: "number" }).notNull(),
-  perMember: jsonb("per_member").$type<Array<{ member: string; ops: number }>>().notNull(),
-  capturedAt: timestamp("captured_at", { withTimezone: true }).notNull().defaultNow(),
-});
+export const indexSnapshots = pgTable(
+  "index_snapshots",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    clusterId: uuid("cluster_id")
+      .notNull()
+      .references(() => clusters.id, { onDelete: "cascade" }),
+    database: text("database").notNull(),
+    collection: text("collection").notNull(),
+    indexName: text("index_name").notNull(),
+    spec: jsonb("spec").$type<Record<string, unknown>>().notNull(),
+    sizeBytes: bigint("size_bytes", { mode: "number" }).notNull(),
+    perMember: jsonb("per_member").$type<Array<{ member: string; ops: number }>>().notNull(),
+    capturedAt: timestamp("captured_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index("index_snapshots_cluster_time").on(table.clusterId, table.capturedAt)],
+);
 
-export const recommendations = pgTable("recommendations", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  clusterId: uuid("cluster_id")
-    .notNull()
-    .references(() => clusters.id, { onDelete: "cascade" }),
-  type: recommendationType("type").notNull(),
-  usageClass: usageClass("usage_class"),
-  state: recommendationState("state").notNull().default("PROPOSED"),
-  database: text("database").notNull(),
-  collection: text("collection").notNull(),
-  indexName: text("index_name").notNull(),
-  rationale: text("rationale").notNull(),
-  estimatedBytesSaved: bigint("estimated_bytes_saved", { mode: "number" }).notNull().default(0),
-  hiddenAt: timestamp("hidden_at", { withTimezone: true }),
-  baselineReadOps: bigint("baseline_read_ops", { mode: "number" }),
-  baselineReadLatency: bigint("baseline_read_latency", { mode: "number" }),
-  // Set when a CREATE/UPDATE/MERGE is built: the write-latency baseline for the
-  // post-build regression watch. Cleared once the index graduates the window.
-  builtAt: timestamp("built_at", { withTimezone: true }),
-  baselineWriteOps: bigint("baseline_write_ops", { mode: "number" }),
-  baselineWriteLatency: bigint("baseline_write_latency", { mode: "number" }),
-  targetSpec: jsonb("target_spec").$type<{ keys: string[]; retire: string[] }>(),
-  createdAt,
-  updatedAt,
-});
+export const recommendations = pgTable(
+  "recommendations",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    clusterId: uuid("cluster_id")
+      .notNull()
+      .references(() => clusters.id, { onDelete: "cascade" }),
+    type: recommendationType("type").notNull(),
+    usageClass: usageClass("usage_class"),
+    state: recommendationState("state").notNull().default("PROPOSED"),
+    database: text("database").notNull(),
+    collection: text("collection").notNull(),
+    indexName: text("index_name").notNull(),
+    rationale: text("rationale").notNull(),
+    estimatedBytesSaved: bigint("estimated_bytes_saved", { mode: "number" }).notNull().default(0),
+    hiddenAt: timestamp("hidden_at", { withTimezone: true }),
+    baselineReadOps: bigint("baseline_read_ops", { mode: "number" }),
+    baselineReadLatency: bigint("baseline_read_latency", { mode: "number" }),
+    // Set when a CREATE/UPDATE/MERGE is built: the write-latency baseline for the
+    // post-build regression watch. Cleared once the index graduates the window.
+    builtAt: timestamp("built_at", { withTimezone: true }),
+    baselineWriteOps: bigint("baseline_write_ops", { mode: "number" }),
+    baselineWriteLatency: bigint("baseline_write_latency", { mode: "number" }),
+    targetSpec: jsonb("target_spec").$type<{ keys: string[]; retire: string[] }>(),
+    createdAt,
+    updatedAt,
+  },
+  (table) => [index("recommendations_cluster_state").on(table.clusterId, table.state)],
+);
 
 // Immutable audit of every executed operation and its rollback token.
-export const actions = pgTable("actions", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  recommendationId: uuid("recommendation_id")
-    .notNull()
-    .references(() => recommendations.id, { onDelete: "cascade" }),
-  kind: text("kind").notNull(),
-  actor: text("actor").notNull(),
-  result: text("result").notNull(),
-  rollbackToken: jsonb("rollback_token").$type<Record<string, unknown>>(),
-  createdAt,
-});
+export const actions = pgTable(
+  "actions",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    recommendationId: uuid("recommendation_id")
+      .notNull()
+      .references(() => recommendations.id, { onDelete: "cascade" }),
+    kind: text("kind").notNull(),
+    actor: text("actor").notNull(),
+    result: text("result").notNull(),
+    rollbackToken: jsonb("rollback_token").$type<Record<string, unknown>>(),
+    createdAt,
+  },
+  (table) => [index("actions_recommendation").on(table.recommendationId)],
+);
 
 export const roiMetrics = pgTable("roi_metrics", {
   id: uuid("id").defaultRandom().primaryKey(),
@@ -262,16 +275,20 @@ export const indexCooldowns = pgTable(
 
 // Per-collection read/write latency sampled each collect — a time series that
 // shows the app getting faster (or a build/drop regressing it).
-export const latencySamples = pgTable("latency_samples", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  clusterId: uuid("cluster_id")
-    .notNull()
-    .references(() => clusters.id, { onDelete: "cascade" }),
-  database: text("database").notNull(),
-  collection: text("collection").notNull(),
-  readOps: bigint("read_ops", { mode: "number" }).notNull(),
-  readLatencyMicros: bigint("read_latency_micros", { mode: "number" }).notNull(),
-  writeOps: bigint("write_ops", { mode: "number" }).notNull(),
-  writeLatencyMicros: bigint("write_latency_micros", { mode: "number" }).notNull(),
-  capturedAt: timestamp("captured_at", { withTimezone: true }).notNull().defaultNow(),
-});
+export const latencySamples = pgTable(
+  "latency_samples",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    clusterId: uuid("cluster_id")
+      .notNull()
+      .references(() => clusters.id, { onDelete: "cascade" }),
+    database: text("database").notNull(),
+    collection: text("collection").notNull(),
+    readOps: bigint("read_ops", { mode: "number" }).notNull(),
+    readLatencyMicros: bigint("read_latency_micros", { mode: "number" }).notNull(),
+    writeOps: bigint("write_ops", { mode: "number" }).notNull(),
+    writeLatencyMicros: bigint("write_latency_micros", { mode: "number" }).notNull(),
+    capturedAt: timestamp("captured_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index("latency_samples_cluster_time").on(table.clusterId, table.capturedAt)],
+);

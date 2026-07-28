@@ -1,18 +1,9 @@
 import { isRegression } from "../analysis";
-import {
-  actions,
-  and,
-  createDatabase,
-  eq,
-  inArray,
-  policies,
-  recommendations,
-  roiMetrics,
-} from "../db";
-import { requiredEnv } from "../env";
+import { actions, and, eq, inArray, policies, recommendations, roiMetrics } from "../db";
 import { MongoIndexCollector, MongoIndexExecutor, serializeSpec } from "../mongo";
 import { openClusterMongo } from "./cluster-connection";
 import { recordRegression } from "./cooldowns";
+import { jobDb } from "./db";
 import { preflightDrop } from "./preflight";
 
 const DEFAULT_OBSERVE_DAYS = 30;
@@ -24,7 +15,7 @@ const REGRESSION_OPTIONS = { factor: 1.5, minWindowOps: 20 };
 // un-hides the index and re-proposes it (the reversible safety path). Freed
 // bytes are recorded to roi_metrics for the dashboard headline.
 export async function finalizeCluster(clusterId: string): Promise<number> {
-  const db = createDatabase(requiredEnv("DATABASE_URL"));
+  const db = jobDb();
   const periodStart = new Date();
   const [policy] = await db
     .select()
@@ -54,12 +45,12 @@ export async function finalizeCluster(clusterId: string): Promise<number> {
     );
   if (due.length === 0 && watched.length === 0) return 0;
 
-  const { conn, demoMode, release } = await openClusterMongo(db, clusterId);
+  const { conn, readOnly, release } = await openClusterMongo(db, clusterId);
   try {
-    // Demo/read-only clusters never execute writes.
-    if (demoMode) return 0;
+    // Read-only clusters never execute writes.
+    if (readOnly) return 0;
     const collector = new MongoIndexCollector(conn);
-    const executor = new MongoIndexExecutor(conn, demoMode);
+    const executor = new MongoIndexExecutor(conn, readOnly);
     let dropped = 0;
     let freedBytes = 0;
 

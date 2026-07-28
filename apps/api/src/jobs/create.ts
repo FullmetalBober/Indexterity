@@ -1,7 +1,7 @@
-import { actions, and, createDatabase, eq, inArray, recommendations } from "../db";
-import { requiredEnv } from "../env";
+import { actions, and, eq, inArray, recommendations } from "../db";
 import { MongoIndexCollector, MongoIndexExecutor } from "../mongo";
 import { openClusterMongo } from "./cluster-connection";
+import { jobDb } from "./db";
 
 // APPROVED CREATE/UPDATE/MERGE -> build the index (executor.create) -> ACTIVE.
 // Retiring superseded indexes is left to the next classify pass, which sees them
@@ -9,7 +9,7 @@ import { openClusterMongo } from "./cluster-connection";
 // At build time the collection's write latency is recorded as the baseline for
 // the post-build regression watch (finalize drops the index if writes regress).
 export async function applyCreatesForCluster(clusterId: string): Promise<number> {
-  const db = createDatabase(requiredEnv("DATABASE_URL"));
+  const db = jobDb();
   const approved = await db
     .select()
     .from(recommendations)
@@ -22,11 +22,11 @@ export async function applyCreatesForCluster(clusterId: string): Promise<number>
     );
   if (approved.length === 0) return 0;
 
-  const { conn, demoMode, release } = await openClusterMongo(db, clusterId);
+  const { conn, readOnly, release } = await openClusterMongo(db, clusterId);
   try {
-    if (demoMode) return 0;
+    if (readOnly) return 0;
     const collector = new MongoIndexCollector(conn);
-    const executor = new MongoIndexExecutor(conn, demoMode);
+    const executor = new MongoIndexExecutor(conn, readOnly);
     let built = 0;
     for (const rec of approved) {
       const target = rec.targetSpec;

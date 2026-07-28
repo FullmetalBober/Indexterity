@@ -6,6 +6,7 @@ import { applyCreatesForCluster } from "./create";
 import { dispatchToAllClusters } from "./dispatch";
 import { finalizeCluster } from "./finalize";
 import { clusterIdFromPayload } from "./payload";
+import { pruneOldSamples } from "./retention";
 import { suggestForCluster } from "./suggest";
 
 // graphile-worker task registry. Per-cluster tasks (collect/classify/suggest/
@@ -39,5 +40,8 @@ export const taskList = {
   },
   scheduleFinalize: async (_payload: unknown, helpers: JobHelpers): Promise<void> => {
     await dispatchToAllClusters("finalize", helpers);
+  },
+  retention: async (): Promise<void> => {
+    await pruneOldSamples();
   },
 };

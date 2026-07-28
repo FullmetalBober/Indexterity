@@ -1,4 +1,4 @@
-import { Controller, Req } from "@nestjs/common";
+import { Controller, ForbiddenException, Req } from "@nestjs/common";
 import { type Cluster, contract, type Recommendation } from "@repo/contracts";
 import { TsRestHandler, tsRestHandler } from "@ts-rest/nest";
 import type { FastifyRequest } from "fastify";
@@ -12,7 +12,7 @@ import {
   summarizeLatency,
 } from "../analysis";
 import { requireUserId } from "../auth/session";
-import { resolveOrgId } from "../auth/tenancy";
+import { type Membership, resolveMembership } from "../auth/tenancy";
 import {
   actions,
   and,
@@ -31,6 +31,7 @@ import { classifyCluster } from "../jobs/classify";
 import { openClusterMongo } from "../jobs/cluster-connection";
 import { collectCluster } from "../jobs/collect";
 import { MongoIndexExecutor } from "../mongo";
+import { isMongoConnString } from "../mongo/conn-string";
 
 // A drop's rollback token carries the dropped index's serialized spec.
 const rollbackTokenSchema = z.object({ spec: z.unknown() });
@@ -40,7 +41,7 @@ function toCluster(row: typeof clusters.$inferSelect): Cluster {
     id: row.id,
     name: row.name,
     connectionMode: row.connectionMode,
-    demoMode: row.demoMode,
+    readOnly: row.readOnly,
     createdAt: row.createdAt.toISOString(),
   };
 }
@@ -67,9 +68,21 @@ function toRecommendation(row: typeof recommendations.$inferSelect): Recommendat
 export class RecommendationsController {
   constructor(private readonly database: DatabaseService) {}
 
-  // Authn + tenancy: 401 without a valid session, else the caller's org id.
+  // Authn + tenancy: 401 without a valid session, else the caller's membership.
+  private async resolveMember(req: FastifyRequest): Promise<Membership> {
+    return resolveMembership(this.database.db, await requireUserId(req));
+  }
+
   private async resolveOrg(req: FastifyRequest): Promise<string> {
-    return resolveOrgId(this.database.db, await requireUserId(req));
+    return (await this.resolveMember(req)).orgId;
+  }
+
+  // Mutations (connect cluster, mode, approve, undo, collect) are owner-only;
+  // members read everything.
+  private async requireOwner(req: FastifyRequest): Promise<string> {
+    const member = await this.resolveMember(req);
+    if (member.role !== "owner") throw new ForbiddenException("owner role required");
+    return member.orgId;
   }
 
   private async ownsCluster(clusterId: string, orgId: string): Promise<boolean> {
@@ -225,7 +238,13 @@ export class RecommendationsController {
   @TsRestHandler(contract.createCluster)
   createCluster(@Req() req: FastifyRequest) {
     return tsRestHandler(contract.createCluster, async ({ body }) => {
-      const orgId = await this.resolveOrg(req);
+      const orgId = await this.requireOwner(req);
+      if (!isMongoConnString(body.connectionString)) {
+        return {
+          status: 400,
+          body: { message: "connection string must be mongodb:// or mongodb+srv://" },
+        };
+      }
       const sealed = await seal(
         new TextEncoder().encode(body.connectionString),
         envKeyProvider(masterKeyBytes()),
@@ -236,7 +255,7 @@ export class RecommendationsController {
           orgId,
           name: body.name,
           connectionMode: "HOSTED_DIRECT",
-          demoMode: true,
+          readOnly: true,
           sealedDek: Buffer.from(sealed.dek),
           sealedData: Buffer.from(sealed.data),
         })
@@ -246,10 +265,25 @@ export class RecommendationsController {
     });
   }
 
+  // Owner-only: flip a cluster between read-only and live mode.
+  @TsRestHandler(contract.setClusterMode)
+  setClusterMode(@Req() req: FastifyRequest) {
+    return tsRestHandler(contract.setClusterMode, async ({ params, body }) => {
+      const orgId = await this.requireOwner(req);
+      const [row] = await this.database.db
+        .update(clusters)
+        .set({ readOnly: body.readOnly })
+        .where(and(eq(clusters.id, params.clusterId), eq(clusters.orgId, orgId)))
+        .returning();
+      if (row === undefined) return { status: 404, body: { message: "cluster not found" } };
+      return { status: 200, body: toCluster(row) };
+    });
+  }
+
   @TsRestHandler(contract.triggerCollect)
   triggerCollect(@Req() req: FastifyRequest) {
     return tsRestHandler(contract.triggerCollect, async ({ params }) => {
-      const orgId = await this.resolveOrg(req);
+      const orgId = await this.requireOwner(req);
       if (!(await this.ownsCluster(params.clusterId, orgId))) {
         return { status: 404, body: { message: "cluster not found" } };
       }
@@ -262,7 +296,7 @@ export class RecommendationsController {
   @TsRestHandler(contract.approveRecommendation)
   approveRecommendation(@Req() req: FastifyRequest) {
     return tsRestHandler(contract.approveRecommendation, async ({ params }) => {
-      const orgId = await this.resolveOrg(req);
+      const orgId = await this.requireOwner(req);
       const [owned] = await this.database.db
         .select({ id: recommendations.id })
         .from(recommendations)
@@ -289,7 +323,7 @@ export class RecommendationsController {
   @TsRestHandler(contract.rollbackRecommendation)
   rollbackRecommendation(@Req() req: FastifyRequest) {
     return tsRestHandler(contract.rollbackRecommendation, async ({ params }) => {
-      const orgId = await this.resolveOrg(req);
+      const orgId = await this.requireOwner(req);
       const [owned] = await this.database.db
         .select({ rec: recommendations })
         .from(recommendations)
@@ -324,12 +358,12 @@ export class RecommendationsController {
       if (keys === null) {
         return { status: 409, body: { message: "stored spec cannot be rebuilt automatically" } };
       }
-      const { conn, demoMode, release } = await openClusterMongo(this.database.db, rec.clusterId);
+      const { conn, readOnly, release } = await openClusterMongo(this.database.db, rec.clusterId);
       try {
-        if (demoMode) {
-          return { status: 409, body: { message: "cluster is in demo mode" } };
+        if (readOnly) {
+          return { status: 409, body: { message: "cluster is read-only" } };
         }
-        const executor = new MongoIndexExecutor(conn, demoMode);
+        const executor = new MongoIndexExecutor(conn, readOnly);
         await executor.create(rec.database, rec.collection, keys, { name: indexName });
       } finally {
         release();

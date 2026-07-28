@@ -5,7 +5,7 @@ import { acquireClusterConnection } from "./connection-pool";
 
 export interface ClusterMongo {
   readonly conn: MongoConnection;
-  readonly demoMode: boolean;
+  readonly readOnly: boolean;
   // Return the connection to the pool — callers must not close it.
   readonly release: () => void;
 }
@@ -21,5 +21,5 @@ export async function openClusterMongo(db: Database, clusterId: string): Promise
     ),
   );
   const { conn, release } = await acquireClusterConnection(clusterId, connString);
-  return { conn, demoMode: cluster.demoMode, release };
+  return { conn, readOnly: cluster.readOnly, release };
 }

@@ -6,10 +6,12 @@ import { taskList } from "./jobs/tasks";
 //  - collect + classify every 6h
 //  - hide approved drops every 5 min
 //  - finalize (drop past-observe hidden) hourly
+//  - prune time-series tables past RETENTION_DAYS daily
 const CRONTAB = [
   "0 */6 * * * scheduleCollect",
   "*/5 * * * * scheduleApply",
   "0 * * * * scheduleFinalize",
+  "0 3 * * * retention",
 ].join("\n");
 
 // Long-running background worker (deploy separately from the HTTP api).

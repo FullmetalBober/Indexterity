@@ -10,7 +10,7 @@ regression check. Full design and decision log in
 ## What it does
 
 1. **Connect** a cluster — the connection string is sealed with envelope
-   encryption; `demoMode` (read-only) is on by default.
+   encryption; clusters start in **read-only mode** — the engine analyzes but never writes until an owner flips it live (dashboard toggle).
 2. **Collect** index usage, sizes and per-collection read/write latency on a
    schedule via `$indexStats` / `$collStats` — it never reads your documents.
    Connections are pooled per cluster (one client reused across jobs).
@@ -67,7 +67,7 @@ read either way. Only collections with **≥ 1000 docs** are considered;
 ### Instant apply
 
 A `CREATE` on a critical collection, when `policy.instantCreate` is on and the
-cluster is not in demo mode, is auto-approved and built immediately — adding an
+cluster is live (not read-only), is auto-approved and built immediately — adding an
 index is safe and reversible, so a critical missing index does not wait for the
 next scheduler tick. **Drops are never instant.**
 
@@ -106,14 +106,14 @@ index is rebuilt from the spec captured at drop time (`rollbackToken`) and the
 ROI headline is corrected back down.
 
 Every executed operation writes an **immutable `actions` row** (actor, result,
-rollback token). In **demo mode** (default on) the pipeline computes everything
+rollback token). In **read-only mode** (default on) the pipeline computes everything
 but never writes to your cluster.
 
 ## Policy knobs (per cluster)
 
 | knob | effect | default |
 |------|--------|---------|
-| `demoMode` | read-only; compute but never write | on |
+| `readOnly` | compute everything, never write (owner-toggled) | on |
 | `autoApply` | approve recommendations without a human | off |
 | `workloadAnalysis` | enable the create/merge/update engine (needs profiler) | off |
 | `instantCreate` | auto-build critical missing indexes | off |
@@ -140,10 +140,17 @@ cookie lives on the web origin, then forwards that cookie to the api on every
 data call. Set `WEB_ORIGIN` (api) and `VITE_WEB_ORIGIN` (web) to the dashboard's
 public origin so better-auth trusts it as a request origin.
 
-**Teams**: invite a teammate from the dashboard — the api returns a one-time
-token (7-day expiry) to share; they join with it. If their only org is the empty
-auto-created one, it's replaced by the org they join; a user's oldest membership
-is their active org.
+**Teams & roles**: invite a teammate from the dashboard — the api returns a
+one-time token (7-day expiry) to share; they join with it. If their only org is
+the empty auto-created one, it's replaced by the org they join; a user's oldest
+membership is their active org. The org creator is **owner**; invited users are
+**members**. Members read everything; mutations (connect cluster, mode toggle,
+approve, undo, collect, invite) are owner-only (403 otherwise).
+
+**Hardening**: auth endpoints are rate-limited (20/min per IP; 300/min global),
+connection strings must be `mongodb://`/`mongodb+srv://` (SSRF guard), and a
+daily retention job prunes latency samples + index snapshots past
+`RETENTION_DAYS` (default 90).
 
 ## Stack
 

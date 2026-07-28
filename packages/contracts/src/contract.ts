@@ -52,8 +52,16 @@ export const contract = c.router({
     method: "POST",
     path: "/clusters",
     body: z.object({ name: z.string().min(1), connectionString: z.string().min(1) }),
-    responses: { 200: cluster },
+    responses: { 200: cluster, 400: z.object({ message: z.string() }) },
     summary: "Connect a cluster; stores its connection string envelope-encrypted",
+  },
+  setClusterMode: {
+    method: "PATCH",
+    path: "/clusters/:clusterId/mode",
+    pathParams: z.object({ clusterId: z.string().uuid() }),
+    body: z.object({ readOnly: z.boolean() }),
+    responses: { 200: cluster, 404: z.object({ message: z.string() }) },
+    summary: "Toggle read-only mode (owner only) — live mode lets the engine write",
   },
   triggerCollect: {
     method: "POST",

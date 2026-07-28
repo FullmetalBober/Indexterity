@@ -1,10 +1,10 @@
 import { randomBytes } from "node:crypto";
-import { Controller, Req } from "@nestjs/common";
+import { Controller, ForbiddenException, Req } from "@nestjs/common";
 import { contract } from "@repo/contracts";
 import { TsRestHandler, tsRestHandler } from "@ts-rest/nest";
 import type { FastifyRequest } from "fastify";
 import { requireUserId } from "../auth/session";
-import { acceptOrgInvite, resolveOrgId } from "../auth/tenancy";
+import { acceptOrgInvite, resolveMembership, resolveOrgId } from "../auth/tenancy";
 import { and, eq, gt, invites, isNull, members, organizations, user } from "../db";
 import { DatabaseService } from "../db/database.service";
 
@@ -60,7 +60,9 @@ export class OrgController {
   createInvite(@Req() req: FastifyRequest) {
     return tsRestHandler(contract.createInvite, async ({ body }) => {
       const userId = await requireUserId(req);
-      const orgId = await resolveOrgId(this.database.db, userId);
+      const member = await resolveMembership(this.database.db, userId);
+      if (member.role !== "owner") throw new ForbiddenException("owner role required");
+      const orgId = member.orgId;
       const token = randomBytes(24).toString("base64url");
       const expiresAt = new Date(Date.now() + INVITE_TTL_MS);
       await this.database.db.insert(invites).values({

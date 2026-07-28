@@ -1,23 +1,32 @@
 import { and, asc, clusters, type Database, eq, members, organizations, sql } from "../db";
 
-// The caller's active org: the oldest membership (deterministic when a user
+export interface Membership {
+  readonly orgId: string;
+  readonly role: string;
+}
+
+// The caller's active membership: the oldest one (deterministic when a user
 // belongs to several orgs), created lazily on first authenticated use so a
-// fresh account always has somewhere to put its clusters.
-export async function resolveOrgId(db: Database, userId: string): Promise<string> {
+// fresh account always has somewhere to put its clusters. The creator is owner.
+export async function resolveMembership(db: Database, userId: string): Promise<Membership> {
   const [membership] = await db
-    .select({ orgId: members.orgId })
+    .select({ orgId: members.orgId, role: members.role })
     .from(members)
     .where(eq(members.userId, userId))
     .orderBy(asc(members.createdAt))
     .limit(1);
-  if (membership !== undefined) return membership.orgId;
+  if (membership !== undefined) return membership;
   const [org] = await db
     .insert(organizations)
     .values({ name: "My Org" })
     .returning({ id: organizations.id });
   if (org === undefined) throw new Error("failed to create organization");
   await db.insert(members).values({ orgId: org.id, userId, role: "owner" });
-  return org.id;
+  return { orgId: org.id, role: "owner" };
+}
+
+export async function resolveOrgId(db: Database, userId: string): Promise<string> {
+  return (await resolveMembership(db, userId)).orgId;
 }
 
 // Join an org from an invite. If the caller's only org is the empty auto-created

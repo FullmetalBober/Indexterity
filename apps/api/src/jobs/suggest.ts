@@ -1,10 +1,10 @@
 import { recommendCreates } from "../analysis";
-import { and, createDatabase, eq, inArray, policies, recommendations } from "../db";
-import { requiredEnv } from "../env";
+import { and, eq, inArray, policies, recommendations } from "../db";
 import { MongoIndexCollector } from "../mongo";
 import { openClusterMongo } from "./cluster-connection";
 import { activeCooldownKeys, cooldownKey } from "./cooldowns";
 import { applyCreatesForCluster } from "./create";
+import { jobDb } from "./db";
 
 const SYSTEM_DATABASES = new Set(["admin", "local", "config"]);
 const WORKLOAD_OPTIONS = { minCount: 1 };
@@ -18,10 +18,10 @@ function proposedName(keys: readonly string[]): string {
 
 // Workload analysis (opt-in): read the profiler and propose CREATE/UPDATE/MERGE.
 // A brand-new index on a critical collection, when instantCreate is opted in and
-// the cluster is not in demo mode, is auto-approved and built immediately
+// the cluster is writable, is auto-approved and built immediately
 // (creates only — never drops; docs/architecture.md §7.5).
 export async function suggestForCluster(clusterId: string): Promise<number> {
-  const db = createDatabase(requiredEnv("DATABASE_URL"));
+  const db = jobDb();
   const [policy] = await db
     .select()
     .from(policies)
@@ -30,7 +30,7 @@ export async function suggestForCluster(clusterId: string): Promise<number> {
   if (policy?.workloadAnalysis !== true) return 0;
   const cooled = await activeCooldownKeys(db, clusterId);
 
-  const { conn, demoMode, release } = await openClusterMongo(db, clusterId);
+  const { conn, readOnly, release } = await openClusterMongo(db, clusterId);
   let created = 0;
   let instantApproved = 0;
   try {
@@ -52,7 +52,7 @@ export async function suggestForCluster(clusterId: string): Promise<number> {
           const indexName = proposedName(candidate.keys);
           if (cooled.has(cooldownKey(database, collection, indexName))) continue;
           const instant =
-            candidate.type === "CREATE" && critical && policy.instantCreate && !demoMode;
+            candidate.type === "CREATE" && critical && policy.instantCreate && !readOnly;
           if (instant) instantApproved += 1;
           toInsert.push({
             clusterId,

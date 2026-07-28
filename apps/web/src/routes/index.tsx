@@ -1,4 +1,4 @@
-import { createFileRoute, useRouter } from "@tanstack/react-router";
+import { createFileRoute, useNavigate, useRouter } from "@tanstack/react-router";
 import { createServerFn } from "@tanstack/react-start";
 import { useState } from "react";
 import { LineChart, SERIES_PALETTE } from "../components/latency-chart";
@@ -18,43 +18,47 @@ import { signIn, signOut, signUp } from "../lib/auth";
 // api. A 401 means "not signed in" — the component shows the auth form instead.
 const EMPTY_ORG = { id: "", name: "", members: [], pendingInvites: [] };
 
-const loadDashboard = createServerFn({ method: "GET" }).handler(async () => {
-  const api = serverApi();
-  const [clustersResult, orgResult] = await Promise.all([api.listClusters(), api.getOrg()]);
-  if (clustersResult.status === 401) return { authed: false as const };
-  const org = orgResult.status === 200 ? orgResult.body : EMPTY_ORG;
-  const clusters = clustersResult.status === 200 ? clustersResult.body : [];
-  const cluster = clusters[0] ?? null;
-  if (cluster === null) {
+const loadDashboard = createServerFn({ method: "GET" })
+  .validator((selected: unknown): string | null => (typeof selected === "string" ? selected : null))
+  .handler(async ({ data: selected }) => {
+    const api = serverApi();
+    const [clustersResult, orgResult] = await Promise.all([api.listClusters(), api.getOrg()]);
+    if (clustersResult.status === 401) return { authed: false as const };
+    const org = orgResult.status === 200 ? orgResult.body : EMPTY_ORG;
+    const clusters = clustersResult.status === 200 ? clustersResult.body : [];
+    const cluster = clusters.find((c) => c.id === selected) ?? clusters[0] ?? null;
+    if (cluster === null) {
+      return {
+        authed: true as const,
+        clusters,
+        cluster,
+        recommendations: [],
+        roi: { freedBytes: 0, indexesDropped: 0, estimatedMonthlyUsd: 0 },
+        latency: { collections: [] },
+        latencySeries: { collections: [] },
+        org,
+      };
+    }
+    const [recResult, roiResult, latencyResult, seriesResult] = await Promise.all([
+      api.listRecommendations({ params: { clusterId: cluster.id } }),
+      api.getRoi({ params: { clusterId: cluster.id } }),
+      api.getLatency({ params: { clusterId: cluster.id } }),
+      api.getLatencySeries({ params: { clusterId: cluster.id } }),
+    ]);
     return {
       authed: true as const,
+      clusters,
       cluster,
-      recommendations: [],
-      roi: { freedBytes: 0, indexesDropped: 0, estimatedMonthlyUsd: 0 },
-      latency: { collections: [] },
-      latencySeries: { collections: [] },
+      recommendations: recResult.status === 200 ? recResult.body : [],
+      roi:
+        roiResult.status === 200
+          ? roiResult.body
+          : { freedBytes: 0, indexesDropped: 0, estimatedMonthlyUsd: 0 },
+      latency: latencyResult.status === 200 ? latencyResult.body : { collections: [] },
+      latencySeries: seriesResult.status === 200 ? seriesResult.body : { collections: [] },
       org,
     };
-  }
-  const [recResult, roiResult, latencyResult, seriesResult] = await Promise.all([
-    api.listRecommendations({ params: { clusterId: cluster.id } }),
-    api.getRoi({ params: { clusterId: cluster.id } }),
-    api.getLatency({ params: { clusterId: cluster.id } }),
-    api.getLatencySeries({ params: { clusterId: cluster.id } }),
-  ]);
-  return {
-    authed: true as const,
-    cluster,
-    recommendations: recResult.status === 200 ? recResult.body : [],
-    roi:
-      roiResult.status === 200
-        ? roiResult.body
-        : { freedBytes: 0, indexesDropped: 0, estimatedMonthlyUsd: 0 },
-    latency: latencyResult.status === 200 ? latencyResult.body : { collections: [] },
-    latencySeries: seriesResult.status === 200 ? seriesResult.body : { collections: [] },
-    org,
-  };
-});
+  });
 
 const approveRecommendation = createServerFn({ method: "POST" })
   .validator((id: unknown): string => {
@@ -99,8 +103,54 @@ const acceptInvite = createServerFn({ method: "POST" })
     return { ok: false, message };
   });
 
+const connectCluster = createServerFn({ method: "POST" })
+  .validator((data: unknown): { name: string; connectionString: string } => {
+    if (
+      typeof data === "object" &&
+      data !== null &&
+      "name" in data &&
+      "connectionString" in data &&
+      typeof data.name === "string" &&
+      typeof data.connectionString === "string"
+    ) {
+      return { name: data.name, connectionString: data.connectionString };
+    }
+    throw new Error("invalid cluster");
+  })
+  .handler(async ({ data }) => {
+    const result = await serverApi().createCluster({ body: data });
+    if (result.status === 200) return { ok: true, message: null, id: result.body.id };
+    const message = result.status === 400 ? result.body.message : "failed to connect cluster";
+    return { ok: false, message, id: null };
+  });
+
+const setClusterMode = createServerFn({ method: "POST" })
+  .validator((data: unknown): { clusterId: string; readOnly: boolean } => {
+    if (
+      typeof data === "object" &&
+      data !== null &&
+      "clusterId" in data &&
+      "readOnly" in data &&
+      typeof data.clusterId === "string" &&
+      typeof data.readOnly === "boolean"
+    ) {
+      return { clusterId: data.clusterId, readOnly: data.readOnly };
+    }
+    throw new Error("invalid mode change");
+  })
+  .handler(async ({ data }) => {
+    const result = await serverApi().setClusterMode({
+      params: { clusterId: data.clusterId },
+      body: { readOnly: data.readOnly },
+    });
+    return { ok: result.status === 200 };
+  });
+
 export const Route = createFileRoute("/")({
-  loader: () => loadDashboard(),
+  validateSearch: (search: Record<string, unknown>): { cluster?: string } =>
+    typeof search.cluster === "string" ? { cluster: search.cluster } : {},
+  loaderDeps: ({ search }) => ({ cluster: search.cluster ?? null }),
+  loader: ({ deps }) => loadDashboard({ data: deps.cluster }),
   component: Home,
 });
 
@@ -131,7 +181,7 @@ function Home() {
 
   if (!data.authed) return <AuthForm onDone={() => router.invalidate()} />;
 
-  const { cluster, recommendations, roi, latency, latencySeries, org } = data;
+  const { cluster, clusters, recommendations, roi, latency, latencySeries, org } = data;
   const proposed = recommendations.filter((rec) => rec.state === "PROPOSED");
   const totalSaved = proposed.reduce((sum, rec) => sum + rec.estimatedBytesSaved, 0);
 
@@ -172,10 +222,15 @@ function Home() {
       <div className="flex items-start justify-between">
         <div>
           <h1 className="font-semibold text-2xl">mongo-optimizer</h1>
-          <p className="mt-1 text-muted-foreground">
-            {cluster ? cluster.name : "No cluster connected"}
-            {cluster?.demoMode ? " · demo (read-only)" : ""}
-          </p>
+          {cluster === null ? (
+            <p className="mt-1 text-muted-foreground">No cluster connected</p>
+          ) : (
+            <ClusterBar
+              cluster={cluster}
+              clusters={clusters}
+              onChanged={() => router.invalidate()}
+            />
+          )}
         </div>
         <button
           type="button"
@@ -303,8 +358,134 @@ function Home() {
         </>
       ) : null}
 
+      <ConnectClusterForm />
       <TeamSection org={org} onChanged={() => router.invalidate()} />
     </main>
+  );
+}
+
+interface ClusterOption {
+  readonly id: string;
+  readonly name: string;
+  readonly readOnly: boolean;
+}
+
+function ClusterBar({
+  cluster,
+  clusters,
+  onChanged,
+}: {
+  cluster: ClusterOption;
+  clusters: readonly ClusterOption[];
+  onChanged: () => void;
+}) {
+  const navigate = useNavigate();
+
+  async function onToggleMode() {
+    const goingLive = cluster.readOnly;
+    if (
+      goingLive &&
+      !window.confirm(
+        "Enable live mode? The engine will be allowed to modify indexes on this cluster (hide, drop, build).",
+      )
+    ) {
+      return;
+    }
+    await setClusterMode({ data: { clusterId: cluster.id, readOnly: !cluster.readOnly } });
+    onChanged();
+  }
+
+  return (
+    <div className="mt-1 flex items-center gap-2">
+      {clusters.length > 1 ? (
+        <select
+          className="rounded-md border px-2 py-1 text-sm"
+          value={cluster.id}
+          onChange={(event) => {
+            void navigate({ to: "/", search: { cluster: event.target.value } });
+          }}
+        >
+          {clusters.map((option) => (
+            <option key={option.id} value={option.id}>
+              {option.name}
+            </option>
+          ))}
+        </select>
+      ) : (
+        <span className="text-muted-foreground">{cluster.name}</span>
+      )}
+      <span className={cluster.readOnly ? "text-muted-foreground text-xs" : "text-red-600 text-xs"}>
+        {cluster.readOnly ? "read-only" : "live"}
+      </span>
+      <button
+        type="button"
+        onClick={() => void onToggleMode()}
+        className="rounded-md border px-2 py-0.5 text-muted-foreground text-xs"
+      >
+        {cluster.readOnly ? "Go live" : "Make read-only"}
+      </button>
+    </div>
+  );
+}
+
+function ConnectClusterForm() {
+  const router = useRouter();
+  const navigate = useNavigate();
+  const [name, setName] = useState("");
+  const [connString, setConnString] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function submit() {
+    setBusy(true);
+    setError(null);
+    const result = await connectCluster({ data: { name, connectionString: connString } });
+    setBusy(false);
+    if (!result.ok) {
+      setError(result.message);
+      return;
+    }
+    setName("");
+    setConnString("");
+    if (result.id !== null) await navigate({ to: "/", search: { cluster: result.id } });
+    await router.invalidate();
+  }
+
+  return (
+    <section className="mt-8">
+      <h2 className="font-semibold text-lg">Connect a cluster</h2>
+      <p className="text-muted-foreground text-sm">
+        Starts in read-only mode — the engine analyzes but never writes until you go live.
+      </p>
+      <form
+        className="mt-2 flex flex-wrap gap-2"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void submit();
+        }}
+      >
+        <input
+          className="rounded-md border px-3 py-1.5 text-sm"
+          placeholder="Name"
+          value={name}
+          onChange={(event) => setName(event.target.value)}
+        />
+        <input
+          className="min-w-72 flex-1 rounded-md border px-3 py-1.5 font-mono text-sm"
+          placeholder="mongodb://user:pass@host:27017"
+          value={connString}
+          onChange={(event) => setConnString(event.target.value)}
+        />
+        <button
+          type="submit"
+          disabled={busy || name.length === 0 || connString.length === 0}
+          className="rounded-md bg-primary px-3 py-1.5 text-primary-foreground text-sm disabled:opacity-50"
+        >
+          Connect
+        </button>
+      </form>
+      {error !== null ? <p className="mt-2 text-red-600 text-sm">{error}</p> : null}
+    </section>
   );
 }
 

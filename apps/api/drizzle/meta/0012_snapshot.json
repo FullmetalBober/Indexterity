@@ -1,6 +1,6 @@
 {
-  "id": "176f7d43-87b4-4442-9e63-0c6f032a7f7a",
-  "prevId": "22f61d89-e47e-49fb-9344-d604fe89d252",
+  "id": "24aa8bb3-a3de-407e-81cb-8cb064be497c",
+  "prevId": "176f7d43-87b4-4442-9e63-0c6f032a7f7a",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -160,7 +160,23 @@
           "default": "now()"
         }
       },
-      "indexes": {},
+      "indexes": {
+        "actions_recommendation": {
+          "name": "actions_recommendation",
+          "columns": [
+            {
+              "expression": "recommendation_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "actions_recommendation_id_recommendations_id_fk": {
           "name": "actions_recommendation_id_recommendations_id_fk",
@@ -425,7 +441,29 @@
           "default": "now()"
         }
       },
-      "indexes": {},
+      "indexes": {
+        "index_snapshots_cluster_time": {
+          "name": "index_snapshots_cluster_time",
+          "columns": [
+            {
+              "expression": "cluster_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "captured_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "index_snapshots_cluster_id_clusters_id_fk": {
           "name": "index_snapshots_cluster_id_clusters_id_fk",
@@ -613,7 +651,29 @@
           "default": "now()"
         }
       },
-      "indexes": {},
+      "indexes": {
+        "latency_samples_cluster_time": {
+          "name": "latency_samples_cluster_time",
+          "columns": [
+            {
+              "expression": "cluster_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "captured_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "latency_samples_cluster_id_clusters_id_fk": {
           "name": "latency_samples_cluster_id_clusters_id_fk",
@@ -950,7 +1010,29 @@
           "default": "now()"
         }
       },
-      "indexes": {},
+      "indexes": {
+        "recommendations_cluster_state": {
+          "name": "recommendations_cluster_state",
+          "columns": [
+            {
+              "expression": "cluster_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "state",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "recommendations_cluster_id_clusters_id_fk": {
           "name": "recommendations_cluster_id_clusters_id_fk",

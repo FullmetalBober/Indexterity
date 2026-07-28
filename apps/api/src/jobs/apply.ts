@@ -1,7 +1,7 @@
-import { actions, and, createDatabase, eq, recommendations } from "../db";
-import { requiredEnv } from "../env";
+import { actions, and, eq, recommendations } from "../db";
 import { MongoIndexCollector, MongoIndexExecutor, serializeSpec } from "../mongo";
 import { openClusterMongo } from "./cluster-connection";
+import { jobDb } from "./db";
 import { preflightDrop } from "./preflight";
 
 const DROP_TYPES = new Set(["DROP_UNUSED", "DROP_REDUNDANT", "MERGE"]);
@@ -10,19 +10,19 @@ const DROP_TYPES = new Set(["DROP_UNUSED", "DROP_REDUNDANT", "MERGE"]);
 // instant and reversible; it starts the observe window. Records an audit action
 // with a rollback token. A failed pre-flight re-proposes instead of hiding.
 export async function applyCluster(clusterId: string): Promise<number> {
-  const db = createDatabase(requiredEnv("DATABASE_URL"));
+  const db = jobDb();
   const approved = await db
     .select()
     .from(recommendations)
     .where(and(eq(recommendations.clusterId, clusterId), eq(recommendations.state, "APPROVED")));
   if (approved.length === 0) return 0;
 
-  const { conn, demoMode, release } = await openClusterMongo(db, clusterId);
+  const { conn, readOnly, release } = await openClusterMongo(db, clusterId);
   try {
-    // Demo/read-only clusters never execute writes.
-    if (demoMode) return 0;
+    // Read-only clusters never execute writes.
+    if (readOnly) return 0;
     const collector = new MongoIndexCollector(conn);
-    const executor = new MongoIndexExecutor(conn, demoMode);
+    const executor = new MongoIndexExecutor(conn, readOnly);
     let hidden = 0;
     for (const rec of approved) {
       if (!DROP_TYPES.has(rec.type)) continue;
