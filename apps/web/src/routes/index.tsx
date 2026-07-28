@@ -36,14 +36,16 @@ const loadDashboard = createServerFn({ method: "GET" })
         roi: { freedBytes: 0, indexesDropped: 0, estimatedMonthlyUsd: 0 },
         latency: { collections: [] },
         latencySeries: { collections: [] },
+        policy: null,
         org,
       };
     }
-    const [recResult, roiResult, latencyResult, seriesResult] = await Promise.all([
+    const [recResult, roiResult, latencyResult, seriesResult, policyResult] = await Promise.all([
       api.listRecommendations({ params: { clusterId: cluster.id } }),
       api.getRoi({ params: { clusterId: cluster.id } }),
       api.getLatency({ params: { clusterId: cluster.id } }),
       api.getLatencySeries({ params: { clusterId: cluster.id } }),
+      api.getPolicy({ params: { clusterId: cluster.id } }),
     ]);
     return {
       authed: true as const,
@@ -56,6 +58,7 @@ const loadDashboard = createServerFn({ method: "GET" })
           : { freedBytes: 0, indexesDropped: 0, estimatedMonthlyUsd: 0 },
       latency: latencyResult.status === 200 ? latencyResult.body : { collections: [] },
       latencySeries: seriesResult.status === 200 ? seriesResult.body : { collections: [] },
+      policy: policyResult.status === 200 ? policyResult.body : null,
       org,
     };
   });
@@ -124,6 +127,54 @@ const connectCluster = createServerFn({ method: "POST" })
     return { ok: false, message, id: null };
   });
 
+interface PolicyInput {
+  readonly clusterId: string;
+  readonly autoApply: boolean;
+  readonly workloadAnalysis: boolean;
+  readonly instantCreate: boolean;
+  readonly observeWindowDays: number;
+}
+
+const savePolicy = createServerFn({ method: "POST" })
+  .validator((data: unknown): PolicyInput => {
+    if (
+      typeof data === "object" &&
+      data !== null &&
+      "clusterId" in data &&
+      typeof data.clusterId === "string" &&
+      "autoApply" in data &&
+      typeof data.autoApply === "boolean" &&
+      "workloadAnalysis" in data &&
+      typeof data.workloadAnalysis === "boolean" &&
+      "instantCreate" in data &&
+      typeof data.instantCreate === "boolean" &&
+      "observeWindowDays" in data &&
+      typeof data.observeWindowDays === "number"
+    ) {
+      return {
+        clusterId: data.clusterId,
+        autoApply: data.autoApply,
+        workloadAnalysis: data.workloadAnalysis,
+        instantCreate: data.instantCreate,
+        observeWindowDays: data.observeWindowDays,
+      };
+    }
+    throw new Error("invalid policy");
+  })
+  .handler(async ({ data }) => {
+    const result = await serverApi().updatePolicy({
+      params: { clusterId: data.clusterId },
+      body: {
+        autoApply: data.autoApply,
+        workloadAnalysis: data.workloadAnalysis,
+        instantCreate: data.instantCreate,
+        observeWindowDays: data.observeWindowDays,
+        maxCollectionSizeBytes: null,
+      },
+    });
+    return { ok: result.status === 200 };
+  });
+
 const setClusterMode = createServerFn({ method: "POST" })
   .validator((data: unknown): { clusterId: string; readOnly: boolean } => {
     if (
@@ -181,7 +232,7 @@ function Home() {
 
   if (!data.authed) return <AuthForm onDone={() => router.invalidate()} />;
 
-  const { cluster, clusters, recommendations, roi, latency, latencySeries, org } = data;
+  const { cluster, clusters, recommendations, roi, latency, latencySeries, policy, org } = data;
   const proposed = recommendations.filter((rec) => rec.state === "PROPOSED");
   const totalSaved = proposed.reduce((sum, rec) => sum + rec.estimatedBytesSaved, 0);
 
@@ -358,6 +409,9 @@ function Home() {
         </>
       ) : null}
 
+      {policy !== null ? (
+        <PolicySection key={policy.clusterId} policy={policy} onSaved={() => router.invalidate()} />
+      ) : null}
       <ConnectClusterForm />
       <TeamSection org={org} onChanged={() => router.invalidate()} />
     </main>
@@ -425,6 +479,104 @@ function ClusterBar({
         {cluster.readOnly ? "Go live" : "Make read-only"}
       </button>
     </div>
+  );
+}
+
+interface PolicyView {
+  readonly clusterId: string;
+  readonly autoApply: boolean;
+  readonly workloadAnalysis: boolean;
+  readonly instantCreate: boolean;
+  readonly observeWindowDays: number;
+}
+
+// The engine knobs, owner-editable. Checkbox changes stage locally; Save PUTs.
+function PolicySection({ policy, onSaved }: { policy: PolicyView; onSaved: () => void }) {
+  const [autoApply, setAutoApply] = useState(policy.autoApply);
+  const [workloadAnalysis, setWorkloadAnalysis] = useState(policy.workloadAnalysis);
+  const [instantCreate, setInstantCreate] = useState(policy.instantCreate);
+  const [observeDays, setObserveDays] = useState(policy.observeWindowDays);
+  const [saved, setSaved] = useState<boolean | null>(null);
+
+  async function onSave() {
+    const result = await savePolicy({
+      data: {
+        clusterId: policy.clusterId,
+        autoApply,
+        workloadAnalysis,
+        instantCreate,
+        observeWindowDays: observeDays,
+      },
+    });
+    setSaved(result.ok);
+    if (result.ok) onSaved();
+  }
+
+  const toggles: Array<{ label: string; hint: string; value: boolean; set: (v: boolean) => void }> =
+    [
+      {
+        label: "Auto-apply",
+        hint: "approve recommendations without a human",
+        value: autoApply,
+        set: setAutoApply,
+      },
+      {
+        label: "Workload analysis",
+        hint: "propose CREATE/UPDATE/MERGE from query shapes",
+        value: workloadAnalysis,
+        set: setWorkloadAnalysis,
+      },
+      {
+        label: "Instant create",
+        hint: "auto-build critical missing indexes",
+        value: instantCreate,
+        set: setInstantCreate,
+      },
+    ];
+
+  return (
+    <section className="mt-8">
+      <h2 className="font-semibold text-lg">Policy</h2>
+      <div className="mt-2 flex flex-wrap items-center gap-4">
+        {toggles.map((toggle) => (
+          <label
+            key={toggle.label}
+            className="flex items-center gap-1.5 text-sm"
+            title={toggle.hint}
+          >
+            <input
+              type="checkbox"
+              checked={toggle.value}
+              onChange={(event) => toggle.set(event.target.checked)}
+            />
+            {toggle.label}
+          </label>
+        ))}
+        <label className="flex items-center gap-1.5 text-sm">
+          Observe window
+          <input
+            type="number"
+            min={1}
+            max={365}
+            value={observeDays}
+            onChange={(event) => setObserveDays(Number(event.target.value))}
+            className="w-16 rounded-md border px-2 py-1 text-sm"
+          />
+          days
+        </label>
+        <button
+          type="button"
+          onClick={() => void onSave()}
+          className="rounded-md bg-primary px-3 py-1.5 text-primary-foreground text-sm"
+        >
+          Save
+        </button>
+        {saved === false ? (
+          <span className="text-red-600 text-sm">not saved (owner only)</span>
+        ) : null}
+        {saved === true ? <span className="text-muted-foreground text-sm">saved</span> : null}
+      </div>
+    </section>
   );
 }
 

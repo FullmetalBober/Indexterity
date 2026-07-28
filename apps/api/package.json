@@ -27,6 +27,7 @@
     "drizzle-orm": "^0.45.2",
     "graphile-worker": "^0.17.3",
     "mongodb": "^7.5.0",
+    "nodemailer": "^9.0.3",
     "pg": "^8.22.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2",
@@ -37,6 +38,7 @@
     "@swc-node/register": "^1.12.1",
     "@swc/cli": "^0.8.1",
     "@swc/core": "^1.15.46",
+    "@types/nodemailer": "^8.0.1",
     "@types/pg": "^8.20.0",
     "drizzle-kit": "^0.31.10",
     "vitest": "^4.1.10"

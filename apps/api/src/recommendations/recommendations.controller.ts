@@ -21,6 +21,7 @@ import {
   envKeyProvider,
   eq,
   latencySamples,
+  policies,
   recommendations,
   roiMetrics,
   seal,
@@ -262,6 +263,48 @@ export class RecommendationsController {
         .returning();
       if (row === undefined) throw new Error("failed to create cluster");
       return { status: 200, body: toCluster(row) };
+    });
+  }
+
+  @TsRestHandler(contract.getPolicy)
+  getPolicy(@Req() req: FastifyRequest) {
+    return tsRestHandler(contract.getPolicy, async ({ params }) => {
+      const orgId = await this.resolveOrg(req);
+      if (!(await this.ownsCluster(params.clusterId, orgId))) {
+        return { status: 404, body: { message: "cluster not found" } };
+      }
+      const [row] = await this.database.db
+        .select()
+        .from(policies)
+        .where(eq(policies.clusterId, params.clusterId))
+        .limit(1);
+      return {
+        status: 200,
+        body: {
+          clusterId: params.clusterId,
+          autoApply: row?.autoApply ?? false,
+          workloadAnalysis: row?.workloadAnalysis ?? false,
+          instantCreate: row?.instantCreate ?? false,
+          observeWindowDays: row?.observeWindowDays ?? 30,
+          maxCollectionSizeBytes: row?.maxCollectionSizeBytes ?? null,
+        },
+      };
+    });
+  }
+
+  // Owner-only: replace the cluster's engine knobs.
+  @TsRestHandler(contract.updatePolicy)
+  updatePolicy(@Req() req: FastifyRequest) {
+    return tsRestHandler(contract.updatePolicy, async ({ params, body }) => {
+      const orgId = await this.requireOwner(req);
+      if (!(await this.ownsCluster(params.clusterId, orgId))) {
+        return { status: 404, body: { message: "cluster not found" } };
+      }
+      await this.database.db
+        .insert(policies)
+        .values({ clusterId: params.clusterId, ...body })
+        .onConflictDoUpdate({ target: policies.clusterId, set: body });
+      return { status: 200, body: { clusterId: params.clusterId, ...body } };
     });
   }
 

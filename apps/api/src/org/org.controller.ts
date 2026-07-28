@@ -7,6 +7,7 @@ import { requireUserId } from "../auth/session";
 import { acceptOrgInvite, resolveMembership, resolveOrgId } from "../auth/tenancy";
 import { and, eq, gt, invites, isNull, members, organizations, user } from "../db";
 import { DatabaseService } from "../db/database.service";
+import { sendMail } from "../mail/mailer";
 
 const INVITE_TTL_MS = 7 * 86_400_000;
 
@@ -73,6 +74,19 @@ export class OrgController {
         invitedBy: userId,
         expiresAt,
       });
+      const [org] = await this.database.db
+        .select({ name: organizations.name })
+        .from(organizations)
+        .where(eq(organizations.id, orgId))
+        .limit(1);
+      // Best-effort: the token is also returned to the inviter to share manually.
+      await sendMail(
+        body.email,
+        `You're invited to ${org?.name ?? "an org"} on mongo-optimizer`,
+        `You've been invited to join "${org?.name ?? "an org"}" as ${body.role}.\n\n` +
+          `Sign up (or sign in), then paste this invite token in the Team section:\n\n` +
+          `${token}\n\nThe invite expires ${expiresAt.toISOString().slice(0, 10)}.`,
+      );
       return {
         status: 200,
         body: { token, email: body.email, role: body.role, expiresAt: expiresAt.toISOString() },

@@ -115,10 +115,15 @@ but never writes to your cluster.
 |------|--------|---------|
 | `readOnly` | compute everything, never write (owner-toggled) | on |
 | `autoApply` | approve recommendations without a human | off |
-| `workloadAnalysis` | enable the create/merge/update engine (needs profiler) | off |
+| `workloadAnalysis` | enable the create/merge/update engine | off |
 | `instantCreate` | auto-build critical missing indexes | off |
 | `observeWindowDays` | how long a hidden index bakes before drop | 30 |
 | `maxCollectionSizeBytes` | size ceiling for touching a collection | — |
+
+Knobs are edited from the dashboard's **Policy** section (`GET/PUT
+/clusters/:id/policy`, owner-only writes). With `autoApply`, proposed
+recommendations are promoted automatically — the hide → observe → finalize
+gates still stand between them and any drop.
 
 ## Sharding & replication
 
@@ -146,6 +151,10 @@ the empty auto-created one, it's replaced by the org they join; a user's oldest
 membership is their active org. The org creator is **owner**; invited users are
 **members**. Members read everything; mutations (connect cluster, mode toggle,
 approve, undo, collect, invite) are owner-only (403 otherwise).
+
+**Email**: with `SMTP_*` configured (see `.env.example`), invites are emailed
+to the invitee and owners get engine alerts (drops executed, regressions rolled
+back). Without SMTP config, sending is a logged no-op.
 
 **Hardening**: auth endpoints are rate-limited (20/min per IP; 300/min global),
 connection strings must be `mongodb://`/`mongodb+srv://` (SSRF guard), and a

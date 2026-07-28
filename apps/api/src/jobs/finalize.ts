@@ -1,5 +1,6 @@
 import { isRegression } from "../analysis";
 import { actions, and, eq, inArray, policies, recommendations, roiMetrics } from "../db";
+import { notifyClusterOwners } from "../mail/notify";
 import { MongoIndexCollector, MongoIndexExecutor, serializeSpec } from "../mongo";
 import { openClusterMongo } from "./cluster-connection";
 import { recordRegression } from "./cooldowns";
@@ -97,6 +98,12 @@ export async function finalizeCluster(clusterId: string): Promise<number> {
         actor: "system",
         result: `rolled back + cooldown until ${day}: write-latency regression after build`,
       });
+      await notifyClusterOwners(
+        db,
+        clusterId,
+        `rolled back ${rec.indexName}`,
+        `The index ${rec.indexName} on ${rec.database}.${rec.collection} slowed writes after being built, so it was dropped automatically. It is cooling down until ${day}.`,
+      );
     }
     for (const rec of due) {
       // Regression gate: did hiding this index slow the collection's reads
@@ -129,6 +136,12 @@ export async function finalizeCluster(clusterId: string): Promise<number> {
             actor: "system",
             result: `aborted + cooldown until ${day}: read-latency regression during observe`,
           });
+          await notifyClusterOwners(
+            db,
+            clusterId,
+            `kept ${rec.indexName} (regression)`,
+            `Hiding ${rec.indexName} on ${rec.database}.${rec.collection} slowed reads during the observe window, so the drop was aborted and the index un-hidden. It is cooling down until ${day}.`,
+          );
           continue;
         }
       }
@@ -183,6 +196,12 @@ export async function finalizeCluster(clusterId: string): Promise<number> {
         periodStart,
         periodEnd: new Date(),
       });
+      await notifyClusterOwners(
+        db,
+        clusterId,
+        `dropped ${dropped} ${dropped === 1 ? "index" : "indexes"}`,
+        `${dropped} ${dropped === 1 ? "index" : "indexes"} passed the observe window and regression gates and ${dropped === 1 ? "was" : "were"} dropped, freeing ~${Math.round(freedBytes / 1024)} KB. Undo is available on the dashboard.`,
+      );
     }
     return dropped;
   } finally {

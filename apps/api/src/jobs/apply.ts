@@ -1,4 +1,4 @@
-import { actions, and, eq, recommendations } from "../db";
+import { actions, and, eq, policies, recommendations } from "../db";
 import { MongoIndexCollector, MongoIndexExecutor, serializeSpec } from "../mongo";
 import { openClusterMongo } from "./cluster-connection";
 import { jobDb } from "./db";
@@ -9,8 +9,21 @@ const DROP_TYPES = new Set(["DROP_UNUSED", "DROP_REDUNDANT", "MERGE"]);
 // APPROVED drops -> pre-flight -> hide (collMod hidden:true) -> HIDDEN. Hiding is
 // instant and reversible; it starts the observe window. Records an audit action
 // with a rollback token. A failed pre-flight re-proposes instead of hiding.
+// With policy.autoApply, PROPOSED recommendations are promoted first — the
+// hide -> observe -> finalize gates still stand between them and any drop.
 export async function applyCluster(clusterId: string): Promise<number> {
   const db = jobDb();
+  const [policy] = await db
+    .select()
+    .from(policies)
+    .where(eq(policies.clusterId, clusterId))
+    .limit(1);
+  if (policy?.autoApply === true) {
+    await db
+      .update(recommendations)
+      .set({ state: "APPROVED", updatedAt: new Date() })
+      .where(and(eq(recommendations.clusterId, clusterId), eq(recommendations.state, "PROPOSED")));
+  }
   const approved = await db
     .select()
     .from(recommendations)

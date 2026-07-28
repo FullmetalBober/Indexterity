@@ -104,6 +104,17 @@ export const clusterLatencySeries = z.object({
 });
 export type ClusterLatencySeries = z.infer<typeof clusterLatencySeries>;
 
+// Per-cluster engine knobs. maxCollectionSizeBytes null = no ceiling.
+export const clusterPolicy = z.object({
+  clusterId: z.string().uuid(),
+  autoApply: z.boolean(),
+  workloadAnalysis: z.boolean(),
+  instantCreate: z.boolean(),
+  observeWindowDays: z.number().int().min(1).max(365),
+  maxCollectionSizeBytes: z.number().int().positive().nullable(),
+});
+export type ClusterPolicy = z.infer<typeof clusterPolicy>;
+
 export const orgMember = z.object({
   userId: z.string(),
   email: z.string(),
