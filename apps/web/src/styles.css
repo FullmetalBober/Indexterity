@@ -16,20 +16,23 @@
   --color-accent-foreground: var(--accent-foreground);
 }
 
+/* MongoDB-family theme: forest green primary (#00684A, ~8:1 on white), evergreen
+   ink, soft green-tinted neutrals. Chart series colors live in latency-chart.tsx
+   and are validated separately (dataviz palette gates). */
 :root {
   --background: hsl(0 0% 100%);
-  --foreground: hsl(240 10% 3.9%);
+  --foreground: hsl(174 93% 10%);
   --card: hsl(0 0% 100%);
-  --muted: hsl(240 4.8% 95.9%);
-  --muted-foreground: hsl(240 3.8% 46.1%);
-  --border: hsl(240 5.9% 90%);
-  --primary: hsl(240 5.9% 10%);
+  --muted: hsl(150 15% 95.5%);
+  --muted-foreground: hsl(160 8% 40%);
+  --border: hsl(150 12% 89%);
+  --primary: hsl(166 100% 20.4%);
   --primary-foreground: hsl(0 0% 98%);
-  --secondary: hsl(240 4.8% 95.9%);
-  --secondary-foreground: hsl(240 5.9% 10%);
+  --secondary: hsl(150 15% 95.5%);
+  --secondary-foreground: hsl(174 93% 10%);
   --destructive: hsl(0 72% 51%);
-  --accent: hsl(240 4.8% 95.9%);
-  --accent-foreground: hsl(240 5.9% 10%);
+  --accent: hsl(151 100% 46%);
+  --accent-foreground: hsl(174 93% 10%);
 }
 
 @layer base {

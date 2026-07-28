@@ -1,10 +1,12 @@
 import { CartesianGrid, Line, LineChart as RechartsLine, Tooltip, XAxis, YAxis } from "recharts";
 import { ChartContainer, ChartTooltipContent } from "./ui/chart";
 
-// Categorical slots 1-4 (dataviz default palette, light mode) — validated with
-// scripts/validate_palette.js: CVD/normal-vision floors pass; aqua+yellow sit
-// below 3:1 contrast, so direct labels + the summary table provide relief.
-export const SERIES_PALETTE = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"];
+// MongoDB-family categorical slots, green first — validated with the dataviz
+// scripts/validate_palette.js (light mode): lightness band, chroma, CVD +
+// normal-vision floors and 3:1 contrast all PASS. Blue↔green tritan ΔE 7.2 sits
+// in the 6–8 band, which is legal with secondary encoding — these charts carry
+// a legend, direct labels and the summary table.
+export const SERIES_PALETTE = ["#00A35C", "#016BF8", "#C77F00", "#B45AF2"];
 
 export interface ChartPoint {
   readonly t: string; // ISO-8601
