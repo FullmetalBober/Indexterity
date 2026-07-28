@@ -1,6 +1,7 @@
 import { createFileRoute, useRouter } from "@tanstack/react-router";
 import { createServerFn } from "@tanstack/react-start";
 import { useState } from "react";
+import { LineChart, SERIES_PALETTE } from "../components/latency-chart";
 import { Badge } from "../components/ui/badge";
 import {
   Table,
@@ -31,13 +32,15 @@ const loadDashboard = createServerFn({ method: "GET" }).handler(async () => {
       recommendations: [],
       roi: { freedBytes: 0, indexesDropped: 0, estimatedMonthlyUsd: 0 },
       latency: { collections: [] },
+      latencySeries: { collections: [] },
       org,
     };
   }
-  const [recResult, roiResult, latencyResult] = await Promise.all([
+  const [recResult, roiResult, latencyResult, seriesResult] = await Promise.all([
     api.listRecommendations({ params: { clusterId: cluster.id } }),
     api.getRoi({ params: { clusterId: cluster.id } }),
     api.getLatency({ params: { clusterId: cluster.id } }),
+    api.getLatencySeries({ params: { clusterId: cluster.id } }),
   ]);
   return {
     authed: true as const,
@@ -48,6 +51,7 @@ const loadDashboard = createServerFn({ method: "GET" }).handler(async () => {
         ? roiResult.body
         : { freedBytes: 0, indexesDropped: 0, estimatedMonthlyUsd: 0 },
     latency: latencyResult.status === 200 ? latencyResult.body : { collections: [] },
+    latencySeries: seriesResult.status === 200 ? seriesResult.body : { collections: [] },
     org,
   };
 });
@@ -127,9 +131,26 @@ function Home() {
 
   if (!data.authed) return <AuthForm onDone={() => router.invalidate()} />;
 
-  const { cluster, recommendations, roi, latency, org } = data;
+  const { cluster, recommendations, roi, latency, latencySeries, org } = data;
   const proposed = recommendations.filter((rec) => rec.state === "PROPOSED");
   const totalSaved = proposed.reduce((sum, rec) => sum + rec.estimatedBytesSaved, 0);
+
+  // Top collections by sample count get the four validated palette slots; the
+  // rest fold (color follows the collection across both charts).
+  const chartCollections = [...latencySeries.collections]
+    .sort((a, b) => b.points.length - a.points.length)
+    .slice(0, SERIES_PALETTE.length);
+  const foldedCount = latencySeries.collections.length - chartCollections.length;
+  const readSeries = chartCollections.map((coll, i) => ({
+    label: `${coll.database}.${coll.collection}`,
+    color: SERIES_PALETTE[i] ?? "#2a78d6",
+    points: coll.points.map((point) => ({ t: point.capturedAt, v: point.readMicros })),
+  }));
+  const writeSeries = chartCollections.map((coll, i) => ({
+    label: `${coll.database}.${coll.collection}`,
+    color: SERIES_PALETTE[i] ?? "#2a78d6",
+    points: coll.points.map((point) => ({ t: point.capturedAt, v: point.writeMicros })),
+  }));
 
   async function onApprove(id: string) {
     await approveRecommendation({ data: id });
@@ -232,6 +253,18 @@ function Home() {
           ))}
         </TableBody>
       </Table>
+
+      {chartCollections.length > 0 ? (
+        <section className="mt-8 grid gap-6 md:grid-cols-2">
+          <LineChart title="Read latency" unit="µs/op" series={readSeries} />
+          <LineChart title="Write latency" unit="µs/op" series={writeSeries} />
+          {foldedCount > 0 ? (
+            <p className="text-muted-foreground text-xs md:col-span-2">
+              +{foldedCount} more collections — see the table below.
+            </p>
+          ) : null}
+        </section>
+      ) : null}
 
       {latency.collections.length > 0 ? (
         <>

@@ -11,8 +11,9 @@ regression check. Full design and decision log in
 
 1. **Connect** a cluster — the connection string is sealed with envelope
    encryption; `demoMode` (read-only) is on by default.
-2. **Collect** index usage and sizes on a schedule via `$indexStats` /
-   `$collStats` — it never reads your documents.
+2. **Collect** index usage, sizes and per-collection read/write latency on a
+   schedule via `$indexStats` / `$collStats` — it never reads your documents.
+   Connections are pooled per cluster (one client reused across jobs).
 3. **Decide** what to change with a pure analysis engine (see below).
 4. **Approve** on the dashboard, or let policy auto-apply.
 5. **Apply** safely: `hide → observe → drop` for removals, `build` for additions.
@@ -51,9 +52,12 @@ sparse. Zero ops does not mean unused for these.
 
 ### Adding indexes (workload analysis, opt-in)
 
-Requires `policy.workloadAnalysis`. Reads the profiler (`system.profile`), never
-documents. Only collections with **≥ 1000 docs** are considered; **≥ 10 000 docs**
-is "critical". For each recurring query shape that did a `COLLSCAN`:
+Requires `policy.workloadAnalysis`. Query shapes come from **`$queryStats`**
+(mongo 7+, no profiler needed — set `internalQueryStatsRateLimit > 0`), falling
+back to the profiler (`system.profile`) when unavailable; documents are never
+read either way. Only collections with **≥ 1000 docs** are considered;
+**≥ 10 000 docs** is "critical". For each recurring query shape that did a
+`COLLSCAN`:
 
 - an existing index already equals the wanted fields → nothing
 - an existing index is a proper prefix of the wanted fields → **UPDATE** (extend it)
@@ -131,11 +135,15 @@ but never writes to your cluster.
 ## Auth & tenancy
 
 Every api endpoint requires a better-auth session and is scoped to the caller's
-org (one org per user, created on first sign-in). The dashboard is a BFF: it
-proxies `/api/auth` to the api so the session cookie lives on the web origin,
-then forwards that cookie to the api on every data call. Set `WEB_ORIGIN` (api)
-and `VITE_WEB_ORIGIN` (web) to the dashboard's public origin so better-auth
-trusts it as a request origin.
+org. The dashboard is a BFF: it proxies `/api/auth` to the api so the session
+cookie lives on the web origin, then forwards that cookie to the api on every
+data call. Set `WEB_ORIGIN` (api) and `VITE_WEB_ORIGIN` (web) to the dashboard's
+public origin so better-auth trusts it as a request origin.
+
+**Teams**: invite a teammate from the dashboard — the api returns a one-time
+token (7-day expiry) to share; they join with it. If their only org is the empty
+auto-created one, it's replaced by the org they join; a user's oldest membership
+is their active org.
 
 ## Stack
 

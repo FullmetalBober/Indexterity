@@ -5,6 +5,7 @@ import type { FastifyRequest } from "fastify";
 import { z } from "zod";
 import {
   type LatencyReading,
+  latencyPoints,
   monthlySavingsUsd,
   parseStoredSpec,
   rebuildKeys,
@@ -176,6 +177,46 @@ export class RecommendationsController {
         database: group.database,
         collection: group.collection,
         ...summarizeLatency(group.readings),
+      }));
+      return { status: 200, body: { clusterId: params.clusterId, collections } };
+    });
+  }
+
+  @TsRestHandler(contract.getLatencySeries)
+  getLatencySeries(@Req() req: FastifyRequest) {
+    return tsRestHandler(contract.getLatencySeries, async ({ params }) => {
+      const orgId = await this.resolveOrg(req);
+      if (!(await this.ownsCluster(params.clusterId, orgId))) {
+        return { status: 200, body: { clusterId: params.clusterId, collections: [] } };
+      }
+      const rows = await this.database.db
+        .select()
+        .from(latencySamples)
+        .where(eq(latencySamples.clusterId, params.clusterId));
+      const groups = new Map<
+        string,
+        { database: string; collection: string; readings: LatencyReading[] }
+      >();
+      for (const row of rows) {
+        const key = `${row.database} ${row.collection}`;
+        const group = groups.get(key) ?? {
+          database: row.database,
+          collection: row.collection,
+          readings: [],
+        };
+        group.readings.push({
+          readOps: row.readOps,
+          readLatencyMicros: row.readLatencyMicros,
+          writeOps: row.writeOps,
+          writeLatencyMicros: row.writeLatencyMicros,
+          capturedAt: row.capturedAt.toISOString(),
+        });
+        groups.set(key, group);
+      }
+      const collections = [...groups.values()].map((group) => ({
+        database: group.database,
+        collection: group.collection,
+        points: latencyPoints(group.readings),
       }));
       return { status: 200, body: { clusterId: params.clusterId, collections } };
     });

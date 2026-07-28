@@ -3,6 +3,7 @@ import { z } from "zod";
 import {
   cluster,
   clusterLatency,
+  clusterLatencySeries,
   clusterRoi,
   createdInvite,
   orgInfo,
@@ -39,6 +40,13 @@ export const contract = c.router({
     pathParams: z.object({ clusterId: z.string().uuid() }),
     responses: { 200: clusterLatency },
     summary: "Per-collection read/write latency trend (before/after)",
+  },
+  getLatencySeries: {
+    method: "GET",
+    path: "/clusters/:clusterId/latency-series",
+    pathParams: z.object({ clusterId: z.string().uuid() }),
+    responses: { 200: clusterLatencySeries },
+    summary: "Per-collection windowed latency time series (µs per op)",
   },
   createCluster: {
     method: "POST",

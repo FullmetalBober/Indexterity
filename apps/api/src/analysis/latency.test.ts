@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { type LatencyReading, summarizeLatency } from "./latency";
+import { type LatencyReading, latencyPoints, summarizeLatency } from "./latency";
 
 function reading(
   readOps: number,
@@ -49,5 +49,30 @@ describe("summarizeLatency", () => {
       reading(100, 100_000, 0, 0, 1),
     ]);
     expect(trend.currentReadMicros).toBeNull();
+  });
+});
+
+describe("latencyPoints", () => {
+  it("emits one windowed point per consecutive pair, later timestamp", () => {
+    const points = latencyPoints(series);
+    expect(points).toHaveLength(2);
+    expect(points[0]).toEqual({
+      capturedAt: "2026-07-25T01:00:00Z",
+      readMicros: 1000,
+      writeMicros: 4000,
+    });
+    expect(points[1]).toEqual({
+      capturedAt: "2026-07-25T02:00:00Z",
+      readMicros: 500,
+      writeMicros: 7000,
+    });
+  });
+  it("nulls a channel whose ops did not advance", () => {
+    const points = latencyPoints([
+      reading(100, 100_000, 5, 1000, 0),
+      reading(200, 150_000, 5, 1000, 1),
+    ]);
+    expect(points[0]?.readMicros).toBe(500);
+    expect(points[0]?.writeMicros).toBeNull();
   });
 });

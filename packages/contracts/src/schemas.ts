@@ -83,6 +83,27 @@ export const clusterLatency = z.object({
 });
 export type ClusterLatency = z.infer<typeof clusterLatency>;
 
+// One windowed µs/op point per collect interval — the chart series.
+export const latencySeriesPoint = z.object({
+  capturedAt: z.string(),
+  readMicros: z.number().nullable(),
+  writeMicros: z.number().nullable(),
+});
+export type LatencySeriesPoint = z.infer<typeof latencySeriesPoint>;
+
+export const collectionLatencySeries = z.object({
+  database: z.string(),
+  collection: z.string(),
+  points: z.array(latencySeriesPoint),
+});
+export type CollectionLatencySeries = z.infer<typeof collectionLatencySeries>;
+
+export const clusterLatencySeries = z.object({
+  clusterId: z.string().uuid(),
+  collections: z.array(collectionLatencySeries),
+});
+export type ClusterLatencySeries = z.infer<typeof clusterLatencySeries>;
+
 export const orgMember = z.object({
   userId: z.string(),
   email: z.string(),
