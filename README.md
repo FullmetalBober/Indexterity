@@ -21,11 +21,14 @@ regression check. Full design and decision log in
    `STORAGE_USD_PER_GB_MONTH`), index-count delta, and a per-collection
    read/write **latency trend** (before/after), with a regression gate that
    aborts — and remembers — anything that slowed reads down.
+7. **One dashboard**: recommendations with approve/undo, read/write latency
+   charts, the immutable activity trail, the policy editor, team & invites, and
+   a cluster picker with the read-only ⇄ live toggle.
 
 ## How it decides
 
-Two independent engines, both **pure functions in `packages/core`** — no I/O, so
-they are deterministic and unit-testable without a database or a cluster.
+Two independent engines, both **pure functions in `apps/api/src/analysis`** — no
+I/O, so they are deterministic and unit-tested without a database or a cluster.
 
 ### Removing indexes (usage + redundancy)
 
@@ -214,8 +217,18 @@ docker compose up         # postgres + api + web, hot reload
 npm run dev
 ```
 
-Other: `npm run build` · `npm run typecheck` · `npm run lint`.
+Other: `npm run build` · `npm run typecheck` · `npm run lint` · `npm run test`
+(unit — the pure engines).
 Database: `npm run db:generate` · `npm run db:migrate`.
+
+**Integration tests** (spawn the built api against real postgres + mongo — the
+same suite CI runs with service containers):
+
+```bash
+npm run build
+DATABASE_URL=postgres://… MONGO_URL=mongodb://localhost:27017 \
+  npm run test:int -w @repo/api
+```
 
 ## Deploy
 
@@ -230,6 +243,35 @@ docker build -f apps/web/Dockerfile -t mo-web \
 api ≈ 390 MB, web ≈ 235 MB. The web bundle **bakes `VITE_API_URL` at build time**
 (Vite inlines `VITE_*`), so set it per environment. The worker deploys from the
 api image with `CMD ["node", "apps/api/dist/worker.js"]`.
+
+## Roadmap (Mongo-focused)
+
+Engine depth, roughly in order:
+
+1. **Duplicate-index detection** — the redundancy rule catches proper key
+   prefixes; two indexes with *identical* keys under different names slip
+   through today. Trivial rule, real-world common.
+2. **Replica-aware ROI** — a dropped index frees its bytes on *every*
+   replica-set member; the headline currently counts one copy. Multiply by
+   member count (already collected per snapshot).
+3. **Aggregation shapes** — workload analysis parses `find` filters; parse the
+   `$match`/`$sort` stages of `aggregate` shapes from `$queryStats` too.
+4. **Create cost estimate** — CREATE recommendations should show the price:
+   estimated index size (doc count × key size) and write amplification, next to
+   the read win.
+5. **Wire `maxCollectionSizeBytes`** — the knob exists and is editable; the
+   engine doesn't read it yet.
+6. **Advisory tier** — unique/TTL indexes that look unused are never touched;
+   surface them as "review manually" advisories instead of staying silent.
+7. **Partial/TTL suggestions** — profiler samples carry real filter values;
+   always-`status:"active"` queries justify a partial index, monotonic date
+   ranges a TTL review.
+8. **Sort-direction-aware ESR** — compound keys are all-ascending today; mixed
+   `sort {a: 1, b: -1}` needs matching index directions.
+9. **Atlas onboarding** — create the index-only user via the Atlas Admin API
+   instead of asking customers to paste `createRole` snippets.
+10. **Read-only digest** — a weekly "here's what we *would* have done" email
+    for clusters still in read-only mode; the go-live conversion driver.
 
 ## Notes
 
