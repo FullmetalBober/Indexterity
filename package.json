@@ -19,13 +19,12 @@
     "lint:fix": "biome check --write .",
     "format": "biome format --write .",
     "db:generate": "npm run db:generate -w @repo/api",
-    "db:migrate": "npm run db:migrate -w @repo/api",
-    "postinstall": "npm install --prefix tools/editor-ts --no-audit --no-fund"
+    "db:migrate": "npm run db:migrate -w @repo/api"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.5",
     "@types/node": "^26.1.1",
     "turbo": "^2.10.5",
-    "typescript": "^7.0.2"
+    "typescript": "^6.0.3"
   }
 }

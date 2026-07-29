@@ -1,8 +1,0 @@
-{
-  "name": "editor-ts",
-  "private": true,
-  "description": "Editor-only TypeScript with tsserver.js — the repo builds on typescript 7 (native tsgo), which ships no tsserver until 7.1. Zed/VSCode point their tsdk here.",
-  "dependencies": {
-    "typescript": "^5.9.3"
-  }
-}

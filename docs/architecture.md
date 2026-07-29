@@ -512,7 +512,7 @@ Redis + BullMQ only if scale demands it.
 | D10 | graphile-worker for jobs | Postgres-backed, no Redis; fits compose | Locked |
 | D11 | Demo/read-only default per cluster | Read-only is structural, not a toggle | Locked |
 | D12 | npm workspaces (not pnpm) for now | Local Node is Zed-managed; a global pnpm install conflicted. Turbo supports npm workspaces; swappable later | Locked |
-| D13 | TypeScript 7 everywhere; api built with **swc** directly (no Nest CLI) | TS 7's native compiler is CLI-only until 7.1, so the Nest CLI can't run on it. swc is what Nest's builder uses anyway; `tsc` 7 still type-checks | Locked |
+| D13 | TypeScript **6** (last JS line); api built with **swc** directly (no Nest CLI) | Was TS 7 (native), but 7 ships no `tsserver.js` until 7.1 — editors broke. TS 6 keeps full toolchain parity (tsserver, programmatic API); typecheck speed is a non-issue at this repo size. Revisit 7 at 7.1 | Revised |
 | D14 | zod pinned to **v3** | `@ts-rest/*` peers require `^3.22.3`; revisit when ts-rest supports zod 4 | Locked |
 | D15 | Internal packages compile to CJS `dist`; apps consume built output | Predictable dev/prod module resolution; Turbo orders builds via `^build` | Locked |
 
@@ -520,8 +520,9 @@ Redis + BullMQ only if scale demands it.
 
 - **KMS/Vault custodian** — deferred to funded stage / first enterprise deal
   (see §9.2). App-level now.
-- **Nest CLI build for api** — revert `api` to `nest build` / `nest start --watch`
-  once TypeScript 7.1 restores the programmatic compiler API (see D13).
+- **TypeScript 7 (native)** — re-adopt at 7.1 when `tsserver.js` and the
+  programmatic compiler API return; also unblocks reverting api to the Nest CLI
+  (see D13).
 - **zod 4** — adopt once `@ts-rest/*` peers allow it (see D14).
 - **Agent mode** — phase 2. Interface designed for it from day one.
 - **Suggest-mode (`CREATE` from workload)** — higher trust tier; needs profiler
