@@ -8,3 +8,8 @@ export function createDatabase(connectionString: string) {
   const pool = new Pool({ connectionString });
   return drizzle(pool, { schema });
 }
+
+// Drain the underlying pg pool (graceful shutdown).
+export async function closeDatabase(db: Database): Promise<void> {
+  await db.$client.end();
+}

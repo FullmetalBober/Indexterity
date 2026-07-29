@@ -43,6 +43,10 @@ async function bootstrap(): Promise<void> {
     },
   );
 
+  // SIGTERM/SIGINT run the shutdown hooks (pools drained in DatabaseService)
+  // instead of hanging until the container runtime SIGKILLs after 10s.
+  app.enableShutdownHooks();
+
   const port = Number(process.env.API_PORT ?? 3001);
   await app.listen(port, "0.0.0.0");
 }

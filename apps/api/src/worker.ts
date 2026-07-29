@@ -1,5 +1,7 @@
 import { run } from "graphile-worker";
 import { requiredEnv } from "./env";
+import { drainPool } from "./jobs/connection-pool";
+import { closeJobDb } from "./jobs/db";
 import { taskList } from "./jobs/tasks";
 
 // Recurring schedule (per cluster via the dispatcher tasks):
@@ -22,6 +24,15 @@ async function main(): Promise<void> {
     taskList,
     crontab: CRONTAB,
   });
+  // Graceful shutdown: finish in-flight jobs, then drain every pool.
+  const stop = async (): Promise<void> => {
+    await runner.stop();
+    await drainPool();
+    await closeJobDb();
+    process.exit(0);
+  };
+  process.once("SIGTERM", () => void stop());
+  process.once("SIGINT", () => void stop());
   await runner.promise;
 }
 

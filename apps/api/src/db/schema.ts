@@ -150,8 +150,11 @@ export const clusters = pgTable("clusters", {
   connectionMode: connectionMode("connection_mode").notNull().default("HOSTED_DIRECT"),
   readOnly: boolean("read_only").notNull().default(true),
   // The control plane holds the cluster's connection string, envelope-encrypted.
+  // keyVersion selects the master key that sealed it (MASTER_KEY, MASTER_KEY_V2,
+  // …) so the KEK can rotate without re-sealing everything at once.
   sealedDek: bytea("sealed_dek").notNull(),
   sealedData: bytea("sealed_data").notNull(),
+  keyVersion: integer("key_version").notNull().default(1),
   createdAt,
 });
 

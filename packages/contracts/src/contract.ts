@@ -1,6 +1,7 @@
 import { initContract } from "@ts-rest/core";
 import { z } from "zod";
 import {
+  auditAction,
   cluster,
   clusterLatency,
   clusterLatencySeries,
@@ -63,6 +64,13 @@ export const contract = c.router({
     body: z.object({ readOnly: z.boolean() }),
     responses: { 200: cluster, 404: z.object({ message: z.string() }) },
     summary: "Toggle read-only mode (owner only) — live mode lets the engine write",
+  },
+  listActions: {
+    method: "GET",
+    path: "/clusters/:clusterId/actions",
+    pathParams: z.object({ clusterId: z.string().uuid() }),
+    responses: { 200: z.array(auditAction) },
+    summary: "The cluster's audit trail (latest 50 executed operations)",
   },
   getPolicy: {
     method: "GET",

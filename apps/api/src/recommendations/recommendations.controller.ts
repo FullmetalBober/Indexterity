@@ -27,7 +27,7 @@ import {
   seal,
 } from "../db";
 import { DatabaseService } from "../db/database.service";
-import { masterKeyBytes } from "../env";
+import { currentKeyVersion, masterKeyBytesFor } from "../env";
 import { classifyCluster } from "../jobs/classify";
 import { openClusterMongo } from "../jobs/cluster-connection";
 import { collectCluster } from "../jobs/collect";
@@ -246,9 +246,10 @@ export class RecommendationsController {
           body: { message: "connection string must be mongodb:// or mongodb+srv://" },
         };
       }
+      const keyVersion = currentKeyVersion();
       const sealed = await seal(
         new TextEncoder().encode(body.connectionString),
-        envKeyProvider(masterKeyBytes()),
+        envKeyProvider(masterKeyBytesFor(keyVersion)),
       );
       const [row] = await this.database.db
         .insert(clusters)
@@ -259,10 +260,39 @@ export class RecommendationsController {
           readOnly: true,
           sealedDek: Buffer.from(sealed.dek),
           sealedData: Buffer.from(sealed.data),
+          keyVersion,
         })
         .returning();
       if (row === undefined) throw new Error("failed to create cluster");
       return { status: 200, body: toCluster(row) };
+    });
+  }
+
+  @TsRestHandler(contract.listActions)
+  listActions(@Req() req: FastifyRequest) {
+    return tsRestHandler(contract.listActions, async ({ params }) => {
+      const orgId = await this.resolveOrg(req);
+      if (!(await this.ownsCluster(params.clusterId, orgId))) return { status: 200, body: [] };
+      const rows = await this.database.db
+        .select({
+          id: actions.id,
+          kind: actions.kind,
+          actor: actions.actor,
+          result: actions.result,
+          database: recommendations.database,
+          collection: recommendations.collection,
+          indexName: recommendations.indexName,
+          createdAt: actions.createdAt,
+        })
+        .from(actions)
+        .innerJoin(recommendations, eq(actions.recommendationId, recommendations.id))
+        .where(eq(recommendations.clusterId, params.clusterId))
+        .orderBy(desc(actions.createdAt))
+        .limit(50);
+      return {
+        status: 200,
+        body: rows.map((row) => ({ ...row, createdAt: row.createdAt.toISOString() })),
+      };
     });
   }
 

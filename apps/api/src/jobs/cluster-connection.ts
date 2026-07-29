@@ -1,5 +1,5 @@
 import { clusters, type Database, envKeyProvider, eq, open } from "../db";
-import { masterKeyBytes } from "../env";
+import { masterKeyBytesFor } from "../env";
 import type { MongoConnection } from "../mongo";
 import { acquireClusterConnection } from "./connection-pool";
 
@@ -17,7 +17,7 @@ export async function openClusterMongo(db: Database, clusterId: string): Promise
   const connString = new TextDecoder().decode(
     await open(
       { dek: cluster.sealedDek, data: cluster.sealedData },
-      envKeyProvider(masterKeyBytes()),
+      envKeyProvider(masterKeyBytesFor(cluster.keyVersion)),
     ),
   );
   const { conn, release } = await acquireClusterConnection(clusterId, connString);

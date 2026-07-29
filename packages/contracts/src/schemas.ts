@@ -104,6 +104,19 @@ export const clusterLatencySeries = z.object({
 });
 export type ClusterLatencySeries = z.infer<typeof clusterLatencySeries>;
 
+// One executed operation from the immutable audit trail.
+export const auditAction = z.object({
+  id: z.string().uuid(),
+  kind: z.string(),
+  actor: z.string(),
+  result: z.string(),
+  database: z.string(),
+  collection: z.string(),
+  indexName: z.string(),
+  createdAt: z.string(),
+});
+export type AuditAction = z.infer<typeof auditAction>;
+
 // Per-cluster engine knobs. maxCollectionSizeBytes null = no ceiling.
 export const clusterPolicy = z.object({
   clusterId: z.string().uuid(),

@@ -1,0 +1,1 @@
+ALTER TABLE "clusters" ADD COLUMN "key_version" integer DEFAULT 1 NOT NULL;

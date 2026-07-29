@@ -125,6 +125,12 @@ Knobs are edited from the dashboard's **Policy** section (`GET/PUT
 recommendations are promoted automatically — the hide → observe → finalize
 gates still stand between them and any drop.
 
+## Connecting a customer cluster
+
+See [`docs/mongo-user.md`](./docs/mongo-user.md) — the exact `createRole`
+snippets for the index-only user (analyze-only first, live-manage when you go
+live). Indexterity never gets document read/write privileges.
+
 ## Sharding & replication
 
 - **Replica sets.** `$indexStats` is per-member; usage sums every member, so an

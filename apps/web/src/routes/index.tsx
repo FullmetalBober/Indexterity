@@ -22,8 +22,15 @@ const loadDashboard = createServerFn({ method: "GET" })
   .validator((selected: unknown): string | null => (typeof selected === "string" ? selected : null))
   .handler(async ({ data: selected }) => {
     const api = serverApi();
-    const [clustersResult, orgResult] = await Promise.all([api.listClusters(), api.getOrg()]);
-    if (clustersResult.status === 401) return { authed: false as const };
+    let clustersResult: Awaited<ReturnType<typeof api.listClusters>>;
+    let orgResult: Awaited<ReturnType<typeof api.getOrg>>;
+    try {
+      [clustersResult, orgResult] = await Promise.all([api.listClusters(), api.getOrg()]);
+    } catch {
+      // The api is unreachable — render a friendly state instead of a 500.
+      return { authed: false as const, apiDown: true as const };
+    }
+    if (clustersResult.status === 401) return { authed: false as const, apiDown: false as const };
     const org = orgResult.status === 200 ? orgResult.body : EMPTY_ORG;
     const clusters = clustersResult.status === 200 ? clustersResult.body : [];
     const cluster = clusters.find((c) => c.id === selected) ?? clusters[0] ?? null;
@@ -37,16 +44,19 @@ const loadDashboard = createServerFn({ method: "GET" })
         latency: { collections: [] },
         latencySeries: { collections: [] },
         policy: null,
+        activity: [],
         org,
       };
     }
-    const [recResult, roiResult, latencyResult, seriesResult, policyResult] = await Promise.all([
-      api.listRecommendations({ params: { clusterId: cluster.id } }),
-      api.getRoi({ params: { clusterId: cluster.id } }),
-      api.getLatency({ params: { clusterId: cluster.id } }),
-      api.getLatencySeries({ params: { clusterId: cluster.id } }),
-      api.getPolicy({ params: { clusterId: cluster.id } }),
-    ]);
+    const [recResult, roiResult, latencyResult, seriesResult, policyResult, actionsResult] =
+      await Promise.all([
+        api.listRecommendations({ params: { clusterId: cluster.id } }),
+        api.getRoi({ params: { clusterId: cluster.id } }),
+        api.getLatency({ params: { clusterId: cluster.id } }),
+        api.getLatencySeries({ params: { clusterId: cluster.id } }),
+        api.getPolicy({ params: { clusterId: cluster.id } }),
+        api.listActions({ params: { clusterId: cluster.id } }),
+      ]);
     return {
       authed: true as const,
       clusters,
@@ -59,6 +69,7 @@ const loadDashboard = createServerFn({ method: "GET" })
       latency: latencyResult.status === 200 ? latencyResult.body : { collections: [] },
       latencySeries: seriesResult.status === 200 ? seriesResult.body : { collections: [] },
       policy: policyResult.status === 200 ? policyResult.body : null,
+      activity: actionsResult.status === 200 ? actionsResult.body : [],
       org,
     };
   });
@@ -230,9 +241,29 @@ function Home() {
   const data = Route.useLoaderData();
   const router = useRouter();
 
-  if (!data.authed) return <AuthForm onDone={() => router.invalidate()} />;
+  if (!data.authed) {
+    if (data.apiDown) {
+      return (
+        <main className="mx-auto mt-24 max-w-sm p-8">
+          <h1 className="font-semibold text-2xl">Indexterity</h1>
+          <p className="mt-2 text-muted-foreground">
+            The API is unreachable right now. Retry in a moment.
+          </p>
+          <button
+            type="button"
+            onClick={() => void router.invalidate()}
+            className="mt-4 rounded-md border px-3 py-1.5 text-sm"
+          >
+            Retry
+          </button>
+        </main>
+      );
+    }
+    return <AuthForm onDone={() => router.invalidate()} />;
+  }
 
-  const { cluster, clusters, recommendations, roi, latency, latencySeries, policy, org } = data;
+  const { cluster, clusters, recommendations, roi, latency, latencySeries, policy, activity, org } =
+    data;
   const proposed = recommendations.filter((rec) => rec.state === "PROPOSED");
   const totalSaved = proposed.reduce((sum, rec) => sum + rec.estimatedBytesSaved, 0);
 
@@ -407,6 +438,43 @@ function Home() {
             </TableBody>
           </Table>
         </>
+      ) : null}
+
+      {activity.length > 0 ? (
+        <section className="mt-8">
+          <h2 className="font-semibold text-lg">Activity</h2>
+          <p className="text-muted-foreground text-sm">
+            Every executed operation, with its outcome — the immutable audit trail.
+          </p>
+          <Table className="mt-2">
+            <TableHeader>
+              <TableRow>
+                <TableHead>When</TableHead>
+                <TableHead>Op</TableHead>
+                <TableHead>Index</TableHead>
+                <TableHead>Actor</TableHead>
+                <TableHead>Result</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {activity.map((entry) => (
+                <TableRow key={entry.id}>
+                  <TableCell className="whitespace-nowrap text-muted-foreground text-xs">
+                    {new Date(entry.createdAt).toLocaleString()}
+                  </TableCell>
+                  <TableCell>
+                    <Badge variant="outline">{entry.kind}</Badge>
+                  </TableCell>
+                  <TableCell className="font-mono text-xs">
+                    {entry.database}.{entry.collection} · {entry.indexName}
+                  </TableCell>
+                  <TableCell className="text-muted-foreground text-xs">{entry.actor}</TableCell>
+                  <TableCell className="text-muted-foreground text-xs">{entry.result}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </section>
       ) : null}
 
       {policy !== null ? (

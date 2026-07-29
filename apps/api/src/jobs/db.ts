@@ -9,3 +9,9 @@ export function jobDb(): Database {
   shared ??= createDatabase(requiredEnv("DATABASE_URL"));
   return shared;
 }
+
+export async function closeJobDb(): Promise<void> {
+  if (shared === null) return;
+  await shared.$client.end();
+  shared = null;
+}
