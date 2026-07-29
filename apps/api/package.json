@@ -8,8 +8,9 @@
     "dev": "node --watch -r @swc-node/register src/main.ts",
     "start": "node dist/main.js",
     "worker": "node -r @swc-node/register src/worker.ts",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p integration",
     "test": "vitest run",
+    "test:int": "vitest run --config vitest.integration.config.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate"
   },
