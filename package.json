@@ -19,7 +19,8 @@
     "lint:fix": "biome check --write .",
     "format": "biome format --write .",
     "db:generate": "npm run db:generate -w @repo/api",
-    "db:migrate": "npm run db:migrate -w @repo/api"
+    "db:migrate": "npm run db:migrate -w @repo/api",
+    "postinstall": "npm install --prefix tools/editor-ts --no-audit --no-fund"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.5",

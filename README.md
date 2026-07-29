@@ -227,6 +227,14 @@ api image with `CMD ["node", "apps/api/dist/worker.js"]`.
 
 ## Notes
 
+- **Editor TypeScript**: builds run on **typescript 7** (the native compiler),
+  which ships no `tsserver.js` until 7.1 — so editors can't use the workspace
+  install for their language server. `tools/editor-ts/` holds an isolated
+  TS 5.9 just for that (installed automatically via `postinstall`; kept out of
+  the workspace so its `tsc` bin can't shadow tsc 7). `.zed/settings.json`
+  points Zed's tsdk there; VS Code users: "TypeScript: Select TypeScript
+  Version" → `tools/editor-ts/node_modules/typescript/lib`.
+
 - The repo uses **npm workspaces**.
 - **zod is pinned to v3** — `@ts-rest/*` peers require `^3.22.3`. Revisit when
   ts-rest ships zod 4 support.
