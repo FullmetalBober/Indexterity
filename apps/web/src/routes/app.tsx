@@ -171,6 +171,77 @@ const connectCluster = createServerFn({ method: "POST" })
     }
   });
 
+function orpcMessage(error: unknown, fallback: string): string {
+  return error instanceof ORPCError && [400, 403, 404, 409].includes(error.status)
+    ? error.message
+    : fallback;
+}
+
+const renameOrg = createServerFn({ method: "POST" })
+  .validator((name: unknown): string => {
+    if (typeof name !== "string" || name.length === 0) throw new Error("name required");
+    return name;
+  })
+  .handler(async ({ data }) => {
+    try {
+      await serverApi().renameOrg({ name: data });
+      return { ok: true };
+    } catch {
+      return { ok: false };
+    }
+  });
+
+const setMemberRole = createServerFn({ method: "POST" })
+  .validator((data: unknown): { userId: string; role: "member" | "owner" } => {
+    if (
+      typeof data === "object" &&
+      data !== null &&
+      "userId" in data &&
+      "role" in data &&
+      typeof data.userId === "string" &&
+      (data.role === "member" || data.role === "owner")
+    ) {
+      return { userId: data.userId, role: data.role };
+    }
+    throw new Error("invalid role change");
+  })
+  .handler(async ({ data }) => {
+    try {
+      await serverApi().setMemberRole(data);
+      return { ok: true, message: null };
+    } catch (error) {
+      return { ok: false, message: orpcMessage(error, "role change failed") };
+    }
+  });
+
+const removeMember = createServerFn({ method: "POST" })
+  .validator((userId: unknown): string => {
+    if (typeof userId !== "string" || userId.length === 0) throw new Error("userId required");
+    return userId;
+  })
+  .handler(async ({ data }) => {
+    try {
+      await serverApi().removeMember({ userId: data });
+      return { ok: true, message: null };
+    } catch (error) {
+      return { ok: false, message: orpcMessage(error, "remove failed") };
+    }
+  });
+
+const leaveOrg = createServerFn({ method: "POST" })
+  .validator((data: unknown): Record<string, never> => {
+    if (typeof data === "object" && data !== null) return {};
+    throw new Error("invalid");
+  })
+  .handler(async () => {
+    try {
+      await serverApi().leaveOrg({});
+      return { ok: true, message: null };
+    } catch (error) {
+      return { ok: false, message: orpcMessage(error, "leave failed") };
+    }
+  });
+
 // Credential rotation: verified server-side before storing, so a typo can't
 // brick the cluster; history survives (unlike disconnect + reconnect).
 const rotateConnection = createServerFn({ method: "POST" })
@@ -1147,10 +1218,13 @@ interface TeamOrg {
 }
 
 function TeamSection({ org, onChanged }: { org: TeamOrg; onChanged: () => void }) {
+  const toast = useToast();
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteToken, setInviteToken] = useState<string | null>(null);
   const [acceptToken, setAcceptToken] = useState("");
   const [acceptMessage, setAcceptMessage] = useState<string | null>(null);
+  const [renaming, setRenaming] = useState(false);
+  const [orgName, setOrgName] = useState(org.name);
 
   async function onInvite() {
     const result = await createInvite({ data: inviteEmail });
@@ -1166,14 +1240,110 @@ function TeamSection({ org, onChanged }: { org: TeamOrg; onChanged: () => void }
     if (result.ok) onChanged();
   }
 
+  async function onRename() {
+    const result = await renameOrg({ data: orgName }).catch(() => ({ ok: false }));
+    if (result.ok) toast("Org renamed");
+    else toast("Rename failed (owner only)", "error");
+    setRenaming(false);
+    onChanged();
+  }
+
+  async function onSetRole(userId: string, role: "member" | "owner") {
+    const result = await setMemberRole({ data: { userId, role } }).catch(() => ({
+      ok: false,
+      message: "failed",
+    }));
+    if (result.ok) toast(`Role changed to ${role}`);
+    else toast(result.message ?? "Role change failed", "error");
+    onChanged();
+  }
+
+  async function onRemove(userId: string, email: string) {
+    if (!window.confirm(`Remove ${email} from ${org.name}?`)) return;
+    const result = await removeMember({ data: userId }).catch(() => ({
+      ok: false,
+      message: "failed",
+    }));
+    if (result.ok) toast("Member removed");
+    else toast(result.message ?? "Remove failed", "error");
+    onChanged();
+  }
+
+  async function onLeave() {
+    if (!window.confirm(`Leave ${org.name}? You lose access to its clusters.`)) return;
+    const result = await leaveOrg({ data: {} }).catch(() => ({ ok: false, message: "failed" }));
+    if (result.ok) toast("Left the org");
+    else toast(result.message ?? "Leave failed", "error");
+    onChanged();
+  }
+
   return (
     <section className="mt-8">
-      <h2 className="font-semibold text-lg">Team — {org.name}</h2>
+      <div className="flex items-center gap-2">
+        <h2 className="font-semibold text-lg">Team — {org.name}</h2>
+        {renaming ? (
+          <form
+            className="flex gap-1"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void onRename();
+            }}
+          >
+            <input
+              className="rounded-md border px-2 py-0.5 text-sm"
+              value={orgName}
+              onChange={(event) => setOrgName(event.target.value)}
+            />
+            <button
+              type="submit"
+              className="rounded-md bg-primary px-2 py-0.5 text-primary-foreground text-xs"
+            >
+              Save
+            </button>
+          </form>
+        ) : (
+          <button
+            type="button"
+            onClick={() => {
+              setOrgName(org.name);
+              setRenaming(true);
+            }}
+            className="rounded-md border px-2 py-0.5 text-muted-foreground text-xs"
+          >
+            Rename
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={() => void onLeave()}
+          className="rounded-md border px-2 py-0.5 text-red-600 text-xs"
+        >
+          Leave org
+        </button>
+      </div>
       <ul className="mt-2 space-y-1">
         {org.members.map((member) => (
-          <li key={member.userId} className="text-sm">
-            {member.name} <span className="text-muted-foreground">({member.email})</span> ·{" "}
-            <span className="text-muted-foreground">{member.role}</span>
+          <li key={member.userId} className="flex items-center gap-2 text-sm">
+            <span>
+              {member.name} <span className="text-muted-foreground">({member.email})</span> ·{" "}
+              <span className="text-muted-foreground">{member.role}</span>
+            </span>
+            <button
+              type="button"
+              onClick={() =>
+                void onSetRole(member.userId, member.role === "owner" ? "member" : "owner")
+              }
+              className="rounded-md border px-1.5 py-0.5 text-muted-foreground text-xs"
+            >
+              {member.role === "owner" ? "Make member" : "Make owner"}
+            </button>
+            <button
+              type="button"
+              onClick={() => void onRemove(member.userId, member.email)}
+              className="rounded-md border px-1.5 py-0.5 text-red-600 text-xs"
+            >
+              Remove
+            </button>
           </li>
         ))}
         {org.pendingInvites.map((invite) => (

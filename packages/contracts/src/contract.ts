@@ -192,6 +192,41 @@ export const contract = {
     })
     .output(orgInfo),
 
+  renameOrg: oc
+    .route({ method: "PATCH", path: "/org", summary: "Rename the active org (owner only)" })
+    .input(z.object({ name: z.string().min(1).max(120) }))
+    .output(z.object({ id: z.uuid(), name: z.string() })),
+
+  setMemberRole: oc
+    .route({
+      method: "PATCH",
+      path: "/org/members/{userId}",
+      summary: "Change a member's role (owner only); the last owner cannot be demoted",
+    })
+    .errors({ NOT_FOUND: {}, CONFLICT: {} })
+    .input(z.object({ userId: z.string().min(1), role: z.enum(["member", "owner"]) }))
+    .output(z.object({ userId: z.string(), role: z.string() })),
+
+  removeMember: oc
+    .route({
+      method: "DELETE",
+      path: "/org/members/{userId}",
+      summary: "Remove a member from the active org (owner only; use leave for yourself)",
+    })
+    .errors({ NOT_FOUND: {}, CONFLICT: {} })
+    .input(z.object({ userId: z.string().min(1) }))
+    .output(z.object({ removed: z.boolean() })),
+
+  leaveOrg: oc
+    .route({
+      method: "POST",
+      path: "/org/leave",
+      summary: "Leave the active org; the last owner must transfer ownership first",
+    })
+    .errors({ CONFLICT: {} })
+    .input(z.object({}))
+    .output(z.object({ left: z.boolean() })),
+
   listOrgs: oc
     .route({
       method: "GET",

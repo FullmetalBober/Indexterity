@@ -42,6 +42,7 @@ let db: ReturnType<typeof createDatabase>;
 let mongo: MongoConnection;
 let owner: Session;
 let member: Session;
+let switcher: Session;
 let clusterId: string;
 
 const createdEmails: string[] = [];
@@ -361,7 +362,7 @@ describe("collect, audit trail and undo", () => {
 
 describe("org switcher", () => {
   it("switches the active org and rescopes every request", async () => {
-    const switcher = await signUp("switcher");
+    switcher = await signUp("switcher");
     createdEmails.push(switcher.email);
     // A cluster in the shell org keeps it from being collapsed on invite-accept.
     const own = await api("/clusters", switcher, {
@@ -517,6 +518,89 @@ describe("cluster offboarding", () => {
       .from(recommendations)
       .where(eq(recommendations.clusterId, id));
     expect(remaining).toHaveLength(0);
+  });
+});
+
+describe("org management", () => {
+  it("renames the org (owner only)", async () => {
+    const denied = await api("/org", member, {
+      method: "PATCH",
+      body: JSON.stringify({ name: "Nope Corp" }),
+    });
+    expect(denied.status).toBe(403);
+    const renamed = await api("/org", owner, {
+      method: "PATCH",
+      body: JSON.stringify({ name: "Renamed Intcorp" }),
+    });
+    expect(renamed.status).toBe(200);
+    const org = asRecord(await (await api("/org", owner)).json());
+    expect(org.name).toBe("Renamed Intcorp");
+  });
+
+  it("guards the last owner and round-trips a role change", async () => {
+    const ownerOrg = asRecord(await (await api("/org", owner)).json());
+    // Target by email — switcher is also a plain member of this org.
+    const rows = Array.isArray(ownerOrg.members) ? ownerOrg.members.map(asRecord) : [];
+    const ownerRow = rows.find((entry) => entry.email === owner.email);
+    const memberRow = rows.find((entry) => entry.email === member.email);
+    if (ownerRow === undefined || memberRow === undefined) throw new Error("rows missing");
+
+    // Demoting the sole owner is refused.
+    const selfDemote = await api(`/org/members/${asString(ownerRow.userId)}`, owner, {
+      method: "PATCH",
+      body: JSON.stringify({ role: "member" }),
+    });
+    expect(selfDemote.status).toBe(409);
+
+    // Promote, then demote back.
+    const promote = await api(`/org/members/${asString(memberRow.userId)}`, owner, {
+      method: "PATCH",
+      body: JSON.stringify({ role: "owner" }),
+    });
+    expect(promote.status).toBe(200);
+    const demote = await api(`/org/members/${asString(memberRow.userId)}`, owner, {
+      method: "PATCH",
+      body: JSON.stringify({ role: "member" }),
+    });
+    expect(demote.status).toBe(200);
+  });
+
+  it("removes a member, who falls back to a fresh shell org", async () => {
+    const ownerOrg = asRecord(await (await api("/org", owner)).json());
+    const memberRow = (Array.isArray(ownerOrg.members) ? ownerOrg.members.map(asRecord) : []).find(
+      (entry) => entry.email === member.email,
+    );
+    if (memberRow === undefined) throw new Error("member row missing");
+    const removed = await api(`/org/members/${asString(memberRow.userId)}`, owner, {
+      method: "DELETE",
+    });
+    expect(removed.status).toBe(200);
+    const after = asRecord(await (await api("/org", owner)).json());
+    const emails = (Array.isArray(after.members) ? after.members.map(asRecord) : []).map(
+      (entry) => entry.email,
+    );
+    expect(emails).not.toContain(member.email);
+
+    // The removed member's next request lazily creates a fresh shell org...
+    const shell = asRecord(await (await api("/org", member)).json());
+    createdOrgIds.push(asString(shell.id));
+    expect(Array.isArray(shell.members) && shell.members.length === 1).toBe(true);
+    // ...where they are the sole owner, so leaving is refused.
+    const leave = await api("/org/leave", member, { method: "POST", body: JSON.stringify({}) });
+    expect(leave.status).toBe(409);
+  });
+
+  it("lets a non-last-owner leave, falling back to their own org", async () => {
+    // switcher's active org is the owner's (from the switch test); they are a
+    // plain member there, so leaving works and rescopes them to their own org.
+    const leave = await api("/org/leave", switcher, { method: "POST", body: JSON.stringify({}) });
+    expect(leave.status).toBe(200);
+    const clustersAfter = await (await api("/clusters", switcher)).json();
+    const names = Array.isArray(clustersAfter)
+      ? clustersAfter.map((entry) => asRecord(entry).name)
+      : [];
+    expect(names).toContain("Switcher Own");
+    expect(names).not.toContain("Int Cluster");
   });
 });
 

@@ -17,6 +17,104 @@ const INVITE_TTL_MS = 7 * 86_400_000;
 export class OrgController {
   constructor(private readonly database: DatabaseService) {}
 
+  // The caller's active org, owner role required (403 otherwise).
+  private async requireOwnerOrg(req: FastifyRequest): Promise<string> {
+    const userId = await requireUserId(req);
+    const member = await resolveMembership(this.database.db, userId);
+    if (member.role !== "owner") {
+      throw new ORPCError("FORBIDDEN", { message: "owner role required" });
+    }
+    return member.orgId;
+  }
+
+  private async ownerCount(orgId: string): Promise<number> {
+    const rows = await this.database.db
+      .select({ id: members.id })
+      .from(members)
+      .where(and(eq(members.orgId, orgId), eq(members.role, "owner")));
+    return rows.length;
+  }
+
+  @Implement(contract.renameOrg)
+  renameOrg(@Req() req: FastifyRequest) {
+    return implement(contract.renameOrg).handler(async ({ input }) => {
+      const orgId = await this.requireOwnerOrg(req);
+      const [updated] = await this.database.db
+        .update(organizations)
+        .set({ name: input.name })
+        .where(eq(organizations.id, orgId))
+        .returning({ id: organizations.id, name: organizations.name });
+      if (updated === undefined) throw new Error("failed to rename organization");
+      return updated;
+    });
+  }
+
+  @Implement(contract.setMemberRole)
+  setMemberRole(@Req() req: FastifyRequest) {
+    return implement(contract.setMemberRole).handler(async ({ input, errors }) => {
+      const orgId = await this.requireOwnerOrg(req);
+      const [target] = await this.database.db
+        .select()
+        .from(members)
+        .where(and(eq(members.orgId, orgId), eq(members.userId, input.userId)))
+        .limit(1);
+      if (target === undefined) throw errors.NOT_FOUND({ message: "member not found" });
+      if (target.role === "owner" && input.role === "member") {
+        // Demoting the last owner would strand the org with no one able to
+        // manage it.
+        if ((await this.ownerCount(orgId)) === 1) {
+          throw errors.CONFLICT({
+            message: "the last owner cannot be demoted — promote someone else first",
+          });
+        }
+      }
+      await this.database.db
+        .update(members)
+        .set({ role: input.role })
+        .where(eq(members.id, target.id));
+      return { userId: input.userId, role: input.role };
+    });
+  }
+
+  @Implement(contract.removeMember)
+  removeMember(@Req() req: FastifyRequest) {
+    return implement(contract.removeMember).handler(async ({ input, errors }) => {
+      const userId = await requireUserId(req);
+      const member = await resolveMembership(this.database.db, userId);
+      if (member.role !== "owner") {
+        throw new ORPCError("FORBIDDEN", { message: "owner role required" });
+      }
+      if (input.userId === userId) {
+        throw errors.CONFLICT({ message: "use leave to remove yourself" });
+      }
+      const [target] = await this.database.db
+        .select()
+        .from(members)
+        .where(and(eq(members.orgId, member.orgId), eq(members.userId, input.userId)))
+        .limit(1);
+      if (target === undefined) throw errors.NOT_FOUND({ message: "member not found" });
+      await this.database.db.delete(members).where(eq(members.id, target.id));
+      return { removed: true };
+    });
+  }
+
+  @Implement(contract.leaveOrg)
+  leaveOrg(@Req() req: FastifyRequest) {
+    return implement(contract.leaveOrg).handler(async ({ errors }) => {
+      const userId = await requireUserId(req);
+      const member = await resolveMembership(this.database.db, userId);
+      if (member.role === "owner" && (await this.ownerCount(member.orgId)) === 1) {
+        throw errors.CONFLICT({
+          message: "you are the last owner — transfer ownership first",
+        });
+      }
+      await this.database.db
+        .delete(members)
+        .where(and(eq(members.orgId, member.orgId), eq(members.userId, userId)));
+      return { left: true };
+    });
+  }
+
   @Implement(contract.getOrg)
   getOrg(@Req() req: FastifyRequest) {
     return implement(contract.getOrg).handler(async () => {
