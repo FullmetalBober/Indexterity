@@ -91,3 +91,54 @@ describe("recommendForCollection", () => {
     expect(parsed.keys[0]?.field).toBe("a");
   });
 });
+
+describe("unique-prefix advisory", () => {
+  it("flags a unique index whose keys prefix a wider index", () => {
+    const unique = input(
+      spec("email_1", [{ field: "email", direction: 1 }], { unique: true }),
+      [5, 5, 5],
+    );
+    const wider = input(
+      spec("email_1_tenant_1", [
+        { field: "email", direction: 1 },
+        { field: "tenant", direction: 1 },
+      ]),
+      [9, 9, 9],
+    );
+    const out = recommendForCollection([unique, wider], {}, { recentWindow: 3, minHistory: 3 });
+    const advisory = out.find((c) => c.type === "ADVISORY_REVIEW" && c.indexName === "email_1");
+    expect(advisory).toBeDefined();
+    expect(advisory?.rationale).toContain("uniqueness constraint");
+  });
+
+  it("stays silent for different collations and shard keys", () => {
+    const uniqueCollated = input(
+      spec("email_ci", [{ field: "email", direction: 1 }], { unique: true, collation: "en" }),
+      [5, 5, 5],
+    );
+    const shardKey = input(
+      spec("email_shard", [{ field: "email", direction: 1 }], { unique: true, isShardKey: true }),
+      [5, 5, 5],
+    );
+    const wider = input(
+      spec("email_1_tenant_1", [
+        { field: "email", direction: 1 },
+        { field: "tenant", direction: 1 },
+      ]),
+      [9, 9, 9],
+    );
+    const out = recommendForCollection(
+      [uniqueCollated, shardKey, wider],
+      {},
+      { recentWindow: 3, minHistory: 3 },
+    );
+    expect(
+      out.some((c) => c.indexName === "email_ci" && c.rationale.includes("uniqueness constraint")),
+    ).toBe(false);
+    expect(
+      out.some(
+        (c) => c.indexName === "email_shard" && c.rationale.includes("uniqueness constraint"),
+      ),
+    ).toBe(false);
+  });
+});

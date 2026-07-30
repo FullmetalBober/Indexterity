@@ -109,3 +109,40 @@ describe("recommendCreates (ESR)", () => {
     expect(recommendCreates([shape(["a"], [], [], 0)], [], options)).toHaveLength(0);
   });
 });
+
+describe("recommendCreates (consolidation)", () => {
+  it("folds a prefix want into the widest covering want, summing counts", () => {
+    const out = recommendCreates(
+      [shape(["a"], [], [], 5), shape(["a", "b"], [], [], 3), shape(["a", "b", "c"], [], [], 2)],
+      [],
+      options,
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]?.keys.map((key) => key.field)).toEqual(["a", "b", "c"]);
+    expect(out[0]?.count).toBe(10);
+    expect(out[0]?.rationale).toContain("2 narrower shapes");
+  });
+
+  it("does not consolidate across mismatched directions", () => {
+    const out = recommendCreates(
+      [shape([], [bAsc], [], 5), shape([], [{ field: "b", direction: -1 }, atDesc], [], 3)],
+      [],
+      options,
+    );
+    expect(out).toHaveLength(2);
+  });
+
+  it("never consolidates into or out of partial candidates", () => {
+    const partialShape: QueryShape = {
+      equality: ["status", "b"],
+      sort: [],
+      range: [],
+      collscan: true,
+      count: 4,
+      constants: { status: "active" },
+    };
+    // The partial candidate indexes {b} only; the {b, at} want must survive.
+    const out = recommendCreates([partialShape, shape(["b"], [atDesc], [], 2)], [], options);
+    expect(out).toHaveLength(2);
+  });
+});

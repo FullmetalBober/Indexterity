@@ -4,6 +4,7 @@ import type {
   IndexDirection,
   IndexKey,
   IndexSpec,
+  LookupJoin,
   QueryShape,
   SortKey,
 } from "../analysis";
@@ -17,9 +18,33 @@ function sortKeysOf(sortSpec: Record<string, unknown>): SortKey[] {
   }));
 }
 
-function shapeMapKey(equality: string[], sort: SortKey[], range: string[]): string {
+function shapeMapKey(
+  equality: string[],
+  sort: SortKey[],
+  range: string[],
+  lookups: readonly LookupJoin[],
+): string {
   const sortPart = sort.map((key) => `${key.field}:${key.direction}`).join(",");
-  return `${equality.join(",")}|${sortPart}|${range.join(",")}`;
+  const lookupPart = lookups.map((join) => `${join.from}.${join.foreignField}`).join(",");
+  return `${equality.join(",")}|${sortPart}|${range.join(",")}|${lookupPart}`;
+}
+
+// Every $lookup join in the pipeline that names a foreign field (the
+// localField/foreignField form; pipeline-form lookups without foreignField
+// carry no index signal). Scans ALL stages — unlike pipelineShape, a $lookup
+// after a blocking stage still runs a real per-document foreign query. Field
+// names are structural, so $queryStats keeps them through shapification.
+export function lookupJoins(pipeline: readonly Record<string, unknown>[]): LookupJoin[] {
+  const joins: LookupJoin[] = [];
+  for (const stage of pipeline) {
+    const lookup = stage.$lookup;
+    if (!isRecord(lookup)) continue;
+    const { from, foreignField } = lookup;
+    if (typeof from !== "string" || typeof foreignField !== "string") continue;
+    if (joins.some((join) => join.from === from && join.foreignField === foreignField)) continue;
+    joins.push({ from, foreignField });
+  }
+  return joins;
 }
 
 // One index's usage on one replica-set member ($indexStats is per-member; on a
@@ -41,12 +66,17 @@ export interface CollectionLatency {
   readonly writes: LatencyPair;
 }
 
+export interface CollectionStorage {
+  readonly dataSizeBytes: number;
+  readonly docCount: number;
+}
+
 export interface IndexCollector {
   listCollectionNames(database: string): Promise<string[]>;
   listIndexes(database: string, collection: string): Promise<IndexSpec[]>;
   collectUsage(database: string, collection: string): Promise<IndexUsageStat[]>;
   indexSizes(database: string, collection: string): Promise<Record<string, number>>;
-  collectionDataSize(database: string, collection: string): Promise<number>;
+  collectionStorage(database: string, collection: string): Promise<CollectionStorage>;
   readLatency(database: string, collection: string): Promise<LatencyPair>;
   collectionLatency(database: string, collection: string): Promise<CollectionLatency>;
   collectSlowQueries(database: string, collection: string): Promise<QueryShape[]>;
@@ -79,7 +109,7 @@ const collStatsDoc = z.object({
 });
 
 const dataSizeDoc = z.object({
-  storageStats: z.object({ size: z.coerce.number() }),
+  storageStats: z.object({ size: z.coerce.number(), count: z.coerce.number() }),
 });
 
 const latencyPair = z.object({ ops: z.coerce.number(), latency: z.coerce.number() });
@@ -365,20 +395,26 @@ export class MongoIndexCollector implements IndexCollector {
       }));
   }
 
-  // Uncompressed data size of the collection, summed across shards — the input
-  // for the policy's maxCollectionSizeBytes build ceiling.
-  async collectionDataSize(database: string, collection: string): Promise<number> {
+  // Uncompressed data size + document count, summed across shards. Sizes feed
+  // the maxCollectionSizeBytes build ceiling; counts feed the collection-size
+  // gates. Sourced from $collStats — the `count` command would need a `find`
+  // grant the scoped least-privilege user deliberately lacks.
+  async collectionStorage(database: string, collection: string): Promise<CollectionStorage> {
     const raw = await this.conn
       .db(database)
       .collection(collection)
       .aggregate([{ $collStats: { storageStats: {} } }])
       .toArray();
-    let total = 0;
+    let dataSizeBytes = 0;
+    let docCount = 0;
     for (const doc of raw) {
       const parsed = dataSizeDoc.safeParse(doc);
-      if (parsed.success) total += parsed.data.storageStats.size;
+      if (parsed.success) {
+        dataSizeBytes += parsed.data.storageStats.size;
+        docCount += parsed.data.storageStats.count;
+      }
     }
-    return total;
+    return { dataSizeBytes, docCount };
   }
 
   // Sum index sizes across every $collStats doc — one per shard on a sharded
@@ -436,6 +472,7 @@ export class MongoIndexCollector implements IndexCollector {
         collscan: boolean;
         count: number;
         constants: Record<string, ConstantValue>;
+        lookups: LookupJoin[];
       }
     >();
     for (const entry of profileDoc.array().parse(raw)) {
@@ -443,6 +480,7 @@ export class MongoIndexCollector implements IndexCollector {
       let range: string[] = [];
       let sort: SortKey[] = [];
       let constants: Record<string, ConstantValue> = {};
+      let lookups: LookupJoin[] = [];
       const filter = entry.command?.filter;
       if (filter !== undefined) {
         collectPredicates(filter, equality, range);
@@ -450,18 +488,28 @@ export class MongoIndexCollector implements IndexCollector {
         // Profiler filters carry real literals — the partial-index signal.
         constants = equalityConstants(filter);
       } else if (entry.command?.pipeline !== undefined) {
+        lookups = lookupJoins(entry.command.pipeline);
         const shape = pipelineShape(entry.command.pipeline);
-        if (shape === null) continue;
-        ({ equality, range, sort } = { ...shape });
+        // A pipeline that gives an index nothing to serve can still carry a
+        // $lookup — the foreign-side index signal survives as an empty shape.
+        if (shape === null && lookups.length === 0) continue;
+        if (shape !== null) ({ equality, range, sort } = { ...shape });
       } else {
         continue;
       }
-      if (equality.length === 0 && range.length === 0 && sort.length === 0) continue;
-      const key = shapeMapKey(equality, sort, range);
+      if (
+        equality.length === 0 &&
+        range.length === 0 &&
+        sort.length === 0 &&
+        lookups.length === 0
+      ) {
+        continue;
+      }
+      const key = shapeMapKey(equality, sort, range, lookups);
       const collscan = (entry.planSummary ?? "").includes("COLLSCAN");
       const prev = shapes.get(key);
       if (prev === undefined) {
-        shapes.set(key, { equality, sort, range, collscan, count: 1, constants });
+        shapes.set(key, { equality, sort, range, collscan, count: 1, constants, lookups });
       } else {
         prev.count += 1;
         prev.collscan = prev.collscan || collscan;
@@ -475,6 +523,7 @@ export class MongoIndexCollector implements IndexCollector {
       collscan: shape.collscan,
       count: shape.count,
       ...(Object.keys(shape.constants).length > 0 ? { constants: shape.constants } : {}),
+      ...(shape.lookups.length > 0 ? { lookups: shape.lookups } : {}),
     }));
   }
 
@@ -488,7 +537,14 @@ export class MongoIndexCollector implements IndexCollector {
       .toArray();
     const shapes = new Map<
       string,
-      { equality: string[]; sort: SortKey[]; range: string[]; collscan: boolean; count: number }
+      {
+        equality: string[];
+        sort: SortKey[];
+        range: string[];
+        collscan: boolean;
+        count: number;
+        lookups: LookupJoin[];
+      }
     >();
     for (const doc of raw) {
       const parsed = queryStatsDoc.safeParse(doc);
@@ -500,30 +556,46 @@ export class MongoIndexCollector implements IndexCollector {
       let equality: string[] = [];
       let range: string[] = [];
       let sort: SortKey[] = [];
+      let lookups: LookupJoin[] = [];
       const filter = key.queryShape.filter;
       if (filter !== undefined) {
         collectPredicates(filter, equality, range);
         sort = key.queryShape.sort === undefined ? [] : sortKeysOf(key.queryShape.sort);
       } else if (key.queryShape.pipeline !== undefined) {
+        lookups = lookupJoins(key.queryShape.pipeline);
         const shape = pipelineShape(key.queryShape.pipeline);
-        if (shape === null) continue;
-        ({ equality, range, sort } = { ...shape });
+        if (shape === null && lookups.length === 0) continue;
+        if (shape !== null) ({ equality, range, sort } = { ...shape });
       } else {
         continue;
       }
-      if (equality.length === 0 && range.length === 0 && sort.length === 0) continue;
+      if (
+        equality.length === 0 &&
+        range.length === 0 &&
+        sort.length === 0 &&
+        lookups.length === 0
+      ) {
+        continue;
+      }
       const collscan =
         (metrics.keysExamined?.sum ?? 0) === 0 && (metrics.docsExamined?.sum ?? 0) > 0;
-      const mapKey = shapeMapKey(equality, sort, range);
+      const mapKey = shapeMapKey(equality, sort, range, lookups);
       const prev = shapes.get(mapKey);
       if (prev === undefined) {
-        shapes.set(mapKey, { equality, sort, range, collscan, count: metrics.execCount });
+        shapes.set(mapKey, { equality, sort, range, collscan, count: metrics.execCount, lookups });
       } else {
         prev.count += metrics.execCount;
         prev.collscan = prev.collscan || collscan;
       }
     }
-    return [...shapes.values()];
+    return [...shapes.values()].map((shape) => ({
+      equality: shape.equality,
+      sort: shape.sort,
+      range: shape.range,
+      collscan: shape.collscan,
+      count: shape.count,
+      ...(shape.lookups.length > 0 ? { lookups: shape.lookups } : {}),
+    }));
   }
 
   // Recurring age-based deletes ({field: {$lt: <date>}}) from the profiler —

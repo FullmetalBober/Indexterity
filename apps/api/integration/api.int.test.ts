@@ -12,6 +12,9 @@ import {
   user,
   verification,
 } from "../src/db";
+import { drainPool } from "../src/jobs/connection-pool";
+import { applyCreatesForCluster } from "../src/jobs/create";
+import { closeJobDb } from "../src/jobs/db";
 import { MongoConnection } from "../src/mongo";
 import {
   API_BASE,
@@ -60,6 +63,9 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  // The change-window test ran job code in THIS process — release its pools.
+  await drainPool();
+  await closeJobDb();
   for (const id of createdClusterIds) {
     await db
       .delete(clusters)
@@ -163,6 +169,8 @@ describe("cluster lifecycle", () => {
         observeWindowDays: 7,
         maxCollectionSizeBytes: null,
         autoApplyScore: null,
+        changeWindowStartHour: null,
+        changeWindowEndHour: null,
       }),
     });
     expect(put.status).toBe(200);
@@ -233,6 +241,8 @@ describe("tenancy, invites and roles", () => {
         observeWindowDays: 30,
         maxCollectionSizeBytes: null,
         autoApplyScore: null,
+        changeWindowStartHour: null,
+        changeWindowEndHour: null,
       }),
     });
     expect([mode.status, create.status, invite.status, policy.status]).toEqual([
@@ -602,6 +612,61 @@ describe("org management", () => {
       : [];
     expect(names).toContain("Switcher Own");
     expect(names).not.toContain("Int Cluster");
+  });
+});
+
+describe("change window gates elective builds", () => {
+  const setWindow = async (start: number | null, end: number | null) => {
+    const res = await api(`/clusters/${clusterId}/policy`, owner, {
+      method: "PUT",
+      body: JSON.stringify({
+        autoApply: false,
+        workloadAnalysis: true,
+        instantCreate: false,
+        observeWindowDays: 7,
+        maxCollectionSizeBytes: null,
+        autoApplyScore: null,
+        changeWindowStartHour: start,
+        changeWindowEndHour: end,
+      }),
+    });
+    expect(res.status).toBe(200);
+  };
+
+  it("holds an approved CREATE outside the window, builds inside it", async () => {
+    // The job code runs IN THIS PROCESS here — it needs the same MASTER_KEY the
+    // api child was started with to unseal the cluster's connection string.
+    process.env.MASTER_KEY =
+      process.env.MASTER_KEY ?? Buffer.from("0123456789abcdef0123456789abcdef").toString("base64");
+    const [rec] = await db
+      .insert(recommendations)
+      .values({
+        clusterId,
+        type: "CREATE",
+        state: "APPROVED",
+        database: "inttest",
+        collection: "orders",
+        indexName: "winidx_1",
+        rationale: "change-window test",
+        estimatedBytesSaved: 0,
+        targetSpec: { keys: ["winidx"], retire: [] },
+      })
+      .returning();
+    if (rec === undefined) throw new Error("failed to insert recommendation");
+
+    // A window that excludes the current hour: nothing may build.
+    const hour = new Date().getUTCHours();
+    await setWindow((hour + 2) % 24, (hour + 3) % 24);
+    expect(await applyCreatesForCluster(clusterId)).toBe(0);
+    const [held] = await db.select().from(recommendations).where(eq(recommendations.id, rec.id));
+    expect(held?.state).toBe("APPROVED");
+
+    // Clearing the window lets the same tick build it.
+    await setWindow(null, null);
+    expect(await applyCreatesForCluster(clusterId)).toBe(1);
+    const specs = await mongo.db("inttest").collection("orders").indexes();
+    expect(specs.some((spec) => spec.name === "winidx_1")).toBe(true);
+    await mongo.db("inttest").collection("orders").dropIndex("winidx_1");
   });
 });
 

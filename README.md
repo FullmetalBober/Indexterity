@@ -91,9 +91,24 @@ auto-built** — a TTL index deletes documents, the one thing Indexterity
 promises never to touch; you review and run it yourself. Detection ignores the
 collection-size gate on purpose: a pruned collection is small *by design*.
 
+**Consolidation**: proposed indexes that are a directed key-prefix of another
+proposal fold into the wider one (one index serves both shapes; the survivor
+inherits the narrower shapes' counts) — three overlapping shapes become one
+recommendation, not three.
+
+**$lookup joins**: aggregations joining another collection
+(`localField`/`foreignField` form, from `$queryStats` or the profiler) produce
+a CREATE on the **foreign** collection's join field when no index leads with
+it — without one, every joined document scans the foreign collection.
+
 **Collation-aware redundancy**: `IndexSpec` models the index collation; a
 key-prefix under a different collation is never flagged redundant (it serves
 different queries), and undo restores the original collation.
+
+**Unique-prefix advisories**: a unique index whose keys prefix a wider index
+stores redundant data, but dropping it would lose the uniqueness constraint —
+flagged as an advisory (drop it yourself, or make the wider index unique);
+never auto-dropped.
 
 ### Instant apply
 
@@ -151,6 +166,7 @@ but never writes to your cluster.
 | `observeWindowDays` | how long a hidden index bakes before drop | 30 |
 | `maxCollectionSizeBytes` | size ceiling for building new indexes | — |
 | `autoApplyScore` | auto-approve recommendations scoring ≥ this (0-100) | off |
+| `changeWindowStartHour` / `EndHour` | elective changes (hide/build/drop) only run in this UTC hour window; safety rollbacks never wait | anytime |
 
 Knobs are edited from the dashboard's **Policy** section (`GET/PUT
 /clusters/:id/policy`, owner-only writes). With `autoApply`, proposed

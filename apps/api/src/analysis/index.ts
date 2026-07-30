@@ -8,4 +8,5 @@ export * from "./rollback";
 export * from "./safety";
 export * from "./score";
 export * from "./types";
+export * from "./window";
 export * from "./workload";

@@ -358,6 +358,12 @@ interface PolicyInput {
   readonly instantCreate: boolean;
   readonly observeWindowDays: number;
   readonly autoApplyScore: number | null;
+  readonly changeWindowStartHour: number | null;
+  readonly changeWindowEndHour: number | null;
+}
+
+function nullableNumber(value: unknown): value is number | null {
+  return value === null || typeof value === "number";
 }
 
 const savePolicy = createServerFn({ method: "POST" })
@@ -376,7 +382,11 @@ const savePolicy = createServerFn({ method: "POST" })
       "observeWindowDays" in data &&
       typeof data.observeWindowDays === "number" &&
       "autoApplyScore" in data &&
-      (data.autoApplyScore === null || typeof data.autoApplyScore === "number")
+      nullableNumber(data.autoApplyScore) &&
+      "changeWindowStartHour" in data &&
+      nullableNumber(data.changeWindowStartHour) &&
+      "changeWindowEndHour" in data &&
+      nullableNumber(data.changeWindowEndHour)
     ) {
       return {
         clusterId: data.clusterId,
@@ -385,6 +395,8 @@ const savePolicy = createServerFn({ method: "POST" })
         instantCreate: data.instantCreate,
         observeWindowDays: data.observeWindowDays,
         autoApplyScore: data.autoApplyScore,
+        changeWindowStartHour: data.changeWindowStartHour,
+        changeWindowEndHour: data.changeWindowEndHour,
       };
     }
     throw new Error("invalid policy");
@@ -399,6 +411,8 @@ const savePolicy = createServerFn({ method: "POST" })
         observeWindowDays: data.observeWindowDays,
         maxCollectionSizeBytes: null,
         autoApplyScore: data.autoApplyScore,
+        changeWindowStartHour: data.changeWindowStartHour,
+        changeWindowEndHour: data.changeWindowEndHour,
       });
       return { ok: true };
     } catch {
@@ -981,6 +995,8 @@ interface PolicyView {
   readonly instantCreate: boolean;
   readonly observeWindowDays: number;
   readonly autoApplyScore: number | null;
+  readonly changeWindowStartHour: number | null;
+  readonly changeWindowEndHour: number | null;
 }
 
 // The engine knobs, owner-editable. Checkbox changes stage locally; Save PUTs.
@@ -990,6 +1006,8 @@ function PolicySection({ policy, onSaved }: { policy: PolicyView; onSaved: () =>
   const [instantCreate, setInstantCreate] = useState(policy.instantCreate);
   const [observeDays, setObserveDays] = useState(policy.observeWindowDays);
   const [autoScore, setAutoScore] = useState(policy.autoApplyScore);
+  const [windowStart, setWindowStart] = useState(policy.changeWindowStartHour);
+  const [windowEnd, setWindowEnd] = useState(policy.changeWindowEndHour);
   const toast = useToast();
 
   async function onSave() {
@@ -1001,6 +1019,9 @@ function PolicySection({ policy, onSaved }: { policy: PolicyView; onSaved: () =>
         instantCreate,
         observeWindowDays: observeDays,
         autoApplyScore: autoScore,
+        // Half-set windows are meaningless — persist only a complete pair.
+        changeWindowStartHour: windowEnd === null ? null : windowStart,
+        changeWindowEndHour: windowStart === null ? null : windowEnd,
       },
     }).catch(() => ({ ok: false }));
     if (result.ok) {
@@ -1079,6 +1100,36 @@ function PolicySection({ policy, onSaved }: { policy: PolicyView; onSaved: () =>
             }
             className="w-16 rounded-md border px-2 py-1 text-sm"
           />
+        </label>
+        <label
+          className="flex items-center gap-1.5 text-sm"
+          title="Elective changes (hide/build/drop) only run inside this UTC hour window; safety rollbacks never wait. Empty = anytime. Start after end wraps midnight."
+        >
+          Change window (UTC)
+          <input
+            type="number"
+            min={0}
+            max={23}
+            placeholder="–"
+            value={windowStart ?? ""}
+            onChange={(event) =>
+              setWindowStart(event.target.value === "" ? null : Number(event.target.value))
+            }
+            className="w-14 rounded-md border px-2 py-1 text-sm"
+          />
+          →
+          <input
+            type="number"
+            min={0}
+            max={23}
+            placeholder="–"
+            value={windowEnd ?? ""}
+            onChange={(event) =>
+              setWindowEnd(event.target.value === "" ? null : Number(event.target.value))
+            }
+            className="w-14 rounded-md border px-2 py-1 text-sm"
+          />
+          h
         </label>
         <button
           type="button"

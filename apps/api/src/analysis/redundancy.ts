@@ -12,18 +12,26 @@ function optionsCompatible(candidate: IndexSpec, other: IndexSpec): boolean {
   return true;
 }
 
-// True when `candidate` is a proper key-prefix of `other` with matching key
-// directions and compatible options — i.e. `other` already covers it.
-export function isRedundantPrefix(candidate: IndexSpec, other: IndexSpec): boolean {
+// Raw structural check: `candidate`'s keys are a proper prefix of `other`'s
+// with matching directions and the same collation. Says nothing about options
+// (unique/TTL/…) — that's isRedundantPrefix's job.
+export function isKeyPrefix(candidate: IndexSpec, other: IndexSpec): boolean {
   if (candidate.name === other.name) return false;
   if (candidate.keys.length >= other.keys.length) return false;
-  if (!optionsCompatible(candidate, other)) return false;
+  if (candidate.collation !== other.collation) return false;
   return candidate.keys.every((key, i) => {
     const otherKey = other.keys[i];
     return (
       otherKey !== undefined && otherKey.field === key.field && otherKey.direction === key.direction
     );
   });
+}
+
+// True when `candidate` is a proper key-prefix of `other` with matching key
+// directions and compatible options — i.e. `other` already covers it.
+export function isRedundantPrefix(candidate: IndexSpec, other: IndexSpec): boolean {
+  if (!optionsCompatible(candidate, other)) return false;
+  return isKeyPrefix(candidate, other);
 }
 
 // NOTE: an "exact duplicate" rule (same keys, different name) was built and then

@@ -1,4 +1,4 @@
-import { isRegression } from "../analysis";
+import { inChangeWindow, isRegression } from "../analysis";
 import { actions, and, eq, inArray, policies, recommendations, roiMetrics } from "../db";
 import { notifyClusterOwners } from "../mail/notify";
 import { MongoIndexCollector, MongoIndexExecutor, serializeSpec } from "../mongo";
@@ -24,6 +24,13 @@ export async function finalizeCluster(clusterId: string): Promise<number> {
     .where(eq(policies.clusterId, clusterId))
     .limit(1);
   const observeDays = policy?.observeWindowDays ?? DEFAULT_OBSERVE_DAYS;
+  // Gates only the ELECTIVE drop below. Safety actions — regression unhide,
+  // write-watch rollback — always run; deferring them would prolong harm.
+  const windowOpen = inChangeWindow(
+    new Date(),
+    policy?.changeWindowStartHour ?? null,
+    policy?.changeWindowEndHour ?? null,
+  );
 
   const hiddenRecs = await db
     .select()
@@ -145,6 +152,9 @@ export async function finalizeCluster(clusterId: string): Promise<number> {
           continue;
         }
       }
+      // The regression gate above ran (safety); the drop itself waits for the
+      // change window — the index simply stays hidden until a tick inside it.
+      if (!windowOpen) continue;
       const check = await preflightDrop(collector, rec);
       if (!check.safe) {
         if (check.spec !== null) {

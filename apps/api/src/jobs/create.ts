@@ -1,4 +1,5 @@
-import { actions, and, eq, inArray, recommendations } from "../db";
+import { inChangeWindow } from "../analysis";
+import { actions, and, eq, inArray, policies, recommendations } from "../db";
 import { MongoIndexCollector, MongoIndexExecutor } from "../mongo";
 import { openClusterMongo } from "./cluster-connection";
 import { jobDb } from "./db";
@@ -21,6 +22,21 @@ export async function applyCreatesForCluster(clusterId: string): Promise<number>
       ),
     );
   if (approved.length === 0) return 0;
+  // Builds are elective and can spike load — they wait for the change window.
+  const [policy] = await db
+    .select()
+    .from(policies)
+    .where(eq(policies.clusterId, clusterId))
+    .limit(1);
+  if (
+    !inChangeWindow(
+      new Date(),
+      policy?.changeWindowStartHour ?? null,
+      policy?.changeWindowEndHour ?? null,
+    )
+  ) {
+    return 0;
+  }
 
   const { conn, readOnly, release } = await openClusterMongo(db, clusterId);
   try {

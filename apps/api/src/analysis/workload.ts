@@ -12,6 +12,13 @@ export interface SortKey {
 // values ($queryStats shapifies them away), so this is often empty.
 export type ConstantValue = string | number | boolean;
 
+// A $lookup join observed in an aggregation: the foreign collection and the
+// field it is joined on — the signal for a foreign-side index.
+export interface LookupJoin {
+  readonly from: string;
+  readonly foreignField: string;
+}
+
 // A distinct query pattern from $queryStats/the profiler, split for the ESR
 // rule: equality predicates, then sort keys (with directions), then ranges.
 export interface QueryShape {
@@ -21,6 +28,8 @@ export interface QueryShape {
   readonly collscan: boolean;
   readonly count: number;
   readonly constants?: Readonly<Record<string, ConstantValue>>;
+  // $lookup joins anywhere in the pipeline (indexed on the FOREIGN collection).
+  readonly lookups?: readonly LookupJoin[];
 }
 
 // The ESR key: Equality fields first, then Sort, then Range — the order that
@@ -75,21 +84,39 @@ function describe(keys: readonly SortKey[]): string {
   return keys.map((key) => (key.direction === -1 ? `${key.field}: -1` : key.field)).join(", ");
 }
 
+// True when a's directed keys are a PROPER prefix of b's — an index on b
+// serves every query an index on a would.
+function isDirectedPrefix(a: readonly SortKey[], b: readonly SortKey[]): boolean {
+  if (a.length >= b.length) return false;
+  return a.every((key, i) => b[i]?.field === key.field && b[i]?.direction === key.direction);
+}
+
+interface Want {
+  readonly shape: QueryShape;
+  readonly wantedKeys: SortKey[];
+  readonly partialFilter?: Readonly<Record<string, ConstantValue>>;
+  absorbedCount: number;
+  absorbedShapes: number;
+}
+
 // Propose index additions from collection-scan query shapes. Pure. The caller
 // should only pass shapes from non-trivial collections (size gate lives there).
 //  - UPDATE: an existing index is a proper prefix of the wanted keys -> extend it
 //  - MERGE:  two+ single-field indexes cover the wanted fields -> one compound
 //  - CREATE: otherwise a brand-new index
-// Never retires a never-drop index (unique/TTL/shard/_id_). Existing-index
-// matching is by field names (a single-key sort is servable by backward scan);
-// only emitted keys carry directions.
+// Wants that are a directed prefix of another want CONSOLIDATE into the wider
+// one (one index serves both shapes; the wider inherits the narrower's counts).
+// Partial candidates never consolidate — a partial index only serves queries
+// matching its filter. Never retires a never-drop index (unique/TTL/shard/_id_).
+// Existing-index matching is by field names (a single-key sort is servable by
+// backward scan); only emitted keys carry directions.
 export function recommendCreates(
   shapes: readonly QueryShape[],
   existing: readonly IndexSpec[],
   options: WorkloadOptions,
 ): CreateCandidate[] {
-  const candidates: CreateCandidate[] = [];
   const seen = new Set<string>();
+  const wants: Want[] = [];
   for (const shape of shapes) {
     if (!shape.collscan || shape.count < options.minCount) continue;
     let wantedKeys = esrKeys(shape);
@@ -112,13 +139,53 @@ export function recommendCreates(
       partialFilter = filter;
       wantedKeys = wantedKeys.filter((key) => !constantFields.includes(key.field));
     }
-    const wanted = wantedKeys.map((key) => key.field);
     const wantedKey = wantedKeys.map((key) => `${key.field}:${key.direction}`).join(",");
     if (seen.has(wantedKey)) continue;
     seen.add(wantedKey);
-    if (existing.some((idx) => equalFields(fieldsOf(idx), wanted))) continue;
+    if (
+      existing.some((idx) =>
+        equalFields(
+          fieldsOf(idx),
+          wantedKeys.map((key) => key.field),
+        ),
+      )
+    ) {
+      continue;
+    }
+    wants.push({ shape, wantedKeys, partialFilter, absorbedCount: 0, absorbedShapes: 0 });
+  }
 
-    const scan = `collection scan seen ${shape.count}×`;
+  // Consolidation: fold prefix wants into the widest want that covers them,
+  // narrowest first so chains ({a} ⊂ {a,b} ⊂ {a,b,c}) collapse fully.
+  wants.sort((a, b) => a.wantedKeys.length - b.wantedKeys.length);
+  const survivors: Want[] = [];
+  for (const want of wants) {
+    const covers = wants.filter(
+      (other) =>
+        other !== want &&
+        want.partialFilter === undefined &&
+        other.partialFilter === undefined &&
+        isDirectedPrefix(want.wantedKeys, other.wantedKeys),
+    );
+    const widest = covers.at(-1);
+    if (widest !== undefined) {
+      widest.absorbedCount += want.shape.count + want.absorbedCount;
+      widest.absorbedShapes += 1 + want.absorbedShapes;
+      continue;
+    }
+    survivors.push(want);
+  }
+
+  const candidates: CreateCandidate[] = [];
+  for (const want of survivors) {
+    const { shape, wantedKeys, partialFilter } = want;
+    const wanted = wantedKeys.map((key) => key.field);
+    const count = shape.count + want.absorbedCount;
+    const scan =
+      `collection scan seen ${count}×` +
+      (want.absorbedShapes > 0
+        ? ` (also serves ${want.absorbedShapes} narrower shape${want.absorbedShapes === 1 ? "" : "s"})`
+        : "");
     const extendable = existing.find((idx) => !isNeverDrop(idx) && isPrefix(fieldsOf(idx), wanted));
     const singles = existing.filter(
       (idx) =>
@@ -131,7 +198,7 @@ export function recommendCreates(
         keys: wantedKeys,
         retireIndexes: [extendable.name],
         rationale: `Extend ${extendable.name} to {${describe(wantedKeys)}} — ${scan}.`,
-        count: shape.count,
+        count,
       });
     } else if (singles.length >= 2) {
       candidates.push({
@@ -139,7 +206,7 @@ export function recommendCreates(
         keys: wantedKeys,
         retireIndexes: singles.map((idx) => idx.name),
         rationale: `Replace ${singles.map((idx) => idx.name).join(" + ")} with a compound index on {${describe(wantedKeys)}} — ${scan}.`,
-        count: shape.count,
+        count,
       });
     } else {
       const partialNote =
@@ -153,7 +220,7 @@ export function recommendCreates(
         keys: wantedKeys,
         retireIndexes: [],
         rationale: `Add an index on {${describe(wantedKeys)}} — ${scan}.${partialNote}`,
-        count: shape.count,
+        count,
         ...(partialFilter === undefined ? {} : { partialFilter }),
       });
     }

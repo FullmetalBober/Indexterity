@@ -266,6 +266,10 @@ export const policies = pgTable("policies", {
   maxCollectionSizeBytes: bigint("max_collection_size_bytes", { mode: "number" }),
   // Recommendations scoring >= this auto-approve (null = only manual/autoApply).
   autoApplyScore: integer("auto_apply_score"),
+  // Elective changes (hide/build/drop) only run inside this UTC hour window;
+  // safety actions (unhide, regression rollback) ignore it. Null = anytime.
+  changeWindowStartHour: integer("change_window_start_hour"),
+  changeWindowEndHour: integer("change_window_end_hour"),
 });
 
 // Regression memory: an index whose drop slowed reads during observe is parked

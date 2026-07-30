@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dateRangeCutoff, equalityConstants, pipelineShape } from "./collector";
+import { dateRangeCutoff, equalityConstants, lookupJoins, pipelineShape } from "./collector";
 
 describe("pipelineShape", () => {
   it("extracts equality/range/directed sort from leading $match + $sort", () => {
@@ -60,5 +60,25 @@ describe("dateRangeCutoff", () => {
     expect(dateRangeCutoff({ createdAt: { $lt: cutoff }, status: "x" })).toBeNull();
     expect(dateRangeCutoff({ createdAt: { $lt: "2026-06-01" } })).toBeNull();
     expect(dateRangeCutoff({ _id: "abc" })).toBeNull();
+  });
+});
+
+describe("lookupJoins", () => {
+  it("collects localField/foreignField joins anywhere in the pipeline, deduped", () => {
+    const pipeline = [
+      { $match: { status: "a" } },
+      { $group: { _id: "$x" } },
+      { $lookup: { from: "users", localField: "userId", foreignField: "_id", as: "u" } },
+      { $lookup: { from: "users", localField: "ownerId", foreignField: "_id", as: "o" } },
+      { $lookup: { from: "items", localField: "sku", foreignField: "sku", as: "i" } },
+    ];
+    expect(lookupJoins(pipeline)).toEqual([
+      { from: "users", foreignField: "_id" },
+      { from: "items", foreignField: "sku" },
+    ]);
+  });
+
+  it("ignores pipeline-form lookups without a foreignField", () => {
+    expect(lookupJoins([{ $lookup: { from: "users", pipeline: [], as: "u" } }])).toEqual([]);
   });
 });

@@ -608,6 +608,8 @@ export class RecommendationsController {
         observeWindowDays: row?.observeWindowDays ?? 30,
         maxCollectionSizeBytes: row?.maxCollectionSizeBytes ?? null,
         autoApplyScore: row?.autoApplyScore ?? null,
+        changeWindowStartHour: row?.changeWindowStartHour ?? null,
+        changeWindowEndHour: row?.changeWindowEndHour ?? null,
       };
     });
   }

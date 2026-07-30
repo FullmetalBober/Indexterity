@@ -1,3 +1,4 @@
+import { inChangeWindow } from "../analysis";
 import { actions, and, eq, gte, ne, policies, recommendations } from "../db";
 import { MongoIndexCollector, MongoIndexExecutor, serializeSpec } from "../mongo";
 import { openClusterMongo } from "./cluster-connection";
@@ -43,6 +44,18 @@ export async function applyCluster(clusterId: string): Promise<number> {
     .from(recommendations)
     .where(and(eq(recommendations.clusterId, clusterId), eq(recommendations.state, "APPROVED")));
   if (approved.length === 0) return 0;
+  // Hides are elective — they wait for the change window (the promotion above
+  // is db-only and runs anytime). Recommendations stay APPROVED until a tick
+  // lands inside the window.
+  if (
+    !inChangeWindow(
+      new Date(),
+      policy?.changeWindowStartHour ?? null,
+      policy?.changeWindowEndHour ?? null,
+    )
+  ) {
+    return 0;
+  }
 
   const { conn, readOnly, release } = await openClusterMongo(db, clusterId);
   try {

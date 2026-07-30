@@ -189,6 +189,10 @@ export const clusterPolicy = z.object({
   maxCollectionSizeBytes: z.number().int().positive().nullable(),
   // Score threshold for auto-approval (null = never auto-approve by score).
   autoApplyScore: z.number().int().min(0).max(100).nullable(),
+  // Elective changes (hide/build/drop) run only inside this UTC hour window;
+  // safety responses never wait. Null = anytime; start > end wraps midnight.
+  changeWindowStartHour: z.int().min(0).max(23).nullable(),
+  changeWindowEndHour: z.int().min(0).max(23).nullable(),
 });
 export type ClusterPolicy = z.infer<typeof clusterPolicy>;
 

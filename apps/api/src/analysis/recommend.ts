@@ -1,7 +1,7 @@
 import type { RecommendationType, UsageClass } from "@repo/contracts";
 import { z } from "zod";
 import { type ClassifyOptions, classifyUsage } from "./classify";
-import { isRedundantPrefix } from "./redundancy";
+import { isKeyPrefix, isRedundantPrefix } from "./redundancy";
 import { isNeverDrop } from "./safety";
 import { dropScore } from "./score";
 import type { IndexSpec, UsageSnapshot } from "./types";
@@ -107,10 +107,12 @@ export function recommendForCollection(
   // Advisory tier: protected indexes (unique/TTL/shard/partial/sparse) are never
   // auto-dropped, but one that also shows zero usage deserves a human look
   // instead of staying silent. _id_ is exempt — it is never optional.
+  const advised = new Set<string>();
   for (const index of indexes) {
     if (!isNeverDrop(index.spec) || index.spec.name === "_id_") continue;
     const usageClass = classifyUsage(index.history, options);
     if (usageClass !== "FLAT_ZERO" && usageClass !== "PERIODIC_DEAD") continue;
+    advised.add(index.spec.name);
     candidates.push({
       type: "ADVISORY_REVIEW",
       indexName: index.spec.name,
@@ -121,6 +123,34 @@ export function recommendForCollection(
         usageClass,
         snapshots: index.history.length,
         redundant: false,
+        sizeBytes: sizes[index.spec.name] ?? 0,
+        pastRegressions: pastRegressions[index.spec.name] ?? 0,
+      }),
+      estimatedBytesSaved: sizes[index.spec.name] ?? 0,
+    });
+  }
+
+  // A unique index whose keys prefix a wider index stores redundant DATA, but
+  // dropping it loses the uniqueness constraint — a call only a human can make,
+  // so it is advisory-only (and the engine's drop paths still protect it).
+  for (const index of indexes) {
+    if (!index.spec.unique || index.spec.name === "_id_" || index.spec.isShardKey) continue;
+    if (advised.has(index.spec.name)) continue;
+    const wider = indexes.find((other) => isKeyPrefix(index.spec, other.spec));
+    if (wider === undefined) continue;
+    candidates.push({
+      type: "ADVISORY_REVIEW",
+      indexName: index.spec.name,
+      usageClass: null,
+      rationale:
+        `Unique index whose keys are a prefix of ${wider.spec.name} — the index data is ` +
+        `redundant, but dropping it would lose the uniqueness constraint. If the constraint ` +
+        `is obsolete, drop it yourself; if not, consider making ${wider.spec.name} unique ` +
+        `and dropping this one. Never auto-dropped.`,
+      score: dropScore({
+        usageClass: null,
+        snapshots: index.history.length,
+        redundant: true,
         sizeBytes: sizes[index.spec.name] ?? 0,
         pastRegressions: pastRegressions[index.spec.name] ?? 0,
       }),
