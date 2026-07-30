@@ -1,8 +1,10 @@
 import { run } from "graphile-worker";
 import { requiredEnv } from "./env";
 import { drainPool } from "./jobs/connection-pool";
-import { closeJobDb } from "./jobs/db";
+import { closeJobDb, jobDb } from "./jobs/db";
+import { finalClusterFailure } from "./jobs/failure";
 import { taskList } from "./jobs/tasks";
+import { notifyClusterOwners } from "./mail/notify";
 
 // Recurring schedule (per cluster via the dispatcher tasks):
 //  - collect + classify every 6h
@@ -26,6 +28,27 @@ async function main(): Promise<void> {
     taskList,
     crontab: CRONTAB,
   });
+  // A cluster task that burns its last retry alerts the owners — a dead
+  // connection string or revoked user otherwise fails silently forever.
+  runner.events.on("job:failed", ({ job, error }) => {
+    const clusterId = finalClusterFailure({
+      taskIdentifier: job.task_identifier,
+      attempts: job.attempts,
+      maxAttempts: job.max_attempts,
+      payload: job.payload,
+    });
+    if (clusterId === null) return;
+    void notifyClusterOwners(
+      jobDb(),
+      clusterId,
+      `${job.task_identifier} keeps failing`,
+      `The background ${job.task_identifier} task gave up after ${job.attempts} attempts.\n\n` +
+        `Last error: ${String(error)}\n\n` +
+        `Usual causes: the cluster is unreachable, the connection string changed, or the ` +
+        `Indexterity user was removed. It will be retried on the next schedule tick.`,
+    );
+  });
+
   // Graceful shutdown: finish in-flight jobs, then drain every pool.
   const stop = async (): Promise<void> => {
     await runner.stop();

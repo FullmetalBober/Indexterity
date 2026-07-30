@@ -48,15 +48,26 @@ const loadDashboard = createServerFn({ method: "GET" })
         org,
       };
     }
-    const [recResult, roiResult, latencyResult, seriesResult, policyResult, actionsResult] =
-      await Promise.all([
-        api.listRecommendations({ params: { clusterId: cluster.id } }),
-        api.getRoi({ params: { clusterId: cluster.id } }),
-        api.getLatency({ params: { clusterId: cluster.id } }),
-        api.getLatencySeries({ params: { clusterId: cluster.id } }),
-        api.getPolicy({ params: { clusterId: cluster.id } }),
-        api.listActions({ params: { clusterId: cluster.id } }),
-      ]);
+    let recResult: Awaited<ReturnType<typeof api.listRecommendations>>;
+    let roiResult: Awaited<ReturnType<typeof api.getRoi>>;
+    let latencyResult: Awaited<ReturnType<typeof api.getLatency>>;
+    let seriesResult: Awaited<ReturnType<typeof api.getLatencySeries>>;
+    let policyResult: Awaited<ReturnType<typeof api.getPolicy>>;
+    let actionsResult: Awaited<ReturnType<typeof api.listActions>>;
+    try {
+      [recResult, roiResult, latencyResult, seriesResult, policyResult, actionsResult] =
+        await Promise.all([
+          api.listRecommendations({ params: { clusterId: cluster.id } }),
+          api.getRoi({ params: { clusterId: cluster.id } }),
+          api.getLatency({ params: { clusterId: cluster.id } }),
+          api.getLatencySeries({ params: { clusterId: cluster.id } }),
+          api.getPolicy({ params: { clusterId: cluster.id } }),
+          api.listActions({ params: { clusterId: cluster.id } }),
+        ]);
+    } catch {
+      // The api died between the two batches — same friendly state, no 500.
+      return { authed: false as const, apiDown: true as const };
+    }
     return {
       authed: true as const,
       clusters,
@@ -289,13 +300,17 @@ function Home() {
     points: coll.points.map((point) => ({ t: point.capturedAt, v: point.writeMicros })),
   }));
 
+  const [actionError, setActionError] = useState<string | null>(null);
+
   async function onApprove(id: string) {
-    await approveRecommendation({ data: id });
+    const result = await approveRecommendation({ data: id }).catch(() => ({ ok: false }));
+    setActionError(result.ok ? null : "Approve failed — are you an owner, and is the API up?");
     await router.invalidate();
   }
 
   async function onUndo(id: string) {
-    await rollbackRecommendation({ data: id });
+    const result = await rollbackRecommendation({ data: id }).catch(() => ({ ok: false }));
+    setActionError(result.ok ? null : "Undo failed — the cluster may be unreachable or read-only.");
     await router.invalidate();
   }
 
@@ -342,6 +357,8 @@ function Home() {
           </div>
         </div>
       </div>
+
+      {actionError !== null ? <p className="mt-4 text-red-600 text-sm">{actionError}</p> : null}
 
       <Table className="mt-6">
         <TableHeader>
@@ -511,6 +528,7 @@ function ClusterBar({
   onChanged: () => void;
 }) {
   const navigate = useNavigate();
+  const [modeError, setModeError] = useState<string | null>(null);
 
   async function onToggleMode() {
     const goingLive = cluster.readOnly;
@@ -522,7 +540,10 @@ function ClusterBar({
     ) {
       return;
     }
-    await setClusterMode({ data: { clusterId: cluster.id, readOnly: !cluster.readOnly } });
+    const result = await setClusterMode({
+      data: { clusterId: cluster.id, readOnly: !cluster.readOnly },
+    }).catch(() => ({ ok: false }));
+    setModeError(result.ok ? null : "mode change failed (owner only)");
     onChanged();
   }
 
@@ -555,6 +576,7 @@ function ClusterBar({
       >
         {cluster.readOnly ? "Go live" : "Make read-only"}
       </button>
+      {modeError !== null ? <span className="text-red-600 text-xs">{modeError}</span> : null}
     </div>
   );
 }

@@ -7,7 +7,17 @@ export async function dispatchToAllClusters(task: string, helpers: JobHelpers): 
   const db = jobDb();
   const rows = await db.select({ id: clusters.id }).from(clusters);
   for (const row of rows) {
-    await helpers.addJob(task, { clusterId: row.id });
+    // Cap retries (5, exponential backoff) and dedup per cluster+task: a slow
+    // or failing cluster replaces its pending job instead of piling new ones.
+    await helpers.addJob(
+      task,
+      { clusterId: row.id },
+      {
+        maxAttempts: 5,
+        jobKey: `${task}:${row.id}`,
+        jobKeyMode: "replace",
+      },
+    );
   }
   helpers.logger.info(`scheduler: dispatched ${task} to ${rows.length} cluster(s)`);
   return rows.length;

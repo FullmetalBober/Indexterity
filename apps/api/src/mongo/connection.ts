@@ -6,7 +6,9 @@ export class MongoConnection {
   private readonly client: MongoClient;
 
   constructor(connectionString: string) {
-    this.client = new MongoClient(connectionString);
+    // Fail fast on unreachable clusters: 5s server selection instead of the
+    // driver's 30s default, so requests surface a 502 quickly.
+    this.client = new MongoClient(connectionString, { serverSelectionTimeoutMS: 5000 });
   }
 
   async connect(): Promise<void> {

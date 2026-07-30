@@ -4,9 +4,11 @@ import { NestFactory } from "@nestjs/core";
 import { FastifyAdapter, type NestFastifyApplication } from "@nestjs/platform-fastify";
 import { AppModule } from "./app.module";
 import { auth } from "./auth";
+import { AppExceptionFilter } from "./errors/exception.filter";
 
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create<NestFastifyApplication>(AppModule, new FastifyAdapter());
+  app.useGlobalFilters(new AppExceptionFilter());
   const fastify = app.getHttpAdapter().getInstance();
 
   // Global ceiling per IP, with a tight budget on the auth endpoints — they are
