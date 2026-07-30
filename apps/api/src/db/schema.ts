@@ -31,6 +31,7 @@ export const recommendationType = pgEnum("recommendation_type", [
   "MERGE",
   "CREATE",
   "UPDATE",
+  "ADVISORY_REVIEW",
 ]);
 export const recommendationState = pgEnum("recommendation_state", [
   "PROPOSED",

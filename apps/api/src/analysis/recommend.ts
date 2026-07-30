@@ -83,5 +83,22 @@ export function recommendForCollection(
     });
   }
 
+  // Advisory tier: protected indexes (unique/TTL/shard/partial/sparse) are never
+  // auto-dropped, but one that also shows zero usage deserves a human look
+  // instead of staying silent. _id_ is exempt — it is never optional.
+  for (const index of indexes) {
+    if (!isNeverDrop(index.spec) || index.spec.name === "_id_") continue;
+    const usageClass = classifyUsage(index.history, options);
+    if (usageClass !== "FLAT_ZERO" && usageClass !== "PERIODIC_DEAD") continue;
+    candidates.push({
+      type: "ADVISORY_REVIEW",
+      indexName: index.spec.name,
+      usageClass,
+      rationale:
+        "Protected index (unique/TTL/shard/partial/sparse) with no recorded usage — never auto-dropped; review manually.",
+      estimatedBytesSaved: sizes[index.spec.name] ?? 0,
+    });
+  }
+
   return candidates;
 }

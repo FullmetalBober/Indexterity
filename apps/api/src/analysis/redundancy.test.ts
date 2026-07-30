@@ -39,4 +39,8 @@ describe("isRedundantPrefix", () => {
   it("false against itself", () => {
     expect(isRedundantPrefix(spec("a", [x1]), spec("a", [x1, y1]))).toBe(false);
   });
+
+  it("false for equal-length identical keys (mongod forbids creating those)", () => {
+    expect(isRedundantPrefix(spec("a", [x1]), spec("b", [x1]))).toBe(false);
+  });
 });

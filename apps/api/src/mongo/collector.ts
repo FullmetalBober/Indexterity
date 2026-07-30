@@ -26,6 +26,7 @@ export interface IndexCollector {
   listIndexes(database: string, collection: string): Promise<IndexSpec[]>;
   collectUsage(database: string, collection: string): Promise<IndexUsageStat[]>;
   indexSizes(database: string, collection: string): Promise<Record<string, number>>;
+  collectionDataSize(database: string, collection: string): Promise<number>;
   readLatency(database: string, collection: string): Promise<LatencyPair>;
   collectionLatency(database: string, collection: string): Promise<CollectionLatency>;
   collectSlowQueries(database: string, collection: string): Promise<QueryShape[]>;
@@ -53,6 +54,10 @@ const indexStat = z.object({
 
 const collStatsDoc = z.object({
   storageStats: z.object({ indexSizes: z.record(z.string(), z.coerce.number()) }),
+});
+
+const dataSizeDoc = z.object({
+  storageStats: z.object({ size: z.coerce.number() }),
 });
 
 const latencyPair = z.object({ ops: z.coerce.number(), latency: z.coerce.number() });
@@ -83,6 +88,7 @@ const queryStatsDoc = z.object({
       cmdNs: z.object({ db: z.string(), coll: z.string() }),
       filter: z.record(z.string(), z.unknown()).optional(),
       sort: z.record(z.string(), z.unknown()).optional(),
+      pipeline: z.array(z.record(z.string(), z.unknown())).optional(),
     }),
   }),
   metrics: z.object({
@@ -100,6 +106,7 @@ const profileDoc = z.object({
     .object({
       filter: z.record(z.string(), z.unknown()).optional(),
       sort: z.record(z.string(), z.unknown()).optional(),
+      pipeline: z.array(z.record(z.string(), z.unknown())).optional(),
     })
     .optional(),
 });
@@ -141,6 +148,36 @@ function collectPredicates(
     if (isRangePredicate(value)) range.push(field);
     else equality.push(field);
   }
+}
+
+export interface PipelineShape {
+  readonly equality: string[];
+  readonly sort: string[];
+  readonly range: string[];
+}
+
+// An index only serves an aggregation's LEADING $match/$sort stages — anything
+// after the first blocking stage ($group/$project/$lookup/…) runs in memory.
+// Null when the leading stages give an index nothing to work with.
+export function pipelineShape(pipeline: readonly Record<string, unknown>[]): PipelineShape | null {
+  const equality: string[] = [];
+  const range: string[] = [];
+  const sort: string[] = [];
+  for (const stage of pipeline) {
+    const match = stage.$match;
+    if (isRecord(match)) {
+      collectPredicates(match, equality, range);
+      continue;
+    }
+    const sortStage = stage.$sort;
+    if (isRecord(sortStage)) {
+      sort.push(...Object.keys(sortStage));
+      continue;
+    }
+    break; // first non-$match/$sort stage ends index applicability
+  }
+  if (equality.length === 0 && range.length === 0 && sort.length === 0) return null;
+  return { equality, sort, range };
 }
 
 function normalizeDirection(direction: number | string): IndexDirection {
@@ -233,6 +270,22 @@ export class MongoIndexCollector implements IndexCollector {
       }));
   }
 
+  // Uncompressed data size of the collection, summed across shards — the input
+  // for the policy's maxCollectionSizeBytes build ceiling.
+  async collectionDataSize(database: string, collection: string): Promise<number> {
+    const raw = await this.conn
+      .db(database)
+      .collection(collection)
+      .aggregate([{ $collStats: { storageStats: {} } }])
+      .toArray();
+    let total = 0;
+    for (const doc of raw) {
+      const parsed = dataSizeDoc.safeParse(doc);
+      if (parsed.success) total += parsed.data.storageStats.size;
+    }
+    return total;
+  }
+
   // Sum index sizes across every $collStats doc — one per shard on a sharded
   // collection, a single doc otherwise.
   async indexSizes(database: string, collection: string): Promise<Record<string, number>> {
@@ -284,12 +337,20 @@ export class MongoIndexCollector implements IndexCollector {
       { equality: string[]; sort: string[]; range: string[]; collscan: boolean; count: number }
     >();
     for (const entry of profileDoc.array().parse(raw)) {
+      let equality: string[] = [];
+      let range: string[] = [];
+      let sort: string[] = [];
       const filter = entry.command?.filter;
-      if (filter === undefined) continue;
-      const equality: string[] = [];
-      const range: string[] = [];
-      collectPredicates(filter, equality, range);
-      const sort = entry.command?.sort === undefined ? [] : Object.keys(entry.command.sort);
+      if (filter !== undefined) {
+        collectPredicates(filter, equality, range);
+        sort = entry.command?.sort === undefined ? [] : Object.keys(entry.command.sort);
+      } else if (entry.command?.pipeline !== undefined) {
+        const shape = pipelineShape(entry.command.pipeline);
+        if (shape === null) continue;
+        ({ equality, range, sort } = { ...shape });
+      } else {
+        continue;
+      }
       if (equality.length === 0 && range.length === 0 && sort.length === 0) continue;
       const key = `${equality.join(",")}|${sort.join(",")}|${range.join(",")}`;
       const collscan = (entry.planSummary ?? "").includes("COLLSCAN");
@@ -329,12 +390,20 @@ export class MongoIndexCollector implements IndexCollector {
       if (key.queryShape.cmdNs.db !== database || key.queryShape.cmdNs.coll !== collection) {
         continue;
       }
+      let equality: string[] = [];
+      let range: string[] = [];
+      let sort: string[] = [];
       const filter = key.queryShape.filter;
-      if (filter === undefined) continue;
-      const equality: string[] = [];
-      const range: string[] = [];
-      collectPredicates(filter, equality, range);
-      const sort = key.queryShape.sort === undefined ? [] : Object.keys(key.queryShape.sort);
+      if (filter !== undefined) {
+        collectPredicates(filter, equality, range);
+        sort = key.queryShape.sort === undefined ? [] : Object.keys(key.queryShape.sort);
+      } else if (key.queryShape.pipeline !== undefined) {
+        const shape = pipelineShape(key.queryShape.pipeline);
+        if (shape === null) continue;
+        ({ equality, range, sort } = { ...shape });
+      } else {
+        continue;
+      }
       if (equality.length === 0 && range.length === 0 && sort.length === 0) continue;
       const collscan =
         (metrics.keysExamined?.sum ?? 0) === 0 && (metrics.docsExamined?.sum ?? 0) > 0;

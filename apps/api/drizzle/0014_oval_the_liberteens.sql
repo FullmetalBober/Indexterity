@@ -1,0 +1,1 @@
+ALTER TYPE "public"."recommendation_type" ADD VALUE 'ADVISORY_REVIEW';

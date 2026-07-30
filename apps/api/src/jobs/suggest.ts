@@ -43,11 +43,26 @@ export async function suggestForCluster(clusterId: string): Promise<number> {
       for (const collection of await collector.listCollectionNames(database)) {
         const docCount = await conn.db(database).collection(collection).estimatedDocumentCount();
         if (docCount < MIN_COLLECTION_DOCS) continue;
+        // Policy ceiling: building an index on a huge collection is the one
+        // expensive create-side operation — skip collections above the limit.
+        if (policy.maxCollectionSizeBytes !== null) {
+          const dataSize = await collector.collectionDataSize(database, collection);
+          if (dataSize > policy.maxCollectionSizeBytes) continue;
+        }
         const critical = docCount >= CRITICAL_COLLECTION_DOCS;
-        const [shapes, existing] = await Promise.all([
+        const [shapes, existing, sizes] = await Promise.all([
           collector.collectWorkload(database, collection),
           collector.listIndexes(database, collection),
+          collector.indexSizes(database, collection),
         ]);
+        // A new index isn't free: estimate its size from this collection's
+        // average existing index, and remind about the extra write per insert.
+        const sizeValues = Object.values(sizes);
+        const avgIndexBytes =
+          sizeValues.length > 0
+            ? sizeValues.reduce((sum, value) => sum + value, 0) / sizeValues.length
+            : docCount * 16;
+        const cost = ` Est. build ≈ ${Math.max(1, Math.round(avgIndexBytes / 1024))} KB (+1 write per doc write).`;
         for (const candidate of recommendCreates(shapes, existing, WORKLOAD_OPTIONS)) {
           const indexName = proposedName(candidate.keys);
           if (cooled.has(cooldownKey(database, collection, indexName))) continue;
@@ -61,9 +76,9 @@ export async function suggestForCluster(clusterId: string): Promise<number> {
             database,
             collection,
             indexName,
-            rationale: instant
-              ? `${candidate.rationale} (auto-approved: critical)`
-              : candidate.rationale,
+            rationale:
+              (instant ? `${candidate.rationale} (auto-approved: critical)` : candidate.rationale) +
+              cost,
             estimatedBytesSaved: 0,
             targetSpec: { keys: [...candidate.keys], retire: [...candidate.retireIndexes] },
           });

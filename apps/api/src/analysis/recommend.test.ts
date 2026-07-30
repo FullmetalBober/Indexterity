@@ -45,15 +45,34 @@ describe("recommendForCollection", () => {
     expect(out.some((c) => c.indexName === "ab")).toBe(false);
   });
 
-  it("never proposes _id_ or unique indexes", () => {
+  it("never proposes dropping _id_ or unique indexes (unused unique -> advisory)", () => {
     const id = input(spec("_id_", [x1]), [0, 0, 0]);
     const uniq = input(spec("u", [x1], { unique: true }), [0, 0, 0]);
-    expect(recommendForCollection([id, uniq], {}, options)).toHaveLength(0);
+    const out = recommendForCollection([id, uniq], {}, options);
+    expect(out.every((c) => c.type === "ADVISORY_REVIEW")).toBe(true);
+    expect(out.some((c) => c.indexName === "_id_")).toBe(false);
   });
 
   it("keeps a continuously-used index", () => {
     const hot = input(spec("hot", [{ field: "h", direction: 1 }]), [3, 3, 3]);
     expect(recommendForCollection([hot], {}, options)).toHaveLength(0);
+  });
+
+  it("surfaces an unused protected index as ADVISORY_REVIEW, never a drop", () => {
+    const ttl = input(
+      spec("expiry_ttl", [{ field: "at", direction: 1 }], { ttl: true }),
+      [0, 0, 0],
+    );
+    const out = recommendForCollection([ttl], { expiry_ttl: 2048 }, options);
+    expect(out).toHaveLength(1);
+    expect(out[0]?.type).toBe("ADVISORY_REVIEW");
+    expect(out[0]?.estimatedBytesSaved).toBe(2048);
+  });
+
+  it("never advises on _id_ or on used protected indexes", () => {
+    const id = input(spec("_id_", [x1]), [0, 0, 0]);
+    const busyUnique = input(spec("u", [y1], { unique: true }), [3, 3, 3]);
+    expect(recommendForCollection([id, busyUnique], {}, options)).toHaveLength(0);
   });
 
   it("parseStoredSpec rehydrates a persisted spec", () => {

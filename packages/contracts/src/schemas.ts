@@ -6,6 +6,7 @@ export const recommendationType = z.enum([
   "MERGE",
   "CREATE",
   "UPDATE",
+  "ADVISORY_REVIEW",
 ]);
 export type RecommendationType = z.infer<typeof recommendationType>;
 

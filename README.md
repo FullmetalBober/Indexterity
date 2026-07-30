@@ -248,9 +248,10 @@ api image with `CMD ["node", "apps/api/dist/worker.js"]`.
 
 Engine depth, roughly in order:
 
-1. **Duplicate-index detection** — the redundancy rule catches proper key
-   prefixes; two indexes with *identical* keys under different names slip
-   through today. Trivial rule, real-world common.
+1. **Collation-aware redundancy** — exact same-key duplicates turn out to be
+   impossible (mongod rejects the create with `IndexKeySpecsConflict`; verified
+   live). The real twin is same-keys-different-*collation*, which is legal and
+   invisible to the engine until `IndexSpec` models collation.
 2. **Replica-aware ROI** — a dropped index frees its bytes on *every*
    replica-set member; the headline currently counts one copy. Multiply by
    member count (already collected per snapshot).

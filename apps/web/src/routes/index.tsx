@@ -217,7 +217,7 @@ export const Route = createFileRoute("/")({
 });
 
 function badgeVariant(type: string): "secondary" | "destructive" | "default" | "outline" {
-  if (type === "DROP_REDUNDANT") return "secondary";
+  if (type === "DROP_REDUNDANT" || type === "ADVISORY_REVIEW") return "secondary";
   if (type === "DROP_UNUSED") return "destructive";
   return "outline"; // CREATE / UPDATE / MERGE (additive)
 }
@@ -362,7 +362,9 @@ function Home() {
               <TableCell>{rec.usageClass ?? "—"}</TableCell>
               <TableCell className="text-muted-foreground">{rec.rationale}</TableCell>
               <TableCell>
-                {rec.state === "PROPOSED" ? (
+                {rec.type === "ADVISORY_REVIEW" ? (
+                  <span className="text-muted-foreground text-xs">review manually</span>
+                ) : rec.state === "PROPOSED" ? (
                   <button
                     type="button"
                     onClick={() => {

@@ -21,3 +21,9 @@ export function isRedundantPrefix(candidate: IndexSpec, other: IndexSpec): boole
     );
   });
 }
+
+// NOTE: an "exact duplicate" rule (same keys, different name) was built and then
+// removed — mongod itself rejects that create (IndexKeySpecsConflict), so true
+// duplicates cannot exist. The real-world twin is same-keys-different-COLLATION,
+// which is legal but not yet modeled in IndexSpec; flagging it without collation
+// awareness would be a false positive. See the README roadmap.
