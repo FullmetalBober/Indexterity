@@ -21,9 +21,10 @@ regression check. Full design and decision log in
    `STORAGE_USD_PER_GB_MONTH`), index-count delta, and a per-collection
    read/write **latency trend** (before/after), with a regression gate that
    aborts — and remembers — anything that slowed reads down.
-7. **One dashboard**: recommendations with approve/undo, read/write latency
-   charts, the immutable activity trail, the policy editor, team & invites, and
-   a cluster picker with the read-only ⇄ live toggle.
+7. **One dashboard** (at `/app`; `/` is the landing page): recommendations with
+   approve/undo, read/write latency charts, the immutable activity trail, the
+   policy editor, team & invites, and a cluster picker with the read-only ⇄
+   live toggle.
 
 ## How it decides
 
