@@ -185,17 +185,20 @@ export async function finalizeCluster(clusterId: string): Promise<number> {
         result: "ok",
         rollbackToken: check.spec === null ? null : { spec: serializeSpec(check.spec) },
       });
+      // One ROI row per drop, attributed to its recommendation, so the
+      // dashboard can show which index earned what (undo nets it back out).
+      await db.insert(roiMetrics).values({
+        clusterId,
+        recommendationId: rec.id,
+        freedBytes: rec.estimatedBytesSaved,
+        indexCountDelta: 1,
+        periodStart,
+        periodEnd: new Date(),
+      });
       freedBytes += rec.estimatedBytesSaved;
       dropped += 1;
     }
     if (dropped > 0) {
-      await db.insert(roiMetrics).values({
-        clusterId,
-        freedBytes,
-        indexCountDelta: dropped,
-        periodStart,
-        periodEnd: new Date(),
-      });
       await notifyClusterOwners(
         db,
         clusterId,

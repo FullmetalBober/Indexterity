@@ -120,6 +120,9 @@ export const members = pgTable("members", {
     .notNull()
     .references(() => user.id, { onDelete: "cascade" }),
   role: text("role").notNull().default("member"),
+  // The org switcher's selection. At most one true per user; when none is set
+  // the oldest membership is the active one (the pre-switcher behavior).
+  isActive: boolean("is_active").notNull().default(false),
   createdAt,
 });
 
@@ -238,6 +241,11 @@ export const roiMetrics = pgTable("roi_metrics", {
   clusterId: uuid("cluster_id")
     .notNull()
     .references(() => clusters.id, { onDelete: "cascade" }),
+  // Which recommendation earned (or, negative on undo, un-earned) this row —
+  // the dashboard's per-index attribution. Null on legacy aggregate rows.
+  recommendationId: uuid("recommendation_id").references(() => recommendations.id, {
+    onDelete: "cascade",
+  }),
   freedBytes: bigint("freed_bytes", { mode: "number" }).notNull().default(0),
   indexCountDelta: integer("index_count_delta").notNull().default(0),
   periodStart: timestamp("period_start", { withTimezone: true }).notNull(),

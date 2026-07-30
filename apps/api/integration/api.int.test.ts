@@ -8,6 +8,7 @@ import {
   inArray,
   organizations,
   recommendations,
+  roiMetrics,
   user,
 } from "../src/db";
 import { MongoConnection } from "../src/mongo";
@@ -235,6 +236,19 @@ describe("collect, audit trail and undo", () => {
     expect(typeof body.snapshots === "number" && body.snapshots > 0).toBe(true);
   });
 
+  it("summarizes the per-collection index footprint", async () => {
+    const res = await api(`/clusters/${clusterId}/collections`, owner);
+    expect(res.status).toBe(200);
+    const body = asRecord(await res.json());
+    const collections = Array.isArray(body.collections) ? body.collections.map(asRecord) : [];
+    const orders = collections.find(
+      (coll) => coll.database === "inttest" && coll.collection === "orders",
+    );
+    expect(orders).toBeDefined();
+    expect(typeof orders?.indexCount === "number" && orders.indexCount >= 1).toBe(true);
+    expect(typeof orders?.totalIndexBytes === "number" && orders.totalIndexBytes > 0).toBe(true);
+  });
+
   it("exposes the audit trail and rebuilds a dropped index on undo", async () => {
     const [rec] = await db
       .insert(recommendations)
@@ -286,6 +300,87 @@ describe("collect, audit trail and undo", () => {
     const indexes = await mongo.db("inttest").collection("orders").indexes();
     expect(indexes.some((index) => index.name === "old_1")).toBe(true);
   });
+
+  it("attributes reclaimed bytes to their recommendation in the ROI payload", async () => {
+    const [rec] = await db
+      .insert(recommendations)
+      .values({
+        clusterId,
+        type: "DROP_UNUSED",
+        state: "DROPPED",
+        database: "inttest",
+        collection: "orders",
+        indexName: "attr_test_1",
+        rationale: "attribution test",
+        estimatedBytesSaved: 8192,
+      })
+      .returning();
+    if (rec === undefined) throw new Error("failed to insert recommendation");
+    await db.insert(roiMetrics).values({
+      clusterId,
+      recommendationId: rec.id,
+      freedBytes: 8192,
+      indexCountDelta: 1,
+      periodStart: new Date(),
+      periodEnd: new Date(),
+    });
+    const roi = asRecord(await (await api(`/clusters/${clusterId}/roi`, owner)).json());
+    const attribution = Array.isArray(roi.attribution) ? roi.attribution.map(asRecord) : [];
+    const entry = attribution.find((item) => item.indexName === "attr_test_1");
+    expect(entry?.freedBytes).toBe(8192);
+    expect(typeof entry?.estimatedMonthlyUsd).toBe("number");
+    // The undone drop from the previous test netted to zero — never listed.
+    expect(attribution.some((item) => item.indexName === "old_1")).toBe(false);
+  });
+});
+
+describe("org switcher", () => {
+  it("switches the active org and rescopes every request", async () => {
+    const switcher = await signUp("switcher");
+    createdEmails.push(switcher.email);
+    // A cluster in the shell org keeps it from being collapsed on invite-accept.
+    const own = await api("/clusters", switcher, {
+      method: "POST",
+      body: JSON.stringify({ name: "Switcher Own", connectionString: MONGO_URL }),
+    });
+    expect(own.status).toBe(200);
+    createdClusterIds.push(asString(asRecord(await own.json()).id));
+    const ownOrg = asRecord(await (await api("/org", switcher)).json());
+    createdOrgIds.push(asString(ownOrg.id));
+
+    const inviteRes = await api("/org/invites", owner, {
+      method: "POST",
+      body: JSON.stringify({ email: switcher.email, role: "member" }),
+    });
+    const token = asString(asRecord(await inviteRes.json()).token);
+    const accept = await api("/invites/accept", switcher, {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    });
+    expect(accept.status).toBe(200);
+
+    // Two orgs now; the oldest (own shell) is active until a switch.
+    const orgsBody = await (await api("/orgs", switcher)).json();
+    const orgList = Array.isArray(orgsBody) ? orgsBody.map(asRecord) : [];
+    expect(orgList).toHaveLength(2);
+    expect(orgList.find((entry) => entry.active === true)?.orgId).toBe(asString(ownOrg.id));
+
+    const ownerOrg = asRecord(await (await api("/org", owner)).json());
+    const switchRes = await api("/orgs/switch", switcher, {
+      method: "POST",
+      body: JSON.stringify({ orgId: asString(ownerOrg.id) }),
+    });
+    expect(switchRes.status).toBe(200);
+    expect(asRecord(await switchRes.json()).active).toBe(true);
+
+    // Every subsequent request is scoped to the switched-to org.
+    const clustersAfter = await (await api("/clusters", switcher)).json();
+    const names = Array.isArray(clustersAfter)
+      ? clustersAfter.map((entry) => asRecord(entry).name)
+      : [];
+    expect(names).toContain("Int Cluster");
+    expect(names).not.toContain("Switcher Own");
+  });
 });
 
 describe("least-privilege provisioning", () => {
@@ -324,6 +419,79 @@ describe("least-privilege provisioning", () => {
     expect(collect.status).toBe(200);
 
     await mongo.db("admin").command({ dropUser: username });
+  });
+});
+
+describe("cluster offboarding", () => {
+  it("offboards a provisioned cluster and returns the revoke command", async () => {
+    const res = await api("/clusters/provision", owner, {
+      method: "POST",
+      body: JSON.stringify({ name: "Offboard Provisioned", adminConnectionString: MONGO_URL }),
+    });
+    expect(res.status).toBe(200);
+    const body = asRecord(await res.json());
+    const username = asString(body.username);
+    const id = asString(asRecord(body.cluster).id);
+
+    const del = await api(`/clusters/${id}`, owner, { method: "DELETE" });
+    expect(del.status).toBe(200);
+    const deleted = asRecord(await del.json());
+    expect(deleted.unhidden).toBe(0);
+    expect(deleted.revokeCommand).toBe(`db.getSiblingDB("admin").dropUser("${username}")`);
+
+    // Run the revoke and confirm the scoped user is gone.
+    await mongo.db("admin").command({ dropUser: username });
+    const info = asRecord(await mongo.db("admin").command({ usersInfo: username }));
+    expect(Array.isArray(info.users) && info.users.length === 0).toBe(true);
+  });
+
+  it("restores hidden indexes and cascades all data on delete", async () => {
+    const res = await api("/clusters", owner, {
+      method: "POST",
+      body: JSON.stringify({ name: "Offboard Plain", connectionString: MONGO_URL }),
+    });
+    expect(res.status).toBe(200);
+    const id = asString(asRecord(await res.json()).id);
+    await mongo
+      .db("inttest")
+      .collection("orders")
+      .createIndex({ tmpHide: 1 }, { name: "tmp_hide_1" });
+    await mongo
+      .db("inttest")
+      .command({ collMod: "orders", index: { name: "tmp_hide_1", hidden: true } });
+    const [rec] = await db
+      .insert(recommendations)
+      .values({
+        clusterId: id,
+        type: "DROP_UNUSED",
+        state: "HIDDEN",
+        database: "inttest",
+        collection: "orders",
+        indexName: "tmp_hide_1",
+        rationale: "offboard restore",
+        estimatedBytesSaved: 0,
+      })
+      .returning();
+    if (rec === undefined) throw new Error("failed to insert recommendation");
+
+    const del = await api(`/clusters/${id}`, owner, { method: "DELETE" });
+    expect(del.status).toBe(200);
+    expect(asRecord(await del.json()).unhidden).toBe(1);
+
+    // The in-flight hidden index was restored on the customer cluster...
+    const specs = await mongo.db("inttest").collection("orders").indexes();
+    const restored = specs.find((spec) => spec.name === "tmp_hide_1");
+    expect(restored !== undefined && restored.hidden !== true).toBe(true);
+    await mongo.db("inttest").collection("orders").dropIndex("tmp_hide_1");
+
+    // ...and every stored row cascaded away.
+    const policyRes = await api(`/clusters/${id}/policy`, owner);
+    expect(policyRes.status).toBe(404);
+    const remaining = await db
+      .select()
+      .from(recommendations)
+      .where(eq(recommendations.clusterId, id));
+    expect(remaining).toHaveLength(0);
   });
 });
 

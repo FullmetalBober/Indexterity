@@ -30,8 +30,9 @@ const loadDashboard = createServerFn({ method: "GET" })
     const api = serverApi();
     let clusters: Awaited<ReturnType<typeof api.listClusters>>;
     let org: Awaited<ReturnType<typeof api.getOrg>>;
+    let orgs: Awaited<ReturnType<typeof api.listOrgs>>;
     try {
-      [clusters, org] = await Promise.all([api.listClusters(), api.getOrg()]);
+      [clusters, org, orgs] = await Promise.all([api.listClusters(), api.getOrg(), api.listOrgs()]);
     } catch (error) {
       if (isStatus(error, 401)) return { authed: false as const, apiDown: false as const };
       // The api is unreachable — render a friendly state instead of a 500.
@@ -44,23 +45,27 @@ const loadDashboard = createServerFn({ method: "GET" })
         clusters,
         cluster,
         recommendations: [],
-        roi: { freedBytes: 0, indexesDropped: 0, estimatedMonthlyUsd: 0 },
+        roi: { freedBytes: 0, indexesDropped: 0, estimatedMonthlyUsd: 0, attribution: [] },
         latency: { collections: [] },
         latencySeries: { collections: [] },
+        collectionStats: { collections: [] },
         policy: null,
         activity: [],
         org: org ?? EMPTY_ORG,
+        orgs,
       };
     }
     try {
-      const [recommendations, roi, latency, latencySeries, policy, activity] = await Promise.all([
-        api.listRecommendations({ clusterId: cluster.id }),
-        api.getRoi({ clusterId: cluster.id }),
-        api.getLatency({ clusterId: cluster.id }),
-        api.getLatencySeries({ clusterId: cluster.id }),
-        api.getPolicy({ clusterId: cluster.id }),
-        api.listActions({ clusterId: cluster.id }),
-      ]);
+      const [recommendations, roi, latency, latencySeries, collectionStats, policy, activity] =
+        await Promise.all([
+          api.listRecommendations({ clusterId: cluster.id }),
+          api.getRoi({ clusterId: cluster.id }),
+          api.getLatency({ clusterId: cluster.id }),
+          api.getLatencySeries({ clusterId: cluster.id }),
+          api.getCollections({ clusterId: cluster.id }),
+          api.getPolicy({ clusterId: cluster.id }),
+          api.listActions({ clusterId: cluster.id }),
+        ]);
       return {
         authed: true as const,
         clusters,
@@ -69,9 +74,11 @@ const loadDashboard = createServerFn({ method: "GET" })
         roi,
         latency,
         latencySeries,
+        collectionStats,
         policy,
         activity,
         org,
+        orgs,
       };
     } catch (error) {
       if (isStatus(error, 401)) return { authed: false as const, apiDown: false as const };
@@ -208,6 +215,42 @@ const provisionCluster = createServerFn({ method: "POST" })
     }
   });
 
+const switchOrgFn = createServerFn({ method: "POST" })
+  .validator((orgId: unknown): string => {
+    if (typeof orgId !== "string" || orgId.length === 0) throw new Error("orgId required");
+    return orgId;
+  })
+  .handler(async ({ data }) => {
+    try {
+      const switched = await serverApi().switchOrg({ orgId: data });
+      return { ok: true, name: switched.name };
+    } catch {
+      return { ok: false, name: null };
+    }
+  });
+
+// Offboard a cluster: the api restores in-flight hidden indexes, deletes all
+// collected data, and reports how to revoke the provisioned user.
+const disconnectCluster = createServerFn({ method: "POST" })
+  .validator((clusterId: unknown): string => {
+    if (typeof clusterId !== "string" || clusterId.length === 0) {
+      throw new Error("clusterId required");
+    }
+    return clusterId;
+  })
+  .handler(async ({ data }) => {
+    try {
+      const result = await serverApi().deleteCluster({ clusterId: data });
+      return {
+        ok: true,
+        unhidden: result.unhidden,
+        revokeCommand: result.revokeCommand,
+      };
+    } catch {
+      return { ok: false, unhidden: 0, revokeCommand: null };
+    }
+  });
+
 interface PolicyInput {
   readonly clusterId: string;
   readonly autoApply: boolean;
@@ -300,6 +343,11 @@ function badgeVariant(type: string): "secondary" | "destructive" | "default" | "
   return "outline"; // CREATE / UPDATE / MERGE (additive)
 }
 
+function fmtBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / 1024).toFixed(0)} KB`;
+}
+
 function fmtMicros(value: number | null): string {
   return value === null ? "—" : `${Math.round(value)}`;
 }
@@ -318,6 +366,7 @@ function DeltaCell({ pct }: { pct: number | null }) {
 function Home() {
   const data = Route.useLoaderData();
   const router = useRouter();
+  const navigate = useNavigate();
   const toast = useToast();
 
   if (!data.authed) {
@@ -341,8 +390,19 @@ function Home() {
     return <AuthForm onDone={() => router.invalidate()} />;
   }
 
-  const { cluster, clusters, recommendations, roi, latency, latencySeries, policy, activity, org } =
-    data;
+  const {
+    cluster,
+    clusters,
+    recommendations,
+    roi,
+    latency,
+    latencySeries,
+    collectionStats,
+    policy,
+    activity,
+    org,
+    orgs,
+  } = data;
   const proposed = recommendations.filter((rec) => rec.state === "PROPOSED");
   const totalSaved = proposed.reduce((sum, rec) => sum + rec.estimatedBytesSaved, 0);
 
@@ -382,6 +442,30 @@ function Home() {
     await router.invalidate();
   }
 
+  async function onSwitchOrg(orgId: string) {
+    const result = await switchOrgFn({ data: orgId }).catch(() => ({ ok: false, name: null }));
+    if (result.ok) toast(`Switched to ${result.name ?? "org"}`);
+    else toast("Org switch failed", "error");
+    // The selected cluster belongs to the previous org — reset the selection.
+    await navigate({ to: "/app", search: {} });
+    await router.invalidate();
+  }
+
+  // Merge the index footprint (latest snapshot batch) with the windowed
+  // latency summary, keyed by namespace — one row per collection.
+  const latencyByNs = new Map(latency.collections.map((c) => [`${c.database}.${c.collection}`, c]));
+  const statNs = new Set(collectionStats.collections.map((c) => `${c.database}.${c.collection}`));
+  const collectionRows = [
+    ...collectionStats.collections.map((stat) => ({
+      ns: `${stat.database}.${stat.collection}`,
+      stat,
+      lat: latencyByNs.get(`${stat.database}.${stat.collection}`) ?? null,
+    })),
+    ...latency.collections
+      .filter((c) => !statNs.has(`${c.database}.${c.collection}`))
+      .map((lat) => ({ ns: `${lat.database}.${lat.collection}`, stat: null, lat })),
+  ];
+
   return (
     <main className="mx-auto max-w-4xl p-8">
       <div className="flex items-start justify-between">
@@ -397,13 +481,29 @@ function Home() {
             />
           )}
         </div>
-        <button
-          type="button"
-          onClick={() => void onSignOut()}
-          className="rounded-md border px-2 py-1 text-muted-foreground text-xs"
-        >
-          Sign out
-        </button>
+        <div className="flex items-center gap-2">
+          {orgs.length > 1 ? (
+            <select
+              className="rounded-md border px-2 py-1 text-xs"
+              value={orgs.find((entry) => entry.active)?.orgId ?? ""}
+              onChange={(event) => void onSwitchOrg(event.target.value)}
+              title="Switch organization"
+            >
+              {orgs.map((entry) => (
+                <option key={entry.orgId} value={entry.orgId}>
+                  {entry.name} ({entry.role})
+                </option>
+              ))}
+            </select>
+          ) : null}
+          <button
+            type="button"
+            onClick={() => void onSignOut()}
+            className="rounded-md border px-2 py-1 text-muted-foreground text-xs"
+          >
+            Sign out
+          </button>
+        </div>
       </div>
 
       <div className="mt-4 grid grid-cols-2 gap-4">
@@ -414,12 +514,36 @@ function Home() {
         </div>
         <div className="rounded-lg border p-4">
           <div className="text-muted-foreground text-sm">Reclaimed</div>
-          <div className="font-semibold text-2xl">{(roi.freedBytes / 1024).toFixed(0)} KB</div>
+          <div className="font-semibold text-2xl">{fmtBytes(roi.freedBytes)}</div>
           <div className="text-muted-foreground text-sm">
             {roi.indexesDropped} indexes dropped · ${roi.estimatedMonthlyUsd.toFixed(2)}/mo
           </div>
         </div>
       </div>
+
+      {roi.attribution.length > 0 ? (
+        <div className="mt-4 rounded-lg border p-4">
+          <div className="text-muted-foreground text-sm">Reclaimed by index</div>
+          <ul className="mt-2 space-y-1 text-sm">
+            {roi.attribution.map((entry) => (
+              <li
+                key={entry.recommendationId}
+                className="flex items-baseline justify-between gap-4"
+              >
+                <span className="font-mono text-xs">
+                  {entry.database}.{entry.collection} · {entry.indexName}
+                </span>
+                <span className="whitespace-nowrap">
+                  {fmtBytes(entry.freedBytes)}{" "}
+                  <span className="text-muted-foreground text-xs">
+                    ~${entry.estimatedMonthlyUsd.toFixed(2)}/mo
+                  </span>
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
 
       <Table className="mt-6">
         <TableHeader>
@@ -490,35 +614,48 @@ function Home() {
         </section>
       ) : null}
 
-      {latency.collections.length > 0 ? (
+      {collectionRows.length > 0 ? (
         <>
-          <h2 className="mt-8 font-semibold text-lg">Latency — µs per op</h2>
+          <h2 className="mt-8 font-semibold text-lg">Collections</h2>
           <p className="text-muted-foreground text-sm">
-            Current windowed average vs the first sample; negative Δ = faster.
+            Index footprint from the latest collect; latency is the current windowed average vs the
+            first sample (negative Δ = faster).
           </p>
           <Table className="mt-2">
             <TableHeader>
               <TableRow>
                 <TableHead>Collection</TableHead>
+                <TableHead>Indexes</TableHead>
+                <TableHead>Index size</TableHead>
                 <TableHead>Read µs</TableHead>
                 <TableHead>Read Δ</TableHead>
                 <TableHead>Write µs</TableHead>
                 <TableHead>Write Δ</TableHead>
+                <TableHead>Proposed</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {latency.collections.map((coll) => (
-                <TableRow key={`${coll.database}.${coll.collection}`}>
-                  <TableCell className="font-mono text-xs">
-                    {coll.database}.{coll.collection}
-                  </TableCell>
-                  <TableCell>{fmtMicros(coll.currentReadMicros)}</TableCell>
+              {collectionRows.map((row) => (
+                <TableRow key={row.ns}>
+                  <TableCell className="font-mono text-xs">{row.ns}</TableCell>
+                  <TableCell>{row.stat?.indexCount ?? "—"}</TableCell>
                   <TableCell>
-                    <DeltaCell pct={coll.readDeltaPct} />
+                    {row.stat === null ? "—" : fmtBytes(row.stat.totalIndexBytes)}
                   </TableCell>
-                  <TableCell>{fmtMicros(coll.currentWriteMicros)}</TableCell>
+                  <TableCell>{fmtMicros(row.lat?.currentReadMicros ?? null)}</TableCell>
                   <TableCell>
-                    <DeltaCell pct={coll.writeDeltaPct} />
+                    <DeltaCell pct={row.lat?.readDeltaPct ?? null} />
+                  </TableCell>
+                  <TableCell>{fmtMicros(row.lat?.currentWriteMicros ?? null)}</TableCell>
+                  <TableCell>
+                    <DeltaCell pct={row.lat?.writeDeltaPct ?? null} />
+                  </TableCell>
+                  <TableCell>
+                    {row.stat !== null && row.stat.proposedRecommendations > 0 ? (
+                      <Badge variant="secondary">{row.stat.proposedRecommendations}</Badge>
+                    ) : (
+                      <span className="text-muted-foreground text-xs">—</span>
+                    )}
                   </TableCell>
                 </TableRow>
               ))}
@@ -613,6 +750,36 @@ function ClusterBar({
     onChanged();
   }
 
+  async function onDisconnect() {
+    const revokeHint =
+      cluster.provisionedUsername === null
+        ? ""
+        : `\n\nThe scoped user ${cluster.provisionedUsername} stays on your cluster — revoke it afterwards:\ndb.getSiblingDB("admin").dropUser("${cluster.provisionedUsername}")`;
+    if (
+      !window.confirm(
+        `Disconnect "${cluster.name}"? All collected snapshots, recommendations, ROI history and the audit trail will be deleted. Indexes still hidden in an observe window are restored first.${revokeHint}`,
+      )
+    ) {
+      return;
+    }
+    const result = await disconnectCluster({ data: cluster.id }).catch(() => ({
+      ok: false,
+      unhidden: 0,
+      revokeCommand: null,
+    }));
+    if (result.ok) {
+      toast(
+        result.unhidden > 0
+          ? `Disconnected — ${result.unhidden} hidden ${result.unhidden === 1 ? "index" : "indexes"} restored`
+          : "Cluster disconnected",
+      );
+    } else {
+      toast("Disconnect failed (owner only)", "error");
+    }
+    await navigate({ to: "/app", search: {} });
+    onChanged();
+  }
+
   return (
     <div className="mt-1 flex items-center gap-2">
       {clusters.length > 1 ? (
@@ -649,6 +816,13 @@ function ClusterBar({
         className="rounded-md border px-2 py-0.5 text-muted-foreground text-xs"
       >
         {cluster.readOnly ? "Go live" : "Make read-only"}
+      </button>
+      <button
+        type="button"
+        onClick={() => void onDisconnect()}
+        className="rounded-md border px-2 py-0.5 text-red-600 text-xs"
+      >
+        Disconnect
       </button>
     </div>
   );

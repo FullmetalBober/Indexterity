@@ -82,7 +82,9 @@ export async function api(
   return fetch(`${API_BASE}${path}`, {
     ...init,
     headers: {
-      "content-type": "application/json",
+      // Only claim a JSON body when one is sent — fastify 400s on an empty
+      // JSON body (bit the body-less DELETE).
+      ...(init?.body === undefined ? {} : { "content-type": "application/json" }),
       ...(session === null ? {} : { cookie: session.cookie }),
       ...init?.headers,
     },

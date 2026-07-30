@@ -436,6 +436,8 @@ all queries are org-filtered. An immutable audit log records every state transit
 - **better-auth tables** (users, sessions, accounts) — via the better-auth Drizzle
   adapter.
 - **organizations**, **members** — multi-tenant; everything scoped by `orgId`.
+  `members.is_active` is the org switcher's selection (at most one per user;
+  unset falls back to the oldest membership).
 - **clusters** — connection mode, encrypted creds/agent token (`Sealed`),
   `demoMode` (default `true`).
 - **agents** — registration, last-seen, version (phase 2).
@@ -445,7 +447,10 @@ all queries are org-filtered. An immutable audit log records every state transit
   estimated savings, state.
 - **actions** — audit: what / when / who-or-policy, before/after, rollback token,
   result.
-- **roi_metrics** — freed bytes, throughput delta, index-count delta, per period.
+- **roi_metrics** — freed bytes, throughput delta, index-count delta, per
+  period. `recommendation_id` attributes each row to the drop that earned it
+  (undo inserts a negative row against the same id, netting it out of the
+  dashboard's per-index list).
 - **policies** — per-cluster auto-apply rules, maintenance windows, thresholds,
   observe-window override.
 - **audit_log** — immutable, every state transition.

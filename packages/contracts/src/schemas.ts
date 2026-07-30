@@ -69,13 +69,60 @@ export const recommendation = z.object({
 });
 export type Recommendation = z.infer<typeof recommendation>;
 
+// One dropped index's net contribution to the ROI headline (undo rows netted
+// out; only positive contributors are listed).
+export const roiContribution = z.object({
+  recommendationId: z.uuid(),
+  database: z.string(),
+  collection: z.string(),
+  indexName: z.string(),
+  freedBytes: z.number().int().positive(),
+  estimatedMonthlyUsd: z.number().nonnegative(),
+});
+export type RoiContribution = z.infer<typeof roiContribution>;
+
 export const clusterRoi = z.object({
   clusterId: z.uuid(),
   freedBytes: z.number().int().nonnegative(),
   indexesDropped: z.number().int().nonnegative(),
   estimatedMonthlyUsd: z.number().nonnegative(),
+  attribution: z.array(roiContribution),
 });
 export type ClusterRoi = z.infer<typeof clusterRoi>;
+
+// Per-collection index footprint from the latest snapshot batch.
+export const collectionStat = z.object({
+  database: z.string(),
+  collection: z.string(),
+  indexCount: z.int().nonnegative(),
+  totalIndexBytes: z.int().nonnegative(),
+  proposedRecommendations: z.int().nonnegative(),
+});
+export type CollectionStat = z.infer<typeof collectionStat>;
+
+export const clusterCollections = z.object({
+  clusterId: z.uuid(),
+  collections: z.array(collectionStat),
+});
+export type ClusterCollections = z.infer<typeof clusterCollections>;
+
+// The result of disconnecting a cluster: how many in-flight hidden indexes were
+// restored, and the command to revoke the provisioned user (null when the
+// cluster was connected with a pasted string).
+export const offboardResult = z.object({
+  unhidden: z.int().nonnegative(),
+  revokeCommand: z.string().nullable(),
+});
+export type OffboardResult = z.infer<typeof offboardResult>;
+
+// One org the caller belongs to — the switcher's option list.
+export const orgSummary = z.object({
+  orgId: z.uuid(),
+  name: z.string(),
+  role: z.string(),
+  active: z.boolean(),
+});
+export type OrgSummary = z.infer<typeof orgSummary>;
 
 // Per-collection read/write latency: current vs baseline windowed average (µs/op)
 // and the percent change. Negative delta = faster. Nulls when data is too sparse.

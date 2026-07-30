@@ -55,6 +55,60 @@ export class OrgController {
     });
   }
 
+  @Implement(contract.listOrgs)
+  listOrgs(@Req() req: FastifyRequest) {
+    return implement(contract.listOrgs).handler(async () => {
+      const userId = await requireUserId(req);
+      // Resolving first guarantees the lazy shell org exists for fresh accounts.
+      const active = await resolveMembership(this.database.db, userId);
+      const rows = await this.database.db
+        .select({
+          orgId: members.orgId,
+          role: members.role,
+          createdAt: members.createdAt,
+          name: organizations.name,
+        })
+        .from(members)
+        .innerJoin(organizations, eq(members.orgId, organizations.id))
+        .where(eq(members.userId, userId));
+      return rows
+        .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
+        .map((row) => ({
+          orgId: row.orgId,
+          name: row.name,
+          role: row.role,
+          active: row.orgId === active.orgId,
+        }));
+    });
+  }
+
+  // Point every subsequent request at another of the caller's orgs. Exactly one
+  // membership per user carries is_active after a switch.
+  @Implement(contract.switchOrg)
+  switchOrg(@Req() req: FastifyRequest) {
+    return implement(contract.switchOrg).handler(async ({ input, errors }) => {
+      const userId = await requireUserId(req);
+      const [target] = await this.database.db
+        .select({ role: members.role, name: organizations.name })
+        .from(members)
+        .innerJoin(organizations, eq(members.orgId, organizations.id))
+        .where(and(eq(members.userId, userId), eq(members.orgId, input.orgId)))
+        .limit(1);
+      if (target === undefined) {
+        throw errors.NOT_FOUND({ message: "not a member of that org" });
+      }
+      await this.database.db
+        .update(members)
+        .set({ isActive: false })
+        .where(eq(members.userId, userId));
+      await this.database.db
+        .update(members)
+        .set({ isActive: true })
+        .where(and(eq(members.userId, userId), eq(members.orgId, input.orgId)));
+      return { orgId: input.orgId, name: target.name, role: target.role, active: true };
+    });
+  }
+
   @Implement(contract.createInvite)
   createInvite(@Req() req: FastifyRequest) {
     return implement(contract.createInvite).handler(async ({ input }) => {

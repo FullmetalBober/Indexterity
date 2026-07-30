@@ -28,9 +28,13 @@ regression check. Full design and decision log in
    read/write **latency trend** (before/after), with a regression gate that
    aborts — and remembers — anything that slowed reads down.
 7. **One dashboard** (at `/app`; `/` is the landing page): recommendations with
-   approve/undo, read/write latency charts, the immutable activity trail, the
-   policy editor, team & invites, and a cluster picker with the read-only ⇄
-   live toggle.
+   approve/undo, read/write latency charts, a per-collection table (index
+   count, on-disk index size, latency trend, open proposals), **per-index ROI
+   attribution** (which drop earned what, undo netted out), the immutable
+   activity trail, the policy editor, team & invites, an **org switcher** for
+   multi-org users, and a cluster picker with the read-only ⇄ live toggle plus
+   **disconnect** (offboarding restores any still-hidden indexes, deletes all
+   collected data, and hands you the command to revoke the provisioned user).
 
 ## How it decides
 

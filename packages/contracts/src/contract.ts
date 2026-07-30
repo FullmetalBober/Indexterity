@@ -3,12 +3,15 @@ import { z } from "zod";
 import {
   auditAction,
   cluster,
+  clusterCollections,
   clusterLatency,
   clusterLatencySeries,
   clusterPolicy,
   clusterRoi,
   createdInvite,
+  offboardResult,
   orgInfo,
+  orgSummary,
   provisionedCluster,
   recommendation,
 } from "./schemas.js";
@@ -60,6 +63,15 @@ export const contract = {
     .input(clusterId)
     .output(clusterLatencySeries),
 
+  getCollections: oc
+    .route({
+      method: "GET",
+      path: "/clusters/{clusterId}/collections",
+      summary: "Per-collection index footprint from the latest snapshot batch",
+    })
+    .input(clusterId)
+    .output(clusterCollections),
+
   listActions: oc
     .route({
       method: "GET",
@@ -89,6 +101,17 @@ export const contract = {
     .errors({ BAD_REQUEST: {} })
     .input(z.object({ name: z.string().min(1), adminConnectionString: z.string().min(1) }))
     .output(provisionedCluster),
+
+  deleteCluster: oc
+    .route({
+      method: "DELETE",
+      path: "/clusters/{clusterId}",
+      summary:
+        "Disconnect a cluster (owner only): restore in-flight hidden indexes, delete all collected data, return the user-revoke command",
+    })
+    .errors({ NOT_FOUND: {} })
+    .input(clusterId)
+    .output(offboardResult),
 
   setClusterMode: oc
     .route({
@@ -154,9 +177,27 @@ export const contract = {
     .route({
       method: "GET",
       path: "/org",
-      summary: "The caller's org: members and pending invites",
+      summary: "The caller's active org: members and pending invites",
     })
     .output(orgInfo),
+
+  listOrgs: oc
+    .route({
+      method: "GET",
+      path: "/orgs",
+      summary: "Every org the caller belongs to, with the active one flagged",
+    })
+    .output(z.array(orgSummary)),
+
+  switchOrg: oc
+    .route({
+      method: "POST",
+      path: "/orgs/switch",
+      summary: "Make another of the caller's orgs the active one",
+    })
+    .errors({ NOT_FOUND: {} })
+    .input(z.object({ orgId: z.uuid() }))
+    .output(orgSummary),
 
   createInvite: oc
     .route({

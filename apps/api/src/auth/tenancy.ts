@@ -1,19 +1,20 @@
-import { and, asc, clusters, type Database, eq, members, organizations, sql } from "../db";
+import { and, asc, clusters, type Database, desc, eq, members, organizations, sql } from "../db";
 
 export interface Membership {
   readonly orgId: string;
   readonly role: string;
 }
 
-// The caller's active membership: the oldest one (deterministic when a user
-// belongs to several orgs), created lazily on first authenticated use so a
-// fresh account always has somewhere to put its clusters. The creator is owner.
+// The caller's active membership: the switched-to one (is_active), else the
+// oldest (deterministic when a user belongs to several orgs). Created lazily on
+// first authenticated use so a fresh account always has somewhere to put its
+// clusters. The creator is owner.
 export async function resolveMembership(db: Database, userId: string): Promise<Membership> {
   const [membership] = await db
     .select({ orgId: members.orgId, role: members.role })
     .from(members)
     .where(eq(members.userId, userId))
-    .orderBy(asc(members.createdAt))
+    .orderBy(desc(members.isActive), asc(members.createdAt))
     .limit(1);
   if (membership !== undefined) return membership;
   const [org] = await db

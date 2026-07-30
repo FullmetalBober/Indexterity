@@ -106,6 +106,22 @@ export async function poolStats(): Promise<Array<{ clusterId: string; refs: numb
   return out;
 }
 
+// Drop one cluster's entry now (offboarding): close if free, doom otherwise.
+export async function evictCluster(clusterId: string): Promise<void> {
+  const pending = entries.get(clusterId);
+  if (pending === undefined) return;
+  const entry = await pending.catch(() => null);
+  if (entry === null) {
+    entries.delete(clusterId);
+    return;
+  }
+  entry.doomed = true;
+  if (entry.refs === 0) {
+    entries.delete(clusterId);
+    await entry.conn.close().catch(() => {});
+  }
+}
+
 // Close everything now (tests / graceful shutdown).
 export async function drainPool(): Promise<void> {
   const all = [...entries.values()];

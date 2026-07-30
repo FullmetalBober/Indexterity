@@ -1,7 +1,7 @@
 import { Controller, Req } from "@nestjs/common";
 import { Implement, implement } from "@orpc/nest";
 import { ORPCError } from "@orpc/server";
-import { type Cluster, contract, type Recommendation } from "@repo/contracts";
+import { type Cluster, contract, type Recommendation, type RoiContribution } from "@repo/contracts";
 import type { FastifyRequest } from "fastify";
 import { z } from "zod";
 import {
@@ -21,17 +21,21 @@ import {
   desc,
   envKeyProvider,
   eq,
+  inArray,
+  indexSnapshots,
   latencySamples,
   policies,
   recommendations,
   roiMetrics,
   seal,
+  sql,
 } from "../db";
 import { DatabaseService } from "../db/database.service";
 import { currentKeyVersion, masterKeyBytesFor } from "../env";
 import { classifyCluster } from "../jobs/classify";
 import { openClusterMongo } from "../jobs/cluster-connection";
 import { collectCluster } from "../jobs/collect";
+import { evictCluster } from "../jobs/connection-pool";
 import { MongoIndexExecutor, ProvisionDeniedError, provisionScopedUser } from "../mongo";
 import { isMongoConnString } from "../mongo/conn-string";
 
@@ -186,6 +190,7 @@ export class RecommendationsController {
           freedBytes: 0,
           indexesDropped: 0,
           estimatedMonthlyUsd: 0,
+          attribution: [],
         };
       }
       const rows = await this.database.db
@@ -202,11 +207,52 @@ export class RecommendationsController {
         rows.reduce((sum, row) => sum + row.indexCountDelta, 0),
       );
       const envRate = Number(process.env.STORAGE_USD_PER_GB_MONTH);
-      const estimatedMonthlyUsd = monthlySavingsUsd(
+      const rate = Number.isFinite(envRate) && envRate > 0 ? envRate : undefined;
+      // Attribution: net freed bytes per recommendation (drop rows minus undo
+      // rows), positive contributors only, biggest first.
+      const net = new Map<string, number>();
+      for (const row of rows) {
+        if (row.recommendationId === null) continue;
+        net.set(row.recommendationId, (net.get(row.recommendationId) ?? 0) + row.freedBytes);
+      }
+      const contributors = [...net.entries()]
+        .filter(([, bytes]) => bytes > 0)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 10);
+      let attribution: RoiContribution[] = [];
+      if (contributors.length > 0) {
+        const recRows = await this.database.db
+          .select()
+          .from(recommendations)
+          .where(
+            inArray(
+              recommendations.id,
+              contributors.map(([id]) => id),
+            ),
+          );
+        const byId = new Map(recRows.map((rec) => [rec.id, rec]));
+        attribution = contributors.flatMap(([id, bytes]) => {
+          const rec = byId.get(id);
+          if (rec === undefined) return [];
+          return [
+            {
+              recommendationId: id,
+              database: rec.database,
+              collection: rec.collection,
+              indexName: rec.indexName,
+              freedBytes: bytes,
+              estimatedMonthlyUsd: monthlySavingsUsd(bytes, rate),
+            },
+          ];
+        });
+      }
+      return {
+        clusterId: input.clusterId,
         freedBytes,
-        Number.isFinite(envRate) && envRate > 0 ? envRate : undefined,
-      );
-      return { clusterId: input.clusterId, freedBytes, indexesDropped, estimatedMonthlyUsd };
+        indexesDropped,
+        estimatedMonthlyUsd: monthlySavingsUsd(freedBytes, rate),
+        attribution,
+      };
     });
   }
 
@@ -240,6 +286,67 @@ export class RecommendationsController {
         collection: group.collection,
         points: latencyPoints(group.readings),
       }));
+      return { clusterId: input.clusterId, collections };
+    });
+  }
+
+  // Per-collection index footprint from the latest snapshot batch (one collect
+  // run inserts all its rows in a single statement, so they share a timestamp).
+  @Implement(contract.getCollections)
+  getCollections(@Req() req: FastifyRequest) {
+    return implement(contract.getCollections).handler(async ({ input }) => {
+      const orgId = await this.resolveOrg(req);
+      if (!(await this.ownsCluster(input.clusterId, orgId))) {
+        return { clusterId: input.clusterId, collections: [] };
+      }
+      // The max(captured_at) comparison must stay in SQL: pg keeps microseconds
+      // and a JS Date round-trip truncates to ms, so re-querying by an equal
+      // Date would match nothing.
+      const snapshotRows = await this.database.db
+        .select()
+        .from(indexSnapshots)
+        .where(
+          and(
+            eq(indexSnapshots.clusterId, input.clusterId),
+            sql`${indexSnapshots.capturedAt} = (select max(${indexSnapshots.capturedAt}) from ${indexSnapshots} where ${indexSnapshots.clusterId} = ${input.clusterId})`,
+          ),
+        );
+      const proposedRows = await this.database.db
+        .select({ database: recommendations.database, collection: recommendations.collection })
+        .from(recommendations)
+        .where(
+          and(
+            eq(recommendations.clusterId, input.clusterId),
+            eq(recommendations.state, "PROPOSED"),
+          ),
+        );
+      const proposedByNs = new Map<string, number>();
+      for (const rec of proposedRows) {
+        const key = `${rec.database} ${rec.collection}`;
+        proposedByNs.set(key, (proposedByNs.get(key) ?? 0) + 1);
+      }
+      const byNs = new Map<
+        string,
+        { database: string; collection: string; indexCount: number; totalIndexBytes: number }
+      >();
+      for (const row of snapshotRows) {
+        const key = `${row.database} ${row.collection}`;
+        const group = byNs.get(key) ?? {
+          database: row.database,
+          collection: row.collection,
+          indexCount: 0,
+          totalIndexBytes: 0,
+        };
+        group.indexCount += 1;
+        group.totalIndexBytes += row.sizeBytes;
+        byNs.set(key, group);
+      }
+      const collections = [...byNs.entries()]
+        .map(([key, group]) => ({
+          ...group,
+          proposedRecommendations: proposedByNs.get(key) ?? 0,
+        }))
+        .sort((a, b) => b.totalIndexBytes - a.totalIndexBytes);
       return { clusterId: input.clusterId, collections };
     });
   }
@@ -342,6 +449,63 @@ export class RecommendationsController {
         cluster: toCluster(row),
         username: provisioned.username,
         connectionString: provisioned.connectionString,
+      };
+    });
+  }
+
+  // Owner-only offboarding: leave the customer's cluster as we found it
+  // (un-hide anything still parked in the observe window — restoration runs
+  // even on read-only clusters), drop the pooled connection, delete the row
+  // (cascade wipes snapshots, recommendations, actions, ROI, policy, cooldowns,
+  // latency samples), and hand back the command to revoke the provisioned user.
+  @Implement(contract.deleteCluster)
+  deleteCluster(@Req() req: FastifyRequest) {
+    return implement(contract.deleteCluster).handler(async ({ input, errors }) => {
+      const orgId = await this.requireOwner(req);
+      const [row] = await this.database.db
+        .select()
+        .from(clusters)
+        .where(and(eq(clusters.id, input.clusterId), eq(clusters.orgId, orgId)))
+        .limit(1);
+      if (row === undefined) throw errors.NOT_FOUND({ message: "cluster not found" });
+      const inFlight = await this.database.db
+        .select()
+        .from(recommendations)
+        .where(
+          and(
+            eq(recommendations.clusterId, input.clusterId),
+            inArray(recommendations.state, ["HIDDEN", "OBSERVE"]),
+          ),
+        );
+      let unhidden = 0;
+      if (inFlight.length > 0) {
+        try {
+          const { conn, release } = await openClusterMongo(this.database.db, input.clusterId);
+          try {
+            const executor = new MongoIndexExecutor(conn, false);
+            for (const rec of inFlight) {
+              try {
+                await executor.unhide(rec.database, rec.collection, rec.indexName);
+                unhidden += 1;
+              } catch {
+                // index already gone — nothing to restore
+              }
+            }
+          } finally {
+            release();
+          }
+        } catch {
+          // cluster unreachable: offboarding still proceeds
+        }
+      }
+      await evictCluster(input.clusterId);
+      await this.database.db.delete(clusters).where(eq(clusters.id, input.clusterId));
+      return {
+        unhidden,
+        revokeCommand:
+          row.provisionedUsername === null
+            ? null
+            : `db.getSiblingDB("admin").dropUser("${row.provisionedUsername}")`,
       };
     });
   }
@@ -503,9 +667,11 @@ export class RecommendationsController {
       } catch (error) {
         mapClusterError(error);
       }
-      // The freed bytes are spent again — correct the ROI headline.
+      // The freed bytes are spent again — correct the ROI headline, attributed
+      // so the per-index list nets this recommendation back out.
       await this.database.db.insert(roiMetrics).values({
         clusterId: rec.clusterId,
+        recommendationId: rec.id,
         freedBytes: -rec.estimatedBytesSaved,
         indexCountDelta: -1,
         periodStart: new Date(),
