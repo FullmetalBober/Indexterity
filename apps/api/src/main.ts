@@ -7,7 +7,15 @@ import { auth } from "./auth";
 import { AppExceptionFilter } from "./errors/exception.filter";
 
 async function bootstrap(): Promise<void> {
-  const app = await NestFactory.create<NestFastifyApplication>(AppModule, new FastifyAdapter());
+  // Fastify's built-in pino: structured request/response logs with req ids,
+  // secrets redacted. LOG_LEVEL=debug for verbose, silent in tests.
+  const adapter = new FastifyAdapter({
+    logger: {
+      level: process.env.LOG_LEVEL ?? "info",
+      redact: ["req.headers.authorization", "req.headers.cookie", 'res.headers["set-cookie"]'],
+    },
+  });
+  const app = await NestFactory.create<NestFastifyApplication>(AppModule, adapter);
   app.useGlobalFilters(new AppExceptionFilter());
   const fastify = app.getHttpAdapter().getInstance();
 

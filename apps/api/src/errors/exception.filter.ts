@@ -58,7 +58,7 @@ export class AppExceptionFilter implements ExceptionFilter {
 
     const error = exception instanceof Error ? exception : new Error(String(exception));
     if (UNREACHABLE_NAME.test(error.name) || UNREACHABLE_MESSAGE.test(error.message)) {
-      console.error(`[${request.id}] 502 ${request.method} ${request.url}: ${error.message}`);
+      request.log.error({ err: error }, "cluster unreachable");
       void reply.status(502).send({
         message: "cluster unreachable — check the connection string and network access",
         requestId: request.id,
@@ -70,7 +70,7 @@ export class AppExceptionFilter implements ExceptionFilter {
       return;
     }
 
-    console.error(`[${request.id}] 500 ${request.method} ${request.url}:`, error);
+    request.log.error({ err: error }, "unhandled error");
     void reply.status(500).send({ message: "internal error", requestId: request.id });
   }
 }

@@ -513,7 +513,7 @@ Redis + BullMQ only if scale demands it.
 | D11 | Demo/read-only default per cluster | Read-only is structural, not a toggle | Locked |
 | D12 | npm workspaces (not pnpm) for now | Local Node is Zed-managed; a global pnpm install conflicted. Turbo supports npm workspaces; swappable later | Locked |
 | D13 | TypeScript **6** (last JS line); api built with **swc** directly (no Nest CLI) | Was TS 7 (native), but 7 ships no `tsserver.js` until 7.1 — editors broke. TS 6 keeps full toolchain parity (tsserver, programmatic API); typecheck speed is a non-issue at this repo size. Revisit 7 at 7.1 | Revised |
-| D14 | zod pinned to **v3** | `@ts-rest/*` peers require `^3.22.3`; revisit when ts-rest supports zod 4 | Locked |
+| D14 | zod pinned to **v3** (for now) | Original blocker resolved: ts-rest **3.53.0+** accepts zod 4 via Standard Schema. Migration = minor ts-rest bump + zod 4 breaking-change sweep; scheduled, not urgent. **oRPC evaluated and declined** (Jul 2026): `@orpc/nest` is real (`@Implement` decorator) and zod-4-native, but its zod adapter is still `@beta` and the move would rewrite all contracts, both controllers, the web client and the integration suite — to gain what a minor version bump now gives us | Revised |
 | D15 | Internal packages compile to CJS `dist`; apps consume built output | Predictable dev/prod module resolution; Turbo orders builds via `^build` | Locked |
 
 ### Deferred / open
@@ -523,7 +523,9 @@ Redis + BullMQ only if scale demands it.
 - **TypeScript 7 (native)** — re-adopt at 7.1 when `tsserver.js` and the
   programmatic compiler API return; also unblocks reverting api to the Nest CLI
   (see D13).
-- **zod 4** — adopt once `@ts-rest/*` peers allow it (see D14).
+- **zod 4** — unblocked (ts-rest ≥ 3.53 via Standard Schema); do the bump +
+  zod-4 API sweep (`.passthrough()`, `z.string().uuid()`, error shapes) as its
+  own change (see D14).
 - **Agent mode** — phase 2. Interface designed for it from day one.
 - **Suggest-mode (`CREATE` from workload)** — higher trust tier; needs profiler
   access. Ship cleanup path first.

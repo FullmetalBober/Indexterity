@@ -11,6 +11,7 @@ import {
   TableHeader,
   TableRow,
 } from "../components/ui/table";
+import { useToast } from "../components/ui/toast";
 import { serverApi } from "../lib/api";
 import { signIn, signOut, signUp } from "../lib/auth";
 
@@ -300,17 +301,19 @@ function Home() {
     points: coll.points.map((point) => ({ t: point.capturedAt, v: point.writeMicros })),
   }));
 
-  const [actionError, setActionError] = useState<string | null>(null);
+  const toast = useToast();
 
   async function onApprove(id: string) {
     const result = await approveRecommendation({ data: id }).catch(() => ({ ok: false }));
-    setActionError(result.ok ? null : "Approve failed — are you an owner, and is the API up?");
+    if (result.ok) toast("Approved — enters the pipeline on the next tick");
+    else toast("Approve failed — are you an owner, and is the API up?", "error");
     await router.invalidate();
   }
 
   async function onUndo(id: string) {
     const result = await rollbackRecommendation({ data: id }).catch(() => ({ ok: false }));
-    setActionError(result.ok ? null : "Undo failed — the cluster may be unreachable or read-only.");
+    if (result.ok) toast("Undo complete — the index was rebuilt");
+    else toast("Undo failed — the cluster may be unreachable or read-only", "error");
     await router.invalidate();
   }
 
@@ -357,8 +360,6 @@ function Home() {
           </div>
         </div>
       </div>
-
-      {actionError !== null ? <p className="mt-4 text-red-600 text-sm">{actionError}</p> : null}
 
       <Table className="mt-6">
         <TableHeader>
@@ -528,7 +529,7 @@ function ClusterBar({
   onChanged: () => void;
 }) {
   const navigate = useNavigate();
-  const [modeError, setModeError] = useState<string | null>(null);
+  const toast = useToast();
 
   async function onToggleMode() {
     const goingLive = cluster.readOnly;
@@ -543,7 +544,11 @@ function ClusterBar({
     const result = await setClusterMode({
       data: { clusterId: cluster.id, readOnly: !cluster.readOnly },
     }).catch(() => ({ ok: false }));
-    setModeError(result.ok ? null : "mode change failed (owner only)");
+    if (result.ok)
+      toast(
+        goingLive ? "Live mode enabled — the engine may now write" : "Cluster is read-only again",
+      );
+    else toast("Mode change failed (owner only)", "error");
     onChanged();
   }
 
@@ -576,7 +581,6 @@ function ClusterBar({
       >
         {cluster.readOnly ? "Go live" : "Make read-only"}
       </button>
-      {modeError !== null ? <span className="text-red-600 text-xs">{modeError}</span> : null}
     </div>
   );
 }
@@ -597,7 +601,7 @@ function PolicySection({ policy, onSaved }: { policy: PolicyView; onSaved: () =>
   const [instantCreate, setInstantCreate] = useState(policy.instantCreate);
   const [observeDays, setObserveDays] = useState(policy.observeWindowDays);
   const [autoScore, setAutoScore] = useState(policy.autoApplyScore);
-  const [saved, setSaved] = useState<boolean | null>(null);
+  const toast = useToast();
 
   async function onSave() {
     const result = await savePolicy({
@@ -609,9 +613,13 @@ function PolicySection({ policy, onSaved }: { policy: PolicyView; onSaved: () =>
         observeWindowDays: observeDays,
         autoApplyScore: autoScore,
       },
-    });
-    setSaved(result.ok);
-    if (result.ok) onSaved();
+    }).catch(() => ({ ok: false }));
+    if (result.ok) {
+      toast("Policy saved");
+      onSaved();
+    } else {
+      toast("Policy not saved (owner only)", "error");
+    }
   }
 
   const toggles: Array<{ label: string; hint: string; value: boolean; set: (v: boolean) => void }> =
@@ -690,10 +698,6 @@ function PolicySection({ policy, onSaved }: { policy: PolicyView; onSaved: () =>
         >
           Save
         </button>
-        {saved === false ? (
-          <span className="text-red-600 text-sm">not saved (owner only)</span>
-        ) : null}
-        {saved === true ? <span className="text-muted-foreground text-sm">saved</span> : null}
       </div>
     </section>
   );
