@@ -3,6 +3,7 @@ import { z } from "zod";
 import { type ClassifyOptions, classifyUsage } from "./classify";
 import { isRedundantPrefix } from "./redundancy";
 import { isNeverDrop } from "./safety";
+import { dropScore } from "./score";
 import type { IndexSpec, UsageSnapshot } from "./types";
 
 const directionSchema = z.union([
@@ -39,6 +40,7 @@ export interface RecommendationCandidate {
   readonly indexName: string;
   readonly usageClass: UsageClass | null;
   readonly rationale: string;
+  readonly score: number;
   readonly estimatedBytesSaved: number;
 }
 
@@ -48,6 +50,8 @@ export function recommendForCollection(
   indexes: readonly IndexInput[],
   sizes: Readonly<Record<string, number>>,
   options: ClassifyOptions,
+  // Past regression count per index name (cooldown history) — cuts confidence.
+  pastRegressions: Readonly<Record<string, number>> = {},
 ): RecommendationCandidate[] {
   const candidates: RecommendationCandidate[] = [];
   const eligible = indexes.filter((index) => !isNeverDrop(index.spec));
@@ -62,6 +66,13 @@ export function recommendForCollection(
         indexName: candidate.spec.name,
         usageClass: null,
         rationale: `Key-prefix of ${covering.spec.name}, which already covers it.`,
+        score: dropScore({
+          usageClass: null,
+          snapshots: candidate.history.length,
+          redundant: true,
+          sizeBytes: sizes[candidate.spec.name] ?? 0,
+          pastRegressions: pastRegressions[candidate.spec.name] ?? 0,
+        }),
         estimatedBytesSaved: sizes[candidate.spec.name] ?? 0,
       });
     }
@@ -79,6 +90,13 @@ export function recommendForCollection(
         usageClass === "PERIODIC_DEAD"
           ? "Was periodic, then went quiet — the workload using it appears retired."
           : "No recorded usage across the observation window.",
+      score: dropScore({
+        usageClass,
+        snapshots: index.history.length,
+        redundant: false,
+        sizeBytes: sizes[index.spec.name] ?? 0,
+        pastRegressions: pastRegressions[index.spec.name] ?? 0,
+      }),
       estimatedBytesSaved: sizes[index.spec.name] ?? 0,
     });
   }
@@ -96,6 +114,13 @@ export function recommendForCollection(
       usageClass,
       rationale:
         "Protected index (unique/TTL/shard/partial/sparse) with no recorded usage — never auto-dropped; review manually.",
+      score: dropScore({
+        usageClass,
+        snapshots: index.history.length,
+        redundant: false,
+        sizeBytes: sizes[index.spec.name] ?? 0,
+        pastRegressions: pastRegressions[index.spec.name] ?? 0,
+      }),
       estimatedBytesSaved: sizes[index.spec.name] ?? 0,
     });
   }

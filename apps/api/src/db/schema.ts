@@ -191,6 +191,8 @@ export const recommendations = pgTable(
     collection: text("collection").notNull(),
     indexName: text("index_name").notNull(),
     rationale: text("rationale").notNull(),
+    // Confidence 0-100 — gates propose/auto-approve, never the safety stages.
+    score: integer("score").notNull().default(0),
     estimatedBytesSaved: bigint("estimated_bytes_saved", { mode: "number" }).notNull().default(0),
     hiddenAt: timestamp("hidden_at", { withTimezone: true }),
     baselineReadOps: bigint("baseline_read_ops", { mode: "number" }),
@@ -247,6 +249,8 @@ export const policies = pgTable("policies", {
   instantCreate: boolean("instant_create").notNull().default(false),
   observeWindowDays: integer("observe_window_days").notNull().default(30),
   maxCollectionSizeBytes: bigint("max_collection_size_bytes", { mode: "number" }),
+  // Recommendations scoring >= this auto-approve (null = only manual/autoApply).
+  autoApplyScore: integer("auto_apply_score"),
 });
 
 // Regression memory: an index whose drop slowed reads during observe is parked

@@ -50,6 +50,8 @@ export const recommendation = z.object({
   collection: z.string(),
   indexName: z.string(),
   rationale: z.string(),
+  // Confidence 0-100 — gates propose/auto-approve, never the safety stages.
+  score: z.number().int().min(0).max(100),
   estimatedBytesSaved: z.number().int().nonnegative(),
   createdAt: z.string(),
 });
@@ -126,6 +128,8 @@ export const clusterPolicy = z.object({
   instantCreate: z.boolean(),
   observeWindowDays: z.number().int().min(1).max(365),
   maxCollectionSizeBytes: z.number().int().positive().nullable(),
+  // Score threshold for auto-approval (null = never auto-approve by score).
+  autoApplyScore: z.number().int().min(0).max(100).nullable(),
 });
 export type ClusterPolicy = z.infer<typeof clusterPolicy>;
 

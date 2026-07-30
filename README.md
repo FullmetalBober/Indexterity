@@ -121,12 +121,21 @@ but never writes to your cluster.
 | `workloadAnalysis` | enable the create/merge/update engine | off |
 | `instantCreate` | auto-build critical missing indexes | off |
 | `observeWindowDays` | how long a hidden index bakes before drop | 30 |
-| `maxCollectionSizeBytes` | size ceiling for touching a collection | — |
+| `maxCollectionSizeBytes` | size ceiling for building new indexes | — |
+| `autoApplyScore` | auto-approve recommendations scoring ≥ this (0-100) | off |
 
 Knobs are edited from the dashboard's **Policy** section (`GET/PUT
 /clusters/:id/policy`, owner-only writes). With `autoApply`, proposed
 recommendations are promoted automatically — the hide → observe → finalize
 gates still stand between them and any drop.
+
+**Confidence scores.** Every recommendation carries a 0-100 score: drops earn
+points from dead usage, redundancy, history depth and reclaimable size; creates
+from scan frequency and collection size; past regressions on the same index cut
+the score hard. The score gates *entry* (what gets proposed, what auto-approves
+via `autoApplyScore`) — never the safety stages: an auto-approved drop still
+goes hide → observe → regression/pre-flight before anything is deleted, and
+advisories never auto-approve.
 
 ## Connecting a customer cluster
 
@@ -267,11 +276,9 @@ Engine depth, roughly in order:
 7. **Partial/TTL suggestions** — profiler samples carry real filter values;
    always-`status:"active"` queries justify a partial index, monotonic date
    ranges a TTL review.
-8. **Sort-direction-aware ESR** — compound keys are all-ascending today; mixed
-   `sort {a: 1, b: -1}` needs matching index directions.
-9. **Atlas onboarding** — create the index-only user via the Atlas Admin API
+8. **Atlas onboarding** — create the index-only user via the Atlas Admin API
    instead of asking customers to paste `createRole` snippets.
-10. **Read-only digest** — a weekly "here's what we *would* have done" email
+9. **Read-only digest** — a weekly "here's what we *would* have done" email
     for clusters still in read-only mode; the go-live conversion driver.
 
 ## Notes

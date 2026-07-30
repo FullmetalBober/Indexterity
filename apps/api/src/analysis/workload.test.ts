@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { IndexSpec } from "./types";
-import { esrFields, type QueryShape, recommendCreates } from "./workload";
+import { esrKeys, type QueryShape, recommendCreates, type SortKey } from "./workload";
 
-function shape(equality: string[], sort: string[], range: string[], count = 1): QueryShape {
+function shape(equality: string[], sort: SortKey[], range: string[], count = 1): QueryShape {
   return { equality, sort, range, collscan: true, count };
 }
 
@@ -20,25 +20,36 @@ function idx(name: string, fields: string[]): IndexSpec {
 }
 
 const options = { minCount: 1 };
+const atDesc: SortKey = { field: "at", direction: -1 };
+const bAsc: SortKey = { field: "b", direction: 1 };
 
-describe("esrFields", () => {
-  it("orders equality → sort → range and dedupes", () => {
-    expect(esrFields(shape(["a"], ["b"], ["a", "c"]))).toEqual(["a", "b", "c"]);
+describe("esrKeys", () => {
+  it("orders equality → sort → range, dedupes, keeps sort directions", () => {
+    expect(esrKeys(shape(["a"], [atDesc], ["a", "c"]))).toEqual([
+      { field: "a", direction: 1 },
+      { field: "at", direction: -1 },
+      { field: "c", direction: 1 },
+    ]);
   });
 });
 
 describe("recommendCreates (ESR)", () => {
-  it("CREATE with ESR-ordered keys", () => {
-    const out = recommendCreates([shape(["a"], ["b"], ["c"])], [], options);
+  it("CREATE with ESR-ordered directed keys", () => {
+    const out = recommendCreates([shape(["a"], [atDesc], ["c"])], [], options);
     expect(out[0]?.type).toBe("CREATE");
-    expect(out[0]?.keys).toEqual(["a", "b", "c"]);
+    expect(out[0]?.keys).toEqual([
+      { field: "a", direction: 1 },
+      { field: "at", direction: -1 },
+      { field: "c", direction: 1 },
+    ]);
+    expect(out[0]?.count).toBe(1);
   });
 
   it("UPDATE extends an existing prefix index", () => {
     const out = recommendCreates([shape(["a"], [], ["b"])], [idx("a_1", ["a"])], options);
     expect(out[0]?.type).toBe("UPDATE");
     expect(out[0]?.retireIndexes).toEqual(["a_1"]);
-    expect(out[0]?.keys).toEqual(["a", "b"]);
+    expect(out[0]?.keys.map((key) => key.field)).toEqual(["a", "b"]);
   });
 
   it("MERGE replaces single-field indexes when none is a usable prefix", () => {
@@ -51,8 +62,8 @@ describe("recommendCreates (ESR)", () => {
     expect([...(out[0]?.retireIndexes ?? [])].sort()).toEqual(["b_1", "c_1"]);
   });
 
-  it("skips a shape already served by an equal index", () => {
-    const out = recommendCreates([shape(["a", "b"], [], [])], [idx("ab", ["a", "b"])], options);
+  it("skips a shape already served by an equal index (field-name match)", () => {
+    const out = recommendCreates([shape(["a"], [bAsc], [])], [idx("ab", ["a", "b"])], options);
     expect(out).toHaveLength(0);
   });
 

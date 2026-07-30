@@ -2,13 +2,17 @@ import { describe, expect, it } from "vitest";
 import { pipelineShape } from "./collector";
 
 describe("pipelineShape", () => {
-  it("extracts equality/range/sort from leading $match + $sort", () => {
+  it("extracts equality/range/directed sort from leading $match + $sort", () => {
     const shape = pipelineShape([
       { $match: { status: { $eq: "?string" }, qty: { $gt: "?number" } } },
-      { $sort: { createdAt: 1 } },
+      { $sort: { createdAt: -1 } },
       { $group: { _id: "$status" } },
     ]);
-    expect(shape).toEqual({ equality: ["status"], sort: ["createdAt"], range: ["qty"] });
+    expect(shape).toEqual({
+      equality: ["status"],
+      sort: [{ field: "createdAt", direction: -1 }],
+      range: ["qty"],
+    });
   });
 
   it("stops at the first blocking stage", () => {

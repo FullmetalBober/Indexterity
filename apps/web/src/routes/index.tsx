@@ -144,6 +144,7 @@ interface PolicyInput {
   readonly workloadAnalysis: boolean;
   readonly instantCreate: boolean;
   readonly observeWindowDays: number;
+  readonly autoApplyScore: number | null;
 }
 
 const savePolicy = createServerFn({ method: "POST" })
@@ -160,7 +161,9 @@ const savePolicy = createServerFn({ method: "POST" })
       "instantCreate" in data &&
       typeof data.instantCreate === "boolean" &&
       "observeWindowDays" in data &&
-      typeof data.observeWindowDays === "number"
+      typeof data.observeWindowDays === "number" &&
+      "autoApplyScore" in data &&
+      (data.autoApplyScore === null || typeof data.autoApplyScore === "number")
     ) {
       return {
         clusterId: data.clusterId,
@@ -168,6 +171,7 @@ const savePolicy = createServerFn({ method: "POST" })
         workloadAnalysis: data.workloadAnalysis,
         instantCreate: data.instantCreate,
         observeWindowDays: data.observeWindowDays,
+        autoApplyScore: data.autoApplyScore,
       };
     }
     throw new Error("invalid policy");
@@ -181,6 +185,7 @@ const savePolicy = createServerFn({ method: "POST" })
         instantCreate: data.instantCreate,
         observeWindowDays: data.observeWindowDays,
         maxCollectionSizeBytes: null,
+        autoApplyScore: data.autoApplyScore,
       },
     });
     return { ok: result.status === 200 };
@@ -344,6 +349,7 @@ function Home() {
             <TableHead>Type</TableHead>
             <TableHead>Collection</TableHead>
             <TableHead>Index</TableHead>
+            <TableHead>Score</TableHead>
             <TableHead>Usage</TableHead>
             <TableHead>Rationale</TableHead>
             <TableHead>Action</TableHead>
@@ -359,6 +365,7 @@ function Home() {
                 {rec.database}.{rec.collection}
               </TableCell>
               <TableCell className="font-mono text-xs">{rec.indexName}</TableCell>
+              <TableCell className="text-xs">{rec.score}</TableCell>
               <TableCell>{rec.usageClass ?? "—"}</TableCell>
               <TableCell className="text-muted-foreground">{rec.rationale}</TableCell>
               <TableCell>
@@ -558,6 +565,7 @@ interface PolicyView {
   readonly workloadAnalysis: boolean;
   readonly instantCreate: boolean;
   readonly observeWindowDays: number;
+  readonly autoApplyScore: number | null;
 }
 
 // The engine knobs, owner-editable. Checkbox changes stage locally; Save PUTs.
@@ -566,6 +574,7 @@ function PolicySection({ policy, onSaved }: { policy: PolicyView; onSaved: () =>
   const [workloadAnalysis, setWorkloadAnalysis] = useState(policy.workloadAnalysis);
   const [instantCreate, setInstantCreate] = useState(policy.instantCreate);
   const [observeDays, setObserveDays] = useState(policy.observeWindowDays);
+  const [autoScore, setAutoScore] = useState(policy.autoApplyScore);
   const [saved, setSaved] = useState<boolean | null>(null);
 
   async function onSave() {
@@ -576,6 +585,7 @@ function PolicySection({ policy, onSaved }: { policy: PolicyView; onSaved: () =>
         workloadAnalysis,
         instantCreate,
         observeWindowDays: observeDays,
+        autoApplyScore: autoScore,
       },
     });
     setSaved(result.ok);
@@ -633,6 +643,23 @@ function PolicySection({ policy, onSaved }: { policy: PolicyView; onSaved: () =>
             className="w-16 rounded-md border px-2 py-1 text-sm"
           />
           days
+        </label>
+        <label
+          className="flex items-center gap-1.5 text-sm"
+          title="Recommendations scoring at or above this auto-approve (drops still observe first). Empty = manual only."
+        >
+          Auto-approve ≥
+          <input
+            type="number"
+            min={0}
+            max={100}
+            placeholder="off"
+            value={autoScore ?? ""}
+            onChange={(event) =>
+              setAutoScore(event.target.value === "" ? null : Number(event.target.value))
+            }
+            className="w-16 rounded-md border px-2 py-1 text-sm"
+          />
         </label>
         <button
           type="button"

@@ -31,8 +31,13 @@ export async function applyCreatesForCluster(clusterId: string): Promise<number>
     for (const rec of approved) {
       const target = rec.targetSpec;
       if (target === null || target.keys.length === 0) continue;
+      // targetSpec keys encode direction as a ":-1" suffix ("at:-1"); plain
+      // entries are ascending. Older rows are plain-ascending and still parse.
       const keys: Record<string, 1 | -1> = {};
-      for (const field of target.keys) keys[field] = 1;
+      for (const entry of target.keys) {
+        if (entry.endsWith(":-1")) keys[entry.slice(0, -3)] = -1;
+        else keys[entry] = 1;
+      }
       await executor.create(rec.database, rec.collection, keys, { name: rec.indexName });
       // Write-latency baseline at build time — the reference for the post-build watch.
       const { writes } = await collector.collectionLatency(rec.database, rec.collection);

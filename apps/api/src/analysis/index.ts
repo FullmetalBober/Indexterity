@@ -6,5 +6,6 @@ export * from "./redundancy";
 export * from "./regression";
 export * from "./rollback";
 export * from "./safety";
+export * from "./score";
 export * from "./types";
 export * from "./workload";

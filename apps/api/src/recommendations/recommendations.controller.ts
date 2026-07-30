@@ -58,6 +58,7 @@ function toRecommendation(row: typeof recommendations.$inferSelect): Recommendat
     collection: row.collection,
     indexName: row.indexName,
     rationale: row.rationale,
+    score: row.score,
     estimatedBytesSaved: row.estimatedBytesSaved,
     createdAt: row.createdAt.toISOString(),
   };
@@ -317,6 +318,7 @@ export class RecommendationsController {
           instantCreate: row?.instantCreate ?? false,
           observeWindowDays: row?.observeWindowDays ?? 30,
           maxCollectionSizeBytes: row?.maxCollectionSizeBytes ?? null,
+          autoApplyScore: row?.autoApplyScore ?? null,
         },
       };
     });

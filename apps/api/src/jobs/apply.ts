@@ -1,4 +1,4 @@
-import { actions, and, eq, policies, recommendations } from "../db";
+import { actions, and, eq, gte, ne, policies, recommendations } from "../db";
 import { MongoIndexCollector, MongoIndexExecutor, serializeSpec } from "../mongo";
 import { openClusterMongo } from "./cluster-connection";
 import { jobDb } from "./db";
@@ -23,6 +23,20 @@ export async function applyCluster(clusterId: string): Promise<number> {
       .update(recommendations)
       .set({ state: "APPROVED", updatedAt: new Date() })
       .where(and(eq(recommendations.clusterId, clusterId), eq(recommendations.state, "PROPOSED")));
+  } else if (policy?.autoApplyScore !== null && policy?.autoApplyScore !== undefined) {
+    // Score-gated auto-approval: confident recommendations enter the pipeline on
+    // their own; advisories never do. The observe/regression gates still apply.
+    await db
+      .update(recommendations)
+      .set({ state: "APPROVED", updatedAt: new Date() })
+      .where(
+        and(
+          eq(recommendations.clusterId, clusterId),
+          eq(recommendations.state, "PROPOSED"),
+          gte(recommendations.score, policy.autoApplyScore),
+          ne(recommendations.type, "ADVISORY_REVIEW"),
+        ),
+      );
   }
   const approved = await db
     .select()

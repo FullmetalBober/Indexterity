@@ -1,6 +1,19 @@
 import { z } from "zod";
-import type { IndexDirection, IndexKey, IndexSpec, QueryShape } from "../analysis";
+import type { IndexDirection, IndexKey, IndexSpec, QueryShape, SortKey } from "../analysis";
 import type { MongoConnection } from "./connection";
+
+// Normalize a sort spec's values into directed keys (anything odd → ascending).
+function sortKeysOf(sortSpec: Record<string, unknown>): SortKey[] {
+  return Object.entries(sortSpec).map(([field, value]) => ({
+    field,
+    direction: value === -1 ? -1 : 1,
+  }));
+}
+
+function shapeMapKey(equality: string[], sort: SortKey[], range: string[]): string {
+  const sortPart = sort.map((key) => `${key.field}:${key.direction}`).join(",");
+  return `${equality.join(",")}|${sortPart}|${range.join(",")}`;
+}
 
 // One index's usage on one replica-set member ($indexStats is per-member; on a
 // sharded cluster mongos merges every shard's members, tagged by host).
@@ -152,7 +165,7 @@ function collectPredicates(
 
 export interface PipelineShape {
   readonly equality: string[];
-  readonly sort: string[];
+  readonly sort: SortKey[];
   readonly range: string[];
 }
 
@@ -162,7 +175,7 @@ export interface PipelineShape {
 export function pipelineShape(pipeline: readonly Record<string, unknown>[]): PipelineShape | null {
   const equality: string[] = [];
   const range: string[] = [];
-  const sort: string[] = [];
+  const sort: SortKey[] = [];
   for (const stage of pipeline) {
     const match = stage.$match;
     if (isRecord(match)) {
@@ -171,7 +184,7 @@ export function pipelineShape(pipeline: readonly Record<string, unknown>[]): Pip
     }
     const sortStage = stage.$sort;
     if (isRecord(sortStage)) {
-      sort.push(...Object.keys(sortStage));
+      sort.push(...sortKeysOf(sortStage));
       continue;
     }
     break; // first non-$match/$sort stage ends index applicability
@@ -334,16 +347,16 @@ export class MongoIndexCollector implements IndexCollector {
     const raw = await this.conn.db(database).collection("system.profile").find({ ns }).toArray();
     const shapes = new Map<
       string,
-      { equality: string[]; sort: string[]; range: string[]; collscan: boolean; count: number }
+      { equality: string[]; sort: SortKey[]; range: string[]; collscan: boolean; count: number }
     >();
     for (const entry of profileDoc.array().parse(raw)) {
       let equality: string[] = [];
       let range: string[] = [];
-      let sort: string[] = [];
+      let sort: SortKey[] = [];
       const filter = entry.command?.filter;
       if (filter !== undefined) {
         collectPredicates(filter, equality, range);
-        sort = entry.command?.sort === undefined ? [] : Object.keys(entry.command.sort);
+        sort = entry.command?.sort === undefined ? [] : sortKeysOf(entry.command.sort);
       } else if (entry.command?.pipeline !== undefined) {
         const shape = pipelineShape(entry.command.pipeline);
         if (shape === null) continue;
@@ -352,7 +365,7 @@ export class MongoIndexCollector implements IndexCollector {
         continue;
       }
       if (equality.length === 0 && range.length === 0 && sort.length === 0) continue;
-      const key = `${equality.join(",")}|${sort.join(",")}|${range.join(",")}`;
+      const key = shapeMapKey(equality, sort, range);
       const collscan = (entry.planSummary ?? "").includes("COLLSCAN");
       const prev = shapes.get(key);
       if (prev === undefined) {
@@ -381,7 +394,7 @@ export class MongoIndexCollector implements IndexCollector {
       .toArray();
     const shapes = new Map<
       string,
-      { equality: string[]; sort: string[]; range: string[]; collscan: boolean; count: number }
+      { equality: string[]; sort: SortKey[]; range: string[]; collscan: boolean; count: number }
     >();
     for (const doc of raw) {
       const parsed = queryStatsDoc.safeParse(doc);
@@ -392,11 +405,11 @@ export class MongoIndexCollector implements IndexCollector {
       }
       let equality: string[] = [];
       let range: string[] = [];
-      let sort: string[] = [];
+      let sort: SortKey[] = [];
       const filter = key.queryShape.filter;
       if (filter !== undefined) {
         collectPredicates(filter, equality, range);
-        sort = key.queryShape.sort === undefined ? [] : Object.keys(key.queryShape.sort);
+        sort = key.queryShape.sort === undefined ? [] : sortKeysOf(key.queryShape.sort);
       } else if (key.queryShape.pipeline !== undefined) {
         const shape = pipelineShape(key.queryShape.pipeline);
         if (shape === null) continue;
@@ -407,7 +420,7 @@ export class MongoIndexCollector implements IndexCollector {
       if (equality.length === 0 && range.length === 0 && sort.length === 0) continue;
       const collscan =
         (metrics.keysExamined?.sum ?? 0) === 0 && (metrics.docsExamined?.sum ?? 0) > 0;
-      const mapKey = `${equality.join(",")}|${sort.join(",")}|${range.join(",")}`;
+      const mapKey = shapeMapKey(equality, sort, range);
       const prev = shapes.get(mapKey);
       if (prev === undefined) {
         shapes.set(mapKey, { equality, sort, range, collscan, count: metrics.execCount });
