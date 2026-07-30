@@ -32,7 +32,7 @@ export const connectionMode = z.enum(["HOSTED_DIRECT", "AGENT"]);
 export type ConnectionMode = z.infer<typeof connectionMode>;
 
 export const cluster = z.object({
-  id: z.string().uuid(),
+  id: z.uuid(),
   name: z.string(),
   connectionMode,
   readOnly: z.boolean(),
@@ -41,8 +41,8 @@ export const cluster = z.object({
 export type Cluster = z.infer<typeof cluster>;
 
 export const recommendation = z.object({
-  id: z.string().uuid(),
-  clusterId: z.string().uuid(),
+  id: z.uuid(),
+  clusterId: z.uuid(),
   type: recommendationType,
   usageClass: usageClass.nullable(),
   state: recommendationState,
@@ -58,7 +58,7 @@ export const recommendation = z.object({
 export type Recommendation = z.infer<typeof recommendation>;
 
 export const clusterRoi = z.object({
-  clusterId: z.string().uuid(),
+  clusterId: z.uuid(),
   freedBytes: z.number().int().nonnegative(),
   indexesDropped: z.number().int().nonnegative(),
   estimatedMonthlyUsd: z.number().nonnegative(),
@@ -81,7 +81,7 @@ export const latencySummary = z.object({
 export type LatencySummary = z.infer<typeof latencySummary>;
 
 export const clusterLatency = z.object({
-  clusterId: z.string().uuid(),
+  clusterId: z.uuid(),
   collections: z.array(latencySummary),
 });
 export type ClusterLatency = z.infer<typeof clusterLatency>;
@@ -102,14 +102,14 @@ export const collectionLatencySeries = z.object({
 export type CollectionLatencySeries = z.infer<typeof collectionLatencySeries>;
 
 export const clusterLatencySeries = z.object({
-  clusterId: z.string().uuid(),
+  clusterId: z.uuid(),
   collections: z.array(collectionLatencySeries),
 });
 export type ClusterLatencySeries = z.infer<typeof clusterLatencySeries>;
 
 // One executed operation from the immutable audit trail.
 export const auditAction = z.object({
-  id: z.string().uuid(),
+  id: z.uuid(),
   kind: z.string(),
   actor: z.string(),
   result: z.string(),
@@ -122,7 +122,7 @@ export type AuditAction = z.infer<typeof auditAction>;
 
 // Per-cluster engine knobs. maxCollectionSizeBytes null = no ceiling.
 export const clusterPolicy = z.object({
-  clusterId: z.string().uuid(),
+  clusterId: z.uuid(),
   autoApply: z.boolean(),
   workloadAnalysis: z.boolean(),
   instantCreate: z.boolean(),
@@ -142,7 +142,7 @@ export const orgMember = z.object({
 export type OrgMember = z.infer<typeof orgMember>;
 
 export const orgInfo = z.object({
-  id: z.string().uuid(),
+  id: z.uuid(),
   name: z.string(),
   members: z.array(orgMember),
   pendingInvites: z.array(z.object({ email: z.string(), role: z.string(), expiresAt: z.string() })),

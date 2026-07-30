@@ -200,7 +200,7 @@ daily retention job prunes latency samples + index snapshots past
 ## Stack
 
 Turbo monorepo · NestJS + Fastify (api) · TanStack Start + shadcn (web) ·
-better-auth · Drizzle + PostgreSQL · ts-rest contracts · graphile-worker ·
+better-auth · Drizzle + PostgreSQL · oRPC contracts (zod 4) · graphile-worker ·
 Biome · strict TypeScript (no `any`, no `as`, no lint-ignore).
 
 ## Layout
@@ -218,7 +218,7 @@ apps/api                control plane — NestJS + Fastify
   src/recommendations   ts-rest handlers · src/health health check
 apps/web                dashboard — TanStack Start + shadcn
 
-packages/contracts      ts-rest + zod contracts shared by api and web (the one shared type boundary)
+packages/contracts      oRPC + zod 4 contracts shared by api and web (the one shared type boundary)
 packages/config         shared tsconfig
 ```
 
@@ -300,8 +300,8 @@ Engine depth, roughly in order:
 ## Notes
 
 The repo uses **npm workspaces**.
-- **zod is pinned to v3** — `@ts-rest/*` peers require `^3.22.3`. Revisit when
-  ts-rest ships zod 4 support.
+- Contracts run on **oRPC + zod 4** (migrated from ts-rest/zod 3 — paths were
+  kept stable, so external callers and the integration suite were unaffected).
 - **Docker** resolves to **podman** + `podman-compose` on this machine; the
   compose file is standard and works with either.
 </content>

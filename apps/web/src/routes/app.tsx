@@ -1,3 +1,4 @@
+import { ORPCError } from "@orpc/client";
 import { createFileRoute, useNavigate, useRouter } from "@tanstack/react-router";
 import { createServerFn } from "@tanstack/react-start";
 import { useState } from "react";
@@ -15,25 +16,27 @@ import { useToast } from "../components/ui/toast";
 import { serverApi } from "../lib/api";
 import { signIn, signOut, signUp } from "../lib/auth";
 
-// Runs on the web server for every navigation; forwards the session cookie to the
-// api. A 401 means "not signed in" — the component shows the auth form instead.
+// Runs on the web server for every navigation; forwards the session cookie to
+// the api. oRPC calls return data directly and throw ORPCError on failure.
 const EMPTY_ORG = { id: "", name: "", members: [], pendingInvites: [] };
+
+function isStatus(error: unknown, status: number): boolean {
+  return error instanceof ORPCError && error.status === status;
+}
 
 const loadDashboard = createServerFn({ method: "GET" })
   .validator((selected: unknown): string | null => (typeof selected === "string" ? selected : null))
   .handler(async ({ data: selected }) => {
     const api = serverApi();
-    let clustersResult: Awaited<ReturnType<typeof api.listClusters>>;
-    let orgResult: Awaited<ReturnType<typeof api.getOrg>>;
+    let clusters: Awaited<ReturnType<typeof api.listClusters>>;
+    let org: Awaited<ReturnType<typeof api.getOrg>>;
     try {
-      [clustersResult, orgResult] = await Promise.all([api.listClusters(), api.getOrg()]);
-    } catch {
+      [clusters, org] = await Promise.all([api.listClusters(), api.getOrg()]);
+    } catch (error) {
+      if (isStatus(error, 401)) return { authed: false as const, apiDown: false as const };
       // The api is unreachable — render a friendly state instead of a 500.
       return { authed: false as const, apiDown: true as const };
     }
-    if (clustersResult.status === 401) return { authed: false as const, apiDown: false as const };
-    const org = orgResult.status === 200 ? orgResult.body : EMPTY_ORG;
-    const clusters = clustersResult.status === 200 ? clustersResult.body : [];
     const cluster = clusters.find((c) => c.id === selected) ?? clusters[0] ?? null;
     if (cluster === null) {
       return {
@@ -46,44 +49,35 @@ const loadDashboard = createServerFn({ method: "GET" })
         latencySeries: { collections: [] },
         policy: null,
         activity: [],
-        org,
+        org: org ?? EMPTY_ORG,
       };
     }
-    let recResult: Awaited<ReturnType<typeof api.listRecommendations>>;
-    let roiResult: Awaited<ReturnType<typeof api.getRoi>>;
-    let latencyResult: Awaited<ReturnType<typeof api.getLatency>>;
-    let seriesResult: Awaited<ReturnType<typeof api.getLatencySeries>>;
-    let policyResult: Awaited<ReturnType<typeof api.getPolicy>>;
-    let actionsResult: Awaited<ReturnType<typeof api.listActions>>;
     try {
-      [recResult, roiResult, latencyResult, seriesResult, policyResult, actionsResult] =
-        await Promise.all([
-          api.listRecommendations({ params: { clusterId: cluster.id } }),
-          api.getRoi({ params: { clusterId: cluster.id } }),
-          api.getLatency({ params: { clusterId: cluster.id } }),
-          api.getLatencySeries({ params: { clusterId: cluster.id } }),
-          api.getPolicy({ params: { clusterId: cluster.id } }),
-          api.listActions({ params: { clusterId: cluster.id } }),
-        ]);
-    } catch {
+      const [recommendations, roi, latency, latencySeries, policy, activity] = await Promise.all([
+        api.listRecommendations({ clusterId: cluster.id }),
+        api.getRoi({ clusterId: cluster.id }),
+        api.getLatency({ clusterId: cluster.id }),
+        api.getLatencySeries({ clusterId: cluster.id }),
+        api.getPolicy({ clusterId: cluster.id }),
+        api.listActions({ clusterId: cluster.id }),
+      ]);
+      return {
+        authed: true as const,
+        clusters,
+        cluster,
+        recommendations,
+        roi,
+        latency,
+        latencySeries,
+        policy,
+        activity,
+        org,
+      };
+    } catch (error) {
+      if (isStatus(error, 401)) return { authed: false as const, apiDown: false as const };
       // The api died between the two batches — same friendly state, no 500.
       return { authed: false as const, apiDown: true as const };
     }
-    return {
-      authed: true as const,
-      clusters,
-      cluster,
-      recommendations: recResult.status === 200 ? recResult.body : [],
-      roi:
-        roiResult.status === 200
-          ? roiResult.body
-          : { freedBytes: 0, indexesDropped: 0, estimatedMonthlyUsd: 0 },
-      latency: latencyResult.status === 200 ? latencyResult.body : { collections: [] },
-      latencySeries: seriesResult.status === 200 ? seriesResult.body : { collections: [] },
-      policy: policyResult.status === 200 ? policyResult.body : null,
-      activity: actionsResult.status === 200 ? actionsResult.body : [],
-      org,
-    };
   });
 
 const approveRecommendation = createServerFn({ method: "POST" })
@@ -92,8 +86,12 @@ const approveRecommendation = createServerFn({ method: "POST" })
     return id;
   })
   .handler(async ({ data }) => {
-    const result = await serverApi().approveRecommendation({ params: { id: data }, body: {} });
-    return { ok: result.status === 200 };
+    try {
+      await serverApi().approveRecommendation({ id: data });
+      return { ok: true };
+    } catch {
+      return { ok: false };
+    }
   });
 
 const rollbackRecommendation = createServerFn({ method: "POST" })
@@ -102,8 +100,12 @@ const rollbackRecommendation = createServerFn({ method: "POST" })
     return id;
   })
   .handler(async ({ data }) => {
-    const result = await serverApi().rollbackRecommendation({ params: { id: data }, body: {} });
-    return { ok: result.status === 200 };
+    try {
+      await serverApi().rollbackRecommendation({ id: data });
+      return { ok: true };
+    } catch {
+      return { ok: false };
+    }
   });
 
 const createInvite = createServerFn({ method: "POST" })
@@ -112,9 +114,12 @@ const createInvite = createServerFn({ method: "POST" })
     return email;
   })
   .handler(async ({ data }) => {
-    const result = await serverApi().createInvite({ body: { email: data, role: "member" } });
-    if (result.status !== 200) return { token: null };
-    return { token: result.body.token };
+    try {
+      const invite = await serverApi().createInvite({ email: data, role: "member" });
+      return { token: invite.token };
+    } catch {
+      return { token: null };
+    }
   });
 
 const acceptInvite = createServerFn({ method: "POST" })
@@ -123,10 +128,13 @@ const acceptInvite = createServerFn({ method: "POST" })
     return token;
   })
   .handler(async ({ data }) => {
-    const result = await serverApi().acceptInvite({ body: { token: data } });
-    if (result.status === 200) return { ok: true, message: `joined ${result.body.orgName}` };
-    const message = result.status === 404 || result.status === 409 ? result.body.message : "failed";
-    return { ok: false, message };
+    try {
+      const joined = await serverApi().acceptInvite({ token: data });
+      return { ok: true, message: `joined ${joined.orgName}` };
+    } catch (error) {
+      const message = error instanceof ORPCError ? error.message : "failed";
+      return { ok: false, message };
+    }
   });
 
 const connectCluster = createServerFn({ method: "POST" })
@@ -144,10 +152,16 @@ const connectCluster = createServerFn({ method: "POST" })
     throw new Error("invalid cluster");
   })
   .handler(async ({ data }) => {
-    const result = await serverApi().createCluster({ body: data });
-    if (result.status === 200) return { ok: true, message: null, id: result.body.id };
-    const message = result.status === 400 ? result.body.message : "failed to connect cluster";
-    return { ok: false, message, id: null };
+    try {
+      const created = await serverApi().createCluster(data);
+      return { ok: true, message: null, id: created.id };
+    } catch (error) {
+      const message =
+        error instanceof ORPCError && error.status === 400
+          ? error.message
+          : "failed to connect cluster";
+      return { ok: false, message, id: null };
+    }
   });
 
 interface PolicyInput {
@@ -189,18 +203,20 @@ const savePolicy = createServerFn({ method: "POST" })
     throw new Error("invalid policy");
   })
   .handler(async ({ data }) => {
-    const result = await serverApi().updatePolicy({
-      params: { clusterId: data.clusterId },
-      body: {
+    try {
+      await serverApi().updatePolicy({
+        clusterId: data.clusterId,
         autoApply: data.autoApply,
         workloadAnalysis: data.workloadAnalysis,
         instantCreate: data.instantCreate,
         observeWindowDays: data.observeWindowDays,
         maxCollectionSizeBytes: null,
         autoApplyScore: data.autoApplyScore,
-      },
-    });
-    return { ok: result.status === 200 };
+      });
+      return { ok: true };
+    } catch {
+      return { ok: false };
+    }
   });
 
 const setClusterMode = createServerFn({ method: "POST" })
@@ -218,11 +234,12 @@ const setClusterMode = createServerFn({ method: "POST" })
     throw new Error("invalid mode change");
   })
   .handler(async ({ data }) => {
-    const result = await serverApi().setClusterMode({
-      params: { clusterId: data.clusterId },
-      body: { readOnly: data.readOnly },
-    });
-    return { ok: result.status === 200 };
+    try {
+      await serverApi().setClusterMode({ clusterId: data.clusterId, readOnly: data.readOnly });
+      return { ok: true };
+    } catch {
+      return { ok: false };
+    }
   });
 
 export const Route = createFileRoute("/app")({

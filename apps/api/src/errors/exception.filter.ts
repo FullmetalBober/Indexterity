@@ -1,22 +1,10 @@
 import { type ArgumentsHost, Catch, type ExceptionFilter, HttpException } from "@nestjs/common";
-import { RequestValidationError } from "@ts-rest/nest";
 import type { FastifyReply, FastifyRequest } from "fastify";
-import type { ZodError } from "zod";
 
-// One place for everything thrown: compact contract-validation 400s (instead of
-// raw zod issue dumps), 502 for unreachable customer clusters, 404 for missing
-// ones, and logged 500s with a request id — never a bare stack trace response.
-
-function firstIssue(...errors: Array<ZodError | null>): string {
-  for (const error of errors) {
-    const issue = error?.issues[0];
-    if (issue !== undefined) {
-      const path = issue.path.join(".");
-      return path === "" ? issue.message : `${path}: ${issue.message}`;
-    }
-  }
-  return "invalid request";
-}
+// Catches everything thrown OUTSIDE the oRPC pipeline (the better-auth mount,
+// Nest-level failures): 502 for unreachable customer clusters, 404 for missing
+// ones, logged 500s with a request id — never a bare stack trace response.
+// Handler-level errors are oRPC's job (see mapClusterError in the controller).
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -32,18 +20,6 @@ export class AppExceptionFilter implements ExceptionFilter {
     const reply = ctx.getResponse<FastifyReply>();
     const request = ctx.getRequest<FastifyRequest>();
 
-    if (exception instanceof RequestValidationError) {
-      void reply.status(400).send({
-        message: firstIssue(
-          exception.pathParams,
-          exception.body,
-          exception.query,
-          exception.headers,
-        ),
-      });
-      return;
-    }
-
     if (exception instanceof HttpException) {
       const response = exception.getResponse();
       const message =
@@ -57,6 +33,15 @@ export class AppExceptionFilter implements ExceptionFilter {
     }
 
     const error = exception instanceof Error ? exception : new Error(String(exception));
+    // Fastify-flavored errors (rate limit's 429, payload-too-large, …) carry a
+    // statusCode — honor it instead of flattening them into 500s.
+    if ("statusCode" in error && typeof error.statusCode === "number") {
+      const statusCode = error.statusCode;
+      if (statusCode >= 400 && statusCode < 600) {
+        void reply.status(statusCode).send({ message: error.message });
+        return;
+      }
+    }
     if (UNREACHABLE_NAME.test(error.name) || UNREACHABLE_MESSAGE.test(error.message)) {
       request.log.error({ err: error }, "cluster unreachable");
       void reply.status(502).send({

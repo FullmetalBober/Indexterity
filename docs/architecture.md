@@ -62,8 +62,8 @@ Do **not** compete on auto-create on Atlas. Compete on safe cleanup everywhere.
 | App database | **PostgreSQL** | control-plane state (not the managed DBs) |
 | Monorepo | **Turbo** | build/task orchestration |
 | Lint/format | **Biome** | one tool, strict |
-| API contracts | **ts-rest** | typed contracts shared api ↔ web ↔ agent |
-| Data fetching (web) | **TanStack Query** | pairs with TanStack Start + ts-rest client |
+| API contracts | **oRPC** (`@orpc/contract` + `@orpc/nest` + OpenAPILink client) | typed contracts shared api ↔ web ↔ agent, zod 4 |
+| Data fetching (web) | **TanStack Query** | pairs with TanStack Start + the oRPC client |
 | Job queue | **graphile-worker** | Postgres-backed jobs (no Redis) |
 | Crypto | **@noble/ciphers** | envelope encryption for secrets |
 | Container | **Docker** | separate api/web images, compose for dev |
@@ -126,7 +126,7 @@ packages/
   core/         PURE analysis + safety engine. No I/O. Heavily tested. ← the heart
   mongo/        driver wrapper: collect $indexStats, execute create/drop/hide
   db/           Drizzle schema + migrations (Postgres) + secret sealing
-  contracts/    ts-rest contracts + zod schemas (shared types api ↔ web ↔ agent)
+  contracts/    oRPC contracts + zod 4 schemas (shared types api ↔ web ↔ agent)
   auth/         better-auth config (GitHub + email/password)
   config/       shared tsconfig + Biome config
 ```
@@ -434,11 +434,11 @@ all queries are org-filtered. An immutable audit log records every state transit
 
 ## 11. API & contracts
 
-- **ts-rest** contracts live in `packages/contracts` and are shared by api, web, and
+- **oRPC** contracts live in `packages/contracts` and are shared by api, web, and
   agent — one source of truth for types, no codegen, no `any`. Zod schemas validate
   at the boundary.
-- **Dashboard API:** ts-rest over Fastify; consumed by the web app through the
-  ts-rest client + TanStack Query.
+- **Dashboard API:** oRPC (`@Implement` on Nest controllers) over Fastify;
+  consumed by the web app through the oRPC OpenAPILink client.
 - **Agent channel (phase 2):** authenticated, outbound-initiated. The agent posts
   snapshots over HTTPS and receives commands (create/drop/hide) via a long-lived
   channel (long-poll or websocket). Agent authenticates with a per-agent token; mTLS
@@ -508,12 +508,12 @@ Redis + BullMQ only if scale demands it.
 | D6 | Usage classified by time series (incl. `PERIODIC_DEAD`) | Distinguishes live periodic jobs from decommissioned ones — safer and faster | Locked |
 | D7 | "Instant apply" limited to creates, opt-in, size-gated | Auto-create is additive-ish; auto-drop never instant | Locked |
 | D8 | App-level envelope encryption via swappable `KeyProvider`, `@noble/ciphers` | Zero cost, no extra infra, no lock-in; KMS/Vault later without call-site changes | Locked |
-| D9 | ts-rest for contracts | Typed api ↔ web ↔ agent, no codegen, no `any` | Locked |
+| D9 | **oRPC** for contracts (was ts-rest) | Migrated Jul 2026 at the founder's call: same contract-first shape (`@Implement` mirrors `@TsRestHandler`), zod 4 native, OpenAPI-standard paths kept so the integration suite survived unchanged (11/12 on first run). Handler errors are ORPCError-coded; the Nest filter now covers only non-oRPC paths | Revised |
 | D10 | graphile-worker for jobs | Postgres-backed, no Redis; fits compose | Locked |
 | D11 | Demo/read-only default per cluster | Read-only is structural, not a toggle | Locked |
 | D12 | npm workspaces (not pnpm) for now | Local Node is Zed-managed; a global pnpm install conflicted. Turbo supports npm workspaces; swappable later | Locked |
 | D13 | TypeScript **6** (last JS line); api built with **swc** directly (no Nest CLI) | Was TS 7 (native), but 7 ships no `tsserver.js` until 7.1 — editors broke. TS 6 keeps full toolchain parity (tsserver, programmatic API); typecheck speed is a non-issue at this repo size. Revisit 7 at 7.1 | Revised |
-| D14 | zod pinned to **v3** (for now) | Original blocker resolved: ts-rest **3.53.0+** accepts zod 4 via Standard Schema. Migration = minor ts-rest bump + zod 4 breaking-change sweep; scheduled, not urgent. **oRPC evaluated and declined** (Jul 2026): `@orpc/nest` is real (`@Implement` decorator) and zod-4-native, but its zod adapter is still `@beta` and the move would rewrite all contracts, both controllers, the web client and the integration suite — to gain what a minor version bump now gives us | Revised |
+| D14 | **zod 4** (pin lifted) | Landed with the oRPC migration (D9). The api's internal driver-boundary schemas were already v4-compatible (two-arg `z.record`, no deprecated APIs) — zero code changes beyond `z.uuid()`/`z.email()` in the contracts | Revised |
 | D15 | Internal packages compile to CJS `dist`; apps consume built output | Predictable dev/prod module resolution; Turbo orders builds via `^build` | Locked |
 
 ### Deferred / open
@@ -523,9 +523,7 @@ Redis + BullMQ only if scale demands it.
 - **TypeScript 7 (native)** — re-adopt at 7.1 when `tsserver.js` and the
   programmatic compiler API return; also unblocks reverting api to the Nest CLI
   (see D13).
-- **zod 4** — unblocked (ts-rest ≥ 3.53 via Standard Schema); do the bump +
-  zod-4 API sweep (`.passthrough()`, `z.string().uuid()`, error shapes) as its
-  own change (see D14).
+
 - **Agent mode** — phase 2. Interface designed for it from day one.
 - **Suggest-mode (`CREATE` from workload)** — higher trust tier; needs profiler
   access. Ship cleanup path first.

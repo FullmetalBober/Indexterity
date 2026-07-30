@@ -21,9 +21,11 @@
     "@nestjs/core": "^11.1.28",
     "@nestjs/platform-fastify": "^11.1.28",
     "@noble/ciphers": "^2.2.0",
+    "@orpc/client": "^1.14.13",
+    "@orpc/contract": "^1.14.13",
+    "@orpc/nest": "^1.14.13",
+    "@orpc/server": "^1.14.13",
     "@repo/contracts": "*",
-    "@ts-rest/core": "^3.52.1",
-    "@ts-rest/nest": "^3.52.1",
     "better-auth": "^1.6.24",
     "drizzle-orm": "^0.45.2",
     "graphile-worker": "^0.17.3",
@@ -32,7 +34,7 @@
     "pg": "^8.22.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2",
-    "zod": "^3.25.76"
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@repo/config": "*",
