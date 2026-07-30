@@ -122,6 +122,31 @@ describe("cluster lifecycle", () => {
     expect(asRecord(await live.json()).readOnly).toBe(false);
   });
 
+  it("rotates the connection string only after verifying it", async () => {
+    // A dead target must be rejected before anything is stored.
+    const dead = await api(`/clusters/${clusterId}/connection`, owner, {
+      method: "PATCH",
+      body: JSON.stringify({ connectionString: "mongodb://127.0.0.1:59999" }),
+    });
+    expect(dead.status).toBe(502);
+    const badScheme = await api(`/clusters/${clusterId}/connection`, owner, {
+      method: "PATCH",
+      body: JSON.stringify({ connectionString: "http://example.com" }),
+    });
+    expect(badScheme.status).toBe(400);
+    // A reachable string replaces the stored one; collect keeps working on it.
+    const rotated = await api(`/clusters/${clusterId}/connection`, owner, {
+      method: "PATCH",
+      body: JSON.stringify({ connectionString: "mongodb://127.0.0.1:27017" }),
+    });
+    expect(rotated.status).toBe(200);
+    const collect = await api(`/clusters/${clusterId}/collect`, owner, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    expect(collect.status).toBe(200);
+  });
+
   it("serves policy defaults and round-trips an update", async () => {
     const defaults = asRecord(await (await api(`/clusters/${clusterId}/policy`, owner)).json());
     expect(defaults.observeWindowDays).toBe(30);

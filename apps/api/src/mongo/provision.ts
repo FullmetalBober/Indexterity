@@ -56,6 +56,18 @@ function isAuthorizationError(error: unknown): boolean {
   );
 }
 
+// The username a connection string authenticates as, or null (no credentials /
+// unparseable). Used by rotation to decide whether the stored scoped-user
+// marker still describes the new string.
+export function connStringUsername(uri: string): string | null {
+  try {
+    const username = new ConnectionString(uri).username;
+    return username.length === 0 ? null : decodeURIComponent(username);
+  } catch {
+    return null;
+  }
+}
+
 // Rewrite the admin connection string for the scoped user: same scheme, hosts
 // and options, our credentials, authSource forced to admin (where the user
 // lives). Pure — unit-tested against srv/multi-host/param-carrying strings.

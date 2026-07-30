@@ -36,7 +36,13 @@ import { classifyCluster } from "../jobs/classify";
 import { openClusterMongo } from "../jobs/cluster-connection";
 import { collectCluster } from "../jobs/collect";
 import { evictCluster } from "../jobs/connection-pool";
-import { MongoIndexExecutor, ProvisionDeniedError, provisionScopedUser } from "../mongo";
+import {
+  connStringUsername,
+  MongoConnection,
+  MongoIndexExecutor,
+  ProvisionDeniedError,
+  provisionScopedUser,
+} from "../mongo";
 import { isMongoConnString } from "../mongo/conn-string";
 
 // A drop's rollback token carries the dropped index's serialized spec.
@@ -450,6 +456,63 @@ export class RecommendationsController {
         username: provisioned.username,
         connectionString: provisioned.connectionString,
       };
+    });
+  }
+
+  // Owner-only credential rotation: the new string is dialed and pinged BEFORE
+  // it replaces the stored one (a typo must not brick the cluster), then the
+  // pooled connection is evicted so the old credentials stop being used
+  // immediately. History (snapshots, ROI, audit) survives — this is the
+  // alternative to disconnect + reconnect.
+  @Implement(contract.rotateConnection)
+  rotateConnection(@Req() req: FastifyRequest) {
+    return implement(contract.rotateConnection).handler(async ({ input, errors }) => {
+      const orgId = await this.requireOwner(req);
+      const [row] = await this.database.db
+        .select()
+        .from(clusters)
+        .where(and(eq(clusters.id, input.clusterId), eq(clusters.orgId, orgId)))
+        .limit(1);
+      if (row === undefined) throw errors.NOT_FOUND({ message: "cluster not found" });
+      if (!isMongoConnString(input.connectionString)) {
+        throw errors.BAD_REQUEST({
+          message: "connection string must be mongodb:// or mongodb+srv://",
+        });
+      }
+      const probe = new MongoConnection(input.connectionString);
+      try {
+        await probe.connect();
+        await probe.db("admin").command({ ping: 1 });
+      } catch (error) {
+        mapClusterError(error);
+      } finally {
+        await probe.close();
+      }
+      const keyVersion = currentKeyVersion();
+      const sealed = await seal(
+        new TextEncoder().encode(input.connectionString),
+        envKeyProvider(masterKeyBytesFor(keyVersion)),
+      );
+      // The scoped-user marker only survives if the new string still
+      // authenticates as that user; anything else is a user we didn't create.
+      const provisionedUsername =
+        row.provisionedUsername !== null &&
+        connStringUsername(input.connectionString) === row.provisionedUsername
+          ? row.provisionedUsername
+          : null;
+      const [updated] = await this.database.db
+        .update(clusters)
+        .set({
+          sealedDek: Buffer.from(sealed.dek),
+          sealedData: Buffer.from(sealed.data),
+          keyVersion,
+          provisionedUsername,
+        })
+        .where(eq(clusters.id, input.clusterId))
+        .returning();
+      if (updated === undefined) throw errors.NOT_FOUND({ message: "cluster not found" });
+      await evictCluster(input.clusterId);
+      return toCluster(updated);
     });
   }
 

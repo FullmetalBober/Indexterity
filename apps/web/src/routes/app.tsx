@@ -171,6 +171,35 @@ const connectCluster = createServerFn({ method: "POST" })
     }
   });
 
+// Credential rotation: verified server-side before storing, so a typo can't
+// brick the cluster; history survives (unlike disconnect + reconnect).
+const rotateConnection = createServerFn({ method: "POST" })
+  .validator((data: unknown): { clusterId: string; connectionString: string } => {
+    if (
+      typeof data === "object" &&
+      data !== null &&
+      "clusterId" in data &&
+      "connectionString" in data &&
+      typeof data.clusterId === "string" &&
+      typeof data.connectionString === "string"
+    ) {
+      return { clusterId: data.clusterId, connectionString: data.connectionString };
+    }
+    throw new Error("invalid rotation");
+  })
+  .handler(async ({ data }) => {
+    try {
+      await serverApi().rotateConnection(data);
+      return { ok: true, message: null };
+    } catch (error) {
+      const message =
+        error instanceof ORPCError && [400, 404, 502].includes(error.status)
+          ? error.message
+          : "rotation failed";
+      return { ok: false, message };
+    }
+  });
+
 interface ProvisionResult {
   readonly ok: boolean;
   readonly message: string | null;
@@ -728,6 +757,8 @@ function ClusterBar({
 }) {
   const navigate = useNavigate();
   const toast = useToast();
+  const [rotateOpen, setRotateOpen] = useState(false);
+  const [rotateString, setRotateString] = useState("");
 
   async function onToggleMode() {
     const goingLive = cluster.readOnly;
@@ -747,6 +778,20 @@ function ClusterBar({
         goingLive ? "Live mode enabled — the engine may now write" : "Cluster is read-only again",
       );
     else toast("Mode change failed (owner only)", "error");
+    onChanged();
+  }
+
+  async function onRotate() {
+    const result = await rotateConnection({
+      data: { clusterId: cluster.id, connectionString: rotateString },
+    }).catch(() => ({ ok: false, message: "rotation failed" }));
+    if (result.ok) {
+      toast("Connection string rotated — history preserved");
+      setRotateOpen(false);
+      setRotateString("");
+    } else {
+      toast(result.message ?? "rotation failed", "error");
+    }
     onChanged();
   }
 
@@ -781,7 +826,7 @@ function ClusterBar({
   }
 
   return (
-    <div className="mt-1 flex items-center gap-2">
+    <div className="mt-1 flex flex-wrap items-center gap-2">
       {clusters.length > 1 ? (
         <select
           className="rounded-md border px-2 py-1 text-sm"
@@ -819,11 +864,41 @@ function ClusterBar({
       </button>
       <button
         type="button"
+        onClick={() => setRotateOpen(!rotateOpen)}
+        className="rounded-md border px-2 py-0.5 text-muted-foreground text-xs"
+      >
+        Rotate string
+      </button>
+      <button
+        type="button"
         onClick={() => void onDisconnect()}
         className="rounded-md border px-2 py-0.5 text-red-600 text-xs"
       >
         Disconnect
       </button>
+      {rotateOpen ? (
+        <form
+          className="flex w-full gap-2 pt-1"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void onRotate();
+          }}
+        >
+          <input
+            className="min-w-72 flex-1 rounded-md border px-2 py-1 font-mono text-xs"
+            placeholder="new mongodb:// connection string (verified before stored)"
+            value={rotateString}
+            onChange={(event) => setRotateString(event.target.value)}
+          />
+          <button
+            type="submit"
+            disabled={rotateString.length === 0}
+            className="rounded-md bg-primary px-2 py-1 text-primary-foreground text-xs disabled:opacity-50"
+          >
+            Save
+          </button>
+        </form>
+      ) : null}
     </div>
   );
 }

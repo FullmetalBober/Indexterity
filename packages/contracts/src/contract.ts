@@ -113,6 +113,17 @@ export const contract = {
     .input(clusterId)
     .output(offboardResult),
 
+  rotateConnection: oc
+    .route({
+      method: "PATCH",
+      path: "/clusters/{clusterId}/connection",
+      summary:
+        "Replace the cluster's connection string (owner only) — verified against the cluster before it is stored, so history survives credential rotation",
+    })
+    .errors({ NOT_FOUND: {}, BAD_REQUEST: {} })
+    .input(clusterId.extend({ connectionString: z.string().min(1) }))
+    .output(cluster),
+
   setClusterMode: oc
     .route({
       method: "PATCH",
