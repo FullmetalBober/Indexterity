@@ -3,6 +3,7 @@ import type { MongoConnection } from "./connection";
 export interface CreateIndexOptions {
   readonly name?: string;
   readonly unique?: boolean;
+  readonly partialFilterExpression?: Readonly<Record<string, string | number | boolean>>;
 }
 
 export interface IndexExecutor {

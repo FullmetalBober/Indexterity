@@ -67,6 +67,35 @@ describe("recommendCreates (ESR)", () => {
     expect(out).toHaveLength(0);
   });
 
+  it("moves constant equality predicates into a partial filter", () => {
+    const withConstants: QueryShape = {
+      equality: ["status", "region"],
+      sort: [atDesc],
+      range: [],
+      collscan: true,
+      count: 5,
+      constants: { status: "active" },
+    };
+    const out = recommendCreates([withConstants], [], options);
+    expect(out[0]?.partialFilter).toEqual({ status: "active" });
+    expect(out[0]?.keys.map((key) => key.field)).toEqual(["region", "at"]);
+    expect(out[0]?.rationale).toContain('status = "active"');
+  });
+
+  it("keeps a normal candidate when constants would leave no keys", () => {
+    const allConstant: QueryShape = {
+      equality: ["status"],
+      sort: [],
+      range: [],
+      collscan: true,
+      count: 3,
+      constants: { status: "active" },
+    };
+    const out = recommendCreates([allConstant], [], options);
+    expect(out[0]?.partialFilter).toBeUndefined();
+    expect(out[0]?.keys.map((key) => key.field)).toEqual(["status"]);
+  });
+
   it("ignores non-collscan or below-count shapes", () => {
     const notScanning: QueryShape = {
       equality: ["a"],

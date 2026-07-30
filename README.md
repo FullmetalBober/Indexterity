@@ -67,6 +67,12 @@ read either way. Only collections with **≥ 1000 docs** are considered;
 - two or more single-field indexes cover the fields → **MERGE** into one compound
 - otherwise → **CREATE**
 
+**Partial indexes**: when the profiler shows an equality field compared against
+the *same literal in every sample* (the `status: "active"` pattern), that
+predicate moves into a `partialFilterExpression` and out of the keys — a
+smaller index serving the same query. Profiler-only: `$queryStats` shapifies
+values away, so it can't provide this signal.
+
 ### Instant apply
 
 A `CREATE` on a critical collection, when `policy.instantCreate` is on and the
@@ -273,9 +279,8 @@ Engine depth, roughly in order:
    engine doesn't read it yet.
 6. **Advisory tier** — unique/TTL indexes that look unused are never touched;
    surface them as "review manually" advisories instead of staying silent.
-7. **Partial/TTL suggestions** — profiler samples carry real filter values;
-   always-`status:"active"` queries justify a partial index, monotonic date
-   ranges a TTL review.
+7. **TTL suggestions** — partial indexes shipped; the TTL half (monotonic date
+   ranges + deletes by date) still needs a signal design.
 8. **Atlas onboarding** — create the index-only user via the Atlas Admin API
    instead of asking customers to paste `createRole` snippets.
 9. **Read-only digest** — a weekly "here's what we *would* have done" email

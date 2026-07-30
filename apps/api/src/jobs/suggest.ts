@@ -78,7 +78,11 @@ export async function suggestForCluster(clusterId: string): Promise<number> {
             : docCount * 16;
         const cost = ` Est. build ≈ ${Math.max(1, Math.round(avgIndexBytes / 1024))} KB (+1 write per doc write).`;
         for (const candidate of recommendCreates(shapes, existing, WORKLOAD_OPTIONS)) {
-          const indexName = proposedName(candidate.keys);
+          // Partial variants get a suffix so they never collide with the full
+          // index of the same keys.
+          const indexName =
+            proposedName(candidate.keys) +
+            (candidate.partialFilter === undefined ? "" : "_partial");
           if (cooled.has(cooldownKey(database, collection, indexName))) continue;
           const score = createScore({
             collscan: true,
@@ -101,7 +105,13 @@ export async function suggestForCluster(clusterId: string): Promise<number> {
               cost,
             score,
             estimatedBytesSaved: 0,
-            targetSpec: { keys: encodeKeys(candidate.keys), retire: [...candidate.retireIndexes] },
+            targetSpec: {
+              keys: encodeKeys(candidate.keys),
+              retire: [...candidate.retireIndexes],
+              ...(candidate.partialFilter === undefined
+                ? {}
+                : { partial: { ...candidate.partialFilter } }),
+            },
           });
         }
       }

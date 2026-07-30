@@ -1,5 +1,12 @@
 import { z } from "zod";
-import type { IndexDirection, IndexKey, IndexSpec, QueryShape, SortKey } from "../analysis";
+import type {
+  ConstantValue,
+  IndexDirection,
+  IndexKey,
+  IndexSpec,
+  QueryShape,
+  SortKey,
+} from "../analysis";
 import type { MongoConnection } from "./connection";
 
 // Normalize a sort spec's values into directed keys (anything odd → ascending).
@@ -161,6 +168,45 @@ function collectPredicates(
     if (isRangePredicate(value)) range.push(field);
     else equality.push(field);
   }
+}
+
+function isConstant(value: unknown): value is ConstantValue {
+  return typeof value === "string" || typeof value === "number" || typeof value === "boolean";
+}
+
+// Real literal values equality predicates compared against — the partial-index
+// signal. PROFILER ONLY: $queryStats shapifies values into "?type" markers,
+// which must never be mistaken for constants. Handles direct equality and $eq,
+// flattening $and.
+export function equalityConstants(filter: Record<string, unknown>): Record<string, ConstantValue> {
+  const constants: Record<string, ConstantValue> = {};
+  for (const [field, value] of Object.entries(filter)) {
+    if (field === "$and" && Array.isArray(value)) {
+      for (const clause of value) {
+        if (isRecord(clause)) Object.assign(constants, equalityConstants(clause));
+      }
+      continue;
+    }
+    if (field.startsWith("$")) continue;
+    if (isConstant(value)) {
+      constants[field] = value;
+    } else if (isRecord(value) && isConstant(value.$eq) && Object.keys(value).length === 1) {
+      constants[field] = value.$eq;
+    }
+  }
+  return constants;
+}
+
+// Keep only fields whose value matched in every sample seen so far.
+function intersectConstants(
+  previous: Record<string, ConstantValue>,
+  next: Record<string, ConstantValue>,
+): Record<string, ConstantValue> {
+  const merged: Record<string, ConstantValue> = {};
+  for (const [field, value] of Object.entries(previous)) {
+    if (next[field] === value) merged[field] = value;
+  }
+  return merged;
 }
 
 export interface PipelineShape {
@@ -347,16 +393,26 @@ export class MongoIndexCollector implements IndexCollector {
     const raw = await this.conn.db(database).collection("system.profile").find({ ns }).toArray();
     const shapes = new Map<
       string,
-      { equality: string[]; sort: SortKey[]; range: string[]; collscan: boolean; count: number }
+      {
+        equality: string[];
+        sort: SortKey[];
+        range: string[];
+        collscan: boolean;
+        count: number;
+        constants: Record<string, ConstantValue>;
+      }
     >();
     for (const entry of profileDoc.array().parse(raw)) {
       let equality: string[] = [];
       let range: string[] = [];
       let sort: SortKey[] = [];
+      let constants: Record<string, ConstantValue> = {};
       const filter = entry.command?.filter;
       if (filter !== undefined) {
         collectPredicates(filter, equality, range);
         sort = entry.command?.sort === undefined ? [] : sortKeysOf(entry.command.sort);
+        // Profiler filters carry real literals — the partial-index signal.
+        constants = equalityConstants(filter);
       } else if (entry.command?.pipeline !== undefined) {
         const shape = pipelineShape(entry.command.pipeline);
         if (shape === null) continue;
@@ -369,10 +425,11 @@ export class MongoIndexCollector implements IndexCollector {
       const collscan = (entry.planSummary ?? "").includes("COLLSCAN");
       const prev = shapes.get(key);
       if (prev === undefined) {
-        shapes.set(key, { equality, sort, range, collscan, count: 1 });
+        shapes.set(key, { equality, sort, range, collscan, count: 1, constants });
       } else {
         prev.count += 1;
         prev.collscan = prev.collscan || collscan;
+        prev.constants = intersectConstants(prev.constants, constants);
       }
     }
     return [...shapes.values()].map((shape) => ({
@@ -381,6 +438,7 @@ export class MongoIndexCollector implements IndexCollector {
       range: shape.range,
       collscan: shape.collscan,
       count: shape.count,
+      ...(Object.keys(shape.constants).length > 0 ? { constants: shape.constants } : {}),
     }));
   }
 

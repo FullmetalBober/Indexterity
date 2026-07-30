@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { pipelineShape } from "./collector";
+import { equalityConstants, pipelineShape } from "./collector";
 
 describe("pipelineShape", () => {
   it("extracts equality/range/directed sort from leading $match + $sort", () => {
@@ -27,5 +27,22 @@ describe("pipelineShape", () => {
   it("null when the leading stages give an index nothing", () => {
     expect(pipelineShape([{ $group: { _id: "$x" } }])).toBeNull();
     expect(pipelineShape([])).toBeNull();
+  });
+});
+
+describe("equalityConstants", () => {
+  it("captures direct and $eq literals, flattening $and", () => {
+    expect(
+      equalityConstants({
+        status: "active",
+        $and: [{ archived: { $eq: false } }],
+        qty: { $gt: 5 },
+      }),
+    ).toEqual({ status: "active", archived: false });
+  });
+  it("ignores operators, objects and non-primitives", () => {
+    expect(equalityConstants({ qty: { $gt: 1 }, meta: { a: 1 }, tags: { $in: ["x"] } })).toEqual(
+      {},
+    );
   });
 });

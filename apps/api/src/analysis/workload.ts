@@ -7,6 +7,11 @@ export interface SortKey {
   readonly direction: 1 | -1;
 }
 
+// A primitive an equality predicate compared against in EVERY sample of a
+// shape — the signal for a partial index. Only the profiler carries real
+// values ($queryStats shapifies them away), so this is often empty.
+export type ConstantValue = string | number | boolean;
+
 // A distinct query pattern from $queryStats/the profiler, split for the ESR
 // rule: equality predicates, then sort keys (with directions), then ranges.
 export interface QueryShape {
@@ -15,6 +20,7 @@ export interface QueryShape {
   readonly range: readonly string[];
   readonly collscan: boolean;
   readonly count: number;
+  readonly constants?: Readonly<Record<string, ConstantValue>>;
 }
 
 // The ESR key: Equality fields first, then Sort, then Range — the order that
@@ -43,6 +49,9 @@ export interface CreateCandidate {
   readonly rationale: string;
   // The observed frequency behind this candidate (feeds the confidence score).
   readonly count: number;
+  // When set, build a partial index: these constant equality predicates move
+  // into partialFilterExpression and out of the keys — smaller index, same query.
+  readonly partialFilter?: Readonly<Record<string, ConstantValue>>;
 }
 
 export interface WorkloadOptions {
@@ -83,8 +92,26 @@ export function recommendCreates(
   const seen = new Set<string>();
   for (const shape of shapes) {
     if (!shape.collscan || shape.count < options.minCount) continue;
-    const wantedKeys = esrKeys(shape);
+    let wantedKeys = esrKeys(shape);
     if (wantedKeys.length === 0) continue;
+    // Constant equality predicates (same literal in every sample) become a
+    // partialFilterExpression instead of index keys — but only when other keys
+    // remain to index; a filter with nothing to index stays a normal candidate.
+    const constants = shape.constants ?? {};
+    const constantFields = Object.keys(constants).filter((field) => shape.equality.includes(field));
+    let partialFilter: Readonly<Record<string, ConstantValue>> | undefined;
+    if (
+      constantFields.length > 0 &&
+      wantedKeys.some((key) => !constantFields.includes(key.field))
+    ) {
+      const filter: Record<string, ConstantValue> = {};
+      for (const field of constantFields) {
+        const value = constants[field];
+        if (value !== undefined) filter[field] = value;
+      }
+      partialFilter = filter;
+      wantedKeys = wantedKeys.filter((key) => !constantFields.includes(key.field));
+    }
     const wanted = wantedKeys.map((key) => key.field);
     const wantedKey = wantedKeys.map((key) => `${key.field}:${key.direction}`).join(",");
     if (seen.has(wantedKey)) continue;
@@ -115,12 +142,19 @@ export function recommendCreates(
         count: shape.count,
       });
     } else {
+      const partialNote =
+        partialFilter === undefined
+          ? ""
+          : ` Partial: only documents where ${Object.entries(partialFilter)
+              .map(([field, value]) => `${field} = ${JSON.stringify(value)}`)
+              .join(", ")} — smaller index, same query.`;
       candidates.push({
         type: "CREATE",
         keys: wantedKeys,
         retireIndexes: [],
-        rationale: `Add an index on {${describe(wantedKeys)}} — ${scan}.`,
+        rationale: `Add an index on {${describe(wantedKeys)}} — ${scan}.${partialNote}`,
         count: shape.count,
+        ...(partialFilter === undefined ? {} : { partialFilter }),
       });
     }
   }

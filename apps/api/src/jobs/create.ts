@@ -38,7 +38,10 @@ export async function applyCreatesForCluster(clusterId: string): Promise<number>
         if (entry.endsWith(":-1")) keys[entry.slice(0, -3)] = -1;
         else keys[entry] = 1;
       }
-      await executor.create(rec.database, rec.collection, keys, { name: rec.indexName });
+      await executor.create(rec.database, rec.collection, keys, {
+        name: rec.indexName,
+        ...(target.partial === undefined ? {} : { partialFilterExpression: target.partial }),
+      });
       // Write-latency baseline at build time — the reference for the post-build watch.
       const { writes } = await collector.collectionLatency(rec.database, rec.collection);
       await db

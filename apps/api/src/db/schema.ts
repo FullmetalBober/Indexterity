@@ -202,7 +202,11 @@ export const recommendations = pgTable(
     builtAt: timestamp("built_at", { withTimezone: true }),
     baselineWriteOps: bigint("baseline_write_ops", { mode: "number" }),
     baselineWriteLatency: bigint("baseline_write_latency", { mode: "number" }),
-    targetSpec: jsonb("target_spec").$type<{ keys: string[]; retire: string[] }>(),
+    targetSpec: jsonb("target_spec").$type<{
+      keys: string[];
+      retire: string[];
+      partial?: Record<string, string | number | boolean>;
+    }>(),
     createdAt,
     updatedAt,
   },
