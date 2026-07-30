@@ -6,6 +6,8 @@ export interface IndexKey {
 }
 
 // Normalized view of a MongoDB index plus the options that affect safety.
+// collation = the locale string, or null for the default binary comparison —
+// two same-key indexes under different collations serve DIFFERENT queries.
 export interface IndexSpec {
   readonly name: string;
   readonly keys: readonly IndexKey[];
@@ -15,6 +17,7 @@ export interface IndexSpec {
   readonly sparse: boolean;
   readonly hidden: boolean;
   readonly isShardKey: boolean;
+  readonly collation: string | null;
 }
 
 // $indexStats is cumulative-since-restart and per-member; capture uptime so a

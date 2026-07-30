@@ -1,5 +1,5 @@
 import { createScore, recommendCreates, type SortKey } from "../analysis";
-import { and, eq, inArray, indexCooldowns, policies, recommendations } from "../db";
+import { and, eq, inArray, indexCooldowns, like, or, policies, recommendations } from "../db";
 import { MongoIndexCollector } from "../mongo";
 import { openClusterMongo } from "./cluster-connection";
 import { activeCooldownKeys, cooldownKey } from "./cooldowns";
@@ -8,6 +8,8 @@ import { jobDb } from "./db";
 
 const SYSTEM_DATABASES = new Set(["admin", "local", "config"]);
 const WORKLOAD_OPTIONS = { minCount: 1 };
+// A TTL advisory needs a RECURRING delete pattern, not a one-off cleanup.
+const TTL_MIN_DELETES = 3;
 const MIN_COLLECTION_DOCS = 1000;
 // A collection scan on a collection this large is "critical" (instant-apply eligible).
 const CRITICAL_COLLECTION_DOCS = 10_000;
@@ -55,6 +57,40 @@ export async function suggestForCluster(clusterId: string): Promise<number> {
     const toInsert: Array<typeof recommendations.$inferInsert> = [];
     for (const database of databases) {
       for (const collection of await collector.listCollectionNames(database)) {
+        // TTL advisories run BEFORE the size gate: a collection with recurring
+        // age-based deletes is small BY DESIGN (it's being pruned). The app
+        // already deletes by age — a TTL index would do it automatically.
+        // Indexterity NEVER builds TTL indexes (they delete documents), so this
+        // is advisory-only, excluded from every auto-approve path.
+        const deletePatterns = await collector.collectDeletePatterns(database, collection);
+        const ttlWorthy = deletePatterns.filter((pattern) => pattern.count >= TTL_MIN_DELETES);
+        if (ttlWorthy.length > 0) {
+          const currentIndexes = await collector.listIndexes(database, collection);
+          for (const pattern of ttlWorthy) {
+            if (currentIndexes.some((idx) => idx.ttl && idx.keys[0]?.field === pattern.field)) {
+              continue;
+            }
+            const indexName = `${pattern.field}_1_ttl`;
+            if (cooled.has(cooldownKey(database, collection, indexName))) continue;
+            const days = Math.max(1, Math.round(pattern.medianRetentionSeconds / 86_400));
+            toInsert.push({
+              clusterId,
+              type: "ADVISORY_REVIEW",
+              state: "PROPOSED",
+              database,
+              collection,
+              indexName,
+              rationale:
+                `Recurring age-based deletes on ${pattern.field} (${pattern.count}× in the profiler, ` +
+                `retention ≈ ${days} days). A TTL index would expire documents automatically and ` +
+                `steadily: db.${collection}.createIndex({ ${pattern.field}: 1 }, { expireAfterSeconds: ${pattern.medianRetentionSeconds} }). ` +
+                `CAUTION: TTL deletes documents — verify the retention window and create it yourself; Indexterity never builds TTL indexes.`,
+              score: Math.min(80, 30 + pattern.count * 10),
+              estimatedBytesSaved: 0,
+            });
+          }
+        }
+
         const docCount = await conn.db(database).collection(collection).estimatedDocumentCount();
         if (docCount < MIN_COLLECTION_DOCS) continue;
         // Policy ceiling: building an index on a huge collection is the one
@@ -122,7 +158,13 @@ export async function suggestForCluster(clusterId: string): Promise<number> {
         and(
           eq(recommendations.clusterId, clusterId),
           eq(recommendations.state, "PROPOSED"),
-          inArray(recommendations.type, ["CREATE", "UPDATE", "MERGE"]),
+          or(
+            inArray(recommendations.type, ["CREATE", "UPDATE", "MERGE"]),
+            and(
+              eq(recommendations.type, "ADVISORY_REVIEW"),
+              like(recommendations.indexName, "%_ttl"),
+            ),
+          ),
         ),
       );
     if (toInsert.length > 0) await db.insert(recommendations).values(toInsert);

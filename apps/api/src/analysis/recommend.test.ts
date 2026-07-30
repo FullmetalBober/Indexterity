@@ -12,6 +12,7 @@ function spec(name: string, keys: IndexKey[], overrides: Partial<IndexSpec> = {}
     sparse: false,
     hidden: false,
     isShardKey: false,
+    collation: null,
     ...overrides,
   };
 }

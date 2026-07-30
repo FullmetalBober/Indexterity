@@ -16,6 +16,7 @@ function idx(name: string, fields: string[]): IndexSpec {
     sparse: false,
     hidden: false,
     isShardKey: false,
+    collation: null,
   };
 }
 

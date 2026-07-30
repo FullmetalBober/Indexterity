@@ -5,6 +5,10 @@ import type { IndexSpec } from "./types";
 function optionsCompatible(candidate: IndexSpec, other: IndexSpec): boolean {
   if (candidate.unique && !other.unique) return false;
   if (candidate.partial || candidate.sparse || candidate.ttl) return false;
+  // A prefix under a different collation is NOT covered — collation-dependent
+  // queries (case-insensitive string comparison etc.) can only use the index
+  // whose collation matches.
+  if (candidate.collation !== other.collation) return false;
   return true;
 }
 

@@ -9,11 +9,13 @@ import { taskList } from "./jobs/tasks";
 //  - hide approved drops every 5 min
 //  - finalize (drop past-observe hidden) hourly
 //  - prune time-series tables past RETENTION_DAYS daily
+//  - weekly read-only digest email (Monday 09:00)
 const CRONTAB = [
   "0 */6 * * * scheduleCollect",
   "*/5 * * * * scheduleApply",
   "0 * * * * scheduleFinalize",
   "0 3 * * * retention",
+  "0 9 * * 1 digest",
 ].join("\n");
 
 // Long-running background worker (deploy separately from the HTTP api).

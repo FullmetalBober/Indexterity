@@ -52,6 +52,7 @@ export interface IndexCollector {
   collectSlowQueries(database: string, collection: string): Promise<QueryShape[]>;
   collectQueryStats(database: string, collection: string): Promise<QueryShape[]>;
   collectWorkload(database: string, collection: string): Promise<QueryShape[]>;
+  collectDeletePatterns(database: string, collection: string): Promise<DeletePattern[]>;
 }
 
 // Parse driver output at the boundary so nothing downstream sees `any`.
@@ -63,6 +64,7 @@ const indexDescription = z.object({
   hidden: z.boolean().optional(),
   expireAfterSeconds: z.number().optional(),
   partialFilterExpression: z.record(z.string(), z.unknown()).optional(),
+  collation: z.object({ locale: z.string() }).passthrough().optional(),
 });
 
 const indexStat = z.object({
@@ -121,15 +123,48 @@ const queryStatsDoc = z.object({
 // system.profile entry (lenient — only field names are used downstream).
 const profileDoc = z.object({
   ns: z.string(),
+  op: z.string().optional(),
+  ts: z.coerce.date().optional(),
   planSummary: z.string().optional(),
   command: z
     .object({
       filter: z.record(z.string(), z.unknown()).optional(),
       sort: z.record(z.string(), z.unknown()).optional(),
       pipeline: z.array(z.record(z.string(), z.unknown())).optional(),
+      q: z.record(z.string(), z.unknown()).optional(),
     })
     .optional(),
 });
+
+// An age-based delete pattern: recurring deleteMany({field: {$lt: <date>}}).
+export interface DeletePattern {
+  readonly field: string;
+  readonly count: number;
+  readonly medianRetentionSeconds: number;
+}
+
+// The single date-range predicate of a delete filter, or null when the filter
+// is anything else — only clean {field: {$lt/$lte: Date}} deletes count.
+export function dateRangeCutoff(
+  q: Record<string, unknown>,
+): { field: string; cutoff: Date } | null {
+  const fields = Object.keys(q).filter((field) => !field.startsWith("$"));
+  const field = fields[0];
+  if (fields.length !== 1 || field === undefined) return null;
+  const predicate = q[field];
+  if (!isRecord(predicate)) return null;
+  const bound = predicate.$lt ?? predicate.$lte;
+  if (!(bound instanceof Date)) return null;
+  return { field, cutoff: bound };
+}
+
+function median(values: readonly number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  const at = sorted[mid] ?? 0;
+  const before = sorted[mid - 1] ?? at;
+  return sorted.length % 2 === 0 ? (before + at) / 2 : at;
+}
 
 // Operators that produce a range (index-bound) scan rather than an equality match.
 const RANGE_OPS = new Set([
@@ -261,6 +296,7 @@ function toIndexSpec(desc: z.infer<typeof indexDescription>): IndexSpec {
     sparse: desc.sparse ?? false,
     hidden: desc.hidden ?? false,
     isShardKey: false,
+    collation: desc.collation?.locale ?? null,
   };
 }
 
@@ -488,6 +524,37 @@ export class MongoIndexCollector implements IndexCollector {
       }
     }
     return [...shapes.values()];
+  }
+
+  // Recurring age-based deletes ({field: {$lt: <date>}}) from the profiler —
+  // the strong TTL-advisory signal. Retention = delete time minus its cutoff.
+  async collectDeletePatterns(database: string, collection: string): Promise<DeletePattern[]> {
+    const ns = `${database}.${collection}`;
+    const raw = await this.conn
+      .db(database)
+      .collection("system.profile")
+      .find({ ns, op: "remove" })
+      .toArray();
+    const samples = new Map<string, number[]>();
+    for (const doc of raw) {
+      const parsed = profileDoc.safeParse(doc);
+      if (!parsed.success) continue;
+      const entry = parsed.data;
+      const q = entry.command?.q;
+      if (q === undefined || entry.ts === undefined) continue;
+      const range = dateRangeCutoff(q);
+      if (range === null) continue;
+      const retentionSeconds = (entry.ts.getTime() - range.cutoff.getTime()) / 1000;
+      if (retentionSeconds <= 0) continue;
+      const list = samples.get(range.field) ?? [];
+      list.push(retentionSeconds);
+      samples.set(range.field, list);
+    }
+    return [...samples.entries()].map(([field, retentions]) => ({
+      field,
+      count: retentions.length,
+      medianRetentionSeconds: Math.round(median(retentions)),
+    }));
   }
 
   // Preferred workload source: $queryStats, falling back to the profiler when

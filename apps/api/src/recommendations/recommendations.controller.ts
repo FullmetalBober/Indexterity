@@ -423,10 +423,12 @@ export class RecommendationsController {
       }
       let keys: Record<string, 1 | -1> | null = null;
       let indexName = rec.indexName;
+      let collation: string | null = null;
       try {
         const spec = parseStoredSpec(rollbackTokenSchema.parse(withToken.rollbackToken).spec);
         keys = rebuildKeys(spec);
         indexName = spec.name;
+        collation = spec.collation;
       } catch {
         keys = null;
       }
@@ -439,7 +441,10 @@ export class RecommendationsController {
           return { status: 409, body: { message: "cluster is read-only" } };
         }
         const executor = new MongoIndexExecutor(conn, readOnly);
-        await executor.create(rec.database, rec.collection, keys, { name: indexName });
+        await executor.create(rec.database, rec.collection, keys, {
+          name: indexName,
+          ...(collation === null ? {} : { collation: { locale: collation } }),
+        });
       } finally {
         release();
       }

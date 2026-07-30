@@ -73,6 +73,17 @@ predicate moves into a `partialFilterExpression` and out of the keys — a
 smaller index serving the same query. Profiler-only: `$queryStats` shapifies
 values away, so it can't provide this signal.
 
+**TTL advisories**: recurring age-based deletes in the profiler
+(`deleteMany({createdAt: {$lt: …}})`, ≥ 3 sightings) produce an advisory with
+the estimated retention window and the exact `createIndex` command. **Never
+auto-built** — a TTL index deletes documents, the one thing Indexterity
+promises never to touch; you review and run it yourself. Detection ignores the
+collection-size gate on purpose: a pruned collection is small *by design*.
+
+**Collation-aware redundancy**: `IndexSpec` models the index collation; a
+key-prefix under a different collation is never flagged redundant (it serves
+different queries), and undo restores the original collation.
+
 ### Instant apply
 
 A `CREATE` on a critical collection, when `policy.instantCreate` is on and the
@@ -263,10 +274,9 @@ api image with `CMD ["node", "apps/api/dist/worker.js"]`.
 
 Engine depth, roughly in order:
 
-1. **Collation-aware redundancy** — exact same-key duplicates turn out to be
-   impossible (mongod rejects the create with `IndexKeySpecsConflict`; verified
-   live). The real twin is same-keys-different-*collation*, which is legal and
-   invisible to the engine until `IndexSpec` models collation.
+1. ~~Collation-aware redundancy~~ — shipped: collation is modeled, captured
+   from `listIndexes`, respected by the redundancy rule and restored on undo.
+   (Exact same-key duplicates remain impossible — mongod rejects them.)
 2. **Replica-aware ROI** — a dropped index frees its bytes on *every*
    replica-set member; the headline currently counts one copy. Multiply by
    member count (already collected per snapshot).
@@ -279,8 +289,8 @@ Engine depth, roughly in order:
    engine doesn't read it yet.
 6. **Advisory tier** — unique/TTL indexes that look unused are never touched;
    surface them as "review manually" advisories instead of staying silent.
-7. **TTL suggestions** — partial indexes shipped; the TTL half (monotonic date
-   ranges + deletes by date) still needs a signal design.
+7. ~~TTL suggestions~~ — shipped as advisories from the recurring-delete
+   signal (see above).
 8. **Atlas onboarding** — create the index-only user via the Atlas Admin API
    instead of asking customers to paste `createRole` snippets.
 9. **Read-only digest** — a weekly "here's what we *would* have done" email

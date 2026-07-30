@@ -39,6 +39,7 @@ export function serializeSpec(spec: IndexSpec): Record<string, unknown> {
     sparse: spec.sparse,
     hidden: spec.hidden,
     isShardKey: spec.isShardKey,
+    collation: spec.collation,
   };
 }
 

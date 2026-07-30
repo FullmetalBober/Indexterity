@@ -12,6 +12,7 @@ function spec(keys: IndexKey[]): IndexSpec {
     sparse: false,
     hidden: false,
     isShardKey: false,
+    collation: null,
   };
 }
 

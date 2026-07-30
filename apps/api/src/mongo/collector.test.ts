@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { equalityConstants, pipelineShape } from "./collector";
+import { dateRangeCutoff, equalityConstants, pipelineShape } from "./collector";
 
 describe("pipelineShape", () => {
   it("extracts equality/range/directed sort from leading $match + $sort", () => {
@@ -44,5 +44,21 @@ describe("equalityConstants", () => {
     expect(equalityConstants({ qty: { $gt: 1 }, meta: { a: 1 }, tags: { $in: ["x"] } })).toEqual(
       {},
     );
+  });
+});
+
+describe("dateRangeCutoff", () => {
+  const cutoff = new Date("2026-06-01T00:00:00Z");
+  it("accepts a single clean $lt/$lte date predicate", () => {
+    expect(dateRangeCutoff({ createdAt: { $lt: cutoff } })).toEqual({
+      field: "createdAt",
+      cutoff,
+    });
+    expect(dateRangeCutoff({ at: { $lte: cutoff } })).toEqual({ field: "at", cutoff });
+  });
+  it("rejects multi-field, non-date and non-range deletes", () => {
+    expect(dateRangeCutoff({ createdAt: { $lt: cutoff }, status: "x" })).toBeNull();
+    expect(dateRangeCutoff({ createdAt: { $lt: "2026-06-01" } })).toBeNull();
+    expect(dateRangeCutoff({ _id: "abc" })).toBeNull();
   });
 });

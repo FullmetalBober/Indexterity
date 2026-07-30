@@ -3,6 +3,7 @@ import { applyCluster } from "./apply";
 import { classifyCluster } from "./classify";
 import { collectCluster } from "./collect";
 import { applyCreatesForCluster } from "./create";
+import { runDigest } from "./digest";
 import { dispatchToAllClusters } from "./dispatch";
 import { finalizeCluster } from "./finalize";
 import { clusterIdFromPayload } from "./payload";
@@ -43,5 +44,8 @@ export const taskList = {
   },
   retention: async (): Promise<void> => {
     await pruneOldSamples();
+  },
+  digest: async (): Promise<void> => {
+    await runDigest();
   },
 };

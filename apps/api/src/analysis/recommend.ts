@@ -23,11 +23,14 @@ const storedSpecSchema = z.object({
   sparse: z.boolean(),
   hidden: z.boolean(),
   isShardKey: z.boolean(),
+  // Older persisted specs predate collation capture — default to binary.
+  collation: z.string().nullable().optional(),
 });
 
 // Rehydrate an IndexSpec from a persisted snapshot's `spec` jsonb (no `as`).
 export function parseStoredSpec(value: unknown): IndexSpec {
-  return storedSpecSchema.parse(value);
+  const parsed = storedSpecSchema.parse(value);
+  return { ...parsed, collation: parsed.collation ?? null };
 }
 
 export interface IndexInput {

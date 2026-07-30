@@ -12,6 +12,7 @@ function spec(name: string, keys: IndexKey[], overrides: Partial<IndexSpec> = {}
     sparse: false,
     hidden: false,
     isShardKey: false,
+    collation: null,
     ...overrides,
   };
 }
@@ -38,6 +39,18 @@ describe("isRedundantPrefix", () => {
   });
   it("false against itself", () => {
     expect(isRedundantPrefix(spec("a", [x1]), spec("a", [x1, y1]))).toBe(false);
+  });
+
+  it("a prefix under a different collation is not covered", () => {
+    expect(isRedundantPrefix(spec("a", [x1], { collation: "en" }), spec("ab", [x1, y1]))).toBe(
+      false,
+    );
+    expect(
+      isRedundantPrefix(
+        spec("a", [x1], { collation: "en" }),
+        spec("ab", [x1, y1], { collation: "en" }),
+      ),
+    ).toBe(true);
   });
 
   it("false for equal-length identical keys (mongod forbids creating those)", () => {
