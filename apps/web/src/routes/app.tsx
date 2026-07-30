@@ -14,7 +14,7 @@ import {
 } from "../components/ui/table";
 import { useToast } from "../components/ui/toast";
 import { serverApi } from "../lib/api";
-import { signIn, signOut, signUp } from "../lib/auth";
+import { requestPasswordReset, signIn, signOut, signUp } from "../lib/auth";
 
 // Runs on the web server for every navigation; forwards the session cookie to
 // the api. oRPC calls return data directly and throw ORPCError on failure.
@@ -1398,16 +1398,28 @@ function TeamSection({ org, onChanged }: { org: TeamOrg; onChanged: () => void }
 }
 
 function AuthForm({ onDone }: { onDone: () => void }) {
-  const [mode, setMode] = useState<"in" | "up">("in");
+  const [mode, setMode] = useState<"in" | "up" | "forgot">("in");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [name, setName] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   async function submit() {
     setBusy(true);
     setError(null);
+    setNotice(null);
+    if (mode === "forgot") {
+      const sent = await requestPasswordReset({ data: email }).catch(() => ({
+        ok: false,
+        error: "request failed",
+      }));
+      setBusy(false);
+      if (sent.ok) setNotice("If that email has an account, a reset link is on its way.");
+      else setError("error" in sent ? sent.error : "request failed");
+      return;
+    }
     const result =
       mode === "in"
         ? await signIn({ data: { email, password } })
@@ -1421,7 +1433,11 @@ function AuthForm({ onDone }: { onDone: () => void }) {
     <main className="mx-auto mt-24 max-w-sm p-8">
       <h1 className="font-semibold text-2xl">Indexterity</h1>
       <p className="mt-1 text-muted-foreground">
-        {mode === "in" ? "Sign in to your account" : "Create an account"}
+        {mode === "in"
+          ? "Sign in to your account"
+          : mode === "up"
+            ? "Create an account"
+            : "Reset your password"}
       </p>
       <form
         className="mt-6 flex flex-col gap-3"
@@ -1445,29 +1461,43 @@ function AuthForm({ onDone }: { onDone: () => void }) {
           value={email}
           onChange={(event) => setEmail(event.target.value)}
         />
-        <input
-          className="rounded-md border px-3 py-2 text-sm"
-          type="password"
-          placeholder="Password"
-          value={password}
-          onChange={(event) => setPassword(event.target.value)}
-        />
+        {mode !== "forgot" ? (
+          <input
+            className="rounded-md border px-3 py-2 text-sm"
+            type="password"
+            placeholder="Password"
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+          />
+        ) : null}
         {error ? <p className="text-red-600 text-sm">{error}</p> : null}
+        {notice ? <p className="text-muted-foreground text-sm">{notice}</p> : null}
         <button
           type="submit"
           disabled={busy}
           className="rounded-md bg-primary px-3 py-2 text-primary-foreground text-sm disabled:opacity-50"
         >
-          {mode === "in" ? "Sign in" : "Sign up"}
+          {mode === "in" ? "Sign in" : mode === "up" ? "Sign up" : "Send reset link"}
         </button>
       </form>
-      <button
-        type="button"
-        onClick={() => setMode(mode === "in" ? "up" : "in")}
-        className="mt-4 text-muted-foreground text-sm underline"
-      >
-        {mode === "in" ? "Need an account? Sign up" : "Have an account? Sign in"}
-      </button>
+      <div className="mt-4 flex flex-col items-start gap-1">
+        <button
+          type="button"
+          onClick={() => setMode(mode === "in" ? "up" : "in")}
+          className="text-muted-foreground text-sm underline"
+        >
+          {mode === "in" ? "Need an account? Sign up" : "Have an account? Sign in"}
+        </button>
+        {mode === "in" ? (
+          <button
+            type="button"
+            onClick={() => setMode("forgot")}
+            className="text-muted-foreground text-sm underline"
+          >
+            Forgot password?
+          </button>
+        ) : null}
+      </div>
     </main>
   );
 }

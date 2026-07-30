@@ -99,3 +99,30 @@ export const signUp = createServerFn({ method: "POST" })
   .handler(({ data }) => proxy("sign-up/email", data));
 
 export const signOut = createServerFn({ method: "POST" }).handler(() => proxy("sign-out", {}));
+
+// Asks the api to email a reset link. The redirect target is fixed server-side
+// to this app's /reset-password page (never taken from the client).
+export const requestPasswordReset = createServerFn({ method: "POST" })
+  .validator((email: unknown): string => {
+    if (typeof email !== "string" || email.length === 0) throw new Error("email required");
+    return email;
+  })
+  .handler(({ data }) =>
+    proxy("request-password-reset", { email: data, redirectTo: `${webOrigin}/reset-password` }),
+  );
+
+export const resetPassword = createServerFn({ method: "POST" })
+  .validator((data: unknown): { token: string; newPassword: string } => {
+    if (
+      typeof data === "object" &&
+      data !== null &&
+      "token" in data &&
+      "newPassword" in data &&
+      typeof data.token === "string" &&
+      typeof data.newPassword === "string"
+    ) {
+      return { token: data.token, newPassword: data.newPassword };
+    }
+    throw new Error("invalid reset");
+  })
+  .handler(({ data }) => proxy("reset-password", data));

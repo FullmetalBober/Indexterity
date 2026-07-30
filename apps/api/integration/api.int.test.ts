@@ -10,6 +10,7 @@ import {
   recommendations,
   roiMetrics,
   user,
+  verification,
 } from "../src/db";
 import { MongoConnection } from "../src/mongo";
 import {
@@ -601,6 +602,40 @@ describe("org management", () => {
       : [];
     expect(names).toContain("Switcher Own");
     expect(names).not.toContain("Int Cluster");
+  });
+});
+
+describe("password reset (changes the owner password — keep near the end)", () => {
+  it("round-trips request -> stored token -> new password -> sign-in", async () => {
+    const res = await fetch(`${API_BASE}/api/auth/request-password-reset`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: WEB_ORIGIN },
+      body: JSON.stringify({ email: owner.email, redirectTo: `${WEB_ORIGIN}/reset-password` }),
+    });
+    expect(res.status).toBe(200);
+
+    // The mailer is a no-op without SMTP; fish the token better-auth stored
+    // out of the verification table instead of an inbox.
+    const [ownerUser] = await db.select().from(user).where(eq(user.email, owner.email));
+    if (ownerUser === undefined) throw new Error("owner user missing");
+    const rows = await db.select().from(verification).where(eq(verification.value, ownerUser.id));
+    const reset = rows.find((row) => row.identifier.startsWith("reset-password:"));
+    if (reset === undefined) throw new Error("reset token was not stored");
+    const token = reset.identifier.slice("reset-password:".length);
+
+    const apply = await fetch(`${API_BASE}/api/auth/reset-password`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: WEB_ORIGIN },
+      body: JSON.stringify({ token, newPassword: "rotated-pass-456" }),
+    });
+    expect(apply.status).toBe(200);
+
+    const signInRes = await fetch(`${API_BASE}/api/auth/sign-in/email`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: WEB_ORIGIN },
+      body: JSON.stringify({ email: owner.email, password: "rotated-pass-456" }),
+    });
+    expect(signInRes.status).toBe(200);
   });
 });
 
