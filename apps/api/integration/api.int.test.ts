@@ -134,6 +134,7 @@ describe("cluster lifecycle", () => {
         instantCreate: false,
         observeWindowDays: 7,
         maxCollectionSizeBytes: null,
+        autoApplyScore: null,
       }),
     });
     expect(put.status).toBe(200);
@@ -203,6 +204,7 @@ describe("tenancy, invites and roles", () => {
         instantCreate: false,
         observeWindowDays: 30,
         maxCollectionSizeBytes: null,
+        autoApplyScore: null,
       }),
     });
     expect([mode.status, create.status, invite.status, policy.status]).toEqual([
