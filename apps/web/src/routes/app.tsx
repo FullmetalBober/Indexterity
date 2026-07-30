@@ -164,6 +164,50 @@ const connectCluster = createServerFn({ method: "POST" })
     }
   });
 
+interface ProvisionResult {
+  readonly ok: boolean;
+  readonly message: string | null;
+  readonly id: string | null;
+  readonly username: string | null;
+  readonly connectionString: string | null;
+}
+
+// Admin-string onboarding: the api uses the admin string once to create a
+// scoped user and returns that user's string (shown a single time).
+const provisionCluster = createServerFn({ method: "POST" })
+  .validator((data: unknown): { name: string; adminConnectionString: string } => {
+    if (
+      typeof data === "object" &&
+      data !== null &&
+      "name" in data &&
+      "adminConnectionString" in data &&
+      typeof data.name === "string" &&
+      typeof data.adminConnectionString === "string"
+    ) {
+      return { name: data.name, adminConnectionString: data.adminConnectionString };
+    }
+    throw new Error("invalid cluster");
+  })
+  .handler(async ({ data }): Promise<ProvisionResult> => {
+    try {
+      const created = await serverApi().provisionCluster(data);
+      return {
+        ok: true,
+        message: null,
+        id: created.cluster.id,
+        username: created.username,
+        connectionString: created.connectionString,
+      };
+    } catch (error) {
+      // 400 bad string, 422 provision denied, 502 unreachable all carry guidance.
+      const message =
+        error instanceof ORPCError && [400, 422, 502].includes(error.status)
+          ? error.message
+          : "failed to provision the cluster";
+      return { ok: false, message, id: null, username: null, connectionString: null };
+    }
+  });
+
 interface PolicyInput {
   readonly clusterId: string;
   readonly autoApply: boolean;
@@ -274,6 +318,7 @@ function DeltaCell({ pct }: { pct: number | null }) {
 function Home() {
   const data = Route.useLoaderData();
   const router = useRouter();
+  const toast = useToast();
 
   if (!data.authed) {
     if (data.apiDown) {
@@ -317,8 +362,6 @@ function Home() {
     color: SERIES_PALETTE[i] ?? "#2a78d6",
     points: coll.points.map((point) => ({ t: point.capturedAt, v: point.writeMicros })),
   }));
-
-  const toast = useToast();
 
   async function onApprove(id: string) {
     const result = await approveRecommendation({ data: id }).catch(() => ({ ok: false }));
@@ -534,6 +577,7 @@ interface ClusterOption {
   readonly id: string;
   readonly name: string;
   readonly readOnly: boolean;
+  readonly provisionedUsername: string | null;
 }
 
 function ClusterBar({
@@ -591,6 +635,14 @@ function ClusterBar({
       <span className={cluster.readOnly ? "text-muted-foreground text-xs" : "text-red-600 text-xs"}>
         {cluster.readOnly ? "read-only" : "live"}
       </span>
+      {cluster.provisionedUsername !== null ? (
+        <span
+          className="text-muted-foreground text-xs"
+          title="Indexterity runs as its own least-privilege user on this cluster — it cannot read your documents"
+        >
+          scoped user <code>{cluster.provisionedUsername}</code>
+        </span>
+      ) : null}
       <button
         type="button"
         onClick={() => void onToggleMode()}
@@ -720,22 +772,36 @@ function PolicySection({ policy, onSaved }: { policy: PolicyView; onSaved: () =>
   );
 }
 
+type ConnectMode = "scoped" | "admin";
+
 function ConnectClusterForm() {
   const router = useRouter();
   const navigate = useNavigate();
+  const [mode, setMode] = useState<ConnectMode>("scoped");
   const [name, setName] = useState("");
   const [connString, setConnString] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [provisioned, setProvisioned] = useState<{
+    username: string;
+    connectionString: string;
+  } | null>(null);
 
   async function submit() {
     setBusy(true);
     setError(null);
-    const result = await connectCluster({ data: { name, connectionString: connString } });
+    setProvisioned(null);
+    const result =
+      mode === "admin"
+        ? await provisionCluster({ data: { name, adminConnectionString: connString } })
+        : await connectCluster({ data: { name, connectionString: connString } });
     setBusy(false);
     if (!result.ok) {
       setError(result.message);
       return;
+    }
+    if ("username" in result && result.username !== null && result.connectionString !== null) {
+      setProvisioned({ username: result.username, connectionString: result.connectionString });
     }
     setName("");
     setConnString("");
@@ -743,11 +809,37 @@ function ConnectClusterForm() {
     await router.invalidate();
   }
 
+  const modeTab = (value: ConnectMode, label: string) => (
+    <button
+      type="button"
+      onClick={() => {
+        setMode(value);
+        setError(null);
+      }}
+      className={
+        mode === value
+          ? "rounded-md bg-primary px-3 py-1 text-primary-foreground text-xs"
+          : "rounded-md border px-3 py-1 text-muted-foreground text-xs"
+      }
+    >
+      {label}
+    </button>
+  );
+
   return (
     <section className="mt-8">
       <h2 className="font-semibold text-lg">Connect a cluster</h2>
       <p className="text-muted-foreground text-sm">
         Starts in read-only mode — the engine analyzes but never writes until you go live.
+      </p>
+      <div className="mt-2 flex gap-1">
+        {modeTab("scoped", "Paste a scoped string")}
+        {modeTab("admin", "Admin string — provision for me")}
+      </div>
+      <p className="mt-1 text-muted-foreground text-xs">
+        {mode === "admin"
+          ? "The admin string is used once to create a least-privilege user on your cluster (it cannot read documents), then discarded — only the scoped user's string is stored."
+          : "Connect with a user you manage. The exact privilege list the engine needs is in the docs."}
       </p>
       <form
         className="mt-2 flex flex-wrap gap-2"
@@ -764,7 +856,11 @@ function ConnectClusterForm() {
         />
         <input
           className="min-w-72 flex-1 rounded-md border px-3 py-1.5 font-mono text-sm"
-          placeholder="mongodb://user:pass@host:27017"
+          placeholder={
+            mode === "admin"
+              ? "mongodb://admin:pass@host:27017 (used once, never stored)"
+              : "mongodb://user:pass@host:27017"
+          }
           value={connString}
           onChange={(event) => setConnString(event.target.value)}
         />
@@ -773,10 +869,24 @@ function ConnectClusterForm() {
           disabled={busy || name.length === 0 || connString.length === 0}
           className="rounded-md bg-primary px-3 py-1.5 text-primary-foreground text-sm disabled:opacity-50"
         >
-          Connect
+          {mode === "admin" ? (busy ? "Provisioning…" : "Provision + connect") : "Connect"}
         </button>
       </form>
       {error !== null ? <p className="mt-2 text-red-600 text-sm">{error}</p> : null}
+      {provisioned !== null ? (
+        <div className="mt-3 rounded-md border p-3 text-sm">
+          <p className="font-medium">
+            Created scoped user <code>{provisioned.username}</code> — shown once
+          </p>
+          <p className="mt-1 break-all font-mono text-muted-foreground text-xs">
+            {provisioned.connectionString}
+          </p>
+          <p className="mt-1 text-muted-foreground text-xs">
+            Indexterity stored this string encrypted; the admin string was not saved. To revoke
+            access later: <code>db.dropUser("{provisioned.username}")</code> in the admin database.
+          </p>
+        </div>
+      ) : null}
     </section>
   );
 }

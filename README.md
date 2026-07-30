@@ -9,8 +9,14 @@ regression check. Full design and decision log in
 
 ## What it does
 
-1. **Connect** a cluster — the connection string is sealed with envelope
-   encryption; clusters start in **read-only mode** — the engine analyzes but never writes until an owner flips it live (dashboard toggle).
+1. **Connect** a cluster, two ways: paste a scoped connection string, or paste
+   an **admin string once** and Indexterity provisions its own least-privilege
+   user on your cluster (`idx_<hex>`, custom `indexterityEngine` role — no
+   `find` on your collections, so it **cannot read documents**; the exact role
+   is in [`docs/architecture.md` §9.1](./docs/architecture.md)). Only the
+   scoped string is stored, sealed with envelope encryption — the admin string
+   is never persisted. Clusters start in **read-only mode** — the engine
+   analyzes but never writes until an owner flips it live (dashboard toggle).
 2. **Collect** index usage, sizes and per-collection read/write latency on a
    schedule via `$indexStats` / `$collStats` — it never reads your documents.
    Connections are pooled per cluster (one client reused across jobs).

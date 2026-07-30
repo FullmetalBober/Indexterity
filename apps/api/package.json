@@ -30,6 +30,7 @@
     "drizzle-orm": "^0.45.2",
     "graphile-worker": "^0.17.3",
     "mongodb": "^7.5.0",
+    "mongodb-connection-string-url": "^7.0.2",
     "nodemailer": "^9.0.3",
     "pg": "^8.22.0",
     "reflect-metadata": "^0.2.2",

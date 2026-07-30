@@ -32,7 +32,7 @@ import { currentKeyVersion, masterKeyBytesFor } from "../env";
 import { classifyCluster } from "../jobs/classify";
 import { openClusterMongo } from "../jobs/cluster-connection";
 import { collectCluster } from "../jobs/collect";
-import { MongoIndexExecutor } from "../mongo";
+import { MongoIndexExecutor, ProvisionDeniedError, provisionScopedUser } from "../mongo";
 import { isMongoConnString } from "../mongo/conn-string";
 
 // A drop's rollback token carries the dropped index's serialized spec.
@@ -64,6 +64,7 @@ function toCluster(row: typeof clusters.$inferSelect): Cluster {
     name: row.name,
     connectionMode: row.connectionMode,
     readOnly: row.readOnly,
+    provisionedUsername: row.provisionedUsername,
     createdAt: row.createdAt.toISOString(),
   };
 }
@@ -268,6 +269,35 @@ export class RecommendationsController {
     });
   }
 
+  // Seal a connection string and insert the cluster row (read-only by default).
+  private async storeCluster(
+    orgId: string,
+    name: string,
+    connectionString: string,
+    provisionedUsername: string | null,
+  ): Promise<typeof clusters.$inferSelect> {
+    const keyVersion = currentKeyVersion();
+    const sealed = await seal(
+      new TextEncoder().encode(connectionString),
+      envKeyProvider(masterKeyBytesFor(keyVersion)),
+    );
+    const [row] = await this.database.db
+      .insert(clusters)
+      .values({
+        orgId,
+        name,
+        connectionMode: "HOSTED_DIRECT",
+        readOnly: true,
+        sealedDek: Buffer.from(sealed.dek),
+        sealedData: Buffer.from(sealed.data),
+        keyVersion,
+        provisionedUsername,
+      })
+      .returning();
+    if (row === undefined) throw new Error("failed to create cluster");
+    return row;
+  }
+
   @Implement(contract.createCluster)
   createCluster(@Req() req: FastifyRequest) {
     return implement(contract.createCluster).handler(async ({ input, errors }) => {
@@ -277,25 +307,42 @@ export class RecommendationsController {
           message: "connection string must be mongodb:// or mongodb+srv://",
         });
       }
-      const keyVersion = currentKeyVersion();
-      const sealed = await seal(
-        new TextEncoder().encode(input.connectionString),
-        envKeyProvider(masterKeyBytesFor(keyVersion)),
+      return toCluster(await this.storeCluster(orgId, input.name, input.connectionString, null));
+    });
+  }
+
+  // Admin-string onboarding: the admin credentials are used once to create a
+  // least-privilege user + role on the customer cluster, then discarded — only
+  // the scoped user's string is sealed and stored.
+  @Implement(contract.provisionCluster)
+  provisionCluster(@Req() req: FastifyRequest) {
+    return implement(contract.provisionCluster).handler(async ({ input, errors }) => {
+      const orgId = await this.requireOwner(req);
+      if (!isMongoConnString(input.adminConnectionString)) {
+        throw errors.BAD_REQUEST({
+          message: "connection string must be mongodb:// or mongodb+srv://",
+        });
+      }
+      let provisioned: Awaited<ReturnType<typeof provisionScopedUser>>;
+      try {
+        provisioned = await provisionScopedUser(input.adminConnectionString);
+      } catch (error) {
+        if (error instanceof ProvisionDeniedError) {
+          throw new ORPCError("PROVISION_DENIED", { status: 422, message: error.message });
+        }
+        mapClusterError(error);
+      }
+      const row = await this.storeCluster(
+        orgId,
+        input.name,
+        provisioned.connectionString,
+        provisioned.username,
       );
-      const [row] = await this.database.db
-        .insert(clusters)
-        .values({
-          orgId,
-          name: input.name,
-          connectionMode: "HOSTED_DIRECT",
-          readOnly: true,
-          sealedDek: Buffer.from(sealed.dek),
-          sealedData: Buffer.from(sealed.data),
-          keyVersion,
-        })
-        .returning();
-      if (row === undefined) throw new Error("failed to create cluster");
-      return toCluster(row);
+      return {
+        cluster: toCluster(row),
+        username: provisioned.username,
+        connectionString: provisioned.connectionString,
+      };
     });
   }
 
@@ -440,10 +487,7 @@ export class RecommendationsController {
         throw errors.CONFLICT({ message: "stored spec cannot be rebuilt automatically" });
       }
       try {
-        const { conn, readOnly, release } = await openClusterMongo(
-          this.database.db,
-          rec.clusterId,
-        );
+        const { conn, readOnly, release } = await openClusterMongo(this.database.db, rec.clusterId);
         try {
           if (readOnly) {
             throw errors.CONFLICT({ message: "cluster is read-only" });

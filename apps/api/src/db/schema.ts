@@ -156,6 +156,9 @@ export const clusters = pgTable("clusters", {
   sealedDek: bytea("sealed_dek").notNull(),
   sealedData: bytea("sealed_data").notNull(),
   keyVersion: integer("key_version").notNull().default(1),
+  // The least-privilege user Indexterity created on the cluster during
+  // admin-string onboarding; null when the customer pasted a ready-made string.
+  provisionedUsername: text("provisioned_username"),
   createdAt,
 });
 

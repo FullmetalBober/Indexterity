@@ -9,6 +9,7 @@ import {
   clusterRoi,
   createdInvite,
   orgInfo,
+  provisionedCluster,
   recommendation,
 } from "./schemas.js";
 
@@ -77,6 +78,17 @@ export const contract = {
     .errors({ BAD_REQUEST: {} })
     .input(z.object({ name: z.string().min(1), connectionString: z.string().min(1) }))
     .output(cluster),
+
+  provisionCluster: oc
+    .route({
+      method: "POST",
+      path: "/clusters/provision",
+      summary:
+        "Connect with an admin string used ONCE: creates a least-privilege user on the cluster and stores only that user's string",
+    })
+    .errors({ BAD_REQUEST: {} })
+    .input(z.object({ name: z.string().min(1), adminConnectionString: z.string().min(1) }))
+    .output(provisionedCluster),
 
   setClusterMode: oc
     .route({

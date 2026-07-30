@@ -36,9 +36,21 @@ export const cluster = z.object({
   name: z.string(),
   connectionMode,
   readOnly: z.boolean(),
+  // Set when Indexterity provisioned its own least-privilege user on the
+  // cluster (admin-string onboarding); null for pasted-string clusters.
+  provisionedUsername: z.string().nullable(),
   createdAt: z.string(),
 });
 export type Cluster = z.infer<typeof cluster>;
+
+// Returned once at provisioning — the scoped connection string is also stored
+// sealed, but the admin string it was derived from is never persisted.
+export const provisionedCluster = z.object({
+  cluster,
+  username: z.string(),
+  connectionString: z.string(),
+});
+export type ProvisionedCluster = z.infer<typeof provisionedCluster>;
 
 export const recommendation = z.object({
   id: z.uuid(),

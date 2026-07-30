@@ -288,6 +288,45 @@ describe("collect, audit trail and undo", () => {
   });
 });
 
+describe("least-privilege provisioning", () => {
+  it("creates a scoped user from an admin string and stores only the scoped string", async () => {
+    const res = await api("/clusters/provision", owner, {
+      method: "POST",
+      body: JSON.stringify({ name: "Provisioned Cluster", adminConnectionString: MONGO_URL }),
+    });
+    expect(res.status).toBe(200);
+    const body = asRecord(await res.json());
+    const clusterRecord = asRecord(body.cluster);
+    const provisionedId = asString(clusterRecord.id);
+    createdClusterIds.push(provisionedId);
+    const username = asString(body.username);
+    expect(username).toMatch(/^idx_[0-9a-f]{12}$/);
+    // Returned-once scoped string: our user, forced admin authSource.
+    const connectionString = asString(body.connectionString);
+    expect(connectionString).toContain(`${username}:`);
+    expect(connectionString).toContain("authSource=admin");
+    expect(clusterRecord.provisionedUsername).toBe(username);
+    expect(clusterRecord.readOnly).toBe(true);
+
+    // The user really exists on the cluster, holding exactly the engine role.
+    const info = asRecord(await mongo.db("admin").command({ usersInfo: username }));
+    const users = Array.isArray(info.users) ? info.users : [];
+    expect(users).toHaveLength(1);
+    const roles = asRecord(users[0]).roles;
+    expect(Array.isArray(roles) && roles.length === 1).toBe(true);
+    expect(asRecord(Array.isArray(roles) ? roles[0] : {}).role).toBe("indexterityEngine");
+
+    // The sealed string the engine dials is the scoped one — collect works on it.
+    const collect = await api(`/clusters/${provisionedId}/collect`, owner, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    expect(collect.status).toBe(200);
+
+    await mongo.db("admin").command({ dropUser: username });
+  });
+});
+
 describe("rate limiting (runs last — it poisons the auth budget)", () => {
   it("throttles auth brute force with 429", async () => {
     let limited = false;

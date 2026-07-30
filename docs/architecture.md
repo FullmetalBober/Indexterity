@@ -313,25 +313,45 @@ The dashboard headline is these hard numbers.
 
 ### 9.1 Index-only MongoDB role — no data-row access
 
-The data plane connects with a custom role granting only index management and stats,
-excluding `find` / `insert` / `update` / `remove`. It therefore cannot read customer
-documents.
+The data plane connects with a custom role granting only index management and
+stats, excluding `find` / `insert` / `update` / `remove` on customer
+collections. It therefore cannot read customer documents — enforced by the
+server, not by promise.
+
+**Automated (admin-string onboarding).** `POST /clusters/provision` accepts an
+admin connection string, uses it ONCE to create the role + a dedicated user
+(`idx_<hex>`) on the customer cluster, verifies the scoped credentials
+authenticate, and stores only the scoped string (sealed, §9.2). The admin
+string is never persisted. Re-provisioning refreshes the role's privileges via
+`updateRole`, so app updates can evolve the grant. The exact role
+(`apps/api/src/mongo/provision.ts`, live-verified against an `--auth` mongod —
+every engine command allowed, every document access denied):
 
 ```js
 db.getSiblingDB("admin").createRole({
-  role: "indexManager",
+  role: "indexterityEngine",
   privileges: [
-    { resource: { db: "yourDb", collection: "" }, // "" = all collections in db
+    // Un-transformed $queryStats needs BOTH actions (verified on mongo 8);
+    // both are dropped automatically on mongo <7 (profiler fallback).
+    { resource: { cluster: true },
+      actions: ["listDatabases", "queryStatsRead", "queryStatsReadTransformed"] },
+    { resource: { db: "", collection: "" }, // all non-system collections, all dbs
       actions: [
-        "listCollections", "listIndexes",       // discover
-        "indexStats", "collStats", "dbStats",   // usage + size → ROI numbers
-        "createIndex", "dropIndex", "collMod"   // act (collMod = hide before drop)
-      ]
-    }
+        "listCollections", "listIndexes",     // discover
+        "indexStats", "collStats",            // usage + size + latency → ROI
+        "createIndex", "dropIndex", "collMod" // act (collMod = hide before drop)
+      ] },
+    // The only find grants are metadata namespaces:
+    { resource: { db: "", collection: "system.profile" }, actions: ["find"] },
+    { resource: { db: "config", collection: "collections" }, actions: ["find"] }
   ],
   roles: []
 })
 ```
+
+Where direct role creation is not possible (Atlas manages users through its own
+UI/API; the endpoint maps that failure to a 422 with guidance), create the same
+role there manually and connect with the scoped string instead.
 
 - `createIndex` builds the index under server authority, so **no read grant is
   needed** — the role never exposes document contents.
@@ -339,11 +359,11 @@ db.getSiblingDB("admin").createRole({
   `dropIndex` can still cause an outage and `createIndex` can spike load. The
   role does not replace the confirm / hide-first / windowed-build pipeline; both
   layers are required.
-- **Suggesting new indexes needs more.** Workload analysis for `CREATE` reads the
-  profiler / slow-query logs (`system.profile`), which contain query predicates
-  with **literal data values**. That path is a higher trust tier and opt-in. The
-  cleanup path (drop/merge) needs index metadata + `$indexStats` only → zero data
-  exposure. Ship cleanup first.
+- **`system.profile` is the trust boundary.** Profiler entries contain query
+  predicates with **literal data values**; that read powers workload analysis
+  and partial-index detection and remains opt-in (`policy.workloadAnalysis`).
+  The cleanup path (drop/merge) needs index metadata + `$indexStats` only →
+  zero data exposure.
 
 ### 9.2 Secrets at rest — app-level envelope encryption
 
@@ -514,6 +534,7 @@ Redis + BullMQ only if scale demands it.
 | D12 | npm workspaces (not pnpm) for now | Local Node is Zed-managed; a global pnpm install conflicted. Turbo supports npm workspaces; swappable later | Locked |
 | D13 | TypeScript **6** (last JS line); api built with **swc** directly (no Nest CLI) | Was TS 7 (native), but 7 ships no `tsserver.js` until 7.1 — editors broke. TS 6 keeps full toolchain parity (tsserver, programmatic API); typecheck speed is a non-issue at this repo size. Revisit 7 at 7.1 | Revised |
 | D14 | **zod 4** (pin lifted) | Landed with the oRPC migration (D9). The api's internal driver-boundary schemas were already v4-compatible (two-arg `z.record`, no deprecated APIs) — zero code changes beyond `z.uuid()`/`z.email()` in the contracts | Revised |
+| D15 | **Provisioned least-privilege onboarding** instead of an Atlas API integration | Jul 2026. An admin string is used once to create the `indexterityEngine` role + an `idx_<hex>` user on the customer's cluster; only the scoped string is stored (the admin one never persists). Turns "we can't read your documents" from a promise into a server-enforced guarantee (§9.1), works on any self-hosted/community deployment, and degrades to a guided 422 on Atlas (which owns its user management). Live-verified under `--auth`: full engine surface allowed, find/insert/drop/escalation denied, collect e2e as the scoped user | Locked |
 | D15 | Internal packages compile to CJS `dist`; apps consume built output | Predictable dev/prod module resolution; Turbo orders builds via `^build` | Locked |
 
 ### Deferred / open
