@@ -1,5 +1,6 @@
 import { inChangeWindow } from "../analysis";
 import { actions, and, eq, inArray, policies, recommendations } from "../db";
+import { effectiveChangeWindow } from "./change-window";
 import { openClusterSession } from "./cluster-connection";
 import { jobDb } from "./db";
 
@@ -27,13 +28,13 @@ export async function applyCreatesForCluster(clusterId: string): Promise<number>
     .from(policies)
     .where(eq(policies.clusterId, clusterId))
     .limit(1);
-  if (
-    !inChangeWindow(
-      new Date(),
-      policy?.changeWindowStartHour ?? null,
-      policy?.changeWindowEndHour ?? null,
-    )
-  ) {
+  const window = effectiveChangeWindow({
+    changeWindowStartHour: policy?.changeWindowStartHour ?? null,
+    changeWindowEndHour: policy?.changeWindowEndHour ?? null,
+    inferredWindowStartHour: policy?.inferredWindowStartHour ?? null,
+    inferredWindowEndHour: policy?.inferredWindowEndHour ?? null,
+  });
+  if (!inChangeWindow(new Date(), window.startHour, window.endHour)) {
     return 0;
   }
 
