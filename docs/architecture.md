@@ -551,6 +551,36 @@ task, not a v1 blocker.
 (scrypt/argon2). Never hand-encrypt passwords with the above — it is only for
 secrets at rest.
 
+### 10.4 Rotating the master key
+
+`clusters.key_version` records which key sealed each row, so rotation is a
+rolling operation rather than a stop-the-world one — old rows keep opening while
+new ones are written under the new key.
+
+1. Generate a key and add it **alongside** the current one. Do not remove the
+   old one yet; rows still sealed with it need it to open.
+   ```
+   MASTER_KEY=<old, still set>
+   MASTER_KEY_V2=<new>
+   MASTER_KEY_VERSION=2
+   ```
+   From here every new cluster is sealed at v2, and existing v1 rows still work.
+2. Re-seal the backlog:
+   ```
+   node apps/api/dist/rotate-key.js
+   ```
+   It decrypts and re-encrypts inside the api process — plaintext never leaves
+   it — one row at a time, each recording its new version. Safe to interrupt and
+   safe to re-run; it reports `re-sealed N, failed M` and exits non-zero if
+   anything failed.
+3. Only once it reports zero remaining (re-run it; it will say "nothing to do")
+   may the old key be removed from the environment.
+
+A row that fails to re-seal almost always means the key that sealed it is gone.
+The tool names each one rather than stopping, so one orphan does not block the
+rest. It is also the only way back from an orphan: without its original key the
+stored connection string is unrecoverable and the cluster must be reconnected.
+
 ### 9.3 Tenancy
 
 Organizations → members → connected clusters. Every row is scoped by `orgId`;

@@ -468,7 +468,7 @@ export class RecommendationsController {
         message: "connection string must be mongodb:// or mongodb+srv://",
       });
     }
-    consumeDialBudget(await requireUserId(req));
+    await consumeDialBudget(this.database.db, await requireUserId(req));
     const { hosts, isSrv } = adapter.hostsOf(value);
     try {
       await assertTargetsAllowed(hosts, isSrv, { allowPrivate: allowPrivateTargets() });

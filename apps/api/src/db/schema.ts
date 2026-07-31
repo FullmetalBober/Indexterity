@@ -292,6 +292,17 @@ export const policies = pgTable("policies", {
   inferredWindowReason: text("inferred_window_reason"),
 });
 
+// Outbound-dial budget per user. In Postgres rather than in memory because the
+// thing it limits — how fast one account can sweep hosts the control plane will
+// connect to — must not reset on deploy or multiply by the api replica count.
+export const dialBudgets = pgTable("dial_budgets", {
+  userId: text("user_id")
+    .primaryKey()
+    .references(() => user.id, { onDelete: "cascade" }),
+  count: integer("count").notNull().default(0),
+  resetAt: timestamp("reset_at", { withTimezone: true }).notNull(),
+});
+
 // Regression memory: an index whose drop slowed reads during observe is parked
 // here so the engine won't re-propose it until `until`. Repeats escalate.
 export const indexCooldowns = pgTable(

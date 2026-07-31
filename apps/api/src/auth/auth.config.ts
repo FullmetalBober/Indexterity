@@ -9,6 +9,9 @@ export interface AuthConfig {
   readonly databaseUrl: string;
   readonly secret: string;
   readonly baseURL: string;
+  // Set `Secure` on the session cookie. Decided explicitly rather than inferred
+  // from the baseURL scheme — see auth/cookies.ts.
+  readonly secureCookies: boolean;
   // Origins allowed to make auth requests (CSRF); include the web app's origin.
   readonly trustedOrigins: readonly string[];
   readonly githubClientId: string;
@@ -26,6 +29,9 @@ export function createAuth(config: AuthConfig) {
     secret: config.secret,
     baseURL: config.baseURL,
     trustedOrigins: [...config.trustedOrigins],
+    // SameSite=Lax (better-auth's default) is what stops cross-site mutations;
+    // this is what keeps the cookie off plaintext.
+    advanced: { useSecureCookies: config.secureCookies },
     databaseHooks: {
       user: {
         create: {
