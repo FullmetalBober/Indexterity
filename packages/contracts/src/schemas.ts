@@ -222,12 +222,13 @@ export type AuditAction = z.infer<typeof auditAction>;
 // Per-cluster engine knobs. maxCollectionSizeBytes null = no ceiling.
 export const clusterPolicy = z.object({
   clusterId: z.uuid(),
-  autoApply: z.boolean(),
   workloadAnalysis: z.boolean(),
   instantCreate: z.boolean(),
   observeWindowDays: z.number().int().min(1).max(365),
   maxCollectionSizeBytes: z.number().int().positive().nullable(),
-  // Score threshold for auto-approval (null = never auto-approve by score).
+  // The one auto-approval control: null = nothing auto-approves and a human
+  // clicks, 0 = everything does, anything between is a confidence floor.
+  // ADVISORY_REVIEW is never auto-approved at any setting.
   autoApplyScore: z.number().int().min(0).max(100).nullable(),
   // Elective changes (hide/build/drop) run only inside this UTC hour window;
   // safety responses never wait. Null hands the choice to the engine, which

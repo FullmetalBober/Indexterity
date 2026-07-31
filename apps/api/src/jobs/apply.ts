@@ -1,5 +1,15 @@
 import { dynamicObserveDays, inChangeWindow } from "../analysis";
-import { actions, and, eq, gte, indexSnapshots, ne, policies, recommendations } from "../db";
+import {
+  actions,
+  and,
+  type Database,
+  eq,
+  gte,
+  indexSnapshots,
+  ne,
+  policies,
+  recommendations,
+} from "../db";
 import { serializeSpec } from "../mongo";
 import { effectiveChangeWindow } from "./change-window";
 import { openClusterSession } from "./cluster-connection";
@@ -9,11 +19,38 @@ import { preflightDrop } from "./preflight";
 const DROP_TYPES = new Set(["DROP_UNUSED", "DROP_REDUNDANT", "MERGE"]);
 const DEFAULT_OBSERVE_DAYS = 30;
 
+// Auto-approval, the whole of it. One threshold, no companion switch: null
+// means nothing is promoted and a human clicks, 0 means everything is,
+// anything between is a confidence floor.
+//
+// ADVISORY_REVIEW is excluded at every setting. "A human should look at this"
+// is the entire content of an advisory, and promoting one also strands it —
+// classify only deletes and re-inserts PROPOSED rows, so an approved advisory
+// leaves the refresh pool and is never re-evaluated again.
+export async function promoteByScore(
+  db: Database,
+  clusterId: string,
+  threshold: number | null,
+): Promise<void> {
+  if (threshold === null) return;
+  await db
+    .update(recommendations)
+    .set({ state: "APPROVED", updatedAt: new Date() })
+    .where(
+      and(
+        eq(recommendations.clusterId, clusterId),
+        eq(recommendations.state, "PROPOSED"),
+        gte(recommendations.score, threshold),
+        ne(recommendations.type, "ADVISORY_REVIEW"),
+      ),
+    );
+}
+
 // APPROVED drops -> pre-flight -> hide (collMod hidden:true) -> HIDDEN. Hiding is
 // instant and reversible; it starts the observe window. Records an audit action
 // with a rollback token. A failed pre-flight re-proposes instead of hiding.
-// With policy.autoApply, PROPOSED recommendations are promoted first — the
-// hide -> observe -> finalize gates still stand between them and any drop.
+// Anything the threshold above promotes goes through the same gates as a drop
+// a human approved by hand.
 export async function applyCluster(clusterId: string): Promise<number> {
   const db = jobDb();
   const [policy] = await db
@@ -21,26 +58,7 @@ export async function applyCluster(clusterId: string): Promise<number> {
     .from(policies)
     .where(eq(policies.clusterId, clusterId))
     .limit(1);
-  if (policy?.autoApply === true) {
-    await db
-      .update(recommendations)
-      .set({ state: "APPROVED", updatedAt: new Date() })
-      .where(and(eq(recommendations.clusterId, clusterId), eq(recommendations.state, "PROPOSED")));
-  } else if (policy?.autoApplyScore !== null && policy?.autoApplyScore !== undefined) {
-    // Score-gated auto-approval: confident recommendations enter the pipeline on
-    // their own; advisories never do. The observe/regression gates still apply.
-    await db
-      .update(recommendations)
-      .set({ state: "APPROVED", updatedAt: new Date() })
-      .where(
-        and(
-          eq(recommendations.clusterId, clusterId),
-          eq(recommendations.state, "PROPOSED"),
-          gte(recommendations.score, policy.autoApplyScore),
-          ne(recommendations.type, "ADVISORY_REVIEW"),
-        ),
-      );
-  }
+  await promoteByScore(db, clusterId, policy?.autoApplyScore ?? null);
   const approved = await db
     .select()
     .from(recommendations)

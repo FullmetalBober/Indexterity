@@ -396,7 +396,6 @@ const disconnectCluster = createServerFn({ method: "POST" })
 
 interface PolicyInput {
   readonly clusterId: string;
-  readonly autoApply: boolean;
   readonly workloadAnalysis: boolean;
   readonly instantCreate: boolean;
   readonly observeWindowDays: number;
@@ -416,8 +415,6 @@ const savePolicy = createServerFn({ method: "POST" })
       data !== null &&
       "clusterId" in data &&
       typeof data.clusterId === "string" &&
-      "autoApply" in data &&
-      typeof data.autoApply === "boolean" &&
       "workloadAnalysis" in data &&
       typeof data.workloadAnalysis === "boolean" &&
       "instantCreate" in data &&
@@ -433,7 +430,6 @@ const savePolicy = createServerFn({ method: "POST" })
     ) {
       return {
         clusterId: data.clusterId,
-        autoApply: data.autoApply,
         workloadAnalysis: data.workloadAnalysis,
         instantCreate: data.instantCreate,
         observeWindowDays: data.observeWindowDays,
@@ -448,7 +444,6 @@ const savePolicy = createServerFn({ method: "POST" })
     try {
       await serverApi().updatePolicy({
         clusterId: data.clusterId,
-        autoApply: data.autoApply,
         workloadAnalysis: data.workloadAnalysis,
         instantCreate: data.instantCreate,
         observeWindowDays: data.observeWindowDays,
@@ -1102,7 +1097,6 @@ function ClusterBar({
 
 interface PolicyView {
   readonly clusterId: string;
-  readonly autoApply: boolean;
   readonly workloadAnalysis: boolean;
   readonly instantCreate: boolean;
   readonly observeWindowDays: number;
@@ -1114,7 +1108,6 @@ interface PolicyView {
 
 // The engine knobs, owner-editable. Checkbox changes stage locally; Save PUTs.
 function PolicySection({ policy, onSaved }: { policy: PolicyView; onSaved: () => void }) {
-  const [autoApply, setAutoApply] = useState(policy.autoApply);
   const [workloadAnalysis, setWorkloadAnalysis] = useState(policy.workloadAnalysis);
   const [instantCreate, setInstantCreate] = useState(policy.instantCreate);
   const [observeDays, setObserveDays] = useState(policy.observeWindowDays);
@@ -1126,7 +1119,6 @@ function PolicySection({ policy, onSaved }: { policy: PolicyView; onSaved: () =>
     const result = await savePolicy({
       data: {
         clusterId: policy.clusterId,
-        autoApply,
         workloadAnalysis,
         instantCreate,
         observeWindowDays: observeDays,
@@ -1151,13 +1143,6 @@ function PolicySection({ policy, onSaved }: { policy: PolicyView; onSaved: () =>
     value: boolean;
     set: (v: boolean) => void;
   }> = [
-    {
-      id: "policy-auto-apply",
-      label: "Auto-apply",
-      hint: "approve recommendations without a human",
-      value: autoApply,
-      set: setAutoApply,
-    },
     {
       id: "policy-workload",
       label: "Workload analysis",
@@ -1228,6 +1213,13 @@ function PolicySection({ policy, onSaved }: { policy: PolicyView; onSaved: () =>
                 setAutoScore(event.target.value === "" ? null : Number(event.target.value))
               }
             />
+            <p className="text-muted-foreground text-xs">
+              {autoScore === null
+                ? "Empty: nothing is approved without you."
+                : autoScore === 0
+                  ? "0: every recommendation is approved automatically."
+                  : `Only recommendations scoring ${autoScore} or above.`}
+            </p>
           </div>
           <div className="grid gap-1.5">
             <Label htmlFor="window-start">Change window (UTC hours)</Label>

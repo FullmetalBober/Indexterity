@@ -10,13 +10,14 @@ import {
   indexSnapshots,
   latencySamples,
   organizations,
+  policies,
   recommendations,
   roiMetrics,
   user,
   verification,
 } from "../src/db";
 import { workloadKey } from "../src/engine/ports";
-import { applyCluster } from "../src/jobs/apply";
+import { applyCluster, promoteByScore } from "../src/jobs/apply";
 import { refreshInferredWindow } from "../src/jobs/change-window";
 import { classifyCluster } from "../src/jobs/classify";
 import { drainPool } from "../src/jobs/connection-pool";
@@ -167,12 +168,11 @@ describe("cluster lifecycle", () => {
   it("serves policy defaults and round-trips an update", async () => {
     const defaults = asRecord(await (await api(`/clusters/${clusterId}/policy`, owner)).json());
     expect(defaults.observeWindowDays).toBe(30);
-    expect(defaults.autoApply).toBe(false);
+    expect(defaults.autoApplyScore).toBeNull();
 
     const put = await api(`/clusters/${clusterId}/policy`, owner, {
       method: "PUT",
       body: JSON.stringify({
-        autoApply: false,
         workloadAnalysis: true,
         instantCreate: false,
         observeWindowDays: 7,
@@ -244,7 +244,6 @@ describe("tenancy, invites and roles", () => {
     const policy = await api(`/clusters/${clusterId}/policy`, member, {
       method: "PUT",
       body: JSON.stringify({
-        autoApply: true,
         workloadAnalysis: false,
         instantCreate: false,
         observeWindowDays: 30,
@@ -791,7 +790,6 @@ describe("change window gates elective builds", () => {
     const res = await api(`/clusters/${clusterId}/policy`, owner, {
       method: "PUT",
       body: JSON.stringify({
-        autoApply: false,
         workloadAnalysis: true,
         instantCreate: false,
         observeWindowDays: 7,
@@ -1120,6 +1118,95 @@ describe("password reset (changes the owner password — keep near the end)", ()
   });
 });
 
+describe("auto-approval is one threshold", () => {
+  it("means never at null, everything at 0, and never promotes an advisory", async () => {
+    const org = asRecord(await (await api("/org", owner)).json());
+    const [row] = await db
+      .insert(clusters)
+      .values({
+        orgId: asString(org.id),
+        name: "Threshold Cluster",
+        sealedDek: Buffer.alloc(1),
+        sealedData: Buffer.alloc(1),
+        keyVersion: 1,
+      })
+      .returning();
+    if (row === undefined) throw new Error("failed to insert cluster");
+    const thresholdId = row.id;
+    createdClusterIds.push(thresholdId);
+
+    const seed = async () => {
+      await db.delete(recommendations).where(eq(recommendations.clusterId, thresholdId));
+      await db.insert(recommendations).values([
+        {
+          clusterId: thresholdId,
+          type: "DROP_UNUSED",
+          state: "PROPOSED",
+          database: "inttest",
+          collection: "orders",
+          indexName: "weak_1",
+          rationale: "low confidence",
+          score: 40,
+          estimatedBytesSaved: 1024,
+        },
+        {
+          clusterId: thresholdId,
+          type: "DROP_UNUSED",
+          state: "PROPOSED",
+          database: "inttest",
+          collection: "orders",
+          indexName: "strong_1",
+          rationale: "high confidence",
+          score: 90,
+          estimatedBytesSaved: 1024,
+        },
+        {
+          clusterId: thresholdId,
+          type: "ADVISORY_REVIEW",
+          state: "PROPOSED",
+          database: "inttest",
+          collection: "orders",
+          indexName: "unique_1",
+          rationale: "protected index, unused",
+          score: 95,
+          estimatedBytesSaved: 1024,
+        },
+      ]);
+    };
+    const approvedNames = async (): Promise<string[]> => {
+      const rows = await db
+        .select()
+        .from(recommendations)
+        .where(
+          and(eq(recommendations.clusterId, thresholdId), eq(recommendations.state, "APPROVED")),
+        );
+      return rows.map((r) => r.indexName).sort();
+    };
+    await seed();
+    await promoteByScore(db, thresholdId, null);
+    expect(await approvedNames()).toEqual([]);
+
+    await seed();
+    await promoteByScore(db, thresholdId, 70);
+    expect(await approvedNames()).toEqual(["strong_1"]);
+
+    await seed();
+    await promoteByScore(db, thresholdId, 0);
+    // Everything except the advisory, which no setting may promote — an
+    // approved advisory leaves the PROPOSED set classify refreshes.
+    expect(await approvedNames()).toEqual(["strong_1", "weak_1"]);
+
+    // And the threshold applyCluster reads is the stored policy value.
+    await db.insert(policies).values({ clusterId: thresholdId, autoApplyScore: 95 });
+    await seed();
+    await applyCluster(thresholdId).catch(() => {
+      // The fixture's sealed bytes are dummies, so opening a session fails —
+      // after the promotion, which is the step under test.
+    });
+    expect(await approvedNames()).toEqual([]);
+  });
+});
+
 describe("workload collection is batched", () => {
   it("reads the cluster-wide store once and slices it per namespace", async () => {
     const collector = new MongoIndexCollector(mongo);
@@ -1200,7 +1287,6 @@ describe("workload collection is batched", () => {
     await api(`/clusters/${clusterId}/policy`, owner, {
       method: "PUT",
       body: JSON.stringify({
-        autoApply: false,
         workloadAnalysis: true,
         instantCreate: false,
         observeWindowDays: 7,

@@ -270,13 +270,14 @@ export const policies = pgTable("policies", {
     .notNull()
     .unique()
     .references(() => clusters.id, { onDelete: "cascade" }),
-  autoApply: boolean("auto_apply").notNull().default(false),
   workloadAnalysis: boolean("workload_analysis").notNull().default(false),
   // Auto-approve + build brand-new indexes on critical (large) collections.
   instantCreate: boolean("instant_create").notNull().default(false),
   observeWindowDays: integer("observe_window_days").notNull().default(30),
   maxCollectionSizeBytes: bigint("max_collection_size_bytes", { mode: "number" }),
-  // Recommendations scoring >= this auto-approve (null = only manual/autoApply).
+  // The single auto-approval control: null = nothing auto-approves (a human
+  // clicks), 0 = everything does, anything between is a confidence floor.
+  // ADVISORY_REVIEW is excluded at every setting.
   autoApplyScore: integer("auto_apply_score"),
   // Elective changes (hide/build/drop) only run inside this UTC hour window;
   // safety actions (unhide, regression rollback) ignore it. Null = the engine

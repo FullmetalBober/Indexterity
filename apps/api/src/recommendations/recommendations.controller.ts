@@ -695,7 +695,6 @@ export class RecommendationsController {
         .limit(1);
       return {
         clusterId: input.clusterId,
-        autoApply: row?.autoApply ?? false,
         workloadAnalysis: row?.workloadAnalysis ?? false,
         instantCreate: row?.instantCreate ?? false,
         observeWindowDays: row?.observeWindowDays ?? 30,

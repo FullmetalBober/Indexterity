@@ -190,7 +190,7 @@ so a critical missing index does not wait for the next scheduler tick.
 ```mermaid
 stateDiagram-v2
     [*] --> PROPOSED: engine proposes, scored 0 to 100
-    PROPOSED --> APPROVED: dashboard, autoApply, or score at least autoApplyScore
+    PROPOSED --> APPROVED: dashboard, or score at least autoApplyScore
     APPROVED --> HIDDEN: drop path — pre-flight, then hide (inside the change window)
     HIDDEN --> REJECTED: reads regressed — un-hidden + cooldown
     HIDDEN --> PROPOSED: pre-flight failed — un-hidden, re-proposed
@@ -250,16 +250,15 @@ but never writes to your cluster.
 | knob | effect | default |
 |------|--------|---------|
 | `readOnly` | compute everything, never write (owner-toggled) | on |
-| `autoApply` | approve recommendations without a human | off |
 | `workloadAnalysis` | enable the create/merge/update engine | off |
 | `instantCreate` | auto-build critical missing indexes | off |
 | `observeWindowDays` | baseline bake time for a hidden index — auto-extended for periodic usage (2× the largest activity gap, ≤ 90d), auto-shortened for long-proven idleness (≥ half, ≥ 7d) | 30 |
 | `maxCollectionSizeBytes` | size ceiling for building new indexes | — |
-| `autoApplyScore` | auto-approve recommendations scoring ≥ this (0-100) | off |
+| `autoApplyScore` | the one auto-approval control: empty = a human approves everything, `0` = everything auto-approves, `1`-`100` = a confidence floor. Advisories never auto-approve at any setting | empty |
 | `changeWindowStartHour` / `EndHour` | elective changes (hide/build/drop) only run in this UTC hour window; safety rollbacks never wait | **engine-chosen** |
 
 Knobs are edited from the dashboard's **Policy** section (`GET/PUT
-/clusters/:id/policy`, owner-only writes). With `autoApply`, proposed
+/clusters/:id/policy`, owner-only writes). With `autoApplyScore` set, proposed
 recommendations are promoted automatically — the hide → observe → finalize
 gates still stand between them and any drop.
 
@@ -486,10 +485,9 @@ What's actually open is correctness, not features:
   cluster a quarterly job's index is indistinguishable from a dead one. Withhold
   usage-based drops until the history has depth; structural redundancy findings
   don't depend on watching and can keep flowing.
-- **`autoApply` vs `autoApplyScore`** — they are mutually exclusive branches,
-  not a switch and its threshold, so setting both silently discards the score.
-  `autoApply` also promotes `ADVISORY_REVIEW` rows, which then leave the
-  PROPOSED pool `classify` refreshes and never get re-evaluated.
+- ~~`autoApply` vs `autoApplyScore`~~ — fixed by deleting `autoApply`:
+  `autoApplyScore` is now the only auto-approval control, and no setting
+  promotes an advisory.
 
 ## Notes
 
