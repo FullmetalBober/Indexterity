@@ -34,9 +34,12 @@ export async function applyCreatesForCluster(clusterId: string): Promise<number>
     inferredWindowStartHour: policy?.inferredWindowStartHour ?? null,
     inferredWindowEndHour: policy?.inferredWindowEndHour ?? null,
   });
-  if (!inChangeWindow(new Date(), window.startHour, window.endHour)) {
-    return 0;
-  }
+  // Urgent builds answer a scan that is costing on every execution, so they do
+  // not wait — the window exists to avoid adding load at a bad moment, and a
+  // CRITICAL scan is already worse than the build. Everything else waits.
+  const open = inChangeWindow(new Date(), window.startHour, window.endHour);
+  const buildable = open ? approved : approved.filter((rec) => rec.urgent);
+  if (buildable.length === 0) return 0;
 
   const { session, readOnly, release } = await openClusterSession(db, clusterId);
   try {
@@ -44,7 +47,7 @@ export async function applyCreatesForCluster(clusterId: string): Promise<number>
     const collector = session.collector;
     const executor = session.executor(readOnly);
     let built = 0;
-    for (const rec of approved) {
+    for (const rec of buildable) {
       const target = rec.targetSpec;
       if (target === null || target.keys.length === 0) continue;
       // targetSpec keys encode direction as a ":-1" suffix ("at:-1"); plain

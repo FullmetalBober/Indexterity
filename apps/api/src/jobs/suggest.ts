@@ -1,4 +1,11 @@
-import { createScore, type IndexSpec, recommendCreates, type SortKey } from "../analysis";
+import {
+  createScore,
+  type IndexSpec,
+  recommendCreates,
+  type ScanSeverity,
+  type SortKey,
+  scanCost,
+} from "../analysis";
 import { and, eq, inArray, indexCooldowns, like, or, policies, recommendations } from "../db";
 import { type WorkloadTarget, workloadKey } from "../engine/ports";
 import { openClusterSession } from "./cluster-connection";
@@ -11,9 +18,8 @@ import { jobDb } from "./db";
 const WORKLOAD_OPTIONS = { minCount: 3 };
 // A TTL advisory needs a RECURRING delete pattern, not a one-off cleanup.
 const TTL_MIN_DELETES = 3;
+// Below this a collection is too small for a scan to matter at all.
 const MIN_COLLECTION_DOCS = 1000;
-// A collection scan on a collection this large is "critical" (instant-apply eligible).
-const CRITICAL_COLLECTION_DOCS = 10_000;
 // Instant apply (build without human approval) demands stronger recurrence
 // than merely proposing.
 const INSTANT_MIN_COUNT = 5;
@@ -111,7 +117,7 @@ export async function suggestForCluster(clusterId: string): Promise<number> {
     // the workload read so it can be asked for every namespace in one call —
     // the store it reads is cluster-wide, so asking per collection would pull
     // the whole thing once per collection.
-    const eligible: Array<WorkloadTarget & { docCount: number; critical: boolean }> = [];
+    const eligible: Array<WorkloadTarget & { docCount: number }> = [];
     for (const { database, collection } of namespaces) {
       // Counts come from $collStats, not the count command — the scoped
       // least-privilege user has no `find` grant, which `count` requires.
@@ -122,15 +128,10 @@ export async function suggestForCluster(clusterId: string): Promise<number> {
       if (policy.maxCollectionSizeBytes !== null && dataSizeBytes > policy.maxCollectionSizeBytes) {
         continue;
       }
-      eligible.push({
-        database,
-        collection,
-        docCount,
-        critical: docCount >= CRITICAL_COLLECTION_DOCS,
-      });
+      eligible.push({ database, collection, docCount });
     }
     const workload = await collector.collectWorkload(eligible);
-    for (const { database, collection, docCount, critical } of eligible) {
+    for (const { database, collection, docCount } of eligible) {
       const shapes = workload.get(workloadKey(database, collection)) ?? [];
       const [existing, sizes] = await Promise.all([
         collector.listIndexes(database, collection),
@@ -159,6 +160,17 @@ export async function suggestForCluster(clusterId: string): Promise<number> {
           ? sizeValues.reduce((sum, value) => sum + value, 0) / sizeValues.length
           : docCount * 16;
       const cost = ` Est. build ≈ ${Math.max(1, Math.round(avgIndexBytes / 1024))} KB (+1 write per doc write).`;
+      // What this collection's scans are actually costing. The worst shape
+      // decides: one query burning ten million document reads is the problem
+      // whether or not the others are mild.
+      const costs = shapes.map((shape) => scanCost(shape, docCount));
+      const severity: ScanSeverity = costs.some((cost) => cost.severity === "CRITICAL")
+        ? "CRITICAL"
+        : costs.some((cost) => cost.severity === "ELEVATED")
+          ? "ELEVATED"
+          : "ROUTINE";
+      const worst = costs.find((cost) => cost.severity === severity);
+
       for (const candidate of recommendCreates(shapes, existing, WORKLOAD_OPTIONS)) {
         // Partial variants get a suffix so they never collide with the full
         // index of the same keys.
@@ -169,15 +181,19 @@ export async function suggestForCluster(clusterId: string): Promise<number> {
           collscan: true,
           count: candidate.count,
           docCount,
+          severity,
           pastRegressions: regressionCounts.get(`${database} ${collection} ${indexName}`) ?? 0,
         });
         const instant =
           candidate.type === "CREATE" &&
-          critical &&
+          severity !== "ROUTINE" &&
           candidate.count >= INSTANT_MIN_COUNT &&
           policy.instantCreate &&
           !readOnly;
         if (instant) instantApproved += 1;
+        // A CRITICAL scan is paid on every execution; waiting for the quiet
+        // window can mean most of a day of it.
+        const urgent = instant && severity === "CRITICAL";
         toInsert.push({
           clusterId,
           type: candidate.type,
@@ -186,10 +202,14 @@ export async function suggestForCluster(clusterId: string): Promise<number> {
           collection,
           indexName,
           rationale:
-            (instant ? `${candidate.rationale} (auto-approved: critical)` : candidate.rationale) +
+            (instant
+              ? `${candidate.rationale} (auto-approved: ${severity.toLowerCase()} scan)`
+              : candidate.rationale) +
+            (worst === undefined ? "" : ` Cost: ${worst.summary}.`) +
             cost,
           score,
           estimatedBytesSaved: 0,
+          urgent,
           targetSpec: {
             keys: encodeKeys(candidate.keys),
             retire: [...candidate.retireIndexes],
@@ -269,7 +289,8 @@ export async function suggestForCluster(clusterId: string): Promise<number> {
   } finally {
     release();
   }
-  // Build the auto-approved critical creates now, without waiting for the scheduler.
+  // Build the auto-approved creates now rather than waiting for the scheduler.
+  // Anything not marked urgent still waits for the change window inside.
   if (instantApproved > 0) await applyCreatesForCluster(clusterId);
   return created;
 }

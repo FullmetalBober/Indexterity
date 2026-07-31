@@ -106,6 +106,9 @@ export const taskList = {
     });
   },
   suggest: async (payload: unknown, helpers: JobHelpers): Promise<void> => {
+    // suggest builds its own auto-approved creates inline rather than waiting
+    // for the next apply tick; create.ts decides which may run outside the
+    // change window.
     await onCluster("suggest", payload, helpers, suggestForCluster);
   },
   apply: async (payload: unknown, helpers: JobHelpers): Promise<void> => {
@@ -119,6 +122,9 @@ export const taskList = {
   },
   scheduleCollect: async (_payload: unknown, helpers: JobHelpers): Promise<void> => {
     await dispatchToAllClusters("collect", helpers);
+  },
+  scheduleSuggest: async (_payload: unknown, helpers: JobHelpers): Promise<void> => {
+    await dispatchToAllClusters("suggest", helpers);
   },
   scheduleApply: async (_payload: unknown, helpers: JobHelpers): Promise<void> => {
     await dispatchToAllClusters("apply", helpers);

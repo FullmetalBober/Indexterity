@@ -27,6 +27,10 @@ export interface QueryShape {
   readonly range: readonly string[];
   readonly collscan: boolean;
   readonly count: number;
+  // Documents the server actually walked for this shape, when the workload
+  // source reports it ($queryStats does; the profiler does not). The measure of
+  // what a missing index is costing — see analysis/severity.ts.
+  readonly docsExamined?: number;
   readonly constants?: Readonly<Record<string, ConstantValue>>;
   // $lookup joins anywhere in the pipeline (indexed on the FOREIGN collection).
   readonly lookups?: readonly LookupJoin[];

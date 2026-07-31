@@ -1,4 +1,5 @@
 import type { UsageClass } from "@repo/contracts";
+import type { ScanSeverity } from "./severity";
 
 // Confidence scoring (0–100). The score gates pipeline ENTRY — what gets
 // proposed and what auto-approves — never the safety stages: an auto-approved
@@ -25,6 +26,9 @@ export interface CreateSignals {
   readonly count: number;
   readonly docCount: number;
   readonly pastRegressions: number;
+  // How much the scan is actually costing (analysis/severity.ts). Defaults to
+  // ROUTINE so callers without a workload source behave as before.
+  readonly severity?: ScanSeverity;
 }
 
 const GB = 1024 ** 3;
@@ -68,15 +72,23 @@ export function dropScore(signals: DropSignals): number {
 // argument; a shape seen three times on a small collection is a suggestion.
 //
 //   collscan        40  the query is scanning today
-//   frequency     0-35  35 sightings for full credit
-//   collection    0-25  ≥1M docs 25, ≥10k 18, ≥1k 8
+//   frequency     0-30  35 sightings for full credit
+//   collection    0-20  ≥1M docs 20, ≥10k 14, ≥1k 6
+//   severity      0-10  CRITICAL 10, ELEVATED 5 — the measured cost of the scan
+//
+// Severity is worth less than it might seem because it correlates with the
+// other two: a scan doing ten million document reads is usually frequent, on a
+// large collection, or both. It breaks the tie between two candidates the older
+// signals score identically.
 export function createScore(signals: CreateSignals): number {
   let score = 0;
   if (signals.collscan) score += 40;
-  score += Math.min(35, Math.floor((35 * signals.count) / SIGHTINGS_FOR_FULL_CREDIT));
-  if (signals.docCount >= 1_000_000) score += 25;
-  else if (signals.docCount >= 10_000) score += 18;
-  else if (signals.docCount >= 1000) score += 8;
+  score += Math.min(30, Math.floor((30 * signals.count) / SIGHTINGS_FOR_FULL_CREDIT));
+  if (signals.docCount >= 1_000_000) score += 20;
+  else if (signals.docCount >= 10_000) score += 14;
+  else if (signals.docCount >= 1000) score += 6;
+  if (signals.severity === "CRITICAL") score += 10;
+  else if (signals.severity === "ELEVATED") score += 5;
   score -= signals.pastRegressions * REGRESSION_PENALTY;
   return clamp(score);
 }

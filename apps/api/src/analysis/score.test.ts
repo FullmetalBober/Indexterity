@@ -120,10 +120,23 @@ describe("createScore", () => {
     ).toBeGreaterThanOrEqual(75);
   });
 
-  it("reaches 100 for a constant scan on a huge collection", () => {
+  it("reaches 100 for a constant, critically costly scan on a huge collection", () => {
     expect(
-      createScore({ collscan: true, count: 35, docCount: 1_000_000, pastRegressions: 0 }),
+      createScore({
+        collscan: true,
+        count: 35,
+        docCount: 1_000_000,
+        severity: "CRITICAL",
+        pastRegressions: 0,
+      }),
     ).toBe(100);
+  });
+
+  it("ranks a measured-critical scan above an identical one that is not", () => {
+    const base = { collscan: true, count: 10, docCount: 50_000, pastRegressions: 0 } as const;
+    expect(createScore({ ...base, severity: "CRITICAL" })).toBeGreaterThan(
+      createScore({ ...base, severity: "ROUTINE" }),
+    );
   });
   it("a single scan on a small collection stays modest", () => {
     expect(

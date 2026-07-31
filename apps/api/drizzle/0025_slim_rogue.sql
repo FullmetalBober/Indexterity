@@ -1,0 +1,1 @@
+ALTER TABLE "recommendations" ADD COLUMN "urgent" boolean DEFAULT false NOT NULL;

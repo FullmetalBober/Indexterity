@@ -225,6 +225,10 @@ export const recommendations = pgTable(
     builtAt: timestamp("built_at", { withTimezone: true }),
     baselineWriteOps: bigint("baseline_write_ops", { mode: "number" }),
     baselineWriteLatency: bigint("baseline_write_latency", { mode: "number" }),
+    // A CRITICAL missing index (analysis/severity.ts): the scan is costing on
+    // every execution, so the build skips the change window rather than waiting
+    // most of a day for the quiet slot.
+    urgent: boolean("urgent").notNull().default(false),
     targetSpec: jsonb("target_spec").$type<{
       keys: string[];
       retire: string[];

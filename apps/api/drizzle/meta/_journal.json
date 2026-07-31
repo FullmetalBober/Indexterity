@@ -176,6 +176,13 @@
       "when": 1785520421537,
       "tag": "0024_chubby_the_liberteens",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1785524116947,
+      "tag": "0025_slim_rogue",
+      "breakpoints": true
     }
   ]
 }

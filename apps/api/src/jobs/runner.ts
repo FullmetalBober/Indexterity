@@ -7,12 +7,15 @@ import { taskList } from "./tasks";
 
 // Recurring schedule (per cluster via the dispatcher tasks):
 //  - collect + classify every 6h
+//  - workload analysis hourly (a missing index costs on every execution, so
+//    waiting up to 6h to notice one is most of the delay)
 //  - hide approved drops every 5 min
 //  - finalize (drop past-observe hidden) hourly
 //  - prune time-series tables past RETENTION_DAYS daily
 //  - weekly read-only digest email (Monday 09:00)
 const CRONTAB = [
   "0 */6 * * * scheduleCollect",
+  "30 * * * * scheduleSuggest",
   "*/5 * * * * scheduleApply",
   "0 * * * * scheduleFinalize",
   "0 3 * * * retention",

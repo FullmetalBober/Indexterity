@@ -241,12 +241,19 @@ bigger ask than the `createRole` snippet it would replace, and it hands us a
 credential to guard. Atlas clusters get the guided 422 naming the commands to
 run in their own console.
 
-Everything on the correctness list is closed. What is left is severity: the
-engine treats a collection scan on a 50M-document table and one on 1,001
-documents identically past a single 10,000-doc gate, and `$queryStats` already
-reports `docsExamined` — the actual waste — which nothing reads. Discovery is
-also bounded by the 6h collect, so a genuinely critical missing index can wait
-a day even with `instantCreate` on.
+**How urgent a missing index is** comes from `docsExamined` — the documents the
+server actually walked — not from table size:
+
+| the scan | treatment |
+|----------|-----------|
+| ≥ 10M documents walked, or ≥ 500k per execution | **critical** — auto-approved with `instantCreate`, and the build skips the change window |
+| ≥ 1M walked, or a collection over 100k documents | elevated — auto-approved with `instantCreate`, build waits for the window |
+| anything smaller | routine — proposed for a human |
+
+Workload analysis runs **hourly**, not on the 6h collect cadence, because a
+missing index costs on every execution and most of the old delay was waiting to
+notice. A critical scan now goes from first sighting to built index in minutes
+rather than the better part of a day.
 
 ## Notes
 

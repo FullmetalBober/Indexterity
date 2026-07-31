@@ -556,6 +556,7 @@ export class MongoIndexCollector implements IndexCollector {
       string,
       {
         namespace: string;
+        docsExamined: number;
         equality: string[];
         sort: SortKey[];
         range: string[];
@@ -594,8 +595,8 @@ export class MongoIndexCollector implements IndexCollector {
       ) {
         continue;
       }
-      const collscan =
-        (metrics.keysExamined?.sum ?? 0) === 0 && (metrics.docsExamined?.sum ?? 0) > 0;
+      const docsExamined = metrics.docsExamined?.sum ?? 0;
+      const collscan = (metrics.keysExamined?.sum ?? 0) === 0 && docsExamined > 0;
       // Shapes are deduplicated per namespace, not globally — the same filter
       // shape against two collections is two different findings.
       const mapKey = `${namespace}\u0000${shapeMapKey(equality, sort, range, lookups)}`;
@@ -603,6 +604,7 @@ export class MongoIndexCollector implements IndexCollector {
       if (prev === undefined) {
         shapes.set(mapKey, {
           namespace,
+          docsExamined,
           equality,
           sort,
           range,
@@ -612,6 +614,7 @@ export class MongoIndexCollector implements IndexCollector {
         });
       } else {
         prev.count += metrics.execCount;
+        prev.docsExamined += docsExamined;
         prev.collscan = prev.collscan || collscan;
       }
     }
@@ -623,6 +626,7 @@ export class MongoIndexCollector implements IndexCollector {
         range: shape.range,
         collscan: shape.collscan,
         count: shape.count,
+        docsExamined: shape.docsExamined,
         ...(shape.lookups.length > 0 ? { lookups: shape.lookups } : {}),
       });
       byNamespace.set(shape.namespace, list);
