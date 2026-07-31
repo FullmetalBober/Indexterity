@@ -288,6 +288,33 @@ current index spec. If the index is no longer unused, its options changed, or it
 now unique/TTL — **abort and re-propose**. Classification is centralized in `core`;
 this final re-check runs at the executor.
 
+### 7.4.1 Losing the cluster mid-pipeline
+
+An outage of days or weeks is the case where a safety gate is most likely to be
+wrong, because the counters it compares are **cumulative since mongod started**.
+
+- **Restart during the window.** `current.ops < baseline.ops` means the numbers
+  are from a different process lifetime. `evaluateRegression` returns
+  **UNOBSERVABLE** — never STABLE — and finalize **un-hides and re-proposes**
+  the drop instead of taking the one irreversible action on a window it never
+  saw. The same reading also releases an index that sat hidden through the
+  outage. On the create side the write watch re-baselines and restarts rather
+  than graduating unchecked, and graduation is only evaluated *after* a real
+  reading.
+- **No restart, just nobody watching.** The counters kept climbing, so the
+  observation is still valid — the window merely lasted longer. Nothing special
+  happens, which is correct.
+- **Usage history with a hole.** Snapshots stop and resume. `classifyUsage`
+  cannot tell a busy index from a dead one across a gap, so
+  `usageHistoryIsTrustworthy` (≥ 3 snapshots, no gap beyond `maxGapHours`,
+  newest within it) gates every usage-based finding. Structural findings
+  (redundancy, unique-prefix) are unaffected. This also stops a brand-new
+  cluster from proposing a drop for every index on its first collect.
+- **Noise.** A cluster that stays unreachable fails collect every 6h forever;
+  owner alerts are capped at one per cluster+task per day.
+- **Visibility.** `cluster.lastCollectedAt` feeds a staleness badge, so figures
+  from before a gap cannot read as current.
+
 ### 7.5 "Instant apply" for critical indexes — scoped
 
 Restricted to **creation only** — never an instant drop. "Critical" is defined
@@ -649,6 +676,7 @@ submit `/` directly) if the marketing site ever grows more pages.
 | D13 | TypeScript **6** (last JS line); api built with **swc** directly (no Nest CLI) | Was TS 7 (native), but 7 ships no `tsserver.js` until 7.1 — editors broke. TS 6 keeps full toolchain parity (tsserver, programmatic API); typecheck speed is a non-issue at this repo size. Revisit 7 at 7.1 | Revised |
 | D14 | **zod 4** (pin lifted) | Landed with the oRPC migration (D9). The api's internal driver-boundary schemas were already v4-compatible (two-arg `z.record`, no deprecated APIs) — zero code changes beyond `z.uuid()`/`z.email()` in the contracts | Revised |
 | D15 | **Provisioned least-privilege onboarding** instead of an Atlas API integration | Jul 2026. An admin string is used once to create the `indexterityEngine` role + an `idx_<hex>` user on the customer's cluster; only the scoped string is stored (the admin one never persists). Turns "we can't read your documents" from a promise into a server-enforced guarantee (§10.1), works on any self-hosted/community deployment, and degrades to a guided 422 on Atlas (which owns its user management). Live-verified under `--auth`: full engine surface allowed, find/insert/drop/escalation denied, collect e2e as the scoped user | Locked |
+| D19 | **"Cannot tell" is never spelled "all clear"** | Jul 2026. Losing a cluster for days or weeks used to end badly: `$collStats`/`$indexStats` counters are cumulative since mongod started, so a restart during the observe window made `current − baseline` negative, which failed the minimum-ops check and read as *no regression* — the drop then proceeded on evidence that no longer existed, with the pre-flight's `$indexStats` check equally reset. The gate now returns REGRESSED / STABLE / **UNOBSERVABLE**; an unobservable window un-hides and re-proposes (which also ends the case of an index left hidden through an outage), and the create-side watch re-baselines instead of graduating unchecked. Separately, usage findings now require a continuous, current history (≥ 3 snapshots, no hole over 48h) — during a gap a busy index is indistinguishable from a dead one — and repeat failure alerts are capped at one per cluster+task per day | Locked |
 | D18 | **Deny-by-default network guard + invite-only sign-up** (§10.2) | Jul 2026. Onboarding dials whatever an owner pastes, which made the api a request-forgery primitive: with open sign-up, anyone could register and use it to map our internal network, or connect an unauthenticated internal database outright. Targets are now resolved (SRV expanded, IPv4-mapped IPv6 unwrapped, every host in a multi-host string checked) and classified — link-local/metadata forbidden outright, private ranges only with `ALLOW_PRIVATE_CLUSTER_TARGETS`; sign-up defaults to invite-only with first-user bootstrap; a per-user dial budget is consumed before the address check. Self-hosted installs flip both knobs, and the chart warns when the combination is unsafe | Locked |
 | D16 | **Engine ports** extracted for future PostgreSQL/SQL Server support (§9) | Jul 2026. `IndexCollector`/`IndexExecutor`/`EngineSession` moved to `src/engine/ports.ts`; adapters register per `clusters.engine` (enum ready, MONGODB the only implementation); the pool, jobs, and API speak only the ports. Capability flags (`hideIndexes`, `provisionScopedUsers`) mark where engines genuinely differ — notably PostgreSQL has no reversible hide, so its adapter will need an alternative observe stage. Behavior-preserving: the untouched integration suite (25/25) passed on the refactor | Locked |
 | D17 | **Dynamic observe window** + recurrence floor | Jul 2026. The observe window is decided per drop at hide time from the index's own usage history (`analysis/observe.ts`, stored in `recommendations.observe_days`, reason in the audit trail): periodic usage extends to 2× the largest activity gap (≤ 90d) so a monthly job gets a full cycle inside the window; zero usage across ≥ 2× the baseline shortens to half (≥ 7d). Policy stays the baseline and the fallback. Workload shapes now need ≥ 3 sightings to propose and ≥ 5 for instant apply — a manually-run heavy query once or twice produces nothing | Locked |

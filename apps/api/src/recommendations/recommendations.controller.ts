@@ -75,7 +75,10 @@ function toDiagnosis(diagnosis: EngineConnectionDiagnosis) {
   };
 }
 
-function toCluster(row: typeof clusters.$inferSelect): Cluster {
+function toCluster(
+  row: typeof clusters.$inferSelect,
+  lastCollectedAt: Date | null = null,
+): Cluster {
   return {
     id: row.id,
     name: row.name,
@@ -83,6 +86,7 @@ function toCluster(row: typeof clusters.$inferSelect): Cluster {
     engine: row.engine,
     readOnly: row.readOnly,
     provisionedUsername: row.provisionedUsername,
+    lastCollectedAt: lastCollectedAt?.toISOString() ?? null,
     createdAt: row.createdAt.toISOString(),
   };
 }
@@ -177,7 +181,27 @@ export class RecommendationsController {
         .from(clusters)
         .where(eq(clusters.orgId, orgId))
         .orderBy(desc(clusters.createdAt));
-      return rows.map(toCluster);
+      // One grouped query for freshness rather than one per cluster.
+      const freshness = await this.database.db
+        .select({
+          clusterId: indexSnapshots.clusterId,
+          lastCollectedAt: sql<Date | null>`max(${indexSnapshots.capturedAt})`,
+        })
+        .from(indexSnapshots)
+        .where(
+          inArray(
+            indexSnapshots.clusterId,
+            rows.map((row) => row.id),
+          ),
+        )
+        .groupBy(indexSnapshots.clusterId);
+      const lastByCluster = new Map(
+        freshness.map((entry) => [
+          entry.clusterId,
+          entry.lastCollectedAt === null ? null : new Date(entry.lastCollectedAt),
+        ]),
+      );
+      return rows.map((row) => toCluster(row, lastByCluster.get(row.id) ?? null));
     });
   }
 

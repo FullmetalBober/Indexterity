@@ -57,7 +57,9 @@ PostgreSQL / SQL Server adapters can slot in without pipeline changes
 
 ```mermaid
 flowchart TD
-    S[Index snapshots and usage history] --> P{Protected?<br/>_id_ / unique / TTL / shard / partial / sparse}
+    S[Index snapshots and usage history] --> H{History continuous and current?<br/>3+ snapshots, no gap over 48h}
+    H -- no --> HX[No usage-based finding —<br/>absence of evidence only counts<br/>if we were watching]
+    H -- yes --> P{Protected?<br/>_id_ / unique / TTL / shard / partial / sparse}
     P -- yes --> PZ{Zero usage, or a unique index<br/>prefixing a wider one?}
     PZ -- yes --> ADV[ADVISORY_REVIEW<br/>never auto-dropped]
     PZ -- no --> K1[Keep]
@@ -99,13 +101,18 @@ flowchart TD
 Runs off collected snapshots. First each index gets a **usage class** from its
 op-count history:
 
-- needs **≥ 3 snapshots**, otherwise treated as `FLAT_ZERO`
+- needs **≥ 3 snapshots** (below that no usage claim is made at all)
 - ops are summed **across all replica-set members** per snapshot
 - no snapshot has ops → `FLAT_ZERO`
 - every snapshot has ops → `CONTINUOUS`
 - some do, and the last 3 have ops → `PERIODIC_ALIVE`
 - some do, but the last 3 are silent → `PERIODIC_DEAD` (e.g. a monthly job that
   got decommissioned)
+
+**Usage claims need a history worth trusting.** Fewer than 3 snapshots, a hole
+larger than 48 hours, or a newest snapshot older than that, and no usage-based
+finding is made at all — during a collection gap a busy index looks exactly
+like a dead one. Redundancy findings are structural and unaffected.
 
 Then the recommendation:
 
@@ -206,6 +213,11 @@ APPROVED → pre-flight → hide (collMod hidden:true) → HIDDEN → observe �
   The decided window and its reason land in the audit trail.
 - At hide time the collection's **baseline read latency** is recorded.
 - `finalize` runs only after the window elapses and gates the drop three ways:
+  0. **Observability** — `$collStats` counters are cumulative *since mongod
+     started*, so a restart mid-window (common during a long outage) leaves a
+     baseline that no longer relates to them. That reads as **UNOBSERVABLE**,
+     never as "no regression": the index is **un-hidden and re-proposed**
+     rather than dropped on evidence that no longer exists.
   1. **Regression** — if average read latency since hiding exceeds
      `baseline × 1.5` (minimum 20 reads), un-hide the index and park it in a
      **cooldown** (escalating on each repeat) so the engine won't re-propose and

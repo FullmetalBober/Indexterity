@@ -14,9 +14,11 @@ import {
   verification,
 } from "../src/db";
 import { applyCluster } from "../src/jobs/apply";
+import { classifyCluster } from "../src/jobs/classify";
 import { drainPool } from "../src/jobs/connection-pool";
 import { applyCreatesForCluster } from "../src/jobs/create";
 import { closeJobDb } from "../src/jobs/db";
+import { finalizeCluster } from "../src/jobs/finalize";
 import { MongoConnection } from "../src/mongo";
 import {
   API_BASE,
@@ -879,6 +881,107 @@ describe("dynamic observe window", () => {
       .db("inttest")
       .command({ collMod: "orders", index: { name: "dyn_1", hidden: false } });
     await mongo.db("inttest").collection("orders").dropIndex("dyn_1");
+  });
+});
+
+describe("outage resilience", () => {
+  it("un-hides and re-proposes instead of dropping when the counters reset", async () => {
+    process.env.MASTER_KEY =
+      process.env.MASTER_KEY ?? Buffer.from("0123456789abcdef0123456789abcdef").toString("base64");
+    await mongo.db("inttest").collection("orders").createIndex({ outage: 1 }, { name: "outage_1" });
+    await mongo
+      .db("inttest")
+      .command({ collMod: "orders", index: { name: "outage_1", hidden: true } });
+
+    // Hidden a month ago, its observe window long elapsed, with a baseline
+    // FAR above the live counters — exactly what a mongod restart during an
+    // outage leaves behind.
+    const [rec] = await db
+      .insert(recommendations)
+      .values({
+        clusterId,
+        type: "DROP_UNUSED",
+        state: "HIDDEN",
+        database: "inttest",
+        collection: "orders",
+        indexName: "outage_1",
+        rationale: "outage test",
+        estimatedBytesSaved: 0,
+        hiddenAt: new Date(Date.now() - 30 * 86_400_000),
+        observeDays: 7,
+        baselineReadOps: 5_000_000,
+        baselineReadLatency: 5_000_000_000,
+      })
+      .returning();
+    if (rec === undefined) throw new Error("failed to insert recommendation");
+
+    await finalizeCluster(clusterId);
+
+    const [after] = await db.select().from(recommendations).where(eq(recommendations.id, rec.id));
+    // Not dropped, and not left hidden either: restored and re-proposed.
+    expect(after?.state).toBe("PROPOSED");
+    expect(after?.hiddenAt).toBeNull();
+    const specs = await mongo.db("inttest").collection("orders").indexes();
+    const restored = specs.find((spec) => spec.name === "outage_1");
+    expect(restored !== undefined && restored.hidden !== true).toBe(true);
+
+    const trail = await db.select().from(actions).where(eq(actions.recommendationId, rec.id));
+    expect(trail.some((entry) => entry.result.includes("observation lost"))).toBe(true);
+
+    await mongo.db("inttest").collection("orders").dropIndex("outage_1");
+  });
+
+  it("withholds usage-based drops when the snapshot history has a hole", async () => {
+    // A cluster whose only history predates a long gap must not have its
+    // indexes declared unused. Fresh cluster, snapshots aged a month.
+    const res = await api("/clusters", owner, {
+      method: "POST",
+      body: JSON.stringify({ name: "Gapped Cluster", connectionString: MONGO_URL }),
+    });
+    expect(res.status).toBe(200);
+    const gappedId = asString(asRecord(await res.json()).id);
+    createdClusterIds.push(gappedId);
+
+    const old = Date.now() - 30 * 86_400_000;
+    await db.insert(indexSnapshots).values(
+      [0, 1, 2].map((day) => ({
+        clusterId: gappedId,
+        database: "inttest",
+        collection: "orders",
+        indexName: "gap_probe_1",
+        spec: {
+          name: "gap_probe_1",
+          keys: [{ field: "gap", direction: 1 }],
+          unique: false,
+          ttl: false,
+          partial: false,
+          sparse: false,
+          hidden: false,
+          isShardKey: false,
+          collation: null,
+        },
+        sizeBytes: 8192,
+        perMember: [{ member: "m1", ops: 0 }],
+        capturedAt: new Date(old + day * 86_400_000),
+      })),
+    );
+
+    expect(await classifyCluster(gappedId)).toBe(0);
+    const proposals = await db
+      .select()
+      .from(recommendations)
+      .where(eq(recommendations.clusterId, gappedId));
+    expect(proposals).toHaveLength(0);
+  });
+
+  it("reports collection freshness so stale numbers cannot look current", async () => {
+    const list = await (await api("/clusters", owner)).json();
+    const rows = Array.isArray(list) ? list.map(asRecord) : [];
+    const gapped = rows.find((row) => row.name === "Gapped Cluster");
+    expect(typeof gapped?.lastCollectedAt).toBe("string");
+    // A month-old newest snapshot — the dashboard badges this.
+    const age = Date.now() - new Date(asString(gapped?.lastCollectedAt)).getTime();
+    expect(age).toBeGreaterThan(20 * 86_400_000);
   });
 });
 

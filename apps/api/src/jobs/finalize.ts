@@ -1,4 +1,4 @@
-import { inChangeWindow, isRegression } from "../analysis";
+import { evaluateRegression, inChangeWindow } from "../analysis";
 import { actions, and, eq, inArray, policies, recommendations, roiMetrics } from "../db";
 import { notifyClusterOwners } from "../mail/notify";
 import { serializeSpec } from "../mongo";
@@ -76,16 +76,39 @@ export async function finalizeCluster(clusterId: string): Promise<number> {
       ) {
         continue;
       }
-      if (now - rec.builtAt.getTime() >= observeDays * DAY_MS) {
+      const { writes } = await collector.collectionLatency(rec.database, rec.collection);
+      const baseline = { ops: rec.baselineWriteOps, latencyMicros: rec.baselineWriteLatency };
+      const verdict = evaluateRegression(baseline, writes, REGRESSION_OPTIONS);
+      // The server restarted mid-watch: the baseline is meaningless now. Start
+      // the watch again rather than graduating an index nobody ever checked.
+      if (verdict === "UNOBSERVABLE") {
+        await db
+          .update(recommendations)
+          .set({
+            builtAt: new Date(),
+            baselineWriteOps: writes.ops,
+            baselineWriteLatency: writes.latencyMicros,
+            updatedAt: new Date(),
+          })
+          .where(eq(recommendations.id, rec.id));
+        await db.insert(actions).values({
+          recommendationId: rec.id,
+          kind: "CREATE",
+          actor: "system",
+          result: "write watch restarted: counters reset (server restarted) during the window",
+        });
+        continue;
+      }
+      // Graduation is checked only AFTER a real reading, so a window that
+      // elapsed while we could not observe does not silently pass.
+      if (now - rec.builtAt.getTime() >= observeDays * DAY_MS && verdict === "STABLE") {
         await db
           .update(recommendations)
           .set({ baselineWriteOps: null, baselineWriteLatency: null, updatedAt: new Date() })
           .where(eq(recommendations.id, rec.id));
         continue;
       }
-      const { writes } = await collector.collectionLatency(rec.database, rec.collection);
-      const baseline = { ops: rec.baselineWriteOps, latencyMicros: rec.baselineWriteLatency };
-      if (!isRegression(baseline, writes, REGRESSION_OPTIONS)) continue;
+      if (verdict !== "REGRESSED") continue;
       await executor.drop(rec.database, rec.collection, rec.indexName);
       const until = await recordRegression(
         db,
@@ -122,7 +145,35 @@ export async function finalizeCluster(clusterId: string): Promise<number> {
       if (rec.baselineReadOps !== null && rec.baselineReadLatency !== null) {
         const current = await collector.readLatency(rec.database, rec.collection);
         const baseline = { ops: rec.baselineReadOps, latencyMicros: rec.baselineReadLatency };
-        if (isRegression(baseline, current, REGRESSION_OPTIONS)) {
+        const verdict = evaluateRegression(baseline, current, REGRESSION_OPTIONS);
+        // Counters reset (the server restarted, typically while we could not
+        // reach it): the window we thought we observed never happened. Put the
+        // index back and re-propose — the drop is the one irreversible step, so
+        // it does not get taken on evidence we no longer have. This also ends
+        // the case where an index sat hidden through a long outage.
+        if (verdict === "UNOBSERVABLE") {
+          await executor.unhide(rec.database, rec.collection, rec.indexName);
+          await db
+            .update(recommendations)
+            .set({
+              state: "PROPOSED",
+              hiddenAt: null,
+              observeDays: null,
+              baselineReadOps: null,
+              baselineReadLatency: null,
+              updatedAt: new Date(),
+            })
+            .where(eq(recommendations.id, rec.id));
+          await db.insert(actions).values({
+            recommendationId: rec.id,
+            kind: "HIDE",
+            actor: "system",
+            result:
+              "aborted + un-hidden: observation lost (counters reset — server restarted during the observe window)",
+          });
+          continue;
+        }
+        if (verdict === "REGRESSED") {
           await executor.unhide(rec.database, rec.collection, rec.indexName);
           const until = await recordRegression(
             db,

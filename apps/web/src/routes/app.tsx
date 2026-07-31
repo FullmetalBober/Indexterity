@@ -857,6 +857,21 @@ interface ClusterOption {
   readonly name: string;
   readonly readOnly: boolean;
   readonly provisionedUsername: string | null;
+  readonly lastCollectedAt: string | null;
+}
+
+// Anything older than this means the numbers on screen predate a gap in
+// collection — say so rather than letting them read as current.
+const STALE_AFTER_HOURS = 48;
+
+function staleness(lastCollectedAt: string | null): string | null {
+  if (lastCollectedAt === null) return "never collected";
+  const hours = (Date.now() - new Date(lastCollectedAt).getTime()) / 3_600_000;
+  if (!Number.isFinite(hours) || hours < STALE_AFTER_HOURS) return null;
+  const days = Math.floor(hours / 24);
+  return days >= 1
+    ? `last collected ${days} day${days === 1 ? "" : "s"} ago`
+    : `last collected ${Math.floor(hours)}h ago`;
 }
 
 function ClusterBar({
@@ -966,6 +981,14 @@ function ClusterBar({
           title="Indexterity runs as its own least-privilege user on this cluster — it cannot read your documents"
         >
           scoped user <code>{cluster.provisionedUsername}</code>
+        </span>
+      ) : null}
+      {staleness(cluster.lastCollectedAt) !== null ? (
+        <span
+          className="rounded-md bg-amber-100 px-1.5 py-0.5 text-amber-900 text-xs dark:bg-amber-950 dark:text-amber-200"
+          title="These figures predate a gap in collection. Usage-based drop recommendations are withheld until the history is continuous again."
+        >
+          ⚠ {staleness(cluster.lastCollectedAt)}
         </span>
       ) : null}
       <button

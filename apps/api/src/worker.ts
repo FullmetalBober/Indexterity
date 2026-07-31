@@ -4,7 +4,11 @@ import { drainPool } from "./jobs/connection-pool";
 import { closeJobDb, jobDb } from "./jobs/db";
 import { finalClusterFailure } from "./jobs/failure";
 import { taskList } from "./jobs/tasks";
-import { notifyClusterOwners } from "./mail/notify";
+import { alertAllowed, notifyClusterOwners } from "./mail/notify";
+
+// A cluster that stays unreachable fails its collect every 6h. Alert once a
+// day per cluster+task instead of forever.
+const ALERT_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 
 // Recurring schedule (per cluster via the dispatcher tasks):
 //  - collect + classify every 6h
@@ -38,6 +42,7 @@ async function main(): Promise<void> {
       payload: job.payload,
     });
     if (clusterId === null) return;
+    if (!alertAllowed(`${clusterId}:${job.task_identifier}`, ALERT_COOLDOWN_MS)) return;
     void notifyClusterOwners(
       jobDb(),
       clusterId,

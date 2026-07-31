@@ -1,6 +1,6 @@
 import type { RecommendationType, UsageClass } from "@repo/contracts";
 import { z } from "zod";
-import { type ClassifyOptions, classifyUsage } from "./classify";
+import { type ClassifyOptions, classifyUsage, usageHistoryIsTrustworthy } from "./classify";
 import { isKeyPrefix, isRedundantPrefix } from "./redundancy";
 import { isNeverDrop } from "./safety";
 import { dropScore } from "./score";
@@ -55,10 +55,16 @@ export function recommendForCollection(
   options: ClassifyOptions,
   // Past regression count per index name (cooldown history) — cuts confidence.
   pastRegressions: Readonly<Record<string, number>> = {},
+  // "Now" for the history-freshness check; injected to keep this pure.
+  now: Date = new Date(),
 ): RecommendationCandidate[] {
   const candidates: RecommendationCandidate[] = [];
   const eligible = indexes.filter((index) => !isNeverDrop(index.spec));
   const redundant = new Set<string>();
+  // Usage-based findings need a history we can trust; redundancy is structural
+  // and stands on its own.
+  const trusted = (index: IndexInput): boolean =>
+    usageHistoryIsTrustworthy(index.history, options, now);
 
   for (const candidate of eligible) {
     const covering = indexes.find((other) => isRedundantPrefix(candidate.spec, other.spec));
@@ -83,6 +89,9 @@ export function recommendForCollection(
 
   for (const index of eligible) {
     if (redundant.has(index.spec.name)) continue;
+    // A hole in the series (cluster unreachable, collector down) makes a busy
+    // index look exactly like a dead one — say nothing rather than guess.
+    if (!trusted(index)) continue;
     const usageClass = classifyUsage(index.history, options);
     if (usageClass !== "FLAT_ZERO" && usageClass !== "PERIODIC_DEAD") continue;
     candidates.push({
@@ -110,6 +119,7 @@ export function recommendForCollection(
   const advised = new Set<string>();
   for (const index of indexes) {
     if (!isNeverDrop(index.spec) || index.spec.name === "_id_") continue;
+    if (!trusted(index)) continue;
     const usageClass = classifyUsage(index.history, options);
     if (usageClass !== "FLAT_ZERO" && usageClass !== "PERIODIC_DEAD") continue;
     advised.add(index.spec.name);

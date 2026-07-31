@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyUsage } from "./classify";
+import { classifyUsage, usageHistoryIsTrustworthy } from "./classify";
 import type { UsageSnapshot } from "./types";
 
 function snap(ops: number): UsageSnapshot {
@@ -9,7 +9,7 @@ function snap(ops: number): UsageSnapshot {
   };
 }
 
-const options = { recentWindow: 3, minHistory: 3 };
+const options = { recentWindow: 3, minHistory: 3, maxGapHours: 48 };
 
 describe("classifyUsage", () => {
   it("FLAT_ZERO below minHistory", () => {
@@ -36,5 +36,56 @@ describe("classifyUsage", () => {
       ],
     };
     expect(classifyUsage([split, split, split], options)).toBe("CONTINUOUS");
+  });
+});
+
+describe("usageHistoryIsTrustworthy", () => {
+  const opts = { recentWindow: 3, minHistory: 3, maxGapHours: 48 };
+  const at = (iso: string, ops = 0): UsageSnapshot => ({
+    capturedAt: iso,
+    perMember: [{ member: "m", ops, since: "", uptimeSeconds: 100 }],
+  });
+  const now = new Date("2026-03-04T00:00:00Z");
+
+  it("accepts a dense, current series", () => {
+    const history = [
+      at("2026-03-01T00:00:00Z"),
+      at("2026-03-02T00:00:00Z"),
+      at("2026-03-03T12:00:00Z"),
+    ];
+    expect(usageHistoryIsTrustworthy(history, opts, now)).toBe(true);
+  });
+
+  it("rejects history thinner than minHistory", () => {
+    expect(usageHistoryIsTrustworthy([at("2026-03-03T00:00:00Z")], opts, now)).toBe(false);
+  });
+
+  it("rejects a series with a hole in it — the outage case", () => {
+    // Collected, went dark for three weeks, came back: an index that was busy
+    // through the gap looks identical to a dead one.
+    const history = [
+      at("2026-02-01T00:00:00Z"),
+      at("2026-02-02T00:00:00Z"),
+      at("2026-03-03T00:00:00Z"),
+    ];
+    expect(usageHistoryIsTrustworthy(history, opts, now)).toBe(false);
+  });
+
+  it("rejects a series that stopped long ago, even if it was dense", () => {
+    const history = [
+      at("2026-01-01T00:00:00Z"),
+      at("2026-01-02T00:00:00Z"),
+      at("2026-01-03T00:00:00Z"),
+    ];
+    expect(usageHistoryIsTrustworthy(history, opts, now)).toBe(false);
+  });
+
+  it("does not care about ordering of the input", () => {
+    const history = [
+      at("2026-03-03T00:00:00Z"),
+      at("2026-03-01T00:00:00Z"),
+      at("2026-03-02T00:00:00Z"),
+    ];
+    expect(usageHistoryIsTrustworthy(history, opts, now)).toBe(true);
   });
 });

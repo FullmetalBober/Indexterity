@@ -46,6 +46,9 @@ export const cluster = z.object({
   // Set when Indexterity provisioned its own least-privilege user on the
   // cluster (admin-string onboarding); null for pasted-string clusters.
   provisionedUsername: z.string().nullable(),
+  // Newest index snapshot, or null before the first collect. The dashboard
+  // flags stale data so numbers from before an outage cannot read as current.
+  lastCollectedAt: z.string().nullable(),
   createdAt: z.string(),
 });
 export type Cluster = z.infer<typeof cluster>;
