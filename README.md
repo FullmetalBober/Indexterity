@@ -435,29 +435,45 @@ worker deploys from the api image with `CMD ["node", "apps/api/dist/worker.js"]`
 
 ## Roadmap (Mongo-focused)
 
-Engine depth, roughly in order:
+Engine depth — the original list is done:
 
-1. ~~Collation-aware redundancy~~ — shipped: collation is modeled, captured
-   from `listIndexes`, respected by the redundancy rule and restored on undo.
+1. ~~Collation-aware redundancy~~ — collation is modeled, captured from
+   `listIndexes`, respected by the redundancy rule and restored on undo.
    (Exact same-key duplicates remain impossible — mongod rejects them.)
-2. **Replica-aware ROI** — a dropped index frees its bytes on *every*
-   replica-set member; the headline currently counts one copy. Multiply by
-   member count (already collected per snapshot).
-3. **Aggregation shapes** — workload analysis parses `find` filters; parse the
-   `$match`/`$sort` stages of `aggregate` shapes from `$queryStats` too.
-4. **Create cost estimate** — CREATE recommendations should show the price:
-   estimated index size (doc count × key size) and write amplification, next to
-   the read win.
-5. **Wire `maxCollectionSizeBytes`** — the knob exists and is editable; the
-   engine doesn't read it yet.
-6. **Advisory tier** — unique/TTL indexes that look unused are never touched;
-   surface them as "review manually" advisories instead of staying silent.
-7. ~~TTL suggestions~~ — shipped as advisories from the recurring-delete
-   signal (see above).
-8. **Atlas onboarding** — create the index-only user via the Atlas Admin API
-   instead of asking customers to paste `createRole` snippets.
-9. **Read-only digest** — a weekly "here's what we *would* have done" email
-    for clusters still in read-only mode; the go-live conversion driver.
+2. ~~Replica-aware ROI~~ — freed bytes are multiplied by member count
+   (`jobs/classify.ts`). On sharded clusters this over-approximates by the shard
+   count, an accepted ceiling until per-shard member counts are tracked.
+3. ~~Aggregation shapes~~ — `pipelineShape` reads the leading `$match`/`$sort`
+   of `aggregate` shapes on both the `$queryStats` and profiler paths; a
+   `$lookup` anywhere in the pipeline indexes the *foreign* collection.
+4. ~~Create cost estimate~~ — every CREATE rationale carries the price:
+   estimated build size and write amplification, next to the read win.
+5. ~~Wire `maxCollectionSizeBytes`~~ — read as a build ceiling in
+   `jobs/suggest.ts`.
+6. ~~Advisory tier~~ — a protected index with no recorded usage surfaces as
+   `ADVISORY_REVIEW` instead of staying silent.
+7. ~~TTL suggestions~~ — advisories from the recurring-delete signal.
+8. ~~Read-only digest~~ — weekly "here's what we *would* have done" email,
+   Monday 09:00, for clusters still in read-only mode.
+
+**Atlas Admin API onboarding — dropped, not deferred.** An admin API key is a
+*bigger* ask than the `createRole` snippet it would replace, and it hands us a
+credential we would then have to guard. Atlas clusters get the guided 422 naming
+the exact commands to run in their own console; that stays the answer.
+
+What's actually open is correctness, not features:
+
+- **Restricted superset in the redundancy rule** — `optionsCompatible` guards
+  the candidate's options but never the covering index's, so a plain index can be
+  called redundant against a `partial`/`sparse` superset that does not cover it.
+- **Drop vs in-flight create** — `classifyCluster` reads snapshots only, so an
+  index still inside its post-build write watch can be proposed for
+  `DROP_UNUSED` 18 hours after the engine built it.
+- **Warmup** — nothing encodes "we have not watched long enough yet". A usage
+  finding needs 3 snapshots (18h at the 6h cadence), so on a freshly connected
+  cluster a quarterly job's index is indistinguishable from a dead one. Withhold
+  usage-based drops until the history has depth; structural redundancy findings
+  don't depend on watching and can keep flowing.
 
 ## Notes
 
