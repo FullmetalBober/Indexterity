@@ -14,7 +14,11 @@ services:
       # here); .env and the docs use localhost:5433 to match.
       - "5433:5432"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      # postgres:18+ keeps data in a version-specific subdirectory and refuses a
+      # mount at the pre-18 /var/lib/postgresql/data. The volume is named for
+      # its major version: a v17 directory is not readable by 18 without
+      # pg_upgrade, so a bump gets a new volume and a dump/restore.
+      - pgdata18:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U mongo_optimizer"]
       interval: 5s
@@ -99,7 +103,7 @@ services:
         condition: service_healthy
 
 volumes:
-  pgdata:
+  pgdata18:
   mongodata:
   api_node_modules:
   web_node_modules:
