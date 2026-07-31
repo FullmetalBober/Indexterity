@@ -1,15 +1,15 @@
 import { indexSnapshots, latencySamples } from "../db";
 import { collectSnapshots } from "../mongo";
-import { openClusterMongo } from "./cluster-connection";
+import { openClusterSession } from "./cluster-connection";
 import { jobDb } from "./db";
 
 // Collect index snapshots + per-collection read/write latency for a hosted-direct
 // cluster into Postgres.
 export async function collectCluster(clusterId: string): Promise<number> {
   const db = jobDb();
-  const { conn, release } = await openClusterMongo(db, clusterId);
+  const { session, release } = await openClusterSession(db, clusterId);
   try {
-    const { snapshots, latency } = await collectSnapshots(conn);
+    const { snapshots, latency } = await collectSnapshots(session);
     if (snapshots.length > 0) {
       await db
         .insert(indexSnapshots)

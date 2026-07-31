@@ -25,6 +25,8 @@ const updatedAt = timestamp("updated_at", { withTimezone: true }).notNull().defa
 
 // --- enums ---------------------------------------------------------------
 export const connectionMode = pgEnum("connection_mode", ["HOSTED_DIRECT", "AGENT"]);
+// Must match ClusterEngine in src/engine/ports.ts (the adapter registry keys).
+export const clusterEngine = pgEnum("cluster_engine", ["MONGODB", "POSTGRESQL", "MSSQL"]);
 export const recommendationType = pgEnum("recommendation_type", [
   "DROP_UNUSED",
   "DROP_REDUNDANT",
@@ -152,6 +154,9 @@ export const clusters = pgTable("clusters", {
     .references(() => organizations.id, { onDelete: "cascade" }),
   name: text("name").notNull(),
   connectionMode: connectionMode("connection_mode").notNull().default("HOSTED_DIRECT"),
+  // Which adapter dials this cluster (src/engine/registry.ts). Only MONGODB is
+  // implemented today; the column makes the data model engine-ready.
+  engine: clusterEngine("engine").notNull().default("MONGODB"),
   readOnly: boolean("read_only").notNull().default(true),
   // The control plane holds the cluster's connection string, envelope-encrypted.
   // keyVersion selects the master key that sealed it (MASTER_KEY, MASTER_KEY_V2,

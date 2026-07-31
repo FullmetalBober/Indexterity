@@ -4,6 +4,7 @@ import {
   auditAction,
   cluster,
   clusterCollections,
+  clusterEngine,
   clusterLatency,
   clusterLatencySeries,
   clusterPolicy,
@@ -88,7 +89,14 @@ export const contract = {
       summary: "Connect a cluster; stores its connection string envelope-encrypted",
     })
     .errors({ BAD_REQUEST: {} })
-    .input(z.object({ name: z.string().min(1), connectionString: z.string().min(1) }))
+    .input(
+      z.object({
+        name: z.string().min(1),
+        connectionString: z.string().min(1),
+        // Defaults to MONGODB — the only engine with an adapter today.
+        engine: clusterEngine.optional(),
+      }),
+    )
     .output(cluster),
 
   provisionCluster: oc

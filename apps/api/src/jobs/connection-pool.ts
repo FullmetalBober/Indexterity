@@ -1,20 +1,21 @@
-import { MongoConnection } from "../mongo";
+import type { ClusterEngine, EngineSession } from "../engine/ports";
+import { adapterFor } from "../engine/registry";
 
-// One MongoClient per cluster, shared across jobs and requests — the driver
-// pools sockets inside a client, so the win is skipping a fresh client + TLS
+// One engine session per cluster, shared across jobs and requests — drivers
+// pool sockets inside a session, so the win is skipping a fresh client + TLS
 // handshake on every job. Entries are refcounted; idle unreferenced entries are
 // swept, and a changed connection string dooms the old entry (closed once free).
 
 interface PoolEntry {
   connString: string;
-  conn: MongoConnection;
+  session: EngineSession;
   refs: number;
   lastUsed: number;
   doomed: boolean;
 }
 
-export interface PooledConnection {
-  readonly conn: MongoConnection;
+export interface PooledSession {
+  readonly session: EngineSession;
   readonly release: () => void;
 }
 
@@ -40,21 +41,21 @@ async function sweepIdle(): Promise<void> {
     if (entry === null) continue;
     if (entry.refs === 0 && (entry.doomed || now - entry.lastUsed >= IDLE_MS)) {
       entries.delete(key);
-      await entry.conn.close().catch(() => {});
+      await entry.session.close().catch(() => {});
     }
   }
 }
 
-async function createEntry(connString: string): Promise<PoolEntry> {
-  const conn = new MongoConnection(connString);
-  await conn.connect();
-  return { connString, conn, refs: 0, lastUsed: Date.now(), doomed: false };
+async function createEntry(engine: ClusterEngine, connString: string): Promise<PoolEntry> {
+  const session = await adapterFor(engine).open(connString);
+  return { connString, session, refs: 0, lastUsed: Date.now(), doomed: false };
 }
 
-export async function acquireClusterConnection(
+export async function acquireClusterSession(
   clusterId: string,
+  engine: ClusterEngine,
   connString: string,
-): Promise<PooledConnection> {
+): Promise<PooledSession> {
   ensureSweeper();
   let pending = entries.get(clusterId);
   if (pending !== undefined) {
@@ -68,13 +69,13 @@ export async function acquireClusterConnection(
       current.doomed = true;
       if (current.refs === 0) {
         entries.delete(clusterId);
-        await current.conn.close().catch(() => {});
+        await current.session.close().catch(() => {});
       }
       pending = undefined;
     }
   }
   if (pending === undefined) {
-    pending = createEntry(connString);
+    pending = createEntry(engine, connString);
     entries.set(clusterId, pending);
     pending.catch(() => entries.delete(clusterId));
   }
@@ -83,14 +84,14 @@ export async function acquireClusterConnection(
   entry.lastUsed = Date.now();
   let released = false;
   return {
-    conn: entry.conn,
+    session: entry.session,
     release: () => {
       if (released) return;
       released = true;
       entry.refs -= 1;
       entry.lastUsed = Date.now();
       if (entry.doomed && entry.refs === 0) {
-        void entry.conn.close().catch(() => {});
+        void entry.session.close().catch(() => {});
       }
     },
   };
@@ -118,7 +119,7 @@ export async function evictCluster(clusterId: string): Promise<void> {
   entry.doomed = true;
   if (entry.refs === 0) {
     entries.delete(clusterId);
-    await entry.conn.close().catch(() => {});
+    await entry.session.close().catch(() => {});
   }
 }
 
@@ -128,6 +129,6 @@ export async function drainPool(): Promise<void> {
   entries.clear();
   for (const pending of all) {
     const entry = await pending.catch(() => null);
-    if (entry !== null) await entry.conn.close().catch(() => {});
+    if (entry !== null) await entry.session.close().catch(() => {});
   }
 }

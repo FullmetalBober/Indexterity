@@ -1,0 +1,114 @@
+import type { IndexSpec, QueryShape } from "../analysis";
+
+// The engine-neutral boundary. Everything above this file — the analysis core,
+// the job pipeline, the API — speaks these ports; everything below implements
+// them per database engine. Today MongoDB is the only adapter; the PostgreSQL
+// and SQL Server mappings are documented in docs/architecture.md §"Engine
+// ports" (pg_stat_user_indexes / sys.dm_db_index_usage_stats etc.).
+//
+// Vocabulary is MongoDB-flavored on purpose ("collection", "database") — a
+// relational adapter maps them (table, schema/database) rather than the whole
+// codebase adopting a lowest-common-denominator vocabulary.
+
+export type ClusterEngine = "MONGODB" | "POSTGRESQL" | "MSSQL";
+
+// One index's usage on one replica-set member ($indexStats is per-member; on a
+// sharded cluster mongos merges every shard's members, tagged by host).
+// Relational engines report one "member" per server.
+export interface IndexUsageStat {
+  readonly indexName: string;
+  readonly host: string;
+  readonly ops: number;
+  readonly since: string;
+}
+
+export interface LatencyPair {
+  readonly ops: number;
+  readonly latencyMicros: number;
+}
+
+export interface CollectionLatency {
+  readonly reads: LatencyPair;
+  readonly writes: LatencyPair;
+}
+
+export interface CollectionStorage {
+  readonly dataSizeBytes: number;
+  readonly docCount: number;
+}
+
+// An age-based delete pattern: recurring deleteMany({field: {$lt: date}}) — the
+// TTL-advisory signal (mongo-specific today; relational analogue: DELETE with
+// a timestamp predicate in the statement store).
+export interface DeletePattern {
+  readonly field: string;
+  readonly count: number;
+  readonly medianRetentionSeconds: number;
+}
+
+// Read-only statistics surface — everything the engine needs to decide, and
+// deliberately nothing that can read customer data rows.
+export interface IndexCollector {
+  listCollectionNames(database: string): Promise<string[]>;
+  listIndexes(database: string, collection: string): Promise<IndexSpec[]>;
+  collectUsage(database: string, collection: string): Promise<IndexUsageStat[]>;
+  indexSizes(database: string, collection: string): Promise<Record<string, number>>;
+  collectionStorage(database: string, collection: string): Promise<CollectionStorage>;
+  readLatency(database: string, collection: string): Promise<LatencyPair>;
+  collectionLatency(database: string, collection: string): Promise<CollectionLatency>;
+  collectSlowQueries(database: string, collection: string): Promise<QueryShape[]>;
+  collectQueryStats(database: string, collection: string): Promise<QueryShape[]>;
+  collectWorkload(database: string, collection: string): Promise<QueryShape[]>;
+  collectDeletePatterns(database: string, collection: string): Promise<DeletePattern[]>;
+}
+
+export interface CreateIndexOptions {
+  readonly name?: string;
+  readonly unique?: boolean;
+  readonly partialFilterExpression?: Readonly<Record<string, string | number | boolean>>;
+  readonly collation?: { readonly locale: string };
+}
+
+// The only write surface. Implementations must enforce read-only mode
+// structurally (throw on any write when the cluster is read-only).
+export interface IndexExecutor {
+  hide(database: string, collection: string, indexName: string): Promise<void>;
+  unhide(database: string, collection: string, indexName: string): Promise<void>;
+  drop(database: string, collection: string, indexName: string): Promise<void>;
+  create(
+    database: string,
+    collection: string,
+    keys: Record<string, 1 | -1>,
+    options: CreateIndexOptions,
+  ): Promise<void>;
+}
+
+// Where engines genuinely differ — checked at the feature gates, not deep in
+// the pipeline.
+export interface EngineCapabilities {
+  // Reversible index invisibility (mongo collMod hidden, MSSQL DISABLE+REBUILD).
+  // PostgreSQL has no native equivalent: its adapter will need an alternative
+  // observe stage before the pipeline may drop.
+  readonly hideIndexes: boolean;
+  // Can create a scoped least-privilege user from an admin connection string.
+  readonly provisionScopedUsers: boolean;
+}
+
+// One live, pooled connection to a customer cluster.
+export interface EngineSession {
+  readonly collector: IndexCollector;
+  executor(readOnly: boolean): IndexExecutor;
+  // User databases only — each adapter excludes its own system namespaces.
+  listDatabaseNames(): Promise<string[]>;
+  // Cheap liveness round-trip (rotation verifies new credentials with this).
+  ping(): Promise<void>;
+  close(): Promise<void>;
+}
+
+export interface EngineAdapter {
+  readonly engine: ClusterEngine;
+  readonly capabilities: EngineCapabilities;
+  // Shape-validates a connection string BEFORE any dial (the SSRF guard).
+  isConnString(value: string): boolean;
+  open(connectionString: string): Promise<EngineSession>;
+}

@@ -1,8 +1,8 @@
 import { inChangeWindow, isRegression } from "../analysis";
 import { actions, and, eq, inArray, policies, recommendations, roiMetrics } from "../db";
 import { notifyClusterOwners } from "../mail/notify";
-import { MongoIndexCollector, MongoIndexExecutor, serializeSpec } from "../mongo";
-import { openClusterMongo } from "./cluster-connection";
+import { serializeSpec } from "../mongo";
+import { openClusterSession } from "./cluster-connection";
 import { recordRegression } from "./cooldowns";
 import { jobDb } from "./db";
 import { preflightDrop } from "./preflight";
@@ -53,12 +53,12 @@ export async function finalizeCluster(clusterId: string): Promise<number> {
     );
   if (due.length === 0 && watched.length === 0) return 0;
 
-  const { conn, readOnly, release } = await openClusterMongo(db, clusterId);
+  const { session, readOnly, release } = await openClusterSession(db, clusterId);
   try {
     // Read-only clusters never execute writes.
     if (readOnly) return 0;
-    const collector = new MongoIndexCollector(conn);
-    const executor = new MongoIndexExecutor(conn, readOnly);
+    const collector = session.collector;
+    const executor = session.executor(readOnly);
     let dropped = 0;
     let freedBytes = 0;
 

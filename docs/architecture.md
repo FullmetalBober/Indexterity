@@ -56,6 +56,7 @@ Do **not** compete on auto-create on Atlas. Compete on safe cleanup everywhere.
 | Layer | Choice | Role |
 |-------|--------|------|
 | API (control plane) | **NestJS + Fastify** | orchestration, tenancy, apply engine |
+| Engine adapters | **ports + registry** (`src/engine`, §9) | MongoDB shipped; PostgreSQL/MSSQL planned |
 | Web (dashboard) | **TanStack Start** + **shadcn/ui** | dashboard UI |
 | Auth | **better-auth** | GitHub OAuth + email/password |
 | ORM / migrations | **Drizzle** | Postgres schema + migrations |
@@ -309,9 +310,60 @@ The dashboard headline is these hard numbers.
 
 ---
 
-## 9. Security
+## 9. Engine ports — multi-database architecture
 
-### 9.1 Index-only MongoDB role — no data-row access
+The decision core never touches a database driver. Everything engine-specific
+sits behind two ports plus a session factory (`apps/api/src/engine/ports.ts`):
+
+- **`IndexCollector`** — the read-only statistics surface (usage, sizes,
+  latency, workload shapes, delete patterns). Deliberately contains nothing
+  that can read customer data rows.
+- **`IndexExecutor`** — the only write surface (hide/unhide/drop/create);
+  implementations must enforce read-only mode structurally.
+- **`EngineSession`** — a pooled connection exposing both, plus
+  `listDatabaseNames()` (system namespaces pre-filtered per engine) and
+  `ping()` (rotation's verification probe).
+- **`EngineAdapter`** — connection-string validation (the SSRF guard) +
+  `open()`, registered per engine in `src/engine/registry.ts`. The
+  `clusters.engine` column picks the adapter per cluster; adding an engine is
+  one new adapter directory plus one registry line, with zero pipeline changes.
+
+The analysis core (`src/analysis`) is pure and engine-neutral; the jobs, the
+connection pool, and the API speak only the ports. MongoDB
+(`src/mongo/adapter.ts`) is the shipped reference adapter. Vocabulary stays
+MongoDB-flavored ("database", "collection") — relational adapters map their
+terms (schema, table) rather than the codebase adopting a
+lowest-common-denominator vocabulary.
+
+### 9.1 Planned adapter mapping
+
+| Port concept | MongoDB (shipped) | PostgreSQL (planned) | SQL Server (planned) |
+|---|---|---|---|
+| Usage stats | `$indexStats` | `pg_stat_user_indexes.idx_scan` | `sys.dm_db_index_usage_stats` |
+| Sizes + row counts | `$collStats storageStats` | `pg_relation_size` / `pg_stat_user_tables` | `sys.dm_db_partition_stats` |
+| Read/write latency | `$collStats latencyStats` | `pg_stat_statements` aggregated per table | Query Store runtime stats |
+| Workload shapes | `$queryStats` / profiler | `pg_stat_statements` normalized queries | Query Store query texts |
+| Reversible hide | `collMod hidden: true` | **none native** (see capabilities) | `ALTER INDEX … DISABLE` (re-enable = `REBUILD`) |
+| Online create | `createIndex` | `CREATE INDEX CONCURRENTLY` | `WITH (ONLINE = ON)` |
+| Scoped user | `createRole` + `createUser` | `CREATE ROLE` + `pg_monitor` + index DDL grants | `CREATE LOGIN/USER` + `VIEW SERVER STATE` + `ALTER` |
+
+### 9.2 Capability flags
+
+`EngineCapabilities` marks where engines genuinely differ, so feature gates
+check a flag instead of assuming MongoDB semantics deep in the pipeline:
+
+- **`hideIndexes`** — the safety pipeline's observe stage rides on cheap,
+  reversible invisibility. SQL Server has an analogue (`DISABLE`, undone by a
+  rebuild — reversible but not free). PostgreSQL has none: its adapter will
+  need an alternative observe mechanism (extended stats-only observation
+  before an irreversible `DROP INDEX CONCURRENTLY`, with the undo path being
+  a scripted recreate from the rollback token).
+- **`provisionScopedUsers`** — admin-string onboarding (§10.1). Each engine's
+  provisioning is inherently engine-specific commands/SQL.
+
+## 10. Security
+
+### 10.1 Index-only MongoDB role — no data-row access
 
 The data plane connects with a custom role granting only index management and
 stats, excluding `find` / `insert` / `update` / `remove` on customer
@@ -321,7 +373,7 @@ server, not by promise.
 **Automated (admin-string onboarding).** `POST /clusters/provision` accepts an
 admin connection string, uses it ONCE to create the role + a dedicated user
 (`idx_<hex>`) on the customer cluster, verifies the scoped credentials
-authenticate, and stores only the scoped string (sealed, §9.2). The admin
+authenticate, and stores only the scoped string (sealed, §10.2). The admin
 string is never persisted. Re-provisioning refreshes the role's privileges via
 `updateRole`, so app updates can evolve the grant. The exact role
 (`apps/api/src/mongo/provision.ts`, live-verified against an `--auth` mongod —
@@ -365,7 +417,7 @@ role there manually and connect with the scoped string instead.
   The cleanup path (drop/merge) needs index metadata + `$indexStats` only →
   zero data exposure.
 
-### 9.2 Secrets at rest — app-level envelope encryption
+### 10.2 Secrets at rest — app-level envelope encryption
 
 MongoDB connection strings and agent tokens are encrypted with a swappable
 `KeyProvider` (the master-key custodian). v1 keeps the master key in the runtime
@@ -431,7 +483,7 @@ all queries are org-filtered. An immutable audit log records every state transit
 
 ---
 
-## 10. Data model (PostgreSQL / Drizzle)
+## 11. Data model (PostgreSQL / Drizzle)
 
 - **better-auth tables** (users, sessions, accounts) — via the better-auth Drizzle
   adapter.
@@ -457,7 +509,7 @@ all queries are org-filtered. An immutable audit log records every state transit
 
 ---
 
-## 11. API & contracts
+## 12. API & contracts
 
 - **oRPC** contracts live in `packages/contracts` and are shared by api, web, and
   agent — one source of truth for types, no codegen, no `any`. Zod schemas validate
@@ -471,7 +523,7 @@ all queries are org-filtered. An immutable audit log records every state transit
 
 ---
 
-## 12. Background jobs
+## 13. Background jobs
 
 **graphile-worker** (Postgres-backed) — no Redis dependency, fits the compose setup.
 Job kinds:
@@ -487,7 +539,7 @@ Redis + BullMQ only if scale demands it.
 
 ---
 
-## 13. Web / dashboard (TanStack Start + shadcn)
+## 14. Web / dashboard (TanStack Start + shadcn)
 
 - **Overview** — ROI headline (RAM/disk freed, write-throughput gained, index-count
   trend), per-cluster health.
@@ -499,7 +551,7 @@ Redis + BullMQ only if scale demands it.
 
 ---
 
-## 14. Deployment
+## 15. Deployment
 
 - **Separate Dockerfiles** — `apps/api/Dockerfile` and `apps/web/Dockerfile`
   (multi-stage), so api and web deploy independently.
@@ -509,7 +561,7 @@ Redis + BullMQ only if scale demands it.
 
 ---
 
-## 15. Engineering standards
+## 16. Engineering standards
 
 - No `any`, no `as` overrides, no linter-ignore comments. Strict TypeScript
   everywhere; the contracts package enforces boundary types.
@@ -521,7 +573,7 @@ Redis + BullMQ only if scale demands it.
 
 ---
 
-## 16. Decision log
+## 17. Decision log
 
 | # | Decision | Rationale | Status |
 |---|----------|-----------|--------|
@@ -539,13 +591,14 @@ Redis + BullMQ only if scale demands it.
 | D12 | npm workspaces (not pnpm) for now | Local Node is Zed-managed; a global pnpm install conflicted. Turbo supports npm workspaces; swappable later | Locked |
 | D13 | TypeScript **6** (last JS line); api built with **swc** directly (no Nest CLI) | Was TS 7 (native), but 7 ships no `tsserver.js` until 7.1 — editors broke. TS 6 keeps full toolchain parity (tsserver, programmatic API); typecheck speed is a non-issue at this repo size. Revisit 7 at 7.1 | Revised |
 | D14 | **zod 4** (pin lifted) | Landed with the oRPC migration (D9). The api's internal driver-boundary schemas were already v4-compatible (two-arg `z.record`, no deprecated APIs) — zero code changes beyond `z.uuid()`/`z.email()` in the contracts | Revised |
-| D15 | **Provisioned least-privilege onboarding** instead of an Atlas API integration | Jul 2026. An admin string is used once to create the `indexterityEngine` role + an `idx_<hex>` user on the customer's cluster; only the scoped string is stored (the admin one never persists). Turns "we can't read your documents" from a promise into a server-enforced guarantee (§9.1), works on any self-hosted/community deployment, and degrades to a guided 422 on Atlas (which owns its user management). Live-verified under `--auth`: full engine surface allowed, find/insert/drop/escalation denied, collect e2e as the scoped user | Locked |
+| D15 | **Provisioned least-privilege onboarding** instead of an Atlas API integration | Jul 2026. An admin string is used once to create the `indexterityEngine` role + an `idx_<hex>` user on the customer's cluster; only the scoped string is stored (the admin one never persists). Turns "we can't read your documents" from a promise into a server-enforced guarantee (§10.1), works on any self-hosted/community deployment, and degrades to a guided 422 on Atlas (which owns its user management). Live-verified under `--auth`: full engine surface allowed, find/insert/drop/escalation denied, collect e2e as the scoped user | Locked |
+| D16 | **Engine ports** extracted for future PostgreSQL/SQL Server support (§9) | Jul 2026. `IndexCollector`/`IndexExecutor`/`EngineSession` moved to `src/engine/ports.ts`; adapters register per `clusters.engine` (enum ready, MONGODB the only implementation); the pool, jobs, and API speak only the ports. Capability flags (`hideIndexes`, `provisionScopedUsers`) mark where engines genuinely differ — notably PostgreSQL has no reversible hide, so its adapter will need an alternative observe stage. Behavior-preserving: the untouched integration suite (25/25) passed on the refactor | Locked |
 | D15 | Internal packages compile to CJS `dist`; apps consume built output | Predictable dev/prod module resolution; Turbo orders builds via `^build` | Locked |
 
 ### Deferred / open
 
 - **KMS/Vault custodian** — deferred to funded stage / first enterprise deal
-  (see §9.2). App-level now.
+  (see §10.2). App-level now.
 - **TypeScript 7 (native)** — re-adopt at 7.1 when `tsserver.js` and the
   programmatic compiler API return; also unblocks reverting api to the Nest CLI
   (see D13).
@@ -556,7 +609,7 @@ Redis + BullMQ only if scale demands it.
 
 ---
 
-## 17. Phasing
+## 18. Phasing
 
 **v1 (cleanup, hosted-direct)**
 - Hosted-direct connection, index-only role, demo default.

@@ -31,10 +31,17 @@ export type RecommendationState = z.infer<typeof recommendationState>;
 export const connectionMode = z.enum(["HOSTED_DIRECT", "AGENT"]);
 export type ConnectionMode = z.infer<typeof connectionMode>;
 
+// The database engine behind a cluster. Only MONGODB connects today; the enum
+// is the forward-compatible surface for the planned PostgreSQL/SQL Server
+// adapters (docs/architecture.md §"Engine ports").
+export const clusterEngine = z.enum(["MONGODB", "POSTGRESQL", "MSSQL"]);
+export type ClusterEngine = z.infer<typeof clusterEngine>;
+
 export const cluster = z.object({
   id: z.uuid(),
   name: z.string(),
   connectionMode,
+  engine: clusterEngine,
   readOnly: z.boolean(),
   // Set when Indexterity provisioned its own least-privilege user on the
   // cluster (admin-string onboarding); null for pasted-string clusters.

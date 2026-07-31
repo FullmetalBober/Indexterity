@@ -8,6 +8,14 @@ import type {
   QueryShape,
   SortKey,
 } from "../analysis";
+import type {
+  CollectionLatency,
+  CollectionStorage,
+  DeletePattern,
+  IndexCollector,
+  IndexUsageStat,
+  LatencyPair,
+} from "../engine/ports";
 import type { MongoConnection } from "./connection";
 
 // Normalize a sort spec's values into directed keys (anything odd → ascending).
@@ -47,43 +55,16 @@ export function lookupJoins(pipeline: readonly Record<string, unknown>[]): Looku
   return joins;
 }
 
-// One index's usage on one replica-set member ($indexStats is per-member; on a
-// sharded cluster mongos merges every shard's members, tagged by host).
-export interface IndexUsageStat {
-  readonly indexName: string;
-  readonly host: string;
-  readonly ops: number;
-  readonly since: string;
-}
-
-export interface LatencyPair {
-  readonly ops: number;
-  readonly latencyMicros: number;
-}
-
-export interface CollectionLatency {
-  readonly reads: LatencyPair;
-  readonly writes: LatencyPair;
-}
-
-export interface CollectionStorage {
-  readonly dataSizeBytes: number;
-  readonly docCount: number;
-}
-
-export interface IndexCollector {
-  listCollectionNames(database: string): Promise<string[]>;
-  listIndexes(database: string, collection: string): Promise<IndexSpec[]>;
-  collectUsage(database: string, collection: string): Promise<IndexUsageStat[]>;
-  indexSizes(database: string, collection: string): Promise<Record<string, number>>;
-  collectionStorage(database: string, collection: string): Promise<CollectionStorage>;
-  readLatency(database: string, collection: string): Promise<LatencyPair>;
-  collectionLatency(database: string, collection: string): Promise<CollectionLatency>;
-  collectSlowQueries(database: string, collection: string): Promise<QueryShape[]>;
-  collectQueryStats(database: string, collection: string): Promise<QueryShape[]>;
-  collectWorkload(database: string, collection: string): Promise<QueryShape[]>;
-  collectDeletePatterns(database: string, collection: string): Promise<DeletePattern[]>;
-}
+// The collector CONTRACT lives in the engine-neutral ports (../engine/ports);
+// this file is the MongoDB implementation. Types re-exported for convenience.
+export type {
+  CollectionLatency,
+  CollectionStorage,
+  DeletePattern,
+  IndexCollector,
+  IndexUsageStat,
+  LatencyPair,
+} from "../engine/ports";
 
 // Parse driver output at the boundary so nothing downstream sees `any`.
 const indexDescription = z.object({
@@ -165,13 +146,6 @@ const profileDoc = z.object({
     })
     .optional(),
 });
-
-// An age-based delete pattern: recurring deleteMany({field: {$lt: <date>}}).
-export interface DeletePattern {
-  readonly field: string;
-  readonly count: number;
-  readonly medianRetentionSeconds: number;
-}
 
 // The single date-range predicate of a delete filter, or null when the filter
 // is anything else — only clean {field: {$lt/$lte: Date}} deletes count.

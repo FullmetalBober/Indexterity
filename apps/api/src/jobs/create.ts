@@ -1,7 +1,6 @@
 import { inChangeWindow } from "../analysis";
 import { actions, and, eq, inArray, policies, recommendations } from "../db";
-import { MongoIndexCollector, MongoIndexExecutor } from "../mongo";
-import { openClusterMongo } from "./cluster-connection";
+import { openClusterSession } from "./cluster-connection";
 import { jobDb } from "./db";
 
 // APPROVED CREATE/UPDATE/MERGE -> build the index (executor.create) -> ACTIVE.
@@ -38,11 +37,11 @@ export async function applyCreatesForCluster(clusterId: string): Promise<number>
     return 0;
   }
 
-  const { conn, readOnly, release } = await openClusterMongo(db, clusterId);
+  const { session, readOnly, release } = await openClusterSession(db, clusterId);
   try {
     if (readOnly) return 0;
-    const collector = new MongoIndexCollector(conn);
-    const executor = new MongoIndexExecutor(conn, readOnly);
+    const collector = session.collector;
+    const executor = session.executor(readOnly);
     let built = 0;
     for (const rec of approved) {
       const target = rec.targetSpec;

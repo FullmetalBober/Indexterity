@@ -1,8 +1,5 @@
 import type { IndexSpec } from "../analysis";
-import { type IndexUsageStat, MongoIndexCollector } from "./collector";
-import type { MongoConnection } from "./connection";
-
-const SYSTEM_DATABASES = new Set(["admin", "local", "config"]);
+import type { EngineSession, IndexUsageStat } from "../engine/ports";
 
 // One index snapshot, ready to persist or ship to the control plane. Shared by
 // the hosted-direct worker and the customer-side agent.
@@ -54,10 +51,11 @@ function groupByIndex(usage: IndexUsageStat[]): Record<string, IndexUsageStat[]>
 }
 
 // Collect every index's spec + size + per-member usage, plus per-collection
-// read/write latency, across a Mongo connection.
-export async function collectSnapshots(conn: MongoConnection): Promise<CollectResult> {
-  const collector = new MongoIndexCollector(conn);
-  const databases = (await conn.listDatabaseNames()).filter((name) => !SYSTEM_DATABASES.has(name));
+// read/write latency, across an engine session (engine-neutral: written
+// entirely against the collector port).
+export async function collectSnapshots(session: EngineSession): Promise<CollectResult> {
+  const collector = session.collector;
+  const databases = await session.listDatabaseNames();
   const snapshots: CollectedSnapshot[] = [];
   const latency: CollectedLatency[] = [];
   for (const database of databases) {

@@ -1,7 +1,7 @@
 import { type Db, MongoClient } from "mongodb";
 
 // Owns a driver client. Created with an index-only role (see docs/architecture.md
-// §9.1) so it cannot read customer documents.
+// §10.1) so it cannot read customer documents.
 export class MongoConnection {
   private readonly client: MongoClient;
 

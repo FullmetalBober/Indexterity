@@ -1,23 +1,9 @@
+import type { CreateIndexOptions, IndexExecutor } from "../engine/ports";
 import type { MongoConnection } from "./connection";
 
-export interface CreateIndexOptions {
-  readonly name?: string;
-  readonly unique?: boolean;
-  readonly partialFilterExpression?: Readonly<Record<string, string | number | boolean>>;
-  readonly collation?: { readonly locale: string };
-}
-
-export interface IndexExecutor {
-  hide(database: string, collection: string, indexName: string): Promise<void>;
-  unhide(database: string, collection: string, indexName: string): Promise<void>;
-  drop(database: string, collection: string, indexName: string): Promise<void>;
-  create(
-    database: string,
-    collection: string,
-    keys: Record<string, 1 | -1>,
-    options: CreateIndexOptions,
-  ): Promise<void>;
-}
+// The executor CONTRACT lives in the engine-neutral ports (../engine/ports);
+// this file is the MongoDB implementation. Types re-exported for convenience.
+export type { CreateIndexOptions, IndexExecutor } from "../engine/ports";
 
 // Enforces read-only mode structurally: every write throws unless the cluster
 // was explicitly switched to live mode (docs/architecture.md D11).

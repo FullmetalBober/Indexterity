@@ -1,7 +1,7 @@
 import { inChangeWindow } from "../analysis";
 import { actions, and, eq, gte, ne, policies, recommendations } from "../db";
-import { MongoIndexCollector, MongoIndexExecutor, serializeSpec } from "../mongo";
-import { openClusterMongo } from "./cluster-connection";
+import { serializeSpec } from "../mongo";
+import { openClusterSession } from "./cluster-connection";
 import { jobDb } from "./db";
 import { preflightDrop } from "./preflight";
 
@@ -57,12 +57,12 @@ export async function applyCluster(clusterId: string): Promise<number> {
     return 0;
   }
 
-  const { conn, readOnly, release } = await openClusterMongo(db, clusterId);
+  const { session, readOnly, release } = await openClusterSession(db, clusterId);
   try {
     // Read-only clusters never execute writes.
     if (readOnly) return 0;
-    const collector = new MongoIndexCollector(conn);
-    const executor = new MongoIndexExecutor(conn, readOnly);
+    const collector = session.collector;
+    const executor = session.executor(readOnly);
     let hidden = 0;
     for (const rec of approved) {
       if (!DROP_TYPES.has(rec.type)) continue;

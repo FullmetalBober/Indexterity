@@ -31,19 +31,13 @@ import {
   sql,
 } from "../db";
 import { DatabaseService } from "../db/database.service";
+import { adapterFor, engineSupported } from "../engine/registry";
 import { currentKeyVersion, masterKeyBytesFor } from "../env";
 import { classifyCluster } from "../jobs/classify";
-import { openClusterMongo } from "../jobs/cluster-connection";
+import { openClusterSession } from "../jobs/cluster-connection";
 import { collectCluster } from "../jobs/collect";
 import { evictCluster } from "../jobs/connection-pool";
-import {
-  connStringUsername,
-  MongoConnection,
-  MongoIndexExecutor,
-  ProvisionDeniedError,
-  provisionScopedUser,
-} from "../mongo";
-import { isMongoConnString } from "../mongo/conn-string";
+import { connStringUsername, ProvisionDeniedError, provisionScopedUser } from "../mongo";
 
 // A drop's rollback token carries the dropped index's serialized spec.
 const rollbackTokenSchema = z.object({ spec: z.unknown() });
@@ -73,6 +67,7 @@ function toCluster(row: typeof clusters.$inferSelect): Cluster {
     id: row.id,
     name: row.name,
     connectionMode: row.connectionMode,
+    engine: row.engine,
     readOnly: row.readOnly,
     provisionedUsername: row.provisionedUsername,
     createdAt: row.createdAt.toISOString(),
@@ -328,7 +323,7 @@ export class RecommendationsController {
         );
       const proposedByNs = new Map<string, number>();
       for (const rec of proposedRows) {
-        const key = `${rec.database} ${rec.collection}`;
+        const key = `${rec.database} ${rec.collection}`;
         proposedByNs.set(key, (proposedByNs.get(key) ?? 0) + 1);
       }
       const byNs = new Map<
@@ -336,7 +331,7 @@ export class RecommendationsController {
         { database: string; collection: string; indexCount: number; totalIndexBytes: number }
       >();
       for (const row of snapshotRows) {
-        const key = `${row.database} ${row.collection}`;
+        const key = `${row.database} ${row.collection}`;
         const group = byNs.get(key) ?? {
           database: row.database,
           collection: row.collection,
@@ -386,6 +381,7 @@ export class RecommendationsController {
   private async storeCluster(
     orgId: string,
     name: string,
+    engine: typeof clusters.$inferSelect.engine,
     connectionString: string,
     provisionedUsername: string | null,
   ): Promise<typeof clusters.$inferSelect> {
@@ -400,6 +396,7 @@ export class RecommendationsController {
         orgId,
         name,
         connectionMode: "HOSTED_DIRECT",
+        engine,
         readOnly: true,
         sealedDek: Buffer.from(sealed.dek),
         sealedData: Buffer.from(sealed.data),
@@ -415,12 +412,21 @@ export class RecommendationsController {
   createCluster(@Req() req: FastifyRequest) {
     return implement(contract.createCluster).handler(async ({ input, errors }) => {
       const orgId = await this.requireOwner(req);
-      if (!isMongoConnString(input.connectionString)) {
+      const engine = input.engine ?? "MONGODB";
+      if (!engineSupported(engine)) {
+        throw errors.BAD_REQUEST({
+          message: `${engine} support is planned — only MONGODB clusters can connect today`,
+        });
+      }
+      // The engine's adapter owns connection-string validation (SSRF guard).
+      if (!adapterFor(engine).isConnString(input.connectionString)) {
         throw errors.BAD_REQUEST({
           message: "connection string must be mongodb:// or mongodb+srv://",
         });
       }
-      return toCluster(await this.storeCluster(orgId, input.name, input.connectionString, null));
+      return toCluster(
+        await this.storeCluster(orgId, input.name, engine, input.connectionString, null),
+      );
     });
   }
 
@@ -431,7 +437,9 @@ export class RecommendationsController {
   provisionCluster(@Req() req: FastifyRequest) {
     return implement(contract.provisionCluster).handler(async ({ input, errors }) => {
       const orgId = await this.requireOwner(req);
-      if (!isMongoConnString(input.adminConnectionString)) {
+      // Provisioning is engine-specific; MONGODB is the only adapter with the
+      // capability today (see EngineCapabilities.provisionScopedUsers).
+      if (!adapterFor("MONGODB").isConnString(input.adminConnectionString)) {
         throw errors.BAD_REQUEST({
           message: "connection string must be mongodb:// or mongodb+srv://",
         });
@@ -448,6 +456,7 @@ export class RecommendationsController {
       const row = await this.storeCluster(
         orgId,
         input.name,
+        "MONGODB",
         provisioned.connectionString,
         provisioned.username,
       );
@@ -474,19 +483,21 @@ export class RecommendationsController {
         .where(and(eq(clusters.id, input.clusterId), eq(clusters.orgId, orgId)))
         .limit(1);
       if (row === undefined) throw errors.NOT_FOUND({ message: "cluster not found" });
-      if (!isMongoConnString(input.connectionString)) {
+      const adapter = adapterFor(row.engine);
+      if (!adapter.isConnString(input.connectionString)) {
         throw errors.BAD_REQUEST({
           message: "connection string must be mongodb:// or mongodb+srv://",
         });
       }
-      const probe = new MongoConnection(input.connectionString);
       try {
-        await probe.connect();
-        await probe.db("admin").command({ ping: 1 });
+        const probe = await adapter.open(input.connectionString);
+        try {
+          await probe.ping();
+        } finally {
+          await probe.close();
+        }
       } catch (error) {
         mapClusterError(error);
-      } finally {
-        await probe.close();
       }
       const keyVersion = currentKeyVersion();
       const sealed = await seal(
@@ -543,9 +554,9 @@ export class RecommendationsController {
       let unhidden = 0;
       if (inFlight.length > 0) {
         try {
-          const { conn, release } = await openClusterMongo(this.database.db, input.clusterId);
+          const { session, release } = await openClusterSession(this.database.db, input.clusterId);
           try {
-            const executor = new MongoIndexExecutor(conn, false);
+            const executor = session.executor(false);
             for (const rec of inFlight) {
               try {
                 await executor.unhide(rec.database, rec.collection, rec.indexName);
@@ -716,12 +727,15 @@ export class RecommendationsController {
         throw errors.CONFLICT({ message: "stored spec cannot be rebuilt automatically" });
       }
       try {
-        const { conn, readOnly, release } = await openClusterMongo(this.database.db, rec.clusterId);
+        const { session, readOnly, release } = await openClusterSession(
+          this.database.db,
+          rec.clusterId,
+        );
         try {
           if (readOnly) {
             throw errors.CONFLICT({ message: "cluster is read-only" });
           }
-          const executor = new MongoIndexExecutor(conn, readOnly);
+          const executor = session.executor(readOnly);
           await executor.create(rec.database, rec.collection, keys, {
             name: indexName,
             ...(collation === null ? {} : { collation: { locale: collation } }),

@@ -13,7 +13,7 @@ regression check. Full design and decision log in
    an **admin string once** and Indexterity provisions its own least-privilege
    user on your cluster (`idx_<hex>`, custom `indexterityEngine` role — no
    `find` on your collections, so it **cannot read documents**; the exact role
-   is in [`docs/architecture.md` §9.1](./docs/architecture.md)). Only the
+   is in [`docs/architecture.md` §10.1](./docs/architecture.md)). Only the
    scoped string is stored, sealed with envelope encryption — the admin string
    is never persisted. Clusters start in **read-only mode** — the engine
    analyzes but never writes until an owner flips it live (dashboard toggle).
@@ -40,6 +40,14 @@ regression check. Full design and decision log in
 
 Two independent engines, both **pure functions in `apps/api/src/analysis`** — no
 I/O, so they are deterministic and unit-tested without a database or a cluster.
+
+Everything engine-specific sits behind **engine ports**
+(`apps/api/src/engine/ports.ts`): a read-only stats collector, the one write
+surface (executor), and a per-cluster adapter registry. MongoDB is the shipped
+adapter; the data model and contracts already carry an `engine` field so
+PostgreSQL / SQL Server adapters can slot in without pipeline changes
+([`docs/architecture.md` §9](./docs/architecture.md) has the mapping:
+`pg_stat_user_indexes` / `sys.dm_db_index_usage_stats` etc.).
 
 ### Removing indexes (usage + redundancy)
 
