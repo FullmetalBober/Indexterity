@@ -5,12 +5,17 @@ import { activeCooldownKeys, cooldownKey } from "./cooldowns";
 import { applyCreatesForCluster } from "./create";
 import { jobDb } from "./db";
 
-const WORKLOAD_OPTIONS = { minCount: 1 };
+// A shape must recur before it earns a recommendation — someone running a
+// heavy ad-hoc query once or twice must not leave an index behind.
+const WORKLOAD_OPTIONS = { minCount: 3 };
 // A TTL advisory needs a RECURRING delete pattern, not a one-off cleanup.
 const TTL_MIN_DELETES = 3;
 const MIN_COLLECTION_DOCS = 1000;
 // A collection scan on a collection this large is "critical" (instant-apply eligible).
 const CRITICAL_COLLECTION_DOCS = 10_000;
+// Instant apply (build without human approval) demands stronger recurrence
+// than merely proposing.
+const INSTANT_MIN_COUNT = 5;
 
 function proposedName(keys: readonly SortKey[]): string {
   return keys.map((key) => `${key.field}_${key.direction}`).join("_");
@@ -150,7 +155,11 @@ export async function suggestForCluster(clusterId: string): Promise<number> {
             pastRegressions: regressionCounts.get(`${database} ${collection} ${indexName}`) ?? 0,
           });
           const instant =
-            candidate.type === "CREATE" && critical && policy.instantCreate && !readOnly;
+            candidate.type === "CREATE" &&
+            critical &&
+            candidate.count >= INSTANT_MIN_COUNT &&
+            policy.instantCreate &&
+            !readOnly;
           if (instant) instantApproved += 1;
           toInsert.push({
             clusterId,

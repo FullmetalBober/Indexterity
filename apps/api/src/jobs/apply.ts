@@ -1,11 +1,12 @@
-import { inChangeWindow } from "../analysis";
-import { actions, and, eq, gte, ne, policies, recommendations } from "../db";
+import { dynamicObserveDays, inChangeWindow } from "../analysis";
+import { actions, and, eq, gte, indexSnapshots, ne, policies, recommendations } from "../db";
 import { serializeSpec } from "../mongo";
 import { openClusterSession } from "./cluster-connection";
 import { jobDb } from "./db";
 import { preflightDrop } from "./preflight";
 
 const DROP_TYPES = new Set(["DROP_UNUSED", "DROP_REDUNDANT", "MERGE"]);
+const DEFAULT_OBSERVE_DAYS = 30;
 
 // APPROVED drops -> pre-flight -> hide (collMod hidden:true) -> HIDDEN. Hiding is
 // instant and reversible; it starts the observe window. Records an audit action
@@ -83,11 +84,33 @@ export async function applyCluster(clusterId: string): Promise<number> {
       await executor.hide(rec.database, rec.collection, rec.indexName);
       // Baseline read latency at hide time — the reference for regression checks.
       const baseline = await collector.readLatency(rec.database, rec.collection);
+      // The observe window this index actually deserves, from its own usage
+      // history: periodic usage extends it (a monthly job must get a chance to
+      // run inside the window), long-proven idleness shortens it.
+      const historyRows = await db
+        .select()
+        .from(indexSnapshots)
+        .where(
+          and(
+            eq(indexSnapshots.clusterId, clusterId),
+            eq(indexSnapshots.database, rec.database),
+            eq(indexSnapshots.collection, rec.collection),
+            eq(indexSnapshots.indexName, rec.indexName),
+          ),
+        );
+      const window = dynamicObserveDays(
+        historyRows.map((row) => ({
+          capturedAt: row.capturedAt.toISOString(),
+          ops: row.perMember.reduce((sum, member) => sum + member.ops, 0),
+        })),
+        policy?.observeWindowDays ?? DEFAULT_OBSERVE_DAYS,
+      );
       await db
         .update(recommendations)
         .set({
           state: "HIDDEN",
           hiddenAt: new Date(),
+          observeDays: window.days,
           baselineReadOps: baseline.ops,
           baselineReadLatency: baseline.latencyMicros,
           updatedAt: new Date(),
@@ -97,7 +120,10 @@ export async function applyCluster(clusterId: string): Promise<number> {
         recommendationId: rec.id,
         kind: "HIDE",
         actor: "system",
-        result: "ok",
+        result:
+          window.reason === null
+            ? `ok; observing ${window.days} days`
+            : `ok; observing ${window.days} days — ${window.reason}`,
         rollbackToken: check.spec === null ? null : { spec: serializeSpec(check.spec) },
       });
       hidden += 1;

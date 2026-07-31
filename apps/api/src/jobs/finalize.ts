@@ -37,8 +37,12 @@ export async function finalizeCluster(clusterId: string): Promise<number> {
     .from(recommendations)
     .where(and(eq(recommendations.clusterId, clusterId), eq(recommendations.state, "HIDDEN")));
   const now = Date.now();
+  // Each drop observes for the window decided at hide time (dynamic — periodic
+  // usage extends it, proven idleness shortens it); policy is the fallback.
   const due = hiddenRecs.filter(
-    (rec) => rec.hiddenAt !== null && now - rec.hiddenAt.getTime() >= observeDays * DAY_MS,
+    (rec) =>
+      rec.hiddenAt !== null &&
+      now - rec.hiddenAt.getTime() >= (rec.observeDays ?? observeDays) * DAY_MS,
   );
   // Built indexes still under the post-build write watch.
   const watched = await db

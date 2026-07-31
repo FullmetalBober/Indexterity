@@ -6,12 +6,14 @@ import {
   createDatabase,
   eq,
   inArray,
+  indexSnapshots,
   organizations,
   recommendations,
   roiMetrics,
   user,
   verification,
 } from "../src/db";
+import { applyCluster } from "../src/jobs/apply";
 import { drainPool } from "../src/jobs/connection-pool";
 import { applyCreatesForCluster } from "../src/jobs/create";
 import { closeJobDb } from "../src/jobs/db";
@@ -667,6 +669,54 @@ describe("change window gates elective builds", () => {
     const specs = await mongo.db("inttest").collection("orders").indexes();
     expect(specs.some((spec) => spec.name === "winidx_1")).toBe(true);
     await mongo.db("inttest").collection("orders").dropIndex("winidx_1");
+  });
+});
+
+describe("dynamic observe window", () => {
+  it("extends the window at hide time when usage history is periodic", async () => {
+    process.env.MASTER_KEY =
+      process.env.MASTER_KEY ?? Buffer.from("0123456789abcdef0123456789abcdef").toString("base64");
+    await mongo.db("inttest").collection("orders").createIndex({ dyn: 1 }, { name: "dyn_1" });
+    // Usage on day 0, 20, 40 (gaps of 20 days): the policy window here is 7
+    // days, which would expire between two runs — expect 2×20 = 40 days.
+    const base = Date.now() - 45 * 86_400_000;
+    await db.insert(indexSnapshots).values(
+      [0, 10, 20, 30, 40].map((day) => ({
+        clusterId,
+        database: "inttest",
+        collection: "orders",
+        indexName: "dyn_1",
+        spec: { name: "dyn_1" },
+        sizeBytes: 4096,
+        perMember: [{ member: "m1", ops: day % 20 === 0 ? 5 : 0 }],
+        capturedAt: new Date(base + day * 86_400_000),
+      })),
+    );
+    const [rec] = await db
+      .insert(recommendations)
+      .values({
+        clusterId,
+        type: "DROP_UNUSED",
+        state: "APPROVED",
+        database: "inttest",
+        collection: "orders",
+        indexName: "dyn_1",
+        rationale: "dynamic observe test",
+        estimatedBytesSaved: 0,
+      })
+      .returning();
+    if (rec === undefined) throw new Error("failed to insert recommendation");
+
+    expect(await applyCluster(clusterId)).toBe(1);
+    const [hidden] = await db.select().from(recommendations).where(eq(recommendations.id, rec.id));
+    expect(hidden?.state).toBe("HIDDEN");
+    expect(hidden?.observeDays).toBe(40);
+
+    // Restore the cluster: un-hide and drop the test index.
+    await mongo
+      .db("inttest")
+      .command({ collMod: "orders", index: { name: "dyn_1", hidden: false } });
+    await mongo.db("inttest").collection("orders").dropIndex("dyn_1");
   });
 });
 

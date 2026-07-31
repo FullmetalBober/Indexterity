@@ -49,6 +49,47 @@ PostgreSQL / SQL Server adapters can slot in without pipeline changes
 ([`docs/architecture.md` §9](./docs/architecture.md) has the mapping:
 `pg_stat_user_indexes` / `sys.dm_db_index_usage_stats` etc.).
 
+### At a glance — the drop decision
+
+```mermaid
+flowchart TD
+    S[Index snapshots and usage history] --> P{Protected?<br/>_id_ / unique / TTL / shard / partial / sparse}
+    P -- yes --> PZ{Zero usage, or a unique index<br/>prefixing a wider one?}
+    PZ -- yes --> ADV[ADVISORY_REVIEW<br/>never auto-dropped]
+    PZ -- no --> K1[Keep]
+    P -- no --> R{Directed key-prefix of a wider index,<br/>same collation?}
+    R -- yes --> DR[DROP_REDUNDANT]
+    R -- no --> U{Usage class from history}
+    U -- FLAT_ZERO or PERIODIC_DEAD --> DU[DROP_UNUSED]
+    U -- CONTINUOUS or PERIODIC_ALIVE --> K2[Keep]
+    DR --> SC[Confidence score 0 to 100<br/>past regressions subtract 40 each]
+    DU --> SC
+    SC --> PIPE[Safety pipeline below]
+```
+
+### At a glance — the create decision
+
+```mermaid
+flowchart TD
+    W[Query shapes from queryStats or profiler] --> REC{Recurring?<br/>at least 3 sightings}
+    REC -- no --> X0[Ignored — an ad-hoc heavy query<br/>never leaves an index behind]
+    REC -- yes --> CS{COLLSCAN and collection<br/>at least 1000 docs?}
+    CS -- no --> X1[Ignored]
+    CS -- yes --> ESR[ESR key order:<br/>Equality then Sort then Range]
+    ESR --> PA{Equality field compared to the<br/>same literal in every sample?}
+    PA -- yes --> PF[Predicate moves into<br/>partialFilterExpression]
+    PA -- no --> CO
+    PF --> CO{Directed prefix of<br/>another proposal?}
+    CO -- yes --> FOLD[Consolidated into the wider proposal<br/>counts add up]
+    CO -- no --> KI{Against existing indexes}
+    KI -- equal exists --> N0[Nothing to do]
+    KI -- an index prefixes the want --> UPD[UPDATE — extend it]
+    KI -- two or more singles cover it --> MRG[MERGE into one compound]
+    KI -- otherwise --> CRE[CREATE]
+    L[Lookup joins in pipelines] --> FI{Foreign join field indexed?}
+    FI -- no --> CRF[CREATE on the foreign collection]
+```
+
 ### Removing indexes (usage + redundancy)
 
 Runs off collected snapshots. First each index gets a **usage class** from its
@@ -78,7 +119,9 @@ Requires `policy.workloadAnalysis`. Query shapes come from **`$queryStats`**
 (mongo 7+, no profiler needed — set `internalQueryStatsRateLimit > 0`), falling
 back to the profiler (`system.profile`) when unavailable; documents are never
 read either way. Only collections with **≥ 1000 docs** are considered;
-**≥ 10 000 docs** is "critical". For each recurring query shape that did a
+**≥ 10 000 docs** is "critical". A shape must recur — **≥ 3 sightings** —
+before it earns anything, so someone manually running a heavy query once or
+twice never leaves an index behind. For each recurring shape that did a
 `COLLSCAN`:
 
 - an existing index already equals the wanted fields → nothing
@@ -120,14 +163,29 @@ never auto-dropped.
 
 ### Instant apply
 
-A `CREATE` on a critical collection, when `policy.instantCreate` is on and the
-cluster is live (not read-only), is auto-approved and built immediately — adding an
-index is safe and reversible, so a critical missing index does not wait for the
-next scheduler tick. **Drops are never instant.**
+A `CREATE` on a critical collection, when `policy.instantCreate` is on, the
+cluster is live (not read-only), and the shape recurred **≥ 5 times**, is
+auto-approved and built immediately — adding an index is safe and reversible,
+so a critical missing index does not wait for the next scheduler tick.
+**Drops are never instant.**
 
 ## The apply pipeline (state machine)
 
 `PROPOSED → APPROVED` (dashboard, or auto), then it depends on the type.
+
+```mermaid
+stateDiagram-v2
+    [*] --> PROPOSED: engine proposes, scored 0 to 100
+    PROPOSED --> APPROVED: dashboard, autoApply, or score at least autoApplyScore
+    APPROVED --> HIDDEN: drop path — pre-flight, then hide (inside the change window)
+    HIDDEN --> REJECTED: reads regressed — un-hidden + cooldown
+    HIDDEN --> PROPOSED: pre-flight failed — un-hidden, re-proposed
+    HIDDEN --> DROPPED: dynamic observe window elapsed — drop (inside the change window)
+    DROPPED --> ROLLED_BACK: undo — rebuilt from the rollback token
+    APPROVED --> ACTIVE: create path — build (inside the change window)
+    ACTIVE --> ROLLED_BACK: writes regressed — dropped + cooldown
+    ACTIVE --> [*]: survives the watch window — graduates
+```
 
 **Removals** (`DROP_UNUSED` / `DROP_REDUNDANT` / `MERGE` retire):
 
@@ -135,8 +193,13 @@ next scheduler tick. **Drops are never instant.**
 APPROVED → pre-flight → hide (collMod hidden:true) → HIDDEN → observe → finalize → DROPPED
 ```
 
-- Hiding is instant and reversible, and starts the observe window
-  (`policy.observeWindowDays`, default **30**).
+- Hiding is instant and reversible, and starts the observe window.
+  `policy.observeWindowDays` (default **30**) is the *baseline*: at hide time
+  the window is derived from the index's own usage history — **periodic usage
+  extends it** to 2× the largest gap between active snapshots (≤ 90 days, so a
+  monthly job gets a full cycle inside the window), and an index **proven idle**
+  across at least twice the baseline shortens it to half (never under a week).
+  The decided window and its reason land in the audit trail.
 - At hide time the collection's **baseline read latency** is recorded.
 - `finalize` runs only after the window elapses and gates the drop three ways:
   1. **Regression** — if average read latency since hiding exceeds
@@ -171,7 +234,7 @@ but never writes to your cluster.
 | `autoApply` | approve recommendations without a human | off |
 | `workloadAnalysis` | enable the create/merge/update engine | off |
 | `instantCreate` | auto-build critical missing indexes | off |
-| `observeWindowDays` | how long a hidden index bakes before drop | 30 |
+| `observeWindowDays` | baseline bake time for a hidden index — auto-extended for periodic usage (2× the largest activity gap, ≤ 90d), auto-shortened for long-proven idleness (≥ half, ≥ 7d) | 30 |
 | `maxCollectionSizeBytes` | size ceiling for building new indexes | — |
 | `autoApplyScore` | auto-approve recommendations scoring ≥ this (0-100) | off |
 | `changeWindowStartHour` / `EndHour` | elective changes (hide/build/drop) only run in this UTC hour window; safety rollbacks never wait | anytime |

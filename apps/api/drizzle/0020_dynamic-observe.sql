@@ -1,0 +1,1 @@
+ALTER TABLE "recommendations" ADD COLUMN "observe_days" integer;

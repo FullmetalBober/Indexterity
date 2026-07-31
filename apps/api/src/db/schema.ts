@@ -206,6 +206,9 @@ export const recommendations = pgTable(
     score: integer("score").notNull().default(0),
     estimatedBytesSaved: bigint("estimated_bytes_saved", { mode: "number" }).notNull().default(0),
     hiddenAt: timestamp("hidden_at", { withTimezone: true }),
+    // The observe window this drop actually got, decided at hide time from the
+    // index's own usage history (analysis/observe.ts). Null = policy baseline.
+    observeDays: integer("observe_days"),
     baselineReadOps: bigint("baseline_read_ops", { mode: "number" }),
     baselineReadLatency: bigint("baseline_read_latency", { mode: "number" }),
     // Set when a CREATE/UPDATE/MERGE is built: the write-latency baseline for the
