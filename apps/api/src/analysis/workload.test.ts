@@ -132,6 +132,30 @@ describe("recommendCreates (consolidation)", () => {
     expect(out).toHaveLength(2);
   });
 
+  // The filter is only carried by the CREATE branch. A partial want that fell
+  // into UPDATE or MERGE used to lose it silently and widen a full index —
+  // the opposite of the narrowing the analysis had just decided on.
+  it("keeps a partial want a partial CREATE even when an index could be extended", () => {
+    // status is constant, so the want narrows to {b, c} plus a filter — and
+    // the existing b_1 is a proper prefix of that, which is exactly the shape
+    // that used to be turned into a full UPDATE.
+    const partialShape: QueryShape = {
+      equality: ["status", "b", "c"],
+      sort: [],
+      range: [],
+      collscan: true,
+      count: 4,
+      constants: { status: "active" },
+    };
+    const out = recommendCreates([partialShape], [idx("b_1", ["b"])], options);
+    expect(out).toHaveLength(1);
+    expect(out[0]?.type).toBe("CREATE");
+    expect(out[0]?.partialFilter).toEqual({ status: "active" });
+    // The full index is left alone — it may be serving the documents the
+    // filter excludes.
+    expect(out[0]?.retireIndexes).toEqual([]);
+  });
+
   it("never consolidates into or out of partial candidates", () => {
     const partialShape: QueryShape = {
       equality: ["status", "b"],

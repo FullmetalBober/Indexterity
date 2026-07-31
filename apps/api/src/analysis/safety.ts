@@ -1,12 +1,27 @@
 import type { IndexSpec } from "./types";
 
-// Indexes that must never be auto-dropped regardless of usage. Zero query ops
-// does NOT mean unused for unique/TTL/shard-key indexes. When unsure, keep.
+// Indexes that must never be auto-dropped regardless of usage, because
+// dropping one does something no latency gate can detect:
+//
+//   _id_      mandatory.
+//   unique    enforces a constraint; removing it permits duplicate data, and
+//             recreating the index afterwards will not undo them. This also
+//             covers unique partial/sparse indexes, the "unique among active
+//             documents" pattern.
+//   TTL       expires documents; low query usage is the normal state for one.
+//   shard key the cluster does not work without it.
+//
+// Partial and sparse indexes are NOT on this list. They used to be, on the
+// argument that low usage is expected for a deliberately narrow index — but
+// that is a statement about reading counters, and the pipeline does not rely on
+// counters alone: it hides, measures, and un-hides on regression. Taxonomy is
+// the wrong tool when the safety net is measurement. They still carry the usual
+// requirement of a trustworthy history, and a unique one is still protected
+// above.
 export function isNeverDrop(index: IndexSpec): boolean {
   if (index.name === "_id_") return true;
   if (index.unique) return true;
   if (index.ttl) return true;
   if (index.isShardKey) return true;
-  if (index.partial || index.sparse) return true;
   return false;
 }

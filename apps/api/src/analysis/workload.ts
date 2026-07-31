@@ -186,11 +186,23 @@ export function recommendCreates(
       (want.absorbedShapes > 0
         ? ` (also serves ${want.absorbedShapes} narrower shape${want.absorbedShapes === 1 ? "" : "s"})`
         : "");
-    const extendable = existing.find((idx) => !isNeverDrop(idx) && isPrefix(fieldsOf(idx), wanted));
-    const singles = existing.filter(
-      (idx) =>
-        !isNeverDrop(idx) && idx.keys.length === 1 && wanted.includes(fieldsOf(idx)[0] ?? ""),
-    );
+    // A want with a filter can only become a partial index, and only the CREATE
+    // branch carries the filter through. Extending or merging a FULL index into
+    // it would narrow that index to a subset of its documents — every query
+    // outside the filter would lose it — and the existing index may well be
+    // serving exactly those. So a narrowing is proposed as a new index beside
+    // the old one, never as a replacement of it.
+    const extendable =
+      partialFilter === undefined
+        ? existing.find((idx) => !isNeverDrop(idx) && isPrefix(fieldsOf(idx), wanted))
+        : undefined;
+    const singles =
+      partialFilter === undefined
+        ? existing.filter(
+            (idx) =>
+              !isNeverDrop(idx) && idx.keys.length === 1 && wanted.includes(fieldsOf(idx)[0] ?? ""),
+          )
+        : [];
 
     if (extendable !== undefined) {
       candidates.push({
