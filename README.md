@@ -478,9 +478,9 @@ What's actually open is correctness, not features:
 
 - ~~Restricted superset in the redundancy rule~~ — fixed: a covering index that
   is `partial`, `sparse` or `hidden` no longer folds away its prefix.
-- **Drop vs in-flight create** — `classifyCluster` reads snapshots only, so an
-  index still inside its post-build write watch can be proposed for
-  `DROP_UNUSED` 18 hours after the engine built it.
+- ~~Drop vs in-flight create~~ — fixed: an index still inside its post-build
+  write watch cannot be the subject of a finding, though it still counts as a
+  covering index for redundancy.
 - **Warmup** — nothing encodes "we have not watched long enough yet". A usage
   finding needs 3 snapshots (18h at the 6h cadence), so on a freshly connected
   cluster a quarterly job's index is indistinguishable from a dead one. Withhold

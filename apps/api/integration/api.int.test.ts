@@ -2,6 +2,7 @@ import type { ChildProcess } from "node:child_process";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   actions,
+  and,
   clusters,
   createDatabase,
   eq,
@@ -1114,6 +1115,94 @@ describe("password reset (changes the owner password — keep near the end)", ()
       body: JSON.stringify({ email: owner.email, password: "rotated-pass-456" }),
     });
     expect(signInRes.status).toBe(200);
+  });
+});
+
+describe("an index the engine is still watching", () => {
+  it("is not proposed for a drop until its post-build watch has passed", async () => {
+    const org = asRecord(await (await api("/org", owner)).json());
+    const [row] = await db
+      .insert(clusters)
+      .values({
+        orgId: asString(org.id),
+        name: "Watch Cluster",
+        sealedDek: Buffer.alloc(1),
+        sealedData: Buffer.alloc(1),
+        keyVersion: 1,
+      })
+      .returning();
+    if (row === undefined) throw new Error("failed to insert cluster");
+    const watchId = row.id;
+    createdClusterIds.push(watchId);
+
+    // Built for a query shape that then went quiet: three clean snapshots, all
+    // zero ops, which on their own read as FLAT_ZERO -> DROP_UNUSED.
+    const base = Date.now() - 2 * 86_400_000;
+    const spec = {
+      name: "built_1",
+      keys: [{ field: "built", direction: 1 }],
+      unique: false,
+      ttl: false,
+      partial: false,
+      sparse: false,
+      hidden: false,
+      isShardKey: false,
+      collation: null,
+    };
+    const since = new Date(base - 86_400_000).toISOString();
+    await db.insert(indexSnapshots).values(
+      [0, 1, 2].map((day) => ({
+        clusterId: watchId,
+        database: "inttest",
+        collection: "orders",
+        indexName: "built_1",
+        spec,
+        sizeBytes: 4096,
+        perMember: [{ member: "m1", ops: 0, since }],
+        capturedAt: new Date(base + day * 43_200_000),
+      })),
+    );
+
+    // The engine built it a moment ago, so its write watch is still running.
+    const [created] = await db
+      .insert(recommendations)
+      .values({
+        clusterId: watchId,
+        type: "CREATE",
+        state: "ACTIVE",
+        database: "inttest",
+        collection: "orders",
+        indexName: "built_1",
+        rationale: "built from a recurring collection scan",
+        score: 70,
+        estimatedBytesSaved: 0,
+        builtAt: new Date(),
+        baselineWriteOps: 100,
+        baselineWriteLatency: 5000,
+      })
+      .returning();
+    if (created === undefined) throw new Error("failed to insert recommendation");
+
+    expect(await classifyCluster(watchId)).toBe(0);
+
+    // Graduated: watch elapsed, baselines cleared. Now it is an ordinary index
+    // and the usual rules apply — the guard must release, not protect forever.
+    await db
+      .update(recommendations)
+      .set({
+        builtAt: new Date(Date.now() - 120 * 86_400_000),
+        baselineWriteOps: null,
+        baselineWriteLatency: null,
+      })
+      .where(eq(recommendations.id, created.id));
+
+    expect(await classifyCluster(watchId)).toBe(1);
+    const [proposal] = await db
+      .select()
+      .from(recommendations)
+      .where(and(eq(recommendations.clusterId, watchId), eq(recommendations.state, "PROPOSED")));
+    expect(proposal?.type).toBe("DROP_UNUSED");
+    expect(proposal?.indexName).toBe("built_1");
   });
 });
 

@@ -1,7 +1,11 @@
 import { type IndexInput, parseStoredSpec, recommendForCollection } from "../analysis";
-import { and, eq, indexCooldowns, indexSnapshots, recommendations } from "../db";
+import { and, eq, indexCooldowns, indexSnapshots, policies, recommendations } from "../db";
 import { activeCooldownKeys, cooldownKey } from "./cooldowns";
 import { jobDb } from "./db";
+import { watchedIndexKeys, watchKey } from "./watched";
+
+// Policy fallback, matching apply/finalize.
+const DEFAULT_OBSERVE_DAYS = 30;
 
 // Enough history to attempt periodic detection; below this, usage reads FLAT_ZERO.
 // A hole larger than this means we stopped watching, so absence of usage
@@ -14,6 +18,20 @@ const CLASSIFY_OPTIONS = { recentWindow: 3, minHistory: 3, maxGapHours: 48 };
 export async function classifyCluster(clusterId: string): Promise<number> {
   const db = jobDb();
   const cooled = await activeCooldownKeys(db, clusterId);
+  const [policy] = await db
+    .select({ observeWindowDays: policies.observeWindowDays })
+    .from(policies)
+    .where(eq(policies.clusterId, clusterId))
+    .limit(1);
+  // Indexes the engine built and is still watching are off the table — see
+  // watchedIndexKeys. They stay in `inputs` below, because a new compound index
+  // legitimately makes an older prefix redundant; they just cannot be the
+  // subject of a finding while their own verdict is pending.
+  const watched = await watchedIndexKeys(
+    db,
+    clusterId,
+    policy?.observeWindowDays ?? DEFAULT_OBSERVE_DAYS,
+  );
   // Full cooldown history (active or expired): each past regression cuts the
   // confidence score of any future proposal for that index.
   const cooldownRows = await db
@@ -85,6 +103,7 @@ export async function classifyCluster(clusterId: string): Promise<number> {
       pastRegressions,
     )) {
       if (cooled.has(cooldownKey(entry.database, entry.collection, candidate.indexName))) continue;
+      if (watched.has(watchKey(entry.database, entry.collection, candidate.indexName))) continue;
       toInsert.push({
         clusterId,
         type: candidate.type,
