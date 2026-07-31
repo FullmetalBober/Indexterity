@@ -46,6 +46,18 @@ export interface DeletePattern {
   readonly medianRetentionSeconds: number;
 }
 
+// One namespace to gather query shapes for.
+export interface WorkloadTarget {
+  readonly database: string;
+  readonly collection: string;
+}
+
+// Key for a collectWorkload result map. NUL-separated: a collection name may
+// contain almost anything, including spaces and dots.
+export function workloadKey(database: string, collection: string): string {
+  return [database, collection].join("\u0000");
+}
+
 // Read-only statistics surface — everything the engine needs to decide, and
 // deliberately nothing that can read customer data rows.
 export interface IndexCollector {
@@ -57,8 +69,12 @@ export interface IndexCollector {
   readLatency(database: string, collection: string): Promise<LatencyPair>;
   collectionLatency(database: string, collection: string): Promise<CollectionLatency>;
   collectSlowQueries(database: string, collection: string): Promise<QueryShape[]>;
-  collectQueryStats(database: string, collection: string): Promise<QueryShape[]>;
-  collectWorkload(database: string, collection: string): Promise<QueryShape[]>;
+  // Batched deliberately. Every engine's workload source is one cluster-wide
+  // store you filter per namespace — Mongo's `$queryStats`, Postgres's
+  // `pg_stat_statements` — so a per-collection signature invites reading the
+  // whole thing once per collection. Takes every namespace at once and returns
+  // a map keyed by `workloadKey`; missing entries mean no shapes were found.
+  collectWorkload(targets: readonly WorkloadTarget[]): Promise<Map<string, readonly QueryShape[]>>;
   collectDeletePatterns(database: string, collection: string): Promise<DeletePattern[]>;
 }
 

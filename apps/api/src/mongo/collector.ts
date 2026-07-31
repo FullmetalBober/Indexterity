@@ -8,13 +8,15 @@ import type {
   QueryShape,
   SortKey,
 } from "../analysis";
-import type {
-  CollectionLatency,
-  CollectionStorage,
-  DeletePattern,
-  IndexCollector,
-  IndexUsageStat,
-  LatencyPair,
+import {
+  type CollectionLatency,
+  type CollectionStorage,
+  type DeletePattern,
+  type IndexCollector,
+  type IndexUsageStat,
+  type LatencyPair,
+  type WorkloadTarget,
+  workloadKey,
 } from "../engine/ports";
 import type { MongoConnection } from "./connection";
 
@@ -64,6 +66,7 @@ export type {
   IndexCollector,
   IndexUsageStat,
   LatencyPair,
+  WorkloadTarget,
 } from "../engine/ports";
 
 // Parse driver output at the boundary so nothing downstream sees `any`.
@@ -504,14 +507,21 @@ export class MongoIndexCollector implements IndexCollector {
   // Query shapes from $queryStats (mongo 7+): no profiler needed. COLLSCAN is
   // inferred from zero keys examined alongside docs examined. Requires
   // internalQueryStatsRateLimit > 0 on the server.
-  async collectQueryStats(database: string, collection: string): Promise<QueryShape[]> {
+  async collectQueryStats(targets: readonly WorkloadTarget[]): Promise<Map<string, QueryShape[]>> {
+    if (targets.length === 0) return new Map();
+    // ONE read of the store for the whole cluster. It holds an entry per
+    // distinct query shape the server has seen, so reading it per collection
+    // costs the full store times the collection count.
     const raw = await this.conn
       .db("admin")
       .aggregate([{ $queryStats: {} }])
       .toArray();
+    const byNamespace = new Map<string, QueryShape[]>();
+    const wanted = new Set(targets.map((t) => workloadKey(t.database, t.collection)));
     const shapes = new Map<
       string,
       {
+        namespace: string;
         equality: string[];
         sort: SortKey[];
         range: string[];
@@ -524,9 +534,8 @@ export class MongoIndexCollector implements IndexCollector {
       const parsed = queryStatsDoc.safeParse(doc);
       if (!parsed.success) continue;
       const { key, metrics } = parsed.data;
-      if (key.queryShape.cmdNs.db !== database || key.queryShape.cmdNs.coll !== collection) {
-        continue;
-      }
+      const namespace = workloadKey(key.queryShape.cmdNs.db, key.queryShape.cmdNs.coll);
+      if (!wanted.has(namespace)) continue;
       let equality: string[] = [];
       let range: string[] = [];
       let sort: SortKey[] = [];
@@ -553,23 +562,38 @@ export class MongoIndexCollector implements IndexCollector {
       }
       const collscan =
         (metrics.keysExamined?.sum ?? 0) === 0 && (metrics.docsExamined?.sum ?? 0) > 0;
-      const mapKey = shapeMapKey(equality, sort, range, lookups);
+      // Shapes are deduplicated per namespace, not globally — the same filter
+      // shape against two collections is two different findings.
+      const mapKey = `${namespace}\u0000${shapeMapKey(equality, sort, range, lookups)}`;
       const prev = shapes.get(mapKey);
       if (prev === undefined) {
-        shapes.set(mapKey, { equality, sort, range, collscan, count: metrics.execCount, lookups });
+        shapes.set(mapKey, {
+          namespace,
+          equality,
+          sort,
+          range,
+          collscan,
+          count: metrics.execCount,
+          lookups,
+        });
       } else {
         prev.count += metrics.execCount;
         prev.collscan = prev.collscan || collscan;
       }
     }
-    return [...shapes.values()].map((shape) => ({
-      equality: shape.equality,
-      sort: shape.sort,
-      range: shape.range,
-      collscan: shape.collscan,
-      count: shape.count,
-      ...(shape.lookups.length > 0 ? { lookups: shape.lookups } : {}),
-    }));
+    for (const shape of shapes.values()) {
+      const list = byNamespace.get(shape.namespace) ?? [];
+      list.push({
+        equality: shape.equality,
+        sort: shape.sort,
+        range: shape.range,
+        collscan: shape.collscan,
+        count: shape.count,
+        ...(shape.lookups.length > 0 ? { lookups: shape.lookups } : {}),
+      });
+      byNamespace.set(shape.namespace, list);
+    }
+    return byNamespace;
   }
 
   // Recurring age-based deletes ({field: {$lt: <date>}}) from the profiler —
@@ -604,14 +628,29 @@ export class MongoIndexCollector implements IndexCollector {
   }
 
   // Preferred workload source: $queryStats, falling back to the profiler when
-  // it is unavailable (mongo <7, disabled, missing permission) or empty.
-  async collectWorkload(database: string, collection: string): Promise<QueryShape[]> {
+  // it is unavailable (mongo <7, disabled, missing permission) or has nothing
+  // for a given namespace. The fallback stays per namespace: $queryStats can
+  // answer for one collection and not another.
+  async collectWorkload(
+    targets: readonly WorkloadTarget[],
+  ): Promise<Map<string, readonly QueryShape[]>> {
+    let fromStats = new Map<string, QueryShape[]>();
     try {
-      const shapes = await this.collectQueryStats(database, collection);
-      if (shapes.length > 0) return shapes;
+      fromStats = await this.collectQueryStats(targets);
     } catch {
-      // fall through to the profiler
+      // Store unavailable for the whole cluster — every namespace falls back.
     }
-    return this.collectSlowQueries(database, collection);
+    const out = new Map<string, readonly QueryShape[]>();
+    for (const target of targets) {
+      const key = workloadKey(target.database, target.collection);
+      const shapes = fromStats.get(key) ?? [];
+      out.set(
+        key,
+        shapes.length > 0
+          ? shapes
+          : await this.collectSlowQueries(target.database, target.collection),
+      );
+    }
+    return out;
   }
 }

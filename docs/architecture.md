@@ -349,7 +349,11 @@ sits behind two ports plus a session factory (`apps/api/src/engine/ports.ts`):
 
 - **`IndexCollector`** — the read-only statistics surface (usage, sizes,
   latency, workload shapes, delete patterns). Deliberately contains nothing
-  that can read customer data rows.
+  that can read customer data rows. Every method is per namespace except
+  `collectWorkload`, which takes them all at once: each engine's workload source
+  is one cluster-wide store you filter per namespace (`$queryStats`,
+  `pg_stat_statements`), so a per-collection signature invites reading the whole
+  store once per collection.
 - **`IndexExecutor`** — the only write surface (hide/unhide/drop/create);
   implementations must enforce read-only mode structurally.
 - **`EngineSession`** — a pooled connection exposing both, plus

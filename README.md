@@ -486,6 +486,10 @@ What's actually open is correctness, not features:
   cluster a quarterly job's index is indistinguishable from a dead one. Withhold
   usage-based drops until the history has depth; structural redundancy findings
   don't depend on watching and can keep flowing.
+- **`autoApply` vs `autoApplyScore`** — they are mutually exclusive branches,
+  not a switch and its threshold, so setting both silently discards the score.
+  `autoApply` also promotes `ADVISORY_REVIEW` rows, which then leave the
+  PROPOSED pool `classify` refreshes and never get re-evaluated.
 
 ## Notes
 

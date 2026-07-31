@@ -15,6 +15,7 @@ import {
   user,
   verification,
 } from "../src/db";
+import { workloadKey } from "../src/engine/ports";
 import { applyCluster } from "../src/jobs/apply";
 import { refreshInferredWindow } from "../src/jobs/change-window";
 import { classifyCluster } from "../src/jobs/classify";
@@ -22,7 +23,8 @@ import { drainPool } from "../src/jobs/connection-pool";
 import { applyCreatesForCluster } from "../src/jobs/create";
 import { closeJobDb } from "../src/jobs/db";
 import { finalizeCluster } from "../src/jobs/finalize";
-import { MongoConnection } from "../src/mongo";
+import { suggestForCluster } from "../src/jobs/suggest";
+import { MongoConnection, MongoIndexCollector } from "../src/mongo";
 import {
   API_BASE,
   api,
@@ -1115,6 +1117,100 @@ describe("password reset (changes the owner password — keep near the end)", ()
       body: JSON.stringify({ email: owner.email, password: "rotated-pass-456" }),
     });
     expect(signInRes.status).toBe(200);
+  });
+});
+
+describe("workload collection is batched", () => {
+  it("reads the cluster-wide store once and slices it per namespace", async () => {
+    const collector = new MongoIndexCollector(mongo);
+    const targets = [
+      { database: "inttest", collection: "orders" },
+      { database: "inttest", collection: "carts" },
+    ];
+
+    // Count the aggregates this run issues. $queryStats needs mongo 7+ and a
+    // non-zero rate limit; when it is unavailable the call falls through to the
+    // profiler per namespace, which is exactly the behaviour to keep.
+    let adminAggregates = 0;
+    const db = mongo.db.bind(mongo);
+    const counting = (name: string) => {
+      const handle = db(name);
+      if (name !== "admin") return handle;
+      const aggregate = handle.aggregate.bind(handle);
+      return Object.assign(handle, {
+        aggregate: (pipeline: Record<string, unknown>[]) => {
+          adminAggregates += 1;
+          return aggregate(pipeline);
+        },
+      });
+    };
+    Object.assign(mongo, { db: counting });
+    try {
+      const workload = await collector.collectWorkload(targets);
+      // One read of the whole store, not one per namespace.
+      expect(adminAggregates).toBeLessThanOrEqual(1);
+      // Every namespace asked for gets an entry, and nothing else does.
+      expect([...workload.keys()].sort()).toEqual(
+        targets.map((t) => workloadKey(t.database, t.collection)).sort(),
+      );
+    } finally {
+      Object.assign(mongo, { db });
+    }
+  });
+
+  it("asks for nothing when there are no targets", async () => {
+    const collector = new MongoIndexCollector(mongo);
+    expect((await collector.collectWorkload([])).size).toBe(0);
+  });
+
+  it("keeps each namespace's shapes to itself, and drives a real suggest run", async () => {
+    // $queryStats records nothing until the sampling rate is lifted.
+    await mongo
+      .db("admin")
+      .command({ setParameter: 1, internalQueryStatsRateLimit: -1 })
+      .catch(() => {});
+
+    // Two collections, both over MIN_COLLECTION_DOCS so the eligibility pass
+    // keeps them, each queried on a DIFFERENT field.
+    const docs = Array.from({ length: 1200 }, (_, i) => ({ i, status: "open", tier: "gold" }));
+    for (const name of ["wl_orders", "wl_carts"]) {
+      await mongo.db("inttest").collection(name).deleteMany({});
+      await mongo.db("inttest").collection(name).insertMany(docs);
+    }
+    for (let run = 0; run < 4; run++) {
+      await mongo.db("inttest").collection("wl_orders").find({ status: "open" }).toArray();
+      await mongo.db("inttest").collection("wl_carts").find({ tier: "gold" }).toArray();
+    }
+
+    const collector = new MongoIndexCollector(mongo);
+    const workload = await collector.collectWorkload([
+      { database: "inttest", collection: "wl_orders" },
+      { database: "inttest", collection: "wl_carts" },
+    ]);
+    const orders = workload.get(workloadKey("inttest", "wl_orders")) ?? [];
+    const carts = workload.get(workloadKey("inttest", "wl_carts")) ?? [];
+    // The orders shape filters on `status`, the carts shape on `tier`. If the
+    // store were sliced wrongly, each namespace would carry the other's field.
+    expect(orders.every((shape) => !shape.equality.includes("tier"))).toBe(true);
+    expect(carts.every((shape) => !shape.equality.includes("status"))).toBe(true);
+    if (orders.length > 0) expect(orders.some((s) => s.equality.includes("status"))).toBe(true);
+    if (carts.length > 0) expect(carts.some((s) => s.equality.includes("tier"))).toBe(true);
+
+    // And the restructured suggest run completes against a real cluster.
+    await api(`/clusters/${clusterId}/policy`, owner, {
+      method: "PUT",
+      body: JSON.stringify({
+        autoApply: false,
+        workloadAnalysis: true,
+        instantCreate: false,
+        observeWindowDays: 7,
+        maxCollectionSizeBytes: null,
+        autoApplyScore: null,
+        changeWindowStartHour: null,
+        changeWindowEndHour: null,
+      }),
+    });
+    expect(await suggestForCluster(clusterId)).toBeGreaterThanOrEqual(0);
   });
 });
 

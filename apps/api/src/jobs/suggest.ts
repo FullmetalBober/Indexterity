@@ -1,5 +1,6 @@
 import { createScore, type IndexSpec, recommendCreates, type SortKey } from "../analysis";
 import { and, eq, inArray, indexCooldowns, like, or, policies, recommendations } from "../db";
+import { type WorkloadTarget, workloadKey } from "../engine/ports";
 import { openClusterSession } from "./cluster-connection";
 import { activeCooldownKeys, cooldownKey } from "./cooldowns";
 import { applyCreatesForCluster } from "./create";
@@ -64,124 +65,139 @@ export async function suggestForCluster(clusterId: string): Promise<number> {
       string,
       { database: string; from: string; foreignField: string; count: number }
     >();
+    const namespaces: WorkloadTarget[] = [];
     for (const database of databases) {
       for (const collection of await collector.listCollectionNames(database)) {
-        // TTL advisories run BEFORE the size gate: a collection with recurring
-        // age-based deletes is small BY DESIGN (it's being pruned). The app
-        // already deletes by age — a TTL index would do it automatically.
-        // Indexterity NEVER builds TTL indexes (they delete documents), so this
-        // is advisory-only, excluded from every auto-approve path.
-        const deletePatterns = await collector.collectDeletePatterns(database, collection);
-        const ttlWorthy = deletePatterns.filter((pattern) => pattern.count >= TTL_MIN_DELETES);
-        if (ttlWorthy.length > 0) {
-          const currentIndexes = await collector.listIndexes(database, collection);
-          for (const pattern of ttlWorthy) {
-            if (currentIndexes.some((idx) => idx.ttl && idx.keys[0]?.field === pattern.field)) {
-              continue;
-            }
-            const indexName = `${pattern.field}_1_ttl`;
-            if (cooled.has(cooldownKey(database, collection, indexName))) continue;
-            const days = Math.max(1, Math.round(pattern.medianRetentionSeconds / 86_400));
-            toInsert.push({
-              clusterId,
-              type: "ADVISORY_REVIEW",
-              state: "PROPOSED",
-              database,
-              collection,
-              indexName,
-              rationale:
-                `Recurring age-based deletes on ${pattern.field} (${pattern.count}× in the profiler, ` +
-                `retention ≈ ${days} days). A TTL index would expire documents automatically and ` +
-                `steadily: db.${collection}.createIndex({ ${pattern.field}: 1 }, { expireAfterSeconds: ${pattern.medianRetentionSeconds} }). ` +
-                `CAUTION: TTL deletes documents — verify the retention window and create it yourself; Indexterity never builds TTL indexes.`,
-              score: Math.min(80, 30 + pattern.count * 10),
-              estimatedBytesSaved: 0,
-            });
+        namespaces.push({ database, collection });
+      }
+    }
+    for (const { database, collection } of namespaces) {
+      // TTL advisories run BEFORE the size gate: a collection with recurring
+      // age-based deletes is small BY DESIGN (it's being pruned). The app
+      // already deletes by age — a TTL index would do it automatically.
+      // Indexterity NEVER builds TTL indexes (they delete documents), so this
+      // is advisory-only, excluded from every auto-approve path.
+      const deletePatterns = await collector.collectDeletePatterns(database, collection);
+      const ttlWorthy = deletePatterns.filter((pattern) => pattern.count >= TTL_MIN_DELETES);
+      if (ttlWorthy.length > 0) {
+        const currentIndexes = await collector.listIndexes(database, collection);
+        for (const pattern of ttlWorthy) {
+          if (currentIndexes.some((idx) => idx.ttl && idx.keys[0]?.field === pattern.field)) {
+            continue;
           }
-        }
-
-        // Counts come from $collStats, not the count command — the scoped
-        // least-privilege user has no `find` grant, which `count` requires.
-        const { dataSizeBytes, docCount } = await collector.collectionStorage(database, collection);
-        if (docCount < MIN_COLLECTION_DOCS) continue;
-        // Policy ceiling: building an index on a huge collection is the one
-        // expensive create-side operation — skip collections above the limit.
-        if (
-          policy.maxCollectionSizeBytes !== null &&
-          dataSizeBytes > policy.maxCollectionSizeBytes
-        ) {
-          continue;
-        }
-        const critical = docCount >= CRITICAL_COLLECTION_DOCS;
-        const [shapes, existing, sizes] = await Promise.all([
-          collector.collectWorkload(database, collection),
-          collector.listIndexes(database, collection),
-          collector.indexSizes(database, collection),
-        ]);
-        indexCache.set(`${database}\u0000${collection}`, existing);
-        // Record $lookup joins for the post-loop foreign-side pass.
-        for (const shape of shapes) {
-          for (const join of shape.lookups ?? []) {
-            const key = `${database}\u0000${join.from}\u0000${join.foreignField}`;
-            const prev = lookupWants.get(key) ?? {
-              database,
-              from: join.from,
-              foreignField: join.foreignField,
-              count: 0,
-            };
-            prev.count += shape.count;
-            lookupWants.set(key, prev);
-          }
-        }
-        // A new index isn't free: estimate its size from this collection's
-        // average existing index, and remind about the extra write per insert.
-        const sizeValues = Object.values(sizes);
-        const avgIndexBytes =
-          sizeValues.length > 0
-            ? sizeValues.reduce((sum, value) => sum + value, 0) / sizeValues.length
-            : docCount * 16;
-        const cost = ` Est. build ≈ ${Math.max(1, Math.round(avgIndexBytes / 1024))} KB (+1 write per doc write).`;
-        for (const candidate of recommendCreates(shapes, existing, WORKLOAD_OPTIONS)) {
-          // Partial variants get a suffix so they never collide with the full
-          // index of the same keys.
-          const indexName =
-            proposedName(candidate.keys) +
-            (candidate.partialFilter === undefined ? "" : "_partial");
+          const indexName = `${pattern.field}_1_ttl`;
           if (cooled.has(cooldownKey(database, collection, indexName))) continue;
-          const score = createScore({
-            collscan: true,
-            count: candidate.count,
-            docCount,
-            pastRegressions: regressionCounts.get(`${database} ${collection} ${indexName}`) ?? 0,
-          });
-          const instant =
-            candidate.type === "CREATE" &&
-            critical &&
-            candidate.count >= INSTANT_MIN_COUNT &&
-            policy.instantCreate &&
-            !readOnly;
-          if (instant) instantApproved += 1;
+          const days = Math.max(1, Math.round(pattern.medianRetentionSeconds / 86_400));
           toInsert.push({
             clusterId,
-            type: candidate.type,
-            state: instant ? "APPROVED" : "PROPOSED",
+            type: "ADVISORY_REVIEW",
+            state: "PROPOSED",
             database,
             collection,
             indexName,
             rationale:
-              (instant ? `${candidate.rationale} (auto-approved: critical)` : candidate.rationale) +
-              cost,
-            score,
+              `Recurring age-based deletes on ${pattern.field} (${pattern.count}× in the profiler, ` +
+              `retention ≈ ${days} days). A TTL index would expire documents automatically and ` +
+              `steadily: db.${collection}.createIndex({ ${pattern.field}: 1 }, { expireAfterSeconds: ${pattern.medianRetentionSeconds} }). ` +
+              `CAUTION: TTL deletes documents — verify the retention window and create it yourself; Indexterity never builds TTL indexes.`,
+            score: Math.min(80, 30 + pattern.count * 10),
             estimatedBytesSaved: 0,
-            targetSpec: {
-              keys: encodeKeys(candidate.keys),
-              retire: [...candidate.retireIndexes],
-              ...(candidate.partialFilter === undefined
-                ? {}
-                : { partial: { ...candidate.partialFilter } }),
-            },
           });
         }
+      }
+    }
+
+    // Which collections are worth create-side analysis at all. Settled before
+    // the workload read so it can be asked for every namespace in one call —
+    // the store it reads is cluster-wide, so asking per collection would pull
+    // the whole thing once per collection.
+    const eligible: Array<WorkloadTarget & { docCount: number; critical: boolean }> = [];
+    for (const { database, collection } of namespaces) {
+      // Counts come from $collStats, not the count command — the scoped
+      // least-privilege user has no `find` grant, which `count` requires.
+      const { dataSizeBytes, docCount } = await collector.collectionStorage(database, collection);
+      if (docCount < MIN_COLLECTION_DOCS) continue;
+      // Policy ceiling: building an index on a huge collection is the one
+      // expensive create-side operation — skip collections above the limit.
+      if (policy.maxCollectionSizeBytes !== null && dataSizeBytes > policy.maxCollectionSizeBytes) {
+        continue;
+      }
+      eligible.push({
+        database,
+        collection,
+        docCount,
+        critical: docCount >= CRITICAL_COLLECTION_DOCS,
+      });
+    }
+    const workload = await collector.collectWorkload(eligible);
+    for (const { database, collection, docCount, critical } of eligible) {
+      const shapes = workload.get(workloadKey(database, collection)) ?? [];
+      const [existing, sizes] = await Promise.all([
+        collector.listIndexes(database, collection),
+        collector.indexSizes(database, collection),
+      ]);
+      indexCache.set(`${database}\u0000${collection}`, existing);
+      // Record $lookup joins for the post-loop foreign-side pass.
+      for (const shape of shapes) {
+        for (const join of shape.lookups ?? []) {
+          const key = `${database}\u0000${join.from}\u0000${join.foreignField}`;
+          const prev = lookupWants.get(key) ?? {
+            database,
+            from: join.from,
+            foreignField: join.foreignField,
+            count: 0,
+          };
+          prev.count += shape.count;
+          lookupWants.set(key, prev);
+        }
+      }
+      // A new index isn't free: estimate its size from this collection's
+      // average existing index, and remind about the extra write per insert.
+      const sizeValues = Object.values(sizes);
+      const avgIndexBytes =
+        sizeValues.length > 0
+          ? sizeValues.reduce((sum, value) => sum + value, 0) / sizeValues.length
+          : docCount * 16;
+      const cost = ` Est. build ≈ ${Math.max(1, Math.round(avgIndexBytes / 1024))} KB (+1 write per doc write).`;
+      for (const candidate of recommendCreates(shapes, existing, WORKLOAD_OPTIONS)) {
+        // Partial variants get a suffix so they never collide with the full
+        // index of the same keys.
+        const indexName =
+          proposedName(candidate.keys) + (candidate.partialFilter === undefined ? "" : "_partial");
+        if (cooled.has(cooldownKey(database, collection, indexName))) continue;
+        const score = createScore({
+          collscan: true,
+          count: candidate.count,
+          docCount,
+          pastRegressions: regressionCounts.get(`${database} ${collection} ${indexName}`) ?? 0,
+        });
+        const instant =
+          candidate.type === "CREATE" &&
+          critical &&
+          candidate.count >= INSTANT_MIN_COUNT &&
+          policy.instantCreate &&
+          !readOnly;
+        if (instant) instantApproved += 1;
+        toInsert.push({
+          clusterId,
+          type: candidate.type,
+          state: instant ? "APPROVED" : "PROPOSED",
+          database,
+          collection,
+          indexName,
+          rationale:
+            (instant ? `${candidate.rationale} (auto-approved: critical)` : candidate.rationale) +
+            cost,
+          score,
+          estimatedBytesSaved: 0,
+          targetSpec: {
+            keys: encodeKeys(candidate.keys),
+            retire: [...candidate.retireIndexes],
+            ...(candidate.partialFilter === undefined
+              ? {}
+              : { partial: { ...candidate.partialFilter } }),
+          },
+        });
       }
     }
     // Foreign-side $lookup indexes: a join field with no leading index makes
