@@ -5,6 +5,20 @@ import type { IndexSpec } from "./types";
 function optionsCompatible(candidate: IndexSpec, other: IndexSpec): boolean {
   if (candidate.unique && !other.unique) return false;
   if (candidate.partial || candidate.sparse || candidate.ttl) return false;
+  // The covering index has to actually cover. Sharing a key prefix is not
+  // enough when `other` is itself restricted:
+  //
+  //   partial - indexes only the documents matching its filter, so queries
+  //             outside that filter would fall back to a collection scan;
+  //   sparse  - skips documents missing the field entirely;
+  //   hidden  - the planner will not use it at all, and our own drop pipeline
+  //             hides an index for the whole observe window, which would
+  //             otherwise make every prefix of it look redundant right when it
+  //             is least able to serve anything.
+  //
+  // TTL is deliberately absent: it expires documents but indexes all of them,
+  // so a TTL superset covers its prefix fine.
+  if (other.partial || other.sparse || other.hidden) return false;
   // A prefix under a different collation is NOT covered — collation-dependent
   // queries (case-insensitive string comparison etc.) can only use the index
   // whose collation matches.

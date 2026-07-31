@@ -49,6 +49,17 @@ describe("recommendForCollection", () => {
     expect(out.some((c) => c.indexName === "ab")).toBe(false);
   });
 
+  // Ops are non-zero throughout so the DROP_UNUSED path stays out of the way
+  // and only the redundancy verdict is under test.
+  it("does not fold a plain index into a restricted superset", () => {
+    const plain = input(spec("a", [x1]), [5, 5, 5]);
+    for (const restriction of [{ partial: true }, { sparse: true }, { hidden: true }]) {
+      const wider = input(spec("ab", [x1, y1], restriction), [5, 5, 5]);
+      const out = recommendForCollection([plain, wider], {}, options, {}, NOW);
+      expect(out.some((c) => c.type === "DROP_REDUNDANT")).toBe(false);
+    }
+  });
+
   it("never proposes dropping _id_ or unique indexes (unused unique -> advisory)", () => {
     const id = input(spec("_id_", [x1]), [0, 0, 0]);
     const uniq = input(spec("u", [x1], { unique: true }), [0, 0, 0]);

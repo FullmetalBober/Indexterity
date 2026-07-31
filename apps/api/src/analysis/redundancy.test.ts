@@ -37,6 +37,25 @@ describe("isRedundantPrefix", () => {
   it("false when candidate is partial/sparse/ttl", () => {
     expect(isRedundantPrefix(spec("a", [x1], { partial: true }), spec("ab", [x1, y1]))).toBe(false);
   });
+
+  // The covering index must actually cover: a restricted superset shares the
+  // keys but not the documents, so folding the plain index into it would send
+  // every query outside that restriction to a collection scan.
+  it("false when the covering index is partial (covers only its filter)", () => {
+    expect(isRedundantPrefix(spec("a", [x1]), spec("ab", [x1, y1], { partial: true }))).toBe(false);
+  });
+  it("false when the covering index is sparse (misses documents lacking the field)", () => {
+    expect(isRedundantPrefix(spec("a", [x1]), spec("ab", [x1, y1], { sparse: true }))).toBe(false);
+  });
+  it("false when the covering index is hidden (the planner will not use it)", () => {
+    // Reachable through our own pipeline: a drop hides its index for the whole
+    // observe window, which would otherwise make every prefix of it look
+    // redundant exactly while it can serve nothing.
+    expect(isRedundantPrefix(spec("a", [x1]), spec("ab", [x1, y1], { hidden: true }))).toBe(false);
+  });
+  it("still folds into a TTL superset — TTL expires documents, it does not skip them", () => {
+    expect(isRedundantPrefix(spec("a", [x1]), spec("ab", [x1, y1], { ttl: true }))).toBe(true);
+  });
   it("false against itself", () => {
     expect(isRedundantPrefix(spec("a", [x1]), spec("a", [x1, y1]))).toBe(false);
   });

@@ -476,9 +476,8 @@ the exact commands to run in their own console; that stays the answer.
 
 What's actually open is correctness, not features:
 
-- **Restricted superset in the redundancy rule** — `optionsCompatible` guards
-  the candidate's options but never the covering index's, so a plain index can be
-  called redundant against a `partial`/`sparse` superset that does not cover it.
+- ~~Restricted superset in the redundancy rule~~ — fixed: a covering index that
+  is `partial`, `sparse` or `hidden` no longer folds away its prefix.
 - **Drop vs in-flight create** — `classifyCluster` reads snapshots only, so an
   index still inside its post-build write watch can be proposed for
   `DROP_UNUSED` 18 hours after the engine built it.
