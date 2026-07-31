@@ -19,6 +19,7 @@ import {
   workloadKey,
 } from "../engine/ports";
 import type { MongoConnection } from "./connection";
+import type { MemberConnections } from "./members";
 
 // Normalize a sort spec's values into directed keys (anything odd → ascending).
 function sortKeysOf(sortSpec: Record<string, unknown>): SortKey[] {
@@ -314,8 +315,40 @@ function shardKeyIsPrefix(shardKey: readonly string[], indexFields: readonly str
   return shardKey.every((field, i) => indexFields[i] === field);
 }
 
+// One member's $indexStats. A member that fails mid-collect (stepped down,
+// restarting) contributes nothing rather than failing the whole collection.
+async function readIndexStats(
+  conn: MongoConnection,
+  database: string,
+  collection: string,
+): Promise<IndexUsageStat[]> {
+  try {
+    const raw = await conn
+      .db(database)
+      .collection(collection)
+      .aggregate([{ $indexStats: {} }])
+      .toArray();
+    return indexStat
+      .array()
+      .parse(raw)
+      .map((doc) => ({
+        indexName: doc.name,
+        host: doc.host,
+        ops: doc.accesses.ops,
+        since: doc.accesses.since.toISOString(),
+      }));
+  } catch {
+    return [];
+  }
+}
+
 export class MongoIndexCollector implements IndexCollector {
-  constructor(private readonly conn: MongoConnection) {}
+  constructor(
+    private readonly conn: MongoConnection,
+    // Absent in tests and for one-off diagnostic connections, where the
+    // primary's own counters are all that is being asked for.
+    private readonly members?: MemberConnections,
+  ) {}
 
   async listCollectionNames(database: string): Promise<string[]> {
     const raw = await this.conn.db(database).listCollections().toArray();
@@ -356,20 +389,18 @@ export class MongoIndexCollector implements IndexCollector {
   }
 
   async collectUsage(database: string, collection: string): Promise<IndexUsageStat[]> {
-    const raw = await this.conn
-      .db(database)
-      .collection(collection)
-      .aggregate([{ $indexStats: {} }])
-      .toArray();
-    return indexStat
-      .array()
-      .parse(raw)
-      .map((doc) => ({
-        indexName: doc.name,
-        host: doc.host,
-        ops: doc.accesses.ops,
-        since: doc.accesses.since.toISOString(),
-      }));
+    // Every member, not just the one the driver picked. See mongo/members.ts:
+    // $indexStats is node-local, so the primary alone cannot tell a dead index
+    // from one that only serves secondary reads.
+    const connections = [this.conn, ...(await (this.members?.all() ?? Promise.resolve([])))];
+    const perMember = await Promise.all(
+      connections.map((conn) => readIndexStats(conn, database, collection)),
+    );
+    // Keyed by index AND host: the same index reports once per member, and each
+    // member's counter has its own `since`.
+    const seen = new Map<string, IndexUsageStat>();
+    for (const stat of perMember.flat()) seen.set(`${stat.indexName}\u0000${stat.host}`, stat);
+    return [...seen.values()];
   }
 
   // Uncompressed data size + document count, summed across shards. Sizes feed

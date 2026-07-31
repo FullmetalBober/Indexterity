@@ -11,6 +11,29 @@ export function mongoHosts(value: string): { hosts: string[]; isSrv: boolean } {
   }
 }
 
+// The same credentials and TLS settings, pointed at exactly one member.
+//
+// `$indexStats` reports for the node that runs it, and the driver sends reads
+// to the primary, so per-member usage needs a connection per member. An SRV
+// string cannot be retargeted this way (its hosts live in DNS and the scheme
+// forbids a port), so it is converted to a plain mongodb:// string.
+//
+// replicaSet is dropped because it contradicts directConnection, and
+// readPreference because a direct connection has one node to choose from.
+export function directConnectionTo(value: string, host: string): string {
+  const parsed = new ConnectionString(value);
+  const direct = new ConnectionString(
+    parsed.isSRV ? value.replace(/^mongodb\+srv:\/\//, "mongodb://") : value,
+    { looseValidation: true },
+  );
+  direct.protocol = "mongodb:";
+  direct.hosts = [host];
+  direct.searchParams.delete("replicaSet");
+  direct.searchParams.delete("readPreference");
+  direct.searchParams.set("directConnection", "true");
+  return direct.toString();
+}
+
 // Scheme guard: the control plane dials whatever createCluster stores, so only
 // mongodb schemes with a host are accepted — never http/file/gopher/…. The
 // address itself is vetted separately by engine/net-guard.ts.

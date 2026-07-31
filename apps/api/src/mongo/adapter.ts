@@ -4,14 +4,22 @@ import { isMongoConnString, mongoHosts } from "./conn-string";
 import { MongoConnection } from "./connection";
 import { diagnoseConnection } from "./diagnose";
 import { MongoIndexExecutor } from "./executor";
+import { MemberConnections } from "./members";
 
 const SYSTEM_DATABASES = new Set(["admin", "local", "config"]);
 
 class MongoEngineSession implements EngineSession {
   readonly collector: IndexCollector;
+  private readonly members: MemberConnections;
 
-  constructor(private readonly conn: MongoConnection) {
-    this.collector = new MongoIndexCollector(conn);
+  constructor(
+    private readonly conn: MongoConnection,
+    connString: string,
+  ) {
+    // Opened lazily on the first usage collection and held for the session's
+    // life, so a 3-member set costs 3 connections rather than 3 per collect.
+    this.members = new MemberConnections(conn, connString);
+    this.collector = new MongoIndexCollector(conn, this.members);
   }
 
   executor(readOnly: boolean): IndexExecutor {
@@ -27,8 +35,9 @@ class MongoEngineSession implements EngineSession {
     await this.conn.db("admin").command({ ping: 1 });
   }
 
-  close(): Promise<void> {
-    return this.conn.close();
+  async close(): Promise<void> {
+    await this.members.close();
+    await this.conn.close();
   }
 }
 
@@ -41,7 +50,7 @@ export const mongoAdapter: EngineAdapter = {
   open: async (connectionString: string): Promise<EngineSession> => {
     const conn = new MongoConnection(connectionString);
     await conn.connect();
-    return new MongoEngineSession(conn);
+    return new MongoEngineSession(conn, connectionString);
   },
   diagnose: diagnoseConnection,
 };

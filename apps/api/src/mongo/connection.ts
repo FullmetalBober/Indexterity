@@ -19,6 +19,16 @@ export class MongoConnection {
     return this.client.db(name);
   }
 
+  // Replica-set members as the cluster itself reports them, or an empty list for
+  // a standalone and for a mongos (which has no `hosts` — its shards do).
+  async replicaMembers(): Promise<string[]> {
+    const hello: unknown = await this.client.db("admin").command({ hello: 1 });
+    if (typeof hello !== "object" || hello === null) return [];
+    const hosts: unknown = Reflect.get(hello, "hosts");
+    if (!Array.isArray(hosts)) return [];
+    return hosts.filter((host): host is string => typeof host === "string");
+  }
+
   async listDatabaseNames(): Promise<string[]> {
     const result = await this.client.db("admin").admin().listDatabases();
     return result.databases.map((entry) => entry.name);

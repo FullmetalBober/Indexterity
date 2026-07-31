@@ -1,0 +1,64 @@
+import { allowPrivateTargets, assertTargetsAllowed } from "../engine/net-guard";
+import { directConnectionTo } from "./conn-string";
+import { MongoConnection } from "./connection";
+
+// Per-member connections for usage collection.
+//
+// `$indexStats` reports for the node that executes it, and the driver sends
+// reads to the primary. So a single connection sees the primary's counters and
+// nothing else — an index serving only secondary reads (the standard shape for
+// analytics and reporting traffic, `readPreference=secondaryPreferred`) looks
+// completely idle. Dropping it would be invisible to the regression gate too,
+// because `$collStats` latency is equally node-local.
+//
+// So: ask the cluster for its members and open a direct connection to each.
+// A standalone reports none, and a mongos reports none of its own (its shards'
+// primaries answer the fan-out already), so both cost nothing.
+export class MemberConnections {
+  private opened: MongoConnection[] | null = null;
+
+  constructor(
+    private readonly primary: MongoConnection,
+    private readonly connString: string,
+  ) {}
+
+  // Connections to every member except the one the primary client is already
+  // talking to. Opened once and reused for the life of the session.
+  async all(): Promise<MongoConnection[]> {
+    if (this.opened !== null) return this.opened;
+    this.opened = [];
+    const hosts = await this.primary.replicaMembers().catch(() => []);
+    if (hosts.length <= 1) return this.opened;
+
+    // The member list comes from the cluster, which means a hostile or
+    // misconfigured one could name an address we must not dial. It is
+    // user-influenced input like any connection string, so it goes through the
+    // same guard.
+    const allowed: string[] = [];
+    for (const host of hosts) {
+      const ok = await assertTargetsAllowed([host], false, {
+        allowPrivate: allowPrivateTargets(),
+      })
+        .then(() => true)
+        .catch(() => false);
+      if (ok) allowed.push(host);
+    }
+
+    for (const host of allowed) {
+      try {
+        const conn = new MongoConnection(directConnectionTo(this.connString, host));
+        await conn.connect();
+        this.opened.push(conn);
+      } catch {
+        // A member that is down or unreachable is normal: the others still
+        // report, and a missing member's counters simply do not contribute.
+      }
+    }
+    return this.opened;
+  }
+
+  async close(): Promise<void> {
+    for (const conn of this.opened ?? []) await conn.close().catch(() => {});
+    this.opened = null;
+  }
+}
