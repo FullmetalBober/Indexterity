@@ -1,0 +1,168 @@
+# Indexterity Helm values. The three workloads (api, web, worker) come from two
+# images; PostgreSQL is NOT bundled — point databaseUrl at a managed instance or
+# your own postgres release.
+
+nameOverride: ""
+fullnameOverride: ""
+
+# Applied to every pod. Useful for imagePullSecrets and a shared registry.
+global:
+  imagePullSecrets: []
+
+api:
+  image:
+    repository: indexterity/api
+    # Defaults to .Chart.AppVersion.
+    tag: ""
+    pullPolicy: IfNotPresent
+  replicas: 2
+  port: 3001
+  service:
+    type: ClusterIP
+    port: 3001
+    annotations: {}
+  # The api only needs to be reachable by the web pods — every browser request
+  # goes through the dashboard's server functions. Expose it publicly only for
+  # programmatic API access (see ingress.api below).
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAnnotations: {}
+  # Extra environment variables (name/value pairs).
+  extraEnv: []
+
+web:
+  image:
+    repository: indexterity/web
+    tag: ""
+    pullPolicy: IfNotPresent
+  replicas: 2
+  port: 3000
+  service:
+    type: ClusterIP
+    port: 3000
+    annotations: {}
+  # The dashboard's own public origin. REQUIRED when ingress is enabled: the api
+  # trusts it for auth requests and session cookies are stored against it.
+  publicUrl: ""
+  # Where the web server reaches the api. Defaults to the in-cluster Service.
+  apiUrl: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAnnotations: {}
+  extraEnv: []
+
+worker:
+  # Runs the cron schedule (collect, apply, finalize, retention, digest).
+  # Keep at ONE replica: graphile-worker coordinates through Postgres, but the
+  # crontab would otherwise be scheduled by every pod.
+  enabled: true
+  concurrency: 2
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAnnotations: {}
+  extraEnv: []
+
+# Runs `node dist/migrate.js` as a pre-install/pre-upgrade hook, before any new
+# pod starts. Disable only if you apply migrations out of band.
+migrations:
+  enabled: true
+  backoffLimit: 3
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+
+config:
+  logLevel: info
+  # Reject sign-ins from unverified addresses (needs working SMTP).
+  requireEmailVerification: false
+  # Storage price used for the $/month ROI headline.
+  storageUsdPerGbMonth: ""
+  # Public origin of the api itself — only needed when the api is exposed and
+  # better-auth must build absolute URLs. Defaults to the in-cluster Service.
+  betterAuthUrl: ""
+
+secrets:
+  # Bring your own Secret instead of the values below. It must contain:
+  # DATABASE_URL, BETTER_AUTH_SECRET, MASTER_KEY (and optionally SMTP_PASS,
+  # GITHUB_CLIENT_SECRET).
+  existingSecret: ""
+  # postgres://user:pass@host:5432/indexterity
+  databaseUrl: ""
+  # Session signing key: openssl rand -base64 32
+  betterAuthSecret: ""
+  # KEK for envelope-encrypted cluster credentials: openssl rand -base64 32
+  # LOSING THIS MAKES EVERY STORED CONNECTION STRING UNREADABLE — back it up.
+  masterKey: ""
+  # Bump alongside adding MASTER_KEY_V<n> to rotate the KEK.
+  masterKeyVersion: ""
+  github:
+    clientId: ""
+    clientSecret: ""
+
+# Outbound mail: invites, regression alerts, verification and reset links.
+# Without a host, sending is a logged no-op.
+smtp:
+  host: ""
+  port: 465
+  user: ""
+  password: ""
+  from: ""
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  # The dashboard's host. Must match web.publicUrl.
+  host: ""
+  tls:
+    enabled: false
+    secretName: ""
+  # Expose the api under a second host for programmatic access. Not needed for
+  # the dashboard to work.
+  api:
+    enabled: false
+    host: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  # Left false by default: the node runtime writes to /tmp. Set true and mount
+  # an emptyDir at /tmp if your policy requires it.
+  readOnlyRootFilesystem: false

@@ -1,0 +1,34 @@
+Indexterity {{ .Chart.AppVersion }} is installed as {{ .Release.Name }}.
+
+Dashboard:
+{{- if .Values.ingress.enabled }}
+  {{ include "indexterity.webOrigin" . }}
+{{- else }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "indexterity.fullname" . }}-web {{ .Values.web.service.port }}:{{ .Values.web.service.port }}
+  then open http://localhost:{{ .Values.web.service.port }}
+{{- end }}
+
+Workloads:
+  api     {{ .Values.api.replicas }} replica(s)  — {{ include "indexterity.apiImage" . }}
+  web     {{ .Values.web.replicas }} replica(s)  — {{ include "indexterity.webImage" . }}
+  worker  {{ if .Values.worker.enabled }}1 replica (cron: collect, apply, finalize, retention, digest){{ else }}DISABLED — nothing is collected or applied on a schedule{{ end }}
+
+{{- if not .Values.smtp.host }}
+
+Mail is not configured (smtp.host is empty): invites, regression alerts,
+verification and reset emails are logged and dropped.
+{{- end }}
+{{- if and .Values.config.requireEmailVerification (not .Values.smtp.host) }}
+
+WARNING: config.requireEmailVerification is on but SMTP is not configured —
+nobody will be able to verify an address, so nobody can sign in.
+{{- end }}
+{{- if not .Values.secrets.existingSecret }}
+
+Back up the MASTER_KEY from Secret {{ include "indexterity.secretName" . }}
+outside the cluster. Every customer connection string is sealed with it; if it
+is lost, no connected cluster can be reached again.
+{{- end }}
+
+Clusters connect in read-only mode: the engine analyzes and recommends, but
+writes nothing until an owner flips a cluster live in the dashboard.

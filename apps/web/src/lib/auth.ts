@@ -1,10 +1,15 @@
 import { createServerFn } from "@tanstack/react-start";
 import { setCookie } from "@tanstack/react-start/server";
 
-const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:3001";
+// Both are read at RUNTIME when set (the auth proxy runs server-side only), so
+// one built image serves every environment; the VITE_* values remain the
+// build-time defaults.
+const runtimeEnv = typeof process === "undefined" ? undefined : process.env;
+const apiUrl = runtimeEnv?.API_URL ?? import.meta.env.VITE_API_URL ?? "http://localhost:3001";
 // This app's own origin — sent as Origin so better-auth accepts the request, and
 // the origin the relayed session cookie is stored against.
-const webOrigin = import.meta.env.VITE_WEB_ORIGIN ?? "http://localhost:3000";
+const webOrigin =
+  runtimeEnv?.WEB_ORIGIN ?? import.meta.env.VITE_WEB_ORIGIN ?? "http://localhost:3000";
 
 interface CookieOptions {
   path?: string;

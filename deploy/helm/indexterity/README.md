@@ -1,0 +1,90 @@
+# Indexterity Helm chart
+
+Deploys the three workloads — **api**, **web** (dashboard) and **worker**
+(scheduler) — from two images, plus a pre-upgrade migration job.
+
+PostgreSQL is **not** bundled: point `secrets.databaseUrl` at a managed
+instance or your own postgres release. That is the control-plane store; the
+MongoDB clusters Indexterity manages are added later from the dashboard.
+
+## Install
+
+```bash
+# 1. Build and push the images (repo root is the build context).
+docker build -f apps/api/Dockerfile -t your-registry/indexterity-api:0.1.0 .
+docker build -f apps/web/Dockerfile -t your-registry/indexterity-web:0.1.0 .
+docker push your-registry/indexterity-api:0.1.0
+docker push your-registry/indexterity-web:0.1.0
+
+# 2. Install.
+helm install indexterity deploy/helm/indexterity \
+  --namespace indexterity --create-namespace \
+  --set api.image.repository=your-registry/indexterity-api \
+  --set web.image.repository=your-registry/indexterity-web \
+  --set secrets.databaseUrl='postgres://user:pass@host:5432/indexterity' \
+  --set secrets.betterAuthSecret="$(openssl rand -base64 32)" \
+  --set secrets.masterKey="$(openssl rand -base64 32)" \
+  --set ingress.enabled=true \
+  --set ingress.host=indexterity.example.com \
+  --set ingress.tls.enabled=true \
+  --set ingress.tls.secretName=indexterity-tls
+
+# 3. Verify.
+helm test indexterity -n indexterity
+```
+
+The web image does **not** need rebuilding per environment: `API_URL` and
+`WEB_ORIGIN` are read at runtime (the dashboard's server functions are the only
+thing that talks to the api).
+
+## Back up MASTER_KEY
+
+Every customer connection string is sealed with `MASTER_KEY` (envelope
+encryption). **If it is lost, no connected cluster can be reached again** and
+each one must be re-onboarded. Store it outside the cluster. To rotate, add
+`MASTER_KEY_V2` via `secrets.existingSecret` and set
+`secrets.masterKeyVersion=2`; rows sealed with v1 stay readable.
+
+## What talks to what
+
+```
+browser ──► ingress ──► web (SSR + server functions) ──► api ──► PostgreSQL
+                                                          ▲         ▲
+                                                worker ───┘─────────┘
+                                                   │
+                                                   └──► customer MongoDB clusters
+```
+
+The api never needs to be public: browsers only reach the dashboard, whose
+server functions call the api over the in-cluster Service. Enable
+`ingress.api.*` only if you want programmatic API access.
+
+## Values worth knowing
+
+| Value | Why it matters |
+|---|---|
+| `secrets.existingSecret` | Bring your own Secret (`DATABASE_URL`, `BETTER_AUTH_SECRET`, `MASTER_KEY`, optionally `SMTP_PASS`, `GITHUB_CLIENT_SECRET`) instead of putting values in Helm |
+| `web.publicUrl` | The dashboard's public origin. Defaults to the ingress host; the api trusts it for auth and session cookies are bound to it |
+| `worker.enabled` | Off means nothing is collected, applied or finalized on a schedule — the dashboard still works and can collect on demand |
+| `migrations.enabled` | The pre-install/pre-upgrade Job runs `node dist/migrate.js` before new pods start. Disable only if you migrate out of band |
+| `smtp.*` | Without a host, invites, alerts, verification and reset mails are logged and dropped |
+| `config.requireEmailVerification` | Production posture — needs working SMTP, or nobody can sign in |
+| `config.storageUsdPerGbMonth` | Your storage price, for the $/month ROI headline |
+
+## Notes on the workloads
+
+- **worker runs exactly one replica.** graphile-worker coordinates execution
+  through Postgres, but every replica would install the crontab, so a second
+  pod means duplicate scheduling. Scale job throughput with
+  `worker.concurrency` instead.
+- **api and web scale horizontally.** Both are stateless; sessions live in
+  Postgres.
+- The worker drains its connection pool on `SIGTERM`
+  (`terminationGracePeriodSeconds: 60`).
+
+## Validating changes to this chart
+
+```bash
+helm lint deploy/helm/indexterity
+helm template rel deploy/helm/indexterity --set secrets.existingSecret=s | kubeconform -strict -
+```

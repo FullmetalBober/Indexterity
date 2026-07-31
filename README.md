@@ -9,14 +9,18 @@ regression check. Full design and decision log in
 
 ## What it does
 
-1. **Connect** a cluster, two ways: paste a scoped connection string, or paste
-   an **admin string once** and Indexterity provisions its own least-privilege
-   user on your cluster (`idx_<hex>`, custom `indexterityEngine` role — no
-   `find` on your collections, so it **cannot read documents**; the exact role
-   is in [`docs/architecture.md` §10.1](./docs/architecture.md)). Only the
-   scoped string is stored, sealed with envelope encryption — the admin string
-   is never persisted. Clusters start in **read-only mode** — the engine
-   analyzes but never writes until an owner flips it live (dashboard toggle).
+1. **Connect** a cluster by pasting any connection string. Indexterity first
+   **checks what that string can actually do** — nothing is stored or written
+   yet — and tells you per privilege what works, what is degraded and what is
+   missing. If the credentials can create users, it **asks** whether to
+   provision its own least-privilege user (`idx_<hex>`, custom
+   `indexterityEngine` role — no `find` on your collections, so it **cannot
+   read documents**; the exact role is in
+   [`docs/architecture.md` §10.1](./docs/architecture.md)); the admin string is
+   then used once and never persisted, and only the scoped string is stored,
+   sealed with envelope encryption. Clusters start in **read-only mode** — the
+   engine analyzes but never writes until an owner flips it live (dashboard
+   toggle).
 2. **Collect** index usage, sizes and per-collection read/write latency on a
    schedule via `$indexStats` / `$collStats` — it never reads your documents.
    Connections are pooled per cluster (one client reused across jobs).
@@ -343,7 +347,32 @@ npm run dev
 
 Other: `npm run build` · `npm run typecheck` · `npm run lint` · `npm run test`
 (unit — the pure engines).
-Database: `npm run db:generate` · `npm run db:migrate`.
+Database: `npm run db:generate` · `npm run db:migrate` (dev, via drizzle-kit) ·
+`npm run db:deploy -w @repo/api` (production — runs the compiled migrator, no
+devDependencies needed).
+
+## Deploy on Kubernetes
+
+A Helm chart lives in [`deploy/helm/indexterity`](./deploy/helm/indexterity):
+api + dashboard + worker, a pre-upgrade migration hook, ingress, and a
+`helm test` that probes both services. PostgreSQL is not bundled — point it at
+your own.
+
+```bash
+helm install indexterity deploy/helm/indexterity \
+  --namespace indexterity --create-namespace \
+  --set api.image.repository=your-registry/indexterity-api \
+  --set web.image.repository=your-registry/indexterity-web \
+  --set secrets.databaseUrl='postgres://user:pass@host:5432/indexterity' \
+  --set secrets.betterAuthSecret="$(openssl rand -base64 32)" \
+  --set secrets.masterKey="$(openssl rand -base64 32)" \
+  --set ingress.enabled=true --set ingress.host=indexterity.example.com
+```
+
+The api never has to be public — browsers only reach the dashboard, whose
+server functions call the api in-cluster. **Back up `MASTER_KEY`**: it seals
+every stored connection string. See the
+[chart README](./deploy/helm/indexterity/README.md) for the full value list.
 
 **Integration tests** (spawn the built api against real postgres + mongo — the
 same suite CI runs with service containers):

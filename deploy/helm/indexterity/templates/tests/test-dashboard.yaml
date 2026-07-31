@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "indexterity.fullname" . }}-test-dashboard
+  labels:
+    {{- include "indexterity.labels" . | nindent 4 }}
+    app.kubernetes.io/component: test
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  containers:
+    - name: probe
+      image: curlimages/curl:8.11.0
+      # The landing page must render, and the api must answer its health check.
+      command:
+        - sh
+        - -c
+        - |
+          set -e
+          curl -fsS "http://{{ include "indexterity.fullname" . }}-web:{{ .Values.web.service.port }}/" > /dev/null
+          echo "dashboard ok"
+          curl -fsS "http://{{ include "indexterity.fullname" . }}-api:{{ .Values.api.service.port }}/health" > /dev/null
+          echo "api ok"
