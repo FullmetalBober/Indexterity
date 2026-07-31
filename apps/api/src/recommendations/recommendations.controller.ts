@@ -37,9 +37,7 @@ import { adapterFor, engineSupported } from "../engine/registry";
 import { currentKeyVersion, masterKeyBytesFor } from "../env";
 import { consumeDialBudget } from "../errors/dial-budget";
 import { isUnreachableError } from "../errors/unreachable";
-import { classifyCluster } from "../jobs/classify";
 import { openClusterSession } from "../jobs/cluster-connection";
-import { collectCluster } from "../jobs/collect";
 import { evictCluster } from "../jobs/connection-pool";
 import { connStringUsername, ProvisionDeniedError, provisionScopedUser } from "../mongo";
 import { Implement } from "../orpc/implement";
@@ -742,13 +740,13 @@ export class RecommendationsController {
       if (!(await this.ownsCluster(input.clusterId, orgId))) {
         throw errors.NOT_FOUND({ message: "cluster not found" });
       }
-      try {
-        const snapshots = await collectCluster(input.clusterId);
-        const recommendationCount = await classifyCluster(input.clusterId);
-        return { snapshots, recommendations: recommendationCount };
-      } catch (error) {
-        mapClusterError(error);
-      }
+      // Hand it to the worker rather than dialling the cluster here. A collect
+      // walks every collection and can take minutes on a large one; the
+      // dashboard polls for the result instead of holding the request open.
+      await this.database.db.execute(
+        sql`select graphile_worker.add_job('collect', json_build_object('clusterId', ${input.clusterId}::text), max_attempts => 3)`,
+      );
+      return { queued: true };
     });
   }
 

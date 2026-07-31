@@ -179,11 +179,13 @@ export const contract = {
     .route({
       method: "POST",
       path: "/clusters/{clusterId}/collect",
-      summary: "Collect + classify a cluster now",
+      summary: "Queue a collect + classify for a cluster",
     })
     .errors({ NOT_FOUND: {} })
     .input(clusterId)
-    .output(z.object({ snapshots: z.int(), recommendations: z.int() })),
+    // Queued, not run: dialing a customer cluster can take a while, and doing
+    // it on the request would stall an api process serving other tenants.
+    .output(z.object({ queued: z.boolean() })),
 
   approveRecommendation: oc
     .route({

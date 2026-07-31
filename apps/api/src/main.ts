@@ -5,6 +5,7 @@ import { FastifyAdapter, type NestFastifyApplication } from "@nestjs/platform-fa
 import { AppModule } from "./app.module";
 import { auth } from "./auth";
 import { AppExceptionFilter } from "./errors/exception.filter";
+import { embeddedWorkerEnabled, startWorker } from "./jobs/runner";
 
 async function bootstrap(): Promise<void> {
   // Fastify's built-in pino: structured request/response logs with req ids,
@@ -56,6 +57,16 @@ async function bootstrap(): Promise<void> {
   // SIGTERM/SIGINT run the shutdown hooks (pools drained in DatabaseService)
   // instead of hanging until the container runtime SIGKILLs after 10s.
   app.enableShutdownHooks();
+
+  // One-container mode for small and self-hosted installs. Off by default:
+  // hosted keeps the worker separate so an api rollout cannot abort an
+  // in-flight index build, and so the alert cooldown stays single-replica.
+  if (embeddedWorkerEnabled()) {
+    const runner = await startWorker();
+    app.getHttpAdapter().getInstance().log.info("RUN_WORKER=true — job runner embedded in the api");
+    process.once("SIGTERM", () => void runner.stop());
+    process.once("SIGINT", () => void runner.stop());
+  }
 
   const port = Number(process.env.API_PORT ?? 3001);
   await app.listen(port, "0.0.0.0");

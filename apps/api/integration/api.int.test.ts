@@ -20,6 +20,7 @@ import { workloadKey } from "../src/engine/ports";
 import { applyCluster, promoteByScore } from "../src/jobs/apply";
 import { refreshInferredWindow } from "../src/jobs/change-window";
 import { classifyCluster } from "../src/jobs/classify";
+import { collectCluster } from "../src/jobs/collect";
 import { drainPool } from "../src/jobs/connection-pool";
 import { applyCreatesForCluster } from "../src/jobs/create";
 import { closeJobDb } from "../src/jobs/db";
@@ -158,11 +159,15 @@ describe("cluster lifecycle", () => {
       body: JSON.stringify({ connectionString: "mongodb://127.0.0.1:27017" }),
     });
     expect(rotated.status).toBe(200);
-    const collect = await api(`/clusters/${clusterId}/collect`, owner, {
+    // Run the job directly: the endpoint only queues now, so a 200 from it
+    // would prove a row was inserted, not that the new string dials.
+    expect(await collectCluster(clusterId)).toBeGreaterThan(0);
+    const queued = await api(`/clusters/${clusterId}/collect`, owner, {
       method: "POST",
       body: JSON.stringify({}),
     });
-    expect(collect.status).toBe(200);
+    expect(queued.status).toBe(200);
+    expect(asRecord(await queued.json()).queued).toBe(true);
   });
 
   it("serves policy defaults and round-trips an update", async () => {
@@ -272,13 +277,15 @@ describe("collect, audit trail and undo", () => {
       .db("inttest")
       .collection("orders")
       .insertMany(Array.from({ length: 50 }, (_, i) => ({ status: i % 3, qty: i })));
+    // The endpoint queues; the job is what reads the cluster. Run it here so
+    // the tests that follow have snapshots to work from.
     const res = await api(`/clusters/${clusterId}/collect`, owner, {
       method: "POST",
       body: JSON.stringify({}),
     });
     expect(res.status).toBe(200);
-    const body = asRecord(await res.json());
-    expect(typeof body.snapshots === "number" && body.snapshots > 0).toBe(true);
+    expect(asRecord(await res.json()).queued).toBe(true);
+    expect(await collectCluster(clusterId)).toBeGreaterThan(0);
   });
 
   it("summarizes the per-collection index footprint", async () => {
@@ -619,11 +626,7 @@ describe("least-privilege provisioning", () => {
     expect(asRecord(Array.isArray(roles) ? roles[0] : {}).role).toBe("indexterityEngine");
 
     // The sealed string the engine dials is the scoped one — collect works on it.
-    const collect = await api(`/clusters/${provisionedId}/collect`, owner, {
-      method: "POST",
-      body: JSON.stringify({}),
-    });
-    expect(collect.status).toBe(200);
+    expect(await collectCluster(provisionedId)).toBeGreaterThan(0);
 
     await mongo.db("admin").command({ dropUser: username });
   });
