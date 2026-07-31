@@ -1,0 +1,1 @@
+ALTER TABLE "index_snapshots" ADD COLUMN "hinted" boolean DEFAULT false NOT NULL;

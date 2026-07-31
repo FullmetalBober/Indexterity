@@ -169,6 +169,13 @@
       "when": 1785517519921,
       "tag": "0023_dark_korg",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1785520421537,
+      "tag": "0024_chubby_the_liberteens",
+      "breakpoints": true
     }
   ]
 }

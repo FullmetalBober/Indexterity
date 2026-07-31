@@ -76,6 +76,9 @@ export interface IndexCollector {
   // a map keyed by `workloadKey`; missing entries mean no shapes were found.
   collectWorkload(targets: readonly WorkloadTarget[]): Promise<Map<string, readonly QueryShape[]>>;
   collectDeletePatterns(database: string, collection: string): Promise<DeletePattern[]>;
+  // Indexes named explicitly with hint(). Hiding one breaks its queries instead
+  // of slowing them, so no latency gate can catch the mistake.
+  collectHintedIndexes(database: string, collection: string): Promise<string[]>;
 }
 
 export interface CreateIndexOptions {

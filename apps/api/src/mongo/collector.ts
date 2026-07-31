@@ -147,6 +147,8 @@ const profileDoc = z.object({
       sort: z.record(z.string(), z.unknown()).optional(),
       pipeline: z.array(z.record(z.string(), z.unknown())).optional(),
       q: z.record(z.string(), z.unknown()).optional(),
+      // Recorded by the profiler, and by nothing else — $queryStats drops it.
+      hint: z.union([z.string(), z.record(z.string(), z.unknown())]).optional(),
     })
     .optional(),
 });
@@ -626,6 +628,50 @@ export class MongoIndexCollector implements IndexCollector {
       byNamespace.set(shape.namespace, list);
     }
     return byNamespace;
+  }
+
+  // Indexes the application names explicitly with hint().
+  //
+  // A hinted index cannot be hidden: mongod rejects a hint at a hidden index
+  // outright (BadValue), so the observe stage would BREAK those queries rather
+  // than slow them — and the regression gate measures latency, so it would see
+  // nothing and let the drop through. $queryStats does not record hints at all;
+  // the profiler does, which makes it the only source for this.
+  //
+  // Only the profiler window is visible here, so absence is not proof. It is a
+  // one-way signal: a hint seen means hands off, a hint unseen means nothing.
+  async collectHintedIndexes(database: string, collection: string): Promise<string[]> {
+    const ns = `${database}.${collection}`;
+    const raw = await this.conn
+      .db(database)
+      .collection("system.profile")
+      .find({ ns })
+      .toArray()
+      .catch(() => []);
+    const named = new Set<string>();
+    const patterns: Record<string, unknown>[] = [];
+    for (const doc of raw) {
+      const parsed = profileDoc.safeParse(doc);
+      if (!parsed.success) continue;
+      const hint = parsed.data.command?.hint;
+      if (typeof hint === "string") named.add(hint);
+      else if (isRecord(hint)) patterns.push(hint);
+    }
+    // A key-pattern hint ({b: 1}) names an index by shape, so it has to be
+    // matched against the real index list to get a name.
+    if (patterns.length > 0) {
+      const specs = await this.listIndexes(database, collection).catch(() => []);
+      for (const pattern of patterns) {
+        const fields = Object.keys(pattern);
+        for (const spec of specs) {
+          const keys = spec.keys.map((key) => key.field);
+          if (keys.length === fields.length && keys.every((f, i) => fields[i] === f)) {
+            named.add(spec.name);
+          }
+        }
+      }
+    }
+    return [...named];
   }
 
   // Recurring age-based deletes ({field: {$lt: <date>}}) from the profiler —

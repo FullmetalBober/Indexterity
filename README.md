@@ -243,12 +243,6 @@ run in their own console.
 
 What is actually open is correctness, not features:
 
-- **Narrowing UPDATE** (full index → partial) needs a retire mechanism.
-  `targetSpec.retire` is written and never read; UPDATE and MERGE rely on the
-  next classify pass finding the old index redundant, which cannot happen when
-  the replacement is partial.
-- **Hinted indexes.** Hiding one breaks its queries rather than slowing them,
-  and `$queryStats` does not record hints, so we cannot see which are hinted.
 
 ## Notes
 

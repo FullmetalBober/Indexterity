@@ -67,6 +67,17 @@ export async function classifyCluster(clusterId: string): Promise<number> {
     entry.byIndex.set(row.indexName, list);
   }
 
+  // Indexes the application pins with hint(). Hiding one makes mongod reject
+  // those queries outright, which the read-latency gate cannot see, so they are
+  // excluded from drop findings the same way a watched index is. One sighting
+  // anywhere in the retained history is enough — absence is not proof either
+  // way, so the signal only ever protects.
+  const hintedKeys = new Set(
+    rows
+      .filter((row) => row.hinted)
+      .map((row) => watchKey(row.database, row.collection, row.indexName)),
+  );
+
   const toInsert: Array<typeof recommendations.$inferInsert> = [];
   for (const entry of byCollection.values()) {
     const inputs: IndexInput[] = [];
@@ -104,6 +115,14 @@ export async function classifyCluster(clusterId: string): Promise<number> {
     )) {
       if (cooled.has(cooldownKey(entry.database, entry.collection, candidate.indexName))) continue;
       if (watched.has(watchKey(entry.database, entry.collection, candidate.indexName))) continue;
+      // Advisories still surface — a human should know a hinted index looks
+      // unused. Only the automatic drop is withheld.
+      if (
+        candidate.type !== "ADVISORY_REVIEW" &&
+        hintedKeys.has(watchKey(entry.database, entry.collection, candidate.indexName))
+      ) {
+        continue;
+      }
       toInsert.push({
         clusterId,
         type: candidate.type,

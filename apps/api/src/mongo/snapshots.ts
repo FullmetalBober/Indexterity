@@ -10,6 +10,9 @@ export interface CollectedSnapshot {
   readonly spec: Record<string, unknown>;
   readonly sizeBytes: number;
   readonly perMember: { member: string; ops: number; since?: string }[];
+  // The application named this index with hint(). Hiding it would break those
+  // queries rather than slow them, so it must not be auto-dropped.
+  readonly hinted: boolean;
 }
 
 export interface CollectedLatency {
@@ -61,12 +64,14 @@ export async function collectSnapshots(session: EngineSession): Promise<CollectR
   const latency: CollectedLatency[] = [];
   for (const database of databases) {
     for (const collection of await collector.listCollectionNames(database)) {
-      const [specs, usage, sizes, collLatency] = await Promise.all([
+      const [specs, usage, sizes, collLatency, hinted] = await Promise.all([
         collector.listIndexes(database, collection),
         collector.collectUsage(database, collection),
         collector.indexSizes(database, collection),
         collector.collectionLatency(database, collection),
+        collector.collectHintedIndexes(database, collection).catch(() => []),
       ]);
+      const hintedNames = new Set(hinted);
       latency.push({
         database,
         collection,
@@ -83,6 +88,7 @@ export async function collectSnapshots(session: EngineSession): Promise<CollectR
           indexName: spec.name,
           spec: serializeSpec(spec),
           sizeBytes: sizes[spec.name] ?? 0,
+          hinted: hintedNames.has(spec.name),
           perMember: (usageByIndex[spec.name] ?? []).map((stat) => ({
             member: stat.host,
             ops: stat.ops,

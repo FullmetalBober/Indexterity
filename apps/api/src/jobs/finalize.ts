@@ -11,6 +11,9 @@ import { preflightDrop } from "./preflight";
 const DEFAULT_OBSERVE_DAYS = 30;
 const DAY_MS = 86_400_000;
 const REGRESSION_OPTIONS = { factor: 1.5, minWindowOps: 20 };
+// A superseded index is a structural finding backed by a replacement that has
+// already proven itself, so it scores like any other redundancy.
+const SUPERSEDED_SCORE = 55;
 
 // HIDDEN drops whose observe window has elapsed -> pre-flight -> drop -> DROPPED.
 // The drop is the only irreversible step. A failed pre-flight during observe
@@ -109,6 +112,7 @@ export async function finalizeCluster(clusterId: string): Promise<number> {
           .update(recommendations)
           .set({ baselineWriteOps: null, baselineWriteLatency: null, updatedAt: new Date() })
           .where(eq(recommendations.id, rec.id));
+        await retireSuperseded(db, clusterId, rec);
         continue;
       }
       if (verdict !== "REGRESSED") continue;
@@ -277,5 +281,70 @@ export async function finalizeCluster(clusterId: string): Promise<number> {
     return dropped;
   } finally {
     release();
+  }
+}
+
+// The indexes a graduated CREATE/UPDATE/MERGE replaced.
+//
+// recommendCreates records them in targetSpec.retire, and until now nothing
+// read it: UPDATE and MERGE built the replacement and left the originals to be
+// re-discovered as DROP_REDUNDANT by a later classify pass. That works when the
+// replacement is a strict superset and not otherwise — a partial replacement
+// covers nothing (see analysis/redundancy.ts), so its originals would have sat
+// there forever next to it.
+//
+// Retirement waits for graduation on purpose. Between build and graduation the
+// new index may still be rolled back for slowing writes, and if it goes the
+// originals have to still be there.
+//
+// They are PROPOSED, not dropped: same approval, same hide, same observe window
+// and regression gate as any other drop. This only ensures the finding exists.
+async function retireSuperseded(
+  db: ReturnType<typeof jobDb>,
+  clusterId: string,
+  rec: { id: string; database: string; collection: string; indexName: string; targetSpec: unknown },
+): Promise<void> {
+  const target = rec.targetSpec;
+  if (typeof target !== "object" || target === null) return;
+  const retire: unknown = Reflect.get(target, "retire");
+  if (!Array.isArray(retire)) return;
+  const names = retire.filter((name): name is string => typeof name === "string");
+  if (names.length === 0) return;
+
+  for (const name of names) {
+    // Nothing to do if a proposal for it already exists, or it is already on
+    // its way out — classify may well have found it independently.
+    const [existing] = await db
+      .select({ id: recommendations.id })
+      .from(recommendations)
+      .where(
+        and(
+          eq(recommendations.clusterId, clusterId),
+          eq(recommendations.database, rec.database),
+          eq(recommendations.collection, rec.collection),
+          eq(recommendations.indexName, name),
+          inArray(recommendations.state, ["PROPOSED", "APPROVED", "HIDDEN"]),
+        ),
+      )
+      .limit(1);
+    if (existing !== undefined) continue;
+
+    await db.insert(recommendations).values({
+      clusterId,
+      type: "DROP_REDUNDANT",
+      state: "PROPOSED",
+      database: rec.database,
+      collection: rec.collection,
+      indexName: name,
+      rationale: `Superseded by ${rec.indexName}, which has now survived its post-build watch.`,
+      score: SUPERSEDED_SCORE,
+      estimatedBytesSaved: 0,
+    });
+    await db.insert(actions).values({
+      recommendationId: rec.id,
+      kind: "CREATE",
+      actor: "system",
+      result: `graduated; proposed retiring ${name}`,
+    });
   }
 }

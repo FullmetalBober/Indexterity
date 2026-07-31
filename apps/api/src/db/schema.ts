@@ -187,6 +187,11 @@ export const indexSnapshots = pgTable(
     perMember: jsonb("per_member")
       .$type<Array<{ member: string; ops: number; since?: string }>>()
       .notNull(),
+    // Seen as the target of a hint() in the profiler window. A hinted index
+    // cannot be hidden — mongod rejects the hint — so the observe stage would
+    // break those queries instead of slowing them, and the latency gate would
+    // see nothing.
+    hinted: boolean("hinted").notNull().default(false),
     capturedAt: timestamp("captured_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [index("index_snapshots_cluster_time").on(table.clusterId, table.capturedAt)],
