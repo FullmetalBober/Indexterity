@@ -22,6 +22,35 @@ export async function activeCooldownKeys(db: Database, clusterId: string): Promi
   return new Set(rows.map((row) => cooldownKey(row.database, row.collection, row.indexName)));
 }
 
+// Park an index after a human cancelled its pending drop. Deliberately NOT a
+// regression: `regressionCount` feeds the confidence score and the escalating
+// backoff, and nothing regressed — someone simply knows something the engine
+// does not. The cooldown exists so the next classify pass does not re-propose
+// the same index straight back into the pipeline.
+export async function recordManualVeto(
+  db: Database,
+  clusterId: string,
+  target: CooldownTarget,
+  days: number,
+  reason: string,
+): Promise<Date> {
+  const until = new Date(Date.now() + days * DAY_MS);
+  await db
+    .insert(indexCooldowns)
+    .values({ clusterId, ...target, reason, regressionCount: 0, until })
+    .onConflictDoUpdate({
+      target: [
+        indexCooldowns.clusterId,
+        indexCooldowns.database,
+        indexCooldowns.collection,
+        indexCooldowns.indexName,
+      ],
+      // Keep whatever regression history exists; only push the date out.
+      set: { reason, until, updatedAt: new Date() },
+    });
+  return until;
+}
+
 // Record a regression and escalate: each repeat pushes the cooldown further out
 // (base = 3x the observe window, linear in the regression count). Returns `until`.
 export async function recordRegression(

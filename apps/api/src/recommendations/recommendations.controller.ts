@@ -39,8 +39,13 @@ import { consumeDialBudget } from "../errors/dial-budget";
 import { isUnreachableError } from "../errors/unreachable";
 import { openClusterSession } from "../jobs/cluster-connection";
 import { evictCluster } from "../jobs/connection-pool";
+import { recordManualVeto } from "../jobs/cooldowns";
 import { connStringUsername, ProvisionDeniedError, provisionScopedUser } from "../mongo";
 import { Implement } from "../orpc/implement";
+
+// How long a cancelled drop stays off the table before the engine may propose
+// it again — long enough that an owner is not re-rejecting the same row weekly.
+const VETO_COOLDOWN_DAYS = 90;
 
 // A drop's rollback token carries the dropped index's serialized spec.
 const rollbackTokenSchema = z.object({ spec: z.unknown() });
@@ -860,6 +865,81 @@ export class RecommendationsController {
         kind: "ROLLBACK",
         actor: "user",
         result: "ok",
+      });
+      return toRecommendation(updated);
+    });
+  }
+
+  // Owner-only: cancel a pending drop while the index is still hidden.
+  //
+  // Until now the only ways out of HIDDEN were automatic — the regression gate,
+  // a counter reset, a failed pre-flight — or disconnecting the cluster. An
+  // owner who simply knew the index was needed had to wait out the window.
+  @Implement(contract.unhideRecommendation)
+  unhideRecommendation(@Req() req: FastifyRequest) {
+    return implement(contract.unhideRecommendation).handler(async ({ input, errors }) => {
+      const orgId = await this.requireOwner(req);
+      const [rec] = await this.database.db
+        .select({ rec: recommendations })
+        .from(recommendations)
+        .innerJoin(clusters, eq(recommendations.clusterId, clusters.id))
+        .where(and(eq(recommendations.id, input.id), eq(clusters.orgId, orgId)))
+        .limit(1)
+        .then((rows) => rows.map((row) => row.rec));
+      if (rec === undefined) {
+        throw errors.NOT_FOUND({ message: "recommendation not found" });
+      }
+      if (rec.state !== "HIDDEN") {
+        throw errors.CONFLICT({ message: "only a hidden index can be un-hidden" });
+      }
+
+      try {
+        const { session, readOnly, release } = await openClusterSession(
+          this.database.db,
+          rec.clusterId,
+        );
+        try {
+          if (readOnly) throw errors.CONFLICT({ message: "cluster is read-only" });
+          await session.executor(readOnly).unhide(rec.database, rec.collection, rec.indexName);
+        } finally {
+          release();
+        }
+      } catch (error) {
+        mapClusterError(error);
+      }
+
+      // Park it, so the next classify pass does not propose the same drop
+      // straight back. Not counted as a regression — nothing regressed, an
+      // owner just knows something the engine does not.
+      const until = await recordManualVeto(
+        this.database.db,
+        rec.clusterId,
+        { database: rec.database, collection: rec.collection, indexName: rec.indexName },
+        VETO_COOLDOWN_DAYS,
+        "drop cancelled by an owner",
+      );
+      const day = until.toISOString().slice(0, 10);
+      const [updated] = await this.database.db
+        .update(recommendations)
+        .set({
+          state: "REJECTED",
+          hiddenAt: null,
+          observeDays: null,
+          baselineReadOps: null,
+          baselineReadLatency: null,
+          rationale: `${rec.rationale} — cancelled by an owner; not re-proposed until ${day}`,
+          updatedAt: new Date(),
+        })
+        .where(eq(recommendations.id, rec.id))
+        .returning();
+      if (updated === undefined) {
+        throw errors.NOT_FOUND({ message: "recommendation not found" });
+      }
+      await this.database.db.insert(actions).values({
+        recommendationId: rec.id,
+        kind: "HIDE",
+        actor: "user",
+        result: `un-hidden on request; cooling down until ${day}`,
       });
       return toRecommendation(updated);
     });

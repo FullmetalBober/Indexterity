@@ -120,6 +120,20 @@ const approveRecommendation = createServerFn({ method: "POST" })
     }
   });
 
+const unhideRecommendation = createServerFn({ method: "POST" })
+  .validator((id: unknown): string => {
+    if (typeof id !== "string") throw new Error("id must be a string");
+    return id;
+  })
+  .handler(async ({ data }) => {
+    try {
+      await serverApi().unhideRecommendation({ id: data });
+      return { ok: true };
+    } catch {
+      return { ok: false };
+    }
+  });
+
 const rollbackRecommendation = createServerFn({ method: "POST" })
   .validator((id: unknown): string => {
     if (typeof id !== "string") throw new Error("id must be a string");
@@ -584,6 +598,13 @@ function Home() {
     await router.invalidate();
   }
 
+  async function onUnhide(id: string) {
+    const result = await unhideRecommendation({ data: id }).catch(() => ({ ok: false }));
+    if (result.ok) toast.success("Index un-hidden — this drop won't be proposed again for 90 days");
+    else toast.error("Could not un-hide — the cluster may be unreachable or read-only");
+    await router.invalidate();
+  }
+
   async function onUndo(id: string) {
     const result = await rollbackRecommendation({ data: id }).catch(() => ({ ok: false }));
     if (result.ok) toast.success("Undo complete — the index was rebuilt");
@@ -772,6 +793,18 @@ function Home() {
                     description="The index is recreated from the spec recorded at drop time, and the ROI headline is corrected back down."
                     confirmLabel="Rebuild"
                     onConfirm={() => void onUndo(rec.id)}
+                  />
+                ) : rec.state === "HIDDEN" ? (
+                  <ConfirmButton
+                    trigger={
+                      <Button size="sm" variant="outline">
+                        Keep it
+                      </Button>
+                    }
+                    title={`Cancel the pending drop of ${rec.indexName}?`}
+                    description="The index becomes visible to the query planner again straight away, and this drop is not proposed again for 90 days."
+                    confirmLabel="Un-hide"
+                    onConfirm={() => void onUnhide(rec.id)}
                   />
                 ) : (
                   <span className="text-muted-foreground text-xs">{rec.state}</span>
@@ -1215,10 +1248,12 @@ function PolicySection({ policy, onSaved }: { policy: PolicyView; onSaved: () =>
             />
             <p className="text-muted-foreground text-xs">
               {autoScore === null
-                ? "Empty: nothing is approved without you."
+                ? "Empty: nothing is approved without you. 70 is a good starting point."
                 : autoScore === 0
                   ? "0: every recommendation is approved automatically."
-                  : `Only recommendations scoring ${autoScore} or above.`}
+                  : `Only recommendations scoring ${autoScore} or above.${
+                      autoScore > 70 ? " Above ~85 very little qualifies." : ""
+                    }`}
             </p>
           </div>
           <div className="grid gap-1.5">

@@ -7,6 +7,7 @@ import {
   createDatabase,
   eq,
   inArray,
+  indexCooldowns,
   indexSnapshots,
   latencySamples,
   organizations,
@@ -1118,6 +1119,68 @@ describe("password reset (changes the owner password — keep near the end)", ()
       body: JSON.stringify({ email: owner.email, password: "rotated-pass-456" }),
     });
     expect(signInRes.status).toBe(200);
+  });
+});
+
+describe("cancelling a pending drop", () => {
+  it("un-hides the index on request and parks it without counting a regression", async () => {
+    const coll = mongo.db("inttest").collection("keepme");
+    await coll.insertMany(Array.from({ length: 20 }, (_, i) => ({ k: i })));
+    await coll.createIndex({ k: 1 }, { name: "keep_1" });
+
+    const [rec] = await db
+      .insert(recommendations)
+      .values({
+        clusterId,
+        type: "DROP_UNUSED",
+        state: "HIDDEN",
+        database: "inttest",
+        collection: "keepme",
+        indexName: "keep_1",
+        rationale: "no recorded usage",
+        score: 72,
+        estimatedBytesSaved: 4096,
+        hiddenAt: new Date(),
+        observeDays: 30,
+        baselineReadOps: 10,
+        baselineReadLatency: 100,
+      })
+      .returning();
+    if (rec === undefined) throw new Error("failed to insert recommendation");
+    await coll.dropIndex("keep_1").catch(() => {});
+    await coll.createIndex({ k: 1 }, { name: "keep_1" });
+    await mongo
+      .db("inttest")
+      .command({ collMod: "keepme", index: { name: "keep_1", hidden: true } });
+
+    const res = await api(`/recommendations/${rec.id}/unhide`, owner, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(200);
+    expect(asRecord(await res.json()).state).toBe("REJECTED");
+
+    // Visible to the planner again.
+    const specs = await coll.indexes();
+    expect(specs.find((s) => s.name === "keep_1")?.hidden).toBeFalsy();
+
+    // Parked, but not recorded as a regression — that number feeds the score
+    // and the escalating backoff, and nothing regressed here.
+    const [cooldown] = await db
+      .select()
+      .from(indexCooldowns)
+      .where(and(eq(indexCooldowns.clusterId, clusterId), eq(indexCooldowns.indexName, "keep_1")));
+    expect(cooldown?.regressionCount).toBe(0);
+    expect((cooldown?.until.getTime() ?? 0) > Date.now()).toBe(true);
+
+    // Second call is a conflict — it is no longer hidden.
+    const again = await api(`/recommendations/${rec.id}/unhide`, owner, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    expect(again.status).toBe(409);
+
+    await coll.drop().catch(() => {});
   });
 });
 

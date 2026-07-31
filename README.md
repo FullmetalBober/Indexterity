@@ -83,9 +83,23 @@ Additions get the mirror treatment: write latency is baselined at build time,
 and an index that slows writes during its watch is dropped and cooled down. One
 that survives graduates.
 
-Every executed operation writes an immutable `actions` row. A `DROPPED`
-recommendation can be undone from the dashboard — the index is rebuilt from the
-spec captured at drop time, and the ROI headline corrects back down.
+Every executed operation writes an immutable `actions` row.
+
+Two escape hatches on the dashboard. **Keep it** cancels a pending drop while
+the index is still hidden: it becomes visible again immediately and is parked
+for 90 days so the engine does not re-propose it. **Undo** rebuilds a dropped
+index from the spec captured at drop time and corrects the ROI headline back
+down. Neither counts as a regression — that number feeds the score, and nothing
+regressed.
+
+**The score.** Every recommendation carries 0–100, and the scale is calibrated
+so 100 is reachable and means "as sure as this engine gets". Drops: the argument
+is worth 55 (redundant), 50 (never used) or 35 (was periodic, went quiet); a
+month of unbroken history adds up to 25; reclaimable space up to 20. Creates: 40
+for a live collection scan, up to 35 for frequency, up to 25 for collection size.
+Each past regression on the same index subtracts 40, so one is nearly
+disqualifying and two are. The score gates *entry* only — every safety stage runs
+regardless.
 
 ## Policy knobs (per cluster)
 
@@ -96,7 +110,7 @@ spec captured at drop time, and the ROI headline corrects back down.
 | `instantCreate` | build critical missing indexes without approval | off |
 | `observeWindowDays` | baseline bake time for a hidden index; scaled per index (below) | 30 |
 | `maxCollectionSizeBytes` | size ceiling for building new indexes | — |
-| `autoApplyScore` | the one auto-approval control: empty = you approve everything, `0` = everything auto-approves, `1`–`100` = a confidence floor. Advisories never auto-approve | empty |
+| `autoApplyScore` | the one auto-approval control: empty = you approve everything, `0` = everything auto-approves, `1`–`100` = a confidence floor. **70 is the suggested setting.** Advisories never auto-approve | empty |
 | `changeWindowStartHour` / `EndHour` | elective changes run only in this UTC window; safety rollbacks never wait | engine-chosen |
 
 **The observe window scales to the index.** `observeWindowDays` is the baseline;
@@ -229,8 +243,6 @@ What is actually open is correctness, not features:
 - **Warmup.** A usage finding needs only 3 snapshots — 18h at the 6h cadence —
   so on a freshly connected cluster a quarterly job's index is indistinguishable
   from a dead one. Withhold usage-based drops until the history has depth.
-- **No manual un-hide.** Undo only covers `DROPPED`. An index hidden by mistake
-  comes back only if the regression gate catches it, or on offboarding.
 - **Narrowing UPDATE** (full index → partial) needs a retire mechanism.
   `targetSpec.retire` is written and never read; UPDATE and MERGE rely on the
   next classify pass finding the old index redundant, which cannot happen when
@@ -238,8 +250,6 @@ What is actually open is correctness, not features:
 - **MERGE across partials** needs the filter expression, which is not stored —
   `IndexSpec.partial` is a boolean, so two partial indexes are indistinguishable
   whatever they filter on.
-- **Score ceiling.** Drops top out at 80 and creates at 85, so an
-  `autoApplyScore` above those silently approves nothing.
 - **Hinted indexes.** Hiding one breaks its queries rather than slowing them,
   and `$queryStats` does not record hints, so we cannot see which are hinted.
 

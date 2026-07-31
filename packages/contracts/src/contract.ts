@@ -207,6 +207,16 @@ export const contract = {
     .input(z.object({ id: z.uuid() }))
     .output(recommendation),
 
+  unhideRecommendation: oc
+    .route({
+      method: "POST",
+      path: "/recommendations/{id}/unhide",
+      summary: "Cancel a pending drop: make the index visible again now",
+    })
+    .errors({ NOT_FOUND: {}, CONFLICT: {} })
+    .input(z.object({ id: z.uuid() }))
+    .output(recommendation),
+
   getOrg: oc
     .route({
       method: "GET",

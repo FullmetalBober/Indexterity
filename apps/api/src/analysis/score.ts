@@ -3,6 +3,12 @@ import type { UsageClass } from "@repo/contracts";
 // Confidence scoring (0–100). The score gates pipeline ENTRY — what gets
 // proposed and what auto-approves — never the safety stages: an auto-approved
 // drop still goes hide → observe → regression/pre-flight gates before deletion.
+//
+// The scale is calibrated so 100 is reachable and means "as sure as this engine
+// gets": the strongest argument, a month of unbroken history behind it, and
+// real space to reclaim. A threshold is only meaningful if the top of the range
+// exists — an autoApplyScore above the reachable maximum would silently approve
+// nothing.
 
 export interface DropSignals {
   // null for redundancy-driven drops (usage isn't the argument there).
@@ -22,35 +28,60 @@ export interface CreateSignals {
 }
 
 const GB = 1024 ** 3;
+// Snapshots for full history credit — a month at the 6h collect cadence. The
+// old curve maxed out after ten, which is two and a half days.
+const SNAPSHOTS_FOR_FULL_CREDIT = 125;
+// Sightings of a query shape for full frequency credit.
+const SIGHTINGS_FOR_FULL_CREDIT = 35;
+// One regression is close to disqualifying, two are disqualifying.
+const REGRESSION_PENALTY = 40;
 
 function clamp(score: number): number {
   return Math.max(0, Math.min(100, Math.round(score)));
 }
 
-// Drop confidence: dead usage and redundancy are the strong arguments, history
-// depth and reclaimable size strengthen them, past regressions cut hard.
+// Drop confidence. The argument (55/50/35) carries most of it; evidence depth
+// and reclaimable space decide the rest.
+//
+//   redundant       55  structural — provable from the index list alone
+//   FLAT_ZERO       50  never touched across a history we can trust
+//   PERIODIC_DEAD   35  it used to run and stopped; the job may come back
+//   history       0-25  a month of unbroken collection for full credit
+//   size          0-20  ~1 GB reclaimed for full credit
+//
+// Redundant and FLAT_ZERO never co-occur: a redundant index is excluded from the
+// usage pass, so the ceiling is 55 + 25 + 20.
 export function dropScore(signals: DropSignals): number {
   let score = 0;
-  if (signals.usageClass === "FLAT_ZERO") score += 40;
-  if (signals.usageClass === "PERIODIC_DEAD") score += 30;
-  if (signals.redundant) score += 45;
-  score += Math.min(20, signals.snapshots * 2);
-  // 0 → +0, ~100 MB → +8, ≥1 GB → +15 (log-ish, capped).
+  if (signals.redundant) score += 55;
+  else if (signals.usageClass === "FLAT_ZERO") score += 50;
+  else if (signals.usageClass === "PERIODIC_DEAD") score += 35;
+  score += Math.min(25, Math.floor((25 * signals.snapshots) / SNAPSHOTS_FOR_FULL_CREDIT));
   if (signals.sizeBytes > 0) {
-    score += Math.min(15, Math.round((15 * Math.log10(1 + (9 * signals.sizeBytes) / GB)) / 1));
+    score += Math.min(20, Math.round(20 * Math.log10(1 + (9 * signals.sizeBytes) / GB)));
   }
-  score -= signals.pastRegressions * 40;
+  score -= signals.pastRegressions * REGRESSION_PENALTY;
   return clamp(score);
 }
 
-// Create confidence: a repeated collection scan on a big collection is the
-// argument; past regressions (built then rolled back) cut hard.
+// Create confidence. A repeated collection scan on a big collection is the
+// argument; a shape seen three times on a small collection is a suggestion.
+//
+//   collscan        40  the query is scanning today
+//   frequency     0-35  35 sightings for full credit
+//   collection    0-25  ≥1M docs 25, ≥10k 18, ≥1k 8
 export function createScore(signals: CreateSignals): number {
   let score = 0;
-  if (signals.collscan) score += 35;
-  score += Math.min(25, signals.count);
-  if (signals.docCount >= 10_000) score += 25;
-  else if (signals.docCount >= 1000) score += 10;
-  score -= signals.pastRegressions * 40;
+  if (signals.collscan) score += 40;
+  score += Math.min(35, Math.floor((35 * signals.count) / SIGHTINGS_FOR_FULL_CREDIT));
+  if (signals.docCount >= 1_000_000) score += 25;
+  else if (signals.docCount >= 10_000) score += 18;
+  else if (signals.docCount >= 1000) score += 8;
+  score -= signals.pastRegressions * REGRESSION_PENALTY;
   return clamp(score);
 }
+
+// What the dashboard suggests as an auto-approval threshold, and why. Set high
+// enough that only the two arguments the engine can prove — redundancy, and
+// idleness across a trustworthy history — clear it with evidence behind them.
+export const RECOMMENDED_AUTO_APPLY_SCORE = 70;
