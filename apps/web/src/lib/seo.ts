@@ -1,10 +1,9 @@
-// The canonical public home of the product. Deliberately a constant rather
-// than WEB_ORIGIN: canonical and og:url must point at the one indexable copy
-// no matter which host served the response (preview deploy, raw service URL,
-// apex vs www), or search engines see duplicates. Self-hosters and staging
-// override it with SITE_URL.
-const CANONICAL_ORIGIN = "https://indexterity.alivlad.com";
+import { CANONICAL_ORIGIN } from "./site";
 
+// Canonical and og:url must point at the one indexable copy no matter which
+// host served the response (preview deploy, raw service URL, apex vs www), or
+// search engines see duplicates — hence a constant rather than WEB_ORIGIN.
+// Self-hosters and staging override it with SITE_URL.
 export function siteOrigin(): string {
   const override = typeof process === "undefined" ? undefined : process.env.SITE_URL;
   return (override ?? CANONICAL_ORIGIN).replace(/\/+$/, "");

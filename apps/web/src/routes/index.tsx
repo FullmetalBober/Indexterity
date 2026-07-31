@@ -1,5 +1,6 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { jsonLd, seoTags, siteOrigin } from "../lib/seo";
+import { REQUEST_ACCESS_HREF } from "../lib/site";
 
 const TITLE = "Indexterity — automatic MongoDB index management";
 // Kept under ~155 characters so search results show it whole.
@@ -94,6 +95,11 @@ const STEPS = [
 // data above, so keep answers self-contained.
 const FAQ = [
   {
+    question: "How do I get access?",
+    answer:
+      "Indexterity is invite-only during early access: ask for an invite and you get a link by email. If you self-host it, the first account you create bootstraps the install and can invite the rest of your team — sign-up mode is a configuration switch, not a hosted-only feature.",
+  },
+  {
     question: "Does Indexterity read my data?",
     answer:
       "No. It connects as a least-privilege user whose role grants index management and statistics only — there is no find privilege on your collections, so the server itself refuses any attempt to read documents. Index usage, sizes and latency all come from $indexStats and $collStats, which never expose document contents.",
@@ -157,16 +163,23 @@ function Landing() {
             Read-only until you say otherwise.
           </p>
           <div className="mt-8 flex items-center justify-center gap-3">
-            <Link
-              to="/app"
+            <a
+              href={REQUEST_ACCESS_HREF}
               className="rounded-md bg-primary px-6 py-3 font-medium text-primary-foreground"
             >
-              Get started
-            </Link>
+              Request access
+            </a>
             <a href="#how" className="rounded-md border px-6 py-3 font-medium text-sm">
               How it works
             </a>
           </div>
+          <p className="mt-4 text-muted-foreground text-sm">
+            Invite-only during early access.{" "}
+            <Link to="/app" className="underline">
+              Already have an account? Sign in
+            </Link>
+            .
+          </p>
           <p className="mt-6 font-mono text-muted-foreground text-xs">
             PROPOSED → APPROVED → hidden → observed → dropped · undo anytime
           </p>
@@ -206,14 +219,14 @@ function Landing() {
             ))}
           </ol>
           <div className="mt-12 text-center">
-            <Link
-              to="/app"
+            <a
+              href={REQUEST_ACCESS_HREF}
               className="rounded-md bg-primary px-6 py-3 font-medium text-primary-foreground"
             >
-              Connect a cluster
-            </Link>
+              Request access
+            </a>
             <p className="mt-3 text-muted-foreground text-sm">
-              Starts read-only. Your documents are never read, and never touched.
+              Clusters start read-only. Your documents are never read, and never touched.
             </p>
           </div>
         </section>

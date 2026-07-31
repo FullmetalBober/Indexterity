@@ -16,6 +16,7 @@ import {
 import { useToast } from "../components/ui/toast";
 import { serverApi } from "../lib/api";
 import { requestPasswordReset, signIn, signOut, signUp } from "../lib/auth";
+import { REQUEST_ACCESS_HREF } from "../lib/site";
 
 // Runs on the web server for every navigation; forwards the session cookie to
 // the api. oRPC calls return data directly and throw ORPCError on failure.
@@ -1649,6 +1650,17 @@ function AuthForm({ onDone }: { onDone: () => void }) {
           />
         ) : null}
         {error ? <p className="text-red-600 text-sm">{error}</p> : null}
+        {/* The api rejected sign-up because this instance is invite-only —
+            say what to do next instead of leaving a dead end. */}
+        {error?.includes("invite-only") === true ? (
+          <p className="text-muted-foreground text-sm">
+            Already invited? Use the sign-up link from the invite email, or{" "}
+            <a href={REQUEST_ACCESS_HREF} className="underline">
+              request access
+            </a>
+            .
+          </p>
+        ) : null}
         {notice ? <p className="text-muted-foreground text-sm">{notice}</p> : null}
         <button
           type="submit"
