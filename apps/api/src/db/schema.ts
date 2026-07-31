@@ -182,7 +182,11 @@ export const indexSnapshots = pgTable(
     indexName: text("index_name").notNull(),
     spec: jsonb("spec").$type<Record<string, unknown>>().notNull(),
     sizeBytes: bigint("size_bytes", { mode: "number" }).notNull(),
-    perMember: jsonb("per_member").$type<Array<{ member: string; ops: number }>>().notNull(),
+    // `since` is the member's $indexStats counter start — the restart marker.
+    // jsonb, so adding it needed no DDL; older rows simply omit the key.
+    perMember: jsonb("per_member")
+      .$type<Array<{ member: string; ops: number; since?: string }>>()
+      .notNull(),
     capturedAt: timestamp("captured_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [index("index_snapshots_cluster_time").on(table.clusterId, table.capturedAt)],

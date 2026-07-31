@@ -158,9 +158,14 @@ it is **per-member**. Consequences the engine must handle:
 
 - **Snapshot over time.** Periodically snapshot `$indexStats` into Postgres and
   compute rolling-window usage from the deltas. A single reading is meaningless.
-- **Detect restarts.** If the counter drops, the member restarted; track member
-  uptime. If uptime is shorter than the window, the stats are unreliable — do not
-  recommend a drop.
+- **Detect restarts.** *Implemented* (`countersRestartedDuring`): every snapshot
+  persists each member's `accesses.since` — the moment that member's counter
+  started — so classification can see a reset rather than infer one. A window is
+  distrusted when `since` advances for any member across it, or when the newest
+  counters are younger than the window itself (they cannot account for a period
+  they did not exist for). Either way no usage-based finding is made. Snapshots
+  written before the field existed carry none and are skipped, so the check
+  never invents evidence.
 - **Aggregate across all replica-set members.** Secondaries serve reads with
   different index usage than the primary. Reading only the primary and dropping an
   index a secondary relies on is a classic outage. Sum usage across primary + all

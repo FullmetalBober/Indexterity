@@ -9,7 +9,7 @@ export interface CollectedSnapshot {
   readonly indexName: string;
   readonly spec: Record<string, unknown>;
   readonly sizeBytes: number;
-  readonly perMember: { member: string; ops: number }[];
+  readonly perMember: { member: string; ops: number; since?: string }[];
 }
 
 export interface CollectedLatency {
@@ -85,6 +85,8 @@ export async function collectSnapshots(session: EngineSession): Promise<CollectR
           perMember: (usageByIndex[spec.name] ?? []).map((stat) => ({
             member: stat.host,
             ops: stat.ops,
+            // Persisted so classification can tell a restart from idleness.
+            since: stat.since,
           })),
         });
       }

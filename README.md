@@ -57,7 +57,7 @@ PostgreSQL / SQL Server adapters can slot in without pipeline changes
 
 ```mermaid
 flowchart TD
-    S[Index snapshots and usage history] --> H{History continuous and current?<br/>3+ snapshots, no gap over 48h}
+    S[Index snapshots and usage history] --> H{History trustworthy?<br/>3+ snapshots, no gap over 48h,<br/>no counter restart in the window}
     H -- no --> HX[No usage-based finding —<br/>absence of evidence only counts<br/>if we were watching]
     H -- yes --> P{Protected?<br/>_id_ / unique / TTL / shard / partial / sparse}
     P -- yes --> PZ{Zero usage, or a unique index<br/>prefixing a wider one?}
@@ -110,9 +110,12 @@ op-count history:
   got decommissioned)
 
 **Usage claims need a history worth trusting.** Fewer than 3 snapshots, a hole
-larger than 48 hours, or a newest snapshot older than that, and no usage-based
-finding is made at all — during a collection gap a busy index looks exactly
-like a dead one. Redundancy findings are structural and unaffected.
+larger than 48 hours, a newest snapshot older than that, **or a counter that
+restarted** — and no usage-based finding is made at all. During a collection
+gap, and equally in the moments after a mongod restart, a busy index looks
+exactly like a dead one: each snapshot records every member's
+`$indexStats.accesses.since`, so a reset is seen rather than guessed.
+Redundancy findings are structural and unaffected.
 
 Then the recommendation:
 

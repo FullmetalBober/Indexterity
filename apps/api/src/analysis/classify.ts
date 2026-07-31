@@ -14,15 +14,64 @@ export interface ClassifyOptions {
 
 const HOUR_MS = 3_600_000;
 
+function parseTime(value: string | undefined): number | null {
+  if (value === undefined) return null;
+  const time = Date.parse(value);
+  return Number.isFinite(time) ? time : null;
+}
+
+// Did any member's $indexStats counter restart inside this history? The
+// counter resets to zero when mongod restarts or the index is rebuilt, and
+// `accesses.since` jumps forward to mark it. Two ways to notice:
+//
+//   1. `since` advanced for a member between two snapshots, or
+//   2. the newest counters are YOUNGER than the window being judged — i.e.
+//      they cannot possibly account for the whole period we are claiming was
+//      idle (architecture §6.2).
+//
+// Snapshots collected before `since` was persisted carry none, and are simply
+// skipped: no evidence either way, and the irreversible step downstream is
+// still guarded by the regression gate.
+export function countersRestartedDuring(history: readonly UsageSnapshot[]): boolean {
+  const sorted = [...history].sort(
+    (a, b) => new Date(a.capturedAt).getTime() - new Date(b.capturedAt).getTime(),
+  );
+  const first = sorted[0];
+  const last = sorted.at(-1);
+  if (first === undefined || last === undefined) return false;
+
+  const earliestSince = new Map<string, number>();
+  for (const snapshot of sorted) {
+    for (const member of snapshot.perMember) {
+      const since = parseTime(member.since);
+      if (since === null) continue;
+      const previous = earliestSince.get(member.member);
+      if (previous === undefined) earliestSince.set(member.member, since);
+      else if (since > previous) return true;
+    }
+  }
+
+  const spanMs = new Date(last.capturedAt).getTime() - new Date(first.capturedAt).getTime();
+  const lastCapturedAt = new Date(last.capturedAt).getTime();
+  for (const member of last.perMember) {
+    const since = parseTime(member.since);
+    if (since === null) continue;
+    if (lastCapturedAt - since < spanMs) return true;
+  }
+  return false;
+}
+
 // Is this history good enough to claim an index is UNUSED? Absence of evidence
-// only counts when we were actually watching: too few snapshots, or a hole in
-// the series, and a busy index looks identical to a dead one. Structural
-// findings (redundancy) do not depend on this.
+// only counts when we were actually watching: too few snapshots, a hole in the
+// series, or counters that restarted underneath us, and a busy index looks
+// identical to a dead one. Structural findings (redundancy) do not depend on
+// this.
 export function usageHistoryIsTrustworthy(
   history: readonly UsageSnapshot[],
   options: ClassifyOptions,
   now: Date,
 ): boolean {
+  if (countersRestartedDuring(history)) return false;
   if (history.length < options.minHistory) return false;
   const times = history
     .map((snapshot) => new Date(snapshot.capturedAt).getTime())

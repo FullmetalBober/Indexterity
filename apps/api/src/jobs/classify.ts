@@ -70,8 +70,9 @@ export async function classifyCluster(clusterId: string): Promise<number> {
           perMember: snap.perMember.map((member) => ({
             member: member.member,
             ops: member.ops,
-            since: snap.capturedAt.toISOString(),
-            uptimeSeconds: 0,
+            // Real counter-start time when the snapshot has one; snapshots
+            // taken before it was persisted simply omit it.
+            ...(member.since === undefined ? {} : { since: member.since }),
           })),
         })),
       });

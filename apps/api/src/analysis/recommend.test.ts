@@ -20,7 +20,7 @@ function spec(name: string, keys: IndexKey[], overrides: Partial<IndexSpec> = {}
 function input(indexSpec: IndexSpec, opsPerSnapshot: number[]): IndexInput {
   const history: UsageSnapshot[] = opsPerSnapshot.map((ops, i) => ({
     capturedAt: `2026-01-0${i + 1}T00:00:00Z`,
-    perMember: [{ member: "m", ops, since: "", uptimeSeconds: 100 }],
+    perMember: [{ member: "m", ops, since: "" }],
   }));
   return { spec: indexSpec, history };
 }

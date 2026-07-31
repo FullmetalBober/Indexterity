@@ -974,6 +974,102 @@ describe("outage resilience", () => {
     expect(proposals).toHaveLength(0);
   });
 
+  it("withholds a drop when a member's $indexStats counter restarted", async () => {
+    // Inserted directly: classify reads only Postgres, and the api's per-user
+    // dial budget is (correctly) spent by this point in the suite.
+    const org = asRecord(await (await api("/org", owner)).json());
+    const [row] = await db
+      .insert(clusters)
+      .values({
+        orgId: asString(org.id),
+        name: "Restart Cluster",
+        sealedDek: Buffer.alloc(1),
+        sealedData: Buffer.alloc(1),
+        keyVersion: 1,
+      })
+      .returning();
+    if (row === undefined) throw new Error("failed to insert cluster");
+    const restartId = row.id;
+    createdClusterIds.push(restartId);
+
+    const base = Date.now() - 3 * 86_400_000;
+    const spec = {
+      name: "restart_probe_1",
+      keys: [{ field: "probe", direction: 1 }],
+      unique: false,
+      ttl: false,
+      partial: false,
+      sparse: false,
+      hidden: false,
+      isShardKey: false,
+      collation: null,
+    };
+    // A busy index whose member restarts just before the last snapshot: ops
+    // read zero afterwards, which without `since` is indistinguishable from
+    // an index nobody uses.
+    const counterStart = new Date(base).toISOString();
+    const afterRestart = new Date(base + 2.5 * 86_400_000).toISOString();
+    await db.insert(indexSnapshots).values([
+      {
+        clusterId: restartId,
+        database: "inttest",
+        collection: "orders",
+        indexName: "restart_probe_1",
+        spec,
+        sizeBytes: 4096,
+        perMember: [{ member: "m1", ops: 0, since: counterStart }],
+        capturedAt: new Date(base),
+      },
+      {
+        clusterId: restartId,
+        database: "inttest",
+        collection: "orders",
+        indexName: "restart_probe_1",
+        spec,
+        sizeBytes: 4096,
+        perMember: [{ member: "m1", ops: 0, since: counterStart }],
+        capturedAt: new Date(base + 86_400_000),
+      },
+      {
+        clusterId: restartId,
+        database: "inttest",
+        collection: "orders",
+        indexName: "restart_probe_1",
+        spec,
+        sizeBytes: 4096,
+        perMember: [{ member: "m1", ops: 0, since: afterRestart }],
+        capturedAt: new Date(),
+      },
+    ]);
+
+    expect(await classifyCluster(restartId)).toBe(0);
+    const proposals = await db
+      .select()
+      .from(recommendations)
+      .where(eq(recommendations.clusterId, restartId));
+    expect(proposals).toHaveLength(0);
+  });
+
+  it("persists the real counter-start time from a live collect", async () => {
+    // Snapshots written by the collector (other tests hand-seed rows, so look
+    // at what a real collect produced for the main cluster's own indexes).
+    const rows = await db
+      .select()
+      .from(indexSnapshots)
+      .where(eq(indexSnapshots.clusterId, clusterId));
+    const collected = rows.filter((row) => row.perMember.some((m) => m.since !== undefined));
+    expect(collected.length).toBeGreaterThan(0);
+    // The value comes from $indexStats.accesses.since — not synthesized from
+    // the snapshot's own timestamp, which is what the code used to do.
+    const genuine = collected.some((row) =>
+      row.perMember.some(
+        (member) =>
+          typeof member.since === "string" && member.since !== row.capturedAt.toISOString(),
+      ),
+    );
+    expect(genuine).toBe(true);
+  });
+
   it("reports collection freshness so stale numbers cannot look current", async () => {
     const list = await (await api("/clusters", owner)).json();
     const rows = Array.isArray(list) ? list.map(asRecord) : [];

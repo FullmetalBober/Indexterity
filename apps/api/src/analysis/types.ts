@@ -20,13 +20,15 @@ export interface IndexSpec {
   readonly collation: string | null;
 }
 
-// $indexStats is cumulative-since-restart and per-member; capture uptime so a
-// short-lived member's zero count is not mistaken for "unused".
+// $indexStats is cumulative and per-member. `since` is when THAT member's
+// counter started — it jumps forward when mongod restarts or the index is
+// rebuilt, and the ops count begins again at zero. Without it a busy index is
+// indistinguishable from a dead one immediately after a restart.
+// Optional: snapshots collected before it was persisted simply lack it.
 export interface MemberUsage {
   readonly member: string;
   readonly ops: number;
-  readonly since: string;
-  readonly uptimeSeconds: number;
+  readonly since?: string;
 }
 
 export interface UsageSnapshot {

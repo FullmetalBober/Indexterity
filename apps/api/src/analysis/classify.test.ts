@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { classifyUsage, usageHistoryIsTrustworthy } from "./classify";
+import { classifyUsage, countersRestartedDuring, usageHistoryIsTrustworthy } from "./classify";
 import type { UsageSnapshot } from "./types";
 
 function snap(ops: number): UsageSnapshot {
   return {
     capturedAt: "2026-01-01T00:00:00Z",
-    perMember: [{ member: "m", ops, since: "2026-01-01T00:00:00Z", uptimeSeconds: 100 }],
+    perMember: [{ member: "m", ops, since: "2026-01-01T00:00:00Z" }],
   };
 }
 
@@ -31,8 +31,8 @@ describe("classifyUsage", () => {
     const split: UsageSnapshot = {
       capturedAt: "2026-01-01T00:00:00Z",
       perMember: [
-        { member: "a", ops: 0, since: "", uptimeSeconds: 100 },
-        { member: "b", ops: 4, since: "", uptimeSeconds: 100 },
+        { member: "a", ops: 0, since: "" },
+        { member: "b", ops: 4, since: "" },
       ],
     };
     expect(classifyUsage([split, split, split], options)).toBe("CONTINUOUS");
@@ -43,7 +43,7 @@ describe("usageHistoryIsTrustworthy", () => {
   const opts = { recentWindow: 3, minHistory: 3, maxGapHours: 48 };
   const at = (iso: string, ops = 0): UsageSnapshot => ({
     capturedAt: iso,
-    perMember: [{ member: "m", ops, since: "", uptimeSeconds: 100 }],
+    perMember: [{ member: "m", ops, since: "" }],
   });
   const now = new Date("2026-03-04T00:00:00Z");
 
@@ -87,5 +87,100 @@ describe("usageHistoryIsTrustworthy", () => {
       at("2026-03-02T00:00:00Z"),
     ];
     expect(usageHistoryIsTrustworthy(history, opts, now)).toBe(true);
+  });
+});
+
+describe("countersRestartedDuring", () => {
+  const snap = (
+    day: number,
+    members: Array<{ member: string; ops: number; since?: string }>,
+  ): UsageSnapshot => ({
+    capturedAt: `2026-03-0${day}T00:00:00Z`,
+    perMember: members,
+  });
+  // Counters that started well before the window.
+  const OLD = "2026-01-01T00:00:00Z";
+
+  it("is false when every counter predates the window and never moves", () => {
+    const history = [
+      snap(1, [{ member: "a", ops: 0, since: OLD }]),
+      snap(2, [{ member: "a", ops: 0, since: OLD }]),
+      snap(3, [{ member: "a", ops: 0, since: OLD }]),
+    ];
+    expect(countersRestartedDuring(history)).toBe(false);
+  });
+
+  it("catches a member whose counter start jumped forward", () => {
+    const history = [
+      snap(1, [{ member: "a", ops: 500, since: OLD }]),
+      snap(2, [{ member: "a", ops: 500, since: OLD }]),
+      // Restarted: counter start moves up and ops begin again at zero.
+      snap(3, [{ member: "a", ops: 0, since: "2026-03-02T18:00:00Z" }]),
+    ];
+    expect(countersRestartedDuring(history)).toBe(true);
+  });
+
+  it("catches one restarted member among several healthy ones", () => {
+    const history = [
+      snap(1, [
+        { member: "a", ops: 10, since: OLD },
+        { member: "b", ops: 10, since: OLD },
+      ]),
+      snap(3, [
+        { member: "a", ops: 10, since: OLD },
+        { member: "b", ops: 0, since: "2026-03-02T00:00:00Z" },
+      ]),
+    ];
+    expect(countersRestartedDuring(history)).toBe(true);
+  });
+
+  it("catches counters younger than the window they are supposed to cover", () => {
+    // Three days of snapshots, but the counter only started yesterday: it
+    // cannot testify that the index was idle for those three days.
+    const history = [
+      snap(1, [{ member: "a", ops: 0, since: "2026-03-02T12:00:00Z" }]),
+      snap(2, [{ member: "a", ops: 0, since: "2026-03-02T12:00:00Z" }]),
+      snap(3, [{ member: "a", ops: 0, since: "2026-03-02T12:00:00Z" }]),
+    ];
+    expect(countersRestartedDuring(history)).toBe(true);
+  });
+
+  it("says nothing when snapshots predate the field (legacy rows)", () => {
+    const history = [
+      snap(1, [{ member: "a", ops: 0 }]),
+      snap(2, [{ member: "a", ops: 0 }]),
+      snap(3, [{ member: "a", ops: 0 }]),
+    ];
+    expect(countersRestartedDuring(history)).toBe(false);
+  });
+});
+
+describe("usageHistoryIsTrustworthy with restart evidence", () => {
+  const opts = { recentWindow: 3, minHistory: 3, maxGapHours: 48 };
+  const now = new Date("2026-03-04T00:00:00Z");
+  const history = (since: string[]): UsageSnapshot[] =>
+    since.map((value, i) => ({
+      capturedAt: `2026-03-0${i + 1}T00:00:00Z`,
+      perMember: [{ member: "a", ops: 0, since: value }],
+    }));
+
+  it("trusts a dense window whose counters outlive it", () => {
+    expect(
+      usageHistoryIsTrustworthy(
+        history(["2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"]),
+        opts,
+        now,
+      ),
+    ).toBe(true);
+  });
+
+  it("refuses once a restart lands inside it", () => {
+    expect(
+      usageHistoryIsTrustworthy(
+        history(["2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z", "2026-03-02T06:00:00Z"]),
+        opts,
+        now,
+      ),
+    ).toBe(false);
   });
 });
