@@ -9,6 +9,7 @@ import {
   ne,
   policies,
   recommendations,
+  sql,
 } from "../db";
 import { serializeSpec } from "../mongo";
 import { effectiveChangeWindow } from "./change-window";
@@ -77,6 +78,15 @@ export async function applyCluster(clusterId: string): Promise<number> {
     return 0;
   }
 
+  // When collection for this cluster began. An index first seen well after
+  // that appeared on our watch, so its age is knowable; one present from the
+  // start could be any age at all.
+  const [watch] = await db
+    .select({ since: sql<Date | null>`min(${indexSnapshots.capturedAt})` })
+    .from(indexSnapshots)
+    .where(eq(indexSnapshots.clusterId, clusterId));
+  const watchingSince = watch?.since == null ? null : new Date(watch.since).toISOString();
+
   const { session, readOnly, release } = await openClusterSession(db, clusterId);
   try {
     // Read-only clusters never execute writes.
@@ -123,6 +133,7 @@ export async function applyCluster(clusterId: string): Promise<number> {
           ops: row.perMember.reduce((sum, member) => sum + member.ops, 0),
         })),
         policy?.observeWindowDays ?? DEFAULT_OBSERVE_DAYS,
+        { watchingSince, now: new Date() },
       );
       await db
         .update(recommendations)

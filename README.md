@@ -252,7 +252,7 @@ but never writes to your cluster.
 | `readOnly` | compute everything, never write (owner-toggled) | on |
 | `workloadAnalysis` | enable the create/merge/update engine | off |
 | `instantCreate` | auto-build critical missing indexes | off |
-| `observeWindowDays` | baseline bake time for a hidden index — auto-extended for periodic usage (2× the largest activity gap, ≤ 90d), auto-shortened for long-proven idleness (≥ half, ≥ 7d) | 30 |
+| `observeWindowDays` | baseline bake time for a hidden index — the engine scales it per index (see below) | 30 |
 | `maxCollectionSizeBytes` | size ceiling for building new indexes | — |
 | `autoApplyScore` | the one auto-approval control: empty = a human approves everything, `0` = everything auto-approves, `1`-`100` = a confidence floor. Advisories never auto-approve at any setting | empty |
 | `changeWindowStartHour` / `EndHour` | elective changes (hide/build/drop) only run in this UTC hour window; safety rollbacks never wait | **engine-chosen** |
@@ -261,6 +261,26 @@ Knobs are edited from the dashboard's **Policy** section (`GET/PUT
 /clusters/:id/policy`, owner-only writes). With `autoApplyScore` set, proposed
 recommendations are promoted automatically — the hide → observe → finalize
 gates still stand between them and any drop.
+
+**The observe window scales to the index.** `observeWindowDays` is the
+baseline; each pending drop gets its own window, decided once at hide time and
+recorded in the audit trail with its reason. Longest applicable rule wins, and
+they don't overlap:
+
+| the index | window |
+|-----------|--------|
+| periodic usage (monthly report, weekly batch) | 2× the largest activity gap, ≤ 90d — a full cycle has to fit inside |
+| in place ≥ 2× the policy window and used during that time | 1.5× the policy, ≤ 90d — a fixture of the schema gets the benefit of the doubt |
+| zero usage across ≥ 2× the policy window | half the policy, ≥ 7d — the history already *is* the observation |
+| appeared while we were watching and never used since | about as long as it has existed, ≥ 7d, ≤ the policy — its whole life is on record |
+| anything else | the policy |
+
+The last two are what handle a hand-made ad-hoc index: created, used once by
+the person who made it, forgotten. There is no hidden history to wait out, so
+it leaves in about a week instead of a month. **Age only counts when the index
+appeared after we started watching** — snapshots begin at onboarding, so an
+index present in the first one may be five years old, and no age-based rule
+touches it.
 
 **The change window picks itself.** Left unset, the engine derives one from the
 cluster's own traffic instead of running at any hour: op counters from
