@@ -9,7 +9,13 @@ export const Route = createRootRoute({
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
       { title: "Indexterity" },
+      // MongoDB-family primary, matching the dashboard's theme.
+      { name: "theme-color", content: "#00684A" },
+      // Routes override this: the landing page opts INTO indexing, everything
+      // else (dashboard, password reset) stays out of search results.
+      { name: "robots", content: "noindex, nofollow" },
     ],
+    links: [{ rel: "icon", href: "/favicon.svg", type: "image/svg+xml" }],
   }),
   component: RootComponent,
 });

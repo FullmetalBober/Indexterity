@@ -8,6 +8,8 @@ export const Route = createFileRoute("/reset-password")({
   validateSearch: (search: Record<string, unknown>): { token: string } => ({
     token: typeof search.token === "string" ? search.token : "",
   }),
+  // Inherits the root's noindex — a reset link must never reach an index.
+  head: () => ({ meta: [{ title: "Reset your password — Indexterity" }] }),
   component: ResetPasswordPage,
 });
 

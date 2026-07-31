@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Indexterity">
+  <rect width="32" height="32" rx="7" fill="#00684A"/>
+  <!-- three index bars, the shortest one hidden (dimmed) before its drop -->
+  <rect x="7" y="8" width="18" height="4" rx="2" fill="#ffffff"/>
+  <rect x="7" y="14" width="12" height="4" rx="2" fill="#ffffff" opacity="0.75"/>
+  <rect x="7" y="20" width="7" height="4" rx="2" fill="#ffffff" opacity="0.4"/>
+</svg>

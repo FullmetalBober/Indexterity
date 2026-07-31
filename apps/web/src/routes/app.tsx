@@ -473,6 +473,8 @@ export const Route = createFileRoute("/app")({
     typeof search.cluster === "string" ? { cluster: search.cluster } : {},
   loaderDeps: ({ search }) => ({ cluster: search.cluster ?? null }),
   loader: ({ deps }) => loadDashboard({ data: deps.cluster }),
+  // Inherits the root's noindex — the dashboard is behind auth.
+  head: () => ({ meta: [{ title: "Dashboard — Indexterity" }] }),
   component: Home,
 });
 

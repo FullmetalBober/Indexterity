@@ -1,0 +1,6 @@
+# Indexterity — only the marketing landing page is public.
+User-agent: *
+Allow: /$
+Disallow: /app
+Disallow: /reset-password
+Disallow: /api/

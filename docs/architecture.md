@@ -549,6 +549,24 @@ Redis + BullMQ only if scale demands it.
 - **History / audit** — executed actions with rollback controls.
 - **Settings** — connection, policies, maintenance windows, demo toggle.
 
+### 14.1 Landing page and SEO
+
+`/` is the only indexable page: static (no loader, no api calls), so it renders
+even when the control plane is down, and it carries the full meta set —
+title/description, canonical, Open Graph and Twitter card, plus
+`SoftwareApplication` and `FAQPage` JSON-LD emitted through the router's head
+`scripts` (entries are spread as element props: `{type, children}`, not
+`{attrs}`). The root route defaults to `noindex, nofollow` and the landing opts
+back in, so the dashboard and the password-reset page can never be indexed —
+new private routes inherit the safe default automatically. Canonical and
+`og:url` come from `WEB_ORIGIN` at runtime (`VITE_WEB_ORIGIN` at build time),
+so one image serves any domain. `robots.txt`, the OG card and the favicon are
+static assets under `apps/web/public/`.
+
+No `sitemap.xml`: with a single public URL it adds nothing a crawler cannot
+find from `/`, and a static one cannot know the deployment's host. Add one (or
+submit `/` directly) if the marketing site ever grows more pages.
+
 ---
 
 ## 15. Deployment
