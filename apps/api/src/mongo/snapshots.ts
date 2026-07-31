@@ -33,6 +33,7 @@ export function serializeSpec(spec: IndexSpec): Record<string, unknown> {
     unique: spec.unique,
     ttl: spec.ttl,
     partial: spec.partial,
+    partialFilter: spec.partialFilter,
     sparse: spec.sparse,
     hidden: spec.hidden,
     isShardKey: spec.isShardKey,

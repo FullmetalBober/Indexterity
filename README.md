@@ -247,9 +247,6 @@ What is actually open is correctness, not features:
   `targetSpec.retire` is written and never read; UPDATE and MERGE rely on the
   next classify pass finding the old index redundant, which cannot happen when
   the replacement is partial.
-- **MERGE across partials** needs the filter expression, which is not stored —
-  `IndexSpec.partial` is a boolean, so two partial indexes are indistinguishable
-  whatever they filter on.
 - **Hinted indexes.** Hiding one breaks its queries rather than slowing them,
   and `$queryStats` does not record hints, so we cannot see which are hinted.
 

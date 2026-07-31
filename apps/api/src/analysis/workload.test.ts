@@ -13,6 +13,7 @@ function idx(name: string, fields: string[]): IndexSpec {
     unique: false,
     ttl: false,
     partial: false,
+    partialFilter: null,
     sparse: false,
     hidden: false,
     isShardKey: false,
@@ -168,5 +169,95 @@ describe("recommendCreates (consolidation)", () => {
     // The partial candidate indexes {b} only; the {b, at} want must survive.
     const out = recommendCreates([partialShape, shape(["b"], [atDesc], [], 2)], [], options);
     expect(out).toHaveLength(2);
+  });
+});
+
+describe("recommendCreates (partial-aware UPDATE and MERGE)", () => {
+  const partialIdx = (
+    name: string,
+    fields: string[],
+    filter: Record<string, unknown>,
+  ): IndexSpec => ({
+    ...idx(name, fields),
+    partial: true,
+    partialFilter: filter,
+  });
+  const activeShape = (equality: string[], count = 4): QueryShape => ({
+    equality,
+    sort: [],
+    range: [],
+    collscan: true,
+    count,
+    constants: { status: "active" },
+  });
+
+  it("extends a partial index whose filter matches the want", () => {
+    const out = recommendCreates(
+      [activeShape(["status", "b", "c"])],
+      [partialIdx("b_partial", ["b"], { status: "active" })],
+      options,
+    );
+    expect(out[0]?.type).toBe("UPDATE");
+    expect(out[0]?.retireIndexes).toEqual(["b_partial"]);
+    expect(out[0]?.partialFilter).toEqual({ status: "active" });
+  });
+
+  it("merges two partial singles that share the want's filter", () => {
+    const out = recommendCreates(
+      [activeShape(["status", "a", "b", "c"])],
+      [
+        partialIdx("b_partial", ["b"], { status: "active" }),
+        partialIdx("c_partial", ["c"], { status: "active" }),
+      ],
+      options,
+    );
+    expect(out[0]?.type).toBe("MERGE");
+    expect([...(out[0]?.retireIndexes ?? [])].sort()).toEqual(["b_partial", "c_partial"]);
+    expect(out[0]?.partialFilter).toEqual({ status: "active" });
+  });
+
+  it("ignores key order inside the filter expression", () => {
+    const shape: QueryShape = {
+      equality: ["status", "region", "b", "c"],
+      sort: [],
+      range: [],
+      collscan: true,
+      count: 4,
+      constants: { status: "active", region: "eu" },
+    };
+    const out = recommendCreates(
+      [shape],
+      [partialIdx("b_partial", ["b"], { region: "eu", status: "active" })],
+      options,
+    );
+    expect(out[0]?.type).toBe("UPDATE");
+  });
+
+  it("will not fold a DIFFERENT filter, or a full index, into a partial want", () => {
+    const other = recommendCreates(
+      [activeShape(["status", "b", "c"])],
+      [partialIdx("b_partial", ["b"], { status: "archived" })],
+      options,
+    );
+    expect(other[0]?.type).toBe("CREATE");
+    expect(other[0]?.retireIndexes).toEqual([]);
+
+    const full = recommendCreates(
+      [activeShape(["status", "b", "c"])],
+      [idx("b_1", ["b"])],
+      options,
+    );
+    expect(full[0]?.type).toBe("CREATE");
+    expect(full[0]?.retireIndexes).toEqual([]);
+  });
+
+  it("will not fold a partial index into a FULL want either", () => {
+    const out = recommendCreates(
+      [shape(["b", "c"], [], [], 4)],
+      [partialIdx("b_partial", ["b"], { status: "active" })],
+      options,
+    );
+    expect(out[0]?.type).toBe("CREATE");
+    expect(out[0]?.retireIndexes).toEqual([]);
   });
 });

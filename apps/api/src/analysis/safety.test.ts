@@ -9,6 +9,7 @@ function spec(overrides: Partial<IndexSpec> = {}): IndexSpec {
     unique: false,
     ttl: false,
     partial: false,
+    partialFilter: null,
     sparse: false,
     hidden: false,
     isShardKey: false,
@@ -35,7 +36,7 @@ describe("isNeverDrop", () => {
   // But a constraint is a constraint whatever else the index is — dropping one
   // permits duplicates, which no latency gate sees and recreating cannot undo.
   it("still protects a unique partial or sparse index", () => {
-    expect(isNeverDrop(spec({ partial: true, unique: true }))).toBe(true);
+    expect(isNeverDrop(spec({ partial: true, partialFilter: null, unique: true }))).toBe(true);
     expect(isNeverDrop(spec({ sparse: true, unique: true }))).toBe(true);
   });
 });

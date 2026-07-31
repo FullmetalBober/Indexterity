@@ -91,6 +91,26 @@ function isDirectedPrefix(a: readonly SortKey[], b: readonly SortKey[]): boolean
   return a.every((key, i) => b[i]?.field === key.field && b[i]?.direction === key.direction);
 }
 
+// Do two indexes cover the same documents? Both unfiltered, or both filtered on
+// exactly the same thing. Key order in the expression is irrelevant, so compare
+// sorted entries rather than the objects.
+//
+// Deliberately exact: `{status:"active"}` and `{status:{$in:["active"]}}` select
+// the same documents but are not recognised as equal here. Deciding that one
+// filter implies another is predicate implication, which is a real research
+// problem — exact matches are the subset that is provably safe.
+function sameFilter(
+  a: Readonly<Record<string, unknown>> | null | undefined,
+  b: Readonly<Record<string, unknown>> | null | undefined,
+): boolean {
+  const left = a ?? null;
+  const right = b ?? null;
+  if (left === null || right === null) return left === right;
+  const canonical = (filter: Readonly<Record<string, unknown>>): string =>
+    JSON.stringify(Object.entries(filter).sort(([x], [y]) => x.localeCompare(y)));
+  return canonical(left) === canonical(right);
+}
+
 interface Want {
   readonly shape: QueryShape;
   readonly wantedKeys: SortKey[];
@@ -186,23 +206,22 @@ export function recommendCreates(
       (want.absorbedShapes > 0
         ? ` (also serves ${want.absorbedShapes} narrower shape${want.absorbedShapes === 1 ? "" : "s"})`
         : "");
-    // A want with a filter can only become a partial index, and only the CREATE
-    // branch carries the filter through. Extending or merging a FULL index into
-    // it would narrow that index to a subset of its documents — every query
-    // outside the filter would lose it — and the existing index may well be
-    // serving exactly those. So a narrowing is proposed as a new index beside
-    // the old one, never as a replacement of it.
-    const extendable =
-      partialFilter === undefined
-        ? existing.find((idx) => !isNeverDrop(idx) && isPrefix(fieldsOf(idx), wanted))
-        : undefined;
-    const singles =
-      partialFilter === undefined
-        ? existing.filter(
-            (idx) =>
-              !isNeverDrop(idx) && idx.keys.length === 1 && wanted.includes(fieldsOf(idx)[0] ?? ""),
-          )
-        : [];
+    // Only indexes covering the SAME documents may be extended or merged into
+    // this want. For a full want that means full indexes: narrowing an existing
+    // index to a filtered subset would strand every query outside the filter,
+    // and the index may well be serving exactly those. For a partial want it
+    // means partial indexes with an identical filter — same keys and same
+    // documents, so folding them together loses nothing.
+    const compatible = (idx: IndexSpec): boolean =>
+      !isNeverDrop(idx) && sameFilter(idx.partialFilter, partialFilter);
+    const extendable = existing.find((idx) => compatible(idx) && isPrefix(fieldsOf(idx), wanted));
+    const singles = existing.filter(
+      (idx) => compatible(idx) && idx.keys.length === 1 && wanted.includes(fieldsOf(idx)[0] ?? ""),
+    );
+
+    // The replacement keeps the want's filter — the retired indexes carry the
+    // same one, so the documents covered do not change.
+    const keepFilter = partialFilter === undefined ? {} : { partialFilter };
 
     if (extendable !== undefined) {
       candidates.push({
@@ -211,6 +230,7 @@ export function recommendCreates(
         retireIndexes: [extendable.name],
         rationale: `Extend ${extendable.name} to {${describe(wantedKeys)}} — ${scan}.`,
         count,
+        ...keepFilter,
       });
     } else if (singles.length >= 2) {
       candidates.push({
@@ -219,6 +239,7 @@ export function recommendCreates(
         retireIndexes: singles.map((idx) => idx.name),
         rationale: `Replace ${singles.map((idx) => idx.name).join(" + ")} with a compound index on {${describe(wantedKeys)}} — ${scan}.`,
         count,
+        ...keepFilter,
       });
     } else {
       const partialNote =

@@ -14,6 +14,11 @@ export interface IndexSpec {
   readonly unique: boolean;
   readonly ttl: boolean;
   readonly partial: boolean;
+  // The actual partialFilterExpression, not just whether there is one. Two
+  // partial indexes are only interchangeable if they filter on the same thing,
+  // and a boolean cannot say that. Null for a full index, and for specs
+  // persisted before this was captured.
+  readonly partialFilter: Readonly<Record<string, unknown>> | null;
   readonly sparse: boolean;
   readonly hidden: boolean;
   readonly isShardKey: boolean;

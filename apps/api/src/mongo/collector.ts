@@ -301,6 +301,7 @@ function toIndexSpec(desc: z.infer<typeof indexDescription>): IndexSpec {
     unique: desc.unique ?? false,
     ttl: desc.expireAfterSeconds !== undefined,
     partial: desc.partialFilterExpression !== undefined,
+    partialFilter: desc.partialFilterExpression ?? null,
     sparse: desc.sparse ?? false,
     hidden: desc.hidden ?? false,
     isShardKey: false,

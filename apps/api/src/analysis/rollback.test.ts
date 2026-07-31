@@ -9,6 +9,7 @@ function spec(keys: IndexKey[]): IndexSpec {
     unique: false,
     ttl: false,
     partial: false,
+    partialFilter: null,
     sparse: false,
     hidden: false,
     isShardKey: false,

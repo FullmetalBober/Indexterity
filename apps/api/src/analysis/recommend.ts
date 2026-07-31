@@ -20,6 +20,7 @@ const storedSpecSchema = z.object({
   unique: z.boolean(),
   ttl: z.boolean(),
   partial: z.boolean(),
+  partialFilter: z.record(z.string(), z.unknown()).nullable().optional(),
   sparse: z.boolean(),
   hidden: z.boolean(),
   isShardKey: z.boolean(),
@@ -30,7 +31,11 @@ const storedSpecSchema = z.object({
 // Rehydrate an IndexSpec from a persisted snapshot's `spec` jsonb (no `as`).
 export function parseStoredSpec(value: unknown): IndexSpec {
   const parsed = storedSpecSchema.parse(value);
-  return { ...parsed, collation: parsed.collation ?? null };
+  return {
+    ...parsed,
+    collation: parsed.collation ?? null,
+    partialFilter: parsed.partialFilter ?? null,
+  };
 }
 
 export interface IndexInput {
