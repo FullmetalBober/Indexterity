@@ -50,6 +50,36 @@ export const cluster = z.object({
 });
 export type Cluster = z.infer<typeof cluster>;
 
+// One privilege the engine needs and whether the credentials have it.
+// CORE = analysis impossible without it; APPLY = analysis-only without it;
+// WORKLOAD = an optional signal source.
+export const privilegeTier = z.enum(["CORE", "APPLY", "WORKLOAD"]);
+export type PrivilegeTier = z.infer<typeof privilegeTier>;
+
+export const privilegeCheck = z.object({
+  key: z.string(),
+  label: z.string(),
+  enables: z.string(),
+  tier: privilegeTier,
+  granted: z.boolean(),
+});
+export type PrivilegeCheck = z.infer<typeof privilegeCheck>;
+
+// What a pasted connection string can actually do — computed before anything
+// is stored, so onboarding can name what is missing or offer to provision.
+export const connectionDiagnosis = z.object({
+  reachable: z.boolean(),
+  message: z.string().nullable(),
+  username: z.string().nullable(),
+  authEnabled: z.boolean(),
+  canProvision: z.boolean(),
+  ready: z.boolean(),
+  canApply: z.boolean(),
+  privileges: z.array(privilegeCheck),
+  missing: z.array(z.string()),
+});
+export type ConnectionDiagnosis = z.infer<typeof connectionDiagnosis>;
+
 // Returned once at provisioning — the scoped connection string is also stored
 // sealed, but the admin string it was derived from is never persisted.
 export const provisionedCluster = z.object({

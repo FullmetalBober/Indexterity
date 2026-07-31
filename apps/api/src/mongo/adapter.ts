@@ -2,6 +2,7 @@ import type { EngineAdapter, EngineSession, IndexCollector, IndexExecutor } from
 import { MongoIndexCollector } from "./collector";
 import { isMongoConnString } from "./conn-string";
 import { MongoConnection } from "./connection";
+import { diagnoseConnection } from "./diagnose";
 import { MongoIndexExecutor } from "./executor";
 
 const SYSTEM_DATABASES = new Set(["admin", "local", "config"]);
@@ -41,4 +42,5 @@ export const mongoAdapter: EngineAdapter = {
     await conn.connect();
     return new MongoEngineSession(conn);
   },
+  diagnose: diagnoseConnection,
 };

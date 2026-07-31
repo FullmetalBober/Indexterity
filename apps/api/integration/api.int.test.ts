@@ -422,6 +422,45 @@ describe("org switcher", () => {
   });
 });
 
+describe("connection preflight", () => {
+  it("reports what a connection string can do without storing anything", async () => {
+    const res = await api("/clusters/check-connection", owner, {
+      method: "POST",
+      body: JSON.stringify({ connectionString: MONGO_URL }),
+    });
+    expect(res.status).toBe(200);
+    const body = asRecord(await res.json());
+    expect(body.reachable).toBe(true);
+    // The integration mongod runs without auth: everything is permitted, and
+    // the diagnosis says so rather than pretending a scoped user would help.
+    expect(body.authEnabled).toBe(false);
+    expect(body.ready).toBe(true);
+    expect(body.canProvision).toBe(false);
+    expect(Array.isArray(body.privileges) && body.privileges.length > 0).toBe(true);
+
+    const before = await db.select().from(clusters);
+    expect(before.every((row) => row.name !== "check-connection")).toBe(true);
+  });
+
+  it("explains an unreachable target instead of storing a broken cluster", async () => {
+    const res = await api("/clusters/check-connection", owner, {
+      method: "POST",
+      body: JSON.stringify({ connectionString: "mongodb://127.0.0.1:59998" }),
+    });
+    expect(res.status).toBe(200);
+    const body = asRecord(await res.json());
+    expect(body.reachable).toBe(false);
+    expect(asString(body.message)).toContain("unreachable");
+
+    // And connecting with it fails loudly rather than silently.
+    const create = await api("/clusters", owner, {
+      method: "POST",
+      body: JSON.stringify({ name: "dead", connectionString: "mongodb://127.0.0.1:59998" }),
+    });
+    expect(create.status).toBe(502);
+  });
+});
+
 describe("least-privilege provisioning", () => {
   it("creates a scoped user from an admin string and stores only the scoped string", async () => {
     const res = await api("/clusters/provision", owner, {

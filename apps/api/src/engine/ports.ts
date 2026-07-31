@@ -83,6 +83,35 @@ export interface IndexExecutor {
   ): Promise<void>;
 }
 
+// One privilege the engine needs, and whether these credentials have it.
+// CORE = analysis is impossible without it; APPLY = the cluster can still be
+// analyzed but nothing can be changed; WORKLOAD = an optional signal source.
+export type PrivilegeTier = "CORE" | "APPLY" | "WORKLOAD";
+
+export interface PrivilegeCheck {
+  readonly key: string;
+  readonly label: string;
+  readonly enables: string;
+  readonly tier: PrivilegeTier;
+  readonly granted: boolean;
+}
+
+// What a connection string can actually do — computed before anything is
+// stored, so onboarding can say exactly what is missing (or offer to create a
+// scoped user when the credentials are privileged enough).
+export interface ConnectionDiagnosis {
+  readonly reachable: boolean;
+  // Failure reason, or an advisory note on an otherwise usable connection.
+  readonly message: string | null;
+  readonly username: string | null;
+  readonly authEnabled: boolean;
+  readonly canProvision: boolean;
+  readonly ready: boolean;
+  readonly canApply: boolean;
+  readonly privileges: readonly PrivilegeCheck[];
+  readonly missing: readonly string[];
+}
+
 // Where engines genuinely differ — checked at the feature gates, not deep in
 // the pipeline.
 export interface EngineCapabilities {
@@ -111,4 +140,6 @@ export interface EngineAdapter {
   // Shape-validates a connection string BEFORE any dial (the SSRF guard).
   isConnString(value: string): boolean;
   open(connectionString: string): Promise<EngineSession>;
+  // Report what these credentials may do, without writing anything.
+  diagnose(connectionString: string): Promise<ConnectionDiagnosis>;
 }

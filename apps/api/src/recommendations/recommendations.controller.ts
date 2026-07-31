@@ -31,6 +31,7 @@ import {
   sql,
 } from "../db";
 import { DatabaseService } from "../db/database.service";
+import type { ConnectionDiagnosis as EngineConnectionDiagnosis } from "../engine/ports";
 import { adapterFor, engineSupported } from "../engine/registry";
 import { currentKeyVersion, masterKeyBytesFor } from "../env";
 import { classifyCluster } from "../jobs/classify";
@@ -60,6 +61,16 @@ function mapClusterError(error: unknown): never {
     throw new ORPCError("NOT_FOUND", { message: "cluster not found" });
   }
   throw err;
+}
+
+// The domain type carries readonly arrays; the contract's output schema wants
+// plain ones. Copy at the boundary rather than loosening the domain type.
+function toDiagnosis(diagnosis: EngineConnectionDiagnosis) {
+  return {
+    ...diagnosis,
+    privileges: [...diagnosis.privileges],
+    missing: [...diagnosis.missing],
+  };
 }
 
 function toCluster(row: typeof clusters.$inferSelect): Cluster {
@@ -408,20 +419,59 @@ export class RecommendationsController {
     return row;
   }
 
+  // Shape-check a connection string for an engine, or fail with guidance.
+  private assertConnString(
+    engine: typeof clusters.$inferSelect.engine,
+    value: string,
+    errors: { BAD_REQUEST: (options: { message: string }) => Error },
+  ): void {
+    if (!engineSupported(engine)) {
+      throw errors.BAD_REQUEST({
+        message: `${engine} support is planned — only MONGODB clusters can connect today`,
+      });
+    }
+    if (!adapterFor(engine).isConnString(value)) {
+      throw errors.BAD_REQUEST({
+        message: "connection string must be mongodb:// or mongodb+srv://",
+      });
+    }
+  }
+
+  // Onboarding preflight: what can these credentials actually do? Nothing is
+  // stored and nothing is written on the customer cluster — the dashboard uses
+  // this to name missing privileges, or to offer creating a scoped user when
+  // the credentials are privileged enough.
+  @Implement(contract.checkConnection)
+  checkConnection(@Req() req: FastifyRequest) {
+    return implement(contract.checkConnection).handler(async ({ input, errors }) => {
+      await this.requireOwner(req);
+      const engine = input.engine ?? "MONGODB";
+      this.assertConnString(engine, input.connectionString, errors);
+      return toDiagnosis(await adapterFor(engine).diagnose(input.connectionString));
+    });
+  }
+
   @Implement(contract.createCluster)
   createCluster(@Req() req: FastifyRequest) {
     return implement(contract.createCluster).handler(async ({ input, errors }) => {
       const orgId = await this.requireOwner(req);
       const engine = input.engine ?? "MONGODB";
-      if (!engineSupported(engine)) {
-        throw errors.BAD_REQUEST({
-          message: `${engine} support is planned — only MONGODB clusters can connect today`,
+      this.assertConnString(engine, input.connectionString, errors);
+      // Verify before storing: an unusable string must fail at connect time
+      // with the reason, not silently collect nothing for a day.
+      const diagnosis = await adapterFor(engine).diagnose(input.connectionString);
+      if (!diagnosis.reachable) {
+        throw new ORPCError("CLUSTER_UNREACHABLE", {
+          status: 502,
+          message: diagnosis.message ?? "cluster unreachable",
         });
       }
-      // The engine's adapter owns connection-string validation (SSRF guard).
-      if (!adapterFor(engine).isConnString(input.connectionString)) {
+      if (!diagnosis.ready) {
         throw errors.BAD_REQUEST({
-          message: "connection string must be mongodb:// or mongodb+srv://",
+          message:
+            `these credentials are missing: ${diagnosis.missing.join(", ")}. ` +
+            "Grant them, or connect with credentials that can create users and let " +
+            "Indexterity provision a scoped one.",
         });
       }
       return toCluster(

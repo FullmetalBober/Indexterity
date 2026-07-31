@@ -9,6 +9,7 @@ import {
   clusterLatencySeries,
   clusterPolicy,
   clusterRoi,
+  connectionDiagnosis,
   createdInvite,
   offboardResult,
   orgInfo,
@@ -98,6 +99,17 @@ export const contract = {
       }),
     )
     .output(cluster),
+
+  checkConnection: oc
+    .route({
+      method: "POST",
+      path: "/clusters/check-connection",
+      summary:
+        "Report what a connection string may do (owner only) — nothing is stored or written; the onboarding preflight",
+    })
+    .errors({ BAD_REQUEST: {} })
+    .input(z.object({ connectionString: z.string().min(1), engine: clusterEngine.optional() }))
+    .output(connectionDiagnosis),
 
   provisionCluster: oc
     .route({

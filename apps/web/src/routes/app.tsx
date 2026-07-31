@@ -1,4 +1,5 @@
 import { ORPCError } from "@orpc/client";
+import type { ConnectionDiagnosis, PrivilegeCheck } from "@repo/contracts";
 import { createFileRoute, useNavigate, useRouter } from "@tanstack/react-router";
 import { createServerFn } from "@tanstack/react-start";
 import { useState } from "react";
@@ -268,6 +269,30 @@ const rotateConnection = createServerFn({ method: "POST" })
           ? error.message
           : "rotation failed";
       return { ok: false, message };
+    }
+  });
+
+// Onboarding preflight: nothing is stored, nothing is written on the cluster.
+const checkConnection = createServerFn({ method: "POST" })
+  .validator((connectionString: unknown): string => {
+    if (typeof connectionString !== "string" || connectionString.length === 0) {
+      throw new Error("connection string required");
+    }
+    return connectionString;
+  })
+  .handler(async ({ data }) => {
+    try {
+      return {
+        ok: true as const,
+        diagnosis: await serverApi().checkConnection({
+          connectionString: data,
+        }),
+      };
+    } catch (error) {
+      return {
+        ok: false as const,
+        message: error instanceof ORPCError ? error.message : "could not check the connection",
+      };
     }
   });
 
@@ -1143,80 +1168,101 @@ function PolicySection({ policy, onSaved }: { policy: PolicyView; onSaved: () =>
   );
 }
 
-type ConnectMode = "scoped" | "admin";
+function PrivilegeList({ privileges }: { privileges: readonly PrivilegeCheck[] }) {
+  return (
+    <ul className="mt-2 space-y-0.5 text-xs">
+      {privileges.map((privilege) => (
+        <li key={privilege.key} className="flex gap-2">
+          <span className={privilege.granted ? "text-primary" : "text-red-600"}>
+            {privilege.granted ? "✓" : "✗"}
+          </span>
+          <span className={privilege.granted ? "" : "font-medium"}>
+            {privilege.label}
+            {privilege.granted ? null : (
+              <span className="font-normal text-muted-foreground"> — {privilege.enables}</span>
+            )}
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
+}
 
 function ConnectClusterForm() {
   const router = useRouter();
   const navigate = useNavigate();
-  const [mode, setMode] = useState<ConnectMode>("scoped");
   const [name, setName] = useState("");
   const [connString, setConnString] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [diagnosis, setDiagnosis] = useState<ConnectionDiagnosis | null>(null);
   const [provisioned, setProvisioned] = useState<{
     username: string;
     connectionString: string;
   } | null>(null);
 
-  async function submit() {
+  // Preflight: ask the api what these credentials may do before storing them.
+  async function onCheck() {
     setBusy(true);
     setError(null);
+    setDiagnosis(null);
     setProvisioned(null);
-    const result =
-      mode === "admin"
-        ? await provisionCluster({ data: { name, adminConnectionString: connString } })
-        : await connectCluster({ data: { name, connectionString: connString } });
+    const result = await checkConnection({ data: connString }).catch(() => ({
+      ok: false as const,
+      message: "could not check the connection",
+    }));
     setBusy(false);
+    if (result.ok) setDiagnosis(result.diagnosis);
+    else setError(result.message);
+  }
+
+  async function finish(result: { ok: boolean; message: string | null; id: string | null }) {
     if (!result.ok) {
       setError(result.message);
       return;
     }
-    if ("username" in result && result.username !== null && result.connectionString !== null) {
-      setProvisioned({ username: result.username, connectionString: result.connectionString });
-    }
     setName("");
     setConnString("");
+    setDiagnosis(null);
     if (result.id !== null) await navigate({ to: "/app", search: { cluster: result.id } });
     await router.invalidate();
   }
 
-  const modeTab = (value: ConnectMode, label: string) => (
-    <button
-      type="button"
-      onClick={() => {
-        setMode(value);
-        setError(null);
-      }}
-      className={
-        mode === value
-          ? "rounded-md bg-primary px-3 py-1 text-primary-foreground text-xs"
-          : "rounded-md border px-3 py-1 text-muted-foreground text-xs"
-      }
-    >
-      {label}
-    </button>
-  );
+  async function onConnectAsIs() {
+    setBusy(true);
+    setError(null);
+    const result = await connectCluster({ data: { name, connectionString: connString } });
+    setBusy(false);
+    await finish(result);
+  }
+
+  // Consent path: the admin string is used once to create the scoped user and
+  // is never stored.
+  async function onProvision() {
+    setBusy(true);
+    setError(null);
+    const result = await provisionCluster({
+      data: { name, adminConnectionString: connString },
+    });
+    setBusy(false);
+    if (result.ok && result.username !== null && result.connectionString !== null) {
+      setProvisioned({ username: result.username, connectionString: result.connectionString });
+    }
+    await finish(result);
+  }
 
   return (
     <section className="mt-8">
       <h2 className="font-semibold text-lg">Connect a cluster</h2>
       <p className="text-muted-foreground text-sm">
-        Starts in read-only mode — the engine analyzes but never writes until you go live.
-      </p>
-      <div className="mt-2 flex gap-1">
-        {modeTab("scoped", "Paste a scoped string")}
-        {modeTab("admin", "Admin string — provision for me")}
-      </div>
-      <p className="mt-1 text-muted-foreground text-xs">
-        {mode === "admin"
-          ? "The admin string is used once to create a least-privilege user on your cluster (it cannot read documents), then discarded — only the scoped user's string is stored."
-          : "Connect with a user you manage. The exact privilege list the engine needs is in the docs."}
+        Paste any connection string — Indexterity checks what it can do before storing anything.
+        Clusters start in read-only mode.
       </p>
       <form
         className="mt-2 flex flex-wrap gap-2"
         onSubmit={(event) => {
           event.preventDefault();
-          void submit();
+          void onCheck();
         }}
       >
         <input
@@ -1227,23 +1273,102 @@ function ConnectClusterForm() {
         />
         <input
           className="min-w-72 flex-1 rounded-md border px-3 py-1.5 font-mono text-sm"
-          placeholder={
-            mode === "admin"
-              ? "mongodb://admin:pass@host:27017 (used once, never stored)"
-              : "mongodb://user:pass@host:27017"
-          }
+          placeholder="mongodb://user:pass@host:27017"
           value={connString}
-          onChange={(event) => setConnString(event.target.value)}
+          onChange={(event) => {
+            setConnString(event.target.value);
+            setDiagnosis(null);
+          }}
         />
         <button
           type="submit"
           disabled={busy || name.length === 0 || connString.length === 0}
           className="rounded-md bg-primary px-3 py-1.5 text-primary-foreground text-sm disabled:opacity-50"
         >
-          {mode === "admin" ? (busy ? "Provisioning…" : "Provision + connect") : "Connect"}
+          {busy ? "Checking…" : "Check access"}
         </button>
       </form>
       {error !== null ? <p className="mt-2 text-red-600 text-sm">{error}</p> : null}
+
+      {diagnosis !== null && !diagnosis.reachable ? (
+        <div className="mt-3 rounded-md border border-red-300 p-3 text-sm">
+          <p className="font-medium text-red-600">Cannot use this connection string</p>
+          <p className="mt-1 text-muted-foreground">{diagnosis.message}</p>
+        </div>
+      ) : null}
+
+      {diagnosis?.reachable === true ? (
+        <div className="mt-3 rounded-md border p-3 text-sm">
+          <p className="font-medium">
+            Connected as{" "}
+            <code>{diagnosis.username ?? (diagnosis.authEnabled ? "unknown" : "no auth")}</code>
+          </p>
+          {diagnosis.message !== null ? (
+            <p className="mt-1 text-muted-foreground text-xs">{diagnosis.message}</p>
+          ) : null}
+          <PrivilegeList privileges={diagnosis.privileges} />
+
+          {diagnosis.missing.length > 0 ? (
+            <p className="mt-2 text-red-600 text-xs">
+              Missing: {diagnosis.missing.join(", ")}.
+              {diagnosis.ready
+                ? " The cluster can still be analyzed, but no change can be applied."
+                : " Analysis is not possible without these."}
+            </p>
+          ) : null}
+
+          {diagnosis.canProvision ? (
+            <div className="mt-3 rounded-md bg-muted/40 p-3">
+              <p className="font-medium">
+                These credentials can create users — let Indexterity make its own?
+              </p>
+              <p className="mt-1 text-muted-foreground text-xs">
+                A dedicated user <code>idx_…</code> is created on your cluster with the{" "}
+                <code>indexterityEngine</code> role: exactly the privileges listed above and nothing
+                else — notably <strong>no read access to your documents</strong>. The admin string
+                you pasted is used once and never stored; only the new user's string is kept
+                (encrypted). Revoke it any time with <code>db.dropUser(…)</code>.
+              </p>
+              <div className="mt-2 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => void onProvision()}
+                  className="rounded-md bg-primary px-3 py-1.5 text-primary-foreground text-sm disabled:opacity-50"
+                >
+                  {busy ? "Creating…" : "Create a scoped user and connect"}
+                </button>
+                {diagnosis.ready ? (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void onConnectAsIs()}
+                    className="rounded-md border px-3 py-1.5 text-sm disabled:opacity-50"
+                  >
+                    Use these credentials as-is
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          ) : diagnosis.ready ? (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void onConnectAsIs()}
+              className="mt-3 rounded-md bg-primary px-3 py-1.5 text-primary-foreground text-sm disabled:opacity-50"
+            >
+              Connect
+            </button>
+          ) : (
+            <p className="mt-2 text-muted-foreground text-xs">
+              Grant the missing privileges to this user, or paste credentials that can create users
+              and Indexterity will provision a scoped one for you. The exact role is in{" "}
+              <code>docs/architecture.md</code> §10.1.
+            </p>
+          )}
+        </div>
+      ) : null}
+
       {provisioned !== null ? (
         <div className="mt-3 rounded-md border p-3 text-sm">
           <p className="font-medium">
