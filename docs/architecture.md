@@ -615,6 +615,25 @@ Redis + BullMQ only if scale demands it.
 - **History / audit** — executed actions with rollback controls.
 - **Settings** — connection, policies, maintenance windows, demo toggle.
 
+### 14.0 Components
+
+The UI is built from **shadcn/ui** components (`components.json`, new-york,
+generated with the CLI into `src/components/ui`). Anything interactive comes
+from there rather than raw elements: Button, Input, Label, Card, Select,
+Checkbox, Separator, Alert, AlertDialog, Tooltip, Badge, Table, plus **sonner**
+for toasts. `~` is aliased to `src` in both tsconfig and Vite so future
+`shadcn add` output drops in unmodified.
+
+Two deliberate deviations. The generated sonner wrapper is rewritten to drop
+`next-themes` and its two `as` casts (the repo forbids assertions), and card
+headings stay real `<h3>`/`<dt>` elements rather than `CardTitle` on the
+landing page, because its heading outline is load-bearing for SEO.
+
+Every destructive or cluster-affecting action goes through `ConfirmButton`
+(AlertDialog) instead of `window.confirm`, so the dialog can show the exact
+consequence — the revoke command for a disconnect, what a drop will observe
+first, who loses access.
+
 ### 14.1 Landing page and SEO
 
 `/` is the only indexable page: static (no loader, no api calls), so it renders

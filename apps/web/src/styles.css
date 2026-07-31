@@ -1,36 +1,57 @@
 @import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
   --color-muted: var(--muted);
   --color-muted-foreground: var(--muted-foreground);
   --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
   --color-primary: var(--primary);
   --color-primary-foreground: var(--primary-foreground);
   --color-secondary: var(--secondary);
   --color-secondary-foreground: var(--secondary-foreground);
   --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-foreground);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
 }
 
 /* MongoDB-family theme: forest green primary (#00684A, ~8:1 on white), evergreen
    ink, soft green-tinted neutrals. Chart series colors live in latency-chart.tsx
-   and are validated separately (dataviz palette gates). */
+   and are validated separately (dataviz palette gates). The input/ring/popover
+   tokens exist because the shadcn components reference them. */
 :root {
+  --radius: 0.625rem;
   --background: hsl(0 0% 100%);
   --foreground: hsl(174 93% 10%);
   --card: hsl(0 0% 100%);
+  --card-foreground: hsl(174 93% 10%);
+  --popover: hsl(0 0% 100%);
+  --popover-foreground: hsl(174 93% 10%);
   --muted: hsl(150 15% 95.5%);
   --muted-foreground: hsl(160 8% 40%);
   --border: hsl(150 12% 89%);
+  --input: hsl(150 12% 89%);
+  --ring: hsl(166 100% 20.4%);
   --primary: hsl(166 100% 20.4%);
   --primary-foreground: hsl(0 0% 98%);
   --secondary: hsl(150 15% 95.5%);
   --secondary-foreground: hsl(174 93% 10%);
   --destructive: hsl(0 72% 51%);
+  --destructive-foreground: hsl(0 0% 98%);
   --accent: hsl(151 100% 46%);
   --accent-foreground: hsl(174 93% 10%);
 }

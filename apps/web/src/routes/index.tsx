@@ -1,4 +1,6 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
+import { Button } from "~/components/ui/button";
+import { Card, CardContent, CardHeader } from "~/components/ui/card";
 import { jsonLd, seoTags, siteOrigin } from "../lib/seo";
 import { REQUEST_ACCESS_HREF } from "../lib/site";
 
@@ -142,12 +144,9 @@ function Landing() {
       <header className="mx-auto flex max-w-5xl items-center justify-between p-6">
         <span className="font-semibold text-lg">Indexterity</span>
         <nav aria-label="Main">
-          <Link
-            to="/app"
-            className="rounded-md bg-primary px-4 py-2 text-primary-foreground text-sm"
-          >
-            Sign in
-          </Link>
+          <Button asChild size="sm">
+            <Link to="/app">Sign in</Link>
+          </Button>
         </nav>
       </header>
 
@@ -163,15 +162,12 @@ function Landing() {
             Read-only until you say otherwise.
           </p>
           <div className="mt-8 flex items-center justify-center gap-3">
-            <a
-              href={REQUEST_ACCESS_HREF}
-              className="rounded-md bg-primary px-6 py-3 font-medium text-primary-foreground"
-            >
-              Request access
-            </a>
-            <a href="#how" className="rounded-md border px-6 py-3 font-medium text-sm">
-              How it works
-            </a>
+            <Button asChild size="lg">
+              <a href={REQUEST_ACCESS_HREF}>Request access</a>
+            </Button>
+            <Button asChild size="lg" variant="outline">
+              <a href="#how">How it works</a>
+            </Button>
           </div>
           <p className="mt-4 text-muted-foreground text-sm">
             Invite-only during early access.{" "}
@@ -192,10 +188,16 @@ function Landing() {
             </h2>
             <div className="mt-10 grid gap-6 md:grid-cols-3">
               {FEATURES.map((feature) => (
-                <article key={feature.title} className="rounded-lg border bg-background p-5">
-                  <h3 className="font-semibold">{feature.title}</h3>
-                  <p className="mt-2 text-muted-foreground text-sm">{feature.body}</p>
-                </article>
+                <Card key={feature.title}>
+                  <CardHeader>
+                    {/* A real h3: CardTitle renders a div, and the landing page
+                        depends on its h1 → h2 → h3 outline. */}
+                    <h3 className="font-semibold leading-none">{feature.title}</h3>
+                  </CardHeader>
+                  <CardContent className="text-muted-foreground text-sm">
+                    {feature.body}
+                  </CardContent>
+                </Card>
               ))}
             </div>
           </div>
@@ -219,12 +221,9 @@ function Landing() {
             ))}
           </ol>
           <div className="mt-12 text-center">
-            <a
-              href={REQUEST_ACCESS_HREF}
-              className="rounded-md bg-primary px-6 py-3 font-medium text-primary-foreground"
-            >
-              Request access
-            </a>
+            <Button asChild size="lg">
+              <a href={REQUEST_ACCESS_HREF}>Request access</a>
+            </Button>
             <p className="mt-3 text-muted-foreground text-sm">
               Clusters start read-only. Your documents are never read, and never touched.
             </p>
@@ -238,10 +237,10 @@ function Landing() {
             </h2>
             <dl className="mt-8 space-y-6">
               {FAQ.map((entry) => (
-                <div key={entry.question} className="rounded-lg border bg-background p-5">
+                <Card key={entry.question} className="p-5">
                   <dt className="font-semibold">{entry.question}</dt>
-                  <dd className="mt-2 text-muted-foreground text-sm">{entry.answer}</dd>
-                </div>
+                  <dd className="text-muted-foreground text-sm">{entry.answer}</dd>
+                </Card>
               ))}
             </dl>
           </div>

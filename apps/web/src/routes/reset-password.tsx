@@ -1,5 +1,10 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useState } from "react";
+import { Alert, AlertDescription } from "~/components/ui/alert";
+import { Button } from "~/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
+import { Input } from "~/components/ui/input";
+import { Label } from "~/components/ui/label";
 import { resetPassword } from "../lib/auth";
 
 // Landing page for the emailed reset link: better-auth's callback redirects
@@ -40,14 +45,18 @@ function ResetPasswordPage() {
   if (token === "") {
     return (
       <main className="mx-auto mt-24 max-w-sm p-8">
-        <h1 className="font-semibold text-2xl">Indexterity</h1>
-        <p className="mt-2 text-muted-foreground">
-          This page needs the reset link from your email. Request one from the{" "}
-          <Link to="/app" className="underline">
-            sign-in page
-          </Link>
-          .
-        </p>
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-2xl">Indexterity</CardTitle>
+            <CardDescription>
+              This page needs the reset link from your email. Request one from the{" "}
+              <Link to="/app" className="underline">
+                sign-in page
+              </Link>
+              .
+            </CardDescription>
+          </CardHeader>
+        </Card>
       </main>
     );
   }
@@ -55,51 +64,67 @@ function ResetPasswordPage() {
   if (done) {
     return (
       <main className="mx-auto mt-24 max-w-sm p-8">
-        <h1 className="font-semibold text-2xl">Password updated</h1>
-        <p className="mt-2 text-muted-foreground">
-          You can now{" "}
-          <Link to="/app" className="underline">
-            sign in with the new password
-          </Link>
-          .
-        </p>
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-2xl">Password updated</CardTitle>
+            <CardDescription>
+              You can now{" "}
+              <Link to="/app" className="underline">
+                sign in with the new password
+              </Link>
+              .
+            </CardDescription>
+          </CardHeader>
+        </Card>
       </main>
     );
   }
 
   return (
     <main className="mx-auto mt-24 max-w-sm p-8">
-      <h1 className="font-semibold text-2xl">Choose a new password</h1>
-      <form
-        className="mt-6 flex flex-col gap-3"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void submit();
-        }}
-      >
-        <input
-          className="rounded-md border px-3 py-2 text-sm"
-          type="password"
-          placeholder="New password"
-          value={password}
-          onChange={(event) => setPassword(event.target.value)}
-        />
-        <input
-          className="rounded-md border px-3 py-2 text-sm"
-          type="password"
-          placeholder="Repeat it"
-          value={confirm}
-          onChange={(event) => setConfirm(event.target.value)}
-        />
-        {error ? <p className="text-red-600 text-sm">{error}</p> : null}
-        <button
-          type="submit"
-          disabled={busy || password.length === 0}
-          className="rounded-md bg-primary px-3 py-2 text-primary-foreground text-sm disabled:opacity-50"
-        >
-          Set password
-        </button>
-      </form>
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-2xl">Choose a new password</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <form
+            className="flex flex-col gap-4"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void submit();
+            }}
+          >
+            <div className="grid gap-1.5">
+              <Label htmlFor="new-password">New password</Label>
+              <Input
+                id="new-password"
+                type="password"
+                autoComplete="new-password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <Label htmlFor="confirm-password">Repeat it</Label>
+              <Input
+                id="confirm-password"
+                type="password"
+                autoComplete="new-password"
+                value={confirm}
+                onChange={(event) => setConfirm(event.target.value)}
+              />
+            </div>
+            {error !== null ? (
+              <Alert variant="destructive">
+                <AlertDescription>{error}</AlertDescription>
+              </Alert>
+            ) : null}
+            <Button type="submit" disabled={busy || password.length === 0}>
+              Set password
+            </Button>
+          </form>
+        </CardContent>
+      </Card>
     </main>
   );
 }

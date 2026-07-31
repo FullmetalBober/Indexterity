@@ -1,6 +1,7 @@
 import { createRootRoute, HeadContent, Outlet, Scripts } from "@tanstack/react-router";
 import type { ReactNode } from "react";
-import { ToastProvider } from "../components/ui/toast";
+import { Toaster } from "~/components/ui/sonner";
+import { TooltipProvider } from "~/components/ui/tooltip";
 import "../styles.css";
 
 export const Route = createRootRoute({
@@ -23,9 +24,10 @@ export const Route = createRootRoute({
 function RootComponent() {
   return (
     <RootDocument>
-      <ToastProvider>
+      <TooltipProvider delayDuration={200}>
         <Outlet />
-      </ToastProvider>
+        <Toaster richColors closeButton />
+      </TooltipProvider>
     </RootDocument>
   );
 }

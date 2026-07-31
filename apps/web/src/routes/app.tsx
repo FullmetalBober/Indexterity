@@ -3,8 +3,23 @@ import type { ConnectionDiagnosis, PrivilegeCheck } from "@repo/contracts";
 import { createFileRoute, useNavigate, useRouter } from "@tanstack/react-router";
 import { createServerFn } from "@tanstack/react-start";
 import { useState } from "react";
-import { LineChart, SERIES_PALETTE } from "../components/latency-chart";
-import { Badge } from "../components/ui/badge";
+import { toast } from "sonner";
+import { ConfirmButton } from "~/components/confirm-button";
+import { Alert, AlertDescription, AlertTitle } from "~/components/ui/alert";
+import { Badge } from "~/components/ui/badge";
+import { Button } from "~/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
+import { Checkbox } from "~/components/ui/checkbox";
+import { Input } from "~/components/ui/input";
+import { Label } from "~/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "~/components/ui/select";
+import { Separator } from "~/components/ui/separator";
 import {
   Table,
   TableBody,
@@ -12,8 +27,9 @@ import {
   TableHead,
   TableHeader,
   TableRow,
-} from "../components/ui/table";
-import { useToast } from "../components/ui/toast";
+} from "~/components/ui/table";
+import { Tooltip, TooltipContent, TooltipTrigger } from "~/components/ui/tooltip";
+import { LineChart, SERIES_PALETTE } from "../components/latency-chart";
 import { serverApi } from "../lib/api";
 import { requestPasswordReset, signIn, signOut, signUp } from "../lib/auth";
 import { REQUEST_ACCESS_HREF } from "../lib/site";
@@ -509,23 +525,22 @@ function Home() {
   const data = Route.useLoaderData();
   const router = useRouter();
   const navigate = useNavigate();
-  const toast = useToast();
 
   if (!data.authed) {
     if (data.apiDown) {
       return (
         <main className="mx-auto mt-24 max-w-sm p-8">
-          <h1 className="font-semibold text-2xl">Indexterity</h1>
-          <p className="mt-2 text-muted-foreground">
-            The API is unreachable right now. Retry in a moment.
-          </p>
-          <button
-            type="button"
-            onClick={() => void router.invalidate()}
-            className="mt-4 rounded-md border px-3 py-1.5 text-sm"
-          >
-            Retry
-          </button>
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-2xl">Indexterity</CardTitle>
+              <CardDescription>The API is unreachable right now.</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <Button variant="outline" onClick={() => void router.invalidate()}>
+                Retry
+              </Button>
+            </CardContent>
+          </Card>
         </main>
       );
     }
@@ -567,15 +582,15 @@ function Home() {
 
   async function onApprove(id: string) {
     const result = await approveRecommendation({ data: id }).catch(() => ({ ok: false }));
-    if (result.ok) toast("Approved — enters the pipeline on the next tick");
-    else toast("Approve failed — are you an owner, and is the API up?", "error");
+    if (result.ok) toast.success("Approved — enters the pipeline on the next tick");
+    else toast.error("Approve failed — are you an owner, and is the API up?");
     await router.invalidate();
   }
 
   async function onUndo(id: string) {
     const result = await rollbackRecommendation({ data: id }).catch(() => ({ ok: false }));
-    if (result.ok) toast("Undo complete — the index was rebuilt");
-    else toast("Undo failed — the cluster may be unreachable or read-only", "error");
+    if (result.ok) toast.success("Undo complete — the index was rebuilt");
+    else toast.error("Undo failed — the cluster may be unreachable or read-only");
     await router.invalidate();
   }
 
@@ -586,8 +601,8 @@ function Home() {
 
   async function onSwitchOrg(orgId: string) {
     const result = await switchOrgFn({ data: orgId }).catch(() => ({ ok: false, name: null }));
-    if (result.ok) toast(`Switched to ${result.name ?? "org"}`);
-    else toast("Org switch failed", "error");
+    if (result.ok) toast.success(`Switched to ${result.name ?? "org"}`);
+    else toast.error("Org switch failed");
     // The selected cluster belongs to the previous org — reset the selection.
     await navigate({ to: "/app", search: {} });
     await router.invalidate();
@@ -625,66 +640,77 @@ function Home() {
         </div>
         <div className="flex items-center gap-2">
           {orgs.length > 1 ? (
-            <select
-              className="rounded-md border px-2 py-1 text-xs"
+            <Select
               value={orgs.find((entry) => entry.active)?.orgId ?? ""}
-              onChange={(event) => void onSwitchOrg(event.target.value)}
-              title="Switch organization"
+              onValueChange={(value) => void onSwitchOrg(value)}
             >
-              {orgs.map((entry) => (
-                <option key={entry.orgId} value={entry.orgId}>
-                  {entry.name} ({entry.role})
-                </option>
-              ))}
-            </select>
+              <SelectTrigger size="sm" className="w-[220px]" aria-label="Switch organization">
+                <SelectValue placeholder="Organization" />
+              </SelectTrigger>
+              <SelectContent>
+                {orgs.map((entry) => (
+                  <SelectItem key={entry.orgId} value={entry.orgId}>
+                    {entry.name} ({entry.role})
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           ) : null}
-          <button
-            type="button"
-            onClick={() => void onSignOut()}
-            className="rounded-md border px-2 py-1 text-muted-foreground text-xs"
-          >
+          <Button variant="outline" size="sm" onClick={() => void onSignOut()}>
             Sign out
-          </button>
+          </Button>
         </div>
       </div>
 
-      <div className="mt-4 grid grid-cols-2 gap-4">
-        <div className="rounded-lg border p-4">
-          <div className="text-muted-foreground text-sm">Proposed reclaimable</div>
-          <div className="font-semibold text-2xl">{(totalSaved / 1024).toFixed(0)} KB</div>
-          <div className="text-muted-foreground text-sm">{proposed.length} recommendations</div>
-        </div>
-        <div className="rounded-lg border p-4">
-          <div className="text-muted-foreground text-sm">Reclaimed</div>
-          <div className="font-semibold text-2xl">{fmtBytes(roi.freedBytes)}</div>
-          <div className="text-muted-foreground text-sm">
-            {roi.indexesDropped} indexes dropped · ${roi.estimatedMonthlyUsd.toFixed(2)}/mo
-          </div>
-        </div>
+      <div className="mt-6 grid gap-4 sm:grid-cols-2">
+        <Card>
+          <CardHeader>
+            <CardDescription>Proposed reclaimable</CardDescription>
+            <CardTitle className="text-3xl tabular-nums">{fmtBytes(totalSaved)}</CardTitle>
+          </CardHeader>
+          <CardContent className="text-muted-foreground text-sm">
+            {proposed.length} recommendation{proposed.length === 1 ? "" : "s"} awaiting review
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader>
+            <CardDescription>Reclaimed</CardDescription>
+            <CardTitle className="text-3xl tabular-nums">{fmtBytes(roi.freedBytes)}</CardTitle>
+          </CardHeader>
+          <CardContent className="text-muted-foreground text-sm">
+            {roi.indexesDropped} index{roi.indexesDropped === 1 ? "" : "es"} dropped · $
+            {roi.estimatedMonthlyUsd.toFixed(2)}/mo
+          </CardContent>
+        </Card>
       </div>
 
       {roi.attribution.length > 0 ? (
-        <div className="mt-4 rounded-lg border p-4">
-          <div className="text-muted-foreground text-sm">Reclaimed by index</div>
-          <ul className="mt-2 space-y-1 text-sm">
-            {roi.attribution.map((entry) => (
-              <li
-                key={entry.recommendationId}
-                className="flex items-baseline justify-between gap-4"
-              >
-                <span className="font-mono text-xs">
-                  {entry.database}.{entry.collection} · {entry.indexName}
-                </span>
-                <span className="whitespace-nowrap">
-                  {fmtBytes(entry.freedBytes)}{" "}
-                  <span className="text-muted-foreground text-xs">
-                    ~${entry.estimatedMonthlyUsd.toFixed(2)}/mo
+        <Card className="mt-4">
+          <CardHeader>
+            <CardTitle className="text-base">Reclaimed by index</CardTitle>
+            <CardDescription>Undone drops are netted out.</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <ul className="space-y-1 text-sm">
+              {roi.attribution.map((entry) => (
+                <li
+                  key={entry.recommendationId}
+                  className="flex items-baseline justify-between gap-4"
+                >
+                  <span className="font-mono text-xs">
+                    {entry.database}.{entry.collection} · {entry.indexName}
                   </span>
-                </span>
-              </li>
-            ))}
-          </ul>
-        </div>
+                  <span className="whitespace-nowrap tabular-nums">
+                    {fmtBytes(entry.freedBytes)}{" "}
+                    <span className="text-muted-foreground text-xs">
+                      ~${entry.estimatedMonthlyUsd.toFixed(2)}/mo
+                    </span>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </CardContent>
+        </Card>
       ) : null}
 
       <Table className="mt-6">
@@ -716,25 +742,40 @@ function Home() {
                 {rec.type === "ADVISORY_REVIEW" ? (
                   <span className="text-muted-foreground text-xs">review manually</span>
                 ) : rec.state === "PROPOSED" ? (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      void onApprove(rec.id);
-                    }}
-                    className="rounded-md bg-primary px-2 py-1 text-primary-foreground text-xs"
-                  >
-                    Approve
-                  </button>
+                  <ConfirmButton
+                    trigger={
+                      <Button size="sm" variant="secondary">
+                        Approve
+                      </Button>
+                    }
+                    title={`Approve ${rec.indexName}?`}
+                    description={
+                      <>
+                        <p>
+                          {rec.type.startsWith("DROP") || rec.type === "MERGE"
+                            ? "The index is hidden first and observed before anything is dropped — hiding is instant and reversible."
+                            : "The index is built and then watched: if writes regress, the build rolls back automatically."}
+                        </p>
+                        <p className="font-mono text-xs">
+                          {rec.database}.{rec.collection} · {rec.indexName}
+                        </p>
+                      </>
+                    }
+                    confirmLabel="Approve"
+                    onConfirm={() => void onApprove(rec.id)}
+                  />
                 ) : rec.state === "DROPPED" ? (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      void onUndo(rec.id);
-                    }}
-                    className="rounded-md border px-2 py-1 text-xs"
-                  >
-                    Undo
-                  </button>
+                  <ConfirmButton
+                    trigger={
+                      <Button size="sm" variant="outline">
+                        Undo
+                      </Button>
+                    }
+                    title={`Rebuild ${rec.indexName}?`}
+                    description="The index is recreated from the spec recorded at drop time, and the ROI headline is corrected back down."
+                    confirmLabel="Rebuild"
+                    onConfirm={() => void onUndo(rec.id)}
+                  />
                 ) : (
                   <span className="text-muted-foreground text-xs">{rec.state}</span>
                 )}
@@ -884,28 +925,19 @@ function ClusterBar({
   onChanged: () => void;
 }) {
   const navigate = useNavigate();
-  const toast = useToast();
   const [rotateOpen, setRotateOpen] = useState(false);
   const [rotateString, setRotateString] = useState("");
 
   async function onToggleMode() {
     const goingLive = cluster.readOnly;
-    if (
-      goingLive &&
-      !window.confirm(
-        "Enable live mode? The engine will be allowed to modify indexes on this cluster (hide, drop, build).",
-      )
-    ) {
-      return;
-    }
     const result = await setClusterMode({
       data: { clusterId: cluster.id, readOnly: !cluster.readOnly },
     }).catch(() => ({ ok: false }));
     if (result.ok)
-      toast(
+      toast.success(
         goingLive ? "Live mode enabled — the engine may now write" : "Cluster is read-only again",
       );
-    else toast("Mode change failed (owner only)", "error");
+    else toast.error("Mode change failed (owner only)");
     onChanged();
   }
 
@@ -914,40 +946,29 @@ function ClusterBar({
       data: { clusterId: cluster.id, connectionString: rotateString },
     }).catch(() => ({ ok: false, message: "rotation failed" }));
     if (result.ok) {
-      toast("Connection string rotated — history preserved");
+      toast.success("Connection string rotated — history preserved");
       setRotateOpen(false);
       setRotateString("");
     } else {
-      toast(result.message ?? "rotation failed", "error");
+      toast.error(result.message ?? "rotation failed");
     }
     onChanged();
   }
 
   async function onDisconnect() {
-    const revokeHint =
-      cluster.provisionedUsername === null
-        ? ""
-        : `\n\nThe scoped user ${cluster.provisionedUsername} stays on your cluster — revoke it afterwards:\ndb.getSiblingDB("admin").dropUser("${cluster.provisionedUsername}")`;
-    if (
-      !window.confirm(
-        `Disconnect "${cluster.name}"? All collected snapshots, recommendations, ROI history and the audit trail will be deleted. Indexes still hidden in an observe window are restored first.${revokeHint}`,
-      )
-    ) {
-      return;
-    }
     const result = await disconnectCluster({ data: cluster.id }).catch(() => ({
       ok: false,
       unhidden: 0,
       revokeCommand: null,
     }));
     if (result.ok) {
-      toast(
+      toast.success(
         result.unhidden > 0
           ? `Disconnected — ${result.unhidden} hidden ${result.unhidden === 1 ? "index" : "indexes"} restored`
           : "Cluster disconnected",
       );
     } else {
-      toast("Disconnect failed (owner only)", "error");
+      toast.error("Disconnect failed (owner only)");
     }
     await navigate({ to: "/app", search: {} });
     onChanged();
@@ -956,62 +977,101 @@ function ClusterBar({
   return (
     <div className="mt-1 flex flex-wrap items-center gap-2">
       {clusters.length > 1 ? (
-        <select
-          className="rounded-md border px-2 py-1 text-sm"
+        <Select
           value={cluster.id}
-          onChange={(event) => {
-            void navigate({ to: "/app", search: { cluster: event.target.value } });
+          onValueChange={(value) => {
+            void navigate({ to: "/app", search: { cluster: value } });
           }}
         >
-          {clusters.map((option) => (
-            <option key={option.id} value={option.id}>
-              {option.name}
-            </option>
-          ))}
-        </select>
+          <SelectTrigger size="sm" className="w-[220px]" aria-label="Select cluster">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {clusters.map((option) => (
+              <SelectItem key={option.id} value={option.id}>
+                {option.name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       ) : (
         <span className="text-muted-foreground">{cluster.name}</span>
       )}
-      <span className={cluster.readOnly ? "text-muted-foreground text-xs" : "text-red-600 text-xs"}>
+      <Badge variant={cluster.readOnly ? "secondary" : "destructive"}>
         {cluster.readOnly ? "read-only" : "live"}
-      </span>
+      </Badge>
       {cluster.provisionedUsername !== null ? (
-        <span
-          className="text-muted-foreground text-xs"
-          title="Indexterity runs as its own least-privilege user on this cluster — it cannot read your documents"
-        >
-          scoped user <code>{cluster.provisionedUsername}</code>
-        </span>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Badge variant="outline" className="font-mono">
+              {cluster.provisionedUsername}
+            </Badge>
+          </TooltipTrigger>
+          <TooltipContent>
+            Indexterity runs as its own least-privilege user here — it cannot read your documents
+          </TooltipContent>
+        </Tooltip>
       ) : null}
       {staleness(cluster.lastCollectedAt) !== null ? (
-        <span
-          className="rounded-md bg-amber-100 px-1.5 py-0.5 text-amber-900 text-xs dark:bg-amber-950 dark:text-amber-200"
-          title="These figures predate a gap in collection. Usage-based drop recommendations are withheld until the history is continuous again."
-        >
-          ⚠ {staleness(cluster.lastCollectedAt)}
-        </span>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Badge variant="outline" className="border-amber-500 text-amber-700">
+              ⚠ {staleness(cluster.lastCollectedAt)}
+            </Badge>
+          </TooltipTrigger>
+          <TooltipContent>
+            These figures predate a gap in collection. Usage-based drop recommendations are withheld
+            until the history is continuous again.
+          </TooltipContent>
+        </Tooltip>
       ) : null}
-      <button
-        type="button"
-        onClick={() => void onToggleMode()}
-        className="rounded-md border px-2 py-0.5 text-muted-foreground text-xs"
-      >
-        {cluster.readOnly ? "Go live" : "Make read-only"}
-      </button>
-      <button
-        type="button"
-        onClick={() => setRotateOpen(!rotateOpen)}
-        className="rounded-md border px-2 py-0.5 text-muted-foreground text-xs"
-      >
+      {cluster.readOnly ? (
+        <ConfirmButton
+          trigger={
+            <Button variant="outline" size="sm">
+              Go live
+            </Button>
+          }
+          title="Enable live mode?"
+          description={`The engine will be allowed to modify indexes on "${cluster.name}" — hide, drop and build. Drops still pass the observe window and the regression gate first.`}
+          confirmLabel="Go live"
+          onConfirm={() => void onToggleMode()}
+        />
+      ) : (
+        <Button variant="outline" size="sm" onClick={() => void onToggleMode()}>
+          Make read-only
+        </Button>
+      )}
+      <Button variant="outline" size="sm" onClick={() => setRotateOpen(!rotateOpen)}>
         Rotate string
-      </button>
-      <button
-        type="button"
-        onClick={() => void onDisconnect()}
-        className="rounded-md border px-2 py-0.5 text-red-600 text-xs"
-      >
-        Disconnect
-      </button>
+      </Button>
+      <ConfirmButton
+        destructive
+        trigger={
+          <Button variant="ghost" size="sm" className="text-destructive">
+            Disconnect
+          </Button>
+        }
+        title={`Disconnect "${cluster.name}"?`}
+        description={
+          <>
+            <p>
+              All collected snapshots, recommendations, ROI history and the audit trail are deleted.
+              Indexes still hidden in an observe window are restored first.
+            </p>
+            {cluster.provisionedUsername === null ? null : (
+              <p>
+                The scoped user stays on your cluster — revoke it afterwards:
+                <code className="mt-1 block break-all rounded bg-muted p-2 font-mono text-xs">
+                  db.getSiblingDB("admin").dropUser("{cluster.provisionedUsername}")
+                </code>
+              </p>
+            )}
+          </>
+        }
+        confirmLabel="Disconnect"
+        onConfirm={() => void onDisconnect()}
+      />
       {rotateOpen ? (
         <form
           className="flex w-full gap-2 pt-1"
@@ -1020,19 +1080,15 @@ function ClusterBar({
             void onRotate();
           }}
         >
-          <input
-            className="min-w-72 flex-1 rounded-md border px-2 py-1 font-mono text-xs"
+          <Input
+            className="min-w-72 flex-1 font-mono text-xs"
             placeholder="new mongodb:// connection string (verified before stored)"
             value={rotateString}
             onChange={(event) => setRotateString(event.target.value)}
           />
-          <button
-            type="submit"
-            disabled={rotateString.length === 0}
-            className="rounded-md bg-primary px-2 py-1 text-primary-foreground text-xs disabled:opacity-50"
-          >
+          <Button type="submit" size="sm" disabled={rotateString.length === 0}>
             Save
-          </button>
+          </Button>
         </form>
       ) : null}
     </div>
@@ -1059,7 +1115,6 @@ function PolicySection({ policy, onSaved }: { policy: PolicyView; onSaved: () =>
   const [autoScore, setAutoScore] = useState(policy.autoApplyScore);
   const [windowStart, setWindowStart] = useState(policy.changeWindowStartHour);
   const [windowEnd, setWindowEnd] = useState(policy.changeWindowEndHour);
-  const toast = useToast();
 
   async function onSave() {
     const result = await savePolicy({
@@ -1076,121 +1131,136 @@ function PolicySection({ policy, onSaved }: { policy: PolicyView; onSaved: () =>
       },
     }).catch(() => ({ ok: false }));
     if (result.ok) {
-      toast("Policy saved");
+      toast.success("Policy saved");
       onSaved();
     } else {
-      toast("Policy not saved (owner only)", "error");
+      toast.error("Policy not saved (owner only)");
     }
   }
 
-  const toggles: Array<{ label: string; hint: string; value: boolean; set: (v: boolean) => void }> =
-    [
-      {
-        label: "Auto-apply",
-        hint: "approve recommendations without a human",
-        value: autoApply,
-        set: setAutoApply,
-      },
-      {
-        label: "Workload analysis",
-        hint: "propose CREATE/UPDATE/MERGE from query shapes",
-        value: workloadAnalysis,
-        set: setWorkloadAnalysis,
-      },
-      {
-        label: "Instant create",
-        hint: "auto-build critical missing indexes",
-        value: instantCreate,
-        set: setInstantCreate,
-      },
-    ];
+  const toggles: Array<{
+    id: string;
+    label: string;
+    hint: string;
+    value: boolean;
+    set: (v: boolean) => void;
+  }> = [
+    {
+      id: "policy-auto-apply",
+      label: "Auto-apply",
+      hint: "approve recommendations without a human",
+      value: autoApply,
+      set: setAutoApply,
+    },
+    {
+      id: "policy-workload",
+      label: "Workload analysis",
+      hint: "propose CREATE/UPDATE/MERGE from query shapes",
+      value: workloadAnalysis,
+      set: setWorkloadAnalysis,
+    },
+    {
+      id: "policy-instant-create",
+      label: "Instant create",
+      hint: "auto-build critical missing indexes",
+      value: instantCreate,
+      set: setInstantCreate,
+    },
+  ];
 
   return (
-    <section className="mt-8">
-      <h2 className="font-semibold text-lg">Policy</h2>
-      <div className="mt-2 flex flex-wrap items-center gap-4">
-        {toggles.map((toggle) => (
-          <label
-            key={toggle.label}
-            className="flex items-center gap-1.5 text-sm"
-            title={toggle.hint}
-          >
-            <input
-              type="checkbox"
-              checked={toggle.value}
-              onChange={(event) => toggle.set(event.target.checked)}
+    <Card className="mt-8">
+      <CardHeader>
+        <CardTitle className="text-base">Policy</CardTitle>
+        <CardDescription>
+          The engine knobs for this cluster. Owner-only; the safety gates apply regardless.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-5">
+        <div className="flex flex-wrap gap-6">
+          {toggles.map((toggle) => (
+            <div key={toggle.label} className="flex items-start gap-2">
+              <Checkbox
+                id={toggle.id}
+                checked={toggle.value}
+                onCheckedChange={(checked) => toggle.set(checked === true)}
+              />
+              <div className="grid gap-0.5 leading-none">
+                <Label htmlFor={toggle.id}>{toggle.label}</Label>
+                <p className="text-muted-foreground text-xs">{toggle.hint}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <Separator />
+
+        <div className="flex flex-wrap items-end gap-6">
+          <div className="grid gap-1.5">
+            <Label htmlFor="observe-days">Observe window (days)</Label>
+            <Input
+              id="observe-days"
+              type="number"
+              min={1}
+              max={365}
+              className="w-24"
+              value={observeDays}
+              onChange={(event) => setObserveDays(Number(event.target.value))}
             />
-            {toggle.label}
-          </label>
-        ))}
-        <label className="flex items-center gap-1.5 text-sm">
-          Observe window
-          <input
-            type="number"
-            min={1}
-            max={365}
-            value={observeDays}
-            onChange={(event) => setObserveDays(Number(event.target.value))}
-            className="w-16 rounded-md border px-2 py-1 text-sm"
-          />
-          days
-        </label>
-        <label
-          className="flex items-center gap-1.5 text-sm"
-          title="Recommendations scoring at or above this auto-approve (drops still observe first). Empty = manual only."
-        >
-          Auto-approve ≥
-          <input
-            type="number"
-            min={0}
-            max={100}
-            placeholder="off"
-            value={autoScore ?? ""}
-            onChange={(event) =>
-              setAutoScore(event.target.value === "" ? null : Number(event.target.value))
-            }
-            className="w-16 rounded-md border px-2 py-1 text-sm"
-          />
-        </label>
-        <label
-          className="flex items-center gap-1.5 text-sm"
-          title="Elective changes (hide/build/drop) only run inside this UTC hour window; safety rollbacks never wait. Empty = anytime. Start after end wraps midnight."
-        >
-          Change window (UTC)
-          <input
-            type="number"
-            min={0}
-            max={23}
-            placeholder="–"
-            value={windowStart ?? ""}
-            onChange={(event) =>
-              setWindowStart(event.target.value === "" ? null : Number(event.target.value))
-            }
-            className="w-14 rounded-md border px-2 py-1 text-sm"
-          />
-          →
-          <input
-            type="number"
-            min={0}
-            max={23}
-            placeholder="–"
-            value={windowEnd ?? ""}
-            onChange={(event) =>
-              setWindowEnd(event.target.value === "" ? null : Number(event.target.value))
-            }
-            className="w-14 rounded-md border px-2 py-1 text-sm"
-          />
-          h
-        </label>
-        <button
-          type="button"
-          onClick={() => void onSave()}
-          className="rounded-md bg-primary px-3 py-1.5 text-primary-foreground text-sm"
-        >
-          Save
-        </button>
-      </div>
-    </section>
+          </div>
+          <div className="grid gap-1.5">
+            <Label htmlFor="auto-score">Auto-approve score ≥</Label>
+            <Input
+              id="auto-score"
+              type="number"
+              min={0}
+              max={100}
+              placeholder="off"
+              className="w-24"
+              value={autoScore ?? ""}
+              onChange={(event) =>
+                setAutoScore(event.target.value === "" ? null : Number(event.target.value))
+              }
+            />
+          </div>
+          <div className="grid gap-1.5">
+            <Label htmlFor="window-start">Change window (UTC hours)</Label>
+            <div className="flex items-center gap-2">
+              <Input
+                id="window-start"
+                type="number"
+                min={0}
+                max={23}
+                placeholder="–"
+                className="w-20"
+                value={windowStart ?? ""}
+                onChange={(event) =>
+                  setWindowStart(event.target.value === "" ? null : Number(event.target.value))
+                }
+              />
+              <span className="text-muted-foreground">→</span>
+              <Input
+                aria-label="Change window end hour"
+                type="number"
+                min={0}
+                max={23}
+                placeholder="–"
+                className="w-20"
+                value={windowEnd ?? ""}
+                onChange={(event) =>
+                  setWindowEnd(event.target.value === "" ? null : Number(event.target.value))
+                }
+              />
+            </div>
+          </div>
+          <Button onClick={() => void onSave()}>Save policy</Button>
+        </div>
+        <p className="text-muted-foreground text-xs">
+          Elective changes (hide, build, drop) run only inside the change window; safety rollbacks
+          never wait. Leave it empty for anytime — a start after the end wraps midnight.
+        </p>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -1278,138 +1348,139 @@ function ConnectClusterForm() {
   }
 
   return (
-    <section className="mt-8">
-      <h2 className="font-semibold text-lg">Connect a cluster</h2>
-      <p className="text-muted-foreground text-sm">
-        Paste any connection string — Indexterity checks what it can do before storing anything.
-        Clusters start in read-only mode.
-      </p>
-      <form
-        className="mt-2 flex flex-wrap gap-2"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void onCheck();
-        }}
-      >
-        <input
-          className="rounded-md border px-3 py-1.5 text-sm"
-          placeholder="Name"
-          value={name}
-          onChange={(event) => setName(event.target.value)}
-        />
-        <input
-          className="min-w-72 flex-1 rounded-md border px-3 py-1.5 font-mono text-sm"
-          placeholder="mongodb://user:pass@host:27017"
-          value={connString}
-          onChange={(event) => {
-            setConnString(event.target.value);
-            setDiagnosis(null);
+    <Card className="mt-8">
+      <CardHeader>
+        <CardTitle className="text-base">Connect a cluster</CardTitle>
+        <CardDescription>
+          Paste any connection string — Indexterity checks what it can do before storing anything.
+          Clusters start in read-only mode.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <form
+          className="flex flex-wrap items-end gap-3"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void onCheck();
           }}
-        />
-        <button
-          type="submit"
-          disabled={busy || name.length === 0 || connString.length === 0}
-          className="rounded-md bg-primary px-3 py-1.5 text-primary-foreground text-sm disabled:opacity-50"
         >
-          {busy ? "Checking…" : "Check access"}
-        </button>
-      </form>
-      {error !== null ? <p className="mt-2 text-red-600 text-sm">{error}</p> : null}
+          <div className="grid gap-1.5">
+            <Label htmlFor="cluster-name">Name</Label>
+            <Input
+              id="cluster-name"
+              className="w-48"
+              placeholder="Production"
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+            />
+          </div>
+          <div className="grid min-w-72 flex-1 gap-1.5">
+            <Label htmlFor="cluster-conn">Connection string</Label>
+            <Input
+              id="cluster-conn"
+              className="font-mono"
+              placeholder="mongodb://user:pass@host:27017"
+              value={connString}
+              onChange={(event) => {
+                setConnString(event.target.value);
+                setDiagnosis(null);
+              }}
+            />
+          </div>
+          <Button type="submit" disabled={busy || name.length === 0 || connString.length === 0}>
+            {busy ? "Checking…" : "Check access"}
+          </Button>
+        </form>
 
-      {diagnosis !== null && !diagnosis.reachable ? (
-        <div className="mt-3 rounded-md border border-red-300 p-3 text-sm">
-          <p className="font-medium text-red-600">Cannot use this connection string</p>
-          <p className="mt-1 text-muted-foreground">{diagnosis.message}</p>
-        </div>
-      ) : null}
+        {error !== null ? (
+          <Alert variant="destructive">
+            <AlertTitle>Could not check the connection</AlertTitle>
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        ) : null}
 
-      {diagnosis?.reachable === true ? (
-        <div className="mt-3 rounded-md border p-3 text-sm">
-          <p className="font-medium">
-            Connected as{" "}
-            <code>{diagnosis.username ?? (diagnosis.authEnabled ? "unknown" : "no auth")}</code>
-          </p>
-          {diagnosis.message !== null ? (
-            <p className="mt-1 text-muted-foreground text-xs">{diagnosis.message}</p>
-          ) : null}
-          <PrivilegeList privileges={diagnosis.privileges} />
+        {diagnosis !== null && !diagnosis.reachable ? (
+          <Alert variant="destructive">
+            <AlertTitle>Cannot use this connection string</AlertTitle>
+            <AlertDescription>{diagnosis.message}</AlertDescription>
+          </Alert>
+        ) : null}
 
-          {diagnosis.missing.length > 0 ? (
-            <p className="mt-2 text-red-600 text-xs">
-              Missing: {diagnosis.missing.join(", ")}.
-              {diagnosis.ready
-                ? " The cluster can still be analyzed, but no change can be applied."
-                : " Analysis is not possible without these."}
+        {diagnosis?.reachable === true ? (
+          <div className="rounded-lg border p-4 text-sm">
+            <p className="font-medium">
+              Connected as{" "}
+              <code>{diagnosis.username ?? (diagnosis.authEnabled ? "unknown" : "no auth")}</code>
             </p>
-          ) : null}
+            {diagnosis.message !== null ? (
+              <p className="mt-1 text-muted-foreground text-xs">{diagnosis.message}</p>
+            ) : null}
+            <PrivilegeList privileges={diagnosis.privileges} />
 
-          {diagnosis.canProvision ? (
-            <div className="mt-3 rounded-md bg-muted/40 p-3">
-              <p className="font-medium">
-                These credentials can create users — let Indexterity make its own?
-              </p>
-              <p className="mt-1 text-muted-foreground text-xs">
-                A dedicated user <code>idx_…</code> is created on your cluster with the{" "}
-                <code>indexterityEngine</code> role: exactly the privileges listed above and nothing
-                else — notably <strong>no read access to your documents</strong>. The admin string
-                you pasted is used once and never stored; only the new user's string is kept
-                (encrypted). Revoke it any time with <code>db.dropUser(…)</code>.
-              </p>
-              <div className="mt-2 flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  disabled={busy}
-                  onClick={() => void onProvision()}
-                  className="rounded-md bg-primary px-3 py-1.5 text-primary-foreground text-sm disabled:opacity-50"
-                >
-                  {busy ? "Creating…" : "Create a scoped user and connect"}
-                </button>
-                {diagnosis.ready ? (
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() => void onConnectAsIs()}
-                    className="rounded-md border px-3 py-1.5 text-sm disabled:opacity-50"
-                  >
-                    Use these credentials as-is
-                  </button>
-                ) : null}
+            {diagnosis.missing.length > 0 ? (
+              <Alert variant="destructive" className="mt-3">
+                <AlertTitle>Missing: {diagnosis.missing.join(", ")}</AlertTitle>
+                <AlertDescription>
+                  {diagnosis.ready
+                    ? "The cluster can still be analyzed, but no change can be applied."
+                    : "Analysis is not possible without these."}
+                </AlertDescription>
+              </Alert>
+            ) : null}
+
+            {diagnosis.canProvision ? (
+              <div className="mt-3 rounded-md bg-muted/40 p-3">
+                <p className="font-medium">
+                  These credentials can create users — let Indexterity make its own?
+                </p>
+                <p className="mt-1 text-muted-foreground text-xs">
+                  A dedicated user <code>idx_…</code> is created on your cluster with the{" "}
+                  <code>indexterityEngine</code> role: exactly the privileges listed above and
+                  nothing else — notably <strong>no read access to your documents</strong>. The
+                  admin string you pasted is used once and never stored; only the new user's string
+                  is kept (encrypted). Revoke it any time with <code>db.dropUser(…)</code>.
+                </p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <Button disabled={busy} onClick={() => void onProvision()}>
+                    {busy ? "Creating…" : "Create a scoped user and connect"}
+                  </Button>
+                  {diagnosis.ready ? (
+                    <Button variant="outline" disabled={busy} onClick={() => void onConnectAsIs()}>
+                      Use these credentials as-is
+                    </Button>
+                  ) : null}
+                </div>
               </div>
-            </div>
-          ) : diagnosis.ready ? (
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => void onConnectAsIs()}
-              className="mt-3 rounded-md bg-primary px-3 py-1.5 text-primary-foreground text-sm disabled:opacity-50"
-            >
-              Connect
-            </button>
-          ) : (
-            <p className="mt-2 text-muted-foreground text-xs">
-              Grant the missing privileges to this user, or paste credentials that can create users
-              and Indexterity will provision a scoped one for you. The exact role is in{" "}
-              <code>docs/architecture.md</code> §10.1.
-            </p>
-          )}
-        </div>
-      ) : null}
+            ) : diagnosis.ready ? (
+              <Button className="mt-3" disabled={busy} onClick={() => void onConnectAsIs()}>
+                Connect
+              </Button>
+            ) : (
+              <p className="mt-2 text-muted-foreground text-xs">
+                Grant the missing privileges to this user, or paste credentials that can create
+                users and Indexterity will provision a scoped one for you. The exact role is in{" "}
+                <code>docs/architecture.md</code> §10.1.
+              </p>
+            )}
+          </div>
+        ) : null}
 
-      {provisioned !== null ? (
-        <div className="mt-3 rounded-md border p-3 text-sm">
-          <p className="font-medium">
-            Created scoped user <code>{provisioned.username}</code> — shown once
-          </p>
-          <p className="mt-1 break-all font-mono text-muted-foreground text-xs">
-            {provisioned.connectionString}
-          </p>
-          <p className="mt-1 text-muted-foreground text-xs">
-            Indexterity stored this string encrypted; the admin string was not saved. To revoke
-            access later: <code>db.dropUser("{provisioned.username}")</code> in the admin database.
-          </p>
-        </div>
-      ) : null}
-    </section>
+        {provisioned !== null ? (
+          <Alert>
+            <AlertTitle>
+              Created scoped user <code>{provisioned.username}</code> — shown once
+            </AlertTitle>
+            <AlertDescription className="grid gap-1">
+              <code className="break-all font-mono text-xs">{provisioned.connectionString}</code>
+              <span className="text-xs">
+                Stored encrypted; the admin string was not saved. To revoke access later:{" "}
+                <code>db.dropUser("{provisioned.username}")</code> in the admin database.
+              </span>
+            </AlertDescription>
+          </Alert>
+        ) : null}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -1420,7 +1491,6 @@ interface TeamOrg {
 }
 
 function TeamSection({ org, onChanged }: { org: TeamOrg; onChanged: () => void }) {
-  const toast = useToast();
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteToken, setInviteToken] = useState<string | null>(null);
   const [acceptToken, setAcceptToken] = useState("");
@@ -1444,8 +1514,8 @@ function TeamSection({ org, onChanged }: { org: TeamOrg; onChanged: () => void }
 
   async function onRename() {
     const result = await renameOrg({ data: orgName }).catch(() => ({ ok: false }));
-    if (result.ok) toast("Org renamed");
-    else toast("Rename failed (owner only)", "error");
+    if (result.ok) toast.success("Org renamed");
+    else toast.error("Rename failed (owner only)");
     setRenaming(false);
     onChanged();
   }
@@ -1455,147 +1525,164 @@ function TeamSection({ org, onChanged }: { org: TeamOrg; onChanged: () => void }
       ok: false,
       message: "failed",
     }));
-    if (result.ok) toast(`Role changed to ${role}`);
-    else toast(result.message ?? "Role change failed", "error");
+    if (result.ok) toast.success(`Role changed to ${role}`);
+    else toast.error(result.message ?? "Role change failed");
     onChanged();
   }
 
-  async function onRemove(userId: string, email: string) {
-    if (!window.confirm(`Remove ${email} from ${org.name}?`)) return;
+  async function onRemove(userId: string) {
     const result = await removeMember({ data: userId }).catch(() => ({
       ok: false,
       message: "failed",
     }));
-    if (result.ok) toast("Member removed");
-    else toast(result.message ?? "Remove failed", "error");
+    if (result.ok) toast.success("Member removed");
+    else toast.error(result.message ?? "Remove failed");
     onChanged();
   }
 
   async function onLeave() {
-    if (!window.confirm(`Leave ${org.name}? You lose access to its clusters.`)) return;
     const result = await leaveOrg({ data: {} }).catch(() => ({ ok: false, message: "failed" }));
-    if (result.ok) toast("Left the org");
-    else toast(result.message ?? "Leave failed", "error");
+    if (result.ok) toast.success("Left the org");
+    else toast.error(result.message ?? "Leave failed");
     onChanged();
   }
 
   return (
-    <section className="mt-8">
-      <div className="flex items-center gap-2">
-        <h2 className="font-semibold text-lg">Team — {org.name}</h2>
-        {renaming ? (
-          <form
-            className="flex gap-1"
-            onSubmit={(event) => {
-              event.preventDefault();
-              void onRename();
-            }}
-          >
-            <input
-              className="rounded-md border px-2 py-0.5 text-sm"
-              value={orgName}
-              onChange={(event) => setOrgName(event.target.value)}
+    <Card className="mt-8">
+      <CardHeader>
+        <div className="flex flex-wrap items-center gap-2">
+          <CardTitle className="text-base">Team — {org.name}</CardTitle>
+          {renaming ? (
+            <form
+              className="flex gap-1"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void onRename();
+              }}
+            >
+              <Input
+                aria-label="Organization name"
+                className="h-8 w-48"
+                value={orgName}
+                onChange={(event) => setOrgName(event.target.value)}
+              />
+              <Button type="submit" size="sm">
+                Save
+              </Button>
+            </form>
+          ) : (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setOrgName(org.name);
+                setRenaming(true);
+              }}
+            >
+              Rename
+            </Button>
+          )}
+          <ConfirmButton
+            destructive
+            trigger={
+              <Button variant="ghost" size="sm" className="text-destructive">
+                Leave org
+              </Button>
+            }
+            title={`Leave ${org.name}?`}
+            description="You lose access to its clusters. The last owner must transfer ownership first."
+            confirmLabel="Leave"
+            onConfirm={() => void onLeave()}
+          />
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <ul className="space-y-1">
+          {org.members.map((member) => (
+            <li key={member.userId} className="flex flex-wrap items-center gap-2 text-sm">
+              <span>
+                {member.name} <span className="text-muted-foreground">({member.email})</span>
+              </span>
+              <Badge variant="outline">{member.role}</Badge>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() =>
+                  void onSetRole(member.userId, member.role === "owner" ? "member" : "owner")
+                }
+              >
+                {member.role === "owner" ? "Make member" : "Make owner"}
+              </Button>
+              <ConfirmButton
+                destructive
+                trigger={
+                  <Button variant="ghost" size="sm" className="text-destructive">
+                    Remove
+                  </Button>
+                }
+                title={`Remove ${member.email}?`}
+                description={`They lose access to every cluster in ${org.name}. Their own account stays, in a fresh empty organization.`}
+                confirmLabel="Remove"
+                onConfirm={() => void onRemove(member.userId)}
+              />
+            </li>
+          ))}
+          {org.pendingInvites.map((invite) => (
+            <li
+              key={invite.email}
+              className="flex items-center gap-2 text-muted-foreground text-sm"
+            >
+              {invite.email}
+              <Badge variant="secondary">invited · {invite.role}</Badge>
+            </li>
+          ))}
+        </ul>
+
+        <Separator />
+
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="grid gap-1.5">
+            <Label htmlFor="invite-email">Invite a teammate</Label>
+            <Input
+              id="invite-email"
+              type="email"
+              className="w-64"
+              placeholder="teammate@company.com"
+              value={inviteEmail}
+              onChange={(event) => setInviteEmail(event.target.value)}
             />
-            <button
-              type="submit"
-              className="rounded-md bg-primary px-2 py-0.5 text-primary-foreground text-xs"
-            >
-              Save
-            </button>
-          </form>
-        ) : (
-          <button
-            type="button"
-            onClick={() => {
-              setOrgName(org.name);
-              setRenaming(true);
-            }}
-            className="rounded-md border px-2 py-0.5 text-muted-foreground text-xs"
-          >
-            Rename
-          </button>
-        )}
-        <button
-          type="button"
-          onClick={() => void onLeave()}
-          className="rounded-md border px-2 py-0.5 text-red-600 text-xs"
-        >
-          Leave org
-        </button>
-      </div>
-      <ul className="mt-2 space-y-1">
-        {org.members.map((member) => (
-          <li key={member.userId} className="flex items-center gap-2 text-sm">
-            <span>
-              {member.name} <span className="text-muted-foreground">({member.email})</span> ·{" "}
-              <span className="text-muted-foreground">{member.role}</span>
-            </span>
-            <button
-              type="button"
-              onClick={() =>
-                void onSetRole(member.userId, member.role === "owner" ? "member" : "owner")
-              }
-              className="rounded-md border px-1.5 py-0.5 text-muted-foreground text-xs"
-            >
-              {member.role === "owner" ? "Make member" : "Make owner"}
-            </button>
-            <button
-              type="button"
-              onClick={() => void onRemove(member.userId, member.email)}
-              className="rounded-md border px-1.5 py-0.5 text-red-600 text-xs"
-            >
-              Remove
-            </button>
-          </li>
-        ))}
-        {org.pendingInvites.map((invite) => (
-          <li key={invite.email} className="text-muted-foreground text-sm">
-            {invite.email} · invited ({invite.role})
-          </li>
-        ))}
-      </ul>
+          </div>
+          <Button onClick={() => void onInvite()}>Invite</Button>
+        </div>
+        {inviteToken !== null ? (
+          <Alert>
+            <AlertTitle>Invite created</AlertTitle>
+            <AlertDescription>
+              Share this token: <code className="font-mono">{inviteToken}</code>
+            </AlertDescription>
+          </Alert>
+        ) : null}
 
-      <div className="mt-4 flex gap-2">
-        <input
-          className="rounded-md border px-3 py-1.5 text-sm"
-          type="email"
-          placeholder="teammate@company.com"
-          value={inviteEmail}
-          onChange={(event) => setInviteEmail(event.target.value)}
-        />
-        <button
-          type="button"
-          onClick={() => void onInvite()}
-          className="rounded-md bg-primary px-3 py-1.5 text-primary-foreground text-sm"
-        >
-          Invite
-        </button>
-      </div>
-      {inviteToken !== null ? (
-        <p className="mt-2 text-sm">
-          Share this token: <code className="rounded bg-muted px-1 font-mono">{inviteToken}</code>
-        </p>
-      ) : null}
-
-      <div className="mt-4 flex gap-2">
-        <input
-          className="rounded-md border px-3 py-1.5 font-mono text-sm"
-          placeholder="Paste an invite token"
-          value={acceptToken}
-          onChange={(event) => setAcceptToken(event.target.value)}
-        />
-        <button
-          type="button"
-          onClick={() => void onAccept()}
-          className="rounded-md border px-3 py-1.5 text-sm"
-        >
-          Join org
-        </button>
-      </div>
-      {acceptMessage !== null ? (
-        <p className="mt-2 text-muted-foreground text-sm">{acceptMessage}</p>
-      ) : null}
-    </section>
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="grid gap-1.5">
+            <Label htmlFor="accept-token">Have an invite token?</Label>
+            <Input
+              id="accept-token"
+              className="w-64 font-mono"
+              placeholder="Paste an invite token"
+              value={acceptToken}
+              onChange={(event) => setAcceptToken(event.target.value)}
+            />
+          </div>
+          <Button variant="outline" onClick={() => void onAccept()}>
+            Join org
+          </Button>
+        </div>
+        {acceptMessage !== null ? (
+          <p className="text-muted-foreground text-sm">{acceptMessage}</p>
+        ) : null}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -1633,84 +1720,106 @@ function AuthForm({ onDone }: { onDone: () => void }) {
 
   return (
     <main className="mx-auto mt-24 max-w-sm p-8">
-      <h1 className="font-semibold text-2xl">Indexterity</h1>
-      <p className="mt-1 text-muted-foreground">
-        {mode === "in"
-          ? "Sign in to your account"
-          : mode === "up"
-            ? "Create an account"
-            : "Reset your password"}
-      </p>
-      <form
-        className="mt-6 flex flex-col gap-3"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void submit();
-        }}
-      >
-        {mode === "up" ? (
-          <input
-            className="rounded-md border px-3 py-2 text-sm"
-            placeholder="Name"
-            value={name}
-            onChange={(event) => setName(event.target.value)}
-          />
-        ) : null}
-        <input
-          className="rounded-md border px-3 py-2 text-sm"
-          type="email"
-          placeholder="Email"
-          value={email}
-          onChange={(event) => setEmail(event.target.value)}
-        />
-        {mode !== "forgot" ? (
-          <input
-            className="rounded-md border px-3 py-2 text-sm"
-            type="password"
-            placeholder="Password"
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-          />
-        ) : null}
-        {error ? <p className="text-red-600 text-sm">{error}</p> : null}
-        {/* The api rejected sign-up because this instance is invite-only —
-            say what to do next instead of leaving a dead end. */}
-        {error?.includes("invite-only") === true ? (
-          <p className="text-muted-foreground text-sm">
-            Already invited? Use the sign-up link from the invite email, or{" "}
-            <a href={REQUEST_ACCESS_HREF} className="underline">
-              request access
-            </a>
-            .
-          </p>
-        ) : null}
-        {notice ? <p className="text-muted-foreground text-sm">{notice}</p> : null}
-        <button
-          type="submit"
-          disabled={busy}
-          className="rounded-md bg-primary px-3 py-2 text-primary-foreground text-sm disabled:opacity-50"
-        >
-          {mode === "in" ? "Sign in" : mode === "up" ? "Sign up" : "Send reset link"}
-        </button>
-      </form>
-      <div className="mt-4 flex flex-col items-start gap-1">
-        <button
-          type="button"
-          onClick={() => setMode(mode === "in" ? "up" : "in")}
-          className="text-muted-foreground text-sm underline"
-        >
-          {mode === "in" ? "Need an account? Sign up" : "Have an account? Sign in"}
-        </button>
-        {mode === "in" ? (
-          <button
-            type="button"
-            onClick={() => setMode("forgot")}
-            className="text-muted-foreground text-sm underline"
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-2xl">Indexterity</CardTitle>
+          <CardDescription>
+            {mode === "in"
+              ? "Sign in to your account"
+              : mode === "up"
+                ? "Create an account"
+                : "Reset your password"}
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form
+            className="flex flex-col gap-4"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void submit();
+            }}
           >
-            Forgot password?
-          </button>
-        ) : null}
-      </div>
+            {mode === "up" ? (
+              <div className="grid gap-1.5">
+                <Label htmlFor="auth-name">Name</Label>
+                <Input
+                  id="auth-name"
+                  value={name}
+                  onChange={(event) => setName(event.target.value)}
+                />
+              </div>
+            ) : null}
+            <div className="grid gap-1.5">
+              <Label htmlFor="auth-email">Email</Label>
+              <Input
+                id="auth-email"
+                type="email"
+                autoComplete="email"
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+              />
+            </div>
+            {mode !== "forgot" ? (
+              <div className="grid gap-1.5">
+                <Label htmlFor="auth-password">Password</Label>
+                <Input
+                  id="auth-password"
+                  type="password"
+                  autoComplete={mode === "up" ? "new-password" : "current-password"}
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                />
+              </div>
+            ) : null}
+            {error !== null ? (
+              <Alert variant="destructive">
+                <AlertDescription>
+                  {error}
+                  {/* The api rejected sign-up because this instance is
+                      invite-only — say what to do next, not just what failed. */}
+                  {error.includes("invite-only") ? (
+                    <span className="mt-1 block">
+                      Already invited? Use the link from the invite email, or{" "}
+                      <a href={REQUEST_ACCESS_HREF} className="underline">
+                        request access
+                      </a>
+                      .
+                    </span>
+                  ) : null}
+                </AlertDescription>
+              </Alert>
+            ) : null}
+            {notice !== null ? (
+              <Alert>
+                <AlertDescription>{notice}</AlertDescription>
+              </Alert>
+            ) : null}
+            <Button type="submit" disabled={busy}>
+              {mode === "in" ? "Sign in" : mode === "up" ? "Sign up" : "Send reset link"}
+            </Button>
+          </form>
+          <div className="mt-4 flex flex-col items-start gap-1">
+            <Button
+              variant="link"
+              size="sm"
+              className="h-auto p-0"
+              onClick={() => setMode(mode === "in" ? "up" : "in")}
+            >
+              {mode === "in" ? "Need an account? Sign up" : "Have an account? Sign in"}
+            </Button>
+            {mode === "in" ? (
+              <Button
+                variant="link"
+                size="sm"
+                className="h-auto p-0"
+                onClick={() => setMode("forgot")}
+              >
+                Forgot password?
+              </Button>
+            ) : null}
+          </div>
+        </CardContent>
+      </Card>
     </main>
   );
 }
