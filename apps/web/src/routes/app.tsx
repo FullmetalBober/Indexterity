@@ -29,6 +29,7 @@ import {
   TableRow,
 } from "~/components/ui/table";
 import { Tooltip, TooltipContent, TooltipTrigger } from "~/components/ui/tooltip";
+import { formatTimestamp, useMounted } from "~/lib/hydration";
 import { LineChart, SERIES_PALETTE } from "../components/latency-chart";
 import { serverApi } from "../lib/api";
 import { requestPasswordReset, signIn, signOut, signUp } from "../lib/auth";
@@ -525,6 +526,7 @@ function Home() {
   const data = Route.useLoaderData();
   const router = useRouter();
   const navigate = useNavigate();
+  const mounted = useMounted();
 
   if (!data.authed) {
     if (data.apiDown) {
@@ -867,7 +869,7 @@ function Home() {
               {activity.map((entry) => (
                 <TableRow key={entry.id}>
                   <TableCell className="whitespace-nowrap text-muted-foreground text-xs">
-                    {new Date(entry.createdAt).toLocaleString()}
+                    {formatTimestamp(entry.createdAt, mounted)}
                   </TableCell>
                   <TableCell>
                     <Badge variant="outline">{entry.kind}</Badge>
@@ -927,6 +929,9 @@ function ClusterBar({
   const navigate = useNavigate();
   const [rotateOpen, setRotateOpen] = useState(false);
   const [rotateString, setRotateString] = useState("");
+  // "How long since we last collected" depends on the reader's clock, so it
+  // resolves after hydration rather than differing between the two renders.
+  const stale = useMounted() ? staleness(cluster.lastCollectedAt) : null;
 
   async function onToggleMode() {
     const goingLive = cluster.readOnly;
@@ -1012,11 +1017,11 @@ function ClusterBar({
           </TooltipContent>
         </Tooltip>
       ) : null}
-      {staleness(cluster.lastCollectedAt) !== null ? (
+      {stale !== null ? (
         <Tooltip>
           <TooltipTrigger asChild>
             <Badge variant="outline" className="border-amber-500 text-amber-700">
-              ⚠ {staleness(cluster.lastCollectedAt)}
+              ⚠ {stale}
             </Badge>
           </TooltipTrigger>
           <TooltipContent>

@@ -1,5 +1,5 @@
 import { Controller, Req } from "@nestjs/common";
-import { Implement, implement } from "@orpc/nest";
+import { implement } from "@orpc/nest";
 import { ORPCError } from "@orpc/server";
 import { type Cluster, contract, type Recommendation, type RoiContribution } from "@repo/contracts";
 import type { FastifyRequest } from "fastify";
@@ -36,24 +36,23 @@ import type { ConnectionDiagnosis as EngineConnectionDiagnosis } from "../engine
 import { adapterFor, engineSupported } from "../engine/registry";
 import { currentKeyVersion, masterKeyBytesFor } from "../env";
 import { consumeDialBudget } from "../errors/dial-budget";
+import { isUnreachableError } from "../errors/unreachable";
 import { classifyCluster } from "../jobs/classify";
 import { openClusterSession } from "../jobs/cluster-connection";
 import { collectCluster } from "../jobs/collect";
 import { evictCluster } from "../jobs/connection-pool";
 import { connStringUsername, ProvisionDeniedError, provisionScopedUser } from "../mongo";
+import { Implement } from "../orpc/implement";
 
 // A drop's rollback token carries the dropped index's serialized spec.
 const rollbackTokenSchema = z.object({ spec: z.unknown() });
-
-const UNREACHABLE_NAME = /MongoServerSelectionError|MongoNetworkError|MongoTimeoutError/;
-const UNREACHABLE_MESSAGE = /getaddrinfo|ECONNREFUSED|ETIMEDOUT|Server selection timed out/i;
 
 // oRPC handles handler throws itself (Nest filters never see them), so the
 // customer-cluster failure mapping lives here: unreachable -> 502 with guidance.
 function mapClusterError(error: unknown): never {
   if (error instanceof ORPCError) throw error;
   const err = error instanceof Error ? error : new Error(String(error));
-  if (UNREACHABLE_NAME.test(err.name) || UNREACHABLE_MESSAGE.test(err.message)) {
+  if (isUnreachableError(err)) {
     throw new ORPCError("CLUSTER_UNREACHABLE", {
       status: 502,
       message: "cluster unreachable — check the connection string and network access",

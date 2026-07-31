@@ -362,6 +362,13 @@ npm run dev
 
 Other: `npm run build` · `npm run typecheck` · `npm run lint` · `npm run test`
 (unit — the pure engines).
+
+**House rule: the api and the web app run clean.** No errors and no warnings in
+server logs, build output, or the browser console — a warning is a defect, so
+fix the cause rather than silencing it. Expected external conditions (an
+unreachable cluster, undecryptable credentials) are classified and handled, not
+thrown and retried; anything clock- or timezone-dependent in the UI waits for
+`useMounted()` so hydration matches. See architecture §16.
 Database: `npm run db:generate` · `npm run db:migrate` (dev, via drizzle-kit) ·
 `npm run db:deploy -w @repo/api` (production — runs the compiled migrator, no
 devDependencies needed).

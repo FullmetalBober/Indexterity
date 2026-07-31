@@ -12,10 +12,12 @@ export default defineConfig({
   resolve: { alias: { "~": fileURLToPath(new URL("./src", import.meta.url)) } },
   // Bundle internal + CJS deps into the SSR output so nitro never has to trace
   // them as externals (their exports maps break its dependency copy).
-  ssr: { noExternal: [/^@repo\//, "@ts-rest/core", "zod"] },
+  ssr: { noExternal: [/^@repo\//, "zod"] },
   plugins: [
     tanstackStart(),
-    nitroV2Plugin(),
+    // Pin nitro's defaults to the date this app was built against, instead of
+    // letting it fall back to 2024-04-03 and warn on every build.
+    nitroV2Plugin({ compatibilityDate: "2026-07-31" }),
     // react's vite plugin must come after start's plugin
     viteReact(),
     tailwindcss(),

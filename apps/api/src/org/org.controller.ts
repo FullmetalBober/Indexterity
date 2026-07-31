@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { Controller, Req } from "@nestjs/common";
-import { Implement, implement } from "@orpc/nest";
+import { implement } from "@orpc/nest";
 import { ORPCError } from "@orpc/server";
 import { contract } from "@repo/contracts";
 import type { FastifyRequest } from "fastify";
@@ -9,6 +9,7 @@ import { acceptOrgInvite, resolveMembership, resolveOrgId } from "../auth/tenanc
 import { and, eq, gt, invites, isNull, members, organizations, user } from "../db";
 import { DatabaseService } from "../db/database.service";
 import { sendMail } from "../mail/mailer";
+import { Implement } from "../orpc/implement";
 
 const INVITE_TTL_MS = 7 * 86_400_000;
 

@@ -7,6 +7,11 @@ import { sendMail } from "./mailer";
 // and a restart re-alerting once is the right failure mode.
 const lastAlert = new Map<string, number>();
 
+// One alert per cluster+task per day, shared by both paths that raise them:
+// a task that burned its last retry, and one that skipped because the cluster
+// was unreachable.
+export const ALERT_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+
 export function alertAllowed(key: string, cooldownMs: number, now = Date.now()): boolean {
   const previous = lastAlert.get(key);
   if (previous !== undefined && now - previous < cooldownMs) return false;

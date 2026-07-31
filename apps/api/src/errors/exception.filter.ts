@@ -1,5 +1,6 @@
 import { type ArgumentsHost, Catch, type ExceptionFilter, HttpException } from "@nestjs/common";
 import type { FastifyReply, FastifyRequest } from "fastify";
+import { isUnreachableError } from "./unreachable";
 
 // Catches everything thrown OUTSIDE the oRPC pipeline (the better-auth mount,
 // Nest-level failures): 502 for unreachable customer clusters, 404 for missing
@@ -9,9 +10,6 @@ import type { FastifyReply, FastifyRequest } from "fastify";
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
-
-const UNREACHABLE_NAME = /MongoServerSelectionError|MongoNetworkError|MongoTimeoutError/;
-const UNREACHABLE_MESSAGE = /getaddrinfo|ECONNREFUSED|ETIMEDOUT|Server selection timed out/i;
 
 @Catch()
 export class AppExceptionFilter implements ExceptionFilter {
@@ -42,8 +40,8 @@ export class AppExceptionFilter implements ExceptionFilter {
         return;
       }
     }
-    if (UNREACHABLE_NAME.test(error.name) || UNREACHABLE_MESSAGE.test(error.message)) {
-      request.log.error({ err: error }, "cluster unreachable");
+    if (isUnreachableError(error)) {
+      request.log.warn({ err: error }, "cluster unreachable");
       void reply.status(502).send({
         message: "cluster unreachable — check the connection string and network access",
         requestId: request.id,
