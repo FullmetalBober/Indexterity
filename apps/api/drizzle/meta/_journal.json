@@ -148,6 +148,13 @@
       "when": 1785494169406,
       "tag": "0020_dynamic-observe",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1785511254134,
+      "tag": "0021_vengeful_risque",
+      "breakpoints": true
     }
   ]
 }

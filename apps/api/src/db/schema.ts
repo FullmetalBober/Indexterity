@@ -279,9 +279,16 @@ export const policies = pgTable("policies", {
   // Recommendations scoring >= this auto-approve (null = only manual/autoApply).
   autoApplyScore: integer("auto_apply_score"),
   // Elective changes (hide/build/drop) only run inside this UTC hour window;
-  // safety actions (unhide, regression rollback) ignore it. Null = anytime.
+  // safety actions (unhide, regression rollback) ignore it. Null = the engine
+  // picks one from observed traffic (below); it never means "anytime" now.
   changeWindowStartHour: integer("change_window_start_hour"),
   changeWindowEndHour: integer("change_window_end_hour"),
+  // The window the engine derived from this cluster's own traffic, refreshed
+  // after every collect. Kept apart from the columns above so an owner's choice
+  // stays distinguishable from ours — and so clearing theirs returns to auto.
+  inferredWindowStartHour: integer("inferred_window_start_hour"),
+  inferredWindowEndHour: integer("inferred_window_end_hour"),
+  inferredWindowReason: text("inferred_window_reason"),
 });
 
 // Regression memory: an index whose drop slowed reads during observe is parked

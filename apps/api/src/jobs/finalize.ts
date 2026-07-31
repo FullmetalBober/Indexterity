@@ -2,6 +2,7 @@ import { evaluateRegression, inChangeWindow } from "../analysis";
 import { actions, and, eq, inArray, policies, recommendations, roiMetrics } from "../db";
 import { notifyClusterOwners } from "../mail/notify";
 import { serializeSpec } from "../mongo";
+import { effectiveChangeWindow } from "./change-window";
 import { openClusterSession } from "./cluster-connection";
 import { recordRegression } from "./cooldowns";
 import { jobDb } from "./db";
@@ -26,11 +27,13 @@ export async function finalizeCluster(clusterId: string): Promise<number> {
   const observeDays = policy?.observeWindowDays ?? DEFAULT_OBSERVE_DAYS;
   // Gates only the ELECTIVE drop below. Safety actions — regression unhide,
   // write-watch rollback — always run; deferring them would prolong harm.
-  const windowOpen = inChangeWindow(
-    new Date(),
-    policy?.changeWindowStartHour ?? null,
-    policy?.changeWindowEndHour ?? null,
-  );
+  const window = effectiveChangeWindow({
+    changeWindowStartHour: policy?.changeWindowStartHour ?? null,
+    changeWindowEndHour: policy?.changeWindowEndHour ?? null,
+    inferredWindowStartHour: policy?.inferredWindowStartHour ?? null,
+    inferredWindowEndHour: policy?.inferredWindowEndHour ?? null,
+  });
+  const windowOpen = inChangeWindow(new Date(), window.startHour, window.endHour);
 
   const hiddenRecs = await db
     .select()

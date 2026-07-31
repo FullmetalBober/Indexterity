@@ -1,6 +1,7 @@
 import { dynamicObserveDays, inChangeWindow } from "../analysis";
 import { actions, and, eq, gte, indexSnapshots, ne, policies, recommendations } from "../db";
 import { serializeSpec } from "../mongo";
+import { effectiveChangeWindow } from "./change-window";
 import { openClusterSession } from "./cluster-connection";
 import { jobDb } from "./db";
 import { preflightDrop } from "./preflight";
@@ -48,13 +49,13 @@ export async function applyCluster(clusterId: string): Promise<number> {
   // Hides are elective — they wait for the change window (the promotion above
   // is db-only and runs anytime). Recommendations stay APPROVED until a tick
   // lands inside the window.
-  if (
-    !inChangeWindow(
-      new Date(),
-      policy?.changeWindowStartHour ?? null,
-      policy?.changeWindowEndHour ?? null,
-    )
-  ) {
+  const window = effectiveChangeWindow({
+    changeWindowStartHour: policy?.changeWindowStartHour ?? null,
+    changeWindowEndHour: policy?.changeWindowEndHour ?? null,
+    inferredWindowStartHour: policy?.inferredWindowStartHour ?? null,
+    inferredWindowEndHour: policy?.inferredWindowEndHour ?? null,
+  });
+  if (!inChangeWindow(new Date(), window.startHour, window.endHour)) {
     return 0;
   }
 

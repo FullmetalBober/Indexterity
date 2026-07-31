@@ -703,6 +703,9 @@ export class RecommendationsController {
         autoApplyScore: row?.autoApplyScore ?? null,
         changeWindowStartHour: row?.changeWindowStartHour ?? null,
         changeWindowEndHour: row?.changeWindowEndHour ?? null,
+        inferredWindowStartHour: row?.inferredWindowStartHour ?? null,
+        inferredWindowEndHour: row?.inferredWindowEndHour ?? null,
+        inferredWindowReason: row?.inferredWindowReason ?? null,
       };
     });
   }
@@ -716,11 +719,20 @@ export class RecommendationsController {
       if (!(await this.ownsCluster(clusterId, orgId))) {
         throw errors.NOT_FOUND({ message: "cluster not found" });
       }
-      await this.database.db
+      const [saved] = await this.database.db
         .insert(policies)
         .values({ clusterId, ...knobs })
-        .onConflictDoUpdate({ target: policies.clusterId, set: knobs });
-      return { clusterId, ...knobs };
+        .onConflictDoUpdate({ target: policies.clusterId, set: knobs })
+        .returning();
+      // Echo the engine's window back too — clearing the explicit one hands
+      // the choice back to the engine, and the UI needs to say so immediately.
+      return {
+        clusterId,
+        ...knobs,
+        inferredWindowStartHour: saved?.inferredWindowStartHour ?? null,
+        inferredWindowEndHour: saved?.inferredWindowEndHour ?? null,
+        inferredWindowReason: saved?.inferredWindowReason ?? null,
+      };
     });
   }
 

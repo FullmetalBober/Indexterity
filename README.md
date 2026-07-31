@@ -256,12 +256,25 @@ but never writes to your cluster.
 | `observeWindowDays` | baseline bake time for a hidden index — auto-extended for periodic usage (2× the largest activity gap, ≤ 90d), auto-shortened for long-proven idleness (≥ half, ≥ 7d) | 30 |
 | `maxCollectionSizeBytes` | size ceiling for building new indexes | — |
 | `autoApplyScore` | auto-approve recommendations scoring ≥ this (0-100) | off |
-| `changeWindowStartHour` / `EndHour` | elective changes (hide/build/drop) only run in this UTC hour window; safety rollbacks never wait | anytime |
+| `changeWindowStartHour` / `EndHour` | elective changes (hide/build/drop) only run in this UTC hour window; safety rollbacks never wait | **engine-chosen** |
 
 Knobs are edited from the dashboard's **Policy** section (`GET/PUT
 /clusters/:id/policy`, owner-only writes). With `autoApply`, proposed
 recommendations are promoted automatically — the hide → observe → finalize
 gates still stand between them and any drop.
+
+**The change window picks itself.** Left unset, the engine derives one from the
+cluster's own traffic instead of running at any hour: op counters from
+`latency_samples` are differenced, bucketed into the four 6h slots of the UTC
+day (the finest resolution a 6h collect cadence honestly supports), and the
+quietest slot wins. It re-derives after every collect, so the window follows a
+workload that moves. Three guards keep it from inventing one: every bucket needs
+three clean observations, the quiet slot must sit at or under 75% of peak (a
+flat day yields nothing), and intervals spanning a counter reset or a collection
+gap are discarded rather than averaged in. Until the evidence is there, changes
+run unrestricted — same as before. An explicit setting always wins, and the
+engine's pick is stored separately (`inferred_window_*`) so clearing yours hands
+the choice back rather than freezing whatever it last guessed.
 
 **Confidence scores.** Every recommendation carries a 0-100 score: drops earn
 points from dead usage, redundancy, history depth and reclaimable size; creates

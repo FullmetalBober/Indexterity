@@ -230,11 +230,21 @@ export const clusterPolicy = z.object({
   // Score threshold for auto-approval (null = never auto-approve by score).
   autoApplyScore: z.number().int().min(0).max(100).nullable(),
   // Elective changes (hide/build/drop) run only inside this UTC hour window;
-  // safety responses never wait. Null = anytime; start > end wraps midnight.
+  // safety responses never wait. Null hands the choice to the engine, which
+  // derives one from observed traffic; start > end wraps midnight.
   changeWindowStartHour: z.int().min(0).max(23).nullable(),
   changeWindowEndHour: z.int().min(0).max(23).nullable(),
 });
 export type ClusterPolicy = z.infer<typeof clusterPolicy>;
+
+// Read-only companion to the knobs above: the window the engine chose for
+// itself, and why. Separate so updatePolicy cannot be asked to set it.
+export const clusterPolicyView = clusterPolicy.extend({
+  inferredWindowStartHour: z.int().min(0).max(23).nullable(),
+  inferredWindowEndHour: z.int().min(0).max(23).nullable(),
+  inferredWindowReason: z.string().nullable(),
+});
+export type ClusterPolicyView = z.infer<typeof clusterPolicyView>;
 
 export const orgMember = z.object({
   userId: z.string(),

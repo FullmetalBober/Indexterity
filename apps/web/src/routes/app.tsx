@@ -1109,6 +1109,7 @@ interface PolicyView {
   readonly autoApplyScore: number | null;
   readonly changeWindowStartHour: number | null;
   readonly changeWindowEndHour: number | null;
+  readonly inferredWindowReason: string | null;
 }
 
 // The engine knobs, owner-editable. Checkbox changes stage locally; Save PUTs.
@@ -1257,12 +1258,19 @@ function PolicySection({ policy, onSaved }: { policy: PolicyView; onSaved: () =>
                 }
               />
             </div>
+            {windowStart === null || windowEnd === null ? (
+              <p className="text-muted-foreground text-xs">
+                {policy.inferredWindowReason ??
+                  "Not enough traffic history yet to pick one — changes run at any hour until there is."}
+              </p>
+            ) : null}
           </div>
           <Button onClick={() => void onSave()}>Save policy</Button>
         </div>
         <p className="text-muted-foreground text-xs">
           Elective changes (hide, build, drop) run only inside the change window; safety rollbacks
-          never wait. Leave it empty for anytime — a start after the end wraps midnight.
+          never wait. Leave it empty and Indexterity picks the cluster's quietest six hours itself —
+          a start after the end wraps midnight.
         </p>
       </CardContent>
     </Card>

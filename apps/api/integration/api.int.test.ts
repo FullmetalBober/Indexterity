@@ -7,6 +7,7 @@ import {
   eq,
   inArray,
   indexSnapshots,
+  latencySamples,
   organizations,
   recommendations,
   roiMetrics,
@@ -14,6 +15,7 @@ import {
   verification,
 } from "../src/db";
 import { applyCluster } from "../src/jobs/apply";
+import { refreshInferredWindow } from "../src/jobs/change-window";
 import { classifyCluster } from "../src/jobs/classify";
 import { drainPool } from "../src/jobs/connection-pool";
 import { applyCreatesForCluster } from "../src/jobs/create";
@@ -1112,6 +1114,57 @@ describe("password reset (changes the owner password — keep near the end)", ()
       body: JSON.stringify({ email: owner.email, password: "rotated-pass-456" }),
     });
     expect(signInRes.status).toBe(200);
+  });
+});
+
+describe("engine-chosen change window", () => {
+  it("derives a window from traffic and serves it on a cluster with no policy row", async () => {
+    const org = asRecord(await (await api("/org", owner)).json());
+    const [row] = await db
+      .insert(clusters)
+      .values({
+        orgId: asString(org.id),
+        name: "Window Cluster",
+        sealedDek: Buffer.alloc(1),
+        sealedData: Buffer.alloc(1),
+        keyVersion: 1,
+      })
+      .returning();
+    if (row === undefined) throw new Error("failed to insert cluster");
+    const windowClusterId = row.id;
+    createdClusterIds.push(windowClusterId);
+
+    // Five days of collects at the 6h cadence. Cumulative counters, quiet
+    // overnight (00-06 UTC) and busy through the working day.
+    const perBucket = [40, 900, 1200, 700];
+    let ops = 0;
+    const samples = [];
+    for (let day = 0; day < 5; day++) {
+      for (let bucket = 0; bucket < 4; bucket++) {
+        samples.push({
+          clusterId: windowClusterId,
+          database: "shop",
+          collection: "orders",
+          readOps: ops,
+          readLatencyMicros: 0,
+          writeOps: 0,
+          writeLatencyMicros: 0,
+          capturedAt: new Date(Date.UTC(2026, 5, 1 + day, bucket * 6, 0, 0)),
+        });
+        ops += perBucket[bucket] ?? 0;
+      }
+    }
+    await db.insert(latencySamples).values(samples);
+
+    // No policies row exists for this cluster — the engine must create one.
+    const inferred = await refreshInferredWindow(db, windowClusterId);
+    expect(inferred).toEqual({ startHour: 0, endHour: 6 });
+
+    const policy = asRecord(await (await api(`/clusters/${windowClusterId}/policy`, owner)).json());
+    expect(policy.changeWindowStartHour).toBeNull();
+    expect(policy.inferredWindowStartHour).toBe(0);
+    expect(policy.inferredWindowEndHour).toBe(6);
+    expect(String(policy.inferredWindowReason)).toContain("quietest");
   });
 });
 

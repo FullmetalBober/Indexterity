@@ -2,6 +2,7 @@ import type { JobHelpers } from "graphile-worker";
 import { isUnreachableError } from "../errors/unreachable";
 import { ALERT_COOLDOWN_MS, alertAllowed, notifyClusterOwners } from "../mail/notify";
 import { applyCluster } from "./apply";
+import { refreshInferredWindow } from "./change-window";
 import { classifyCluster } from "./classify";
 import { ClusterCredentialsError } from "./cluster-connection";
 import { collectCluster } from "./collect";
@@ -97,7 +98,12 @@ export const taskList = {
     });
   },
   classify: async (payload: unknown, helpers: JobHelpers): Promise<void> => {
-    await onCluster("classify", payload, helpers, classifyCluster);
+    await onCluster("classify", payload, helpers, async (clusterId) => {
+      await classifyCluster(clusterId);
+      // Same trigger, same evidence: re-derive the change window from the
+      // traffic the collect just recorded.
+      await refreshInferredWindow(jobDb(), clusterId);
+    });
   },
   suggest: async (payload: unknown, helpers: JobHelpers): Promise<void> => {
     await onCluster("suggest", payload, helpers, suggestForCluster);

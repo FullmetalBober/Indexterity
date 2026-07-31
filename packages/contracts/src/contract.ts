@@ -8,6 +8,7 @@ import {
   clusterLatency,
   clusterLatencySeries,
   clusterPolicy,
+  clusterPolicyView,
   clusterRoi,
   connectionDiagnosis,
   createdInvite,
@@ -162,7 +163,7 @@ export const contract = {
     })
     .errors({ NOT_FOUND: {} })
     .input(clusterId)
-    .output(clusterPolicy),
+    .output(clusterPolicyView),
 
   updatePolicy: oc
     .route({
@@ -172,7 +173,7 @@ export const contract = {
     })
     .errors({ NOT_FOUND: {} })
     .input(clusterId.extend(clusterPolicy.omit({ clusterId: true }).shape))
-    .output(clusterPolicy),
+    .output(clusterPolicyView),
 
   triggerCollect: oc
     .route({
