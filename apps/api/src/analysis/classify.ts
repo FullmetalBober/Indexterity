@@ -6,6 +6,10 @@ export interface ClassifyOptions {
   readonly recentWindow: number;
   // Minimum snapshots required before attempting periodic classification.
   readonly minHistory: number;
+  // Minimum span the history must cover before absence of usage counts as
+  // evidence. Snapshot count alone is not enough: three collects is eighteen
+  // hours at the 6h cadence, and plenty of real work runs less often than that.
+  readonly minHistoryDays: number;
   // Largest acceptable hole between consecutive snapshots. A longer one means
   // we stopped watching (cluster unreachable, control plane down), so the
   // history cannot prove absence of usage.
@@ -62,10 +66,16 @@ export function countersRestartedDuring(history: readonly UsageSnapshot[]): bool
 }
 
 // Is this history good enough to claim an index is UNUSED? Absence of evidence
-// only counts when we were actually watching: too few snapshots, a hole in the
-// series, or counters that restarted underneath us, and a busy index looks
-// identical to a dead one. Structural findings (redundancy) do not depend on
-// this.
+// only counts when we were actually watching: too few snapshots, too short a
+// span, a hole in the series, or counters that restarted underneath us, and a
+// busy index looks identical to a dead one. Structural findings (redundancy) do
+// not depend on this.
+//
+// The span requirement is the warm-up. A freshly connected cluster reaches
+// three snapshots in eighteen hours, at which point every index that has not
+// happened to run in those eighteen hours reads as dead — including the weekly
+// batch and the quarterly export. Counting snapshots measures how often we
+// looked; only the span measures how long we watched.
 export function usageHistoryIsTrustworthy(
   history: readonly UsageSnapshot[],
   options: ClassifyOptions,
@@ -78,6 +88,10 @@ export function usageHistoryIsTrustworthy(
     .filter((time) => Number.isFinite(time))
     .sort((a, b) => a - b);
   if (times.length < options.minHistory) return false;
+  const oldest = times[0];
+  const newestSeen = times.at(-1);
+  if (oldest === undefined || newestSeen === undefined) return false;
+  if (newestSeen - oldest < options.minHistoryDays * 24 * HOUR_MS) return false;
   const maxGap = options.maxGapHours * HOUR_MS;
   for (let i = 1; i < times.length; i++) {
     const previous = times[i - 1];

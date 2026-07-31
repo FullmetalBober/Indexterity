@@ -25,7 +25,7 @@ function input(indexSpec: IndexSpec, opsPerSnapshot: number[]): IndexInput {
   return { spec: indexSpec, history };
 }
 
-const options = { recentWindow: 3, minHistory: 3, maxGapHours: 48 };
+const options = { recentWindow: 3, minHistory: 3, minHistoryDays: 0, maxGapHours: 48 };
 // The fixtures' newest snapshot is 2026-01-03; judge from just after it, since
 // usage findings now require a history that is both gapless and current.
 const NOW = new Date("2026-01-03T06:00:00Z");

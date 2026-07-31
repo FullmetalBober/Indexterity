@@ -11,7 +11,7 @@ const DEFAULT_OBSERVE_DAYS = 30;
 // A hole larger than this means we stopped watching, so absence of usage
 // proves nothing (see analysis/classify.ts). Two days spans a missed collect
 // or two at the 6h cadence without tolerating an outage.
-const CLASSIFY_OPTIONS = { recentWindow: 3, minHistory: 3, maxGapHours: 48 };
+const CLASSIFY_OPTIONS = { recentWindow: 3, minHistory: 3, minHistoryDays: 7, maxGapHours: 48 };
 
 // Read a cluster's snapshots, run the pure engine per collection, and replace
 // the cluster's PROPOSED recommendations. Returns the number proposed.

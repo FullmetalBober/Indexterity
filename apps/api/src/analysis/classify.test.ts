@@ -9,7 +9,7 @@ function snap(ops: number): UsageSnapshot {
   };
 }
 
-const options = { recentWindow: 3, minHistory: 3, maxGapHours: 48 };
+const options = { recentWindow: 3, minHistory: 3, minHistoryDays: 0, maxGapHours: 48 };
 
 describe("classifyUsage", () => {
   it("FLAT_ZERO below minHistory", () => {
@@ -40,7 +40,7 @@ describe("classifyUsage", () => {
 });
 
 describe("usageHistoryIsTrustworthy", () => {
-  const opts = { recentWindow: 3, minHistory: 3, maxGapHours: 48 };
+  const opts = { recentWindow: 3, minHistory: 3, minHistoryDays: 0, maxGapHours: 48 };
   const at = (iso: string, ops = 0): UsageSnapshot => ({
     capturedAt: iso,
     perMember: [{ member: "m", ops, since: "" }],
@@ -156,7 +156,7 @@ describe("countersRestartedDuring", () => {
 });
 
 describe("usageHistoryIsTrustworthy with restart evidence", () => {
-  const opts = { recentWindow: 3, minHistory: 3, maxGapHours: 48 };
+  const opts = { recentWindow: 3, minHistory: 3, minHistoryDays: 0, maxGapHours: 48 };
   const now = new Date("2026-03-04T00:00:00Z");
   const history = (since: string[]): UsageSnapshot[] =>
     since.map((value, i) => ({
@@ -182,5 +182,38 @@ describe("usageHistoryIsTrustworthy with restart evidence", () => {
         now,
       ),
     ).toBe(false);
+  });
+});
+
+describe("warm-up: history span, not just snapshot count", () => {
+  const opts = { recentWindow: 3, minHistory: 3, minHistoryDays: 7, maxGapHours: 48 };
+  // A freshly connected cluster collecting every 6h.
+  const collects = (count: number, fromDay: number): UsageSnapshot[] =>
+    Array.from({ length: count }, (_, i) => ({
+      capturedAt: new Date(Date.UTC(2026, 0, fromDay, i * 6)).toISOString(),
+      perMember: [{ member: "m", ops: 0, since: "2026-01-01T00:00:00Z" }],
+    }));
+
+  it("refuses a usage claim on a cluster connected yesterday", () => {
+    // Three snapshots, eighteen hours — enough to count, not enough to know.
+    const history = collects(4, 1);
+    const now = new Date(Date.UTC(2026, 0, 1, 20));
+    expect(usageHistoryIsTrustworthy(history, opts, now)).toBe(false);
+  });
+
+  it("accepts once the history actually spans the warm-up", () => {
+    // Eight unbroken days at the 6h cadence.
+    const history = Array.from({ length: 32 }, (_, i) => ({
+      capturedAt: new Date(Date.UTC(2026, 0, 1, i * 6)).toISOString(),
+      perMember: [{ member: "m", ops: 0, since: "2026-01-01T00:00:00Z" }],
+    }));
+    const now = new Date(Date.UTC(2026, 0, 8, 20));
+    expect(usageHistoryIsTrustworthy(history, opts, now)).toBe(true);
+  });
+
+  it("is opt-out at zero, for callers that supply their own fixtures", () => {
+    const history = collects(4, 1);
+    const now = new Date(Date.UTC(2026, 0, 1, 20));
+    expect(usageHistoryIsTrustworthy(history, { ...opts, minHistoryDays: 0 }, now)).toBe(true);
   });
 });

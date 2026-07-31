@@ -1385,7 +1385,9 @@ describe("an index the engine is still watching", () => {
 
     // Built for a query shape that then went quiet: three clean snapshots, all
     // zero ops, which on their own read as FLAT_ZERO -> DROP_UNUSED.
-    const base = Date.now() - 2 * 86_400_000;
+    // Ten days of collects at 12h intervals: enough span to clear the warm-up
+    // (usage findings need a week of history, not just three snapshots).
+    const base = Date.now() - 10 * 86_400_000;
     const spec = {
       name: "built_1",
       keys: [{ field: "built", direction: 1 }],
@@ -1399,7 +1401,7 @@ describe("an index the engine is still watching", () => {
     };
     const since = new Date(base - 86_400_000).toISOString();
     await db.insert(indexSnapshots).values(
-      [0, 1, 2].map((day) => ({
+      Array.from({ length: 20 }, (_, i) => ({
         clusterId: watchId,
         database: "inttest",
         collection: "orders",
@@ -1407,7 +1409,7 @@ describe("an index the engine is still watching", () => {
         spec,
         sizeBytes: 4096,
         perMember: [{ member: "m1", ops: 0, since }],
-        capturedAt: new Date(base + day * 43_200_000),
+        capturedAt: new Date(base + i * 43_200_000),
       })),
     );
 

@@ -32,10 +32,13 @@ Full design and decision log: [`docs/architecture.md`](./docs/architecture.md).
 (`FLAT_ZERO`, `CONTINUOUS`, `PERIODIC_ALIVE`, `PERIODIC_DEAD`). Dead usage or
 redundancy earns a proposal.
 
-A usage claim needs a history worth trusting: at least 3 snapshots, no hole over
-48h, a recent newest one, and no counter restart in the window. During a
-collection gap a busy index looks exactly like a dead one, so nothing is
-claimed. Redundancy is structural and unaffected.
+A usage claim needs a history worth trusting: **at least a week of it**, no hole
+over 48h, a recent newest snapshot, and no counter restart in the window. The
+week is the warm-up — three snapshots is eighteen hours at the 6h cadence, and
+plenty of real work runs less often, so counting snapshots would measure how
+often we looked rather than how long we watched. During a collection gap a busy
+index looks exactly like a dead one, so nothing is claimed. Redundancy is
+structural and unaffected.
 
 **Never dropped**, whatever the usage: `_id_`, unique (including unique partial
 and sparse — a constraint is not a performance hint), TTL, and shard-key
@@ -240,9 +243,6 @@ run in their own console.
 
 What is actually open is correctness, not features:
 
-- **Warmup.** A usage finding needs only 3 snapshots — 18h at the 6h cadence —
-  so on a freshly connected cluster a quarterly job's index is indistinguishable
-  from a dead one. Withhold usage-based drops until the history has depth.
 - **Narrowing UPDATE** (full index → partial) needs a retire mechanism.
   `targetSpec.retire` is written and never read; UPDATE and MERGE rely on the
   next classify pass finding the old index redundant, which cannot happen when
