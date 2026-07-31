@@ -241,8 +241,12 @@ bigger ask than the `createRole` snippet it would replace, and it hands us a
 credential to guard. Atlas clusters get the guided 422 naming the commands to
 run in their own console.
 
-What is actually open is correctness, not features:
-
+Everything on the correctness list is closed. What is left is severity: the
+engine treats a collection scan on a 50M-document table and one on 1,001
+documents identically past a single 10,000-doc gate, and `$queryStats` already
+reports `docsExamined` — the actual waste — which nothing reads. Discovery is
+also bounded by the 6h collect, so a genuinely critical missing index can wait
+a day even with `instantCreate` on.
 
 ## Notes
 
