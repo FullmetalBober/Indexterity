@@ -16,7 +16,11 @@ export function databaseUrl(): string {
 }
 
 // Spawn the built api and wait for /health. The caller owns teardown.
-export async function startApi(): Promise<ChildProcess> {
+// extraEnv/port let a test drive a second instance with different guards.
+export async function startApi(
+  extraEnv: Record<string, string> = {},
+  port: number = API_PORT,
+): Promise<ChildProcess> {
   const entry = path.resolve(__dirname, "../dist/main.js");
   if (!existsSync(entry)) {
     throw new Error("dist/main.js missing — run `turbo run build` before the integration suite");
@@ -24,19 +28,24 @@ export async function startApi(): Promise<ChildProcess> {
   const child = spawn("node", [entry], {
     env: {
       ...process.env,
-      API_PORT: String(API_PORT),
+      API_PORT: String(port),
       WEB_ORIGIN,
       DATABASE_URL: databaseUrl(),
       BETTER_AUTH_SECRET: process.env.BETTER_AUTH_SECRET ?? "integration-secret",
       MASTER_KEY:
         process.env.MASTER_KEY ??
         Buffer.from("0123456789abcdef0123456789abcdef").toString("base64"),
+      // The suite's mongo is on localhost, and it signs up freely — both are
+      // non-defaults, which is exactly why the guards need their own tests.
+      ALLOW_PRIVATE_CLUSTER_TARGETS: "true",
+      SIGNUP_MODE: "open",
+      ...extraEnv,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
   for (let i = 0; i < 60; i++) {
     try {
-      const res = await fetch(`${API_BASE}/health`);
+      const res = await fetch(`http://localhost:${port}/health`);
       if (res.ok) return child;
     } catch {
       // not up yet

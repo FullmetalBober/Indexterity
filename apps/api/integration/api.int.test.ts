@@ -422,6 +422,129 @@ describe("org switcher", () => {
   });
 });
 
+describe("SSRF guard and sign-up gate (second api with production defaults)", () => {
+  // The main instance runs with ALLOW_PRIVATE_CLUSTER_TARGETS=true and
+  // SIGNUP_MODE=open so the rest of the suite can use a localhost mongo. This
+  // one runs the defaults a hosted deployment gets.
+  const PORT = 3098;
+  const BASE = `http://localhost:${PORT}`;
+  let guarded: ChildProcess;
+  let guardedOwner: Session;
+
+  const post = async (path: string, session: Session | null, body: unknown) =>
+    fetch(`${BASE}${path}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: WEB_ORIGIN,
+        ...(session === null ? {} : { cookie: session.cookie }),
+      },
+      body: JSON.stringify(body),
+    });
+
+  beforeAll(async () => {
+    guarded = await startApi(
+      { ALLOW_PRIVATE_CLUSTER_TARGETS: "false", SIGNUP_MODE: "invite" },
+      PORT,
+    );
+    // Users already exist (the suite signed some up), so this instance is past
+    // its first-user bootstrap: sign-up must now require an invite.
+    const email = `blocked-${Date.now()}@int.test`;
+    const denied = await post("/api/auth/sign-up/email", null, {
+      email,
+      password: "password12345",
+      name: "Stranger",
+    });
+    expect(denied.status).toBe(403);
+    expect(JSON.stringify(await denied.json())).toContain("invite-only");
+
+    // An invited address gets through. Invite from the main instance (shared db).
+    const invitee = `invited-${Date.now()}@int.test`;
+    const invite = await api("/org/invites", owner, {
+      method: "POST",
+      body: JSON.stringify({ email: invitee, role: "member" }),
+    });
+    expect(invite.status).toBe(200);
+    const allowed = await post("/api/auth/sign-up/email", null, {
+      email: invitee,
+      password: "password12345",
+      name: "Invited",
+    });
+    expect(allowed.status).toBe(200);
+    createdEmails.push(email, invitee);
+    guardedOwner = {
+      email: invitee,
+      cookie: allowed.headers
+        .getSetCookie()
+        .map((value) => value.split(";")[0])
+        .join("; "),
+    };
+  });
+
+  afterAll(async () => {
+    await stopApi(guarded);
+  });
+
+  it("refuses to dial private addresses, naming the escape hatch", async () => {
+    const res = await post("/clusters/check-connection", guardedOwner, {
+      connectionString: "mongodb://10.0.0.5:27017",
+    });
+    expect(res.status).toBe(400);
+    const body = JSON.stringify(await res.json());
+    expect(body).toContain("private network");
+    expect(body).toContain("ALLOW_PRIVATE_CLUSTER_TARGETS");
+  });
+
+  it("refuses loopback, so the control plane cannot probe itself", async () => {
+    const res = await post("/clusters/check-connection", guardedOwner, {
+      connectionString: "mongodb://127.0.0.1:27017",
+    });
+    expect(res.status).toBe(400);
+    expect(JSON.stringify(await res.json())).toContain("loopback");
+  });
+
+  it("refuses cloud metadata and never stores such a cluster", async () => {
+    const res = await post("/clusters", guardedOwner, {
+      name: "metadata",
+      connectionString: "mongodb://169.254.169.254:27017",
+    });
+    expect(res.status).toBe(400);
+    expect(JSON.stringify(await res.json())).toContain("metadata");
+    const rows = await db.select().from(clusters).where(eq(clusters.name, "metadata"));
+    expect(rows).toHaveLength(0);
+  });
+
+  it("rejects a private host smuggled in beside a public one", async () => {
+    const res = await post("/clusters/check-connection", guardedOwner, {
+      connectionString: "mongodb://8.8.8.8:27017,192.168.1.10:27017",
+    });
+    expect(res.status).toBe(400);
+    expect(JSON.stringify(await res.json())).toContain("192.168.1.10");
+  });
+
+  it("rate-limits dialing so the guard cannot be brute-forced", async () => {
+    // Blocked targets still consume budget — deliberate, so a scanner cannot
+    // get free attempts by aiming at addresses the guard rejects. It also
+    // keeps this test fast: each call returns immediately instead of waiting
+    // out a connection timeout.
+    let limited = false;
+    let rejections = 0;
+    for (let i = 1; i < 20; i++) {
+      const res = await post("/clusters/check-connection", guardedOwner, {
+        connectionString: `mongodb://10.1.0.${i}:27017`,
+      });
+      if (res.status === 400) rejections += 1;
+      if (res.status === 429) {
+        limited = true;
+        break;
+      }
+    }
+    expect(limited).toBe(true);
+    // The budget bites well before 20 attempts.
+    expect(rejections).toBeLessThan(15);
+  });
+});
+
 describe("connection preflight", () => {
   it("reports what a connection string can do without storing anything", async () => {
     const res = await api("/clusters/check-connection", owner, {

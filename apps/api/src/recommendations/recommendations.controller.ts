@@ -31,9 +31,11 @@ import {
   sql,
 } from "../db";
 import { DatabaseService } from "../db/database.service";
+import { allowPrivateTargets, assertTargetsAllowed, BlockedTargetError } from "../engine/net-guard";
 import type { ConnectionDiagnosis as EngineConnectionDiagnosis } from "../engine/ports";
 import { adapterFor, engineSupported } from "../engine/registry";
 import { currentKeyVersion, masterKeyBytesFor } from "../env";
+import { consumeDialBudget } from "../errors/dial-budget";
 import { classifyCluster } from "../jobs/classify";
 import { openClusterSession } from "../jobs/cluster-connection";
 import { collectCluster } from "../jobs/collect";
@@ -419,21 +421,36 @@ export class RecommendationsController {
     return row;
   }
 
-  // Shape-check a connection string for an engine, or fail with guidance.
-  private assertConnString(
+  // Everything that must be true before the control plane dials a customer
+  // host: a supported engine, a mongodb scheme, a per-user budget, and a
+  // target that is not somewhere on our own network (docs/architecture.md
+  // §10.2). Every endpoint that opens a connection goes through here.
+  private async guardDial(
+    req: FastifyRequest,
     engine: typeof clusters.$inferSelect.engine,
     value: string,
     errors: { BAD_REQUEST: (options: { message: string }) => Error },
-  ): void {
+  ): Promise<void> {
     if (!engineSupported(engine)) {
       throw errors.BAD_REQUEST({
         message: `${engine} support is planned — only MONGODB clusters can connect today`,
       });
     }
-    if (!adapterFor(engine).isConnString(value)) {
+    const adapter = adapterFor(engine);
+    if (!adapter.isConnString(value)) {
       throw errors.BAD_REQUEST({
         message: "connection string must be mongodb:// or mongodb+srv://",
       });
+    }
+    consumeDialBudget(await requireUserId(req));
+    const { hosts, isSrv } = adapter.hostsOf(value);
+    try {
+      await assertTargetsAllowed(hosts, isSrv, { allowPrivate: allowPrivateTargets() });
+    } catch (error) {
+      if (error instanceof BlockedTargetError) {
+        throw errors.BAD_REQUEST({ message: error.message });
+      }
+      throw error;
     }
   }
 
@@ -446,7 +463,7 @@ export class RecommendationsController {
     return implement(contract.checkConnection).handler(async ({ input, errors }) => {
       await this.requireOwner(req);
       const engine = input.engine ?? "MONGODB";
-      this.assertConnString(engine, input.connectionString, errors);
+      await this.guardDial(req, engine, input.connectionString, errors);
       return toDiagnosis(await adapterFor(engine).diagnose(input.connectionString));
     });
   }
@@ -456,7 +473,7 @@ export class RecommendationsController {
     return implement(contract.createCluster).handler(async ({ input, errors }) => {
       const orgId = await this.requireOwner(req);
       const engine = input.engine ?? "MONGODB";
-      this.assertConnString(engine, input.connectionString, errors);
+      await this.guardDial(req, engine, input.connectionString, errors);
       // Verify before storing: an unusable string must fail at connect time
       // with the reason, not silently collect nothing for a day.
       const diagnosis = await adapterFor(engine).diagnose(input.connectionString);
@@ -489,11 +506,7 @@ export class RecommendationsController {
       const orgId = await this.requireOwner(req);
       // Provisioning is engine-specific; MONGODB is the only adapter with the
       // capability today (see EngineCapabilities.provisionScopedUsers).
-      if (!adapterFor("MONGODB").isConnString(input.adminConnectionString)) {
-        throw errors.BAD_REQUEST({
-          message: "connection string must be mongodb:// or mongodb+srv://",
-        });
-      }
+      await this.guardDial(req, "MONGODB", input.adminConnectionString, errors);
       let provisioned: Awaited<ReturnType<typeof provisionScopedUser>>;
       try {
         provisioned = await provisionScopedUser(input.adminConnectionString);
@@ -534,11 +547,7 @@ export class RecommendationsController {
         .limit(1);
       if (row === undefined) throw errors.NOT_FOUND({ message: "cluster not found" });
       const adapter = adapterFor(row.engine);
-      if (!adapter.isConnString(input.connectionString)) {
-        throw errors.BAD_REQUEST({
-          message: "connection string must be mongodb:// or mongodb+srv://",
-        });
-      }
+      await this.guardDial(req, row.engine, input.connectionString, errors);
       try {
         const probe = await adapter.open(input.connectionString);
         try {

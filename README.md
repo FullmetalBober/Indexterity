@@ -351,6 +351,20 @@ Database: `npm run db:generate` · `npm run db:migrate` (dev, via drizzle-kit) �
 `npm run db:deploy -w @repo/api` (production — runs the compiled migrator, no
 devDependencies needed).
 
+## Security posture (defaults)
+
+Both defaults exist because the control plane **dials hosts that users name**:
+
+- **Sign-up is invite-only** (`SIGNUP_MODE`). The first account bootstraps the
+  install; after that an address needs a pending invite. `open` and `closed`
+  are the alternatives — `open` hands that outbound reach to strangers.
+- **Private targets are refused** unless `ALLOW_PRIVATE_CLUSTER_TARGETS=true`
+  (self-hosted installs whose database is on the same private network). Cloud
+  metadata and other never-a-database ranges stay blocked either way, DNS and
+  SRV records are resolved before dialing, and every host in a multi-host
+  string is checked. Details in
+  [`docs/architecture.md` §10.2](./docs/architecture.md).
+
 ## Deploy on Kubernetes
 
 A Helm chart lives in [`deploy/helm/indexterity`](./deploy/helm/indexterity):

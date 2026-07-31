@@ -70,6 +70,21 @@ server functions call the api over the in-cluster Service. Enable
 | `smtp.*` | Without a host, invites, alerts, verification and reset mails are logged and dropped |
 | `config.requireEmailVerification` | Production posture — needs working SMTP, or nobody can sign in |
 | `config.storageUsdPerGbMonth` | Your storage price, for the $/month ROI headline |
+| `config.signupMode` | `invite` (default), `open` or `closed`. The first account always bootstraps the install; after that invite-only. `open` lets any stranger register — and every account can make the control plane dial hosts it names |
+| `config.allowPrivateClusterTargets` | Set `true` when the MongoDB you manage is on a private network (the normal self-hosted case). Leave `false` for anything strangers can reach, or accounts can probe your internal network. Cloud metadata stays blocked either way |
+
+## Security defaults
+
+Onboarding dials whatever connection string a user supplies, so two defaults
+are deliberately restrictive (see `docs/architecture.md` §10.2):
+
+- **Sign-up is invite-only.** First account bootstraps; the rest need an invite.
+- **Private and loopback targets are refused.** Self-hosted installs whose
+  database lives on the cluster network must set
+  `config.allowPrivateClusterTargets=true`. Link-local/cloud-metadata,
+  multicast and reserved ranges are refused regardless.
+
+`helm install` prints a warning when the chosen combination is unsafe.
 
 ## Notes on the workloads
 

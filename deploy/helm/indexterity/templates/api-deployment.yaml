@@ -53,6 +53,8 @@ spec:
               value: {{ default (include "indexterity.internalApiUrl" .) .Values.config.betterAuthUrl | quote }}
             - name: REQUIRE_EMAIL_VERIFICATION
               value: {{ .Values.config.requireEmailVerification | quote }}
+            - name: SIGNUP_MODE
+              value: {{ .Values.config.signupMode | quote }}
             {{- if .Values.secrets.github.clientId }}
             - name: GITHUB_CLIENT_ID
               value: {{ .Values.secrets.github.clientId | quote }}

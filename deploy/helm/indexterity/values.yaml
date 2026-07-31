@@ -101,6 +101,19 @@ config:
   logLevel: info
   # Reject sign-ins from unverified addresses (needs working SMTP).
   requireEmailVerification: false
+  # Who may create an account:
+  #   invite — default. The first account bootstraps the install; after that an
+  #            address needs a pending invite from an owner.
+  #   open   — anyone. Only for a deliberately public instance: the control
+  #            plane dials customer-supplied hosts, so an open front door hands
+  #            that reach to strangers.
+  #   closed — nobody new.
+  signupMode: invite
+  # Allow connecting clusters on private/loopback addresses. Self-hosted
+  # installs whose MongoDB sits on the same private network need this; a hosted
+  # install must leave it false, or any account can probe the internal network.
+  # Cloud metadata and other never-a-database ranges stay blocked either way.
+  allowPrivateClusterTargets: false
   # Storage price used for the $/month ROI headline.
   storageUsdPerGbMonth: ""
   # Public origin of the api itself — only needed when the api is exposed and

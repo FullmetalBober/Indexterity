@@ -1,7 +1,9 @@
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
+import { APIError } from "better-auth/api";
 import { createDatabase, schema } from "../db";
 import { sendMail } from "../mail/mailer";
+import { evaluateSignup } from "./signup-gate";
 
 export interface AuthConfig {
   readonly databaseUrl: string;
@@ -24,6 +26,21 @@ export function createAuth(config: AuthConfig) {
     secret: config.secret,
     baseURL: config.baseURL,
     trustedOrigins: [...config.trustedOrigins],
+    databaseHooks: {
+      user: {
+        create: {
+          // Gates account creation for BOTH email/password and OAuth — the
+          // control plane dials customer networks, so an open front door is
+          // not a neutral default (SIGNUP_MODE, see auth/signup-gate.ts).
+          before: async (newUser) => {
+            const decision = await evaluateSignup(db, newUser.email);
+            if (!decision.allowed) {
+              throw new APIError("FORBIDDEN", { message: decision.reason });
+            }
+          },
+        },
+      },
+    },
     emailAndPassword: {
       enabled: true,
       requireEmailVerification: config.requireEmailVerification,

@@ -13,10 +13,29 @@ Workloads:
   web     {{ .Values.web.replicas }} replica(s)  — {{ include "indexterity.webImage" . }}
   worker  {{ if .Values.worker.enabled }}1 replica (cron: collect, apply, finalize, retention, digest){{ else }}DISABLED — nothing is collected or applied on a schedule{{ end }}
 
+Sign-up: {{ .Values.config.signupMode }}
+{{- if eq .Values.config.signupMode "invite" }} — the first account bootstraps this install; everyone after needs an invite.
+{{- else if eq .Values.config.signupMode "open" }}
+
+  WARNING: anyone who can reach the dashboard can create an account, and every
+  account can make the control plane dial hosts it names. Only do this on a
+  deliberately public instance.
+{{- end }}
+{{- if .Values.config.allowPrivateClusterTargets }}
+
+Private cluster targets are ALLOWED: accounts can point Indexterity at
+loopback and RFC1918 addresses. Correct for a self-hosted install whose
+database is on this network; unsafe if strangers can sign up.
+{{- end }}
 {{- if not .Values.smtp.host }}
 
 Mail is not configured (smtp.host is empty): invites, regression alerts,
 verification and reset emails are logged and dropped.
+{{- end }}
+{{- if and (eq .Values.config.signupMode "invite") (not .Values.smtp.host) }}
+
+NOTE: sign-up is invite-only and SMTP is unset, so invite emails will not be
+delivered — the owner must copy each invite token from the dashboard by hand.
 {{- end }}
 {{- if and .Values.config.requireEmailVerification (not .Values.smtp.host) }}
 

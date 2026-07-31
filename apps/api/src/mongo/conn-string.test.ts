@@ -7,6 +7,13 @@ describe("isMongoConnString", () => {
     expect(isMongoConnString("mongodb://user:pass@host1,host2:27018/db?replicaSet=rs")).toBe(true);
     expect(isMongoConnString("mongodb+srv://cluster0.example.mongodb.net/app")).toBe(true);
   });
+
+  it("accepts a bare multi-host replica-set string", () => {
+    // WHATWG `new URL` throws on this shape, so the old implementation
+    // rejected every credential-less replica-set string.
+    expect(isMongoConnString("mongodb://10.0.0.1:27017,10.0.0.2:27017")).toBe(true);
+    expect(isMongoConnString("mongodb://a:27017,b:27017,c:27017/?replicaSet=rs0")).toBe(true);
+  });
   it("rejects other schemes (SSRF)", () => {
     expect(isMongoConnString("http://169.254.169.254/latest/meta-data")).toBe(false);
     expect(isMongoConnString("file:///etc/passwd")).toBe(false);

@@ -1,6 +1,6 @@
 import type { EngineAdapter, EngineSession, IndexCollector, IndexExecutor } from "../engine/ports";
 import { MongoIndexCollector } from "./collector";
-import { isMongoConnString } from "./conn-string";
+import { isMongoConnString, mongoHosts } from "./conn-string";
 import { MongoConnection } from "./connection";
 import { diagnoseConnection } from "./diagnose";
 import { MongoIndexExecutor } from "./executor";
@@ -37,6 +37,7 @@ export const mongoAdapter: EngineAdapter = {
   engine: "MONGODB",
   capabilities: { hideIndexes: true, provisionScopedUsers: true },
   isConnString: isMongoConnString,
+  hostsOf: mongoHosts,
   open: async (connectionString: string): Promise<EngineSession> => {
     const conn = new MongoConnection(connectionString);
     await conn.connect();

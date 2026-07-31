@@ -95,6 +95,8 @@ app.kubernetes.io/component: {{ .component }}
 {{- end }}
 - name: LOG_LEVEL
   value: {{ .Values.config.logLevel | quote }}
+- name: ALLOW_PRIVATE_CLUSTER_TARGETS
+  value: {{ .Values.config.allowPrivateClusterTargets | quote }}
 {{- end -}}
 
 {{/* SMTP + storage pricing — shared by the api (mail, ROI) and worker (alerts, digest). */}}

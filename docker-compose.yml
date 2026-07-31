@@ -42,6 +42,9 @@ services:
     environment:
       DATABASE_URL: postgres://mongo_optimizer:mongo_optimizer@postgres:5432/mongo_optimizer
       API_PORT: "3001"
+      # Dev targets live on the compose network; sign-up is open for convenience.
+      ALLOW_PRIVATE_CLUSTER_TARGETS: "true"
+      SIGNUP_MODE: open
       BETTER_AUTH_URL: http://localhost:3001
       WEB_ORIGIN: http://localhost:3000
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET}
@@ -86,6 +89,7 @@ services:
     environment:
       DATABASE_URL: postgres://mongo_optimizer:mongo_optimizer@postgres:5432/mongo_optimizer
       MASTER_KEY: ${MASTER_KEY}
+      ALLOW_PRIVATE_CLUSTER_TARGETS: "true"
       WORKER_CONCURRENCY: "2"
     volumes:
       - ./:/app

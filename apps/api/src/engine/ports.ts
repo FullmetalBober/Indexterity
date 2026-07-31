@@ -137,8 +137,10 @@ export interface EngineSession {
 export interface EngineAdapter {
   readonly engine: ClusterEngine;
   readonly capabilities: EngineCapabilities;
-  // Shape-validates a connection string BEFORE any dial (the SSRF guard).
+  // Shape-validates a connection string BEFORE any dial (scheme guard).
   isConnString(value: string): boolean;
+  // Every host the string would dial, for the network guard to vet.
+  hostsOf(value: string): { hosts: string[]; isSrv: boolean };
   open(connectionString: string): Promise<EngineSession>;
   // Report what these credentials may do, without writing anything.
   diagnose(connectionString: string): Promise<ConnectionDiagnosis>;
