@@ -25,7 +25,7 @@ helm install indexterity deploy/helm/indexterity \
   --set secrets.betterAuthSecret="$(openssl rand -base64 32)" \
   --set secrets.masterKey="$(openssl rand -base64 32)" \
   --set ingress.enabled=true \
-  --set ingress.host=indexterity.example.com \
+  --set ingress.host=indexterity.alivlad.com \
   --set ingress.tls.enabled=true \
   --set ingress.tls.secretName=indexterity-tls
 

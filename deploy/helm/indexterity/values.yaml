@@ -53,6 +53,10 @@ web:
   publicUrl: ""
   # Where the web server reaches the api. Defaults to the in-cluster Service.
   apiUrl: ""
+  # Overrides the canonical URL in the landing page's SEO tags (canonical,
+  # og:url, og:image). Leave empty to keep the product's own public domain —
+  # set it when running a fork or a separately-indexed staging copy.
+  siteUrl: ""
   resources:
     requests:
       cpu: 100m

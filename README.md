@@ -366,7 +366,7 @@ helm install indexterity deploy/helm/indexterity \
   --set secrets.databaseUrl='postgres://user:pass@host:5432/indexterity' \
   --set secrets.betterAuthSecret="$(openssl rand -base64 32)" \
   --set secrets.masterKey="$(openssl rand -base64 32)" \
-  --set ingress.enabled=true --set ingress.host=indexterity.example.com
+  --set ingress.enabled=true --set ingress.host=indexterity.alivlad.com
 ```
 
 The api never has to be public — browsers only reach the dashboard, whose
@@ -388,14 +388,14 @@ DATABASE_URL=postgres://… MONGO_URL=mongodb://localhost:27017 \
 Slim, independently-deployable images built with `turbo prune`:
 
 ```bash
-docker build -f apps/api/Dockerfile -t mo-api .
-docker build -f apps/web/Dockerfile -t mo-web \
-  --build-arg VITE_API_URL=https://api.example.com .
+docker build -f apps/api/Dockerfile -t indexterity-api .
+docker build -f apps/web/Dockerfile -t indexterity-web .
 ```
 
-api ≈ 390 MB, web ≈ 235 MB. The web bundle **bakes `VITE_API_URL` at build time**
-(Vite inlines `VITE_*`), so set it per environment. The worker deploys from the
-api image with `CMD ["node", "apps/api/dist/worker.js"]`.
+api ≈ 390 MB, web ≈ 235 MB. **One web image serves every environment**: `API_URL`
+and `WEB_ORIGIN` are read at runtime (the dashboard's server functions are the
+only thing that calls the api), with the `VITE_*` build args as defaults. The
+worker deploys from the api image with `CMD ["node", "apps/api/dist/worker.js"]`.
 
 ## Roadmap (Mongo-focused)
 

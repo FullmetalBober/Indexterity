@@ -1,12 +1,13 @@
-// The app's own public origin, used for canonical and og:url. Runtime
-// WEB_ORIGIN wins on the server (the chart sets it); VITE_WEB_ORIGIN is the
-// build-time default so client-side renders agree. Keep them the same value.
+// The canonical public home of the product. Deliberately a constant rather
+// than WEB_ORIGIN: canonical and og:url must point at the one indexable copy
+// no matter which host served the response (preview deploy, raw service URL,
+// apex vs www), or search engines see duplicates. Self-hosters and staging
+// override it with SITE_URL.
+const CANONICAL_ORIGIN = "https://indexterity.alivlad.com";
+
 export function siteOrigin(): string {
-  const runtime = typeof process === "undefined" ? undefined : process.env.WEB_ORIGIN;
-  return (runtime ?? import.meta.env.VITE_WEB_ORIGIN ?? "http://localhost:3000").replace(
-    /\/+$/,
-    "",
-  );
+  const override = typeof process === "undefined" ? undefined : process.env.SITE_URL;
+  return (override ?? CANONICAL_ORIGIN).replace(/\/+$/, "");
 }
 
 export interface PageSeo {

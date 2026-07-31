@@ -4,3 +4,5 @@ Allow: /$
 Disallow: /app
 Disallow: /reset-password
 Disallow: /api/
+
+Sitemap: https://indexterity.alivlad.com/sitemap.xml
