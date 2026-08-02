@@ -245,9 +245,17 @@ npm install
 docker compose up         # postgres + mongo + api + web + worker, hot reload
 ```
 
-`npm run build` · `npm run typecheck` · `npm run lint` · `npm run test` (unit) ·
+`npm run build` · `npm run typecheck` · `npm run lint` · `npm run test` ·
 `npm run db:generate` · `npm run db:migrate`. Production migrations run the
 compiled migrator: `npm run db:deploy -w @repo/api`.
+
+**Three test layers.** `npm run test` runs two of them without any infra: the
+api's pure decision engine, and the web app's components in jsdom with the
+server functions mocked at the `~/lib/app-server` boundary — what the browser
+does with an answer, not whether the answer was fetched. The third,
+`npm run test:int -w @repo/api`, needs a migrated postgres and a mongo, and CI
+runs it against **6.0, 7.0 and 8.x** because the three take different paths
+through the workload collector.
 
 **House rule: the api and the web app run clean.** No errors and no warnings in
 server logs, build output, or the browser console. A warning is a defect — fix
