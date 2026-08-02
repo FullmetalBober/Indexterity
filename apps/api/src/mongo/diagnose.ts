@@ -1,7 +1,7 @@
 import { MongoClient } from "mongodb";
 import { z } from "zod";
 import type { ConnectionDiagnosis, PrivilegeCheck, PrivilegeTier } from "../engine/ports";
-import { parseServerVersion, supportsHiddenIndexes, unsupportedVersionMessage } from "./version";
+import { parseServerVersion, versionRefusal } from "./version";
 
 // What the engine needs, expressed as (actions, where) pairs. Mirrors
 // ENGINE_PRIVILEGES in provision.ts — the role we CREATE is exactly the set we
@@ -250,9 +250,8 @@ export async function diagnoseConnection(uri: string): Promise<ConnectionDiagnos
     const version = parseServerVersion(
       typeof build === "object" && build !== null ? Reflect.get(build, "version") : null,
     );
-    if (!supportsHiddenIndexes(version)) {
-      return failure(unsupportedVersionMessage(version));
-    }
+    const refusal = versionRefusal(version);
+    if (refusal !== null) return failure(refusal);
     const status = connectionStatusDoc.parse(
       await admin.command({ connectionStatus: 1, showPrivileges: true }),
     );

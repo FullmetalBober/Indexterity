@@ -5,6 +5,7 @@ import type {
   IndexKey,
   IndexSpec,
   LookupJoin,
+  QueryClient,
   QueryShape,
   SortKey,
 } from "../analysis";
@@ -121,6 +122,13 @@ const collectionInfo = z.object({ name: z.string() });
 // shapes are skipped via safeParse.
 const queryStatsDoc = z.object({
   key: z.object({
+    // Present from mongo 7; the shell and every GUI identify themselves here.
+    client: z
+      .object({
+        application: z.object({ name: z.string() }).partial().optional(),
+        driver: z.object({ name: z.string() }).partial().optional(),
+      })
+      .optional(),
     queryShape: z.object({
       cmdNs: z.object({ db: z.string(), coll: z.string() }),
       filter: z.record(z.string(), z.unknown()).optional(),
@@ -557,6 +565,7 @@ export class MongoIndexCollector implements IndexCollector {
       {
         namespace: string;
         docsExamined: number;
+        clients: QueryClient[];
         equality: string[];
         sort: SortKey[];
         range: string[];
@@ -596,6 +605,12 @@ export class MongoIndexCollector implements IndexCollector {
         continue;
       }
       const docsExamined = metrics.docsExamined?.sum ?? 0;
+      const client: QueryClient = {
+        ...(key.client?.application?.name === undefined
+          ? {}
+          : { application: key.client.application.name }),
+        ...(key.client?.driver?.name === undefined ? {} : { driver: key.client.driver.name }),
+      };
       const collscan = (metrics.keysExamined?.sum ?? 0) === 0 && docsExamined > 0;
       // Shapes are deduplicated per namespace, not globally — the same filter
       // shape against two collections is two different findings.
@@ -605,6 +620,7 @@ export class MongoIndexCollector implements IndexCollector {
         shapes.set(mapKey, {
           namespace,
           docsExamined,
+          clients: [client],
           equality,
           sort,
           range,
@@ -615,6 +631,7 @@ export class MongoIndexCollector implements IndexCollector {
       } else {
         prev.count += metrics.execCount;
         prev.docsExamined += docsExamined;
+        prev.clients.push(client);
         prev.collscan = prev.collscan || collscan;
       }
     }
@@ -627,6 +644,7 @@ export class MongoIndexCollector implements IndexCollector {
         collscan: shape.collscan,
         count: shape.count,
         docsExamined: shape.docsExamined,
+        clients: shape.clients,
         ...(shape.lookups.length > 0 ? { lookups: shape.lookups } : {}),
       });
       byNamespace.set(shape.namespace, list);

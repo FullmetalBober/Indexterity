@@ -1,4 +1,5 @@
 import type { RecommendationType } from "@repo/contracts";
+import { isWorthIndexing, type QueryClient } from "./client";
 import { isNeverDrop } from "./safety";
 import type { IndexSpec } from "./types";
 
@@ -31,6 +32,11 @@ export interface QueryShape {
   // source reports it ($queryStats does; the profiler does not). The measure of
   // what a missing index is costing — see analysis/severity.ts.
   readonly docsExamined?: number;
+  // Who issued this shape. $queryStats groups by client as well as by shape,
+  // so a query run from a shell and the same query from an app arrive as
+  // separate entries; merged shapes accumulate every client seen. Empty on
+  // the profiler path, which reports no client.
+  readonly clients?: readonly QueryClient[];
   readonly constants?: Readonly<Record<string, ConstantValue>>;
   // $lookup joins anywhere in the pipeline (indexed on the FOREIGN collection).
   readonly lookups?: readonly LookupJoin[];
@@ -143,6 +149,9 @@ export function recommendCreates(
   const wants: Want[] = [];
   for (const shape of shapes) {
     if (!shape.collscan || shape.count < options.minCount) continue;
+    // Someone exploring at a prompt is not a workload. The index would be
+    // maintained on every write for years, for queries nobody runs again.
+    if (!isWorthIndexing(shape.clients ?? [])) continue;
     let wantedKeys = esrKeys(shape);
     if (wantedKeys.length === 0) continue;
     // Constant equality predicates (same literal in every sample) become a

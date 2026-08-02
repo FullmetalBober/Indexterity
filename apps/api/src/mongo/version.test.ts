@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { parseServerVersion, supportsHiddenIndexes, unsupportedVersionMessage } from "./version";
+import {
+  parseServerVersion,
+  supportsHiddenIndexes,
+  unsupportedVersionMessage,
+  versionRefusal,
+} from "./version";
 
 describe("parseServerVersion", () => {
   it("reads major and minor from a build string", () => {
@@ -41,5 +46,34 @@ describe("unsupportedVersionMessage", () => {
     expect(message).toContain("4.2.24");
     expect(message).toContain("4.4 or newer");
     expect(message).toContain("creation still work");
+  });
+});
+
+describe("version ceiling", () => {
+  it("accepts the tested range", () => {
+    for (const v of ["4.4.30", "6.0.28", "7.0.39", "8.2.9"]) {
+      expect(versionRefusal(parseServerVersion(v))).toBeNull();
+    }
+  });
+
+  it("refuses a major series newer than anything tested", () => {
+    const refusal = versionRefusal(parseServerVersion("9.0.0"));
+    expect(refusal).toContain("newer than the 8.x series");
+    expect(refusal).toContain("ALLOW_UNTESTED_MONGO_VERSION");
+  });
+
+  it("lets an operator opt in to an untested release", () => {
+    process.env.ALLOW_UNTESTED_MONGO_VERSION = "true";
+    try {
+      expect(versionRefusal(parseServerVersion("9.0.0"))).toBeNull();
+      // The floor is NOT overridable — below it the pipeline cannot run at all.
+      expect(versionRefusal(parseServerVersion("4.2.24"))).toContain("cannot hide indexes");
+    } finally {
+      delete process.env.ALLOW_UNTESTED_MONGO_VERSION;
+    }
+  });
+
+  it("prefers the floor's explanation when a version is unreadable", () => {
+    expect(versionRefusal(null)).toContain("cannot hide indexes");
   });
 });

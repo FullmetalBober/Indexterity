@@ -1,5 +1,6 @@
 export * from "./activity";
 export * from "./classify";
+export * from "./client";
 export * from "./cost";
 export * from "./latency";
 export * from "./observe";

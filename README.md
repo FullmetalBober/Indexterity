@@ -50,8 +50,11 @@ trusting the counter.
 
 **Adding** (opt-in via `workloadAnalysis`). Query shapes come from `$queryStats`
 (mongo 7+), falling back to the profiler. A shape must recur — **3+ sightings**
-— before it earns anything, so a heavy ad-hoc query run once never leaves an
-index behind. Keys are ordered Equality → Sort → Range. An equality field
+— and must come from something other than a person at a prompt. `$queryStats`
+groups by client, so the same query from `mongosh` and from your app arrive as
+separate entries; one seen only from shells and GUIs earns nothing, because the
+index would be maintained on every write for years for queries nobody runs
+again. Keys are ordered Equality → Sort → Range. An equality field
 compared against the same literal every time moves into a
 `partialFilterExpression` instead of the keys: smaller index, same query.
 
@@ -142,12 +145,15 @@ history, and an explicit setting always wins.
 
 ## Connecting a cluster
 
-**MongoDB 4.4 or newer.** The floor is set by one feature: `collMod {index:
+**MongoDB 4.4 to 8.x.** The floor is set by one feature: `collMod {index:
 {hidden}}`. Every drop goes hide → observe → measure → drop, and 4.3 and older
 cannot hide an index — `collMod` misreads the request as a TTL change and fails.
 A server below the floor is refused at connect time with that explanation, and
 every write re-checks the version immediately before running, so a cluster
-downgraded or repointed later cannot be half-changed.
+downgraded or repointed later cannot be half-changed. A major series newer than
+anything tested is refused too — this engine drops and builds indexes on a live
+database, and a major release is where command behaviour moves. Set
+`ALLOW_UNTESTED_MONGO_VERSION=true` to run ahead of the tested range.
 
 See [`docs/mongo-user.md`](./docs/mongo-user.md) for the exact `createRole`
 snippets. Indexterity never gets document read or write privileges.

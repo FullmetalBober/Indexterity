@@ -1,6 +1,6 @@
 import type { CreateIndexOptions, IndexExecutor } from "../engine/ports";
 import type { MongoConnection } from "./connection";
-import { supportsHiddenIndexes, unsupportedVersionMessage } from "./version";
+import { versionRefusal } from "./version";
 
 // The server cannot do what the pipeline requires. Distinct from a network
 // failure and from a permission failure: retrying will never fix it, so the
@@ -36,10 +36,8 @@ export class MongoIndexExecutor implements IndexExecutor {
   // or half-applied change on someone else's database. The version is cached on
   // the connection, so this is a field read after the first call.
   private async assertSupported(): Promise<void> {
-    const version = await this.conn.serverVersion();
-    if (!supportsHiddenIndexes(version)) {
-      throw new UnsupportedServerError(unsupportedVersionMessage(version));
-    }
+    const refusal = versionRefusal(await this.conn.serverVersion());
+    if (refusal !== null) throw new UnsupportedServerError(refusal);
   }
 
   hide(database: string, collection: string, indexName: string): Promise<void> {
