@@ -1,13 +1,14 @@
 import { z } from "zod";
-import type {
-  ConstantValue,
-  IndexDirection,
-  IndexKey,
-  IndexSpec,
-  LookupJoin,
-  QueryClient,
-  QueryShape,
-  SortKey,
+import {
+  type ConstantValue,
+  classifyClient,
+  type IndexDirection,
+  type IndexKey,
+  type IndexSpec,
+  type LookupJoin,
+  type QueryClient,
+  type QueryShape,
+  type SortKey,
 } from "../analysis";
 import {
   type CollectionLatency,
@@ -604,6 +605,11 @@ export class MongoIndexCollector implements IndexCollector {
       ) {
         continue;
       }
+      // Work done BY THIS CLIENT. Attributed below only when the client is not
+      // a person at a prompt: shapes merge across clients (the key is the shape
+      // and namespace, not the client), so otherwise a developer running the
+      // same query the app runs inflates both the execution count that gates
+      // instant apply and the examined-document count that drives severity.
       const docsExamined = metrics.docsExamined?.sum ?? 0;
       const client: QueryClient = {
         ...(key.client?.application?.name === undefined
@@ -612,6 +618,9 @@ export class MongoIndexCollector implements IndexCollector {
         ...(key.client?.driver?.name === undefined ? {} : { driver: key.client.driver.name }),
       };
       const collscan = (metrics.keysExamined?.sum ?? 0) === 0 && docsExamined > 0;
+      const interactive = classifyClient(client) === "INTERACTIVE";
+      const countedExecs = interactive ? 0 : metrics.execCount;
+      const countedDocs = interactive ? 0 : docsExamined;
       // Shapes are deduplicated per namespace, not globally — the same filter
       // shape against two collections is two different findings.
       const mapKey = `${namespace}\u0000${shapeMapKey(equality, sort, range, lookups)}`;
@@ -619,18 +628,18 @@ export class MongoIndexCollector implements IndexCollector {
       if (prev === undefined) {
         shapes.set(mapKey, {
           namespace,
-          docsExamined,
+          docsExamined: countedDocs,
           clients: [client],
           equality,
           sort,
           range,
           collscan,
-          count: metrics.execCount,
+          count: countedExecs,
           lookups,
         });
       } else {
-        prev.count += metrics.execCount;
-        prev.docsExamined += docsExamined;
+        prev.count += countedExecs;
+        prev.docsExamined += countedDocs;
         prev.clients.push(client);
         prev.collscan = prev.collscan || collscan;
       }

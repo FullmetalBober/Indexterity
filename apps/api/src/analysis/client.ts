@@ -65,11 +65,3 @@ export function isWorthIndexing(clients: readonly QueryClient[]): boolean {
   if (clients.length === 0) return true;
   return clients.some((client) => classifyClient(client) !== "INTERACTIVE");
 }
-
-// How the rationale explains itself when a shape is skipped.
-export function interactiveClientSummary(clients: readonly QueryClient[]): string {
-  const names = [
-    ...new Set(clients.map((client) => client.application ?? client.driver ?? "an unnamed client")),
-  ];
-  return names.join(", ");
-}
