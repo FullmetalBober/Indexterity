@@ -20,8 +20,17 @@ jobs:
       - run: npm run typecheck
       - run: npm run test
 
+  # Every supported major, because version behaviour is load-bearing: the floor,
+  # the $queryStats plan-metrics gate, and the profiler fallback below 8.0 are
+  # each a different path through collectWorkload. Testing one version means the
+  # other two can break silently — a cluster that quietly produces no
+  # recommendations looks exactly like a cluster with nothing to recommend.
   integration:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mongo: ["6.0", "7.0", "8"]
     services:
       postgres:
         image: postgres:18-alpine
@@ -37,7 +46,7 @@ jobs:
           --health-timeout 5s
           --health-retries 10
       mongo:
-        image: mongo:8
+        image: mongo:${{ matrix.mongo }}
         ports:
           - "27017:27017"
     env:

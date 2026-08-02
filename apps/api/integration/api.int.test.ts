@@ -1,4 +1,5 @@
 import type { ChildProcess } from "node:child_process";
+import { makeWorkerUtils } from "graphile-worker";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   actions,
@@ -14,6 +15,7 @@ import {
   policies,
   recommendations,
   roiMetrics,
+  sql,
   user,
   verification,
 } from "../src/db";
@@ -24,10 +26,12 @@ import { classifyCluster } from "../src/jobs/classify";
 import { collectCluster } from "../src/jobs/collect";
 import { drainPool } from "../src/jobs/connection-pool";
 import { applyCreatesForCluster } from "../src/jobs/create";
-import { closeJobDb } from "../src/jobs/db";
+import { closeJobDb, jobDb } from "../src/jobs/db";
 import { finalizeCluster } from "../src/jobs/finalize";
+import { pruneDeadLetterJobs } from "../src/jobs/retention";
 import { suggestForCluster } from "../src/jobs/suggest";
 import { MongoConnection, MongoIndexCollector } from "../src/mongo";
+import { hasQueryStatsPlanMetrics, parseServerVersion } from "../src/mongo/version";
 import {
   API_BASE,
   api,
@@ -70,6 +74,20 @@ beforeAll(async () => {
   db = createDatabase(databaseUrl());
   mongo = new MongoConnection(MONGO_URL);
   await mongo.connect();
+  // Setup, not just teardown. A run that dies before afterAll leaves indexes
+  // and collections behind, and every test that reads "whatever is on the
+  // server" then passes on that debris — which is how this suite came to
+  // require a long-lived mongo and to fail against a fresh one.
+  await mongo
+    .db("inttest")
+    .dropDatabase()
+    .catch(() => {});
+  // One seeded collection, so the first collect has something to find. Tests
+  // must not depend on a later test having run first.
+  await mongo
+    .db("inttest")
+    .collection("orders")
+    .insertMany(Array.from({ length: 50 }, (_, i) => ({ status: i % 3, qty: i })));
   owner = await signUp("owner");
   createdEmails.push(owner.email);
 });
@@ -155,9 +173,12 @@ describe("cluster lifecycle", () => {
     });
     expect(badScheme.status).toBe(400);
     // A reachable string replaces the stored one; collect keeps working on it.
+    // MONGO_URL, not a literal: this cluster is shared by every test below, so
+    // hardcoding a host here silently repoints the whole suite at that server
+    // and nothing downstream can be run against any other one.
     const rotated = await api(`/clusters/${clusterId}/connection`, owner, {
       method: "PATCH",
-      body: JSON.stringify({ connectionString: "mongodb://127.0.0.1:27017" }),
+      body: JSON.stringify({ connectionString: MONGO_URL }),
     });
     expect(rotated.status).toBe(200);
     // Run the job directly: the endpoint only queues now, so a 200 from it
@@ -1541,5 +1562,109 @@ describe("rate limiting (runs last — it poisons the auth budget)", () => {
       }
     }
     expect(limited).toBe(true);
+  });
+});
+
+// A job that burns its last attempt keeps its row forever — the one table with
+// no retention. An offboarded cluster or a week-long outage leaves debris in
+// the control-plane database that nothing was ever going to remove.
+describe("dead-letter retention", () => {
+  it("removes permanently failed jobs past the window and keeps recent ones", async () => {
+    const utils = await makeWorkerUtils({ connectionString: databaseUrl() });
+    let staleId: string;
+    let freshId: string;
+    let liveId: string;
+    try {
+      // permanentlyFailJobs is how a job becomes a dead letter for real: it
+      // sets attempts to max_attempts and leaves the row behind.
+      const stale = await utils.addJob("collect", { clusterId });
+      const fresh = await utils.addJob("collect", { clusterId });
+      const live = await utils.addJob("collect", { clusterId });
+      staleId = stale.id;
+      freshId = fresh.id;
+      liveId = live.id;
+      await utils.permanentlyFailJobs([staleId, freshId], "integration");
+    } finally {
+      await utils.release();
+    }
+    // Back-dated rather than slept on: the window is the thing under test, and
+    // a test that only passes because time passed is not testing it.
+    await jobDb().execute(
+      sql`update graphile_worker._private_jobs set updated_at = now() - interval '91 days'
+          where id::text = ${staleId}`,
+    );
+
+    expect(await pruneDeadLetterJobs()).toBeGreaterThanOrEqual(1);
+
+    const remaining = await jobDb().execute(
+      sql`select id::text as id from graphile_worker.jobs
+          where id::text in (${staleId}, ${freshId}, ${liveId})`,
+    );
+    const ids = remaining.rows.map((row) => row.id);
+    expect(ids).not.toContain(staleId);
+    // A failure from this morning is still worth reading; only old debris goes.
+    expect(ids).toContain(freshId);
+    expect(ids).toContain(liveId);
+
+    await jobDb().execute(
+      sql`delete from graphile_worker._private_jobs where id::text in (${freshId}, ${liveId})`,
+    );
+  });
+});
+
+// Which source answers depends on the server, and CI runs the whole matrix.
+// $queryStats exists from 6.0 but carries no plan metrics until 8.0, so below
+// 8.0 it cannot tell a scan from an index hit and the profiler must answer
+// instead. Getting that backwards is silent: the store returns shapes, the
+// fallback never runs, and the cluster simply stops producing create
+// recommendations. This asserts the finding survives on whichever path is
+// correct for the server actually running.
+describe("workload source follows the server version", () => {
+  it("finds an in-memory sort via $queryStats on 8.0+, via the profiler below it", async () => {
+    const build = await mongo.db("admin").command({ buildInfo: 1 });
+    const version = parseServerVersion(asRecord(build).version);
+    await mongo
+      .db("admin")
+      .command({ setParameter: 1, internalQueryStatsRateLimit: -1 })
+      .catch(() => {});
+    await mongo
+      .db("inttest")
+      .command({ profile: 2 })
+      .catch(() => {});
+
+    const coll = mongo.db("inttest").collection("wl_sorts");
+    await coll.deleteMany({});
+    await coll.insertMany(
+      Array.from({ length: 1500 }, (_, i) => ({ status: i % 5, at: new Date(i * 1000) })),
+    );
+    await coll.createIndex({ status: 1 }, { name: "status_1" });
+    // status_1 finds the documents; nothing can order them, so the server sorts
+    // in memory. keysExamined > 0, so no scan test sees this.
+    for (let run = 0; run < 5; run++) {
+      await coll.find({ status: 2 }).sort({ at: -1 }).toArray();
+    }
+
+    const collector = new MongoIndexCollector(mongo);
+    const targets = [{ database: "inttest", collection: "wl_sorts" }];
+    const fromStore = await collector.collectQueryStats(targets);
+    if (hasQueryStatsPlanMetrics(version)) {
+      expect(fromStore.size).toBeGreaterThan(0);
+    } else {
+      // Not "no findings" — "cannot tell". Must yield so the profiler runs.
+      expect(fromStore.size).toBe(0);
+    }
+
+    const shapes =
+      (await collector.collectWorkload(targets)).get(workloadKey("inttest", "wl_sorts")) ?? [];
+    const sorting = shapes.filter((shape) => shape.sortedInMemory === true);
+    expect(sorting.length).toBeGreaterThan(0);
+    // Whichever source answered, it attributed the work.
+    expect(sorting.some((shape) => (shape.docsExamined ?? 0) > 0)).toBe(true);
+    expect(sorting.some((shape) => shape.equality.includes("status"))).toBe(true);
+
+    await mongo
+      .db("inttest")
+      .command({ profile: 0 })
+      .catch(() => {});
   });
 });
