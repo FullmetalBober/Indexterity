@@ -5,7 +5,7 @@ import { canProvisionWith, evaluatePrivileges, type MongoPrivilege } from "./dia
 const enginePrivileges: MongoPrivilege[] = [
   {
     resource: { cluster: true },
-    actions: ["listDatabases", "queryStatsRead", "queryStatsReadTransformed"],
+    actions: ["listDatabases", "serverStatus", "queryStatsRead", "queryStatsReadTransformed"],
   },
   {
     resource: { db: "", collection: "" },
@@ -67,6 +67,7 @@ describe("evaluatePrivileges", () => {
           "createIndex",
           "dropIndex",
           "collMod",
+          "serverStatus",
           "find",
           "queryStatsRead",
           "queryStatsReadTransformed",

@@ -8,6 +8,7 @@ import {
   type LookupJoin,
   type QueryClient,
   type QueryShape,
+  type ServerHealth,
   type SortKey,
 } from "../analysis";
 import {
@@ -117,6 +118,29 @@ const shardCollectionDoc = z.object({
 });
 
 const collectionInfo = z.object({ name: z.string() });
+
+// serverStatus, narrowed to the query-engine counters. Lenient throughout:
+// these sub-documents move between releases, and a missing one should cost a
+// signal rather than the whole reading.
+const serverStatusDoc = z.object({
+  metrics: z.object({
+    queryExecutor: z.object({
+      scanned: z.coerce.number(),
+      scannedObjects: z.coerce.number(),
+      collectionScans: z.object({ total: z.coerce.number() }).partial().optional(),
+    }),
+    operation: z.object({ scanAndOrder: z.coerce.number() }).partial().optional(),
+  }),
+  globalLock: z
+    .object({
+      currentQueue: z
+        .object({ readers: z.coerce.number(), writers: z.coerce.number() })
+        .partial()
+        .optional(),
+    })
+    .optional(),
+  mem: z.object({ resident: z.coerce.number() }).partial().optional(),
+});
 
 // One $queryStats entry (mongo 7+). Filters are shapified ({field: {$eq: "?number"}}),
 // metrics arrive as Longs the driver promotes. Lenient: entries for other command
@@ -659,6 +683,29 @@ export class MongoIndexCollector implements IndexCollector {
       byNamespace.set(shape.namespace, list);
     }
     return byNamespace;
+  }
+
+  // Server-wide counters describing what the query engine is doing. Needs the
+  // `serverStatus` action; without it this returns null and the five-minute
+  // probe falls back to per-collection latency alone.
+  async collectServerHealth(): Promise<ServerHealth | null> {
+    try {
+      const raw: unknown = await this.conn.db("admin").command({ serverStatus: 1 });
+      const parsed = serverStatusDoc.safeParse(raw);
+      if (!parsed.success) return null;
+      const { metrics, globalLock, mem } = parsed.data;
+      return {
+        collectionScans: metrics.queryExecutor.collectionScans?.total ?? 0,
+        scannedObjects: metrics.queryExecutor.scannedObjects,
+        scannedKeys: metrics.queryExecutor.scanned,
+        scanAndOrder: metrics.operation?.scanAndOrder ?? 0,
+        queuedReaders: globalLock?.currentQueue?.readers ?? 0,
+        queuedWriters: globalLock?.currentQueue?.writers ?? 0,
+        residentMb: mem?.resident ?? 0,
+      };
+    } catch {
+      return null;
+    }
   }
 
   // Indexes the application names explicitly with hint().

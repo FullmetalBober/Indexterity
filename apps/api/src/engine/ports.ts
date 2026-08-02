@@ -1,4 +1,4 @@
-import type { IndexSpec, QueryShape } from "../analysis";
+import type { IndexSpec, QueryShape, ServerHealth } from "../analysis";
 
 // The engine-neutral boundary. Everything above this file — the analysis core,
 // the job pipeline, the API — speaks these ports; everything below implements
@@ -76,6 +76,9 @@ export interface IndexCollector {
   // a map keyed by `workloadKey`; missing entries mean no shapes were found.
   collectWorkload(targets: readonly WorkloadTarget[]): Promise<Map<string, readonly QueryShape[]>>;
   collectDeletePatterns(database: string, collection: string): Promise<DeletePattern[]>;
+  // Server-wide query-engine counters. Null when the credentials cannot read
+  // them — the privilege is optional, and everything else still works.
+  collectServerHealth(): Promise<ServerHealth | null>;
   // Indexes named explicitly with hint(). Hiding one breaks its queries instead
   // of slowing them, so no latency gate can catch the mistake.
   collectHintedIndexes(database: string, collection: string): Promise<string[]>;

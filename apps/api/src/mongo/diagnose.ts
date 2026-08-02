@@ -94,6 +94,14 @@ export const REQUIRED_PRIVILEGES: readonly RequiredPrivilege[] = [
     scope: { kind: "cluster" },
   },
   {
+    key: "serverStatus",
+    label: "Server status",
+    enables: "the five-minute health probe (collection scans, lock queues)",
+    tier: "WORKLOAD",
+    actions: ["serverStatus"],
+    scope: { kind: "cluster" },
+  },
+  {
     key: "profiler",
     label: "Read system.profile",
     enables: "workload analysis fallback, partial-index and TTL detection",

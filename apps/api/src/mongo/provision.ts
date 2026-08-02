@@ -22,7 +22,7 @@ export const ENGINE_PRIVILEGES: readonly RolePrivilege[] = [
   // mongo 8: queryStatsRead alone is Unauthorized).
   {
     resource: { cluster: true },
-    actions: ["listDatabases", "queryStatsRead", "queryStatsReadTransformed"],
+    actions: ["listDatabases", "serverStatus", "queryStatsRead", "queryStatsReadTransformed"],
   },
   {
     resource: { db: "", collection: "" },

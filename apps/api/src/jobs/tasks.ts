@@ -139,7 +139,9 @@ export const taskList = {
       if (findings.length === 0) return;
       for (const finding of findings) {
         helpers.logger.info(
-          `probe: ${finding.database}.${finding.collection} under read pressure — ${finding.reason}`,
+          finding.database === null
+            ? `probe: cluster under index-related pressure — ${finding.reason}`
+            : `probe: ${finding.database}.${finding.collection} under read pressure — ${finding.reason}`,
         );
       }
       await helpers.addJob("suggest", { clusterId });
