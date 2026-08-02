@@ -52,6 +52,11 @@ export class PolicyController {
       // Only when switching it ON — an org whose plan changed under it must
       // still be able to save the rest of its policy, and to turn this off.
       if (input.workloadAnalysis) await this.tenancy.requireWorkloadAnalysis(orgId);
+      // Only when switching automation ON. Turning it off, or saving anything
+      // else, must stay possible after a downgrade.
+      if (input.autoApplyScore !== null || input.instantCreate) {
+        await this.tenancy.requireAutoApply(orgId);
+      }
       const { clusterId, ...knobs } = input;
       if (!(await this.tenancy.ownsCluster(clusterId, orgId))) {
         throw errors.NOT_FOUND({ message: "cluster not found" });

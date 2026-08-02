@@ -1,6 +1,7 @@
 import type { ChildProcess } from "node:child_process";
 import { makeWorkerUtils } from "graphile-worker";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { entitledAutomation } from "../src/billing/plans";
 import {
   actions,
   and,
@@ -28,6 +29,7 @@ import { drainPool } from "../src/jobs/connection-pool";
 import { applyCreatesForCluster } from "../src/jobs/create";
 import { closeJobDb, jobDb } from "../src/jobs/db";
 import { finalizeCluster } from "../src/jobs/finalize";
+import { planForCluster } from "../src/jobs/plan";
 import { pruneDeadLetterJobs, pruneOldSamples } from "../src/jobs/retention";
 import { suggestForCluster } from "../src/jobs/suggest";
 import { MongoConnection, MongoIndexCollector } from "../src/mongo";
@@ -1732,7 +1734,7 @@ describe("plan limits", () => {
     createdClusterIds.push(asString(asRecord(await afterUpgrade.json()).id));
   });
 
-  it("gates workload analysis, and never gates turning it off", async () => {
+  it("gates unattended changes, and never gates turning them off", async () => {
     const session = await signUp("plan-workload");
     createdEmails.push(session.email);
     const orgId = asString(asRecord(await (await api("/org", session)).json()).id);
@@ -1744,12 +1746,13 @@ describe("plan limits", () => {
     const planClusterId = asString(asRecord(await created.json()).id);
     createdClusterIds.push(planClusterId);
 
-    const policy = (workloadAnalysis: boolean) => ({
-      workloadAnalysis,
-      instantCreate: false,
+    const policy = (automated: boolean) => ({
+      // Free on every plan — seeing what to do is not the paid part.
+      workloadAnalysis: true,
+      instantCreate: automated,
       observeWindowDays: 30,
       maxCollectionSizeBytes: null,
-      autoApplyScore: null,
+      autoApplyScore: automated ? 70 : null,
       changeWindowStartHour: null,
       changeWindowEndHour: null,
     });
@@ -1759,10 +1762,12 @@ describe("plan limits", () => {
       body: JSON.stringify(policy(true)),
     });
     expect(refused.status).toBe(402);
-    // The refusal must not read as "your drops are gated too".
-    expect(asString(asRecord(await refused.json()).message)).toContain("Dropping");
+    // The refusal must not read as "your recommendations are gated too".
+    expect(asString(asRecord(await refused.json()).message)).toContain(
+      "approve any of them yourself",
+    );
 
-    // Saving the rest of the policy still works with it off.
+    // Everything else about the policy still saves, index suggestions included.
     expect(
       (
         await api(`/clusters/${planClusterId}/policy`, session, {
@@ -1781,6 +1786,22 @@ describe("plan limits", () => {
         })
       ).status,
     ).toBe(200);
+
+    // And a downgrade stops the engine acting on what is still stored — the
+    // api gate alone would let a saved score keep approving.
+    await setPlan(orgId, "FREE");
+    const stored = await db
+      .select()
+      .from(policies)
+      .where(eq(policies.clusterId, planClusterId))
+      .limit(1);
+    expect(stored[0]?.autoApplyScore).toBe(70);
+    expect(
+      entitledAutomation(
+        { autoApplyScore: stored[0]?.autoApplyScore ?? null, instantCreate: true },
+        await planForCluster(db, planClusterId),
+      ),
+    ).toEqual({ autoApplyScore: null, instantCreate: false });
   });
 
   it("counts an outstanding invite against the seat limit", async () => {
@@ -1826,8 +1847,8 @@ describe("retention follows the plan", () => {
     const retentionClusterId = asString(asRecord(await created.json()).id);
     createdClusterIds.push(retentionClusterId);
 
-    // 45 days old: inside SCALE's year, outside FREE's month.
-    const captured = new Date(Date.now() - 45 * 86_400_000);
+    // 120 days old: inside SCALE's year, outside FREE's 90 days.
+    const captured = new Date(Date.now() - 120 * 86_400_000);
     const sample = () => ({
       clusterId: retentionClusterId,
       database: "inttest",
@@ -1877,7 +1898,7 @@ describe("retention follows the plan", () => {
       readLatencyMicros: 1,
       writeOps: 0,
       writeLatencyMicros: 0,
-      capturedAt: new Date(Date.now() - 45 * 86_400_000),
+      capturedAt: new Date(Date.now() - 120 * 86_400_000),
     });
 
     const previous = process.env.RETENTION_DAYS;

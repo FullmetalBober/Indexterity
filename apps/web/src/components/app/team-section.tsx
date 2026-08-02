@@ -24,6 +24,7 @@ interface TeamOrg {
     readonly maxClusters: number | null;
     readonly maxMembers: number | null;
     readonly workloadAnalysis: boolean;
+    readonly autoApply: boolean;
     readonly clustersUsed: number;
     readonly membersUsed: number;
   };
@@ -104,7 +105,7 @@ export function TeamSection({ org, onChanged }: { org: TeamOrg; onChanged: () =>
           <span className="text-muted-foreground text-xs">
             {usage(org.plan.clustersUsed, org.plan.maxClusters)} clusters ·{" "}
             {usage(org.plan.membersUsed, org.plan.maxMembers)} seats
-            {org.plan.workloadAnalysis ? "" : " · index suggestions not included"}
+            {org.plan.autoApply ? "" : " · changes need your approval"}
           </span>
           {renaming ? (
             <form

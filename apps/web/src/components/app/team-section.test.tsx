@@ -29,7 +29,8 @@ const org = {
     plan: "FREE",
     maxClusters: 1,
     maxMembers: 3,
-    workloadAnalysis: false,
+    workloadAnalysis: true,
+    autoApply: false,
     clustersUsed: 0,
     membersUsed: 3,
   },
@@ -172,7 +173,7 @@ describe("TeamSection", () => {
     expect(screen.getByText("FREE")).toBeInTheDocument();
     expect(screen.getByText(/0 \/ 1 clusters/)).toBeInTheDocument();
     expect(screen.getByText(/3 \/ 3 seats/)).toBeInTheDocument();
-    expect(screen.getByText(/index suggestions not included/)).toBeInTheDocument();
+    expect(screen.getByText(/changes need your approval/)).toBeInTheDocument();
   });
 
   it("shows a bare count where the plan has no cap", () => {
@@ -185,13 +186,13 @@ describe("TeamSection", () => {
             plan: "SCALE",
             maxClusters: null,
             maxMembers: null,
-            workloadAnalysis: true,
+            autoApply: true,
           },
         }}
         onChanged={vi.fn()}
       />,
     );
     expect(screen.getByText(/0 clusters/)).toBeInTheDocument();
-    expect(screen.queryByText(/not included/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/need your approval/)).not.toBeInTheDocument();
   });
 });

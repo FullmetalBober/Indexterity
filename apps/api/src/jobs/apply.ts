@@ -1,4 +1,5 @@
 import { dynamicObserveDays, inChangeWindow } from "../analysis";
+import { entitledAutomation } from "../billing/plans";
 import {
   actions,
   and,
@@ -15,6 +16,7 @@ import { serializeSpec } from "../mongo";
 import { effectiveChangeWindow } from "./change-window";
 import { openClusterSession } from "./cluster-connection";
 import { jobDb } from "./db";
+import { planForCluster } from "./plan";
 import { preflightDrop } from "./preflight";
 
 const DROP_TYPES = new Set(["DROP_UNUSED", "DROP_REDUNDANT", "MERGE"]);
@@ -59,7 +61,16 @@ export async function applyCluster(clusterId: string): Promise<number> {
     .from(policies)
     .where(eq(policies.clusterId, clusterId))
     .limit(1);
-  await promoteByScore(db, clusterId, policy?.autoApplyScore ?? null);
+  // What the plan permits, not merely what was saved: a downgrade must stop the
+  // engine approving on its own, without discarding the score the owner chose.
+  const automation = entitledAutomation(
+    {
+      autoApplyScore: policy?.autoApplyScore ?? null,
+      instantCreate: policy?.instantCreate ?? false,
+    },
+    await planForCluster(db, clusterId),
+  );
+  await promoteByScore(db, clusterId, automation.autoApplyScore);
   const approved = await db
     .select()
     .from(recommendations)

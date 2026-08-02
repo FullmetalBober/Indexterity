@@ -19,6 +19,7 @@ const EMPTY_ORG = {
     maxClusters: 1,
     maxMembers: 3,
     workloadAnalysis: false,
+    autoApply: false,
     clustersUsed: 0,
     membersUsed: 0,
   },

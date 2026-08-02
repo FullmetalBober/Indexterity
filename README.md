@@ -185,26 +185,19 @@ history, and an explicit setting always wins.
 
 ## Plans
 
-| | clusters | seats | index suggestions | history |
-|---|---|---|---|---|
-| **FREE** | 1 | 3 | — | 30 days |
-| **PRO** | 5 | 15 | yes | 183 days |
-| **SCALE** | unlimited | unlimited | yes | 365 days |
+| | clusters | seats | index suggestions | unattended changes | history |
+|---|---|---|---|---|---|
+| **FREE** | 1 | 3 | yes | — | 90 days |
+| **PRO** | 5 | 15 | yes | yes | 183 days |
+| **SCALE** | unlimited | unlimited | yes | yes | 365 days |
+| **SELF_HOSTED** | 1 | unlimited | yes | yes | 365 days |
 
-Dropping unused and redundant indexes is the core promise and is on every plan,
-free included. What the paid plans add is the create side — proposing new
-indexes reads your query workload, which is the heavier half.
-
-History is enforced, not advertised: the prune job groups clusters by their
-org's plan and applies a cutoff per group. `RETENTION_DAYS` remains the
-operator's ceiling — storage is their bill, so a plan may keep less than the cap
-but never more.
-
-**Self-hosted is unlimited.** A self-hosted install owns its database, so a
-quota it can lift with one `UPDATE` is decoration; the chart ships
-`defaultOrgPlan: SCALE` and says so. The hosted service sets `FREE`. The code
-default is `FREE` because a process that has not been told where it runs should
-assume the stricter answer.
+**Free gives away the analysis and sells the automation.** Every plan sees every
+recommendation, with the reasoning, and can approve any of them by hand. What a
+paid plan adds is not having to: `autoApplyScore` (approve by score) and
+`instantCreate` (build a critical missing index immediately). The safety
+pipeline — hide, observe, regression-gate, roll back — is what makes unattended
+changes safe to run, and it is the part that took the work.
 
 The rules live in one table in `apps/api/src/billing/plans.ts`; nothing else
 decides them. Limits are enforced by the api, not drawn in the dashboard, and a
@@ -213,7 +206,20 @@ refusal comes back as **402** rather than 403 — the caller is an owner, so
 Seats count members plus outstanding invites, so an org cannot invite past its
 plan and leave the refusal for whoever clicks the link. A downgrade never
 deletes anything: an org over its new limit keeps what it has and simply cannot
-add more.
+add more, and an auto-approve score saved on a paid plan stops being obeyed
+without being erased — it comes back on upgrading.
+
+History is enforced, not advertised: the prune job groups clusters by their
+org's plan and applies a cutoff per group. `RETENTION_DAYS` remains the
+operator's ceiling — storage is their bill, so a plan may keep less than the cap
+but never more.
+
+**`SELF_HOSTED` is not a tier anyone buys.** It is the BUSL Additional Use Grant
+expressed as entitlements — one production cluster, everything else on — and it
+is what the chart ships. The licence caps production clusters and says nothing
+about features, seats or history, so neither does this. Shipping self-hosters
+the hosted free tier would restrict them further than the licence they are
+complying with, on hardware they pay for themselves.
 
 **No payment provider is wired, on purpose.** Plans are set with
 `node apps/api/dist/set-plan.js <org> <PLAN> [note]` — enough to charge by
@@ -381,7 +387,7 @@ restriction on commercial use, and this restricts one on purpose.
 | | |
 |---|---|
 | **Non-production use** | free and unlimited — evaluation, development, testing, demos |
-| **Production, one cluster** | free, forever, company or not |
+| **Production, one cluster** | free, forever, company or not — with every feature |
 | **Production, more than one cluster** | needs a commercial licence, or use the hosted service |
 | **Reading, modifying, forking, contributing** | always permitted |
 | **Reselling it or offering it as a service** | never permitted |
@@ -389,12 +395,12 @@ restriction on commercial use, and this restricts one on purpose.
 Each version becomes Apache-2.0 four years after it is published, so nothing
 here is withheld permanently.
 
-The Additional Use Grant is one connected cluster, which is exactly the FREE
-plan — the licence and the software say the same thing, and the chart ships
-`defaultOrgPlan: FREE` so a self-hosted install never quietly invites you past
-what you were granted. That plan is not a security control and is not pretending
-to be one: anyone who owns the database can lift it with one `UPDATE`. The
-licence is what binds.
+The Additional Use Grant is one connected cluster and nothing else, so the chart
+ships `defaultOrgPlan: SELF_HOSTED` — one cluster, every feature on. It would be
+easy to ship the hosted free tier here and cheap to justify; it would also
+restrict you further than the licence you are complying with, which is a nudge
+rather than a limit. The plan is not a security control and does not pretend to
+be: anyone who owns the database can change it. The licence is what binds.
 
 **Want more than the grant?** [hello@alivlad.com](mailto:hello@alivlad.com?subject=Indexterity%20commercial%20licence).
 The copyright is held by one person, so a commercial licence is a conversation,

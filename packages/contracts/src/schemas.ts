@@ -263,6 +263,10 @@ export const planInfo = z.object({
   maxClusters: z.number().nullable(),
   maxMembers: z.number().nullable(),
   workloadAnalysis: z.boolean(),
+  // Whether the engine may approve and build without a human. The paid line,
+  // and the one the dashboard has to show — a limit nobody sees until it
+  // refuses them is a support email.
+  autoApply: z.boolean(),
   clustersUsed: z.number(),
   membersUsed: z.number(),
 });

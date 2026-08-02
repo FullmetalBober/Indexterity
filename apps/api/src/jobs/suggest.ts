@@ -7,12 +7,14 @@ import {
   scanCost,
   sortOrderAdvisories,
 } from "../analysis";
+import { entitledAutomation } from "../billing/plans";
 import { and, eq, inArray, indexCooldowns, like, or, policies, recommendations } from "../db";
 import { type WorkloadTarget, workloadKey } from "../engine/ports";
 import { openClusterSession } from "./cluster-connection";
 import { activeCooldownKeys, cooldownKey } from "./cooldowns";
 import { applyCreatesForCluster } from "./create";
 import { jobDb } from "./db";
+import { planForCluster } from "./plan";
 
 // A shape must recur before it earns a recommendation — someone running a
 // heavy ad-hoc query once or twice must not leave an index behind.
@@ -56,6 +58,12 @@ export async function suggestForCluster(clusterId: string): Promise<number> {
   for (const row of cooldownRows) {
     regressionCounts.set(`${row.database} ${row.collection} ${row.indexName}`, row.regressionCount);
   }
+
+  // Same as apply: obey the plan, not just the stored policy.
+  const automation = entitledAutomation(
+    { autoApplyScore: policy.autoApplyScore, instantCreate: policy.instantCreate },
+    await planForCluster(db, clusterId),
+  );
 
   const { session, readOnly, release } = await openClusterSession(db, clusterId);
   let created = 0;
@@ -220,7 +228,7 @@ export async function suggestForCluster(clusterId: string): Promise<number> {
           candidate.scanning &&
           severity !== "ROUTINE" &&
           candidate.count >= INSTANT_MIN_COUNT &&
-          policy.instantCreate &&
+          automation.instantCreate &&
           !readOnly;
         if (instant) instantApproved += 1;
         // A CRITICAL scan is paid on every execution; waiting for the quiet

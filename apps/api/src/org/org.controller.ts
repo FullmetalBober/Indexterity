@@ -162,6 +162,7 @@ export class OrgController {
           maxClusters: cap(limits.maxClusters),
           maxMembers: cap(limits.maxMembers),
           workloadAnalysis: limits.workloadAnalysis,
+          autoApply: limits.autoApply,
           clustersUsed: clusterRows.length,
           // Seats are members plus outstanding invites — the same count the
           // limit is enforced on, so the number on screen matches the refusal.

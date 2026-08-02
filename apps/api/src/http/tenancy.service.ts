@@ -3,7 +3,13 @@ import { ORPCError } from "@orpc/server";
 import type { FastifyRequest } from "fastify";
 import { requireUserId } from "../auth/session";
 import { type Membership, resolveMembership } from "../auth/tenancy";
-import { allowsWorkloadAnalysis, type Plan, planFrom, withinLimit } from "../billing/plans";
+import {
+  allowsAutoApply,
+  allowsWorkloadAnalysis,
+  type Plan,
+  planFrom,
+  withinLimit,
+} from "../billing/plans";
 import { and, clusters, eq, invites, isNull, members, organizations } from "../db";
 import { DatabaseService } from "../db/database.service";
 
@@ -55,6 +61,13 @@ export class TenancyService {
         ? await this.countClusters(orgId)
         : await this.countMembersAndInvites(orgId);
     const verdict = withinLimit(plan, what, current);
+    if (!verdict.allowed) {
+      throw new ORPCError("PLAN_LIMIT", { status: 402, message: verdict.reason ?? "plan limit" });
+    }
+  }
+
+  async requireAutoApply(orgId: string): Promise<void> {
+    const verdict = allowsAutoApply(await this.plan(orgId));
     if (!verdict.allowed) {
       throw new ORPCError("PLAN_LIMIT", { status: 402, message: verdict.reason ?? "plan limit" });
     }

@@ -85,41 +85,45 @@ test.describe("cluster lifecycle", () => {
     await signUpAndLandOnDashboard(page, uniqueEmail("policy"));
     await connectCluster(page, "E2E Policy");
 
+    // Only fields the free plan includes — the automation ones are gated and
+    // have their own test below.
     await page.getByLabel("Observe window (days)").fill("14");
-    await page.getByLabel("Auto-approve score ≥").fill("70");
-    await page.getByLabel("Instant create").check();
+    await page.getByLabel("Workload analysis").check();
     await page.getByRole("button", { name: "Save policy" }).click();
     await expect(page.getByText("Policy saved")).toBeVisible();
 
     await page.reload();
     await expect(page.getByLabel("Observe window (days)")).toHaveValue("14");
-    await expect(page.getByLabel("Auto-approve score ≥")).toHaveValue("70");
-    await expect(page.getByLabel("Instant create")).toBeChecked();
+    await expect(page.getByLabel("Workload analysis")).toBeChecked();
   });
 
-  // A new account is on the free plan, and workload analysis is not part of it.
-  // The refusal has to say so — the same save can also fail because the caller
-  // is not an owner, and sending someone after the wrong one wastes their day.
-  test("explains that workload analysis is not on this plan, and saves the rest", async ({
+  // The free plan gives away the analysis and sells the automation, so the
+  // refusal has to be clear that the recommendations still arrive — the same
+  // save can also fail because the caller is not an owner, and sending someone
+  // after the wrong problem wastes their day.
+  test("explains that unattended changes are not on this plan, and saves the rest", async ({
     page,
   }) => {
     await signUpAndLandOnDashboard(page, uniqueEmail("plan"));
     await connectCluster(page, "E2E Plan");
 
     await expect(page.getByText("FREE")).toBeVisible();
-    await expect(page.getByText(/index suggestions not included/)).toBeVisible();
 
+    // Index suggestions are free, and saving them proves it.
     await page.getByLabel("Workload analysis").check();
     await page.getByRole("button", { name: "Save policy" }).click();
-    await expect(page.getByText(/does not include it/)).toBeVisible();
-    await expect(page.getByText(/Dropping unused/)).toBeVisible();
-    await expect(page.getByText("Policy saved")).toBeHidden();
+    await expect(page.getByText("Policy saved")).toBeVisible();
 
-    // With it off, the rest of the policy still saves.
-    await page.getByLabel("Workload analysis").uncheck();
+    // Automation is not.
+    await page.getByLabel("Auto-approve score ≥").fill("70");
+    await page.getByRole("button", { name: "Save policy" }).click();
+    await expect(page.getByText(/approve any of them yourself/)).toBeVisible();
+
+    // And turning it back off still saves.
+    await page.getByLabel("Auto-approve score ≥").fill("");
     await page.getByLabel("Observe window (days)").fill("21");
     await page.getByRole("button", { name: "Save policy" }).click();
-    await expect(page.getByText("Policy saved")).toBeVisible();
+    await expect(page.getByText("Policy saved").first()).toBeVisible();
   });
 
   // The free plan allows one, and the limit must be visible before it is hit.

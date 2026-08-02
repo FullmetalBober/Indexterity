@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  allowsAutoApply,
   allowsWorkloadAnalysis,
   DEFAULT_PLAN,
   defaultOrgPlan,
+  entitledAutomation,
   entitlementsFor,
   isPlan,
   PLANS,
@@ -65,22 +67,76 @@ describe("withinLimit", () => {
   });
 });
 
-describe("allowsWorkloadAnalysis", () => {
-  it("is a paid feature", () => {
-    expect(allowsWorkloadAnalysis("FREE").allowed).toBe(false);
-    expect(allowsWorkloadAnalysis("PRO").allowed).toBe(true);
-    expect(allowsWorkloadAnalysis("SCALE").allowed).toBe(true);
+// Seeing what to do is free on every plan — a recommendation nobody can see
+// sells nothing. What is paid is the engine acting on it unattended.
+describe("what free includes", () => {
+  it("gives away the analysis, including index suggestions", () => {
+    const free = entitlementsFor("FREE");
+    expect(free.workloadAnalysis).toBe(true);
+    expect(free.retentionDays).toBe(90);
+    for (const plan of PLANS) {
+      expect(allowsWorkloadAnalysis(plan).allowed).toBe(true);
+    }
   });
 
-  // Gating the create side must not read as gating safety. Dropping is the
-  // core promise and stays free on every plan.
-  it("says plainly that dropping is unaffected", () => {
-    expect(allowsWorkloadAnalysis("FREE").reason).toContain("Dropping");
+  it("sells the automation, not the insight", () => {
+    expect(entitlementsFor("FREE").autoApply).toBe(false);
+    expect(allowsAutoApply("FREE").allowed).toBe(false);
+    expect(allowsAutoApply("PRO").allowed).toBe(true);
+    expect(allowsAutoApply("SCALE").allowed).toBe(true);
+  });
+
+  // The refusal must not read as "your recommendations are gated too".
+  it("says the recommendations still arrive and can be approved by hand", () => {
+    const reason = allowsAutoApply("FREE").reason ?? "";
+    expect(reason).toContain("approve any of them yourself");
+    expect(reason).toContain("unattended");
+  });
+});
+
+// Not a tier anyone buys: the BUSL grant expressed as entitlements. The licence
+// caps production clusters and nothing else, so neither does this.
+describe("SELF_HOSTED", () => {
+  it("matches the licence — one cluster, everything else on", () => {
+    const self = entitlementsFor("SELF_HOSTED");
+    expect(self.maxClusters).toBe(1);
+    expect(self.workloadAnalysis).toBe(true);
+    expect(self.autoApply).toBe(true);
+    expect(self.maxMembers).toBe(Number.POSITIVE_INFINITY);
+  });
+
+  // Restricting a self-hoster further than the licence does would be a nudge,
+  // not a limit — on hardware they pay for themselves.
+  it("is never more restrictive than the hosted free tier", () => {
+    const self = entitlementsFor("SELF_HOSTED");
+    const free = entitlementsFor("FREE");
+    expect(self.maxClusters).toBeGreaterThanOrEqual(free.maxClusters);
+    expect(self.maxMembers).toBeGreaterThanOrEqual(free.maxMembers);
+    expect(self.retentionDays).toBeGreaterThanOrEqual(free.retentionDays);
+    expect(Number(self.autoApply)).toBeGreaterThanOrEqual(Number(free.autoApply));
+  });
+});
+
+// The stored policy is what an owner asked for; this is what the engine obeys.
+describe("entitledAutomation", () => {
+  const asked = { autoApplyScore: 70, instantCreate: true };
+
+  it("passes a paid plan's policy through untouched", () => {
+    expect(entitledAutomation(asked, "PRO")).toEqual(asked);
+    expect(entitledAutomation(asked, "SELF_HOSTED")).toEqual(asked);
+  });
+
+  // The case the job-level check exists for: set on PRO, then downgraded.
+  it("stops the engine acting on a plan that no longer allows it", () => {
+    expect(entitledAutomation(asked, "FREE")).toEqual({
+      autoApplyScore: null,
+      instantCreate: false,
+    });
   });
 });
 
 describe("entitlements", () => {
-  it("never shrinks as the plan grows", () => {
+  it("never shrinks as the paid tiers grow", () => {
     const order: Plan[] = ["FREE", "PRO", "SCALE"];
     for (let i = 1; i < order.length; i++) {
       const lower = entitlementsFor(order[i - 1] ?? "FREE");

@@ -7,7 +7,7 @@
 // provider later means writing the org's plan on a webhook, not touching any of
 // the enforcement below.
 
-export const PLANS = ["FREE", "PRO", "SCALE"] as const;
+export const PLANS = ["FREE", "PRO", "SCALE", "SELF_HOSTED"] as const;
 export type Plan = (typeof PLANS)[number];
 
 export const DEFAULT_PLAN: Plan = "FREE";
@@ -23,10 +23,18 @@ export interface Entitlements {
   // People in the org. Generous — charging per seat on a tool one DBA operates
   // punishes exactly the teams who would share the audit trail.
   readonly maxMembers: number;
-  // The create side (workloadAnalysis). Dropping unused indexes is the core
-  // promise and stays free; proposing new ones reads the query workload, which
-  // is the heavier and more advanced half.
+  // The create side (workloadAnalysis) — proposing new indexes from the query
+  // workload. Free: knowing what to do is the part that makes the tool worth
+  // trying, and a recommendation nobody can see sells nothing.
   readonly workloadAnalysis: boolean;
+  // Whether the engine may act without a human: autoApplyScore (approve by
+  // score) and instantCreate (build a critical missing index immediately).
+  //
+  // This is the paid line. Every plan sees every recommendation and can apply
+  // any of them by hand; what you buy is not having to. The safety pipeline —
+  // hide, observe, regression-gate, roll back — is what makes unattended
+  // changes safe to run, and it is the hard part.
+  readonly autoApply: boolean;
   // How much history the time-series tables keep for this org, in days. Longer
   // history is what makes a usage claim trustworthy — see analysis/classify.ts.
   readonly retentionDays: number;
@@ -34,12 +42,40 @@ export interface Entitlements {
 
 // One table. Change a number here and every gate follows.
 const ENTITLEMENTS: Record<Plan, Entitlements> = {
-  FREE: { maxClusters: 1, maxMembers: 3, workloadAnalysis: false, retentionDays: 30 },
-  PRO: { maxClusters: 5, maxMembers: 15, workloadAnalysis: true, retentionDays: 183 },
+  FREE: {
+    maxClusters: 1,
+    maxMembers: 3,
+    workloadAnalysis: true,
+    autoApply: false,
+    retentionDays: 90,
+  },
+  PRO: {
+    maxClusters: 5,
+    maxMembers: 15,
+    workloadAnalysis: true,
+    autoApply: true,
+    retentionDays: 183,
+  },
   SCALE: {
     maxClusters: Number.POSITIVE_INFINITY,
     maxMembers: Number.POSITIVE_INFINITY,
     workloadAnalysis: true,
+    autoApply: true,
+    retentionDays: 365,
+  },
+  // Not a tier anyone buys — it is the BUSL Additional Use Grant expressed as
+  // entitlements, and what the Helm chart ships.
+  //
+  // The licence caps one thing: production clusters. It says nothing about
+  // features, seats or history, so neither does this. Shipping self-hosters the
+  // hosted FREE tier would restrict them further than the licence they are
+  // complying with, which is not a limit — it is a nudge, and an unfair one on
+  // hardware they are paying for themselves.
+  SELF_HOSTED: {
+    maxClusters: 1,
+    maxMembers: Number.POSITIVE_INFINITY,
+    workloadAnalysis: true,
+    autoApply: true,
     retentionDays: 365,
   },
 };
@@ -84,6 +120,19 @@ export function withinLimit(
   };
 }
 
+// autoApplyScore and instantCreate together — refusing them needs one answer,
+// because a policy save can set both at once.
+export function allowsAutoApply(plan: Plan): LimitVerdict {
+  if (entitlementsFor(plan).autoApply) return ALLOWED;
+  return {
+    allowed: false,
+    reason:
+      `applying changes without approval is not part of the ${plan} plan. Every recommendation ` +
+      `is still made, and you can approve any of them yourself — what a paid plan adds is the ` +
+      `engine doing it unattended.`,
+  };
+}
+
 export function allowsWorkloadAnalysis(plan: Plan): LimitVerdict {
   if (entitlementsFor(plan).workloadAnalysis) return ALLOWED;
   return {
@@ -102,8 +151,26 @@ export function allowsWorkloadAnalysis(plan: Plan): LimitVerdict {
 // keeps the software honest about it, so a self-hosted install does not quietly
 // invite you past what you were granted.
 //
-// FREE by default for the same reason: a process that has not been told
-// otherwise should offer what the licence grants, not more.
+// FREE by default because a process that has not been told where it runs should
+// offer the least. The chart says SELF_HOSTED, which is what the licence grants
+// someone running it on their own hardware.
 export function defaultOrgPlan(): Plan {
   return planFrom(process.env.DEFAULT_ORG_PLAN);
+}
+
+// What a cluster's policy actually means once the plan is applied.
+//
+// The stored policy is what an owner asked for; this is what the engine obeys.
+// They diverge when a plan changes under a cluster — an org that set an
+// auto-approve score on PRO and then moved to FREE must stop approving by
+// itself, and clearing the stored value instead would silently lose the
+// setting they would get back on upgrading.
+export interface PolicyAutomation {
+  readonly autoApplyScore: number | null;
+  readonly instantCreate: boolean;
+}
+
+export function entitledAutomation(policy: PolicyAutomation, plan: Plan): PolicyAutomation {
+  if (entitlementsFor(plan).autoApply) return policy;
+  return { autoApplyScore: null, instantCreate: false };
 }

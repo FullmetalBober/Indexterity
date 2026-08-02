@@ -129,15 +129,19 @@ config:
   # list are all accepted. Leave it off when the api is directly exposed:
   # trusting a forwarded header then lets any client forge an address.
   trustProxy: ""
-  # The plan a newly created organization lands on. FREE, because that is what
-  # the licence grants: BUSL permits production use with one connected cluster,
-  # and unlimited non-production use. The default matches the grant so the
-  # software never quietly invites you past it.
+  # The plan a newly created organization lands on.
   #
-  # A quota cannot be enforced against someone who owns the database, and it is
-  # not trying to — the licence is what binds, and this is what reminds. If you
-  # hold a commercial licence, set the plan with set-plan.js or change this.
-  defaultOrgPlan: FREE
+  # SELF_HOSTED is the BUSL Additional Use Grant expressed as entitlements: one
+  # connected cluster, and everything else on. The licence caps production
+  # clusters and says nothing about features, seats or history — so neither does
+  # this. Shipping the hosted FREE tier here would restrict you further than the
+  # licence you are complying with, on hardware you are paying for yourself.
+  #
+  # It is not a security control and is not pretending to be one: anyone who
+  # owns the database can change it. The licence is what binds; this only keeps
+  # the software from quietly inviting you past the grant. Hold a commercial
+  # licence for more clusters? Set the plan with set-plan.js.
+  defaultOrgPlan: SELF_HOSTED
   # Storage price used for the $/month ROI headline.
   storageUsdPerGbMonth: ""
   # The origin better-auth signs sessions for. Defaults to the dashboard's own
