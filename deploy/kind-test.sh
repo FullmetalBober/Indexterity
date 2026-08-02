@@ -32,6 +32,10 @@ unset _clean_path _path_parts _part
 CLUSTER=${CLUSTER:-indexterity}
 NS=${NS:-indexterity}
 TAG=${TAG:-0.1.0}
+# Pinned so the preload and the manifests can never disagree about a tag.
+PG_IMAGE=${PG_IMAGE:-docker.io/library/postgres:18-alpine}
+MONGO_IMAGE=${MONGO_IMAGE:-docker.io/library/mongo:8}
+CURL_IMAGE=${CURL_IMAGE:-docker.io/curlimages/curl:8.11.0}
 KEEP=${1:-}
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # podman locally, docker on a CI runner. kind needs telling which.
@@ -79,6 +83,17 @@ for img in api web; do
   kind load docker-image "$(image_ref "$img")" --name "$CLUSTER"
 done
 
+# The dependencies too, rather than letting the kubelet pull them. A kind node
+# resolves DNS through the container network, which is one more moving part
+# than this test should depend on — a flaky resolver there fails as
+# ImagePullBackOff and looks like a chart problem. Pulling on the host and
+# loading is also faster on a re-run, since the host cache is warm.
+step "preloading dependency images"
+for img in "$PG_IMAGE" "$MONGO_IMAGE" "$CURL_IMAGE"; do
+  $CTR image exists "$img" 2>/dev/null || $CTR pull "$img"
+  kind load docker-image "$img" --name "$CLUSTER"
+done
+
 step "postgres + mongo (the chart bundles neither, on purpose)"
 kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 kubectl apply -n "$NS" -f "$ROOT/deploy/kind-dependencies.yaml"
@@ -104,7 +119,7 @@ step "functional check: sign up and connect the in-cluster mongo"
 # The chart's own test only curls two ports. This exercises what the chart is
 # actually for: migrations applied, MASTER_KEY sealing a credential, and the api
 # reaching a database over cluster DNS.
-kubectl -n "$NS" run kind-check --rm -i --restart=Never --image=curlimages/curl:8.11.0 --quiet -- sh -c '
+kubectl -n "$NS" run kind-check --rm -i --restart=Never --image="$CURL_IMAGE" --quiet -- sh -c '
   set -e
   API=http://indexterity-api:3001
   ORIGIN=http://indexterity-web:3000

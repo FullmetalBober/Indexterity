@@ -1,0 +1,90 @@
+name: Release
+
+# Tag-driven: `git tag v0.2.0 && git push --tags` publishes the two images and
+# the chart, all versioned from that tag. Nothing publishes from main, so a
+# merge can never move what someone's cluster pulls.
+on:
+  push:
+    tags: ["v*"]
+  # Publishing by hand, e.g. to re-cut a release after fixing a registry problem.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish (without the leading v)"
+        required: true
+
+permissions:
+  contents: read
+  # ghcr.io is free for public packages, and GITHUB_TOKEN is enough to push to
+  # it — no registry secret to rotate.
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version and owner
+        id: meta
+        run: |
+          version="${{ github.event.inputs.version }}"
+          if [ -z "$version" ]; then version="${GITHUB_REF_NAME#v}"; fi
+          # ghcr rejects an uppercase path, and the account is FullmetalBober.
+          owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "owner=$owner" >> "$GITHUB_OUTPUT"
+          echo "publishing $version to ghcr.io/$owner"
+
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push the api image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/api/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ steps.meta.outputs.owner }}/indexterity-api:${{ steps.meta.outputs.version }}
+            ghcr.io/${{ steps.meta.outputs.owner }}/indexterity-api:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push the web image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/web/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ steps.meta.outputs.owner }}/indexterity-web:${{ steps.meta.outputs.version }}
+            ghcr.io/${{ steps.meta.outputs.owner }}/indexterity-web:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - uses: azure/setup-helm@v4
+
+      - name: Package and push the chart
+        run: |
+          v="${{ steps.meta.outputs.version }}"
+          # Chart version and appVersion both come from the tag, so a chart
+          # release always names the images it was tested against.
+          helm package deploy/helm/indexterity --version "$v" --app-version "$v" --destination /tmp
+          helm push "/tmp/indexterity-$v.tgz" "oci://ghcr.io/${{ steps.meta.outputs.owner }}/charts"
+
+      - name: Summary
+        run: |
+          v="${{ steps.meta.outputs.version }}"
+          owner="${{ steps.meta.outputs.owner }}"
+          {
+            echo "### Published \`$v\`"
+            echo ""
+            echo '```bash'
+            echo "helm install indexterity oci://ghcr.io/$owner/charts/indexterity --version $v"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

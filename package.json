@@ -31,5 +31,6 @@
   "allowScripts": {
     "esbuild": true,
     "@swc/core": true
-  }
+  },
+  "license": "BUSL-1.1"
 }

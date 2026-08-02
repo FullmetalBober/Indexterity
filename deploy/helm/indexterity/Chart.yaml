@@ -6,9 +6,9 @@ type: application
 version: 0.2.0
 # Application version — the default image tag.
 appVersion: "0.1.0"
-home: https://github.com/your-org/indexterity
+home: https://github.com/FullmetalBober/Indexterity
 sources:
-  - https://github.com/your-org/indexterity
+  - https://github.com/FullmetalBober/Indexterity
 keywords:
   - mongodb
   - indexes

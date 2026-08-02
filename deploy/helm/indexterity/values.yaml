@@ -1,6 +1,14 @@
 # Indexterity Helm values. The three workloads (api, web, worker) come from two
 # images; PostgreSQL is NOT bundled — point databaseUrl at a managed instance or
 # your own postgres release.
+#
+#   helm install indexterity oci://ghcr.io/fullmetalbober/charts/indexterity \
+#     --set secrets.databaseUrl=... --set secrets.betterAuthSecret=... \
+#     --set secrets.masterKey=... --set web.publicUrl=https://...
+#
+# The image tags default to the chart's appVersion, which the release workflow
+# sets from the same tag that built them — so a chart version always names the
+# images it was tested against.
 
 nameOverride: ""
 fullnameOverride: ""
@@ -11,7 +19,7 @@ global:
 
 api:
   image:
-    repository: indexterity/api
+    repository: ghcr.io/fullmetalbober/indexterity-api
     # Defaults to .Chart.AppVersion.
     tag: ""
     pullPolicy: IfNotPresent
@@ -39,7 +47,7 @@ api:
 
 web:
   image:
-    repository: indexterity/web
+    repository: ghcr.io/fullmetalbober/indexterity-web
     tag: ""
     pullPolicy: IfNotPresent
   replicas: 2
@@ -121,11 +129,15 @@ config:
   # list are all accepted. Leave it off when the api is directly exposed:
   # trusting a forwarded header then lets any client forge an address.
   trustProxy: ""
-  # The plan a newly created organization lands on. SCALE by default because a
-  # self-hosted install owns its own database — a quota it can lift with one
-  # UPDATE is decoration, and making the first run worse buys nothing. Set FREE
-  # if you are running this AS a paid service, where the limits are real.
-  defaultOrgPlan: SCALE
+  # The plan a newly created organization lands on. FREE, because that is what
+  # the licence grants: BUSL permits production use with one connected cluster,
+  # and unlimited non-production use. The default matches the grant so the
+  # software never quietly invites you past it.
+  #
+  # A quota cannot be enforced against someone who owns the database, and it is
+  # not trying to — the licence is what binds, and this is what reminds. If you
+  # hold a commercial licence, set the plan with set-plan.js or change this.
+  defaultOrgPlan: FREE
   # Storage price used for the $/month ROI headline.
   storageUsdPerGbMonth: ""
   # The origin better-auth signs sessions for. Defaults to the dashboard's own

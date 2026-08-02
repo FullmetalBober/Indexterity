@@ -96,12 +96,14 @@ export function allowsWorkloadAnalysis(plan: Plan): LimitVerdict {
 
 // The plan a newly created org lands on.
 //
-// A self-hosted install owns its database, so a quota there is decoration:
-// `UPDATE organizations SET plan='SCALE'` is one command away, and the source
-// is public. Pretending otherwise would only make the first run worse for the
-// person who deployed it. The Helm chart therefore ships SCALE, and the hosted
-// service sets FREE — the code default stays FREE because a process that has
-// not been told where it runs should assume the stricter answer.
+// Nothing here is a security control: anyone who owns the database can lift a
+// quota with one UPDATE, and the source is public. The licence is what binds —
+// BUSL permits production use with one connected cluster — and this is what
+// keeps the software honest about it, so a self-hosted install does not quietly
+// invite you past what you were granted.
+//
+// FREE by default for the same reason: a process that has not been told
+// otherwise should offer what the licence grants, not more.
 export function defaultOrgPlan(): Plan {
   return planFrom(process.env.DEFAULT_ORG_PLAN);
 }

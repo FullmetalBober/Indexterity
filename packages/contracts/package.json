@@ -22,5 +22,6 @@
   },
   "devDependencies": {
     "@repo/config": "*"
-  }
+  },
+  "license": "BUSL-1.1"
 }

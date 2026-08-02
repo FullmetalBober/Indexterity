@@ -6,5 +6,6 @@
     "tsconfig.base.json",
     "tsconfig.nestjs.json",
     "tsconfig.react.json"
-  ]
+  ],
+  "license": "BUSL-1.1"
 }

@@ -369,6 +369,37 @@ missing index costs on every execution and most of the old delay was waiting to
 notice. A critical scan now goes from first sighting to built index in minutes
 rather than the better part of a day.
 
+## Licence
+
+[BUSL-1.1](./LICENSE.md) — the Business Source License, converting to
+Apache-2.0 four years after each release.
+
+**Source-available, not open source**, and the difference is worth stating
+plainly rather than borrowing a label: the Open Source Definition requires no
+restriction on commercial use, and this restricts one on purpose.
+
+| | |
+|---|---|
+| **Non-production use** | free and unlimited — evaluation, development, testing, demos |
+| **Production, one cluster** | free, forever, company or not |
+| **Production, more than one cluster** | needs a commercial licence, or use the hosted service |
+| **Reading, modifying, forking, contributing** | always permitted |
+| **Reselling it or offering it as a service** | never permitted |
+
+Each version becomes Apache-2.0 four years after it is published, so nothing
+here is withheld permanently.
+
+The Additional Use Grant is one connected cluster, which is exactly the FREE
+plan — the licence and the software say the same thing, and the chart ships
+`defaultOrgPlan: FREE` so a self-hosted install never quietly invites you past
+what you were granted. That plan is not a security control and is not pretending
+to be one: anyone who owns the database can lift it with one `UPDATE`. The
+licence is what binds.
+
+**Want more than the grant?** [hello@alivlad.com](mailto:hello@alivlad.com?subject=Indexterity%20commercial%20licence).
+The copyright is held by one person, so a commercial licence is a conversation,
+not a legal project.
+
 ## Notes
 
 npm workspaces. Docker resolves to podman + `podman-compose` here; the compose
