@@ -46,14 +46,34 @@ export interface HealthOptions {
   readonly elevatedDocsPerKey: number;
   // Readers queued behind the global lock — the database is actively behind.
   readonly criticalQueuedReaders: number;
+  // Blocking in-memory sorts in the interval, judged on their own rather than
+  // as a footnote to scanning. A query can find its documents through an index
+  // and still sort them by hand, which moves no scan counter at all — so a
+  // server doing nothing but unindexed sorts would otherwise read as healthy,
+  // and it is the one failure mode that ends in an error rather than slowness.
+  readonly criticalSorts: number;
+  readonly elevatedSorts: number;
 }
 
+// Tuned for the probe's five-second sampling gap (jobs/probe.ts). The sort
+// thresholds are deliberately well above what an ordinary busy server does —
+// firing means running the whole workload pass, so it should mean a real burst
+// (~50/s elevated, ~500/s critical), not a handful of small sorts.
 export const DEFAULT_HEALTH: HealthOptions = {
   minScans: 50,
   criticalDocsPerKey: 1000,
   elevatedDocsPerKey: 100,
   criticalQueuedReaders: 10,
+  criticalSorts: 2500,
+  elevatedSorts: 250,
 };
+
+// The more serious of two readings of the same interval.
+function worse(a: HealthSeverity, b: HealthSeverity): HealthSeverity {
+  if (a === "CRITICAL" || b === "CRITICAL") return "CRITICAL";
+  if (a === "ELEVATED" || b === "ELEVATED") return "ELEVATED";
+  return "HEALTHY";
+}
 
 function round(value: number): string {
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
@@ -79,34 +99,54 @@ export function assessHealth(
     return { severity: "HEALTHY", indexRelated: false, summary: "counters reset" };
   }
 
+  // Documents walked per index key: the shape of the work, independent of
+  // volume. Keys of zero means nothing used an index at all. Below minScans
+  // there is no scanning worth judging.
+  const docsPerKey = keys > 0 ? docs / keys : docs;
+  const scanning: HealthSeverity =
+    scans < options.minScans
+      ? "HEALTHY"
+      : docsPerKey >= options.criticalDocsPerKey
+        ? "CRITICAL"
+        : docsPerKey >= options.elevatedDocsPerKey
+          ? "ELEVATED"
+          : "HEALTHY";
+  const sorting: HealthSeverity =
+    sorts >= options.criticalSorts
+      ? "CRITICAL"
+      : sorts >= options.elevatedSorts
+        ? "ELEVATED"
+        : "HEALTHY";
+  const indexRelated = scanning !== "HEALTHY" || sorting !== "HEALTHY";
+
   // Queued readers mean the database is behind NOW, whatever the cause. Worth
   // reporting even when an index is not the answer.
   if (after.queuedReaders >= options.criticalQueuedReaders) {
     return {
       severity: "CRITICAL",
-      indexRelated: scans >= options.minScans,
+      indexRelated,
       summary:
         `${after.queuedReaders} reads queued behind the global lock` +
         (scans >= options.minScans ? `, with ${round(scans)} collection scans in the window` : ""),
     };
   }
 
-  if (scans < options.minScans) {
-    return { severity: "HEALTHY", indexRelated: false, summary: "no significant scanning" };
+  const severity = worse(scanning, sorting);
+  if (severity === "HEALTHY") {
+    return {
+      severity,
+      indexRelated: false,
+      summary:
+        scans < options.minScans ? "no significant scanning" : "scanning within normal bounds",
+    };
   }
 
-  // Documents walked per index key: the shape of the work, independent of
-  // volume. Keys of zero means nothing used an index at all.
-  const docsPerKey = keys > 0 ? docs / keys : docs;
-  const detail =
-    `${round(scans)} collection scans walking ${round(docs)} documents` +
-    (sorts > 0 ? `, ${round(sorts)} sorts without an index` : "");
-
-  if (docsPerKey >= options.criticalDocsPerKey) {
-    return { severity: "CRITICAL", indexRelated: true, summary: detail };
+  // Name only what actually contributed: a sort burst on an otherwise quiet
+  // server should not be reported as a scan problem.
+  const parts: string[] = [];
+  if (scans >= options.minScans) {
+    parts.push(`${round(scans)} collection scans walking ${round(docs)} documents`);
   }
-  if (docsPerKey >= options.elevatedDocsPerKey) {
-    return { severity: "ELEVATED", indexRelated: true, summary: detail };
-  }
-  return { severity: "HEALTHY", indexRelated: false, summary: "scanning within normal bounds" };
+  if (sorts > 0) parts.push(`${round(sorts)} sorts without an index`);
+  return { severity, indexRelated, summary: parts.join(", ") };
 }

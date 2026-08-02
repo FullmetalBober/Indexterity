@@ -5,6 +5,7 @@ import {
   type ScanSeverity,
   type SortKey,
   scanCost,
+  sortOrderAdvisories,
 } from "../analysis";
 import { and, eq, inArray, indexCooldowns, like, or, policies, recommendations } from "../db";
 import { type WorkloadTarget, workloadKey } from "../engine/ports";
@@ -171,6 +172,32 @@ export async function suggestForCluster(clusterId: string): Promise<number> {
           : "ROUTINE";
       const worst = costs.find((cost) => cost.severity === severity);
 
+      // An index already covers the fields but in an order that cannot serve
+      // the sort. No create is proposed for it — the fix is a second index
+      // differing only in direction, which doubles this collection's write cost
+      // and is a judgement call. Say so rather than drop it silently.
+      for (const advisory of sortOrderAdvisories(shapes, existing, WORKLOAD_OPTIONS)) {
+        const indexName = `${advisory.existingIndex}_sortorder`;
+        if (cooled.has(cooldownKey(database, collection, indexName))) continue;
+        const keys = advisory.wantedKeys.map((key) => `${key.field}: ${key.direction}`).join(", ");
+        toInsert.push({
+          clusterId,
+          type: "ADVISORY_REVIEW",
+          state: "PROPOSED",
+          database,
+          collection,
+          indexName,
+          rationale:
+            `${advisory.existingIndex} covers these fields but not in an order that serves ` +
+            `the sort, so the server orders the results in memory (seen ${advisory.count}×). ` +
+            `An index on {${keys}} would serve it: db.${collection}.createIndex({ ${keys} }). ` +
+            `CAUTION: that is a second index on the same fields — it doubles the write cost ` +
+            `for this collection, so decide whether both are worth keeping before building it.`,
+          score: Math.min(70, 25 + advisory.count * 5),
+          estimatedBytesSaved: 0,
+        });
+      }
+
       for (const candidate of recommendCreates(shapes, existing, WORKLOAD_OPTIONS)) {
         // Partial variants get a suffix so they never collide with the full
         // index of the same keys.
@@ -286,7 +313,10 @@ export async function suggestForCluster(clusterId: string): Promise<number> {
             inArray(recommendations.type, ["CREATE", "UPDATE", "MERGE"]),
             and(
               eq(recommendations.type, "ADVISORY_REVIEW"),
-              like(recommendations.indexName, "%_ttl"),
+              or(
+                like(recommendations.indexName, "%_ttl"),
+                like(recommendations.indexName, "%_sortorder"),
+              ),
             ),
           ),
         ),

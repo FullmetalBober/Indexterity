@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { IndexSpec } from "./types";
-import { esrKeys, type QueryShape, recommendCreates, type SortKey } from "./workload";
+import {
+  esrKeys,
+  type QueryShape,
+  recommendCreates,
+  type SortKey,
+  sortOrderAdvisories,
+} from "./workload";
 
 function shape(equality: string[], sort: SortKey[], range: string[], count = 1): QueryShape {
   return { equality, sort, range, collscan: true, count };
@@ -318,5 +324,87 @@ describe("recommendCreates (in-memory sorts)", () => {
     expect(
       recommendCreates([sortingShape(["a"], [bAsc])], [idx("ab", ["a", "b"])], options),
     ).toHaveLength(0);
+  });
+});
+
+// The fields are indexed, but in an order that cannot serve the sort — so the
+// server sorts in memory and no create is proposed, because the fix is a second
+// index differing only in direction. Silently dropping that was a real finding
+// going unreported.
+describe("sortOrderAdvisories", () => {
+  function directedIdx(name: string, keys: SortKey[]): IndexSpec {
+    return { ...idx(name, []), name, keys };
+  }
+
+  it("names the index whose direction cannot serve the sort", () => {
+    const shape: QueryShape = {
+      equality: ["a"],
+      sort: [{ field: "b", direction: -1 }],
+      range: [],
+      collscan: false,
+      sortedInMemory: true,
+      count: 6,
+    };
+    const out = sortOrderAdvisories(
+      [shape],
+      [
+        directedIdx("a_1_b_1", [
+          { field: "a", direction: 1 },
+          { field: "b", direction: 1 },
+        ]),
+      ],
+      options,
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]?.existingIndex).toBe("a_1_b_1");
+    expect(out[0]?.wantedKeys).toEqual([
+      { field: "a", direction: 1 },
+      { field: "b", direction: -1 },
+    ]);
+    expect(out[0]?.count).toBe(6);
+  });
+
+  // A backward scan reverses every key at once, so an all-opposite index does
+  // serve the sort and there is nothing to report.
+  it("says nothing when a backward scan already serves the sort", () => {
+    const shape: QueryShape = {
+      equality: [],
+      sort: [
+        { field: "a", direction: -1 },
+        { field: "b", direction: -1 },
+      ],
+      range: [],
+      collscan: false,
+      sortedInMemory: true,
+      count: 6,
+    };
+    expect(
+      sortOrderAdvisories(
+        [shape],
+        [
+          directedIdx("a_1_b_1", [
+            { field: "a", direction: 1 },
+            { field: "b", direction: 1 },
+          ]),
+        ],
+        options,
+      ),
+    ).toHaveLength(0);
+  });
+
+  it("says nothing when no index covers the fields — that is a create, not an advisory", () => {
+    const shape: QueryShape = {
+      equality: ["a"],
+      sort: [{ field: "b", direction: -1 }],
+      range: [],
+      collscan: false,
+      sortedInMemory: true,
+      count: 6,
+    };
+    expect(sortOrderAdvisories([shape], [idx("a_1", ["a"])], options)).toHaveLength(0);
+  });
+
+  it("ignores a shape that is scanning rather than sorting in memory", () => {
+    expect(sortOrderAdvisories([shape(["a"], [atDesc], [], 9)], [], options)).toHaveLength(0);
   });
 });

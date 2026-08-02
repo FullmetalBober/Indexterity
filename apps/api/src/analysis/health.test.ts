@@ -62,6 +62,42 @@ describe("assessHealth", () => {
     expect(verdict.summary).toContain("800 sorts without an index");
   });
 
+  // A query can reach its documents by index and still sort them by hand. No
+  // scan counter moves, so before this the server read as perfectly healthy.
+  it("flags a sort storm on a server doing no scanning at all", () => {
+    const verdict = assessHealth(base, later({ scanAndOrder: 10 + 4000 }));
+    expect(verdict.severity).toBe("CRITICAL");
+    expect(verdict.indexRelated).toBe(true);
+    expect(verdict.summary).toBe("4k sorts without an index");
+    expect(verdict.summary).not.toContain("collection scans");
+  });
+
+  it("calls a smaller sort burst elevated", () => {
+    const verdict = assessHealth(base, later({ scanAndOrder: 10 + 400 }));
+    expect(verdict.severity).toBe("ELEVATED");
+    expect(verdict.indexRelated).toBe(true);
+  });
+
+  it("leaves an ordinary trickle of sorts alone", () => {
+    expect(assessHealth(base, later({ scanAndOrder: 10 + 30 })).severity).toBe("HEALTHY");
+  });
+
+  it("takes the worse of the two readings", () => {
+    // Scanning is merely elevated, sorting is critical.
+    const verdict = assessHealth(
+      base,
+      later({
+        collectionScans: 1200,
+        scannedObjects: 500_000 + 200_000,
+        scannedKeys: 400_000 + 1000,
+        scanAndOrder: 10 + 3000,
+      }),
+    );
+    expect(verdict.severity).toBe("CRITICAL");
+    expect(verdict.summary).toContain("collection scans");
+    expect(verdict.summary).toContain("sorts without an index");
+  });
+
   it("ignores a handful of scans — every server does some", () => {
     const verdict = assessHealth(
       base,

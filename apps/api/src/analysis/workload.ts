@@ -132,6 +132,68 @@ function sameFilter(
   return canonical(left) === canonical(right);
 }
 
+// Can this index's key order serve that sort? Directly, or read backwards —
+// a backward scan reverses EVERY key, so {a:1,b:1} serves sort({a:-1,b:-1})
+// but not sort({a:1,b:-1}). A text/hashed/2dsphere key orders nothing, so an
+// index carrying one is never the answer to a sort.
+function servesOrder(index: IndexSpec, wanted: readonly SortKey[]): boolean {
+  if (index.keys.length !== wanted.length) return false;
+  const directions: (1 | -1)[] = [];
+  for (const key of index.keys) {
+    if (key.direction !== 1 && key.direction !== -1) return false;
+    directions.push(key.direction);
+  }
+  const matches = (reversed: boolean): boolean =>
+    index.keys.every((key, i) => {
+      const want = wanted[i];
+      const direction = directions[i];
+      if (want === undefined || direction === undefined) return false;
+      return want.field === key.field && want.direction === (reversed ? -direction : direction);
+    });
+  return matches(false) || matches(true);
+}
+
+// An index already covers these fields, but in an order that cannot serve the
+// sort — so the server sorts in memory anyway and no create is proposed, since
+// the fix is a second index differing only in direction.
+//
+// Building that automatically is a bigger call than this engine makes unasked:
+// two near-identical indexes double the write cost of the collection, and which
+// one to keep is a judgement about the workload. Reported instead of silently
+// dropped, which is what happened before.
+export interface SortOrderAdvisory {
+  readonly existingIndex: string;
+  readonly wantedKeys: readonly SortKey[];
+  readonly count: number;
+}
+
+export function sortOrderAdvisories(
+  shapes: readonly QueryShape[],
+  existing: readonly IndexSpec[],
+  options: WorkloadOptions,
+): SortOrderAdvisory[] {
+  const out: SortOrderAdvisory[] = [];
+  const seen = new Set<string>();
+  for (const shape of shapes) {
+    if (shape.sortedInMemory !== true || shape.count < options.minCount) continue;
+    if (shape.sort.length === 0) continue;
+    if (!isWorthIndexing(shape.clients ?? [])) continue;
+    const wantedKeys = esrKeys(shape);
+    if (wantedKeys.length === 0) continue;
+    const wanted = wantedKeys.map((key) => key.field);
+    const blocker = existing.find(
+      (idx) =>
+        !isNeverDrop(idx) && equalFields(fieldsOf(idx), wanted) && !servesOrder(idx, wantedKeys),
+    );
+    if (blocker === undefined) continue;
+    const key = `${blocker.name} ${wantedKeys.map((k) => `${k.field}:${k.direction}`).join(",")}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ existingIndex: blocker.name, wantedKeys, count: shape.count });
+  }
+  return out;
+}
+
 interface Want {
   readonly shape: QueryShape;
   readonly wantedKeys: SortKey[];
