@@ -1,6 +1,7 @@
 import { MongoClient } from "mongodb";
 import { z } from "zod";
 import type { ConnectionDiagnosis, PrivilegeCheck, PrivilegeTier } from "../engine/ports";
+import { parseServerVersion, supportsHiddenIndexes, unsupportedVersionMessage } from "./version";
 
 // What the engine needs, expressed as (actions, where) pairs. Mirrors
 // ENGINE_PRIVILEGES in provision.ts — the role we CREATE is exactly the set we
@@ -237,6 +238,21 @@ export async function diagnoseConnection(uri: string): Promise<ConnectionDiagnos
   const client = new MongoClient(uri, { serverSelectionTimeoutMS: 5000 });
   try {
     const admin = client.db("admin");
+    // Version first: below the floor nothing else matters, and saying so at
+    // connect time is the difference between a clear refusal and a customer
+    // discovering weeks later that drops silently never happen.
+    //
+    // The failure is deliberately NOT caught here. If buildInfo cannot run, the
+    // reason is unreachable or unauthenticated, not old — and the catch below
+    // says so precisely. Swallowing it would report a version problem for a
+    // host that never answered.
+    const build: unknown = await admin.command({ buildInfo: 1 });
+    const version = parseServerVersion(
+      typeof build === "object" && build !== null ? Reflect.get(build, "version") : null,
+    );
+    if (!supportsHiddenIndexes(version)) {
+      return failure(unsupportedVersionMessage(version));
+    }
     const status = connectionStatusDoc.parse(
       await admin.command({ connectionStatus: 1, showPrivileges: true }),
     );

@@ -1,9 +1,11 @@
 import { type Db, MongoClient } from "mongodb";
+import { parseServerVersion, type ServerVersion } from "./version";
 
 // Owns a driver client. Created with an index-only role (see docs/architecture.md
 // §10.1) so it cannot read customer documents.
 export class MongoConnection {
   private readonly client: MongoClient;
+  private version: ServerVersion | null | undefined;
 
   constructor(connectionString: string) {
     // Fail fast on unreachable clusters: 5s server selection instead of the
@@ -17,6 +19,21 @@ export class MongoConnection {
 
   db(name: string): Db {
     return this.client.db(name);
+  }
+
+  // The server's version, cached: it cannot change under a live connection, and
+  // every write asks for it.
+  async serverVersion(): Promise<ServerVersion | null> {
+    if (this.version !== undefined) return this.version;
+    try {
+      const info: unknown = await this.client.db("admin").command({ buildInfo: 1 });
+      const raw = typeof info === "object" && info !== null ? Reflect.get(info, "version") : null;
+      this.version = parseServerVersion(raw);
+    } catch {
+      // Unreadable version is treated as unsupported, never as "probably fine".
+      this.version = null;
+    }
+    return this.version;
   }
 
   // Replica-set members as the cluster itself reports them, or an empty list for

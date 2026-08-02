@@ -140,6 +140,13 @@ history, and an explicit setting always wins.
 
 ## Connecting a cluster
 
+**MongoDB 4.4 or newer.** The floor is set by one feature: `collMod {index:
+{hidden}}`. Every drop goes hide → observe → measure → drop, and 4.3 and older
+cannot hide an index — `collMod` misreads the request as a TTL change and fails.
+A server below the floor is refused at connect time with that explanation, and
+every write re-checks the version immediately before running, so a cluster
+downgraded or repointed later cannot be half-changed.
+
 See [`docs/mongo-user.md`](./docs/mongo-user.md) for the exact `createRole`
 snippets. Indexterity never gets document read or write privileges.
 

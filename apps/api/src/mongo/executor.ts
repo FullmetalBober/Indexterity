@@ -1,5 +1,16 @@
 import type { CreateIndexOptions, IndexExecutor } from "../engine/ports";
 import type { MongoConnection } from "./connection";
+import { supportsHiddenIndexes, unsupportedVersionMessage } from "./version";
+
+// The server cannot do what the pipeline requires. Distinct from a network
+// failure and from a permission failure: retrying will never fix it, so the
+// jobs treat it as a condition to report rather than an error to retry.
+export class UnsupportedServerError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UnsupportedServerError";
+  }
+}
 
 // The executor CONTRACT lives in the engine-neutral ports (../engine/ports);
 // this file is the MongoDB implementation. Types re-exported for convenience.
@@ -19,6 +30,18 @@ export class MongoIndexExecutor implements IndexExecutor {
     }
   }
 
+  // Asked immediately before every write, not once at onboarding. A cluster can
+  // be downgraded, or a connection string repointed at a different server, long
+  // after we decided it was supported — and the cost of being wrong is a failed
+  // or half-applied change on someone else's database. The version is cached on
+  // the connection, so this is a field read after the first call.
+  private async assertSupported(): Promise<void> {
+    const version = await this.conn.serverVersion();
+    if (!supportsHiddenIndexes(version)) {
+      throw new UnsupportedServerError(unsupportedVersionMessage(version));
+    }
+  }
+
   hide(database: string, collection: string, indexName: string): Promise<void> {
     return this.setHidden(database, collection, indexName, true);
   }
@@ -35,6 +58,7 @@ export class MongoIndexExecutor implements IndexExecutor {
     hidden: boolean,
   ): Promise<void> {
     this.assertWritable(hidden ? "hide index" : "unhide index");
+    await this.assertSupported();
     await this.conn.db(database).command({
       collMod: collection,
       index: { name: indexName, hidden },
@@ -43,6 +67,7 @@ export class MongoIndexExecutor implements IndexExecutor {
 
   async drop(database: string, collection: string, indexName: string): Promise<void> {
     this.assertWritable("drop index");
+    await this.assertSupported();
     await this.conn.db(database).collection(collection).dropIndex(indexName);
   }
 
@@ -53,6 +78,7 @@ export class MongoIndexExecutor implements IndexExecutor {
     options: CreateIndexOptions,
   ): Promise<void> {
     this.assertWritable("create index");
+    await this.assertSupported();
     await this.conn.db(database).collection(collection).createIndex(keys, options);
   }
 }

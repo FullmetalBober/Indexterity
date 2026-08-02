@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { resetAlertCooldowns } from "../mail/notify";
+import { UnsupportedServerError } from "../mongo/executor";
 import { ClusterCredentialsError } from "./cluster-connection";
 import { type ClusterTaskDeps, runClusterTask } from "./tasks";
 
@@ -93,5 +94,17 @@ describe("runClusterTask", () => {
       ),
     ).rejects.toThrow(TypeError);
     expect(log.warns).toHaveLength(0);
+  });
+
+  it("reports an unsupported server once a day and does not retry it", async () => {
+    const log = recorder();
+    const tooOld = new UnsupportedServerError("MongoDB 4.2.24 cannot hide indexes");
+    for (let i = 0; i < 3; i++) {
+      await expect(
+        runClusterTask("apply", CLUSTER, log.deps, () => Promise.reject(tooOld)),
+      ).resolves.toBeUndefined();
+    }
+    expect(log.warns).toHaveLength(3);
+    expect(log.alerts).toEqual([`${CLUSTER}:cluster version not supported`]);
   });
 });

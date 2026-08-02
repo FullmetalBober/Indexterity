@@ -1,6 +1,7 @@
 import type { JobHelpers } from "graphile-worker";
 import { isUnreachableError } from "../errors/unreachable";
 import { ALERT_COOLDOWN_MS, alertAllowed, notifyClusterOwners } from "../mail/notify";
+import { UnsupportedServerError } from "../mongo/executor";
 import { applyCluster } from "./apply";
 import { refreshInferredWindow } from "./change-window";
 import { classifyCluster } from "./classify";
@@ -40,6 +41,15 @@ export async function runClusterTask(
   try {
     await run(clusterId);
   } catch (error) {
+    // The server is too old for the pipeline. No retry can fix a version, so
+    // tell the owners once a day and stop — same shape as an unreachable
+    // cluster, for the same reason.
+    if (error instanceof UnsupportedServerError) {
+      deps.logger.warn(`${task}: cluster ${clusterId} — ${error.message}`);
+      if (!alertAllowed(`${clusterId}:unsupported`, ALERT_COOLDOWN_MS)) return;
+      await deps.alertOwners(clusterId, "cluster version not supported", error.message);
+      return;
+    }
     // Undecryptable credentials need an operator, not a retry and not a
     // customer email — log it every tick so it stays visible, and move on.
     if (error instanceof ClusterCredentialsError) {
