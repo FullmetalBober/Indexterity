@@ -27,15 +27,22 @@ export interface QueryShape {
   readonly sort: readonly SortKey[];
   readonly range: readonly string[];
   readonly collscan: boolean;
+  // The plan found its documents through an index but could not order them, so
+  // the server buffered the result and sorted it in memory. A missing index in
+  // its own right, and one `collscan` can never show: keys WERE examined, so by
+  // every scan test the query looks healthy. It is also the failure mode that
+  // ends in an error rather than slowness — a blocking sort dies at 100 MB.
+  readonly sortedInMemory?: boolean;
   readonly count: number;
-  // Documents the server actually walked for this shape, when the workload
-  // source reports it ($queryStats does; the profiler does not). The measure of
-  // what a missing index is costing — see analysis/severity.ts.
+  // Documents the server actually walked for this shape. The measure of what a
+  // missing index is costing — see analysis/severity.ts. Reported by the
+  // profiler, and by `$queryStats` from mongo 8.0 (earlier stores carry
+  // execution counts only).
   readonly docsExamined?: number;
   // Who issued this shape. $queryStats groups by client as well as by shape,
   // so a query run from a shell and the same query from an app arrive as
-  // separate entries; merged shapes accumulate every client seen. Empty on
-  // the profiler path, which reports no client.
+  // separate entries; merged shapes accumulate every client seen. The profiler
+  // reports `appName`, which lands here the same way.
   readonly clients?: readonly QueryClient[];
   readonly constants?: Readonly<Record<string, ConstantValue>>;
   // $lookup joins anywhere in the pipeline (indexed on the FOREIGN collection).
@@ -68,6 +75,10 @@ export interface CreateCandidate {
   readonly rationale: string;
   // The observed frequency behind this candidate (feeds the confidence score).
   readonly count: number;
+  // Whether a collection scan is behind this candidate, as opposed to only an
+  // in-memory sort. Both are worth an index; a scan is the stronger argument,
+  // and the only one allowed to skip the change window.
+  readonly scanning: boolean;
   // When set, build a partial index: these constant equality predicates move
   // into partialFilterExpression and out of the keys — smaller index, same query.
   readonly partialFilter?: Readonly<Record<string, ConstantValue>>;
@@ -125,12 +136,15 @@ interface Want {
   readonly shape: QueryShape;
   readonly wantedKeys: SortKey[];
   readonly partialFilter?: Readonly<Record<string, ConstantValue>>;
+  scanning: boolean;
   absorbedCount: number;
   absorbedShapes: number;
 }
 
-// Propose index additions from collection-scan query shapes. Pure. The caller
-// should only pass shapes from non-trivial collections (size gate lives there).
+// Propose index additions from query shapes the server is working too hard to
+// serve: collection scans, and queries that reach their documents through an
+// index but then sort them in memory. Pure. The caller should only pass shapes
+// from non-trivial collections (size gate lives there).
 //  - UPDATE: an existing index is a proper prefix of the wanted keys -> extend it
 //  - MERGE:  two+ single-field indexes cover the wanted fields -> one compound
 //  - CREATE: otherwise a brand-new index
@@ -145,10 +159,11 @@ export function recommendCreates(
   existing: readonly IndexSpec[],
   options: WorkloadOptions,
 ): CreateCandidate[] {
-  const seen = new Set<string>();
+  const seen = new Map<string, Want>();
   const wants: Want[] = [];
   for (const shape of shapes) {
-    if (!shape.collscan || shape.count < options.minCount) continue;
+    const sorting = shape.sortedInMemory === true;
+    if ((!shape.collscan && !sorting) || shape.count < options.minCount) continue;
     // Someone exploring at a prompt is not a workload. The index would be
     // maintained on every write for years, for queries nobody runs again.
     if (!isWorthIndexing(shape.clients ?? [])) continue;
@@ -173,8 +188,19 @@ export function recommendCreates(
       wantedKeys = wantedKeys.filter((key) => !constantFields.includes(key.field));
     }
     const wantedKey = wantedKeys.map((key) => `${key.field}:${key.direction}`).join(",");
-    if (seen.has(wantedKey)) continue;
-    seen.add(wantedKey);
+    const already = seen.get(wantedKey);
+    if (already !== undefined) {
+      // Two shapes wanting the same index. One candidate covers both, but a
+      // scan behind either of them is a scan behind the candidate.
+      already.scanning = already.scanning || shape.collscan;
+      continue;
+    }
+    // An index on exactly these fields already exists. For a scanning shape
+    // that means the planner chose not to use it, which an extra index would
+    // not fix. For a sorting shape it means the directions cannot serve the
+    // sort — a real finding, but the fix is a second index differing only in
+    // direction, and proposing that automatically is a bigger call than this
+    // engine should make unasked.
     if (
       existing.some((idx) =>
         equalFields(
@@ -185,7 +211,16 @@ export function recommendCreates(
     ) {
       continue;
     }
-    wants.push({ shape, wantedKeys, partialFilter, absorbedCount: 0, absorbedShapes: 0 });
+    const want: Want = {
+      shape,
+      wantedKeys,
+      partialFilter,
+      scanning: shape.collscan,
+      absorbedCount: 0,
+      absorbedShapes: 0,
+    };
+    seen.set(wantedKey, want);
+    wants.push(want);
   }
 
   // Consolidation: fold prefix wants into the widest want that covers them,
@@ -204,6 +239,7 @@ export function recommendCreates(
     if (widest !== undefined) {
       widest.absorbedCount += want.shape.count + want.absorbedCount;
       widest.absorbedShapes += 1 + want.absorbedShapes;
+      widest.scanning = widest.scanning || want.scanning;
       continue;
     }
     survivors.push(want);
@@ -215,7 +251,7 @@ export function recommendCreates(
     const wanted = wantedKeys.map((key) => key.field);
     const count = shape.count + want.absorbedCount;
     const scan =
-      `collection scan seen ${count}×` +
+      (want.scanning ? `collection scan seen ${count}×` : `in-memory sort seen ${count}×`) +
       (want.absorbedShapes > 0
         ? ` (also serves ${want.absorbedShapes} narrower shape${want.absorbedShapes === 1 ? "" : "s"})`
         : "");
@@ -243,6 +279,7 @@ export function recommendCreates(
         retireIndexes: [extendable.name],
         rationale: `Extend ${extendable.name} to {${describe(wantedKeys)}} — ${scan}.`,
         count,
+        scanning: want.scanning,
         ...keepFilter,
       });
     } else if (singles.length >= 2) {
@@ -252,6 +289,7 @@ export function recommendCreates(
         retireIndexes: singles.map((idx) => idx.name),
         rationale: `Replace ${singles.map((idx) => idx.name).join(" + ")} with a compound index on {${describe(wantedKeys)}} — ${scan}.`,
         count,
+        scanning: want.scanning,
         ...keepFilter,
       });
     } else {
@@ -267,6 +305,7 @@ export function recommendCreates(
         retireIndexes: [],
         rationale: `Add an index on {${describe(wantedKeys)}} — ${scan}.${partialNote}`,
         count,
+        scanning: want.scanning,
         ...(partialFilter === undefined ? {} : { partialFilter }),
       });
     }

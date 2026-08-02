@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { resetAlertCooldowns } from "../mail/notify";
 import { UnsupportedServerError } from "../mongo/executor";
-import { ClusterCredentialsError } from "./cluster-connection";
+import { ClusterCredentialsError, ClusterGoneError } from "./cluster-connection";
 import { type ClusterTaskDeps, runClusterTask } from "./tasks";
 
 const CLUSTER = "11111111-1111-1111-1111-111111111111";
@@ -39,6 +39,19 @@ function unreachable(): Error {
 describe("runClusterTask", () => {
   beforeEach(() => {
     resetAlertCooldowns();
+  });
+
+  // Offboarding does not reach into the queue, so a deleted cluster's ticks
+  // still run. Treating that as a failure costs three retries and a stack trace
+  // per orphaned job, and alerts owners about a cluster they deleted.
+  it("says nothing when the cluster was deleted before the tick ran", async () => {
+    const log = recorder();
+    await runClusterTask("collect", CLUSTER, log.deps, () => {
+      throw new ClusterGoneError(CLUSTER);
+    });
+    expect(log.warns).toHaveLength(0);
+    expect(log.errors).toHaveLength(0);
+    expect(log.alerts).toHaveLength(0);
   });
 
   it("passes a successful run straight through", async () => {

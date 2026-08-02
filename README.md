@@ -49,15 +49,30 @@ a constraint *are* droppable: the pipeline hides and measures rather than
 trusting the counter.
 
 **Adding** (opt-in via `workloadAnalysis`). Query shapes come from `$queryStats`
-(**mongo 6.0+** — verified against a live server; it was backported into the 6.0
-series), falling back to the profiler on 4.4 and 5.0. A shape must recur — **3+ sightings**
-— and must come from something other than a person at a prompt. `$queryStats`
-groups by client, so the same query from `mongosh` and from your app arrive as
-separate entries; one seen only from shells and GUIs earns nothing, because the
-index would be maintained on every write for years for queries nobody runs
-again. Keys are ordered Equality → Sort → Range. An equality field
-compared against the same literal every time moves into a
-`partialFilterExpression` instead of the keys: smaller index, same query.
+on **mongo 8.0+**, and from the profiler below it. `$queryStats` exists from 6.0,
+but until 8.0 it reports execution counts only — no `docsExamined`, no
+`keysExamined`, no `hasSortStage` (verified against live 6.0, 7.0 and 8.2
+servers). That is the difference between knowing a query ran and knowing it
+scanned, so on 6.0 and 7.0 the profiler is the only source that can suggest an
+index and the engine falls back to it. Either way `$queryStats` records nothing
+until `internalQueryStatsRateLimit` is set — it is `0` by default, and connecting
+a cluster says so if it is.
+
+Two shapes earn an index. One is a **collection scan**. The other is a query
+that finds its documents through an index and then **sorts them in memory** —
+invisible to every scan test, because keys were examined, and the failure mode
+that ends in an error rather than slowness, since a blocking sort dies at 100 MB.
+The fix is usually extending the index that already found the documents so it
+can order them too.
+
+A shape must recur — **3+ sightings** — and must come from something other than a
+person at a prompt. `$queryStats` groups by client and the profiler records
+`appName`, so the same query from `mongosh` and from your app arrive as separate
+entries; one seen only from shells and GUIs earns nothing, because the index
+would be maintained on every write for years for queries nobody runs again. Keys
+are ordered Equality → Sort → Range. An equality field compared against the same
+literal every time moves into a `partialFilterExpression` instead of the keys:
+smaller index, same query.
 
 ## The safety pipeline
 
@@ -139,15 +154,29 @@ whole life is on record, so it leaves in about a week instead of a month. Age
 only counts when the index appeared *after* we started watching — snapshots
 begin at onboarding, so an index in the first one may be five years old.
 
-**Every five minutes, a read-pressure probe.** A missing index shows up as a
-collection's average read latency climbing while it keeps serving traffic — and
-that is visible to the least-privilege user, unlike CPU and memory, which need
-`serverStatus` the provisioned role deliberately does not have. When reads get
-sharply slower than their own baseline, the workload pass runs immediately
-instead of waiting for the hourly one. Only the busiest 20 collections are
-probed, and the readings are never written to `latency_samples` — that table's
-6h cadence is what the activity gate and the change-window inference count
-intervals in.
+**Every five minutes, a health probe.** Two things, in order.
+
+First the server as a whole. CPU is not available — mongod reports none outside
+FTDC — but `serverStatus` reports what the query engine is *doing*: collection
+scans, documents and index keys walked, sorts run with no index to order by, and
+operations queued behind the global lock. The signal is **documents walked per
+index key**, which is volume-independent, so it reads the same on a small
+cluster and a large one. A loaded CPU could be a backup or a noisy neighbour;
+thousands of documents per key is a missing index and nothing else. This catches
+a scan storm spread thinly across many collections that no single collection's
+latency would show.
+
+Then per collection: a missing index shows up as average read latency climbing
+while the collection keeps serving traffic. When reads get sharply slower than
+their own baseline, the workload pass runs immediately instead of waiting for the
+hourly one. Only the busiest 20 collections are probed, and the readings are
+never written to `latency_samples` — that table's 6h cadence is what the activity
+gate and the change-window inference count intervals in.
+
+`serverStatus` is the one privilege that reads beyond index metadata, so it is
+optional: a cluster without it onboards clean and simply loses the first half of
+the probe. [`docs/mongo-user.md`](./docs/mongo-user.md) says exactly what it
+exposes.
 
 **The change window picks itself.** Left unset, the engine buckets the cluster's
 own traffic into the four 6h slots of the UTC day and takes the quietest,
@@ -156,14 +185,13 @@ history, and an explicit setting always wins.
 
 ## Connecting a cluster
 
-**MongoDB 4.4 to 8.x.** The floor is set by one feature: `collMod {index:
-{hidden}}`. Every drop goes hide → observe → measure → drop, and 4.3 and older
-cannot hide an index — `collMod` misreads the request as a TTL change and fails.
-A server below the floor is refused at connect time with that explanation, and
-every write re-checks the version immediately before running, so a cluster
-downgraded or repointed later cannot be half-changed. A major series newer than
-anything tested is refused too — this engine drops and builds indexes on a live
-database, and a major release is where command behaviour moves. Set
+**MongoDB 6.0 to 8.x.** 4.4 and 5.0 are past end-of-life and have no
+`$queryStats`, so they are refused rather than supported half-well. A server
+below the floor is refused at connect time with that explanation, and every
+write re-checks the version immediately before running, so a cluster downgraded
+or repointed later cannot be half-changed. A major series newer than anything
+tested is refused too — this engine drops and builds indexes on a live database,
+and a major release is where command behaviour moves. Set
 `ALLOW_UNTESTED_MONGO_VERSION=true` to run ahead of the tested range.
 
 See [`docs/mongo-user.md`](./docs/mongo-user.md) for the exact `createRole`

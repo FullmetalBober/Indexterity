@@ -11,13 +11,14 @@ const base: ServerHealth = {
   residentMb: 500,
 };
 
-const after = (delta: Partial<ServerHealth>): ServerHealth => ({ ...base, ...delta });
+// Not named `after` — that reads as a test hook.
+const later = (delta: Partial<ServerHealth>): ServerHealth => ({ ...base, ...delta });
 
 describe("assessHealth", () => {
   it("is critical when scans walk thousands of documents per index key", () => {
     const verdict = assessHealth(
       base,
-      after({
+      later({
         collectionScans: 1400,
         scannedObjects: 500_000 + 20_000_000,
         scannedKeys: 400_000 + 5000,
@@ -31,7 +32,7 @@ describe("assessHealth", () => {
   it("is healthy for a busy server reading efficiently through indexes", () => {
     const verdict = assessHealth(
       base,
-      after({
+      later({
         collectionScans: 1060,
         scannedObjects: 500_000 + 200_000,
         scannedKeys: 400_000 + 190_000,
@@ -41,7 +42,7 @@ describe("assessHealth", () => {
   });
 
   it("reports queued readers even when an index is not the answer", () => {
-    const verdict = assessHealth(base, after({ queuedReaders: 25 }));
+    const verdict = assessHealth(base, later({ queuedReaders: 25 }));
     expect(verdict.severity).toBe("CRITICAL");
     // No scanning in the window, so this is contention of some other kind.
     expect(verdict.indexRelated).toBe(false);
@@ -51,7 +52,7 @@ describe("assessHealth", () => {
   it("mentions unindexed sorts, a symptom the query-shape path misses", () => {
     const verdict = assessHealth(
       base,
-      after({
+      later({
         collectionScans: 1200,
         scannedObjects: 500_000 + 9_000_000,
         scannedKeys: 400_000 + 3000,
@@ -64,13 +65,13 @@ describe("assessHealth", () => {
   it("ignores a handful of scans — every server does some", () => {
     const verdict = assessHealth(
       base,
-      after({ collectionScans: 1005, scannedObjects: 500_000 + 5_000_000 }),
+      later({ collectionScans: 1005, scannedObjects: 500_000 + 5_000_000 }),
     );
     expect(verdict.severity).toBe("HEALTHY");
   });
 
   it("treats a restart between readings as no evidence", () => {
-    const verdict = assessHealth(base, after({ collectionScans: 5, scannedObjects: 100 }));
+    const verdict = assessHealth(base, later({ collectionScans: 5, scannedObjects: 100 }));
     expect(verdict.severity).toBe("HEALTHY");
     expect(verdict.summary).toBe("counters reset");
   });

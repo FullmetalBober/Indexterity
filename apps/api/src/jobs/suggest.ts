@@ -178,14 +178,19 @@ export async function suggestForCluster(clusterId: string): Promise<number> {
           proposedName(candidate.keys) + (candidate.partialFilter === undefined ? "" : "_partial");
         if (cooled.has(cooldownKey(database, collection, indexName))) continue;
         const score = createScore({
-          collscan: true,
+          collscan: candidate.scanning,
+          sortedInMemory: !candidate.scanning,
           count: candidate.count,
           docCount,
           severity,
           pastRegressions: regressionCounts.get(`${database} ${collection} ${indexName}`) ?? 0,
         });
+        // Severity is the collection's, not this candidate's, so a sort-driven
+        // candidate must not inherit a different shape's scan as grounds for
+        // building itself without being asked.
         const instant =
           candidate.type === "CREATE" &&
+          candidate.scanning &&
           severity !== "ROUTINE" &&
           candidate.count >= INSTANT_MIN_COUNT &&
           policy.instantCreate &&
@@ -205,7 +210,9 @@ export async function suggestForCluster(clusterId: string): Promise<number> {
             (instant
               ? `${candidate.rationale} (auto-approved: ${severity.toLowerCase()} scan)`
               : candidate.rationale) +
-            (worst === undefined ? "" : ` Cost: ${worst.summary}.`) +
+            // Same reason: the cost figure describes the collection's scans, so
+            // quoting it under a sort-driven candidate would misattribute it.
+            (worst === undefined || !candidate.scanning ? "" : ` Cost: ${worst.summary}.`) +
             cost,
           score,
           estimatedBytesSaved: 0,

@@ -58,9 +58,9 @@ export function classifyClient(client: QueryClient): ClientKind {
 //
 // Only if something other than a person at a prompt ran it. A shape seen solely
 // from shells and GUIs is someone exploring; the index would outlive the
-// curiosity by years. UNKNOWN counts as application traffic — the profiler path
-// reports no client at all, and refusing to act on missing evidence would
-// silently disable workload analysis for every cluster on mongo 6 and older.
+// curiosity by years. UNKNOWN counts as application traffic — a client that
+// never named itself leaves no evidence either way, and refusing to act on
+// missing evidence would silently disable workload analysis for those shapes.
 export function isWorthIndexing(clients: readonly QueryClient[]): boolean {
   if (clients.length === 0) return true;
   return clients.some((client) => classifyClient(client) !== "INTERACTIVE");

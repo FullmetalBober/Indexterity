@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { canProvisionWith, evaluatePrivileges, type MongoPrivilege } from "./diagnose";
+import {
+  canProvisionWith,
+  evaluatePrivileges,
+  type MongoPrivilege,
+  queryStatsAdvisory,
+} from "./diagnose";
+import { parseServerVersion } from "./version";
 
 // The privilege set our own provisioned role grants (provision.ts).
 const enginePrivileges: MongoPrivilege[] = [
@@ -133,5 +139,38 @@ describe("canProvisionWith", () => {
     expect(
       canProvisionWith([{ resource: { db: "admin", collection: "" }, actions: ["createUser"] }]),
     ).toBe(false);
+  });
+});
+
+// $queryStats is off by default on every version, and before 8.0 it cannot
+// report whether a query scanned. Both are silent failures without this.
+describe("queryStatsAdvisory", () => {
+  const v8 = parseServerVersion("8.2.9");
+  const v7 = parseServerVersion("7.0.39");
+
+  it("says nothing when the store is sampling on a version that reports plans", () => {
+    expect(queryStatsAdvisory(-1, v8)).toBeNull();
+    expect(queryStatsAdvisory(100, v8)).toBeNull();
+  });
+
+  it("names the parameter when sampling is off", () => {
+    const advisory = queryStatsAdvisory(0, v8);
+    expect(advisory).toContain("internalQueryStatsRateLimit");
+    expect(advisory).toContain("profiler");
+  });
+
+  it("explains that a pre-8.0 store counts executions but cannot see scans", () => {
+    const advisory = queryStatsAdvisory(-1, v7);
+    expect(advisory).toContain("7.0.39");
+    expect(advisory).toContain("execution counts only");
+    expect(advisory).toContain("profiler");
+  });
+
+  it("prefers the sampling problem, which makes the version moot", () => {
+    expect(queryStatsAdvisory(0, v7)).toContain("internalQueryStatsRateLimit");
+  });
+
+  it("stays quiet when the parameter could not be read", () => {
+    expect(queryStatsAdvisory(null, v7)).toBeNull();
   });
 });

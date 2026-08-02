@@ -142,12 +142,12 @@ const serverStatusDoc = z.object({
   mem: z.object({ resident: z.coerce.number() }).partial().optional(),
 });
 
-// One $queryStats entry (mongo 7+). Filters are shapified ({field: {$eq: "?number"}}),
+// One $queryStats entry (mongo 6.0+). Filters are shapified ({field: {$eq: "?number"}}),
 // metrics arrive as Longs the driver promotes. Lenient: entries for other command
 // shapes are skipped via safeParse.
 const queryStatsDoc = z.object({
   key: z.object({
-    // Present from mongo 7; the shell and every GUI identify themselves here.
+    // Present from 6.0; the shell and every GUI identify themselves here.
     client: z
       .object({
         application: z.object({ name: z.string() }).partial().optional(),
@@ -163,17 +163,34 @@ const queryStatsDoc = z.object({
   }),
   metrics: z.object({
     execCount: z.coerce.number(),
+    // Absent before 8.0 — see collectQueryStats. `keysExamined` is the marker
+    // the capability check reads, because it is the one that decides whether a
+    // shape was scanning.
     keysExamined: z.object({ sum: z.coerce.number() }).optional(),
     docsExamined: z.object({ sum: z.coerce.number() }).optional(),
+    // Executions that ran a blocking in-memory SORT, and those that did not.
+    hasSortStage: z.object({ true: z.coerce.number() }).partial().optional(),
   }),
 });
 
 // system.profile entry (lenient — only field names are used downstream).
+//
+// The profiler is richer than `$queryStats` on every version below 8.0: it
+// records the plan summary, the documents walked, whether a blocking sort ran,
+// and who issued the query. It is opt-in and costs write throughput, which is
+// why it is the fallback rather than the default — but where it is on, it is
+// the better source.
 const profileDoc = z.object({
   ns: z.string(),
   op: z.string().optional(),
   ts: z.coerce.date().optional(),
   planSummary: z.string().optional(),
+  docsExamined: z.coerce.number().optional(),
+  // Recorded only when true.
+  hasSortStage: z.boolean().optional(),
+  // The client's own name for itself — same signal as the $queryStats client
+  // key, and the reason shell traffic can be discounted on the profiler path.
+  appName: z.string().optional(),
   command: z
     .object({
       filter: z.record(z.string(), z.unknown()).optional(),
@@ -514,6 +531,9 @@ export class MongoIndexCollector implements IndexCollector {
         sort: SortKey[];
         range: string[];
         collscan: boolean;
+        sortedInMemory: boolean;
+        docsExamined: number;
+        clients: QueryClient[];
         count: number;
         constants: Record<string, ConstantValue>;
         lookups: LookupJoin[];
@@ -551,12 +571,38 @@ export class MongoIndexCollector implements IndexCollector {
       }
       const key = shapeMapKey(equality, sort, range, lookups);
       const collscan = (entry.planSummary ?? "").includes("COLLSCAN");
+      // A blocking SORT: the plan found its documents through an index but had
+      // to order them in memory afterwards, because no index carried the sort.
+      const sortedInMemory = entry.hasSortStage === true;
+      // Same reasoning as the $queryStats path: work done at a prompt is not
+      // workload, so it neither counts as a sighting nor accumulates cost.
+      const client: QueryClient = entry.appName === undefined ? {} : { application: entry.appName };
+      const interactive = classifyClient(client) === "INTERACTIVE";
+      const countedDocs = interactive ? 0 : (entry.docsExamined ?? 0);
       const prev = shapes.get(key);
       if (prev === undefined) {
-        shapes.set(key, { equality, sort, range, collscan, count: 1, constants, lookups });
+        shapes.set(key, {
+          equality,
+          sort,
+          range,
+          collscan,
+          sortedInMemory,
+          docsExamined: countedDocs,
+          clients: [client],
+          count: interactive ? 0 : 1,
+          constants,
+          lookups,
+        });
       } else {
-        prev.count += 1;
+        prev.count += interactive ? 0 : 1;
+        prev.docsExamined += countedDocs;
+        // One profile document per execution, so unlike $queryStats (which
+        // groups by client) the same client arrives over and over.
+        if (!prev.clients.some((seen) => seen.application === client.application)) {
+          prev.clients.push(client);
+        }
         prev.collscan = prev.collscan || collscan;
+        prev.sortedInMemory = prev.sortedInMemory || sortedInMemory;
         prev.constants = intersectConstants(prev.constants, constants);
       }
     }
@@ -565,15 +611,26 @@ export class MongoIndexCollector implements IndexCollector {
       sort: shape.sort,
       range: shape.range,
       collscan: shape.collscan,
+      sortedInMemory: shape.sortedInMemory,
       count: shape.count,
+      docsExamined: shape.docsExamined,
+      clients: shape.clients,
       ...(Object.keys(shape.constants).length > 0 ? { constants: shape.constants } : {}),
       ...(shape.lookups.length > 0 ? { lookups: shape.lookups } : {}),
     }));
   }
 
-  // Query shapes from $queryStats (mongo 7+): no profiler needed. COLLSCAN is
+  // Query shapes from $queryStats (mongo 6.0+): no profiler needed. COLLSCAN is
   // inferred from zero keys examined alongside docs examined. Requires
-  // internalQueryStatsRateLimit > 0 on the server.
+  // internalQueryStatsRateLimit != 0 on the server — it is 0 by default, so a
+  // stock cluster has an empty store however privileged the credentials are.
+  //
+  // Before 8.0 the store reports execution counts and timings only: no
+  // `keysExamined`, no `docsExamined`, no `hasSortStage`. Every shape would
+  // therefore look non-scanning, which is not "no findings" but "cannot tell" —
+  // and returning those shapes would suppress the profiler fallback and with it
+  // every create recommendation the cluster could have had. So a store without
+  // plan metrics reports nothing and lets the profiler answer instead.
   async collectQueryStats(targets: readonly WorkloadTarget[]): Promise<Map<string, QueryShape[]>> {
     if (targets.length === 0) return new Map();
     // ONE read of the store for the whole cluster. It holds an entry per
@@ -595,14 +652,19 @@ export class MongoIndexCollector implements IndexCollector {
         sort: SortKey[];
         range: string[];
         collscan: boolean;
+        sortedInMemory: boolean;
         count: number;
         lookups: LookupJoin[];
       }
     >();
-    for (const doc of raw) {
+    const entries = raw.flatMap((doc) => {
       const parsed = queryStatsDoc.safeParse(doc);
-      if (!parsed.success) continue;
-      const { key, metrics } = parsed.data;
+      return parsed.success ? [parsed.data] : [];
+    });
+    // Server-wide capability, so any one entry answers it. An empty store says
+    // nothing either way and falls through to the same empty result.
+    if (!entries.some((entry) => entry.metrics.keysExamined !== undefined)) return new Map();
+    for (const { key, metrics } of entries) {
       const namespace = workloadKey(key.queryShape.cmdNs.db, key.queryShape.cmdNs.coll);
       if (!wanted.has(namespace)) continue;
       let equality: string[] = [];
@@ -642,6 +704,9 @@ export class MongoIndexCollector implements IndexCollector {
         ...(key.client?.driver?.name === undefined ? {} : { driver: key.client.driver.name }),
       };
       const collscan = (metrics.keysExamined?.sum ?? 0) === 0 && docsExamined > 0;
+      // An index found the documents but none could order them, so the server
+      // sorted in memory. Invisible to the collscan test — keys were examined.
+      const sortedInMemory = (metrics.hasSortStage?.true ?? 0) > 0;
       const interactive = classifyClient(client) === "INTERACTIVE";
       const countedExecs = interactive ? 0 : metrics.execCount;
       const countedDocs = interactive ? 0 : docsExamined;
@@ -658,6 +723,7 @@ export class MongoIndexCollector implements IndexCollector {
           sort,
           range,
           collscan,
+          sortedInMemory,
           count: countedExecs,
           lookups,
         });
@@ -666,6 +732,7 @@ export class MongoIndexCollector implements IndexCollector {
         prev.docsExamined += countedDocs;
         prev.clients.push(client);
         prev.collscan = prev.collscan || collscan;
+        prev.sortedInMemory = prev.sortedInMemory || sortedInMemory;
       }
     }
     for (const shape of shapes.values()) {
@@ -675,6 +742,7 @@ export class MongoIndexCollector implements IndexCollector {
         sort: shape.sort,
         range: shape.range,
         collscan: shape.collscan,
+        sortedInMemory: shape.sortedInMemory,
         count: shape.count,
         docsExamined: shape.docsExamined,
         clients: shape.clients,

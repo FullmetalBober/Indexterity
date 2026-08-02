@@ -62,7 +62,7 @@ const FEATURES = [
   },
   {
     title: "Workload-aware index creation",
-    body: "Recurring query shapes from $queryStats (no profiler needed) or the profiler become Equality → Sort → Range compounds with correct sort directions, partial indexes for constant filters, and TTL advisories for manual age-based cleanups.",
+    body: "Recurring query shapes from $queryStats or the profiler become Equality → Sort → Range compounds with correct sort directions, partial indexes for constant filters, and TTL advisories for manual age-based cleanups. Queries that sort in memory count too, not just collection scans.",
   },
   {
     title: "Proof, not promises",
@@ -129,12 +129,12 @@ const FAQ = [
   {
     question: "Which MongoDB privileges does it need?",
     answer:
-      "listDatabases, listCollections, listIndexes, indexStats and collStats to analyze; createIndex, dropIndex and collMod to apply changes; optionally reading system.profile or $queryStats for workload analysis. Before storing anything, Indexterity checks the connection string and tells you exactly which of these are missing and what each one enables.",
+      "listDatabases, listCollections, listIndexes, indexStats and collStats to analyze; createIndex, dropIndex and collMod to apply changes; optionally system.profile or $queryStats for workload analysis, and serverStatus for the health probe. serverStatus is the one that reads beyond index metadata — it also exposes connection counts and storage-engine internals — so it is optional and a cluster without it works fine. Before storing anything, Indexterity checks the connection string and tells you exactly which of these are missing and what each one enables.",
   },
   {
     question: "Can it create missing indexes, not just drop unused ones?",
     answer:
-      "Yes. Recurring collection-scan query shapes become index recommendations in Equality → Sort → Range order with correct sort directions, folded together when one index can serve several shapes. A shape must recur before it counts, so a heavy query someone runs once by hand never leaves an index behind.",
+      "Yes. Recurring collection scans become index recommendations in Equality → Sort → Range order with correct sort directions, folded together when one index can serve several shapes. So do queries that find their documents through an index and then sort them in memory — invisible to any scan test, and the failure mode that ends in an error rather than slowness. A shape must recur before it counts, so a heavy query someone runs once by hand never leaves an index behind.",
   },
 ];
 

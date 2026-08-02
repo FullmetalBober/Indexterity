@@ -1,7 +1,12 @@
-import { MongoClient } from "mongodb";
+import { type Admin, MongoClient } from "mongodb";
 import { z } from "zod";
 import type { ConnectionDiagnosis, PrivilegeCheck, PrivilegeTier } from "../engine/ports";
-import { parseServerVersion, versionRefusal } from "./version";
+import {
+  hasQueryStatsPlanMetrics,
+  parseServerVersion,
+  type ServerVersion,
+  versionRefusal,
+} from "./version";
 
 // What the engine needs, expressed as (actions, where) pairs. Mirrors
 // ENGINE_PRIVILEGES in provision.ts — the role we CREATE is exactly the set we
@@ -88,7 +93,7 @@ export const REQUIRED_PRIVILEGES: readonly RequiredPrivilege[] = [
   {
     key: "queryStats",
     label: "Query stats ($queryStats)",
-    enables: "workload analysis without the profiler (mongo 7+)",
+    enables: "workload analysis without the profiler (full detail on mongo 8.0+)",
     tier: "WORKLOAD",
     actions: ["queryStatsRead", "queryStatsReadTransformed"],
     scope: { kind: "cluster" },
@@ -96,7 +101,9 @@ export const REQUIRED_PRIVILEGES: readonly RequiredPrivilege[] = [
   {
     key: "serverStatus",
     label: "Server status",
-    enables: "the five-minute health probe (collection scans, lock queues)",
+    enables:
+      "the five-minute health probe (collection scans, lock queues) — " +
+      "note this also exposes connection counts, network totals and storage-engine internals",
     tier: "WORKLOAD",
     actions: ["serverStatus"],
     scope: { kind: "cluster" },
@@ -121,6 +128,51 @@ export const REQUIRED_PRIVILEGES: readonly RequiredPrivilege[] = [
 
 // Actions that let these credentials create the scoped user for us.
 const PROVISION_ACTIONS = ["createRole", "createUser", "grantRole"];
+
+const rateLimitDoc = z.object({ internalQueryStatsRateLimit: z.coerce.number() });
+
+// Holding the $queryStats privilege is not the same as the store having
+// anything in it. `internalQueryStatsRateLimit` is 0 on a stock server of every
+// version, and at 0 the server records nothing — so the grant can look perfect
+// while the store stays permanently empty, and nobody would know why.
+//
+// Returns the advisory to show, or null when there is nothing to say. -1 means
+// record everything; any positive value is a per-second sampling cap. `null`
+// sampling means the parameter could not be read, which is not evidence either
+// way. Pure, so the wording is testable without a server.
+export function queryStatsAdvisory(
+  sampling: number | null,
+  version: ServerVersion | null,
+): string | null {
+  if (sampling === null) return null;
+  if (sampling === 0) {
+    return (
+      "$queryStats is available but not sampling — internalQueryStatsRateLimit is 0, the " +
+      "default, so the server records no query shapes. Set it (-1 records every shape) or " +
+      "enable the profiler; otherwise index suggestions have no workload to read."
+    );
+  }
+  if (!hasQueryStatsPlanMetrics(version)) {
+    return (
+      `$queryStats on MongoDB ${version?.text ?? "this release"} reports execution counts only — ` +
+      "it cannot say whether a query scanned or sorted in memory, which is what index " +
+      "suggestions are made of. Enable the profiler on the databases you want analyzed, or " +
+      "upgrade to 8.0 where the store carries plan metrics."
+    );
+  }
+  return null;
+}
+
+// The parameter is unreadable without the cluster-wide `getParameter` action,
+// which is not one the engine asks for. Silence is the honest answer then.
+async function readQueryStatsSampling(admin: Admin): Promise<number | null> {
+  try {
+    const raw = await admin.command({ getParameter: 1, internalQueryStatsRateLimit: 1 });
+    return rateLimitDoc.parse(raw).internalQueryStatsRateLimit;
+  } catch {
+    return null;
+  }
+}
 
 const privilegeDoc = z.object({
   resource: z.object({
@@ -298,9 +350,16 @@ export async function diagnoseConnection(uri: string): Promise<ConnectionDiagnos
       );
     }
 
-    return summarize(evaluatePrivileges(privileges, userDatabases), {
+    const checks = evaluatePrivileges(privileges, userDatabases);
+    // Only worth saying when the credentials could read the store at all —
+    // without the grant the profiler is the source regardless.
+    const grantedQueryStats = checks.some((check) => check.key === "queryStats" && check.granted);
+    const advisory = grantedQueryStats
+      ? queryStatsAdvisory(await readQueryStatsSampling(admin.admin()), version)
+      : null;
+    return summarize(checks, {
       reachable: true,
-      message: null,
+      message: advisory,
       username: user.user,
       authEnabled: true,
       canProvision: canProvisionWith(privileges),

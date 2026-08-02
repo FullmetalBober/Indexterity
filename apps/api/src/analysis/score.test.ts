@@ -120,6 +120,28 @@ describe("createScore", () => {
     ).toBeGreaterThanOrEqual(75);
   });
 
+  it("scores an in-memory sort below the same shape scanning", () => {
+    const base = { count: 30, docCount: 50_000, pastRegressions: 0 };
+    const sorting = createScore({ ...base, collscan: false, sortedInMemory: true });
+    const scanning = createScore({ ...base, collscan: true });
+    expect(sorting).toBeLessThan(scanning);
+    // Still an argument, not a footnote: the sort can fail outright at 100 MB.
+    expect(sorting).toBeGreaterThanOrEqual(50);
+  });
+
+  it("gives no create credit to a shape that neither scans nor sorts", () => {
+    const idle = createScore({ collscan: false, count: 30, docCount: 50_000, pastRegressions: 0 });
+    expect(idle).toBeLessThan(
+      createScore({
+        collscan: false,
+        sortedInMemory: true,
+        count: 30,
+        docCount: 50_000,
+        pastRegressions: 0,
+      }),
+    );
+  });
+
   it("reaches 100 for a constant, critically costly scan on a huge collection", () => {
     expect(
       createScore({

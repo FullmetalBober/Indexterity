@@ -1284,9 +1284,9 @@ describe("workload collection is batched", () => {
       { database: "inttest", collection: "carts" },
     ];
 
-    // Count the aggregates this run issues. $queryStats needs mongo 7+ and a
-    // non-zero rate limit; when it is unavailable the call falls through to the
-    // profiler per namespace, which is exactly the behaviour to keep.
+    // Count the aggregates this run issues. $queryStats needs mongo 8.0+ for
+    // plan metrics and a non-zero rate limit; when it is unusable the call falls
+    // through to the profiler per namespace, which is the behaviour to keep.
     let adminAggregates = 0;
     const db = mongo.db.bind(mongo);
     const counting = (name: string) => {

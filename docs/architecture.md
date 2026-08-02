@@ -419,10 +419,12 @@ every engine command allowed, every document access denied):
 db.getSiblingDB("admin").createRole({
   role: "indexterityEngine",
   privileges: [
-    // Un-transformed $queryStats needs BOTH actions (verified on mongo 8);
-    // both are dropped automatically on mongo <7 (profiler fallback).
+    // Un-transformed $queryStats needs BOTH actions (verified on mongo 8).
+    // serverStatus is the health probe — server-wide, and the one grant here
+    // that reads beyond index metadata (docs/mongo-user.md explains what).
     { resource: { cluster: true },
-      actions: ["listDatabases", "queryStatsRead", "queryStatsReadTransformed"] },
+      actions: ["listDatabases", "serverStatus",
+                "queryStatsRead", "queryStatsReadTransformed"] },
     { resource: { db: "", collection: "" }, // all non-system collections, all dbs
       actions: [
         "listCollections", "listIndexes",     // discover

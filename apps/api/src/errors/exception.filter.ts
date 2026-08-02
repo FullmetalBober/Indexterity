@@ -1,5 +1,6 @@
 import { type ArgumentsHost, Catch, type ExceptionFilter, HttpException } from "@nestjs/common";
 import type { FastifyReply, FastifyRequest } from "fastify";
+import { ClusterGoneError } from "../jobs/cluster-connection";
 import { isUnreachableError } from "./unreachable";
 
 // Catches everything thrown OUTSIDE the oRPC pipeline (the better-auth mount,
@@ -48,7 +49,7 @@ export class AppExceptionFilter implements ExceptionFilter {
       });
       return;
     }
-    if (error.message.startsWith("cluster not found")) {
+    if (error instanceof ClusterGoneError) {
       void reply.status(404).send({ message: "cluster not found" });
       return;
     }

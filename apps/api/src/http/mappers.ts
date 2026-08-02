@@ -3,6 +3,7 @@ import type { Cluster, Recommendation } from "@repo/contracts";
 import { clusters, recommendations } from "../db";
 import type { ConnectionDiagnosis as EngineConnectionDiagnosis } from "../engine/ports";
 import { isUnreachableError } from "../errors/unreachable";
+import { ClusterGoneError } from "../jobs/cluster-connection";
 
 // Shared boundary conversions and error mapping. Every controller that touches
 // a customer cluster maps failures the same way, and the contract types differ
@@ -19,7 +20,7 @@ export function mapClusterError(error: unknown): never {
       message: "cluster unreachable — check the connection string and network access",
     });
   }
-  if (err.message.startsWith("cluster not found")) {
+  if (err instanceof ClusterGoneError) {
     throw new ORPCError("NOT_FOUND", { message: "cluster not found" });
   }
   throw err;

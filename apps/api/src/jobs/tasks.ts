@@ -5,7 +5,7 @@ import { UnsupportedServerError } from "../mongo/executor";
 import { applyCluster } from "./apply";
 import { refreshInferredWindow } from "./change-window";
 import { classifyCluster } from "./classify";
-import { ClusterCredentialsError } from "./cluster-connection";
+import { ClusterCredentialsError, ClusterGoneError } from "./cluster-connection";
 import { collectCluster } from "./collect";
 import { applyCreatesForCluster } from "./create";
 import { jobDb } from "./db";
@@ -42,6 +42,9 @@ export async function runClusterTask(
   try {
     await run(clusterId);
   } catch (error) {
+    // Offboarded between scheduling and running. Nothing to do and nobody to
+    // tell — the owners deleted it on purpose.
+    if (error instanceof ClusterGoneError) return;
     // The server is too old for the pipeline. No retry can fix a version, so
     // tell the owners once a day and stop — same shape as an unreachable
     // cluster, for the same reason.

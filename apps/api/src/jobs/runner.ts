@@ -19,7 +19,11 @@ const CRONTAB = [
   "0 */6 * * * scheduleCollect",
   "30 * * * * scheduleSuggest",
   "*/5 * * * * scheduleApply",
-  "2-59/5 * * * * scheduleProbe",
+  // Offset from scheduleApply so the two five-minute passes do not contend for
+  // the same connections. Written out because graphile-worker's cron parser
+  // takes a step on a whole field ("*/5") but not on a range ("2-59/5") — it
+  // throws at startup, which takes the whole API down with RUN_WORKER=true.
+  "2,7,12,17,22,27,32,37,42,47,52,57 * * * * scheduleProbe",
   "0 * * * * scheduleFinalize",
   "0 3 * * * retention",
   "0 9 * * 1 digest",

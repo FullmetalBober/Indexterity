@@ -1,14 +1,20 @@
 // Server-version rules.
 //
-// The floor is 4.4, and it is set by one feature: `collMod {index: {hidden}}`.
-// The whole drop path is hide → observe → measure → drop, and on 4.3 and older
-// `collMod` does not know the `hidden` option — it reads the request as a TTL
-// change and fails with "no expireAfterSeconds field" (verified against 4.2.24).
+// The floor is 6.0, and unlike the ceiling it is a support decision rather than
+// a capability one. The capability floor is 4.4: `collMod {index: {hidden}}`,
+// which the whole drop path rests on, and which 4.3 and older read as a TTL
+// change — it fails with "no expireAfterSeconds field" (verified on 4.2.24).
 //
-// Left unchecked, that is the worst kind of failure: onboarding reports the
-// cluster ready, analysis runs, recommendations are produced and approved, and
-// then every apply tick fails with a message about a field nobody mentioned.
-// Nothing drops and nothing explains why.
+// Everything from 4.4 up can technically run the pipeline. 4.4 (EOL February
+// 2024) and 5.0 (EOL October 2024) are refused anyway: they take no security
+// fixes, they have no `$queryStats`, and every version-conditional branch they
+// need is one more path to keep correct on an engine that drops indexes on
+// production databases. Supporting them well costs more than they are worth.
+//
+// Left unchecked, an unsupported server is the worst kind of failure:
+// onboarding reports the cluster ready, analysis runs, recommendations are
+// produced and approved, and then every apply tick fails with a message about
+// a field nobody mentioned. Nothing drops and nothing explains why.
 
 export interface ServerVersion {
   readonly major: number;
@@ -16,8 +22,8 @@ export interface ServerVersion {
   readonly text: string;
 }
 
-export const MIN_MAJOR = 4;
-export const MIN_MINOR = 4;
+export const MIN_MAJOR = 6;
+export const MIN_MINOR = 0;
 export const MIN_VERSION_TEXT = `${MIN_MAJOR}.${MIN_MINOR}`;
 
 // The newest major series the engine has actually been exercised against.
@@ -30,10 +36,24 @@ export const MIN_VERSION_TEXT = `${MIN_MAJOR}.${MIN_MINOR}`;
 export const MAX_MAJOR = 8;
 export const MAX_VERSION_TEXT = `${MAX_MAJOR}.x`;
 
+// `$queryStats` exists from 6.0, but until 8.0 its per-shape metrics are
+// execution counts and timings only — no `keysExamined`, `docsExamined` or
+// `hasSortStage` (verified absent on 6.0.28 and 7.0.39, present on 8.2.9).
+//
+// That is the difference between knowing a query ran and knowing it scanned, so
+// on 6.0 and 7.0 the store cannot drive a single create recommendation and the
+// profiler is the only workload source that can. Callers use this to say so.
+export const QUERY_STATS_PLAN_METRICS_MAJOR = 8;
+
+export function hasQueryStatsPlanMetrics(version: ServerVersion | null): boolean {
+  if (version === null) return false;
+  return version.major >= QUERY_STATS_PLAN_METRICS_MAJOR;
+}
+
 // Blocking every customer on a brand-new release until we ship is its own kind
 // of failure, so the ceiling is overridable — same shape as the other
 // self-hosted escape hatches. The floor is not overridable: below it the
-// pipeline provably cannot run.
+// pipeline is either impossible (pre-4.4) or unsupported on purpose.
 export function allowUntestedVersions(): boolean {
   return process.env.ALLOW_UNTESTED_MONGO_VERSION === "true";
 }
@@ -64,8 +84,8 @@ export function parseServerVersion(value: unknown): ServerVersion | null {
   return { major, minor, text: value };
 }
 
-// Can this server hide an index? Everything the drop path depends on.
-export function supportsHiddenIndexes(version: ServerVersion | null): boolean {
+// Is this server new enough to be supported at all?
+export function meetsVersionFloor(version: ServerVersion | null): boolean {
   if (version === null) return false;
   if (version.major > MIN_MAJOR) return true;
   return version.major === MIN_MAJOR && version.minor >= MIN_MINOR;
@@ -74,16 +94,17 @@ export function supportsHiddenIndexes(version: ServerVersion | null): boolean {
 export function unsupportedVersionMessage(version: ServerVersion | null): string {
   const found = version === null ? "an unreadable version" : `MongoDB ${version.text}`;
   return (
-    `${found} cannot hide indexes (needs ${MIN_VERSION_TEXT} or newer). ` +
-    `Indexterity drops an index only after hiding it and measuring the effect, so ` +
-    `without that the safety pipeline cannot run. Analysis and index creation still work.`
+    `${found} is older than the ${MIN_VERSION_TEXT} Indexterity supports. ` +
+    `Releases before ${MIN_VERSION_TEXT} are past end-of-life and take no security fixes, ` +
+    `and they cannot report the query workload the create side reads. Upgrade the server, ` +
+    `or run the analysis against a ${MIN_VERSION_TEXT}+ replica.`
   );
 }
 
 // The single verdict both the connect-time check and the pre-write guard ask
 // for. Returns null when the server is fine, or the reason it is not.
 export function versionRefusal(version: ServerVersion | null): string | null {
-  if (!supportsHiddenIndexes(version)) return unsupportedVersionMessage(version);
+  if (!meetsVersionFloor(version)) return unsupportedVersionMessage(version);
   if (!isTestedVersion(version) && !allowUntestedVersions()) {
     return untestedVersionMessage(version);
   }

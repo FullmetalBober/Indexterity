@@ -23,6 +23,10 @@ export interface DropSignals {
 
 export interface CreateSignals {
   readonly collscan: boolean;
+  // The query reaches its documents through an index but sorts them in memory.
+  // Only read when `collscan` is false — a scan is the stronger argument and
+  // subsumes it.
+  readonly sortedInMemory?: boolean;
   readonly count: number;
   readonly docCount: number;
   readonly pastRegressions: number;
@@ -72,9 +76,16 @@ export function dropScore(signals: DropSignals): number {
 // argument; a shape seen three times on a small collection is a suggestion.
 //
 //   collscan        40  the query is scanning today
+//   sorted in mem   25  it finds its documents by index, then sorts them by hand
 //   frequency     0-30  35 sightings for full credit
 //   collection    0-20  ≥1M docs 20, ≥10k 14, ≥1k 6
 //   severity      0-10  CRITICAL 10, ELEVATED 5 — the measured cost of the scan
+//
+// An in-memory sort scores below a scan because the query is already finding
+// its documents efficiently — the index would remove a sort, not a table walk.
+// It is not scored as harmless, though: a blocking sort holds the whole result
+// set in memory and fails outright at 100 MB, so it degrades by falling over
+// rather than by slowing down.
 //
 // Severity is worth less than it might seem because it correlates with the
 // other two: a scan doing ten million document reads is usually frequent, on a
@@ -83,6 +94,7 @@ export function dropScore(signals: DropSignals): number {
 export function createScore(signals: CreateSignals): number {
   let score = 0;
   if (signals.collscan) score += 40;
+  else if (signals.sortedInMemory === true) score += 25;
   score += Math.min(30, Math.floor((30 * signals.count) / SIGHTINGS_FOR_FULL_CREDIT));
   if (signals.docCount >= 1_000_000) score += 20;
   else if (signals.docCount >= 10_000) score += 14;

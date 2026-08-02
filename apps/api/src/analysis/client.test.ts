@@ -43,9 +43,9 @@ describe("isWorthIndexing", () => {
     ).toBe(true);
   });
 
-  // The profiler reports no client, and mongo 6 and older have no $queryStats
-  // client grouping. Refusing on missing evidence would quietly switch workload
-  // analysis off for those clusters entirely.
+  // A client that never set an app name is not evidence of a person at a
+  // prompt. Refusing on missing evidence would quietly switch workload analysis
+  // off for every driver that does not identify itself.
   it("does not withhold an index just because nobody was named", () => {
     expect(isWorthIndexing([])).toBe(true);
     expect(isWorthIndexing([{}])).toBe(true);

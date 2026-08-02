@@ -19,6 +19,18 @@ export class ClusterCredentialsError extends Error {
   }
 }
 
+// The cluster was deleted between the tick being scheduled and the job running.
+// Routine — offboarding does not reach into the queue — and the work is moot,
+// so the task must not treat it as a failure: three retries per orphaned job,
+// each printing a stack trace, and a final-failure alert addressed to the
+// owners of a cluster that no longer exists.
+export class ClusterGoneError extends Error {
+  constructor(clusterId: string) {
+    super(`cluster ${clusterId} no longer exists — nothing to do`);
+    this.name = "ClusterGoneError";
+  }
+}
+
 export interface ClusterSession {
   readonly session: EngineSession;
   readonly engine: ClusterEngine;
@@ -31,7 +43,7 @@ export interface ClusterSession {
 // its engine.
 export async function openClusterSession(db: Database, clusterId: string): Promise<ClusterSession> {
   const [cluster] = await db.select().from(clusters).where(eq(clusters.id, clusterId)).limit(1);
-  if (cluster === undefined) throw new Error(`cluster not found: ${clusterId}`);
+  if (cluster === undefined) throw new ClusterGoneError(clusterId);
   let connString: string;
   try {
     connString = new TextDecoder().decode(

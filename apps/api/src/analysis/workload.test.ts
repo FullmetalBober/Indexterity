@@ -261,3 +261,62 @@ describe("recommendCreates (partial-aware UPDATE and MERGE)", () => {
     expect(out[0]?.retireIndexes).toEqual([]);
   });
 });
+
+// A query that reaches its documents through an index and then sorts them in
+// memory. `collscan` is false — keys were examined — so before this the shape
+// was invisible to the create side, however often it ran.
+function sortingShape(equality: string[], sort: SortKey[], count = 5): QueryShape {
+  return { equality, sort, range: [], collscan: false, sortedInMemory: true, count };
+}
+
+describe("recommendCreates (in-memory sorts)", () => {
+  it("extends the index that found the documents so it can order them too", () => {
+    const out = recommendCreates([sortingShape(["a"], [atDesc])], [idx("a_1", ["a"])], options);
+    expect(out).toHaveLength(1);
+    expect(out[0]?.type).toBe("UPDATE");
+    expect(out[0]?.keys).toEqual([
+      { field: "a", direction: 1 },
+      { field: "at", direction: -1 },
+    ]);
+    expect(out[0]?.retireIndexes).toEqual(["a_1"]);
+    expect(out[0]?.rationale).toContain("in-memory sort seen 5×");
+    expect(out[0]?.scanning).toBe(false);
+  });
+
+  it("still ignores a shape that neither scans nor sorts", () => {
+    const healthy: QueryShape = { equality: ["a"], sort: [], range: [], collscan: false, count: 9 };
+    expect(recommendCreates([healthy], [], options)).toHaveLength(0);
+  });
+
+  it("marks the candidate as scanning when any shape behind it scans", () => {
+    // Same wanted keys from two shapes: one sorts in memory, one scans.
+    const out = recommendCreates(
+      [sortingShape(["a"], [atDesc]), shape(["a"], [atDesc], [], 3)],
+      [],
+      options,
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]?.scanning).toBe(true);
+    expect(out[0]?.rationale).toContain("collection scan");
+  });
+
+  it("carries scanning through consolidation into the wider index", () => {
+    // {a} scans, {a,b} only sorts — the surviving wider want inherits the scan.
+    const out = recommendCreates(
+      [shape(["a"], [], [], 4), sortingShape(["a"], [bAsc], 4)],
+      [],
+      options,
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]?.keys).toHaveLength(2);
+    expect(out[0]?.scanning).toBe(true);
+  });
+
+  it("does not propose a duplicate when an index already covers the fields", () => {
+    // The directions cannot serve the sort, but a second index differing only
+    // in direction is a bigger call than the engine makes unasked.
+    expect(
+      recommendCreates([sortingShape(["a"], [bAsc])], [idx("ab", ["a", "b"])], options),
+    ).toHaveLength(0);
+  });
+});
