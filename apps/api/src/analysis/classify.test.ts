@@ -9,7 +9,13 @@ function snap(ops: number): UsageSnapshot {
   };
 }
 
-const options = { recentWindow: 3, minHistory: 3, minHistoryDays: 0, maxGapHours: 48 };
+const options = {
+  recentWindow: 3,
+  minHistory: 3,
+  minHistoryDays: 0,
+  minActiveIntervals: 0,
+  maxGapHours: 48,
+};
 
 describe("classifyUsage", () => {
   it("FLAT_ZERO below minHistory", () => {
@@ -40,7 +46,13 @@ describe("classifyUsage", () => {
 });
 
 describe("usageHistoryIsTrustworthy", () => {
-  const opts = { recentWindow: 3, minHistory: 3, minHistoryDays: 0, maxGapHours: 48 };
+  const opts = {
+    recentWindow: 3,
+    minHistory: 3,
+    minHistoryDays: 0,
+    minActiveIntervals: 0,
+    maxGapHours: 48,
+  };
   const at = (iso: string, ops = 0): UsageSnapshot => ({
     capturedAt: iso,
     perMember: [{ member: "m", ops, since: "" }],
@@ -156,7 +168,13 @@ describe("countersRestartedDuring", () => {
 });
 
 describe("usageHistoryIsTrustworthy with restart evidence", () => {
-  const opts = { recentWindow: 3, minHistory: 3, minHistoryDays: 0, maxGapHours: 48 };
+  const opts = {
+    recentWindow: 3,
+    minHistory: 3,
+    minHistoryDays: 0,
+    minActiveIntervals: 0,
+    maxGapHours: 48,
+  };
   const now = new Date("2026-03-04T00:00:00Z");
   const history = (since: string[]): UsageSnapshot[] =>
     since.map((value, i) => ({
@@ -186,7 +204,13 @@ describe("usageHistoryIsTrustworthy with restart evidence", () => {
 });
 
 describe("warm-up: history span, not just snapshot count", () => {
-  const opts = { recentWindow: 3, minHistory: 3, minHistoryDays: 7, maxGapHours: 48 };
+  const opts = {
+    recentWindow: 3,
+    minHistory: 3,
+    minHistoryDays: 7,
+    minActiveIntervals: 0,
+    maxGapHours: 48,
+  };
   // A freshly connected cluster collecting every 6h.
   const collects = (count: number, fromDay: number): UsageSnapshot[] =>
     Array.from({ length: count }, (_, i) => ({
@@ -215,5 +239,39 @@ describe("warm-up: history span, not just snapshot count", () => {
     const history = collects(4, 1);
     const now = new Date(Date.UTC(2026, 0, 1, 20));
     expect(usageHistoryIsTrustworthy(history, { ...opts, minHistoryDays: 0 }, now)).toBe(true);
+  });
+});
+
+describe("idle databases: activity, not elapsed time", () => {
+  const opts = {
+    recentWindow: 3,
+    minHistory: 3,
+    minHistoryDays: 7,
+    minActiveIntervals: 12,
+    maxGapHours: 48,
+  };
+  // Thirty unbroken days of collects at the 6h cadence — plenty of calendar.
+  const history: UsageSnapshot[] = Array.from({ length: 120 }, (_, i) => ({
+    capturedAt: new Date(Date.UTC(2026, 0, 1, i * 6)).toISOString(),
+    perMember: [{ member: "m", ops: 0, since: "2025-12-01T00:00:00Z" }],
+  }));
+  const now = new Date(Date.UTC(2026, 0, 31));
+
+  it("refuses a usage claim when the collection was barely queried", () => {
+    // A dev cluster: up for a month, worked on for two afternoons.
+    expect(usageHistoryIsTrustworthy(history, opts, now, 3)).toBe(false);
+  });
+
+  it("accepts once the collection has genuinely been in use", () => {
+    expect(usageHistoryIsTrustworthy(history, opts, now, 40)).toBe(true);
+  });
+
+  it("skips the check when the caller has no activity data to give", () => {
+    expect(usageHistoryIsTrustworthy(history, opts, now)).toBe(true);
+  });
+
+  it("still fails on the older rules regardless of activity", () => {
+    const thin = history.slice(0, 2);
+    expect(usageHistoryIsTrustworthy(thin, opts, now, 500)).toBe(false);
   });
 });

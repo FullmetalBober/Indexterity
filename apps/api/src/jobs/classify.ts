@@ -1,5 +1,19 @@
-import { type IndexInput, parseStoredSpec, recommendForCollection } from "../analysis";
-import { and, eq, indexCooldowns, indexSnapshots, policies, recommendations } from "../db";
+import {
+  type ActivityPoint,
+  activeIntervals,
+  type IndexInput,
+  parseStoredSpec,
+  recommendForCollection,
+} from "../analysis";
+import {
+  and,
+  eq,
+  indexCooldowns,
+  indexSnapshots,
+  latencySamples,
+  policies,
+  recommendations,
+} from "../db";
 import { activeCooldownKeys, cooldownKey } from "./cooldowns";
 import { jobDb } from "./db";
 import { watchedIndexKeys, watchKey } from "./watched";
@@ -11,7 +25,18 @@ const DEFAULT_OBSERVE_DAYS = 30;
 // A hole larger than this means we stopped watching, so absence of usage
 // proves nothing (see analysis/classify.ts). Two days spans a missed collect
 // or two at the 6h cadence without tolerating an outage.
-const CLASSIFY_OPTIONS = { recentWindow: 3, minHistory: 3, minHistoryDays: 7, maxGapHours: 48 };
+// minActiveIntervals: the collection must have served reads in at least this
+// many collect intervals before "this index served none of them" is a claim.
+// Twelve at the 6h cadence is three days of genuine traffic, which an
+// always-on but mostly idle dev cluster can take weeks of calendar time to
+// accumulate — which is exactly the point.
+const CLASSIFY_OPTIONS = {
+  recentWindow: 3,
+  minHistory: 3,
+  minHistoryDays: 7,
+  minActiveIntervals: 12,
+  maxGapHours: 48,
+};
 
 // Read a cluster's snapshots, run the pure engine per collection, and replace
 // the cluster's PROPOSED recommendations. Returns the number proposed.
@@ -49,6 +74,23 @@ export async function classifyCluster(clusterId: string): Promise<number> {
     .select()
     .from(indexSnapshots)
     .where(eq(indexSnapshots.clusterId, clusterId));
+  // Per-collection read counters, for the activity gate.
+  const latencyRows = await db
+    .select({
+      database: latencySamples.database,
+      collection: latencySamples.collection,
+      readOps: latencySamples.readOps,
+      capturedAt: latencySamples.capturedAt,
+    })
+    .from(latencySamples)
+    .where(eq(latencySamples.clusterId, clusterId));
+  const activityByCollection = new Map<string, ActivityPoint[]>();
+  for (const sample of latencyRows) {
+    const key = `${sample.database}\u0000${sample.collection}`;
+    const list = activityByCollection.get(key) ?? [];
+    list.push({ capturedAt: sample.capturedAt.toISOString(), readOps: sample.readOps });
+    activityByCollection.set(key, list);
+  }
   type Row = (typeof rows)[number];
 
   const byCollection = new Map<
@@ -107,11 +149,16 @@ export async function classifyCluster(clusterId: string): Promise<number> {
       });
     }
     const pastRegressions = regressionCounts.get(`${entry.database} ${entry.collection}`) ?? {};
+    const active = activeIntervals(
+      activityByCollection.get(`${entry.database}\u0000${entry.collection}`) ?? [],
+    );
     for (const candidate of recommendForCollection(
       inputs,
       sizes,
       CLASSIFY_OPTIONS,
       pastRegressions,
+      new Date(),
+      active,
     )) {
       if (cooled.has(cooldownKey(entry.database, entry.collection, candidate.indexName))) continue;
       if (watched.has(watchKey(entry.database, entry.collection, candidate.indexName))) continue;

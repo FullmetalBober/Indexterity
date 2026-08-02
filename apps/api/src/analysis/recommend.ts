@@ -62,6 +62,10 @@ export function recommendForCollection(
   pastRegressions: Readonly<Record<string, number>> = {},
   // "Now" for the history-freshness check; injected to keep this pure.
   now: Date = new Date(),
+  // Intervals in which this collection actually served reads. Usage findings
+  // need the collection to have been doing something — an idle cluster proves
+  // nothing about any index in it (analysis/activity.ts).
+  activeIntervals?: number,
 ): RecommendationCandidate[] {
   const candidates: RecommendationCandidate[] = [];
   const eligible = indexes.filter((index) => !isNeverDrop(index.spec));
@@ -69,7 +73,7 @@ export function recommendForCollection(
   // Usage-based findings need a history we can trust; redundancy is structural
   // and stands on its own.
   const trusted = (index: IndexInput): boolean =>
-    usageHistoryIsTrustworthy(index.history, options, now);
+    usageHistoryIsTrustworthy(index.history, options, now, activeIntervals);
 
   for (const candidate of eligible) {
     const covering = indexes.find((other) => isRedundantPrefix(candidate.spec, other.spec));

@@ -10,6 +10,10 @@ export interface ClassifyOptions {
   // evidence. Snapshot count alone is not enough: three collects is eighteen
   // hours at the 6h cadence, and plenty of real work runs less often than that.
   readonly minHistoryDays: number;
+  // Minimum intervals in which the COLLECTION actually served reads. Elapsed
+  // time is the wrong clock for a cluster that is up continuously but only
+  // worked occasionally — see analysis/activity.ts.
+  readonly minActiveIntervals: number;
   // Largest acceptable hole between consecutive snapshots. A longer one means
   // we stopped watching (cluster unreachable, control plane down), so the
   // history cannot prove absence of usage.
@@ -80,6 +84,10 @@ export function usageHistoryIsTrustworthy(
   history: readonly UsageSnapshot[],
   options: ClassifyOptions,
   now: Date,
+  // How many intervals the collection was actually queried in. Omitted by
+  // callers with no latency history; the check is then skipped rather than
+  // failing closed, since older data has no way to supply it.
+  collectionActiveIntervals?: number,
 ): boolean {
   if (countersRestartedDuring(history)) return false;
   if (history.length < options.minHistory) return false;
@@ -92,6 +100,14 @@ export function usageHistoryIsTrustworthy(
   const newestSeen = times.at(-1);
   if (oldest === undefined || newestSeen === undefined) return false;
   if (newestSeen - oldest < options.minHistoryDays * 24 * HOUR_MS) return false;
+  // "This index served none of the reads" is only a claim when there were reads
+  // to serve. An idle week proves nothing about any index in it.
+  if (
+    collectionActiveIntervals !== undefined &&
+    collectionActiveIntervals < options.minActiveIntervals
+  ) {
+    return false;
+  }
   const maxGap = options.maxGapHours * HOUR_MS;
   for (let i = 1; i < times.length; i++) {
     const previous = times[i - 1];

@@ -1417,6 +1417,21 @@ describe("an index the engine is still watching", () => {
       })),
     );
 
+    // The collection has to have been genuinely queried, or the activity gate
+    // (correctly) refuses any usage claim about its indexes.
+    await db.insert(latencySamples).values(
+      Array.from({ length: 20 }, (_, i) => ({
+        clusterId: watchId,
+        database: "inttest",
+        collection: "orders",
+        readOps: (i + 1) * 500,
+        readLatencyMicros: 100,
+        writeOps: 0,
+        writeLatencyMicros: 0,
+        capturedAt: new Date(base + i * 43_200_000),
+      })),
+    );
+
     // The engine built it a moment ago, so its write watch is still running.
     const [created] = await db
       .insert(recommendations)

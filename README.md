@@ -32,13 +32,15 @@ Full design and decision log: [`docs/architecture.md`](./docs/architecture.md).
 (`FLAT_ZERO`, `CONTINUOUS`, `PERIODIC_ALIVE`, `PERIODIC_DEAD`). Dead usage or
 redundancy earns a proposal.
 
-A usage claim needs a history worth trusting: **at least a week of it**, no hole
-over 48h, a recent newest snapshot, and no counter restart in the window. The
-week is the warm-up — three snapshots is eighteen hours at the 6h cadence, and
-plenty of real work runs less often, so counting snapshots would measure how
-often we looked rather than how long we watched. During a collection gap a busy
-index looks exactly like a dead one, so nothing is claimed. Redundancy is
-structural and unaffected.
+A usage claim needs a history worth trusting: **at least a week of it, and at
+least three days in which the collection was actually queried**, with no hole
+over 48h, a recent newest snapshot and no counter restart. The week is the
+warm-up; the activity requirement is what makes it mean something. An index
+reads zero either because nobody needs it or because nobody touched the
+collection — elapsed time cannot tell those apart, so an always-on but idle dev
+cluster would otherwise accumulate a month of "proof" without doing any work.
+Intervals in which the collection served no reads simply do not count.
+Redundancy is structural and unaffected.
 
 **Never dropped**, whatever the usage: `_id_`, unique (including unique partial
 and sparse — a constraint is not a performance hint), TTL, and shard-key
