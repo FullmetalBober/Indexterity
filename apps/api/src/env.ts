@@ -22,3 +22,11 @@ export function currentKeyVersion(): number {
   const raw = Number(process.env.MASTER_KEY_VERSION);
   return Number.isInteger(raw) && raw >= 1 ? raw : 1;
 }
+
+// An optional numeric knob. Anything that is not a positive number — unset,
+// empty, a typo, zero — falls back to the default rather than silently
+// disabling the thing it configures.
+export function positiveEnv(name: string, fallback: number): number {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}

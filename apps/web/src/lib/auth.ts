@@ -21,6 +21,28 @@ interface CookieOptions {
   sameSite?: "lax" | "strict" | "none";
 }
 
+// The api has already percent-encoded this cookie value, and setCookie encodes
+// again: better-auth's "sig%2Fabc%3D" reaches the browser as "sig%252Fabc%253D",
+// comes back with an extra layer of escaping, fails signature validation, and
+// every request after signing in is a 401. Base64 signatures contain "/" or "="
+// almost every time, so this was not an edge case — it broke signing in through
+// the web app outright, which is what the end-to-end suite caught.
+//
+// Decoding once here means the re-encode restores exactly what the api sent.
+// Passing `encode` through instead does not work: h3 calls its serializer with
+// the object form, and the serializer only reads `encode` off a second argument
+// h3 never supplies.
+export function decodeOnce(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    // A stray "%" that is not an escape. Relaying it unchanged is wrong in the
+    // same way, but it is not ours to repair and throwing here would lose the
+    // whole cookie.
+    return value;
+  }
+}
+
 // Re-set each Set-Cookie from the api onto this app's response, so the browser
 // stores the better-auth session cookie against the web origin.
 function relaySetCookies(values: readonly string[]): void {
@@ -46,7 +68,7 @@ function relaySetCookies(values: readonly string[]): void {
         if (same === "lax" || same === "strict" || same === "none") options.sameSite = same;
       }
     }
-    setCookie(name, value, options);
+    setCookie(name, decodeOnce(value), options);
   }
 }
 

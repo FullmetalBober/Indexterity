@@ -4,6 +4,7 @@ import { NestFactory } from "@nestjs/core";
 import { FastifyAdapter, type NestFastifyApplication } from "@nestjs/platform-fastify";
 import { AppModule } from "./app.module";
 import { auth } from "./auth";
+import { positiveEnv } from "./env";
 import { AppExceptionFilter } from "./errors/exception.filter";
 import { embeddedWorkerEnabled, startWorker } from "./jobs/runner";
 
@@ -22,13 +23,25 @@ async function bootstrap(): Promise<void> {
 
   // Global ceiling per IP, with a tight budget on the auth endpoints — they are
   // the brute-force target (sign-in/sign-up).
-  await fastify.register(rateLimit, { max: 300, timeWindow: "1 minute" });
+  //
+  // Tunable because the right number depends on the deployment: one shared
+  // office IP behind NAT, or a test suite that signs up fifteen accounts in a
+  // minute, both look like an attack at the default. Raising it is a decision
+  // an operator makes on purpose; the defaults stay where they are.
+  await fastify.register(rateLimit, {
+    max: positiveEnv("RATE_LIMIT_MAX", 300),
+    timeWindow: "1 minute",
+  });
 
   // Mount better-auth at /api/auth/*. Build a web Request from Fastify's parsed
   // request (reusing its JSON body), hand it to better-auth, forward the Response.
   fastify.all(
     "/api/auth/*",
-    { config: { rateLimit: { max: 20, timeWindow: "1 minute" } } },
+    {
+      config: {
+        rateLimit: { max: positiveEnv("AUTH_RATE_LIMIT_MAX", 20), timeWindow: "1 minute" },
+      },
+    },
     async (request, reply) => {
       const url = new URL(request.url, `http://${request.headers.host ?? "localhost"}`);
       const headers = new Headers();

@@ -249,13 +249,21 @@ docker compose up         # postgres + mongo + api + web + worker, hot reload
 `npm run db:generate` · `npm run db:migrate`. Production migrations run the
 compiled migrator: `npm run db:deploy -w @repo/api`.
 
-**Three test layers.** `npm run test` runs two of them without any infra: the
+**Three test layers.** `npm run test` runs the first without any infra: the
 api's pure decision engine, and the web app's components in jsdom with the
 server functions mocked at the `~/lib/app-server` boundary — what the browser
-does with an answer, not whether the answer was fetched. The third,
-`npm run test:int -w @repo/api`, needs a migrated postgres and a mongo, and CI
-runs it against **6.0, 7.0 and 8.x** because the three take different paths
-through the workload collector.
+does with an answer, not whether the answer was fetched. `npm run test:int -w
+@repo/api` needs a migrated postgres and a mongo, and CI runs it against **6.0,
+7.0 and 8.x** because the three take different paths through the workload
+collector. `npm run test:e2e` builds both apps and drives a real browser
+through them with Playwright — nothing mocked, all the way to postgres and
+mongo.
+
+The layers catch different things, and the top one is not decoration: the
+end-to-end suite is what found that the api's session cookie was being
+percent-encoded a second time on its way through the web server, so every
+request after signing in came back 401. Both sides were correct on their own;
+the defect lived in the hand-off, where only a browser could see it.
 
 **House rule: the api and the web app run clean.** No errors and no warnings in
 server logs, build output, or the browser console. A warning is a defect — fix
