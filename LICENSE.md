@@ -14,9 +14,14 @@ Licensed Work:        Indexterity
 
 Additional Use Grant: You may make production use of the Licensed Work,
                       provided that at any one time you have no more than one
-                      (1) database cluster connected to it. Any non-production
-                      use is permitted without limit, including evaluation,
-                      development, testing and internal demonstration.
+                      (1) database cluster connected to it. A database cluster
+                      means one deployment reached through a single connection
+                      string, however many servers it contains: a three-node
+                      replica set is one cluster, and a sharded deployment
+                      reached through its mongos is one cluster. Any
+                      non-production use is permitted without limit, including
+                      evaluation, development, testing and internal
+                      demonstration.
 
 Change Date:          Four years from the date each version of the Licensed
                       Work is first made publicly available.

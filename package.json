@@ -1,6 +1,6 @@
 {
   "name": "indexterity",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "packageManager": "npm@11.6.2",
   "engines": {
@@ -20,7 +20,12 @@
     "format": "biome format --write .",
     "db:generate": "npm run db:generate -w @repo/api",
     "db:migrate": "npm run db:migrate -w @repo/api",
-    "test:e2e": "turbo run build && npm run test:e2e -w @repo/web"
+    "test:e2e": "turbo run build && npm run test:e2e -w @repo/web",
+    "up": "bash scripts/compose.sh up",
+    "down": "bash scripts/compose.sh down",
+    "compose": "bash scripts/compose.sh",
+    "version:set": "node scripts/set-version.mjs set",
+    "version:check": "node scripts/set-version.mjs check"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.5",

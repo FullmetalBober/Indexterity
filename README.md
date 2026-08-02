@@ -286,12 +286,26 @@ already carries an `engine` field.
 ```bash
 cp .env.example .env      # then fill secrets
 npm install
-docker compose up         # postgres + mongo + api + web + worker, hot reload
+npm run up                # postgres + mongo + api + web + worker, hot reload
+npm run down
 ```
+
+`npm run up` wraps `podman-compose` (or docker's) to work around two things that
+break it here: `node_modules/.bin` shadows nftables' `nft` with `@vercel/nft`,
+which podman's network backend shells out to and then fails on with
+`netavark: nftables error`; and a cleaned `XDG_RUNTIME_DIR` leaves containers
+whose crun state is gone, failing with `cannot open .../exec.fifo` — recreating
+them is the fix, and named volumes mean the databases survive it.
 
 `npm run build` · `npm run typecheck` · `npm run lint` · `npm run test` ·
 `npm run db:generate` · `npm run db:migrate`. Production migrations run the
 compiled migrator: `npm run db:deploy -w @repo/api`.
+
+**Versioning.** One number for the whole product, in the root `package.json`.
+`npm run version:set 0.2.0` writes it to every workspace and to the chart's
+`version` and `appVersion`; `npm run version:check` asserts they agree and runs
+in CI. Releasing is `git tag v0.2.0 && git push --tags`, and the release
+workflow refuses a tag whose version the tree does not carry.
 
 **Three test layers.** `npm run test` runs the first without any infra: the
 api's pure decision engine, and the web app's components in jsdom with the
@@ -388,6 +402,7 @@ restriction on commercial use, and this restricts one on purpose.
 |---|---|
 | **Non-production use** | free and unlimited — evaluation, development, testing, demos |
 | **Production, one cluster** | free, forever, company or not — with every feature |
+| **What counts as one cluster** | one deployment behind one connection string — a three-node replica set is one, a sharded deployment behind its mongos is one |
 | **Production, more than one cluster** | needs a commercial licence, or use the hosted service |
 | **Reading, modifying, forking, contributing** | always permitted |
 | **Reselling it or offering it as a service** | never permitted |
