@@ -87,14 +87,53 @@ test.describe("cluster lifecycle", () => {
 
     await page.getByLabel("Observe window (days)").fill("14");
     await page.getByLabel("Auto-approve score ≥").fill("70");
-    await page.getByLabel("Workload analysis").check();
+    await page.getByLabel("Instant create").check();
     await page.getByRole("button", { name: "Save policy" }).click();
     await expect(page.getByText("Policy saved")).toBeVisible();
 
     await page.reload();
     await expect(page.getByLabel("Observe window (days)")).toHaveValue("14");
     await expect(page.getByLabel("Auto-approve score ≥")).toHaveValue("70");
-    await expect(page.getByLabel("Workload analysis")).toBeChecked();
+    await expect(page.getByLabel("Instant create")).toBeChecked();
+  });
+
+  // A new account is on the free plan, and workload analysis is not part of it.
+  // The refusal has to say so — the same save can also fail because the caller
+  // is not an owner, and sending someone after the wrong one wastes their day.
+  test("explains that workload analysis is not on this plan, and saves the rest", async ({
+    page,
+  }) => {
+    await signUpAndLandOnDashboard(page, uniqueEmail("plan"));
+    await connectCluster(page, "E2E Plan");
+
+    await expect(page.getByText("FREE")).toBeVisible();
+    await expect(page.getByText(/index suggestions not included/)).toBeVisible();
+
+    await page.getByLabel("Workload analysis").check();
+    await page.getByRole("button", { name: "Save policy" }).click();
+    await expect(page.getByText(/does not include it/)).toBeVisible();
+    await expect(page.getByText(/Dropping unused/)).toBeVisible();
+    await expect(page.getByText("Policy saved")).toBeHidden();
+
+    // With it off, the rest of the policy still saves.
+    await page.getByLabel("Workload analysis").uncheck();
+    await page.getByLabel("Observe window (days)").fill("21");
+    await page.getByRole("button", { name: "Save policy" }).click();
+    await expect(page.getByText("Policy saved")).toBeVisible();
+  });
+
+  // The free plan allows one, and the limit must be visible before it is hit.
+  test("refuses a second cluster on the free plan and says why", async ({ page }) => {
+    await signUpAndLandOnDashboard(page, uniqueEmail("quota"));
+    await connectCluster(page, "E2E Quota One");
+    await expect(page.getByText(/1 \/ 1 clusters/)).toBeVisible();
+
+    await page.getByLabel("Name").fill("E2E Quota Two");
+    await page.getByLabel("Connection string").fill(MONGO_URL);
+    await page.getByRole("button", { name: "Check access" }).click();
+    await page.getByRole("button", { name: "Connect", exact: true }).click();
+
+    await expect(page.getByText(/FREE plan allows 1 clusters/)).toBeVisible();
   });
 
   test("disconnecting asks first, then removes the cluster", async ({ page }) => {

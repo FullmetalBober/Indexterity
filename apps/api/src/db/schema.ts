@@ -110,6 +110,21 @@ export const verification = pgTable("verification", {
 export const organizations = pgTable("organizations", {
   id: uuid("id").defaultRandom().primaryKey(),
   name: text("name").notNull(),
+  // What this org is entitled to — the rules live in billing/plans.ts, this is
+  // only which set applies. Text rather than an enum so adding a plan is a
+  // constant, not a migration; unrecognised values fall back to FREE.
+  plan: text("plan").notNull().default("FREE"),
+  planUpdatedAt: timestamp("plan_updated_at", { withTimezone: true }),
+  // Why it is on that plan: an invoice number, a trial end, "founding
+  // customer". Written by whoever changed it, shown to nobody but operators.
+  planNote: text("plan_note"),
+  // Set once a payment provider is attached. Nothing reads them yet — they are
+  // here so wiring a provider is a webhook handler rather than a migration on a
+  // table that by then holds live customers. Null means the plan was set by
+  // hand, which is the only way it can be set today.
+  billingProvider: text("billing_provider"),
+  billingCustomerId: text("billing_customer_id"),
+  billingSubscriptionId: text("billing_subscription_id"),
   createdAt,
 });
 

@@ -8,7 +8,23 @@ import { serverApi } from "~/lib/api";
 
 // Runs on the web server for every navigation; forwards the session cookie to
 // the api. oRPC calls return data directly and throw ORPCError on failure.
-const EMPTY_ORG = { id: "", name: "", members: [], pendingInvites: [] };
+// The shape the dashboard renders when the api could not answer. The plan
+// block is the most restrictive one, so a transient failure never draws limits
+// the org does not have.
+const EMPTY_ORG = {
+  id: "",
+  name: "",
+  plan: {
+    plan: "FREE",
+    maxClusters: 1,
+    maxMembers: 3,
+    workloadAnalysis: false,
+    clustersUsed: 0,
+    membersUsed: 0,
+  },
+  members: [],
+  pendingInvites: [],
+};
 
 function isStatus(error: unknown, status: number): boolean {
   return error instanceof ORPCError && error.status === status;
@@ -167,16 +183,19 @@ export const connectCluster = createServerFn({ method: "POST" })
       const created = await serverApi().createCluster(data);
       return { ok: true, message: null, id: created.id };
     } catch (error) {
-      const message =
-        error instanceof ORPCError && error.status === 400
-          ? error.message
-          : "failed to connect cluster";
+      const message = orpcMessage(error, "failed to connect cluster");
       return { ok: false, message, id: null };
     }
   });
 
+// Statuses whose message is written FOR the reader and can be shown as-is.
+// 402 is here because a plan refusal names the plan, the limit and what to do;
+// hiding it behind "failed" is how a billing limit gets reported as a bug.
+// Everything else keeps a generic message — a 500 must not leak internals.
+const READABLE_STATUSES = [400, 402, 403, 404, 409];
+
 function orpcMessage(error: unknown, fallback: string): string {
-  return error instanceof ORPCError && [400, 403, 404, 409].includes(error.status)
+  return error instanceof ORPCError && READABLE_STATUSES.includes(error.status)
     ? error.message
     : fallback;
 }
@@ -437,9 +456,13 @@ export const savePolicy = createServerFn({ method: "POST" })
         changeWindowStartHour: data.changeWindowStartHour,
         changeWindowEndHour: data.changeWindowEndHour,
       });
-      return { ok: true };
-    } catch {
-      return { ok: false };
+      return { ok: true, message: null };
+    } catch (error) {
+      // The reason matters now that a save can fail for two different things:
+      // the caller is not an owner, or the plan does not include what they
+      // switched on. Collapsing both into "owner only" sends half of them
+      // looking for a permissions problem they do not have.
+      return { ok: false, message: orpcMessage(error, "policy not saved") };
     }
   });
 

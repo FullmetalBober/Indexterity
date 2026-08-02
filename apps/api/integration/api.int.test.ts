@@ -34,6 +34,7 @@ import { MongoConnection, MongoIndexCollector } from "../src/mongo";
 import { hasQueryStatsPlanMetrics, parseServerVersion } from "../src/mongo/version";
 import {
   API_BASE,
+  API_PORT,
   api,
   databaseUrl,
   MONGO_URL,
@@ -90,7 +91,19 @@ beforeAll(async () => {
     .insertMany(Array.from({ length: 50 }, (_, i) => ({ status: i % 3, qty: i })));
   owner = await signUp("owner");
   createdEmails.push(owner.email);
+  // This suite is about the engine, not billing: it connects several clusters
+  // to one org, which no free plan would allow. The plan limits have their own
+  // tests below, on their own orgs, at their own plans.
+  await giveRoom(owner);
 });
+
+// Move a session's org onto the top plan, so quota is never what a test fails
+// on unless that is the test.
+async function giveRoom(session: Session): Promise<string> {
+  const orgId = asString(asRecord(await (await api("/org", session)).json()).id);
+  await db.update(organizations).set({ plan: "SCALE" }).where(eq(organizations.id, orgId));
+  return orgId;
+}
 
 afterAll(async () => {
   // The change-window test ran job code in THIS process — release its pools.
@@ -1547,21 +1560,31 @@ describe("engine-chosen change window", () => {
   });
 });
 
-describe("rate limiting (runs last — it poisons the auth budget)", () => {
-  it("throttles auth brute force with 429", async () => {
-    let limited = false;
-    for (let i = 0; i < 25; i++) {
-      const res = await fetch(`${API_BASE}/api/auth/sign-in/email`, {
-        method: "POST",
-        headers: { "content-type": "application/json", origin: WEB_ORIGIN },
-        body: JSON.stringify({ email: "no@int.test", password: "wrongwrong123" }),
-      });
-      if (res.status === 429) {
-        limited = true;
-        break;
+// Its own api instance at the production default. The shared one raises the
+// budget so the suite can sign up an account per scenario, which would make
+// this pass or fail on the wrong number — the limit under test is the one a
+// deployment actually ships with.
+describe("rate limiting", () => {
+  it("throttles auth brute force with 429 at the shipped default", async () => {
+    const port = API_PORT + 2;
+    const server = await startApi({ AUTH_RATE_LIMIT_MAX: "20" }, port);
+    try {
+      let limited = false;
+      for (let i = 0; i < 25; i++) {
+        const res = await fetch(`http://localhost:${port}/api/auth/sign-in/email`, {
+          method: "POST",
+          headers: { "content-type": "application/json", origin: WEB_ORIGIN },
+          body: JSON.stringify({ email: "no@int.test", password: "wrongwrong123" }),
+        });
+        if (res.status === 429) {
+          limited = true;
+          break;
+        }
       }
+      expect(limited).toBe(true);
+    } finally {
+      await stopApi(server);
     }
-    expect(limited).toBe(true);
   });
 });
 
@@ -1666,5 +1689,124 @@ describe("workload source follows the server version", () => {
       .db("inttest")
       .command({ profile: 0 })
       .catch(() => {});
+  });
+});
+
+// Plans decide what an org may do; nothing here talks to a payment provider,
+// because none is wired. What matters is that the limits are enforced by the
+// api rather than only drawn in the dashboard — a quota the client checks is
+// not a quota.
+describe("plan limits", () => {
+  async function setPlan(orgId: string, plan: string): Promise<void> {
+    await db.update(organizations).set({ plan }).where(eq(organizations.id, orgId));
+  }
+
+  it("refuses a second cluster on FREE with 402, and allows it on PRO", async () => {
+    const session = await signUp("plan-clusters");
+    createdEmails.push(session.email);
+    const orgId = asString(asRecord(await (await api("/org", session)).json()).id);
+    createdOrgIds.push(orgId);
+
+    const first = await api("/clusters", session, {
+      method: "POST",
+      body: JSON.stringify({ name: "Plan One", connectionString: MONGO_URL }),
+    });
+    expect(first.status).toBe(200);
+    createdClusterIds.push(asString(asRecord(await first.json()).id));
+
+    const second = await api("/clusters", session, {
+      method: "POST",
+      body: JSON.stringify({ name: "Plan Two", connectionString: MONGO_URL }),
+    });
+    // 402, not 403: the caller is an owner. "Forbidden" would send them
+    // looking for a permissions problem they do not have.
+    expect(second.status).toBe(402);
+    expect(asString(asRecord(await second.json()).message)).toContain("FREE");
+
+    await setPlan(orgId, "PRO");
+    const afterUpgrade = await api("/clusters", session, {
+      method: "POST",
+      body: JSON.stringify({ name: "Plan Three", connectionString: MONGO_URL }),
+    });
+    expect(afterUpgrade.status).toBe(200);
+    createdClusterIds.push(asString(asRecord(await afterUpgrade.json()).id));
+  });
+
+  it("gates workload analysis, and never gates turning it off", async () => {
+    const session = await signUp("plan-workload");
+    createdEmails.push(session.email);
+    const orgId = asString(asRecord(await (await api("/org", session)).json()).id);
+    createdOrgIds.push(orgId);
+    const created = await api("/clusters", session, {
+      method: "POST",
+      body: JSON.stringify({ name: "Plan Workload", connectionString: MONGO_URL }),
+    });
+    const planClusterId = asString(asRecord(await created.json()).id);
+    createdClusterIds.push(planClusterId);
+
+    const policy = (workloadAnalysis: boolean) => ({
+      workloadAnalysis,
+      instantCreate: false,
+      observeWindowDays: 30,
+      maxCollectionSizeBytes: null,
+      autoApplyScore: null,
+      changeWindowStartHour: null,
+      changeWindowEndHour: null,
+    });
+
+    const refused = await api(`/clusters/${planClusterId}/policy`, session, {
+      method: "PUT",
+      body: JSON.stringify(policy(true)),
+    });
+    expect(refused.status).toBe(402);
+    // The refusal must not read as "your drops are gated too".
+    expect(asString(asRecord(await refused.json()).message)).toContain("Dropping");
+
+    // Saving the rest of the policy still works with it off.
+    expect(
+      (
+        await api(`/clusters/${planClusterId}/policy`, session, {
+          method: "PUT",
+          body: JSON.stringify(policy(false)),
+        })
+      ).status,
+    ).toBe(200);
+
+    await setPlan(orgId, "PRO");
+    expect(
+      (
+        await api(`/clusters/${planClusterId}/policy`, session, {
+          method: "PUT",
+          body: JSON.stringify(policy(true)),
+        })
+      ).status,
+    ).toBe(200);
+  });
+
+  it("counts an outstanding invite against the seat limit", async () => {
+    const session = await signUp("plan-seats");
+    createdEmails.push(session.email);
+    const orgId = asString(asRecord(await (await api("/org", session)).json()).id);
+    createdOrgIds.push(orgId);
+
+    // FREE allows 3 seats and the owner is one, so two invites fit.
+    for (const who of ["seat-a", "seat-b"]) {
+      const res = await api("/org/invites", session, {
+        method: "POST",
+        body: JSON.stringify({ email: `${who}@example.test`, role: "member" }),
+      });
+      expect(res.status).toBe(200);
+    }
+    const third = await api("/org/invites", session, {
+      method: "POST",
+      body: JSON.stringify({ email: "seat-c@example.test", role: "member" }),
+    });
+    expect(third.status).toBe(402);
+    expect(asString(asRecord(await third.json()).message)).toContain("members");
+
+    // And the org page reports the same number the refusal was based on.
+    const org = asRecord(await (await api("/org", session)).json());
+    expect(asRecord(org.plan).membersUsed).toBe(3);
+    expect(asRecord(org.plan).maxMembers).toBe(3);
   });
 });

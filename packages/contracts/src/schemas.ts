@@ -255,9 +255,23 @@ export const orgMember = z.object({
 });
 export type OrgMember = z.infer<typeof orgMember>;
 
+// What the org's plan allows, resolved server-side. Sent with the org so the
+// dashboard can show a limit before someone hits it, rather than only
+// explaining the 402 afterwards. Null means no limit.
+export const planInfo = z.object({
+  plan: z.string(),
+  maxClusters: z.number().nullable(),
+  maxMembers: z.number().nullable(),
+  workloadAnalysis: z.boolean(),
+  clustersUsed: z.number(),
+  membersUsed: z.number(),
+});
+export type PlanInfo = z.infer<typeof planInfo>;
+
 export const orgInfo = z.object({
   id: z.uuid(),
   name: z.string(),
+  plan: planInfo,
   members: z.array(orgMember),
   pendingInvites: z.array(z.object({ email: z.string(), role: z.string(), expiresAt: z.string() })),
 });

@@ -183,6 +183,33 @@ own traffic into the four 6h slots of the UTC day and takes the quietest,
 re-deriving after every collect. It declines to guess on a flat day or thin
 history, and an explicit setting always wins.
 
+## Plans
+
+| | clusters | seats | index suggestions | history |
+|---|---|---|---|---|
+| **FREE** | 1 | 3 | — | 30 days |
+| **PRO** | 5 | 15 | yes | 90 days |
+| **SCALE** | unlimited | unlimited | yes | 365 days |
+
+Dropping unused and redundant indexes is the core promise and is on every plan,
+free included. What the paid plans add is the create side — proposing new
+indexes reads your query workload, which is the heavier half.
+
+The rules live in one table in `apps/api/src/billing/plans.ts`; nothing else
+decides them. Limits are enforced by the api, not drawn in the dashboard, and a
+refusal comes back as **402** rather than 403 — the caller is an owner, so
+"forbidden" would send them looking for a permissions problem they do not have.
+Seats count members plus outstanding invites, so an org cannot invite past its
+plan and leave the refusal for whoever clicks the link. A downgrade never
+deletes anything: an org over its new limit keeps what it has and simply cannot
+add more.
+
+**No payment provider is wired, on purpose.** Plans are set with
+`node apps/api/dist/set-plan.js <org> <PLAN> [note]` — enough to charge by
+invoice today, from anywhere, with no processor account. Whoever eventually
+takes the money only decides *which* plan an org is on; a webhook would write
+the same column that CLI does, and the entitlements above would not change.
+
 ## Connecting a cluster
 
 **MongoDB 6.0 to 8.x.** 4.4 and 5.0 are past end-of-life and have no

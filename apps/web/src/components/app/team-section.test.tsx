@@ -25,6 +25,14 @@ vi.mock("sonner", () => ({ toast: { success: toastSuccess, error: toastError } }
 
 const org = {
   name: "Acme",
+  plan: {
+    plan: "FREE",
+    maxClusters: 1,
+    maxMembers: 3,
+    workloadAnalysis: false,
+    clustersUsed: 0,
+    membersUsed: 3,
+  },
   members: [
     { userId: "u1", email: "owner@acme.test", name: "Owner One", role: "owner" },
     { userId: "u2", email: "member@acme.test", name: "Member Two", role: "member" },
@@ -156,5 +164,34 @@ describe("TeamSection", () => {
     await user.click(screen.getByRole("button", { name: "Save" }));
 
     expect(toastError).toHaveBeenCalledWith(expect.stringContaining("owner only"));
+  });
+
+  // A limit nobody can see until they hit it turns into a support email.
+  it("shows the plan and what is left of it", () => {
+    renderInApp(<TeamSection org={org} onChanged={vi.fn()} />);
+    expect(screen.getByText("FREE")).toBeInTheDocument();
+    expect(screen.getByText(/0 \/ 1 clusters/)).toBeInTheDocument();
+    expect(screen.getByText(/3 \/ 3 seats/)).toBeInTheDocument();
+    expect(screen.getByText(/index suggestions not included/)).toBeInTheDocument();
+  });
+
+  it("shows a bare count where the plan has no cap", () => {
+    renderInApp(
+      <TeamSection
+        org={{
+          ...org,
+          plan: {
+            ...org.plan,
+            plan: "SCALE",
+            maxClusters: null,
+            maxMembers: null,
+            workloadAnalysis: true,
+          },
+        }}
+        onChanged={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(/0 clusters/)).toBeInTheDocument();
+    expect(screen.queryByText(/not included/)).not.toBeInTheDocument();
   });
 });

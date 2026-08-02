@@ -40,12 +40,13 @@ export function PolicySection({ policy, onSaved }: { policy: PolicyView; onSaved
         changeWindowStartHour: windowEnd === null ? null : windowStart,
         changeWindowEndHour: windowStart === null ? null : windowEnd,
       },
-    }).catch(() => ({ ok: false }));
+    }).catch(() => ({ ok: false, message: "policy not saved" }));
     if (result.ok) {
       toast.success("Policy saved");
       onSaved();
     } else {
-      toast.error("Policy not saved (owner only)");
+      // The api's own reason — a plan limit reads nothing like a role problem.
+      toast.error(result.message ?? "policy not saved");
     }
   }
 

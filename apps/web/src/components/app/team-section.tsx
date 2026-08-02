@@ -19,8 +19,21 @@ import {
 
 interface TeamOrg {
   readonly name: string;
+  readonly plan: {
+    readonly plan: string;
+    readonly maxClusters: number | null;
+    readonly maxMembers: number | null;
+    readonly workloadAnalysis: boolean;
+    readonly clustersUsed: number;
+    readonly membersUsed: number;
+  };
   readonly members: readonly { userId: string; email: string; name: string; role: string }[];
   readonly pendingInvites: readonly { email: string; role: string; expiresAt: string }[];
+}
+
+// "2 / 3" while there is a cap, the bare count when there is not.
+function usage(used: number, limit: number | null): string {
+  return limit === null ? String(used) : `${used} / ${limit}`;
 }
 
 export function TeamSection({ org, onChanged }: { org: TeamOrg; onChanged: () => void }) {
@@ -85,6 +98,14 @@ export function TeamSection({ org, onChanged }: { org: TeamOrg; onChanged: () =>
       <CardHeader>
         <div className="flex flex-wrap items-center gap-2">
           <CardTitle className="text-base">Team — {org.name}</CardTitle>
+          {/* The limit is worth showing BEFORE it is hit: the alternative is a
+              402 at the moment someone is trying to get work done. */}
+          <Badge variant="outline">{org.plan.plan}</Badge>
+          <span className="text-muted-foreground text-xs">
+            {usage(org.plan.clustersUsed, org.plan.maxClusters)} clusters ·{" "}
+            {usage(org.plan.membersUsed, org.plan.maxMembers)} seats
+            {org.plan.workloadAnalysis ? "" : " · index suggestions not included"}
+          </span>
           {renaming ? (
             <form
               className="flex gap-1"

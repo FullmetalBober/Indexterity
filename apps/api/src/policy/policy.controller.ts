@@ -49,6 +49,9 @@ export class PolicyController {
   updatePolicy(@Req() req: FastifyRequest) {
     return implement(contract.updatePolicy).handler(async ({ input, errors }) => {
       const orgId = await this.tenancy.requireOwner(req);
+      // Only when switching it ON — an org whose plan changed under it must
+      // still be able to save the rest of its policy, and to turn this off.
+      if (input.workloadAnalysis) await this.tenancy.requireWorkloadAnalysis(orgId);
       const { clusterId, ...knobs } = input;
       if (!(await this.tenancy.ownsCluster(clusterId, orgId))) {
         throw errors.NOT_FOUND({ message: "cluster not found" });

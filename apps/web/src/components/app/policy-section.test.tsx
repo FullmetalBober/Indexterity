@@ -109,15 +109,20 @@ describe("PolicySection", () => {
     expect(screen.getByText(/Above ~85 very little qualifies/)).toBeInTheDocument();
   });
 
-  it("says who can do this when the api refuses, and does not claim success", async () => {
-    savePolicy.mockResolvedValue({ ok: false });
+  // Two different failures reach here now — not an owner, or the plan does not
+  // include what was switched on — so the api's own reason has to come through.
+  it("shows the api's reason when a save is refused, and does not claim success", async () => {
+    savePolicy.mockResolvedValue({
+      ok: false,
+      message: "the FREE plan does not include workload analysis",
+    });
     const user = userEvent.setup();
     const onSaved = vi.fn();
     render(<PolicySection policy={policy} onSaved={onSaved} />);
 
     await user.click(screen.getByRole("button", { name: "Save policy" }));
 
-    expect(toastError).toHaveBeenCalledWith(expect.stringContaining("owner only"));
+    expect(toastError).toHaveBeenCalledWith("the FREE plan does not include workload analysis");
     expect(toastSuccess).not.toHaveBeenCalled();
     expect(onSaved).not.toHaveBeenCalled();
   });

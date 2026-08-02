@@ -6,8 +6,10 @@ import { contract } from "@repo/contracts";
 import type { FastifyRequest } from "fastify";
 import { requireUserId } from "../auth/session";
 import { acceptOrgInvite, resolveMembership, resolveOrgId } from "../auth/tenancy";
-import { and, eq, gt, invites, isNull, members, organizations, user } from "../db";
+import { entitlementsFor, planFrom } from "../billing/plans";
+import { and, clusters, eq, gt, invites, isNull, members, organizations, user } from "../db";
 import { DatabaseService } from "../db/database.service";
+import { TenancyService } from "../http/tenancy.service";
 import { sendMail } from "../mail/mailer";
 import { Implement } from "../orpc/implement";
 
@@ -16,7 +18,10 @@ const INVITE_TTL_MS = 7 * 86_400_000;
 // Org membership + invites. Session required; everything scoped to the caller's org.
 @Controller()
 export class OrgController {
-  constructor(private readonly database: DatabaseService) {}
+  constructor(
+    private readonly database: DatabaseService,
+    private readonly tenancy: TenancyService,
+  ) {}
 
   // The caller's active org, owner role required (403 otherwise).
   private async requireOwnerOrg(req: FastifyRequest): Promise<string> {
@@ -131,6 +136,10 @@ export class OrgController {
         .from(members)
         .innerJoin(user, eq(members.userId, user.id))
         .where(eq(members.orgId, orgId));
+      const clusterRows = await this.database.db
+        .select({ id: clusters.id })
+        .from(clusters)
+        .where(eq(clusters.orgId, orgId));
       const pending = await this.database.db
         .select()
         .from(invites)
@@ -141,9 +150,23 @@ export class OrgController {
             gt(invites.expiresAt, new Date()),
           ),
         );
+      const plan = planFrom(org?.plan);
+      const limits = entitlementsFor(plan);
+      // Infinity does not survive JSON, so an absent limit is null.
+      const cap = (value: number): number | null => (Number.isFinite(value) ? value : null);
       return {
         id: orgId,
         name: org?.name ?? "",
+        plan: {
+          plan,
+          maxClusters: cap(limits.maxClusters),
+          maxMembers: cap(limits.maxMembers),
+          workloadAnalysis: limits.workloadAnalysis,
+          clustersUsed: clusterRows.length,
+          // Seats are members plus outstanding invites — the same count the
+          // limit is enforced on, so the number on screen matches the refusal.
+          membersUsed: memberRows.length + pending.length,
+        },
         members: memberRows,
         pendingInvites: pending.map((invite) => ({
           email: invite.email,
@@ -217,6 +240,9 @@ export class OrgController {
         throw new ORPCError("FORBIDDEN", { message: "owner role required" });
       }
       const orgId = member.orgId;
+      // Seats are counted as members plus outstanding invites, so an org cannot
+      // invite past its plan and leave the refusal for whoever clicks the link.
+      await this.tenancy.requireRoomFor(orgId, "members");
       const token = randomBytes(24).toString("base64url");
       const expiresAt = new Date(Date.now() + INVITE_TTL_MS);
       await this.database.db.insert(invites).values({

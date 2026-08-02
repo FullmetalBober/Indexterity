@@ -151,6 +151,9 @@ export class ClustersController {
   createCluster(@Req() req: FastifyRequest) {
     return implement(contract.createCluster).handler(async ({ input, errors }) => {
       const orgId = await this.tenancy.requireOwner(req);
+      // Before the dial, not after: refusing on the plan should not first spend
+      // several seconds connecting to a cluster we are not going to keep.
+      await this.tenancy.requireRoomFor(orgId, "clusters");
       const engine = input.engine ?? "MONGODB";
       await this.guardDial(req, engine, input.connectionString, errors);
       // Verify before storing: an unusable string must fail at connect time
@@ -183,6 +186,8 @@ export class ClustersController {
   provisionCluster(@Req() req: FastifyRequest) {
     return implement(contract.provisionCluster).handler(async ({ input, errors }) => {
       const orgId = await this.tenancy.requireOwner(req);
+      // Before creating a user on someone's cluster, not after.
+      await this.tenancy.requireRoomFor(orgId, "clusters");
       // Provisioning is engine-specific; MONGODB is the only adapter with the
       // capability today (see EngineCapabilities.provisionScopedUsers).
       await this.guardDial(req, "MONGODB", input.adminConnectionString, errors);

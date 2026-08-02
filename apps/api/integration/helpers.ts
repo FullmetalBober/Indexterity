@@ -39,6 +39,11 @@ export async function startApi(
       // non-defaults, which is exactly why the guards need their own tests.
       ALLOW_PRIVATE_CLUSTER_TARGETS: "true",
       SIGNUP_MODE: "open",
+      // The suite signs up an account per scenario from one address, which the
+      // brute-force budget is right to distrust in production and wrong to
+      // here. Same reason the e2e suite raises it.
+      AUTH_RATE_LIMIT_MAX: "500",
+      RATE_LIMIT_MAX: "5000",
       ...extraEnv,
     },
     stdio: ["ignore", "pipe", "pipe"],
