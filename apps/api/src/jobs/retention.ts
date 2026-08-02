@@ -1,17 +1,40 @@
 import { makeWorkerUtils } from "graphile-worker";
-import { indexSnapshots, latencySamples, lt, sql } from "../db";
+import { entitlementsFor, type Plan, planFrom } from "../billing/plans";
+import {
+  and,
+  clusters,
+  eq,
+  inArray,
+  indexSnapshots,
+  latencySamples,
+  lt,
+  organizations,
+  sql,
+} from "../db";
 import { requiredEnv } from "../env";
 import { jobDb } from "./db";
 
-const DEFAULT_RETENTION_DAYS = 90;
 const DAY_MS = 86_400_000;
 // One batch per run. A backlog drains over consecutive days rather than holding
 // a transaction open over a hundred thousand rows.
 const MAX_DEAD_LETTERS_PER_RUN = 5000;
 
-function retentionCutoff(): Date {
+// RETENTION_DAYS is the operator's ceiling, not the plan's number. Storage is
+// the operator's bill, so they can cap it; a plan may keep less than the cap but
+// never more. Unset means the plan decides on its own.
+function operatorCeilingDays(): number {
   const envDays = Number(process.env.RETENTION_DAYS);
-  const days = Number.isFinite(envDays) && envDays > 0 ? envDays : DEFAULT_RETENTION_DAYS;
+  return Number.isFinite(envDays) && envDays > 0 ? envDays : Number.POSITIVE_INFINITY;
+}
+
+export function effectiveRetentionDays(plan: Plan): number {
+  return Math.min(entitlementsFor(plan).retentionDays, operatorCeilingDays());
+}
+
+// Dead letters are not per-org — they belong to the deployment, so they age out
+// on the operator's window, or a generous default when there is none.
+function deadLetterCutoff(): Date {
+  const days = Number.isFinite(operatorCeilingDays()) ? operatorCeilingDays() : 90;
   return new Date(Date.now() - days * DAY_MS);
 }
 
@@ -33,7 +56,7 @@ export async function pruneDeadLetterJobs(): Promise<number> {
     select id::text as id from graphile_worker.jobs
     where attempts >= max_attempts
       and locked_at is null
-      and updated_at < ${retentionCutoff()}
+      and updated_at < ${deadLetterCutoff()}
     limit ${MAX_DEAD_LETTERS_PER_RUN}
   `);
   const ids = rows.rows.flatMap((row) => (typeof row.id === "string" ? [row.id] : []));
@@ -47,19 +70,46 @@ export async function pruneDeadLetterJobs(): Promise<number> {
   return ids.length;
 }
 
-// Time-series tables grow on every collect, forever. Prune rows older than the
-// retention window (RETENTION_DAYS, default 90) — classify only needs a handful
-// of recent snapshots, and the latency charts read the same window.
+// Time-series tables grow on every collect, forever, and how long they are kept
+// is an entitlement: longer history is what makes a usage claim trustworthy
+// (analysis/classify.ts refuses to call an index dead without one), so it is
+// worth paying for and has to be enforced rather than merely advertised.
+//
+// Grouped by plan rather than pruned per cluster: one delete per distinct plan
+// instead of one per cluster, and every org on the same plan shares a cutoff.
 export async function pruneOldSamples(): Promise<number> {
   const db = jobDb();
-  const cutoff = retentionCutoff();
-  const prunedSamples = await db
-    .delete(latencySamples)
-    .where(lt(latencySamples.capturedAt, cutoff))
-    .returning({ id: latencySamples.id });
-  const prunedSnapshots = await db
-    .delete(indexSnapshots)
-    .where(lt(indexSnapshots.capturedAt, cutoff))
-    .returning({ id: indexSnapshots.id });
-  return prunedSamples.length + prunedSnapshots.length + (await pruneDeadLetterJobs());
+  const owned = await db
+    .select({ clusterId: clusters.id, plan: organizations.plan })
+    .from(clusters)
+    .innerJoin(organizations, eq(clusters.orgId, organizations.id));
+
+  const byPlan = new Map<Plan, string[]>();
+  for (const row of owned) {
+    const plan = planFrom(row.plan);
+    const ids = byPlan.get(plan) ?? [];
+    ids.push(row.clusterId);
+    byPlan.set(plan, ids);
+  }
+
+  let pruned = 0;
+  for (const [plan, clusterIds] of byPlan) {
+    const days = effectiveRetentionDays(plan);
+    if (!Number.isFinite(days)) continue;
+    const cutoff = new Date(Date.now() - days * DAY_MS);
+    const samples = await db
+      .delete(latencySamples)
+      .where(
+        and(inArray(latencySamples.clusterId, clusterIds), lt(latencySamples.capturedAt, cutoff)),
+      )
+      .returning({ id: latencySamples.id });
+    const snapshots = await db
+      .delete(indexSnapshots)
+      .where(
+        and(inArray(indexSnapshots.clusterId, clusterIds), lt(indexSnapshots.capturedAt, cutoff)),
+      )
+      .returning({ id: indexSnapshots.id });
+    pruned += samples.length + snapshots.length;
+  }
+  return pruned + (await pruneDeadLetterJobs());
 }

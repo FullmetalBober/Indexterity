@@ -28,7 +28,7 @@ import { drainPool } from "../src/jobs/connection-pool";
 import { applyCreatesForCluster } from "../src/jobs/create";
 import { closeJobDb, jobDb } from "../src/jobs/db";
 import { finalizeCluster } from "../src/jobs/finalize";
-import { pruneDeadLetterJobs } from "../src/jobs/retention";
+import { pruneDeadLetterJobs, pruneOldSamples } from "../src/jobs/retention";
 import { suggestForCluster } from "../src/jobs/suggest";
 import { MongoConnection, MongoIndexCollector } from "../src/mongo";
 import { hasQueryStatsPlanMetrics, parseServerVersion } from "../src/mongo/version";
@@ -1808,5 +1808,89 @@ describe("plan limits", () => {
     const org = asRecord(await (await api("/org", session)).json());
     expect(asRecord(org.plan).membersUsed).toBe(3);
     expect(asRecord(org.plan).maxMembers).toBe(3);
+  });
+});
+
+// Retention is the one entitlement that costs the operator real storage, so it
+// has to be enforced rather than advertised. Two orgs on different plans keep
+// different amounts of the same kind of row.
+describe("retention follows the plan", () => {
+  it("keeps a FREE org's history for less time than a SCALE org's", async () => {
+    const session = await signUp("retention");
+    createdEmails.push(session.email);
+    const orgId = await giveRoom(session);
+    const created = await api("/clusters", session, {
+      method: "POST",
+      body: JSON.stringify({ name: "Retention Cluster", connectionString: MONGO_URL }),
+    });
+    const retentionClusterId = asString(asRecord(await created.json()).id);
+    createdClusterIds.push(retentionClusterId);
+
+    // 45 days old: inside SCALE's year, outside FREE's month.
+    const captured = new Date(Date.now() - 45 * 86_400_000);
+    const sample = () => ({
+      clusterId: retentionClusterId,
+      database: "inttest",
+      collection: "orders",
+      readOps: 1,
+      readLatencyMicros: 1,
+      writeOps: 0,
+      writeLatencyMicros: 0,
+      capturedAt: captured,
+    });
+
+    await db.insert(latencySamples).values(sample());
+    await pruneOldSamples();
+    const keptOnScale = await db
+      .select()
+      .from(latencySamples)
+      .where(eq(latencySamples.clusterId, retentionClusterId));
+    expect(keptOnScale.length).toBeGreaterThan(0);
+
+    await db.update(organizations).set({ plan: "FREE" }).where(eq(organizations.id, orgId));
+    await pruneOldSamples();
+    const keptOnFree = await db
+      .select()
+      .from(latencySamples)
+      .where(eq(latencySamples.clusterId, retentionClusterId));
+    expect(keptOnFree).toHaveLength(0);
+  });
+
+  // Storage is the operator's bill, so RETENTION_DAYS caps every plan. A plan
+  // may keep less than the ceiling; it may never keep more.
+  it("lets the operator cap a plan that would keep more", async () => {
+    const session = await signUp("retention-cap");
+    createdEmails.push(session.email);
+    await giveRoom(session);
+    const created = await api("/clusters", session, {
+      method: "POST",
+      body: JSON.stringify({ name: "Capped Cluster", connectionString: MONGO_URL }),
+    });
+    const cappedClusterId = asString(asRecord(await created.json()).id);
+    createdClusterIds.push(cappedClusterId);
+
+    await db.insert(latencySamples).values({
+      clusterId: cappedClusterId,
+      database: "inttest",
+      collection: "orders",
+      readOps: 1,
+      readLatencyMicros: 1,
+      writeOps: 0,
+      writeLatencyMicros: 0,
+      capturedAt: new Date(Date.now() - 45 * 86_400_000),
+    });
+
+    const previous = process.env.RETENTION_DAYS;
+    process.env.RETENTION_DAYS = "7";
+    try {
+      await pruneOldSamples();
+    } finally {
+      if (previous === undefined) delete process.env.RETENTION_DAYS;
+      else process.env.RETENTION_DAYS = previous;
+    }
+    // SCALE would have kept it for a year; the operator's ceiling wins.
+    expect(
+      await db.select().from(latencySamples).where(eq(latencySamples.clusterId, cappedClusterId)),
+    ).toHaveLength(0);
   });
 });

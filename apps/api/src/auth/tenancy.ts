@@ -1,3 +1,4 @@
+import { defaultOrgPlan } from "../billing/plans";
 import { and, asc, clusters, type Database, desc, eq, members, organizations, sql } from "../db";
 
 export interface Membership {
@@ -19,7 +20,7 @@ export async function resolveMembership(db: Database, userId: string): Promise<M
   if (membership !== undefined) return membership;
   const [org] = await db
     .insert(organizations)
-    .values({ name: "My Org" })
+    .values({ name: "My Org", plan: defaultOrgPlan() })
     .returning({ id: organizations.id });
   if (org === undefined) throw new Error("failed to create organization");
   await db.insert(members).values({ orgId: org.id, userId, role: "owner" });

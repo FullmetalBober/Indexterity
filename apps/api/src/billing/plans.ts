@@ -35,7 +35,7 @@ export interface Entitlements {
 // One table. Change a number here and every gate follows.
 const ENTITLEMENTS: Record<Plan, Entitlements> = {
   FREE: { maxClusters: 1, maxMembers: 3, workloadAnalysis: false, retentionDays: 30 },
-  PRO: { maxClusters: 5, maxMembers: 15, workloadAnalysis: true, retentionDays: 90 },
+  PRO: { maxClusters: 5, maxMembers: 15, workloadAnalysis: true, retentionDays: 183 },
   SCALE: {
     maxClusters: Number.POSITIVE_INFINITY,
     maxMembers: Number.POSITIVE_INFINITY,
@@ -92,4 +92,16 @@ export function allowsWorkloadAnalysis(plan: Plan): LimitVerdict {
       `workload analysis proposes new indexes from your query shapes, and the ${plan} plan ` +
       `does not include it. Dropping unused and redundant indexes is unaffected.`,
   };
+}
+
+// The plan a newly created org lands on.
+//
+// A self-hosted install owns its database, so a quota there is decoration:
+// `UPDATE organizations SET plan='SCALE'` is one command away, and the source
+// is public. Pretending otherwise would only make the first run worse for the
+// person who deployed it. The Helm chart therefore ships SCALE, and the hosted
+// service sets FREE — the code default stays FREE because a process that has
+// not been told where it runs should assume the stricter answer.
+export function defaultOrgPlan(): Plan {
+  return planFrom(process.env.DEFAULT_ORG_PLAN);
 }

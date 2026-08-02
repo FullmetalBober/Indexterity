@@ -1,7 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   allowsWorkloadAnalysis,
   DEFAULT_PLAN,
+  defaultOrgPlan,
   entitlementsFor,
   isPlan,
   PLANS,
@@ -91,5 +92,40 @@ describe("entitlements", () => {
         Number(lower.workloadAnalysis),
       );
     }
+  });
+});
+
+// A self-hosted install owns its database, so a quota there is decoration. The
+// code default stays strict — a process that has not been told where it runs
+// should assume the answer that cannot leak entitlements.
+describe("defaultOrgPlan", () => {
+  const previous = process.env.DEFAULT_ORG_PLAN;
+  afterEach(() => {
+    if (previous === undefined) delete process.env.DEFAULT_ORG_PLAN;
+    else process.env.DEFAULT_ORG_PLAN = previous;
+  });
+
+  it("is FREE when nothing says otherwise", () => {
+    delete process.env.DEFAULT_ORG_PLAN;
+    expect(defaultOrgPlan()).toBe("FREE");
+  });
+
+  it("takes the deployment's answer when there is one", () => {
+    process.env.DEFAULT_ORG_PLAN = "SCALE";
+    expect(defaultOrgPlan()).toBe("SCALE");
+  });
+
+  it("refuses to guess from a typo", () => {
+    process.env.DEFAULT_ORG_PLAN = "scale";
+    expect(defaultOrgPlan()).toBe("FREE");
+  });
+});
+
+// Half a year on PRO: long enough for a quarterly job to show up twice, which
+// is what makes "this index is only used at quarter end" provable rather than
+// a guess.
+describe("retention", () => {
+  it("gives PRO half a year", () => {
+    expect(entitlementsFor("PRO").retentionDays).toBe(183);
   });
 });

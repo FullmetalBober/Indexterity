@@ -188,12 +188,23 @@ history, and an explicit setting always wins.
 | | clusters | seats | index suggestions | history |
 |---|---|---|---|---|
 | **FREE** | 1 | 3 | — | 30 days |
-| **PRO** | 5 | 15 | yes | 90 days |
+| **PRO** | 5 | 15 | yes | 183 days |
 | **SCALE** | unlimited | unlimited | yes | 365 days |
 
 Dropping unused and redundant indexes is the core promise and is on every plan,
 free included. What the paid plans add is the create side — proposing new
 indexes reads your query workload, which is the heavier half.
+
+History is enforced, not advertised: the prune job groups clusters by their
+org's plan and applies a cutoff per group. `RETENTION_DAYS` remains the
+operator's ceiling — storage is their bill, so a plan may keep less than the cap
+but never more.
+
+**Self-hosted is unlimited.** A self-hosted install owns its database, so a
+quota it can lift with one `UPDATE` is decoration; the chart ships
+`defaultOrgPlan: SCALE` and says so. The hosted service sets `FREE`. The code
+default is `FREE` because a process that has not been told where it runs should
+assume the stricter answer.
 
 The rules live in one table in `apps/api/src/billing/plans.ts`; nothing else
 decides them. Limits are enforced by the api, not drawn in the dashboard, and a

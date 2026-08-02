@@ -93,6 +93,8 @@ app.kubernetes.io/component: {{ .component }}
 - name: MASTER_KEY_VERSION
   value: {{ .Values.secrets.masterKeyVersion | quote }}
 {{- end }}
+- name: DEFAULT_ORG_PLAN
+  value: {{ .Values.config.defaultOrgPlan | quote }}
 - name: LOG_LEVEL
   value: {{ .Values.config.logLevel | quote }}
 - name: ALLOW_PRIVATE_CLUSTER_TARGETS
