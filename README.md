@@ -49,7 +49,8 @@ a constraint *are* droppable: the pipeline hides and measures rather than
 trusting the counter.
 
 **Adding** (opt-in via `workloadAnalysis`). Query shapes come from `$queryStats`
-(mongo 7+), falling back to the profiler. A shape must recur — **3+ sightings**
+(**mongo 6.0+** — verified against a live server; it was backported into the 6.0
+series), falling back to the profiler on 4.4 and 5.0. A shape must recur — **3+ sightings**
 — and must come from something other than a person at a prompt. `$queryStats`
 groups by client, so the same query from `mongosh` and from your app arrive as
 separate entries; one seen only from shells and GUIs earns nothing, because the
@@ -137,6 +138,16 @@ The last two handle a hand-made ad-hoc index: created, used once, forgotten. Its
 whole life is on record, so it leaves in about a week instead of a month. Age
 only counts when the index appeared *after* we started watching — snapshots
 begin at onboarding, so an index in the first one may be five years old.
+
+**Every five minutes, a read-pressure probe.** A missing index shows up as a
+collection's average read latency climbing while it keeps serving traffic — and
+that is visible to the least-privilege user, unlike CPU and memory, which need
+`serverStatus` the provisioned role deliberately does not have. When reads get
+sharply slower than their own baseline, the workload pass runs immediately
+instead of waiting for the hourly one. Only the busiest 20 collections are
+probed, and the readings are never written to `latency_samples` — that table's
+6h cadence is what the activity gate and the change-window inference count
+intervals in.
 
 **The change window picks itself.** Left unset, the engine buckets the cluster's
 own traffic into the four 6h slots of the UTC day and takes the quietest,

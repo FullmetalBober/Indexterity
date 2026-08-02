@@ -9,6 +9,8 @@ import { taskList } from "./tasks";
 //  - collect + classify every 6h
 //  - workload analysis hourly (a missing index costs on every execution, so
 //    waiting up to 6h to notice one is most of the delay)
+//  - read-pressure probe every 5 min (a missing index shows up as latency long
+//    before the next scheduled pass would notice)
 //  - hide approved drops every 5 min
 //  - finalize (drop past-observe hidden) hourly
 //  - prune time-series tables past RETENTION_DAYS daily
@@ -17,6 +19,7 @@ const CRONTAB = [
   "0 */6 * * * scheduleCollect",
   "30 * * * * scheduleSuggest",
   "*/5 * * * * scheduleApply",
+  "2-59/5 * * * * scheduleProbe",
   "0 * * * * scheduleFinalize",
   "0 3 * * * retention",
   "0 9 * * 1 digest",

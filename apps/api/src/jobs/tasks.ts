@@ -13,6 +13,7 @@ import { runDigest } from "./digest";
 import { dispatchToAllClusters } from "./dispatch";
 import { finalizeCluster } from "./finalize";
 import { clusterIdFromPayload } from "./payload";
+import { probeCluster } from "./probe";
 import { pruneOldSamples } from "./retention";
 import { suggestForCluster } from "./suggest";
 
@@ -129,6 +130,23 @@ export const taskList = {
   },
   finalize: async (payload: unknown, helpers: JobHelpers): Promise<void> => {
     await onCluster("finalize", payload, helpers, finalizeCluster);
+  },
+  // Every 5 minutes: is anything suddenly much slower to read than usual? If so,
+  // look for the missing index now rather than at the next hourly pass.
+  probe: async (payload: unknown, helpers: JobHelpers): Promise<void> => {
+    await onCluster("probe", payload, helpers, async (clusterId) => {
+      const findings = await probeCluster(clusterId);
+      if (findings.length === 0) return;
+      for (const finding of findings) {
+        helpers.logger.info(
+          `probe: ${finding.database}.${finding.collection} under read pressure — ${finding.reason}`,
+        );
+      }
+      await helpers.addJob("suggest", { clusterId });
+    });
+  },
+  scheduleProbe: async (_payload: unknown, helpers: JobHelpers): Promise<void> => {
+    await dispatchToAllClusters("probe", helpers);
   },
   scheduleCollect: async (_payload: unknown, helpers: JobHelpers): Promise<void> => {
     await dispatchToAllClusters("collect", helpers);

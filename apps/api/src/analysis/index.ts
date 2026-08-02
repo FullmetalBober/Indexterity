@@ -4,6 +4,7 @@ export * from "./client";
 export * from "./cost";
 export * from "./latency";
 export * from "./observe";
+export * from "./pressure";
 export * from "./recommend";
 export * from "./redundancy";
 export * from "./regression";
