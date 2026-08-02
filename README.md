@@ -257,13 +257,19 @@ does with an answer, not whether the answer was fetched. `npm run test:int -w
 7.0 and 8.x** because the three take different paths through the workload
 collector. `npm run test:e2e` builds both apps and drives a real browser
 through them with Playwright — nothing mocked, all the way to postgres and
-mongo.
+mongo. And `deploy/kind-test.sh` installs the Helm chart into a throwaway Kind
+cluster, runs `helm test`, signs up and connects a cluster over cluster DNS,
+and fails if any pod logged a warning.
 
-The layers catch different things, and the top one is not decoration: the
-end-to-end suite is what found that the api's session cookie was being
-percent-encoded a second time on its way through the web server, so every
-request after signing in came back 401. Both sides were correct on their own;
-the defect lived in the hand-off, where only a browser could see it.
+The layers catch different things, and the top ones are not decoration. The
+end-to-end suite found that the api's session cookie was being percent-encoded
+a second time on its way through the web server, so every request after signing
+in came back 401 — both sides correct on their own, the defect in the hand-off.
+The Kind run found that the chart could not install at all: its migration hook
+referenced a ServiceAccount and a Secret that hooks run before, and the api's
+auth signing key was written into the Secret and never handed to a container.
+`helm lint` passed throughout. Rendering valid YAML and being installable are
+different questions.
 
 **House rule: the api and the web app run clean.** No errors and no warnings in
 server logs, build output, or the browser console. A warning is a defect — fix

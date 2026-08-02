@@ -21,7 +21,14 @@ spec:
         app.kubernetes.io/component: migrate
     spec:
       restartPolicy: Never
-      serviceAccountName: {{ include "indexterity.serviceAccountName" . }}
+      # Deliberately NOT the chart's ServiceAccount. This Job is a pre-install
+      # hook, and hooks run before the release's own resources exist — naming it
+      # here made every fresh `helm install` fail with "serviceaccount
+      # indexterity not found" and the Job never got a pod. The account carries
+      # annotations only (it already disables token mounting), so the migration
+      # loses nothing by using the namespace default, and mounts no token
+      # either: it talks to postgres and exits.
+      automountServiceAccountToken: false
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -41,7 +48,10 @@ spec:
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "indexterity.secretName" . }}
+                  # An operator-supplied Secret already exists, so the hook can
+                  # read it; a chart-generated one does not yet, hence the
+                  # hook-scoped copy in migrate-secret.yaml.
+                  name: {{ if .Values.secrets.existingSecret }}{{ .Values.secrets.existingSecret }}{{ else }}{{ include "indexterity.fullname" . }}-migrate{{ end }}
                   key: DATABASE_URL
           resources:
             {{- toYaml .Values.migrations.resources | nindent 12 }}

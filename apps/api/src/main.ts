@@ -4,7 +4,7 @@ import { NestFactory } from "@nestjs/core";
 import { FastifyAdapter, type NestFastifyApplication } from "@nestjs/platform-fastify";
 import { AppModule } from "./app.module";
 import { auth } from "./auth";
-import { positiveEnv } from "./env";
+import { positiveEnv, trustProxySetting } from "./env";
 import { AppExceptionFilter } from "./errors/exception.filter";
 import { embeddedWorkerEnabled, startWorker } from "./jobs/runner";
 
@@ -12,6 +12,9 @@ async function bootstrap(): Promise<void> {
   // Fastify's built-in pino: structured request/response logs with req ids,
   // secrets redacted. LOG_LEVEL=debug for verbose, silent in tests.
   const adapter = new FastifyAdapter({
+    // Without this, every request behind an ingress reports the proxy's address
+    // and the per-IP rate limits become one shared bucket (see env.ts).
+    trustProxy: trustProxySetting(),
     logger: {
       level: process.env.LOG_LEVEL ?? "info",
       redact: ["req.headers.authorization", "req.headers.cookie", 'res.headers["set-cookie"]'],

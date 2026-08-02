@@ -1,4 +1,4 @@
-import { requiredEnv } from "../env";
+import { requiredEnv, trustsProxy } from "../env";
 import { createAuth } from "./auth.config";
 import { assertProductionUrl, useSecureCookies } from "./cookies";
 
@@ -18,4 +18,5 @@ export const auth = createAuth({
   githubClientId: process.env.GITHUB_CLIENT_ID ?? "",
   githubClientSecret: process.env.GITHUB_CLIENT_SECRET ?? "",
   requireEmailVerification: process.env.REQUIRE_EMAIL_VERIFICATION === "true",
+  trustProxy: trustsProxy(),
 });

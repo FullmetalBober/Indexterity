@@ -16,11 +16,23 @@ export function useSecureCookies(baseURL: string, nodeEnv: string | undefined): 
 // A production deploy whose baseURL is not https is almost always a mistake in
 // the ingress wiring, and its symptom — a cookie without Secure — is invisible
 // until someone looks at response headers. Fail the boot instead.
+//
+// Overridable for a cluster with no TLS at all — a Kind or minikube smoke test,
+// where the images still say NODE_ENV=production and there is no ingress to
+// misconfigure. Same shape as the other "unsafe, and sometimes what you meant"
+// switches (ALLOW_PRIVATE_CLUSTER_TARGETS, ALLOW_UNTESTED_MONGO_VERSION):
+// opt-in, named for what it gives up, and never the default.
+export function allowInsecureAuthUrl(): boolean {
+  return process.env.ALLOW_INSECURE_AUTH_URL === "true";
+}
+
 export function assertProductionUrl(baseURL: string, nodeEnv: string | undefined): void {
   if (nodeEnv !== "production") return;
   if (baseURL.startsWith("https://")) return;
+  if (allowInsecureAuthUrl()) return;
   throw new Error(
     `BETTER_AUTH_URL must be https in production (got "${baseURL}"). ` +
-      `Set it to the api's public https origin; the session cookie's Secure flag depends on it.`,
+      `Set it to the api's public https origin; the session cookie's Secure flag depends on it. ` +
+      `Set ALLOW_INSECURE_AUTH_URL=true only for a cluster that terminates no TLS at all.`,
   );
 }

@@ -114,11 +114,24 @@ config:
   # install must leave it false, or any account can probe the internal network.
   # Cloud metadata and other never-a-database ranges stay blocked either way.
   allowPrivateClusterTargets: false
+  # Whether a trusted proxy sits in front of the api. Behind an ingress or a
+  # Service, every request arrives from the proxy, so the per-IP rate limits
+  # collapse into one shared bucket unless the forwarded address is trusted.
+  # Empty = decide from ingress.enabled. "true", a hop count ("1"), or a CIDR
+  # list are all accepted. Leave it off when the api is directly exposed:
+  # trusting a forwarded header then lets any client forge an address.
+  trustProxy: ""
   # Storage price used for the $/month ROI headline.
   storageUsdPerGbMonth: ""
-  # Public origin of the api itself — only needed when the api is exposed and
-  # better-auth must build absolute URLs. Defaults to the in-cluster Service.
+  # The origin better-auth signs sessions for. Defaults to the dashboard's own
+  # public origin (web.publicUrl, or the ingress host), which is where the
+  # session cookie actually lives — the browser never reaches the api directly.
   betterAuthUrl: ""
+  # Allow a non-https auth URL. The api refuses one in production because the
+  # session cookie's Secure flag depends on it, so this is ONLY for a cluster
+  # that terminates no TLS anywhere — a Kind or minikube smoke test. Never set
+  # it on anything a browser reaches over the network.
+  allowInsecureAuthUrl: false
 
 secrets:
   # Bring your own Secret instead of the values below. It must contain:

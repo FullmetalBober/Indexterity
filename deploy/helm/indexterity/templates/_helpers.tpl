@@ -136,3 +136,40 @@ app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+better-auth's baseURL. Defaults to the dashboard's own public origin, not the
+in-cluster api Service: that Service is http, and the api refuses to boot on an
+http baseURL in production because the session cookie's Secure flag rides on it
+— a chart that defaulted to it could never install. The cookie ends up on the
+web origin anyway (the dashboard proxies auth), so that is the honest value.
+*/}}
+{{- define "indexterity.betterAuthUrl" -}}
+{{- default (include "indexterity.webOrigin" .) .Values.config.betterAuthUrl -}}
+{{- end -}}
+
+{{/*
+Fail at render time rather than in CrashLoopBackOff. A non-https auth URL means
+either the ingress is not wired for TLS or this is a cluster with no TLS at all;
+the second is legitimate for a local smoke test and has to be said out loud.
+*/}}
+{{- define "indexterity.validateAuthUrl" -}}
+{{- $url := include "indexterity.betterAuthUrl" . -}}
+{{- if not (hasPrefix "https://" $url) -}}
+{{- if not .Values.config.allowInsecureAuthUrl -}}
+{{- fail (printf "the auth base URL is %q, and the api refuses a non-https one in production because the session cookie's Secure flag depends on it. Set web.publicUrl (or config.betterAuthUrl) to your https origin, or set config.allowInsecureAuthUrl=true for a cluster that terminates no TLS at all." $url) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+TRUST_PROXY. Explicit value wins; otherwise an ingress in front means the
+forwarded address is the real client and the rate limiters should use it.
+*/}}
+{{- define "indexterity.trustProxy" -}}
+{{- if .Values.config.trustProxy -}}
+{{- .Values.config.trustProxy -}}
+{{- else -}}
+{{- ternary "true" "false" .Values.ingress.enabled -}}
+{{- end -}}
+{{- end -}}

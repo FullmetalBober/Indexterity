@@ -19,6 +19,8 @@ export interface AuthConfig {
   // When true, unverified accounts cannot sign in (production posture). Off by
   // default so dev/test environments work without SMTP.
   readonly requireEmailVerification: boolean;
+  // A trusted proxy sits in front, so forwarded client addresses are real.
+  readonly trustProxy: boolean;
 }
 
 // GitHub OAuth + email/password, backed by the Drizzle/Postgres control-plane DB.
@@ -31,7 +33,13 @@ export function createAuth(config: AuthConfig) {
     trustedOrigins: [...config.trustedOrigins],
     // SameSite=Lax (better-auth's default) is what stops cross-site mutations;
     // this is what keeps the cookie off plaintext.
-    advanced: { useSecureCookies: config.secureCookies },
+    advanced: {
+      useSecureCookies: config.secureCookies,
+      // Only when the deployment says a proxy is in front. Reading a forwarded
+      // header otherwise lets a client pick its own address and never reach a
+      // rate limit.
+      ...(config.trustProxy ? { ipAddress: { ipAddressHeaders: ["x-forwarded-for"] } } : {}),
+    },
     databaseHooks: {
       user: {
         create: {
@@ -71,12 +79,19 @@ export function createAuth(config: AuthConfig) {
         );
       },
     },
-    socialProviders: {
-      github: {
-        clientId: config.githubClientId,
-        clientSecret: config.githubClientSecret,
-      },
-    },
+    // Registered only when configured. better-auth warns on every boot about a
+    // provider with empty credentials, and a warning nobody can act on trains
+    // people to ignore the log.
+    ...(config.githubClientId && config.githubClientSecret
+      ? {
+          socialProviders: {
+            github: {
+              clientId: config.githubClientId,
+              clientSecret: config.githubClientSecret,
+            },
+          },
+        }
+      : {}),
   });
 }
 

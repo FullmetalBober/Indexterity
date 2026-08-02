@@ -30,3 +30,30 @@ export function positiveEnv(name: string, fallback: number): number {
   const value = Number(process.env[name]);
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
+
+// Fastify's trustProxy, from the environment.
+//
+// Behind an ingress or a Service every request arrives from the proxy, so
+// `request.ip` is the proxy's address and both rate limiters — Fastify's and
+// better-auth's — collapse from per-client budgets into one global bucket. One
+// noisy client then exhausts the auth budget for everyone, and a brute-force
+// attempt is indistinguishable from ordinary traffic.
+//
+// Off by default and opt-in on purpose: trusting X-Forwarded-For while directly
+// exposed is worse than not resolving the address at all, because then any
+// client can forge a fresh IP per request and never hit a limit.
+//
+// Accepts "true", a hop count ("1" — trust the last N proxies), or a CIDR list
+// ("10.0.0.0/8,192.168.0.0/16"). Anything else means do not trust.
+export function trustProxySetting(): boolean | number | string {
+  const raw = process.env.TRUST_PROXY?.trim();
+  if (raw === undefined || raw === "" || raw === "false") return false;
+  if (raw === "true") return true;
+  const hops = Number(raw);
+  if (Number.isInteger(hops) && hops > 0) return hops;
+  return raw;
+}
+
+export function trustsProxy(): boolean {
+  return trustProxySetting() !== false;
+}

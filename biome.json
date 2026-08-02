@@ -1,6 +1,10 @@
 {
   "$schema": "https://biomejs.dev/schemas/2.5.5/schema.json",
-  "vcs": { "enabled": false, "clientKind": "git", "useIgnoreFile": true },
+  "vcs": {
+    "enabled": false,
+    "clientKind": "git",
+    "useIgnoreFile": true
+  },
   "files": {
     "ignoreUnknown": true,
     "includes": [
@@ -13,7 +17,10 @@
       "!**/graphify-out",
       "!**/drizzle",
       "!**/routeTree.gen.ts",
-      "!**/*.css"
+      "!**/*.css",
+      "!**/test-results",
+      "!**/playwright-report",
+      "!**/blob-report"
     ]
   },
   "formatter": {
@@ -23,14 +30,21 @@
     "lineWidth": 100
   },
   "javascript": {
-    "parser": { "unsafeParameterDecoratorsEnabled": true },
-    "formatter": { "quoteStyle": "double", "semicolons": "always" }
+    "parser": {
+      "unsafeParameterDecoratorsEnabled": true
+    },
+    "formatter": {
+      "quoteStyle": "double",
+      "semicolons": "always"
+    }
   },
   "linter": {
     "enabled": true,
     "rules": {
       "preset": "recommended",
-      "suspicious": { "noExplicitAny": "error" },
+      "suspicious": {
+        "noExplicitAny": "error"
+      },
       "style": {
         "noNonNullAssertion": "error",
         "useImportType": "error",
@@ -40,14 +54,22 @@
   },
   "assist": {
     "enabled": true,
-    "actions": { "source": { "organizeImports": "on" } }
+    "actions": {
+      "source": {
+        "organizeImports": "on"
+      }
+    }
   },
   "overrides": [
     {
-      "includes": ["apps/api/**"],
+      "includes": [
+        "apps/api/**"
+      ],
       "linter": {
         "rules": {
-          "style": { "useImportType": "off" }
+          "style": {
+            "useImportType": "off"
+          }
         }
       }
     }

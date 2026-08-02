@@ -111,3 +111,21 @@ jobs:
           name: playwright-report
           path: apps/web/playwright-report/
           retention-days: 7
+
+  # Installs the chart into a throwaway Kind cluster. On main only — it builds
+  # both images, so per-PR would cost more than it catches. `helm lint` renders
+  # YAML; this one finds out whether the release actually installs, which is a
+  # different question and the one that kept being answered wrong.
+  chart:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: indexterity
+          wait: 120s
+      - uses: azure/setup-helm@v4
+      - run: deploy/kind-test.sh
+        env:
+          CTR: docker

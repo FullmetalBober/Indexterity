@@ -1,3 +1,4 @@
+{{- include "indexterity.validateAuthUrl" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -49,8 +50,22 @@ spec:
             # functions, which send this origin — better-auth must trust it.
             - name: WEB_ORIGIN
               value: {{ include "indexterity.webOrigin" . | quote }}
+            # Only the api serves auth, so the signing key lives here rather
+            # than in the shared core env. It was written into the Secret and
+            # never referenced by any container — the api could not boot.
+            - name: BETTER_AUTH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "indexterity.secretName" . }}
+                  key: BETTER_AUTH_SECRET
             - name: BETTER_AUTH_URL
-              value: {{ default (include "indexterity.internalApiUrl" .) .Values.config.betterAuthUrl | quote }}
+              value: {{ include "indexterity.betterAuthUrl" . | quote }}
+            {{- if .Values.config.allowInsecureAuthUrl }}
+            - name: ALLOW_INSECURE_AUTH_URL
+              value: "true"
+            {{- end }}
+            - name: TRUST_PROXY
+              value: {{ include "indexterity.trustProxy" . | quote }}
             - name: REQUIRE_EMAIL_VERIFICATION
               value: {{ .Values.config.requireEmailVerification | quote }}
             - name: SIGNUP_MODE
