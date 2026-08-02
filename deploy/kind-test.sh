@@ -57,7 +57,17 @@ cleanup() {
 trap cleanup EXIT
 
 step "creating kind cluster"
-kind get clusters 2>/dev/null | grep -qx "$CLUSTER" || kind create cluster --name "$CLUSTER" --wait 120s
+# Asking the container engine, not `kind get clusters`: kind 0.32 lists clusters
+# with --format '{{index .Labels "..."}}', and podman 6 no longer exposes
+# .Labels as a map to templates, so listing fails with "cannot index
+# slice/array with type string". create/delete/load are unaffected. Suppressing
+# that error and reading it as "no such cluster" would make --keep followed by a
+# re-run try to create one that already exists.
+if [ -z "$($CTR ps -a --filter "label=io.x-k8s.kind.cluster=$CLUSTER" -q 2>/dev/null)" ]; then
+  kind create cluster --name "$CLUSTER" --wait 120s
+else
+  echo "reusing existing cluster $CLUSTER"
+fi
 kubectl config use-context "kind-$CLUSTER" >/dev/null
 
 step "building images"
