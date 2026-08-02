@@ -12,6 +12,23 @@
 # Usage:   deploy/kind-test.sh [--keep]
 set -euo pipefail
 
+# podman's network backend shells out to `nft` (nftables). Run this from inside
+# a Node project and node_modules/.bin is on PATH — where @vercel/nft installs a
+# binary of the same name. netavark then reads JavaScript where it expects
+# nftables JSON and the cluster never starts:
+#   Error: netavark: nftables error: got invalid json: EOF at line 1 column 0
+# Nothing here needs those entries, so drop them rather than leave a trap for
+# whoever runs this next.
+_clean_path=""
+IFS=: read -ra _path_parts <<< "$PATH"
+for _part in "${_path_parts[@]}"; do
+  case "$_part" in */node_modules/.bin) continue ;; esac
+  _clean_path="${_clean_path:+$_clean_path:}$_part"
+done
+PATH="$_clean_path"
+export PATH
+unset _clean_path _path_parts _part
+
 CLUSTER=${CLUSTER:-indexterity}
 NS=${NS:-indexterity}
 TAG=${TAG:-0.1.0}
