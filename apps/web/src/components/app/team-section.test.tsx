@@ -60,7 +60,7 @@ beforeEach(() => {
 
 describe("TeamSection", () => {
   it("distinguishes members from people who have only been invited", () => {
-    renderInApp(<TeamSection org={org} onChanged={vi.fn()} />);
+    renderInApp(<TeamSection org={org} onChanged={vi.fn()} onActiveOrgChanged={vi.fn()} />);
     expect(screen.getByText("(owner@acme.test)")).toBeInTheDocument();
     expect(screen.getByText("pending@acme.test")).toBeInTheDocument();
     expect(screen.getByText("invited · member")).toBeInTheDocument();
@@ -70,7 +70,7 @@ describe("TeamSection", () => {
   // one they already have would be a no-op the reader could not diagnose.
   it("offers to promote a member and demote an owner", async () => {
     const user = userEvent.setup();
-    renderInApp(<TeamSection org={org} onChanged={vi.fn()} />);
+    renderInApp(<TeamSection org={org} onChanged={vi.fn()} onActiveOrgChanged={vi.fn()} />);
 
     await user.click(within(row("member@acme.test")).getByRole("button", { name: "Make owner" }));
     expect(setMemberRole).toHaveBeenCalledWith({ data: { userId: "u2", role: "owner" } });
@@ -84,7 +84,7 @@ describe("TeamSection", () => {
   it("shows the api's reason when a role change is refused", async () => {
     setMemberRole.mockResolvedValue({ ok: false, message: "an org must keep one owner" });
     const user = userEvent.setup();
-    renderInApp(<TeamSection org={org} onChanged={vi.fn()} />);
+    renderInApp(<TeamSection org={org} onChanged={vi.fn()} onActiveOrgChanged={vi.fn()} />);
 
     await user.click(within(row("owner@acme.test")).getByRole("button", { name: "Make member" }));
     expect(toastError).toHaveBeenCalledWith("an org must keep one owner");
@@ -92,7 +92,7 @@ describe("TeamSection", () => {
 
   it("asks before removing someone, and names them", async () => {
     const user = userEvent.setup();
-    renderInApp(<TeamSection org={org} onChanged={vi.fn()} />);
+    renderInApp(<TeamSection org={org} onChanged={vi.fn()} onActiveOrgChanged={vi.fn()} />);
 
     await user.click(within(row("member@acme.test")).getByRole("button", { name: "Remove" }));
     expect(await screen.findByText("Remove member@acme.test?")).toBeInTheDocument();
@@ -104,7 +104,7 @@ describe("TeamSection", () => {
 
   it("asks before leaving the org", async () => {
     const user = userEvent.setup();
-    renderInApp(<TeamSection org={org} onChanged={vi.fn()} />);
+    renderInApp(<TeamSection org={org} onChanged={vi.fn()} onActiveOrgChanged={vi.fn()} />);
 
     await user.click(screen.getByRole("button", { name: "Leave org" }));
     expect(await screen.findByText("Leave Acme?")).toBeInTheDocument();
@@ -117,7 +117,7 @@ describe("TeamSection", () => {
   // The token is shown once and never again — losing it means re-inviting.
   it("shows the invite token so it can be passed on", async () => {
     const user = userEvent.setup();
-    renderInApp(<TeamSection org={org} onChanged={vi.fn()} />);
+    renderInApp(<TeamSection org={org} onChanged={vi.fn()} onActiveOrgChanged={vi.fn()} />);
 
     await user.type(screen.getByLabelText("Invite a teammate"), "new@acme.test");
     await user.click(screen.getByRole("button", { name: "Invite" }));
@@ -129,20 +129,68 @@ describe("TeamSection", () => {
   it("reports why an invite token was not accepted", async () => {
     acceptInvite.mockResolvedValue({ ok: false, message: "invite expired" });
     const user = userEvent.setup();
-    const onChanged = vi.fn();
-    renderInApp(<TeamSection org={org} onChanged={onChanged} />);
+    const onActiveOrgChanged = vi.fn();
+    renderInApp(
+      <TeamSection org={org} onChanged={vi.fn()} onActiveOrgChanged={onActiveOrgChanged} />,
+    );
 
     await user.type(screen.getByLabelText("Have an invite token?"), "old_token");
     await user.click(screen.getByRole("button", { name: "Join org" }));
 
     expect(await screen.findByText("invite expired")).toBeInTheDocument();
-    // Nothing changed, so the page must not be told to reload as if it had.
+    // Still in the same org, so nothing may be told to throw its cache away.
+    expect(onActiveOrgChanged).not.toHaveBeenCalled();
+  });
+
+  // Joining lands the caller in a different org, so the answer to every other
+  // question on every other page changed too — not just this member list.
+  it("treats joining another org as more than an org change", async () => {
+    const user = userEvent.setup();
+    const onChanged = vi.fn();
+    const onActiveOrgChanged = vi.fn();
+    renderInApp(
+      <TeamSection org={org} onChanged={onChanged} onActiveOrgChanged={onActiveOrgChanged} />,
+    );
+
+    await user.type(screen.getByLabelText("Have an invite token?"), "good_token");
+    await user.click(screen.getByRole("button", { name: "Join org" }));
+
+    expect(await screen.findByText("joined Acme")).toBeInTheDocument();
+    expect(onActiveOrgChanged).toHaveBeenCalled();
+    expect(onChanged).not.toHaveBeenCalled();
+  });
+
+  it("does the same on the way out", async () => {
+    const user = userEvent.setup();
+    const onActiveOrgChanged = vi.fn();
+    renderInApp(
+      <TeamSection org={org} onChanged={vi.fn()} onActiveOrgChanged={onActiveOrgChanged} />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Leave org" }));
+    await user.click(await screen.findByRole("button", { name: "Leave" }));
+
+    expect(onActiveOrgChanged).toHaveBeenCalled();
+  });
+
+  // An invite that was refused used to leave the reader looking at a form that
+  // had visibly done nothing at all.
+  it("says so when an invite could not be created", async () => {
+    createInvite.mockResolvedValue({ token: null });
+    const user = userEvent.setup();
+    const onChanged = vi.fn();
+    renderInApp(<TeamSection org={org} onChanged={onChanged} onActiveOrgChanged={vi.fn()} />);
+
+    await user.type(screen.getByLabelText("Invite a teammate"), "new@acme.test");
+    await user.click(screen.getByRole("button", { name: "Invite" }));
+
+    expect(toastError).toHaveBeenCalledWith(expect.stringContaining("seat limit"));
     expect(onChanged).not.toHaveBeenCalled();
   });
 
   it("renames the org from the current name, not a stale draft", async () => {
     const user = userEvent.setup();
-    renderInApp(<TeamSection org={org} onChanged={vi.fn()} />);
+    renderInApp(<TeamSection org={org} onChanged={vi.fn()} onActiveOrgChanged={vi.fn()} />);
 
     await user.click(screen.getByRole("button", { name: "Rename" }));
     const field = screen.getByLabelText("Organization name");
@@ -159,7 +207,7 @@ describe("TeamSection", () => {
   it("says who can rename when the api refuses", async () => {
     renameOrg.mockResolvedValue({ ok: false });
     const user = userEvent.setup();
-    renderInApp(<TeamSection org={org} onChanged={vi.fn()} />);
+    renderInApp(<TeamSection org={org} onChanged={vi.fn()} onActiveOrgChanged={vi.fn()} />);
 
     await user.click(screen.getByRole("button", { name: "Rename" }));
     await user.click(screen.getByRole("button", { name: "Save" }));
@@ -169,7 +217,7 @@ describe("TeamSection", () => {
 
   // A limit nobody can see until they hit it turns into a support email.
   it("shows the plan and what is left of it", () => {
-    renderInApp(<TeamSection org={org} onChanged={vi.fn()} />);
+    renderInApp(<TeamSection org={org} onChanged={vi.fn()} onActiveOrgChanged={vi.fn()} />);
     expect(screen.getByText("FREE")).toBeInTheDocument();
     expect(screen.getByText(/0 \/ 1 clusters/)).toBeInTheDocument();
     expect(screen.getByText(/3 \/ 3 seats/)).toBeInTheDocument();
@@ -190,6 +238,7 @@ describe("TeamSection", () => {
           },
         }}
         onChanged={vi.fn()}
+        onActiveOrgChanged={vi.fn()}
       />,
     );
     expect(screen.getByText(/0 clusters/)).toBeInTheDocument();

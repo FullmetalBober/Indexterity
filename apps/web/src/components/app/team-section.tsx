@@ -1,3 +1,4 @@
+import { useMutation } from "@tanstack/react-query";
 import { useState } from "react";
 import { toast } from "sonner";
 import { ConfirmButton } from "~/components/confirm-button";
@@ -37,7 +38,20 @@ function usage(used: number, limit: number | null): string {
   return limit === null ? String(used) : `${used} / ${limit}`;
 }
 
-export function TeamSection({ org, onChanged }: { org: TeamOrg; onChanged: () => void }) {
+export function TeamSection({
+  org,
+  onChanged,
+  onActiveOrgChanged,
+}: {
+  org: TeamOrg;
+  // Something inside this org moved — members, invites, its name. One key.
+  onChanged: () => void;
+  // The caller now belongs to a DIFFERENT org, which is a different question
+  // for everything on every page: leaving switches you out of this one, and
+  // accepting an invite can switch you into another. Nothing cached survives
+  // that, so it is not the same callback.
+  onActiveOrgChanged: () => void;
+}) {
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteToken, setInviteToken] = useState<string | null>(null);
   const [acceptToken, setAcceptToken] = useState("");
@@ -45,54 +59,89 @@ export function TeamSection({ org, onChanged }: { org: TeamOrg; onChanged: () =>
   const [renaming, setRenaming] = useState(false);
   const [orgName, setOrgName] = useState(org.name);
 
-  async function onInvite() {
-    const result = await createInvite({ data: inviteEmail });
-    setInviteToken(result.token);
-    setInviteEmail("");
-    onChanged();
-  }
+  const invite = useMutation({
+    mutationFn: (email: string) => createInvite({ data: email }),
+    onSuccess: (result) => {
+      setInviteToken(result.token);
+      if (result.token === null) {
+        // Used to leave the reader looking at a form that had visibly done
+        // nothing: no token, no error, no way to tell which.
+        toast.error("Invite not created — you may be at your plan's seat limit");
+        return;
+      }
+      setInviteEmail("");
+      onChanged();
+    },
+    onError: () => toast.error("Invite not created"),
+  });
 
-  async function onAccept() {
-    const result = await acceptInvite({ data: acceptToken });
-    setAcceptMessage(result.message);
-    setAcceptToken("");
-    if (result.ok) onChanged();
-  }
+  const accept = useMutation({
+    mutationFn: (token: string) => acceptInvite({ data: token }),
+    onSuccess: (result) => {
+      setAcceptMessage(result.message);
+      setAcceptToken("");
+      if (result.ok) onActiveOrgChanged();
+    },
+    onError: () => setAcceptMessage("could not accept the invite"),
+  });
 
-  async function onRename() {
-    const result = await renameOrg({ data: orgName }).catch(() => ({ ok: false }));
-    if (result.ok) toast.success("Org renamed");
-    else toast.error("Rename failed (owner only)");
-    setRenaming(false);
-    onChanged();
-  }
+  // Each of the four below used to end in the caller's router.invalidate(),
+  // which re-ran every loader on the route to redraw one list. They also fired
+  // it whether or not the api had agreed; a refused rename has nothing to
+  // refetch, and the same toast then reported both.
+  const rename = useMutation({
+    mutationFn: (name: string) => renameOrg({ data: name }),
+    onSuccess: (result) => {
+      if (!result.ok) {
+        toast.error("Rename failed (owner only)");
+        return;
+      }
+      toast.success("Org renamed");
+      setRenaming(false);
+      onChanged();
+    },
+    onError: () => toast.error("Rename failed (owner only)"),
+  });
 
-  async function onSetRole(userId: string, role: "member" | "owner") {
-    const result = await setMemberRole({ data: { userId, role } }).catch(() => ({
-      ok: false,
-      message: "failed",
-    }));
-    if (result.ok) toast.success(`Role changed to ${role}`);
-    else toast.error(result.message ?? "Role change failed");
-    onChanged();
-  }
+  const setRole = useMutation({
+    mutationFn: (change: { userId: string; role: "member" | "owner" }) =>
+      setMemberRole({ data: change }),
+    onSuccess: (result, change) => {
+      if (!result.ok) {
+        toast.error(result.message ?? "Role change failed");
+        return;
+      }
+      toast.success(`Role changed to ${change.role}`);
+      onChanged();
+    },
+    onError: () => toast.error("Role change failed"),
+  });
 
-  async function onRemove(userId: string) {
-    const result = await removeMember({ data: userId }).catch(() => ({
-      ok: false,
-      message: "failed",
-    }));
-    if (result.ok) toast.success("Member removed");
-    else toast.error(result.message ?? "Remove failed");
-    onChanged();
-  }
+  const remove = useMutation({
+    mutationFn: (userId: string) => removeMember({ data: userId }),
+    onSuccess: (result) => {
+      if (!result.ok) {
+        toast.error(result.message ?? "Remove failed");
+        return;
+      }
+      toast.success("Member removed");
+      onChanged();
+    },
+    onError: () => toast.error("Remove failed"),
+  });
 
-  async function onLeave() {
-    const result = await leaveOrg({ data: {} }).catch(() => ({ ok: false, message: "failed" }));
-    if (result.ok) toast.success("Left the org");
-    else toast.error(result.message ?? "Leave failed");
-    onChanged();
-  }
+  const leave = useMutation({
+    mutationFn: () => leaveOrg({ data: {} }),
+    onSuccess: (result) => {
+      if (!result.ok) {
+        toast.error(result.message ?? "Leave failed");
+        return;
+      }
+      toast.success("Left the org");
+      onActiveOrgChanged();
+    },
+    onError: () => toast.error("Leave failed"),
+  });
 
   return (
     <Card className="mt-8">
@@ -112,7 +161,7 @@ export function TeamSection({ org, onChanged }: { org: TeamOrg; onChanged: () =>
               className="flex gap-1"
               onSubmit={(event) => {
                 event.preventDefault();
-                void onRename();
+                rename.mutate(orgName);
               }}
             >
               <Input
@@ -147,7 +196,7 @@ export function TeamSection({ org, onChanged }: { org: TeamOrg; onChanged: () =>
             title={`Leave ${org.name}?`}
             description="You lose access to its clusters. The last owner must transfer ownership first."
             confirmLabel="Leave"
-            onConfirm={() => void onLeave()}
+            onConfirm={() => leave.mutate()}
           />
         </div>
       </CardHeader>
@@ -163,7 +212,10 @@ export function TeamSection({ org, onChanged }: { org: TeamOrg; onChanged: () =>
                 variant="outline"
                 size="sm"
                 onClick={() =>
-                  void onSetRole(member.userId, member.role === "owner" ? "member" : "owner")
+                  setRole.mutate({
+                    userId: member.userId,
+                    role: member.role === "owner" ? "member" : "owner",
+                  })
                 }
               >
                 {member.role === "owner" ? "Make member" : "Make owner"}
@@ -178,7 +230,7 @@ export function TeamSection({ org, onChanged }: { org: TeamOrg; onChanged: () =>
                 title={`Remove ${member.email}?`}
                 description={`They lose access to every cluster in ${org.name}. Their own account stays, in a fresh empty organization.`}
                 confirmLabel="Remove"
-                onConfirm={() => void onRemove(member.userId)}
+                onConfirm={() => remove.mutate(member.userId)}
               />
             </li>
           ))}
@@ -207,7 +259,9 @@ export function TeamSection({ org, onChanged }: { org: TeamOrg; onChanged: () =>
               onChange={(event) => setInviteEmail(event.target.value)}
             />
           </div>
-          <Button onClick={() => void onInvite()}>Invite</Button>
+          <Button onClick={() => invite.mutate(inviteEmail)} disabled={invite.isPending}>
+            Invite
+          </Button>
         </div>
         {inviteToken !== null ? (
           <Alert>
@@ -229,7 +283,11 @@ export function TeamSection({ org, onChanged }: { org: TeamOrg; onChanged: () =>
               onChange={(event) => setAcceptToken(event.target.value)}
             />
           </div>
-          <Button variant="outline" onClick={() => void onAccept()}>
+          <Button
+            variant="outline"
+            onClick={() => accept.mutate(acceptToken)}
+            disabled={accept.isPending}
+          >
             Join org
           </Button>
         </div>

@@ -1,3 +1,4 @@
+import { useMutation } from "@tanstack/react-query";
 import { ArrowRightIcon } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
@@ -29,27 +30,35 @@ export function PolicySection({ policy, onSaved }: { policy: PolicyView; onSaved
   const [windowStart, setWindowStart] = useState(policy.changeWindowStartHour);
   const [windowEnd, setWindowEnd] = useState(policy.changeWindowEndHour);
 
-  async function onSave() {
-    const result = await savePolicy({
-      data: {
-        clusterId: policy.clusterId,
-        workloadAnalysis,
-        instantCreate,
-        observeWindowDays: observeDays,
-        autoApplyScore: autoScore,
-        // Half-set windows are meaningless — persist only a complete pair.
-        changeWindowStartHour: windowEnd === null ? null : windowStart,
-        changeWindowEndHour: windowStart === null ? null : windowEnd,
-      },
-    }).catch(() => ({ ok: false, message: "policy not saved" }));
-    if (result.ok) {
+  // onSaved refetches the policy key, which the dashboard owns: it is keyed on
+  // the SELECTED cluster, and "none selected" is a different key from the id
+  // this form happens to be showing. Building it here would write to one entry
+  // and read from another.
+  const save = useMutation({
+    mutationFn: () =>
+      savePolicy({
+        data: {
+          clusterId: policy.clusterId,
+          workloadAnalysis,
+          instantCreate,
+          observeWindowDays: observeDays,
+          autoApplyScore: autoScore,
+          // Half-set windows are meaningless — persist only a complete pair.
+          changeWindowStartHour: windowEnd === null ? null : windowStart,
+          changeWindowEndHour: windowStart === null ? null : windowEnd,
+        },
+      }),
+    onSuccess: (result) => {
+      if (!result.ok) {
+        // The api's own reason — a plan limit reads nothing like a role problem.
+        toast.error(result.message ?? "policy not saved");
+        return;
+      }
       toast.success("Policy saved");
       onSaved();
-    } else {
-      // The api's own reason — a plan limit reads nothing like a role problem.
-      toast.error(result.message ?? "policy not saved");
-    }
-  }
+    },
+    onError: () => toast.error("policy not saved"),
+  });
 
   const toggles: Array<{
     id: string;
@@ -174,7 +183,9 @@ export function PolicySection({ policy, onSaved }: { policy: PolicyView; onSaved
               </p>
             ) : null}
           </div>
-          <Button onClick={() => void onSave()}>Save policy</Button>
+          <Button onClick={() => save.mutate()} disabled={save.isPending}>
+            Save policy
+          </Button>
         </div>
         <p className="text-muted-foreground text-xs">
           Elective changes (hide, build, drop) run only inside the change window; safety rollbacks
