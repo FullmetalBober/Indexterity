@@ -4,7 +4,8 @@
 // Everything here is about ONE cluster. The shell around it — which cluster,
 // which org, sign out — belongs to the /app layout, and the org page is its
 // own route, so this loader fetches only what this page draws.
-import { createFileRoute, useRouter } from "@tanstack/react-router";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { createFileRoute } from "@tanstack/react-router";
 import { toast } from "sonner";
 import { ConnectClusterForm } from "~/components/app/connect-cluster-form";
 import { badgeVariant, DeltaCell, dropsOn, fmtBytes, fmtMicros } from "~/components/app/format";
@@ -23,11 +24,14 @@ import {
 } from "~/components/ui/table";
 import {
   approveRecommendation,
-  loadClusterDashboard,
+  loadClusterPolicy,
+  loadPipeline,
+  loadTelemetry,
   rollbackRecommendation,
   unhideRecommendation,
 } from "~/lib/app-server";
 import { formatTimestamp, useMounted } from "~/lib/hydration";
+import { queryKeys } from "~/lib/query";
 import { LineChart, SERIES_PALETTE } from "../components/latency-chart";
 import { Route as AppRoute } from "./app";
 
@@ -35,21 +39,112 @@ export const Route = createFileRoute("/app/")({
   loaderDeps: ({ search }: { search: { cluster?: string } }) => ({
     cluster: search.cluster ?? null,
   }),
-  // Which cluster "none selected" means is resolved server-side, in the same
-  // place the layout resolves it, so the two cannot drift apart.
-  loader: ({ deps }) => loadClusterDashboard({ data: deps.cluster }),
+  // The loader writes through the router's query client, so the server render
+  // and the browser cache are one entry. It still fetches on the server, so
+  // first paint does not wait for the browser to boot and ask again.
+  //
+  // ensureQueryData refetches whatever is stale, and staleTime is zero, so a
+  // router.invalidate() — connect a cluster, switch one — refreshes all three.
+  // A mutation touches only its own key.
+  loader: async ({ deps, context }) => {
+    const id = deps.cluster;
+    await Promise.all([
+      context.queryClient.ensureQueryData({
+        queryKey: queryKeys.pipeline(id),
+        queryFn: () => loadPipeline({ data: id }),
+      }),
+      context.queryClient.ensureQueryData({
+        queryKey: queryKeys.telemetry(id),
+        queryFn: () => loadTelemetry({ data: id }),
+      }),
+      context.queryClient.ensureQueryData({
+        queryKey: queryKeys.policy(id),
+        queryFn: () => loadClusterPolicy({ data: id }),
+      }),
+    ]);
+    return { clusterId: id };
+  },
   head: () => ({ meta: [{ title: "Dashboard — Indexterity" }] }),
   component: Dashboard,
 });
 
+// Only reached if the cache were somehow empty; the loader fills it first.
+const EMPTY = {
+  pipeline: {
+    recommendations: [],
+    roi: { freedBytes: 0, indexesDropped: 0, estimatedMonthlyUsd: 0, attribution: [] },
+    activity: [],
+  },
+  telemetry: {
+    latency: { collections: [] },
+    latencySeries: { collections: [] },
+    collectionStats: { collections: [] },
+  },
+  policy: { policy: null },
+};
+
 function Dashboard() {
   const shell = AppRoute.useLoaderData();
-  const data = Route.useLoaderData();
-  const router = useRouter();
+  const { clusterId: id } = Route.useLoaderData();
+  const queryClient = useQueryClient();
   const mounted = useMounted();
+
+  // The loader already put all three in the cache, so these resolve without
+  // suspending. They read rather than fetch.
+  // useQuery, not useSuspenseQuery: the loader has already put all three in the
+  // cache so there is nothing to wait for, and suspending here would let React
+  // hold the previous tree during a navigation that is unmounting this page.
+  const { data: pipeline = EMPTY.pipeline } = useQuery({
+    queryKey: queryKeys.pipeline(id),
+    queryFn: () => loadPipeline({ data: id }),
+  });
+  const { data: telemetry = EMPTY.telemetry } = useQuery({
+    queryKey: queryKeys.telemetry(id),
+    queryFn: () => loadTelemetry({ data: id }),
+  });
+  const { data: policyData = EMPTY.policy } = useQuery({
+    queryKey: queryKeys.policy(id),
+    queryFn: () => loadClusterPolicy({ data: id }),
+  });
+
+  const refetchPipeline = () => queryClient.invalidateQueries({ queryKey: queryKeys.pipeline(id) });
+
+  // Each of these used to end in router.invalidate(), which re-ran every
+  // loader on the route to redraw one table.
+  const approve = useMutation({
+    mutationFn: (recId: string) => approveRecommendation({ data: recId }),
+    onSuccess: (result) => {
+      if (result.ok) toast.success("Approved — enters the pipeline on the next tick");
+      else toast.error("Approve failed — are you an owner, and is the API up?");
+      return refetchPipeline();
+    },
+    onError: () => toast.error("Approve failed — are you an owner, and is the API up?"),
+  });
+  const unhide = useMutation({
+    mutationFn: (recId: string) => unhideRecommendation({ data: recId }),
+    onSuccess: (result) => {
+      if (result.ok)
+        toast.success("Index un-hidden — this drop won't be proposed again for 90 days");
+      else toast.error("Could not un-hide — the cluster may be unreachable or read-only");
+      return refetchPipeline();
+    },
+    onError: () => toast.error("Could not un-hide — the cluster may be unreachable or read-only"),
+  });
+  const undo = useMutation({
+    mutationFn: (recId: string) => rollbackRecommendation({ data: recId }),
+    onSuccess: (result) => {
+      if (result.ok) toast.success("Undo complete — the index was rebuilt");
+      else toast.error("Undo failed — the cluster may be unreachable or read-only");
+      return refetchPipeline();
+    },
+    onError: () => toast.error("Undo failed — the cluster may be unreachable or read-only"),
+  });
+
   if (!shell.authed) return null;
 
-  const { recommendations, roi, latency, latencySeries, collectionStats, policy, activity } = data;
+  const { recommendations, roi, activity } = pipeline;
+  const { latency, latencySeries, collectionStats } = telemetry;
+  const { policy } = policyData;
   const proposed = recommendations.filter((rec) => rec.state === "PROPOSED");
   const totalSaved = proposed.reduce((sum, rec) => sum + rec.estimatedBytesSaved, 0);
 
@@ -69,27 +164,6 @@ function Dashboard() {
     color: SERIES_PALETTE[i] ?? "#2a78d6",
     points: coll.points.map((point) => ({ t: point.capturedAt, v: point.writeMicros })),
   }));
-
-  async function onApprove(id: string) {
-    const result = await approveRecommendation({ data: id }).catch(() => ({ ok: false }));
-    if (result.ok) toast.success("Approved — enters the pipeline on the next tick");
-    else toast.error("Approve failed — are you an owner, and is the API up?");
-    await router.invalidate();
-  }
-
-  async function onUnhide(id: string) {
-    const result = await unhideRecommendation({ data: id }).catch(() => ({ ok: false }));
-    if (result.ok) toast.success("Index un-hidden — this drop won't be proposed again for 90 days");
-    else toast.error("Could not un-hide — the cluster may be unreachable or read-only");
-    await router.invalidate();
-  }
-
-  async function onUndo(id: string) {
-    const result = await rollbackRecommendation({ data: id }).catch(() => ({ ok: false }));
-    if (result.ok) toast.success("Undo complete — the index was rebuilt");
-    else toast.error("Undo failed — the cluster may be unreachable or read-only");
-    await router.invalidate();
-  }
 
   // Merge the index footprint (latest snapshot batch) with the windowed
   // latency summary, keyed by namespace — one row per collection.
@@ -217,7 +291,7 @@ function Dashboard() {
                       </>
                     }
                     confirmLabel="Approve"
-                    onConfirm={() => void onApprove(rec.id)}
+                    onConfirm={() => approve.mutate(rec.id)}
                   />
                 ) : rec.state === "DROPPED" ? (
                   <ConfirmButton
@@ -229,7 +303,7 @@ function Dashboard() {
                     title={`Rebuild ${rec.indexName}?`}
                     description="The index is recreated from the spec recorded at drop time, and the ROI headline is corrected back down."
                     confirmLabel="Rebuild"
-                    onConfirm={() => void onUndo(rec.id)}
+                    onConfirm={() => undo.mutate(rec.id)}
                   />
                 ) : rec.state === "HIDDEN" ? (
                   <ConfirmButton
@@ -241,7 +315,7 @@ function Dashboard() {
                     title={`Cancel the pending drop of ${rec.indexName}?`}
                     description="The index becomes visible to the query planner again straight away, and this drop is not proposed again for 90 days."
                     confirmLabel="Un-hide"
-                    onConfirm={() => void onUnhide(rec.id)}
+                    onConfirm={() => unhide.mutate(rec.id)}
                   />
                 ) : (
                   <span className="text-muted-foreground text-xs">{rec.state}</span>
@@ -351,7 +425,11 @@ function Dashboard() {
         </section>
       ) : null}
       {policy !== null ? (
-        <PolicySection key={policy.clusterId} policy={policy} onSaved={() => router.invalidate()} />
+        <PolicySection
+          key={policy.clusterId}
+          policy={policy}
+          onSaved={() => void queryClient.invalidateQueries({ queryKey: queryKeys.policy(id) })}
+        />
       ) : null}
       <ConnectClusterForm />
     </>

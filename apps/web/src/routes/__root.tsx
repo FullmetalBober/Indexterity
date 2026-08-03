@@ -1,10 +1,12 @@
-import { createRootRoute, HeadContent, Outlet, Scripts } from "@tanstack/react-router";
+import type { QueryClient } from "@tanstack/react-query";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { createRootRouteWithContext, HeadContent, Outlet, Scripts } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 import { Toaster } from "~/components/ui/sonner";
 import { TooltipProvider } from "~/components/ui/tooltip";
 import "../styles.css";
 
-export const Route = createRootRoute({
+export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()({
   head: () => ({
     meta: [
       { charSet: "utf-8" },
@@ -22,12 +24,18 @@ export const Route = createRootRoute({
 });
 
 function RootComponent() {
+  // Out of context, never from the factory. Constructing a second client here
+  // is the bug that made every query suspend against an empty cache while the
+  // loaders filled a different one.
+  const { queryClient } = Route.useRouteContext();
   return (
     <RootDocument>
-      <TooltipProvider delayDuration={200}>
-        <Outlet />
-        <Toaster richColors closeButton />
-      </TooltipProvider>
+      <QueryClientProvider client={queryClient}>
+        <TooltipProvider delayDuration={200}>
+          <Outlet />
+          <Toaster richColors closeButton />
+        </TooltipProvider>
+      </QueryClientProvider>
     </RootDocument>
   );
 }

@@ -1,4 +1,5 @@
 import { createRouter, Link } from "@tanstack/react-router";
+import { createAppQueryClient } from "./lib/query";
 import { routeTree } from "./routeTree.gen";
 
 // Friendly fallbacks instead of the framework's developer screens.
@@ -34,8 +35,13 @@ function NotFound() {
 }
 
 export function getRouter() {
+  // The one and only place this is constructed. Loaders write through it and
+  // the provider reads it back out of context, so server-rendered data and the
+  // browser cache are the same entry rather than two that drift apart.
+  const queryClient = createAppQueryClient();
   return createRouter({
     routeTree,
+    context: { queryClient },
     scrollRestoration: true,
     defaultErrorComponent: AppError,
     defaultNotFoundComponent: NotFound,
