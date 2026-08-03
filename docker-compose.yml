@@ -42,7 +42,14 @@ services:
   api:
     image: docker.io/library/node:26-slim
     working_dir: /app
-    command: sh -c "npm install && npx turbo run dev --filter=@repo/api"
+    # `exec` so the real process becomes PID 1 and podman's SIGTERM reaches it.
+    # Without it `sh` is PID 1, and a non-interactive shell does not forward
+    # signals to the child it is waiting on — so every container ignored stop,
+    # sat out the ten-second grace period, and was SIGKILLed (exit 137). That is
+    # what breaks `down`: the teardown races the stragglers, pod and network
+    # removal fail, and the next `up` reuses a container whose runtime state is
+    # already gone ("cannot open .../exec.fifo").
+    command: sh -c "npm install && exec npx turbo run dev --filter=@repo/api"
     environment:
       DATABASE_URL: postgres://mongo_optimizer:mongo_optimizer@postgres:5432/mongo_optimizer
       API_PORT: "3001"
@@ -72,7 +79,7 @@ services:
   web:
     image: docker.io/library/node:26-slim
     working_dir: /app
-    command: sh -c "npm install && npx turbo run dev --filter=@repo/web"
+    command: sh -c "npm install && exec npx turbo run dev --filter=@repo/web"
     environment:
       WEB_PORT: "3000"
       # The web SERVER calls the api, and it runs in this container — so the
@@ -100,7 +107,7 @@ services:
   worker:
     image: docker.io/library/node:26-slim
     working_dir: /app
-    command: sh -c "npm install && npx turbo run build --filter=@repo/api^... && npm run worker -w @repo/api"
+    command: sh -c "npm install && npx turbo run build --filter=@repo/api^... && exec npm run worker -w @repo/api"
     environment:
       DATABASE_URL: postgres://mongo_optimizer:mongo_optimizer@postgres:5432/mongo_optimizer
       MASTER_KEY: ${MASTER_KEY}
