@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { IndexSpec } from "./types";
 import {
   esrKeys,
+  isRecurring,
   type QueryShape,
   recommendCreates,
   recommendNarrowing,
@@ -28,7 +29,9 @@ function idx(name: string, fields: string[]): IndexSpec {
   };
 }
 
-const options = { minCount: 1 };
+// Rate off by default in these tests: they are about the shape rules, and a
+// shape with no measured window is decided by count alone anyway.
+const options = { minCount: 1, minPerWeek: 0 };
 const mongosh = { application: "mongosh 2.8.3" };
 const atDesc: SortKey = { field: "at", direction: -1 };
 const bAsc: SortKey = { field: "b", direction: 1 };
@@ -456,7 +459,7 @@ describe("recommendNarrowing", () => {
 
   it("ignores shapes below minCount", () => {
     const rare = shape(["a"], [bAsc], [], 1);
-    expect(recommendNarrowing([rare], [wide], { minCount: 3 })).toHaveLength(0);
+    expect(recommendNarrowing([rare], [wide], { minCount: 3, minPerWeek: 0 })).toHaveLength(0);
   });
 
   // Shell traffic cannot justify narrowing on its own...
@@ -507,5 +510,48 @@ describe("recommendNarrowing", () => {
     );
     expect(out[0]?.observedCount).toBe(42);
     expect(out[0]?.droppedKeys).toEqual(["c"]);
+  });
+});
+
+describe("isRecurring", () => {
+  const rated = { minCount: 3, minPerWeek: 0.5 };
+  const withWindow = (count: number, hours: number): QueryShape => ({
+    ...shape(["a"], [], [], count),
+    observedForHours: hours,
+  });
+
+  it("keeps the count floor whatever the window", () => {
+    expect(isRecurring(withWindow(2, 1), rated)).toBe(false);
+  });
+
+  // The case the count alone gets wrong. Both shapes have run three times;
+  // only one of them is a workload.
+  it("separates three runs this hour from three runs since March", () => {
+    expect(isRecurring(withWindow(3, 1), rated)).toBe(true);
+    expect(isRecurring(withWindow(3, 60 * 24), rated)).toBe(false);
+  });
+
+  // A weekly report is a real pattern and can be worth an index, so the line
+  // sits below it rather than on it.
+  it("admits a weekly report", () => {
+    expect(isRecurring(withWindow(4, 30 * 24), rated)).toBe(true);
+  });
+
+  it("admits a nightly job", () => {
+    expect(isRecurring(withWindow(30, 30 * 24), rated)).toBe(true);
+  });
+
+  // An unmeasurable window is not a rate of zero — the count decides alone,
+  // exactly as it did before there was a rate.
+  it("falls back to the count when the source cannot say", () => {
+    expect(isRecurring(shape(["a"], [], [], 3), rated)).toBe(true);
+    expect(isRecurring({ ...shape(["a"], [], [], 3), observedForHours: 0 }, rated)).toBe(true);
+  });
+
+  it("gates the recommenders, not just itself", () => {
+    const stale = { ...shape(["a"], [], ["c"], 3), observedForHours: 60 * 24 };
+    expect(recommendCreates([stale], [], rated)).toHaveLength(0);
+    const busy = { ...stale, observedForHours: 1 };
+    expect(recommendCreates([busy], [], rated).length).toBeGreaterThan(0);
   });
 });

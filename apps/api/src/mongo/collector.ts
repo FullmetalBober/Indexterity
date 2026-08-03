@@ -161,8 +161,17 @@ const queryStatsDoc = z.object({
       pipeline: z.array(z.record(z.string(), z.unknown())).optional(),
     }),
   }),
+  // Server's own clock for this snapshot. Preferred over ours as the "now" in
+  // the rate denominator — a control plane whose clock has drifted from the
+  // cluster's should not turn that drift into a workload measurement.
+  asOf: z.coerce.date().optional(),
   metrics: z.object({
     execCount: z.coerce.number(),
+    // When this shape entered the store. The store keeps entries for the life
+    // of the server (or until eviction), so `now - firstSeen` is how long the
+    // shape has been watchable — the denominator that separates "ran five times
+    // this hour" from "ran five times since March".
+    firstSeenTimestamp: z.coerce.date().optional(),
     // Absent before 8.0 — see collectQueryStats. `keysExamined` is the marker
     // the capability check reads, because it is the one that decides whether a
     // shape was scanning.
@@ -172,6 +181,22 @@ const queryStatsDoc = z.object({
     hasSortStage: z.object({ true: z.coerce.number() }).partial().optional(),
   }),
 });
+
+const HOUR_MS = 3_600_000;
+
+// How long a shape has been watchable, as the optional field the analysis reads.
+// Omitted rather than guessed when either end is missing: an absent window
+// leaves the count to decide on its own, whereas a fabricated one would quietly
+// scale every rate by whatever we made up.
+//
+// `until` is the server's clock where it offered one. Falling back to ours is
+// fine for a span of days, and the alternative is no measurement at all.
+function observedFor(from: Date | null, until: Date | null): { observedForHours?: number } {
+  if (from === null) return {};
+  const end = (until ?? new Date()).getTime();
+  const hours = (end - from.getTime()) / HOUR_MS;
+  return hours > 0 ? { observedForHours: hours } : {};
+}
 
 // system.profile entry (lenient — only field names are used downstream).
 //
@@ -547,6 +572,12 @@ export class MongoIndexCollector implements IndexCollector {
   async collectSlowQueries(database: string, collection: string): Promise<QueryShape[]> {
     const ns = `${database}.${collection}`;
     const raw = await this.conn.db(database).collection("system.profile").find({ ns }).toArray();
+    // The ring's reach, not the shape's. system.profile is capped, so the
+    // oldest entry still in it is as far back as anything here can be seen —
+    // the same window for every shape in this namespace. A busy collection
+    // fills the ring in minutes and a quiet one holds weeks, which is precisely
+    // the difference a bare execution count cannot express.
+    let oldest: Date | null = null;
     const shapes = new Map<
       string,
       {
@@ -563,6 +594,7 @@ export class MongoIndexCollector implements IndexCollector {
       }
     >();
     for (const entry of profileDoc.array().parse(raw)) {
+      if (entry.ts !== undefined && (oldest === null || entry.ts < oldest)) oldest = entry.ts;
       let equality: string[] = [];
       let range: string[] = [];
       let sort: SortKey[] = [];
@@ -629,6 +661,7 @@ export class MongoIndexCollector implements IndexCollector {
         prev.constants = intersectConstants(prev.constants, constants);
       }
     }
+    const window = observedFor(oldest, null);
     return [...shapes.values()].map((shape) => ({
       equality: shape.equality,
       sort: shape.sort,
@@ -638,6 +671,7 @@ export class MongoIndexCollector implements IndexCollector {
       count: shape.count,
       docsExamined: shape.docsExamined,
       clients: shape.clients,
+      ...window,
       ...(Object.keys(shape.constants).length > 0 ? { constants: shape.constants } : {}),
       ...(shape.lookups.length > 0 ? { lookups: shape.lookups } : {}),
     }));
@@ -678,6 +712,9 @@ export class MongoIndexCollector implements IndexCollector {
         sortedInMemory: boolean;
         count: number;
         lookups: LookupJoin[];
+        // Earliest across every client this shape merged from — the longest
+        // window, so the most conservative rate.
+        firstSeen: Date | null;
       }
     >();
     const entries = raw.flatMap((doc) => {
@@ -687,6 +724,8 @@ export class MongoIndexCollector implements IndexCollector {
     // Server-wide capability, so any one entry answers it. An empty store says
     // nothing either way and falls through to the same empty result.
     if (!entries.some((entry) => entry.metrics.keysExamined !== undefined)) return new Map();
+    // The server's clock, from whichever entry carries it.
+    const asOf = entries.find((entry) => entry.asOf !== undefined)?.asOf ?? null;
     for (const { key, metrics } of entries) {
       const namespace = workloadKey(key.queryShape.cmdNs.db, key.queryShape.cmdNs.coll);
       if (!wanted.has(namespace)) continue;
@@ -749,6 +788,7 @@ export class MongoIndexCollector implements IndexCollector {
           sortedInMemory,
           count: countedExecs,
           lookups,
+          firstSeen: metrics.firstSeenTimestamp ?? null,
         });
       } else {
         prev.count += countedExecs;
@@ -756,6 +796,10 @@ export class MongoIndexCollector implements IndexCollector {
         prev.clients.push(client);
         prev.collscan = prev.collscan || collscan;
         prev.sortedInMemory = prev.sortedInMemory || sortedInMemory;
+        const seen = metrics.firstSeenTimestamp;
+        if (seen !== undefined && (prev.firstSeen === null || seen < prev.firstSeen)) {
+          prev.firstSeen = seen;
+        }
       }
     }
     for (const shape of shapes.values()) {
@@ -769,6 +813,7 @@ export class MongoIndexCollector implements IndexCollector {
         count: shape.count,
         docsExamined: shape.docsExamined,
         clients: shape.clients,
+        ...observedFor(shape.firstSeen, asOf),
         ...(shape.lookups.length > 0 ? { lookups: shape.lookups } : {}),
       });
       byNamespace.set(shape.namespace, list);
