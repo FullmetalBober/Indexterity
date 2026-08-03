@@ -290,6 +290,10 @@ apps/api                control plane
   src/jobs              graphile-worker tasks (collect/classify/suggest/apply/finalize)
   src/db                Drizzle schema, client, secret sealing
 apps/web                dashboard
+  src/routes/app.tsx    the /app shell — auth gate, cluster bar, org switcher
+  src/routes/app.index  the cluster dashboard
+  src/routes/app.org    members, roles, invites, plan
+  src/lib/query.ts      the query client and its keys
 packages/contracts      oRPC + zod contracts shared by api and web
 ```
 
@@ -335,10 +339,11 @@ yet. Migration creates schemas, so migration creates both.
 in CI. Releasing is `git tag v0.2.0 && git push --tags`, and the release
 workflow refuses a tag whose version the tree does not carry.
 
-**Three test layers.** `npm run test` runs the first without any infra: the
-api's pure decision engine, and the web app's components in jsdom with the
-server functions mocked at the `~/lib/app-server` boundary — what the browser
-does with an answer, not whether the answer was fetched. `npm run test:int -w
+**Four test layers**, currently 315 api unit, 83 web unit, 55 integration and
+17 end-to-end. `npm run test` runs the first two without any infra: the api's
+pure decision engine, and the web app's components in jsdom with the server
+functions mocked at the `~/lib/app-server` boundary — what the browser does
+with an answer, not whether the answer was fetched. `npm run test:int -w
 @repo/api` needs a migrated postgres and a mongo, and CI runs it against **6.0,
 7.0 and 8.x** because the three take different paths through the workload
 collector. `npm run test:e2e` builds both apps and drives a real browser
@@ -404,16 +409,22 @@ in the api for a one-container install. Hosted should keep them separate: an api
 rollout would otherwise abort an in-flight index build, and the alert cooldown
 assumes a single worker.
 
+**One origin.** The api serves everything under `/api`, and the ingress puts it
+on the dashboard's host: `/api` to the api, `/` to the web app. That is not
+cosmetic — a browser then sees a single origin, so the session cookie is
+first-party and needs neither CORS nor `SameSite=None`. A second hostname for
+the api is still available for callers outside the browser, and off by default.
+
 A Helm chart is in [`deploy/helm/indexterity`](./deploy/helm/indexterity) —
 api + dashboard + worker, a pre-upgrade migration hook, ingress, and a
 `helm test`. Bring your own PostgreSQL.
 
 ## Open
 
-Engine depth from the original roadmap is done: collation-aware redundancy,
-replica-aware ROI, aggregation shapes, create cost estimates, the
-`maxCollectionSizeBytes` ceiling, the advisory tier, TTL suggestions, and the
-read-only digest.
+Planned work lives on the [project board](https://github.com/users/FullmetalBober/projects/6),
+not here — a roadmap in two places is a roadmap that disagrees with itself. What
+follows is the reasoning behind decisions already taken, which the board does not
+carry.
 
 **Atlas Admin API onboarding is dropped, not deferred.** An admin API key is a
 bigger ask than the `createRole` snippet it would replace, and it hands us a
@@ -433,6 +444,13 @@ Workload analysis runs **hourly**, not on the 6h collect cadence, because a
 missing index costs on every execution and most of the old delay was waiting to
 notice. A critical scan now goes from first sighting to built index in minutes
 rather than the better part of a day.
+
+**A shape must recur, measured two ways.** A count floor of three stops someone's
+ad-hoc query leaving an index behind. A rate floor — once a fortnight — stops the
+quieter mistake: `$queryStats` accumulates for the life of the store, so on a
+server up two months, three executions clears a count floor while describing a
+query that runs roughly never. Both windows are measurable, so both are measured
+(`analysis/workload.ts`).
 
 ## Licence
 

@@ -88,8 +88,8 @@ only component that touches MongoDB, using an **index-only role**.
 ┌───────────────────────┐          ┌──────────────────────────┐     ┌──────────┐
 │  MongoDB replica set  │          │  apps/api (NestJS+Fastify)│     │ apps/web │
 │  ┌─────┐ ┌─────────┐  │          │   - accounts / tenancy    │◄───►│ TanStack │
-│  │prim.│ │secondary│  │          │   - recommendations       │ ts- │  Start   │
-│  └──┬──┘ └────┬────┘  │          │   - apply orchestrator    │ rest│ +shadcn  │
+│  │prim.│ │secondary│  │          │   - recommendations       │oRPC │  Start   │
+│  └──┬──┘ └────┬────┘  │          │   - apply orchestrator    │     │ +shadcn  │
 │     │        │        │          │   - audit + ROI           │     └──────────┘
 │  ┌──▼────────▼──────┐ │  HTTPS   │   - job queue (graphile)  │
 │  │  DATA PLANE      │ │◄────────►│                           │
@@ -614,6 +614,24 @@ all queries are org-filtered. An immutable audit log records every state transit
   observe-window override.
 - **audit_log** — immutable, every state transition.
 
+### 11.1 Indexes on the control plane itself
+
+An index optimizer is an embarrassing place to have nine un-indexed foreign
+keys, which is what an audit of `pg_constraint` against `pg_index` found. An
+un-indexed foreign key is not a slow query — it is a scan of the whole child
+table for **every parent row deleted**. Retention bulk-deletes settled
+recommendations and `roi_metrics` references them, so removing ten thousand rows
+took 8.4 seconds, of which 5ms was finding them. With the index, 594ms.
+
+`members` is the other one worth naming: it is the tenancy check on every
+authenticated request, and it was a sequential scan. It is queried three ways —
+by user, by org, and by both — so the composite leads with user and the org gets
+its own, which is the same equality-ordering rule the engine applies to
+everyone else's indexes.
+
+The integration suite now **fails on any foreign key without a leading index**.
+The nine are fixed; the point is that a tenth cannot be added quietly.
+
 ---
 
 ## 12. API & contracts
@@ -648,15 +666,55 @@ Redis + BullMQ only if scale demands it.
 
 ## 14. Web / dashboard (TanStack Start + shadcn)
 
-- **Overview** — ROI headline (RAM/disk freed, write-throughput gained, index-count
-  trend), per-cluster health.
-- **Recommendations** — proposed actions with safety and usage-class badges,
-  approve/reject, diff view.
-- **Cluster detail** — collections, indexes, usage heatmap, redundancy graph.
-- **History / audit** — executed actions with rollback controls.
-- **Settings** — connection, policies, maintenance windows, demo toggle.
+### 14.1 Routes
 
-### 14.0 Components
+`/app` is a **layout** route, not a page. It owns what every signed-in view
+needs and nothing about any one view: the auth gate, the "api is unreachable"
+state, the cluster bar, the org switcher, sign out, and the nav.
+
+| route | renders | loader |
+|---|---|---|
+| `/app` (layout) | shell + `<Outlet/>` | `loadAppShell` — clusters, org, orgs |
+| `/app` (index) | ROI, recommendations, latency charts, per-collection footprint, policy | pipeline + telemetry + policy |
+| `/app/org` | members, roles, invites, plan | none — reads the layout's org |
+
+It was one 452-line route that fetched ten things for every navigation, so
+opening the team page pulled a latency series it never drew. Splitting it is
+what makes `/app/org` cost three calls instead of ten.
+
+### 14.2 Server state
+
+**TanStack Query owns the dashboard's reads.** Three keys, grouped by what
+*changes* them rather than by what draws them: `pipeline` moves on every
+mutation, `telemetry` when the collector runs hours later, `policy` when
+someone saves the form. Approving a recommendation invalidates one key instead
+of re-running every loader on the route.
+
+The route loader is still the SSR entry point, but it **writes through the
+router's query client** (`context.queryClient.ensureQueryData`) rather than
+returning data for the component to re-seed. One cache entry, not a server copy
+and a browser copy that drift.
+
+Three things this cost two attempts to learn, and all three are load-bearing:
+
+- `initialData` cannot seed a loader that re-runs — it only fills an *empty*
+  entry, so after connecting a cluster the cache keeps the pre-connect value.
+- The client is constructed **exactly once**, in `getRouter()`, carried in
+  route context, and read back out by the provider. A second `new QueryClient`
+  in the root component gives the loaders one cache and the components another.
+- `useQuery`, not `useSuspenseQuery`. Sign out and the org link *unmount* this
+  page, and a suspending child lets React hold the previous tree — a signed-out
+  user kept looking at the signed-in dashboard.
+- `staleTime` is `0` deliberately: `ensureQueryData` refetches only what it
+  considers stale, so anything higher makes `router.invalidate()` quietly stop
+  refreshing inside that window.
+
+**Adoption is partial.** The dashboard's reads are converted; the shell loader
+and fourteen mutations across the org, auth and cluster forms still call server
+functions directly and end in `router.invalidate()`. Tracked in the project
+board, not finished here.
+
+### 14.3 Components
 
 The UI is built from **shadcn/ui** components (`components.json`, new-york,
 generated with the CLI into `src/components/ui`). Anything interactive comes
@@ -675,7 +733,7 @@ Every destructive or cluster-affecting action goes through `ConfirmButton`
 consequence — the revoke command for a disconnect, what a drop will observe
 first, who loses access.
 
-### 14.1 Landing page and SEO
+### 14.4 Landing page and SEO
 
 `/` is the only indexable page: static (no loader, no api calls), so it renders
 even when the control plane is down, and it carries the full meta set —
@@ -751,13 +809,16 @@ submit `/` directly) if the marketing site ever grows more pages.
 | D15 | **Provisioned least-privilege onboarding** instead of an Atlas API integration | Jul 2026. An admin string is used once to create the `indexterityEngine` role + an `idx_<hex>` user on the customer's cluster; only the scoped string is stored (the admin one never persists). Turns "we can't read your documents" from a promise into a server-enforced guarantee (§10.1), works on any self-hosted/community deployment, and degrades to a guided 422 on Atlas (which owns its user management). Live-verified under `--auth`: full engine surface allowed, find/insert/drop/escalation denied, collect e2e as the scoped user | Locked |
 | D19 | **"Cannot tell" is never spelled "all clear"** | Jul 2026. Losing a cluster for days or weeks used to end badly: `$collStats`/`$indexStats` counters are cumulative since mongod started, so a restart during the observe window made `current − baseline` negative, which failed the minimum-ops check and read as *no regression* — the drop then proceeded on evidence that no longer existed, with the pre-flight's `$indexStats` check equally reset. The gate now returns REGRESSED / STABLE / **UNOBSERVABLE**; an unobservable window un-hides and re-proposes (which also ends the case of an index left hidden through an outage), and the create-side watch re-baselines instead of graduating unchecked. Separately, usage findings now require a continuous, current history (≥ 3 snapshots, no hole over 48h) — during a gap a busy index is indistinguishable from a dead one — and repeat failure alerts are capped at one per cluster+task per day | Locked |
 | D23 | **The observe window scales to the index's age, not just its usage** | Jul 2026. The window already stretched for periodic usage and shrank for long-proven idleness, but both keyed on the history's *span*, which conflated two different things: how long we have watched, and how long the index has existed. A hand-made ad-hoc index — created, used once by whoever made it, forgotten — has a short span, so it got the full flat month before removal, the slowest possible treatment for the clearest possible case. Two rules added: an index that appeared while we were watching and has never been used is observed roughly as long as it has existed (≥ 7d, ≤ policy), since its entire life is on record and there is no hidden history to wait out; and an index in place ≥ 2× the policy window that saw real use gets 1.5× the policy, because whatever wanted it may want it again on a cadence longer than anything recorded. Age is only claimed when the index first appears at least a day after the cluster's earliest snapshot — collection starts at onboarding, so otherwise every index on a new cluster would look newborn and get fast-tracked, which is the warmup hazard rather than a fix for it | Locked |
+| D24 | Api served under `/api`, on the dashboard's origin | The cookie is the whole argument: two origins means CORS plus `SameSite=None`, which by definition attaches the session cookie to cross-site requests. One host with `/api` and `/` path rules makes it first-party instead. Required `setGlobalPrefix("api")` first — better-auth sits on Fastify at `/api/auth`, controllers sat at bare paths, and no single proxy rule covered both | Locked |
+| D25 | Server state through TanStack Query, keyed by what changes it | Three keys — pipeline, telemetry, policy — rather than one blob, so approving a recommendation stops refetching the latency series. The loader writes through the router's query client instead of returning data to re-seed: one cache entry, not two that drift | Locked |
+| D26 | `minCount` is a floor **and** a rate | Three sightings meant two different things: `$queryStats` accumulates for the life of the store, the profiler is a ring a busy collection fills in minutes. Both windows turn out to be measurable — `firstSeenTimestamp` and the oldest `ts` — so both are measured. Fortnightly admits a weekly report and rejects a handful of runs since March | Locked |
 | D22 | **One auto-approval control, not two** | Jul 2026. `autoApply` (boolean) and `autoApplyScore` (threshold) read like a switch and its dial but were mutually exclusive branches, and the boolean won: setting both silently discarded the number the owner had typed directly beneath the checkbox. The boolean also promoted `ADVISORY_REVIEW` rows, which the score path explicitly excluded — and an approved advisory is worse than useless, because `classify` only deletes and re-inserts PROPOSED rows, so it leaves the refresh pool and is never re-evaluated even after the index starts being used again. `autoApply` is deleted: `autoApplyScore` alone means null = a human approves everything, 0 = everything auto-approves, 1-100 = a confidence floor, advisories never at any setting. Strictly more expressive than the pair, and both bugs stop existing rather than being fixed. Migration carries `auto_apply = true` across as threshold 0 — the behaviour that was actually running | Locked |
 | D21 | **The change window picks itself when unset** | Jul 2026. An unset window used to mean "run elective changes at any hour", which is the worst default available: the one moment a drop's brief collection lock is least welcome is peak traffic, and the owners least likely to configure a window are the ones least able to absorb that. The engine now derives one from the cluster's own `latency_samples` — cumulative counters differenced, bucketed into the four 6h slots of the UTC day, quietest slot wins — and re-derives it after every collect so it tracks a workload that moves. Six hours is the honest resolution: collect runs every 6h, so claiming an hour-level window would be precision the evidence does not have. It refuses to guess rather than guessing badly: three clean observations per bucket minimum, the quiet slot must be ≤ 75% of peak (a flat day yields nothing), and intervals crossing a counter reset or a collection gap are discarded. Stored in `inferred_window_*`, apart from the owner's columns, so an explicit setting always wins and clearing it returns to auto instead of freezing the last guess | Locked |
 | D20 | **A warning is a defect** (§16) | Jul 2026. Adopted as a repo rule, then applied. Three real faults were hiding behind "just warnings": every oRPC route logged `FST_ERR_REP_ALREADY_SENT` because `@orpc/nest`'s interceptor sends the Fastify reply itself while Nest — which only stands down when a handler declares `@Res()` — sent a second empty one (fixed by wrapping `@Implement` in `src/orpc/implement.ts`, so no route can forget); an unreachable cluster threw five stack traces per task per tick instead of being classified and skipped; and the dashboard rendered `toLocaleString()` during SSR, guaranteeing a hydration mismatch for every reader outside UTC. Each was a genuine behavior bug whose only symptom was log noise | Locked |
 | D18 | **Deny-by-default network guard + invite-only sign-up** (§10.2) | Jul 2026. Onboarding dials whatever an owner pastes, which made the api a request-forgery primitive: with open sign-up, anyone could register and use it to map our internal network, or connect an unauthenticated internal database outright. Targets are now resolved (SRV expanded, IPv4-mapped IPv6 unwrapped, every host in a multi-host string checked) and classified — link-local/metadata forbidden outright, private ranges only with `ALLOW_PRIVATE_CLUSTER_TARGETS`; sign-up defaults to invite-only with first-user bootstrap; a per-user dial budget is consumed before the address check. Self-hosted installs flip both knobs, and the chart warns when the combination is unsafe | Locked |
 | D16 | **Engine ports** extracted for future PostgreSQL/SQL Server support (§9) | Jul 2026. `IndexCollector`/`IndexExecutor`/`EngineSession` moved to `src/engine/ports.ts`; adapters register per `clusters.engine` (enum ready, MONGODB the only implementation); the pool, jobs, and API speak only the ports. Capability flags (`hideIndexes`, `provisionScopedUsers`) mark where engines genuinely differ — notably PostgreSQL has no reversible hide, so its adapter will need an alternative observe stage. Behavior-preserving: the untouched integration suite (25/25) passed on the refactor | Locked |
 | D17 | **Dynamic observe window** + recurrence floor | Jul 2026. The observe window is decided per drop at hide time from the index's own usage history (`analysis/observe.ts`, stored in `recommendations.observe_days`, reason in the audit trail): periodic usage extends to 2× the largest activity gap (≤ 90d) so a monthly job gets a full cycle inside the window; zero usage across ≥ 2× the baseline shortens to half (≥ 7d). Policy stays the baseline and the fallback. Workload shapes now need ≥ 3 sightings to propose and ≥ 5 for instant apply — a manually-run heavy query once or twice produces nothing | Locked |
-| D15 | Internal packages compile to CJS `dist`; apps consume built output | Predictable dev/prod module resolution; Turbo orders builds via `^build` | Locked |
+| D27 | Internal packages compile to CJS `dist`; apps consume built output | Predictable dev/prod module resolution; Turbo orders builds via `^build` | Locked |
 
 ### Deferred / open
 
@@ -775,14 +836,11 @@ submit `/` directly) if the marketing site ever grows more pages.
 
 ## 18. Phasing
 
-**v1 (cleanup, hosted-direct)**
-- Hosted-direct connection, index-only role, demo default.
-- Collect snapshots → classify (`DROP_UNUSED`, `DROP_REDUNDANT`, `MERGE`).
-- Hide → observe → drop pipeline with pre-flight.
-- ROI dashboard.
+The original phasing is complete through the engine, the apply pipeline, ROI,
+multi-tenancy, billing, the Helm chart and v0.1.0.
 
-**Phase 2**
-- Agent deployment mode.
-- `CREATE` from workload analysis (profiler, opt-in trust tier).
-- Scoped "instant apply" for critical creates.
-- KMS/Vault key custodian.
+Planned work now lives on the
+[project board](https://github.com/users/FullmetalBober/projects/6). It is not
+duplicated here — two roadmaps in one repo is one roadmap and one lie. This
+document records what was decided and why (§17); the board records what is
+next.
