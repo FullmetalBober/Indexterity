@@ -27,70 +27,81 @@ const EMPTY_ORG = {
   pendingInvites: [],
 };
 
+// What the dashboard renders when there is no cluster selected, or when the
+// per-cluster reads failed. Same shape either way, so the page has one path.
+const EMPTY_DASHBOARD = {
+  recommendations: [],
+  roi: { freedBytes: 0, indexesDropped: 0, estimatedMonthlyUsd: 0, attribution: [] },
+  latency: { collections: [] },
+  latencySeries: { collections: [] },
+  collectionStats: { collections: [] },
+  policy: null,
+  activity: [],
+};
+
 function isStatus(error: unknown, status: number): boolean {
   return error instanceof ORPCError && error.status === status;
 }
 
-export const loadDashboard = createServerFn({ method: "GET" })
+// The shell: who is signed in, which orgs they can see, and which clusters
+// exist. Every /app route needs it, so it is the layout's loader and is
+// fetched once for the whole subtree.
+//
+// It used to be one loader with the per-cluster reads bolted on, which meant
+// opening the team page fetched a latency series nobody was going to look at.
+export const loadAppShell = createServerFn({ method: "GET" })
   .validator((selected: unknown): string | null => (typeof selected === "string" ? selected : null))
   .handler(async ({ data: selected }) => {
     const api = serverApi();
-    let clusters: Awaited<ReturnType<typeof api.listClusters>>;
-    let org: Awaited<ReturnType<typeof api.getOrg>>;
-    let orgs: Awaited<ReturnType<typeof api.listOrgs>>;
     try {
-      [clusters, org, orgs] = await Promise.all([api.listClusters(), api.getOrg(), api.listOrgs()]);
+      const [clusters, org, orgs] = await Promise.all([
+        api.listClusters(),
+        api.getOrg(),
+        api.listOrgs(),
+      ]);
+      return {
+        authed: true as const,
+        clusters,
+        cluster: clusters.find((c) => c.id === selected) ?? clusters[0] ?? null,
+        org: org ?? EMPTY_ORG,
+        orgs,
+      };
     } catch (error) {
       if (isStatus(error, 401)) return { authed: false as const, apiDown: false as const };
       // The api is unreachable — render a friendly state instead of a 500.
       return { authed: false as const, apiDown: true as const };
     }
-    const cluster = clusters.find((c) => c.id === selected) ?? clusters[0] ?? null;
-    if (cluster === null) {
-      return {
-        authed: true as const,
-        clusters,
-        cluster,
-        recommendations: [],
-        roi: { freedBytes: 0, indexesDropped: 0, estimatedMonthlyUsd: 0, attribution: [] },
-        latency: { collections: [] },
-        latencySeries: { collections: [] },
-        collectionStats: { collections: [] },
-        policy: null,
-        activity: [],
-        org: org ?? EMPTY_ORG,
-        orgs,
-      };
-    }
+  });
+
+// Everything that is about one cluster. Only the dashboard asks for it.
+//
+// Returns nulls rather than throwing when the api goes away mid-flight: the
+// shell has already rendered by then, and replacing a working page with an
+// error boundary because one panel failed is worse than showing the shell.
+export const loadClusterDashboard = createServerFn({ method: "GET" })
+  .validator((clusterId: unknown): string | null =>
+    typeof clusterId === "string" ? clusterId : null,
+  )
+  .handler(async ({ data: selected }) => {
+    const api = serverApi();
     try {
+      // "None selected" means the first cluster, the same rule the shell uses.
+      // Resolved here rather than passed down so there is one definition of it.
+      const clusterId = selected ?? (await api.listClusters().then((list) => list[0]?.id ?? null));
+      if (clusterId === null) return EMPTY_DASHBOARD;
       const [recommendations, roi, latency, latencySeries, collectionStats, policy, activity] =
         await Promise.all([
-          api.listRecommendations({ clusterId: cluster.id }),
-          api.getRoi({ clusterId: cluster.id }),
-          api.getLatency({ clusterId: cluster.id }),
-          api.getLatencySeries({ clusterId: cluster.id }),
-          api.getCollections({ clusterId: cluster.id }),
-          api.getPolicy({ clusterId: cluster.id }),
-          api.listActions({ clusterId: cluster.id }),
+          api.listRecommendations({ clusterId }),
+          api.getRoi({ clusterId }),
+          api.getLatency({ clusterId }),
+          api.getLatencySeries({ clusterId }),
+          api.getCollections({ clusterId }),
+          api.getPolicy({ clusterId }),
+          api.listActions({ clusterId }),
         ]);
-      return {
-        authed: true as const,
-        clusters,
-        cluster,
-        recommendations,
-        roi,
-        latency,
-        latencySeries,
-        collectionStats,
-        policy,
-        activity,
-        org,
-        orgs,
-      };
-    } catch (error) {
-      if (isStatus(error, 401)) return { authed: false as const, apiDown: false as const };
-      // The api died between the two batches — same friendly state, no 500.
-      return { authed: false as const, apiDown: true as const };
+      return { recommendations, roi, latency, latencySeries, collectionStats, policy, activity };
+    } catch {
+      return EMPTY_DASHBOARD;
     }
   });
 
