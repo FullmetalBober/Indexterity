@@ -20,7 +20,7 @@ function apiBaseUrl(): string {
 export function serverApi(): JsonifiedClient<ContractRouterClient<typeof contract>> {
   const cookie = getRequest()?.headers.get("cookie") ?? "";
   const link = new OpenAPILink(contract, {
-    url: apiBaseUrl(),
+    url: `${apiBaseUrl()}/api`,
     headers: () => ({ cookie }),
   });
   return createORPCClient(link);

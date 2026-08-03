@@ -21,5 +21,5 @@ spec:
           set -e
           curl -fsS "http://{{ include "indexterity.fullname" . }}-web:{{ .Values.web.service.port }}/" > /dev/null
           echo "dashboard ok"
-          curl -fsS "http://{{ include "indexterity.fullname" . }}-api:{{ .Values.api.service.port }}/health" > /dev/null
+          curl -fsS "http://{{ include "indexterity.fullname" . }}-api:{{ .Values.api.service.port }}/api/health" > /dev/null
           echo "api ok"

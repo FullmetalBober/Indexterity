@@ -3,7 +3,10 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 
 export const API_PORT = Number(process.env.INT_API_PORT ?? 3099);
+// The api serves everything under /api (main.ts setGlobalPrefix), so this is
+// the base every call hangs off — including better-auth at /api/auth.
 export const API_BASE = `http://localhost:${API_PORT}`;
+export const API_ROOT = `${API_BASE}/api`;
 export const WEB_ORIGIN = "http://localhost:3000";
 export const MONGO_URL = process.env.MONGO_URL ?? "mongodb://localhost:27017";
 
@@ -15,7 +18,7 @@ export function databaseUrl(): string {
   return url;
 }
 
-// Spawn the built api and wait for /health. The caller owns teardown.
+// Spawn the built api and wait for /api/health. The caller owns teardown.
 // extraEnv/port let a test drive a second instance with different guards.
 export async function startApi(
   extraEnv: Record<string, string> = {},
@@ -50,7 +53,7 @@ export async function startApi(
   });
   for (let i = 0; i < 60; i++) {
     try {
-      const res = await fetch(`http://localhost:${port}/health`);
+      const res = await fetch(`http://localhost:${port}/api/health`);
       if (res.ok) return child;
     } catch {
       // not up yet
@@ -93,7 +96,7 @@ export async function api(
   session: Session | null,
   init?: RequestInit,
 ): Promise<Response> {
-  return fetch(`${API_BASE}${path}`, {
+  return fetch(`${API_ROOT}${path}`, {
     ...init,
     headers: {
       // Only claim a JSON body when one is sent — fastify 400s on an empty

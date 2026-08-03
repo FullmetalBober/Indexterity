@@ -179,7 +179,7 @@ kubectl -n "$NS" run kind-check --rm -i --restart=Never --image="$CURL_IMAGE" --
   [ -n "$COOKIE" ] || { echo "sign-up returned no session cookie"; exit 1; }
   echo "$COOKIE" | grep -q "__Secure-" || { echo "session cookie is not Secure"; exit 1; }
   echo "signed up, cookie is Secure"
-  curl -sf -X POST "$API/clusters" -H "cookie: $COOKIE" -H "content-type: application/json" \
+  curl -sf -X POST "$API/api/clusters" -H "cookie: $COOKIE" -H "content-type: application/json" \
     -H "origin: $ORIGIN" -H "x-forwarded-for: 203.0.113.7" \
     -d "{\"name\":\"Kind Mongo\",\"connectionString\":\"mongodb://mongo:27017\"}" > /dev/null
   echo "connected a cluster over cluster DNS"

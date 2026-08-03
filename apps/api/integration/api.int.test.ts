@@ -486,6 +486,9 @@ describe("SSRF guard and sign-up gate (second api with production defaults)", ()
   // SIGNUP_MODE=open so the rest of the suite can use a localhost mongo. This
   // one runs the defaults a hosted deployment gets.
   const PORT = 3098;
+  // Server root, not /api: this suite posts to both better-auth (mounted on
+  // Fastify at /api/auth, outside Nest's prefix) and to Nest routes (/api/...),
+  // so the paths below carry their own prefix.
   const BASE = `http://localhost:${PORT}`;
   let guarded: ChildProcess;
   let guardedOwner: Session;
@@ -545,7 +548,7 @@ describe("SSRF guard and sign-up gate (second api with production defaults)", ()
   });
 
   it("refuses to dial private addresses, naming the escape hatch", async () => {
-    const res = await post("/clusters/check-connection", guardedOwner, {
+    const res = await post("/api/clusters/check-connection", guardedOwner, {
       connectionString: "mongodb://10.0.0.5:27017",
     });
     expect(res.status).toBe(400);
@@ -555,7 +558,7 @@ describe("SSRF guard and sign-up gate (second api with production defaults)", ()
   });
 
   it("refuses loopback, so the control plane cannot probe itself", async () => {
-    const res = await post("/clusters/check-connection", guardedOwner, {
+    const res = await post("/api/clusters/check-connection", guardedOwner, {
       connectionString: "mongodb://127.0.0.1:27017",
     });
     expect(res.status).toBe(400);
@@ -563,7 +566,7 @@ describe("SSRF guard and sign-up gate (second api with production defaults)", ()
   });
 
   it("refuses cloud metadata and never stores such a cluster", async () => {
-    const res = await post("/clusters", guardedOwner, {
+    const res = await post("/api/clusters", guardedOwner, {
       name: "metadata",
       connectionString: "mongodb://169.254.169.254:27017",
     });
@@ -574,7 +577,7 @@ describe("SSRF guard and sign-up gate (second api with production defaults)", ()
   });
 
   it("rejects a private host smuggled in beside a public one", async () => {
-    const res = await post("/clusters/check-connection", guardedOwner, {
+    const res = await post("/api/clusters/check-connection", guardedOwner, {
       connectionString: "mongodb://8.8.8.8:27017,192.168.1.10:27017",
     });
     expect(res.status).toBe(400);
@@ -589,7 +592,7 @@ describe("SSRF guard and sign-up gate (second api with production defaults)", ()
     let limited = false;
     let rejections = 0;
     for (let i = 1; i < 20; i++) {
-      const res = await post("/clusters/check-connection", guardedOwner, {
+      const res = await post("/api/clusters/check-connection", guardedOwner, {
         connectionString: `mongodb://10.1.0.${i}:27017`,
       });
       if (res.status === 400) rejections += 1;
