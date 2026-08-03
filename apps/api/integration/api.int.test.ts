@@ -2136,3 +2136,32 @@ describe("finished decisions age out, the ROI they earned does not", () => {
     expect(roi[0]?.recommendationId).toBeNull();
   });
 });
+
+// An index optimizer whose own control plane was missing nine of them.
+//
+// Every one was a foreign key, and an un-indexed foreign key is not a slow
+// query — it is a scan of the whole child table for each parent row deleted.
+// Retention deletes settled recommendations in bulk, and roi_metrics references
+// them: ten thousand rows took 8.4 seconds to remove, of which 5ms was finding
+// them. With the index, 594ms.
+//
+// The test is the rule rather than the nine, because the nine are already
+// fixed. What is worth keeping is that the tenth cannot be added quietly.
+describe("the control plane's own indexes", () => {
+  it("has no foreign key without one", async () => {
+    const rows = await db.execute(sql`
+      select c.conrelid::regclass::text as child, a.attname as column
+      from pg_constraint c
+      join unnest(c.conkey) k(attnum) on true
+      join pg_attribute a on a.attrelid = c.conrelid and a.attnum = k.attnum
+      where c.contype = 'f'
+        and c.connamespace = 'public'::regnamespace
+        and not exists (
+          select 1 from pg_index i
+          where i.indrelid = c.conrelid and i.indkey[0] = a.attnum
+        )
+    `);
+    const unindexed = rows.rows.map((row) => `${String(row.child)}.${String(row.column)}`);
+    expect(unindexed).toEqual([]);
+  });
+});
