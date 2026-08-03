@@ -10,6 +10,15 @@
 #
 # Requires: kind, kubectl, helm, podman (or docker).
 # Usage:   deploy/kind-test.sh [--keep]
+#          RELEASE=0.1.0 deploy/kind-test.sh   # the PUBLISHED artifacts instead
+#
+# RELEASE mode answers a question the default cannot: does what we shipped
+# work? The default builds from the working tree, so it passes even if the
+# release workflow published something broken — a chart whose appVersion names
+# an image tag that was never pushed, or a package left private, both of which
+# a green workflow reports as success. In RELEASE mode nothing is built and
+# nothing is loaded: the chart and both images come from ghcr.io exactly as a
+# stranger would fetch them, so registry visibility is part of the test.
 set -euo pipefail
 
 # podman's network backend shells out to `nft` (nftables). Run this from inside
@@ -31,7 +40,10 @@ unset _clean_path _path_parts _part
 
 CLUSTER=${CLUSTER:-indexterity}
 NS=${NS:-indexterity}
-TAG=${TAG:-0.1.0}
+# In RELEASE mode the version under test IS the tag, so the two cannot drift.
+RELEASE=${RELEASE:-}
+TAG=${TAG:-${RELEASE:-0.1.0}}
+GHCR_OWNER=${GHCR_OWNER:-fullmetalbober}
 # Pinned so the preload and the manifests can never disagree about a tag.
 PG_IMAGE=${PG_IMAGE:-docker.io/library/postgres:18-alpine}
 MONGO_IMAGE=${MONGO_IMAGE:-docker.io/library/mongo:8}
@@ -74,14 +86,25 @@ else
 fi
 kubectl config use-context "kind-$CLUSTER" >/dev/null
 
-step "building images"
-"$CTR" build -f "$ROOT/apps/api/Dockerfile" -t "indexterity/api:$TAG" "$ROOT"
-"$CTR" build -f "$ROOT/apps/web/Dockerfile" -t "indexterity/web:$TAG" "$ROOT"
+if [ -n "$RELEASE" ]; then
+  # Pulled on the host and loaded, like every other image here, so the kubelet
+  # never depends on DNS through the container network. It also proves the
+  # packages are public: an anonymous pull is what a stranger gets.
+  step "pulling the published images ($RELEASE)"
+  for img in api web; do
+    $CTR pull "ghcr.io/$GHCR_OWNER/indexterity-$img:$RELEASE"
+    kind load docker-image "ghcr.io/$GHCR_OWNER/indexterity-$img:$RELEASE" --name "$CLUSTER"
+  done
+else
+  step "building images"
+  "$CTR" build -f "$ROOT/apps/api/Dockerfile" -t "indexterity/api:$TAG" "$ROOT"
+  "$CTR" build -f "$ROOT/apps/web/Dockerfile" -t "indexterity/web:$TAG" "$ROOT"
 
-step "loading images into the cluster"
-for img in api web; do
-  kind load docker-image "$(image_ref "$img")" --name "$CLUSTER"
-done
+  step "loading images into the cluster"
+  for img in api web; do
+    kind load docker-image "$(image_ref "$img")" --name "$CLUSTER"
+  done
+fi
 
 # The dependencies too, rather than letting the kubelet pull them. A kind node
 # resolves DNS through the container network, which is one more moving part
@@ -100,12 +123,26 @@ kubectl apply -n "$NS" -f "$ROOT/deploy/kind-dependencies.yaml"
 kubectl -n "$NS" wait --for=condition=available deploy/postgres deploy/mongo --timeout=180s
 
 step "installing the chart"
+if [ -n "$RELEASE" ]; then
+  CHART="oci://ghcr.io/$GHCR_OWNER/charts/indexterity"
+  CHART_ARGS="--version $RELEASE"
+  API_REPO="ghcr.io/$GHCR_OWNER/indexterity-api"
+  WEB_REPO="ghcr.io/$GHCR_OWNER/indexterity-web"
+else
+  CHART="$ROOT/deploy/helm/indexterity"
+  CHART_ARGS=""
+  API_REPO=$(image_ref api | sed "s/:$TAG//")
+  WEB_REPO=$(image_ref web | sed "s/:$TAG//")
+fi
 # allowInsecureAuthUrl: a Kind cluster terminates no TLS, and the api refuses a
 # non-https auth URL in production. trustProxy: kube-proxy hides the client
 # address, so without it the per-IP rate limits share one bucket.
-helm upgrade --install indexterity "$ROOT/deploy/helm/indexterity" -n "$NS" --wait --timeout 5m \
-  --set "api.image.repository=$(image_ref api | sed "s/:$TAG//"),api.image.tag=$TAG,api.image.pullPolicy=Never,api.replicas=1" \
-  --set "web.image.repository=$(image_ref web | sed "s/:$TAG//"),web.image.tag=$TAG,web.image.pullPolicy=Never,web.replicas=1" \
+# Never: every image is already in the node, and a pull would only be a slower
+# way to fetch what is there — or a spurious failure if the registry blinks.
+# shellcheck disable=SC2086  # CHART_ARGS is a deliberate word split
+helm upgrade --install indexterity "$CHART" $CHART_ARGS -n "$NS" --wait --timeout 5m \
+  --set "api.image.repository=$API_REPO,api.image.tag=$TAG,api.image.pullPolicy=Never,api.replicas=1" \
+  --set "web.image.repository=$WEB_REPO,web.image.tag=$TAG,web.image.pullPolicy=Never,web.replicas=1" \
   --set "config.signupMode=open,config.allowPrivateClusterTargets=true" \
   --set "config.allowInsecureAuthUrl=true,config.trustProxy=true" \
   --set "secrets.databaseUrl=postgres://indexterity:indexterity@postgres:5432/indexterity" \

@@ -22,6 +22,10 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # The smoke job below installs exactly what this one published.
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      owner: ${{ steps.meta.outputs.owner }}
     steps:
       - uses: actions/checkout@v4
 
@@ -93,3 +97,29 @@ jobs:
             echo "helm install indexterity oci://ghcr.io/$owner/charts/indexterity --version $v"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # Publishing successfully and publishing something that works are different
+  # claims, and the job above only makes the first one. It would report success
+  # for a chart whose appVersion names a tag that was never pushed, or for
+  # packages left private — the install command in that summary would fail for
+  # everyone and nothing here would know.
+  #
+  # So the release verifies itself: a throwaway Kind cluster installs the chart
+  # and the images straight from ghcr.io, with no credentials, exactly as a
+  # stranger would. Anonymous pulls make registry visibility part of the test.
+  smoke:
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: indexterity
+          wait: 120s
+      - uses: azure/setup-helm@v4
+      - name: Install the published release
+        run: deploy/kind-test.sh
+        env:
+          CTR: docker
+          GHCR_OWNER: ${{ needs.publish.outputs.owner }}
+          RELEASE: ${{ needs.publish.outputs.version }}
