@@ -27,17 +27,30 @@ const EMPTY_ORG = {
   pendingInvites: [],
 };
 
-// What the dashboard renders when there is no cluster selected, or when the
-// per-cluster reads failed. Same shape either way, so the page has one path.
-const EMPTY_DASHBOARD = {
+const EMPTY_PIPELINE = {
   recommendations: [],
   roi: { freedBytes: 0, indexesDropped: 0, estimatedMonthlyUsd: 0, attribution: [] },
+  activity: [],
+};
+const EMPTY_TELEMETRY = {
   latency: { collections: [] },
   latencySeries: { collections: [] },
   collectionStats: { collections: [] },
-  policy: null,
-  activity: [],
 };
+
+const clusterIdValidator = (id: unknown): string | null => (typeof id === "string" ? id : null);
+
+// "None selected" means the first cluster — the same rule the shell applies.
+// Defined once so the three readers below cannot disagree about which cluster
+// an unqualified request is about.
+async function resolveCluster(
+  api: ReturnType<typeof serverApi>,
+  selected: string | null,
+): Promise<string | null> {
+  if (selected !== null) return selected;
+  const clusters = await api.listClusters();
+  return clusters[0]?.id ?? null;
+}
 
 function isStatus(error: unknown, status: number): boolean {
   return error instanceof ORPCError && error.status === status;
@@ -73,35 +86,64 @@ export const loadAppShell = createServerFn({ method: "GET" })
     }
   });
 
-// Everything that is about one cluster. Only the dashboard asks for it.
+// One cluster's data, grouped by what CHANGES it rather than by what draws it.
 //
-// Returns nulls rather than throwing when the api goes away mid-flight: the
-// shell has already rendered by then, and replacing a working page with an
-// error boundary because one panel failed is worse than showing the shell.
-export const loadClusterDashboard = createServerFn({ method: "GET" })
-  .validator((clusterId: unknown): string | null =>
-    typeof clusterId === "string" ? clusterId : null,
-  )
+// It was a single call returning all seven reads, so approving one
+// recommendation refetched the latency series and the collection footprint as
+// well. Three groups on three clocks:
+//
+//   pipeline   every mutation — approve, undo, un-hide
+//   telemetry  only when the collector runs, hours apart
+//   policy     only when someone saves the policy form
+//
+// Each returns its own empty shape on failure, so one dead read cannot blank
+// the other two panels.
+export const loadPipeline = createServerFn({ method: "GET" })
+  .validator(clusterIdValidator)
   .handler(async ({ data: selected }) => {
     const api = serverApi();
     try {
-      // "None selected" means the first cluster, the same rule the shell uses.
-      // Resolved here rather than passed down so there is one definition of it.
-      const clusterId = selected ?? (await api.listClusters().then((list) => list[0]?.id ?? null));
-      if (clusterId === null) return EMPTY_DASHBOARD;
-      const [recommendations, roi, latency, latencySeries, collectionStats, policy, activity] =
-        await Promise.all([
-          api.listRecommendations({ clusterId }),
-          api.getRoi({ clusterId }),
-          api.getLatency({ clusterId }),
-          api.getLatencySeries({ clusterId }),
-          api.getCollections({ clusterId }),
-          api.getPolicy({ clusterId }),
-          api.listActions({ clusterId }),
-        ]);
-      return { recommendations, roi, latency, latencySeries, collectionStats, policy, activity };
+      const clusterId = await resolveCluster(api, selected);
+      if (clusterId === null) return EMPTY_PIPELINE;
+      const [recommendations, roi, activity] = await Promise.all([
+        api.listRecommendations({ clusterId }),
+        api.getRoi({ clusterId }),
+        api.listActions({ clusterId }),
+      ]);
+      return { recommendations, roi, activity };
     } catch {
-      return EMPTY_DASHBOARD;
+      return EMPTY_PIPELINE;
+    }
+  });
+
+export const loadTelemetry = createServerFn({ method: "GET" })
+  .validator(clusterIdValidator)
+  .handler(async ({ data: selected }) => {
+    const api = serverApi();
+    try {
+      const clusterId = await resolveCluster(api, selected);
+      if (clusterId === null) return EMPTY_TELEMETRY;
+      const [latency, latencySeries, collectionStats] = await Promise.all([
+        api.getLatency({ clusterId }),
+        api.getLatencySeries({ clusterId }),
+        api.getCollections({ clusterId }),
+      ]);
+      return { latency, latencySeries, collectionStats };
+    } catch {
+      return EMPTY_TELEMETRY;
+    }
+  });
+
+export const loadClusterPolicy = createServerFn({ method: "GET" })
+  .validator(clusterIdValidator)
+  .handler(async ({ data: selected }) => {
+    const api = serverApi();
+    try {
+      const clusterId = await resolveCluster(api, selected);
+      if (clusterId === null) return { policy: null };
+      return { policy: await api.getPolicy({ clusterId }) };
+    } catch {
+      return { policy: null };
     }
   });
 
