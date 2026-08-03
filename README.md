@@ -323,6 +323,12 @@ nftables. Typing `podman-compose up` yourself never hits it.
 `npm run db:generate` · `npm run db:migrate`. Production migrations run the
 compiled migrator: `npm run db:deploy -w @repo/api`.
 
+Both install **two** schemas: `public`, which Drizzle owns, and
+`graphile_worker`, which the job queue owns. The queue would install its own on
+first boot, but the api and the worker start together, and anything that queues
+a job before the worker wins that race fails against a schema that is not there
+yet. Migration creates schemas, so migration creates both.
+
 **Versioning.** One number for the whole product, in the root `package.json`.
 `npm run version:set 0.2.0` writes it to every workspace and to the chart's
 `version` and `appVersion`; `npm run version:check` asserts they agree and runs

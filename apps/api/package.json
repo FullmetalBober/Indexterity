@@ -12,7 +12,7 @@
     "test": "vitest run",
     "test:int": "vitest run --config vitest.integration.config.ts",
     "db:generate": "drizzle-kit generate",
-    "db:migrate": "drizzle-kit migrate",
+    "db:migrate": "drizzle-kit migrate && graphile-worker --schema-only",
     "db:deploy": "node dist/migrate.js"
   },
   "dependencies": {
