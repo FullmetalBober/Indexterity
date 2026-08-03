@@ -181,7 +181,7 @@ function Home() {
               value={orgs.find((entry) => entry.active)?.orgId ?? ""}
               onValueChange={(value) => void onSwitchOrg(value)}
             >
-              <SelectTrigger size="sm" className="w-[220px]" aria-label="Switch organization">
+              <SelectTrigger size="sm" className="w-55" aria-label="Switch organization">
                 <SelectValue placeholder="Organization" />
               </SelectTrigger>
               <SelectContent>
