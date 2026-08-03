@@ -61,8 +61,8 @@ jobs:
           tags: |
             ghcr.io/${{ steps.meta.outputs.owner }}/indexterity-api:${{ steps.meta.outputs.version }}
             ghcr.io/${{ steps.meta.outputs.owner }}/indexterity-api:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,scope=api,mode=max
 
       - name: Build and push the web image
         uses: docker/build-push-action@v6
@@ -73,8 +73,8 @@ jobs:
           tags: |
             ghcr.io/${{ steps.meta.outputs.owner }}/indexterity-web:${{ steps.meta.outputs.version }}
             ghcr.io/${{ steps.meta.outputs.owner }}/indexterity-web:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,scope=web,mode=max
 
       - uses: azure/setup-helm@v4
 

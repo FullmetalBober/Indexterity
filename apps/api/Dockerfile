@@ -12,9 +12,14 @@ RUN turbo prune @repo/api --docker
 # Install deps (this layer caches on the lockfile), then build, then drop devDeps.
 FROM base AS builder
 COPY --from=pruner /app/out/json/ .
-RUN npm install
+# The npm cache survives its own layer being invalidated: bump one dependency
+# and BuildKit reruns this step, but it refetches only what actually changed
+# instead of the whole tree. It is a BuildKit-local cache, so it speeds up
+# rebuilds on a developer's machine and on a warm builder; CI's win comes from
+# the layer cache above it, which is a different mechanism.
+RUN --mount=type=cache,target=/root/.npm npm install
 COPY --from=pruner /app/out/full/ .
-RUN turbo run build --filter=@repo/api
+RUN --mount=type=cache,target=/root/.cache/turbo turbo run build --filter=@repo/api
 RUN npm prune --omit=dev
 
 FROM docker.io/library/node:26-slim AS runtime
