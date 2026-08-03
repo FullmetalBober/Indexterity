@@ -80,36 +80,47 @@ export const user = pgTable("user", {
   updatedAt,
 });
 
-export const session = pgTable("session", {
-  id: text("id").primaryKey(),
-  token: text("token").notNull().unique(),
-  userId: text("user_id")
-    .notNull()
-    .references(() => user.id, { onDelete: "cascade" }),
-  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
-  ipAddress: text("ip_address"),
-  userAgent: text("user_agent"),
-  createdAt,
-  updatedAt,
-});
+export const session = pgTable(
+  "session",
+  {
+    id: text("id").primaryKey(),
+    token: text("token").notNull().unique(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    ipAddress: text("ip_address"),
+    userAgent: text("user_agent"),
+    createdAt,
+    updatedAt,
+  },
+  // Deleting a user cascades here. Without this postgres scans every session
+  // row to find theirs, and this is the table that grows with every sign-in.
+  (table) => [index("session_user").on(table.userId)],
+);
 
-export const account = pgTable("account", {
-  id: text("id").primaryKey(),
-  accountId: text("account_id").notNull(),
-  providerId: text("provider_id").notNull(),
-  userId: text("user_id")
-    .notNull()
-    .references(() => user.id, { onDelete: "cascade" }),
-  accessToken: text("access_token"),
-  refreshToken: text("refresh_token"),
-  idToken: text("id_token"),
-  accessTokenExpiresAt: timestamp("access_token_expires_at", { withTimezone: true }),
-  refreshTokenExpiresAt: timestamp("refresh_token_expires_at", { withTimezone: true }),
-  scope: text("scope"),
-  password: text("password"),
-  createdAt,
-  updatedAt,
-});
+export const account = pgTable(
+  "account",
+  {
+    id: text("id").primaryKey(),
+    accountId: text("account_id").notNull(),
+    providerId: text("provider_id").notNull(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    accessToken: text("access_token"),
+    refreshToken: text("refresh_token"),
+    idToken: text("id_token"),
+    accessTokenExpiresAt: timestamp("access_token_expires_at", { withTimezone: true }),
+    refreshTokenExpiresAt: timestamp("refresh_token_expires_at", { withTimezone: true }),
+    scope: text("scope"),
+    password: text("password"),
+    createdAt,
+    updatedAt,
+  },
+  // Cascades on user deletion.
+  (table) => [index("account_user").on(table.userId)],
+);
 
 export const verification = pgTable("verification", {
   id: text("id").primaryKey(),
@@ -142,62 +153,86 @@ export const organizations = pgTable("organizations", {
   createdAt,
 });
 
-export const members = pgTable("members", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  orgId: uuid("org_id")
-    .notNull()
-    .references(() => organizations.id, { onDelete: "cascade" }),
-  userId: text("user_id")
-    .notNull()
-    .references(() => user.id, { onDelete: "cascade" }),
-  role: text("role").notNull().default("member"),
-  // The org switcher's selection. At most one true per user; when none is set
-  // the oldest membership is the active one (the pre-switcher behavior).
-  isActive: boolean("is_active").notNull().default(false),
-  createdAt,
-});
+export const members = pgTable(
+  "members",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    role: text("role").notNull().default("member"),
+    // The org switcher's selection. At most one true per user; when none is set
+    // the oldest membership is the active one (the pre-switcher behavior).
+    isActive: boolean("is_active").notNull().default(false),
+    createdAt,
+  },
+  // The tenancy check, which runs on every authenticated request. Queried three
+  // ways — by user, by org, and by both — so the composite leads with user and
+  // the org gets its own: the same equality-ordering rule the engine applies to
+  // everyone else's indexes. Both also back a cascading foreign key.
+  (table) => [
+    index("members_user_org").on(table.userId, table.orgId),
+    index("members_org").on(table.orgId),
+  ],
+);
 
 // Pending invitations into an org. The token is the bearer credential (returned
 // once at creation); accepting adds the caller as a member and stamps acceptedAt.
-export const invites = pgTable("invites", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  orgId: uuid("org_id")
-    .notNull()
-    .references(() => organizations.id, { onDelete: "cascade" }),
-  email: text("email").notNull(),
-  role: text("role").notNull().default("member"),
-  token: text("token").notNull().unique(),
-  invitedBy: text("invited_by")
-    .notNull()
-    .references(() => user.id, { onDelete: "cascade" }),
-  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
-  acceptedAt: timestamp("accepted_at", { withTimezone: true }),
-  createdAt,
-});
+export const invites = pgTable(
+  "invites",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    email: text("email").notNull(),
+    role: text("role").notNull().default("member"),
+    token: text("token").notNull().unique(),
+    invitedBy: text("invited_by")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    acceptedAt: timestamp("accepted_at", { withTimezone: true }),
+    createdAt,
+  },
+  // Listing an org's invites, and two cascading foreign keys.
+  (table) => [
+    index("invites_org").on(table.orgId),
+    index("invites_invited_by").on(table.invitedBy),
+  ],
+);
 
 // --- managed clusters ----------------------------------------------------
-export const clusters = pgTable("clusters", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  orgId: uuid("org_id")
-    .notNull()
-    .references(() => organizations.id, { onDelete: "cascade" }),
-  name: text("name").notNull(),
-  connectionMode: connectionMode("connection_mode").notNull().default("HOSTED_DIRECT"),
-  // Which adapter dials this cluster (src/engine/registry.ts). Only MONGODB is
-  // implemented today; the column makes the data model engine-ready.
-  engine: clusterEngine("engine").notNull().default("MONGODB"),
-  readOnly: boolean("read_only").notNull().default(true),
-  // The control plane holds the cluster's connection string, envelope-encrypted.
-  // keyVersion selects the master key that sealed it (MASTER_KEY, MASTER_KEY_V2,
-  // …) so the KEK can rotate without re-sealing everything at once.
-  sealedDek: bytea("sealed_dek").notNull(),
-  sealedData: bytea("sealed_data").notNull(),
-  keyVersion: integer("key_version").notNull().default(1),
-  // The least-privilege user Indexterity created on the cluster during
-  // admin-string onboarding; null when the customer pasted a ready-made string.
-  provisionedUsername: text("provisioned_username"),
-  createdAt,
-});
+export const clusters = pgTable(
+  "clusters",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    connectionMode: connectionMode("connection_mode").notNull().default("HOSTED_DIRECT"),
+    // Which adapter dials this cluster (src/engine/registry.ts). Only MONGODB is
+    // implemented today; the column makes the data model engine-ready.
+    engine: clusterEngine("engine").notNull().default("MONGODB"),
+    readOnly: boolean("read_only").notNull().default(true),
+    // The control plane holds the cluster's connection string, envelope-encrypted.
+    // keyVersion selects the master key that sealed it (MASTER_KEY, MASTER_KEY_V2,
+    // …) so the KEK can rotate without re-sealing everything at once.
+    sealedDek: bytea("sealed_dek").notNull(),
+    sealedData: bytea("sealed_data").notNull(),
+    keyVersion: integer("key_version").notNull().default(1),
+    // The least-privilege user Indexterity created on the cluster during
+    // admin-string onboarding; null when the customer pasted a ready-made string.
+    provisionedUsername: text("provisioned_username"),
+    createdAt,
+  },
+  // Every cluster list is scoped to an org, and deleting an org cascades here.
+  (table) => [index("clusters_org").on(table.orgId)],
+);
 
 export const indexSnapshots = pgTable(
   "index_snapshots",
@@ -287,27 +322,41 @@ export const actions = pgTable(
   (table) => [index("actions_recommendation").on(table.recommendationId)],
 );
 
-export const roiMetrics = pgTable("roi_metrics", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  clusterId: uuid("cluster_id")
-    .notNull()
-    .references(() => clusters.id, { onDelete: "cascade" }),
-  // Which recommendation earned (or, negative on undo, un-earned) this row —
-  // the dashboard's per-index attribution. Null on legacy aggregate rows.
+export const roiMetrics = pgTable(
+  "roi_metrics",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    clusterId: uuid("cluster_id")
+      .notNull()
+      .references(() => clusters.id, { onDelete: "cascade" }),
+    // Which recommendation earned (or, negative on undo, un-earned) this row —
+    // the dashboard's per-index attribution. Null on legacy aggregate rows.
+    //
+    // SET NULL, not cascade: retention prunes finished recommendations once they
+    // pass the plan's history window, and the money this product saved must not
+    // leave with them. The headline sums every row and has always tolerated a
+    // null here; only the per-index attribution list needs the link, and that is
+    // a recent-activity view by nature.
+    recommendationId: uuid("recommendation_id").references(() => recommendations.id, {
+      onDelete: "set null",
+    }),
+    freedBytes: bigint("freed_bytes", { mode: "number" }).notNull().default(0),
+    indexCountDelta: integer("index_count_delta").notNull().default(0),
+    periodStart: timestamp("period_start", { withTimezone: true }).notNull(),
+    periodEnd: timestamp("period_end", { withTimezone: true }).notNull(),
+  },
+  // The recommendation index is the expensive omission. Retention deletes
+  // settled recommendations in bulk, and every one of them made postgres scan
+  // this whole table to satisfy the SET NULL — 8.4 seconds to remove ten
+  // thousand rows, of which five milliseconds was finding them.
   //
-  // SET NULL, not cascade: retention prunes finished recommendations once they
-  // pass the plan's history window, and the money this product saved must not
-  // leave with them. The headline sums every row and has always tolerated a
-  // null here; only the per-index attribution list needs the link, and that is
-  // a recent-activity view by nature.
-  recommendationId: uuid("recommendation_id").references(() => recommendations.id, {
-    onDelete: "set null",
-  }),
-  freedBytes: bigint("freed_bytes", { mode: "number" }).notNull().default(0),
-  indexCountDelta: integer("index_count_delta").notNull().default(0),
-  periodStart: timestamp("period_start", { withTimezone: true }).notNull(),
-  periodEnd: timestamp("period_end", { withTimezone: true }).notNull(),
-});
+  // The cluster index serves the ROI headline, which sums every row for a
+  // cluster, and the cascade when a cluster is offboarded.
+  (table) => [
+    index("roi_metrics_recommendation").on(table.recommendationId),
+    index("roi_metrics_cluster").on(table.clusterId),
+  ],
+);
 
 export const policies = pgTable("policies", {
   id: uuid("id").defaultRandom().primaryKey(),
