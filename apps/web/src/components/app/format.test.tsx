@@ -1,6 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import { badgeVariant, DeltaCell, fmtBytes, fmtMicros } from "./format";
+import { badgeVariant, DeltaCell, dropsOn, fmtBytes, fmtMicros } from "./format";
 
 describe("badgeVariant", () => {
   // The badge is the only thing distinguishing a drop from a build at a glance,
@@ -68,5 +68,34 @@ describe("DeltaCell", () => {
   it("renders a dash when there is nothing to compare", () => {
     render(<DeltaCell pct={null} />);
     expect(screen.getByText("—")).toBeInTheDocument();
+  });
+});
+
+describe("dropsOn", () => {
+  const hiddenAt = new Date(Date.now() - 2 * 86_400_000).toISOString();
+
+  it("names the day a hidden drop is due", () => {
+    const due = new Date(Date.now() + 5 * 86_400_000);
+    expect(dropsOn({ state: "HIDDEN", hiddenAt, observeDays: 7 })).toBe(
+      due.toLocaleDateString(undefined, { day: "numeric", month: "short" }),
+    );
+  });
+
+  // Only HIDDEN has a due date: a proposal has not started its window, and a
+  // dropped one has finished.
+  it("says nothing in any other state", () => {
+    expect(dropsOn({ state: "PROPOSED", hiddenAt: null, observeDays: null })).toBeNull();
+    expect(dropsOn({ state: "DROPPED", hiddenAt, observeDays: 7 })).toBeNull();
+  });
+
+  // Past the window the drop is waiting on the change window and the
+  // regression gate, so a date would be a guess.
+  it("says nothing once the window has passed", () => {
+    expect(dropsOn({ state: "HIDDEN", hiddenAt, observeDays: 1 })).toBeNull();
+  });
+
+  // Older rows predate the per-index window and carry no observeDays.
+  it("says nothing without a recorded window", () => {
+    expect(dropsOn({ state: "HIDDEN", hiddenAt, observeDays: null })).toBeNull();
   });
 });

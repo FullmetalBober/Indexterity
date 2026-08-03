@@ -7,7 +7,7 @@ import { toast } from "sonner";
 import { AuthForm } from "~/components/app/auth-form";
 import { ClusterBar } from "~/components/app/cluster-bar";
 import { ConnectClusterForm } from "~/components/app/connect-cluster-form";
-import { badgeVariant, DeltaCell, fmtBytes, fmtMicros } from "~/components/app/format";
+import { badgeVariant, DeltaCell, dropsOn, fmtBytes, fmtMicros } from "~/components/app/format";
 import { PolicySection } from "~/components/app/policy-section";
 import { TeamSection } from "~/components/app/team-section";
 import { ConfirmButton } from "~/components/confirm-button";
@@ -272,7 +272,16 @@ function Home() {
                 {rec.database}.{rec.collection}
               </TableCell>
               <TableCell className="font-mono text-xs">{rec.indexName}</TableCell>
-              <TableCell className="text-xs">{rec.score}</TableCell>
+              <TableCell className="text-xs">
+                {rec.score}
+                {/* Once a drop is hidden the score is history — it decided
+                    whether to start, and the only open question is when this
+                    ends. The window is per-index, so it is not something a
+                    reader can work out from the policy. */}
+                {dropsOn(rec) === null ? null : (
+                  <span className="block text-muted-foreground">drops {dropsOn(rec)}</span>
+                )}
+              </TableCell>
               <TableCell>{rec.usageClass ?? "—"}</TableCell>
               <TableCell className="text-muted-foreground">{rec.rationale}</TableCell>
               <TableCell>

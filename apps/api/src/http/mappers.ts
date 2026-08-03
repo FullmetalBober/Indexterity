@@ -65,6 +65,8 @@ export function toRecommendation(row: typeof recommendations.$inferSelect): Reco
     rationale: row.rationale,
     score: row.score,
     estimatedBytesSaved: row.estimatedBytesSaved,
+    hiddenAt: row.hiddenAt?.toISOString() ?? null,
+    observeDays: row.observeDays,
     createdAt: row.createdAt.toISOString(),
   };
 }

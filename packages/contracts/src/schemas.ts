@@ -105,6 +105,16 @@ export const recommendation = z.object({
   // Confidence 0-100 — gates propose/auto-approve, never the safety stages.
   score: z.number().int().min(0).max(100),
   estimatedBytesSaved: z.number().int().nonnegative(),
+  // When the index was hidden, and the observe window this particular drop was
+  // given — decided from the index's own usage pattern, not the policy default
+  // (a monthly report waits out a full cycle; one still serving traffic answers
+  // within days). Both null until the drop reaches HIDDEN.
+  //
+  // Exposed because the score cannot answer the question anyone actually has
+  // in front of a hidden index: when does this get dropped? "82" does not say.
+  // A date does.
+  hiddenAt: z.string().nullable(),
+  observeDays: z.number().int().positive().nullable(),
   createdAt: z.string(),
 });
 export type Recommendation = z.infer<typeof recommendation>;

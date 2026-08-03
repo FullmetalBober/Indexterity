@@ -15,6 +15,23 @@ export function fmtMicros(value: number | null): string {
   return value === null ? "—" : `${Math.round(value)}`;
 }
 
+// When a hidden index is due to be dropped, or null if that is not a question
+// yet. The observe window is chosen per index from its own usage pattern, so it
+// is not something a reader can derive from the policy setting — a monthly
+// report waits out a full cycle, an index still serving traffic answers within
+// days. Null once the window has passed: the drop is then waiting on the change
+// window and the regression gate, and naming a date would be a guess.
+export function dropsOn(rec: {
+  state: string;
+  hiddenAt: string | null;
+  observeDays: number | null;
+}): string | null {
+  if (rec.state !== "HIDDEN" || rec.hiddenAt === null || rec.observeDays === null) return null;
+  const due = new Date(new Date(rec.hiddenAt).getTime() + rec.observeDays * 86_400_000);
+  if (Number.isNaN(due.getTime()) || due.getTime() <= Date.now()) return null;
+  return due.toLocaleDateString(undefined, { day: "numeric", month: "short" });
+}
+
 export function DeltaCell({ pct }: { pct: number | null }) {
   if (pct === null) return <span className="text-muted-foreground">—</span>;
   const tone = pct < 0 ? "text-green-600" : pct > 0 ? "text-red-600" : "text-muted-foreground";
