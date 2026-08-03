@@ -138,6 +138,22 @@ export class RecommendationsController {
         periodStart: new Date(),
         periodEnd: new Date(),
       });
+      // Park it, exactly as cancelling a pending drop does. Without this the
+      // rebuilt index goes straight back into the pipeline: it carries the same
+      // name, so classify reads its pre-drop history, sees the same zero usage
+      // that justified the drop in the first place, and proposes it again — and
+      // with an autoApplyScore set, drops it again. Undo has to mean something
+      // for longer than one classify tick.
+      //
+      // Not a regression, for the same reason as the cancel path: nothing got
+      // slower, an owner simply knows something the engine does not.
+      await recordManualVeto(
+        this.database.db,
+        rec.clusterId,
+        { database: rec.database, collection: rec.collection, indexName: rec.indexName },
+        VETO_COOLDOWN_DAYS,
+        "drop undone by an owner",
+      );
       const [updated] = await this.database.db
         .update(recommendations)
         .set({ state: "ROLLED_BACK", updatedAt: new Date() })

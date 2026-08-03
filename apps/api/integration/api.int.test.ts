@@ -26,6 +26,7 @@ import { refreshInferredWindow } from "../src/jobs/change-window";
 import { classifyCluster } from "../src/jobs/classify";
 import { collectCluster } from "../src/jobs/collect";
 import { drainPool } from "../src/jobs/connection-pool";
+import { activeCooldownKeys, cooldownKey } from "../src/jobs/cooldowns";
 import { applyCreatesForCluster } from "../src/jobs/create";
 import { closeJobDb, jobDb } from "../src/jobs/db";
 import { finalizeCluster } from "../src/jobs/finalize";
@@ -387,6 +388,13 @@ describe("collect, audit trail and undo", () => {
       body: JSON.stringify({}),
     });
     expect(undo.status).toBe(200);
+
+    // Undo has to outlast one classify tick. The rebuilt index carries the same
+    // name, so its pre-drop history still reads "never used" — without a
+    // cooldown the engine proposes the identical drop on the next pass, and
+    // with an autoApplyScore set it performs it.
+    const parked = await activeCooldownKeys(db, clusterId);
+    expect(parked.has(cooldownKey("inttest", "orders", "old_1"))).toBe(true);
     const indexes = await mongo.db("inttest").collection("orders").indexes();
     expect(indexes.some((index) => index.name === "old_1")).toBe(true);
   });
