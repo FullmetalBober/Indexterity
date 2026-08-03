@@ -109,7 +109,7 @@ export function ClusterBar({
             void navigate({ to: "/app", search: { cluster: value } });
           }}
         >
-          <SelectTrigger size="sm" className="w-[220px]" aria-label="Select cluster">
+          <SelectTrigger size="sm" className="w-55" aria-label="Select cluster">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
