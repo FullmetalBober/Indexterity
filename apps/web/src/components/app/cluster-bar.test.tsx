@@ -129,6 +129,35 @@ describe("ClusterBar", () => {
     expect(navigate).toHaveBeenCalledWith({ to: "/app", search: {} });
   });
 
+  // onChanged refetches the shell. A refused change moved nothing, so asking
+  // for it again is a round trip that redraws the same badge.
+  it("does not refetch when a mode change is refused", async () => {
+    setClusterMode.mockResolvedValue({ ok: false });
+    const user = userEvent.setup();
+    const onChanged = vi.fn();
+    renderInApp(<ClusterBar cluster={cluster} clusters={[cluster]} onChanged={onChanged} />);
+
+    await confirm(user, "Go live", "Go live");
+
+    expect(toastError).toHaveBeenCalledWith(expect.stringContaining("owner only"));
+    expect(onChanged).not.toHaveBeenCalled();
+  });
+
+  // Deselecting a cluster that is still connected would report a disconnect
+  // that did not happen.
+  it("keeps the cluster selected when the disconnect is refused", async () => {
+    disconnectCluster.mockResolvedValue({ ok: false, unhidden: 0, revokeCommand: null });
+    const user = userEvent.setup();
+    const onChanged = vi.fn();
+    renderInApp(<ClusterBar cluster={cluster} clusters={[cluster]} onChanged={onChanged} />);
+
+    await confirm(user, "Disconnect", "Disconnect");
+
+    expect(toastError).toHaveBeenCalledWith(expect.stringContaining("owner only"));
+    expect(navigate).not.toHaveBeenCalled();
+    expect(onChanged).not.toHaveBeenCalled();
+  });
+
   it("will not rotate to an empty string", async () => {
     const user = userEvent.setup();
     renderInApp(<ClusterBar cluster={cluster} clusters={[cluster]} onChanged={vi.fn()} />);

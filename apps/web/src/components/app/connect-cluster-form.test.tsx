@@ -1,20 +1,17 @@
 import type { ConnectionDiagnosis, PrivilegeCheck } from "@repo/contracts";
-import { render, screen } from "@testing-library/react";
+import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { renderInApp } from "~/test-utils";
 import { ConnectClusterForm } from "./connect-cluster-form";
 
 const checkConnection = vi.hoisted(() => vi.fn());
 const connectCluster = vi.hoisted(() => vi.fn());
 const provisionCluster = vi.hoisted(() => vi.fn());
 const navigate = vi.hoisted(() => vi.fn());
-const invalidate = vi.hoisted(() => vi.fn());
 
 vi.mock("~/lib/app-server", () => ({ checkConnection, connectCluster, provisionCluster }));
-vi.mock("@tanstack/react-router", () => ({
-  useNavigate: () => navigate,
-  useRouter: () => ({ invalidate }),
-}));
+vi.mock("@tanstack/react-router", () => ({ useNavigate: () => navigate }));
 
 function privilege(key: string, granted: boolean): PrivilegeCheck {
   return { key, label: key, enables: `${key} does things`, tier: "CORE", granted };
@@ -44,7 +41,6 @@ async function check(user: ReturnType<typeof userEvent.setup>): Promise<void> {
 
 beforeEach(() => {
   navigate.mockResolvedValue(undefined);
-  invalidate.mockResolvedValue(undefined);
 });
 
 describe("ConnectClusterForm", () => {
@@ -52,7 +48,7 @@ describe("ConnectClusterForm", () => {
   // seen what the credentials can do.
   it("will not check until both fields are filled", async () => {
     const user = userEvent.setup();
-    render(<ConnectClusterForm />);
+    renderInApp(<ConnectClusterForm />);
     const button = screen.getByRole("button", { name: "Check access" });
     expect(button).toBeDisabled();
 
@@ -66,7 +62,7 @@ describe("ConnectClusterForm", () => {
   it("checks before it connects, and never stores anything on the check", async () => {
     checkConnection.mockResolvedValue({ ok: true, diagnosis: diagnosis() });
     const user = userEvent.setup();
-    render(<ConnectClusterForm />);
+    renderInApp(<ConnectClusterForm />);
 
     await check(user);
 
@@ -80,7 +76,7 @@ describe("ConnectClusterForm", () => {
     checkConnection.mockResolvedValue({ ok: true, diagnosis: diagnosis() });
     connectCluster.mockResolvedValue({ ok: true, message: null, id: "c9" });
     const user = userEvent.setup();
-    render(<ConnectClusterForm />);
+    renderInApp(<ConnectClusterForm />);
 
     await check(user);
     await user.click(screen.getByRole("button", { name: "Connect" }));
@@ -96,7 +92,7 @@ describe("ConnectClusterForm", () => {
   it("offers to provision a scoped user when the credentials can create one", async () => {
     checkConnection.mockResolvedValue({ ok: true, diagnosis: diagnosis({ canProvision: true }) });
     const user = userEvent.setup();
-    render(<ConnectClusterForm />);
+    renderInApp(<ConnectClusterForm />);
 
     await check(user);
 
@@ -118,7 +114,7 @@ describe("ConnectClusterForm", () => {
       connectionString: "mongodb://idx_abc:secret@host:27017",
     });
     const user = userEvent.setup();
-    render(<ConnectClusterForm />);
+    renderInApp(<ConnectClusterForm />);
 
     await check(user);
     await user.click(screen.getByRole("button", { name: "Create a scoped user and connect" }));
@@ -133,7 +129,7 @@ describe("ConnectClusterForm", () => {
       diagnosis: diagnosis({ ready: false, canApply: false, missing: ["Index usage stats"] }),
     });
     const user = userEvent.setup();
-    render(<ConnectClusterForm />);
+    renderInApp(<ConnectClusterForm />);
 
     await check(user);
 
@@ -149,7 +145,7 @@ describe("ConnectClusterForm", () => {
       diagnosis: diagnosis({ canApply: false, missing: ["Drop indexes"] }),
     });
     const user = userEvent.setup();
-    render(<ConnectClusterForm />);
+    renderInApp(<ConnectClusterForm />);
 
     await check(user);
 
@@ -163,7 +159,7 @@ describe("ConnectClusterForm", () => {
       diagnosis: diagnosis({ reachable: false, message: "cluster unreachable — check the host" }),
     });
     const user = userEvent.setup();
-    render(<ConnectClusterForm />);
+    renderInApp(<ConnectClusterForm />);
 
     await check(user);
 
@@ -174,7 +170,7 @@ describe("ConnectClusterForm", () => {
   it("surfaces a failed check rather than swallowing it", async () => {
     checkConnection.mockRejectedValue(new Error("boom"));
     const user = userEvent.setup();
-    render(<ConnectClusterForm />);
+    renderInApp(<ConnectClusterForm />);
 
     await check(user);
 
@@ -186,7 +182,7 @@ describe("ConnectClusterForm", () => {
   it("discards the diagnosis when the connection string is edited", async () => {
     checkConnection.mockResolvedValue({ ok: true, diagnosis: diagnosis() });
     const user = userEvent.setup();
-    render(<ConnectClusterForm />);
+    renderInApp(<ConnectClusterForm />);
 
     await check(user);
     expect(screen.getByRole("button", { name: "Connect" })).toBeInTheDocument();

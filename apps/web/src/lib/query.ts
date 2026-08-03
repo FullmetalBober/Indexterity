@@ -36,8 +36,25 @@ export function createAppQueryClient(): QueryClient {
 
 // Keys are (resource, cluster). The cluster has to be in the key, or switching
 // clusters would show the previous one's numbers while the new ones load.
+//
+// The shell is the exception and takes no cluster: clusters, org and orgs are
+// the same three reads whichever one is selected, so selecting another is a URL
+// change and not a refetch.
 export const queryKeys = {
+  shell: () => ["shell"] as const,
   pipeline: (clusterId: string | null) => ["pipeline", clusterId] as const,
   telemetry: (clusterId: string | null) => ["telemetry", clusterId] as const,
   policy: (clusterId: string | null) => ["policy", clusterId] as const,
 };
+
+// Signing in, signing out and switching org are the three moments where the
+// answer to every question on the page changes at once, because who is asking
+// changed. Invalidating one key would leave the previous session's clusters and
+// recommendations on screen until something else happened to move them.
+//
+// This is deliberately the whole cache and nothing less. It is still not
+// router.invalidate(): the loaders are not re-run, the cache refetches what is
+// mounted and drops the rest.
+export function invalidateSession(client: QueryClient): Promise<void> {
+  return client.invalidateQueries();
+}

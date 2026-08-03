@@ -1,5 +1,6 @@
 import type { ConnectionDiagnosis } from "@repo/contracts";
-import { useNavigate, useRouter } from "@tanstack/react-router";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { PrivilegeList } from "~/components/app/privilege-list";
 import { Alert, AlertDescription, AlertTitle } from "~/components/ui/alert";
@@ -8,14 +9,14 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/com
 import { Input } from "~/components/ui/input";
 import { Label } from "~/components/ui/label";
 import { checkConnection, connectCluster, provisionCluster } from "~/lib/app-server";
+import { queryKeys } from "~/lib/query";
 
 export function ConnectClusterForm() {
-  const router = useRouter();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const [name, setName] = useState("");
   const [connString, setConnString] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
   const [diagnosis, setDiagnosis] = useState<ConnectionDiagnosis | null>(null);
   const [provisioned, setProvisioned] = useState<{
     username: string;
@@ -23,19 +24,19 @@ export function ConnectClusterForm() {
   } | null>(null);
 
   // Preflight: ask the api what these credentials may do before storing them.
-  async function onCheck() {
-    setBusy(true);
-    setError(null);
-    setDiagnosis(null);
-    setProvisioned(null);
-    const result = await checkConnection({ data: connString }).catch(() => ({
-      ok: false as const,
-      message: "could not check the connection",
-    }));
-    setBusy(false);
-    if (result.ok) setDiagnosis(result.diagnosis);
-    else setError(result.message);
-  }
+  const check = useMutation({
+    mutationFn: (connectionString: string) => checkConnection({ data: connectionString }),
+    onMutate: () => {
+      setError(null);
+      setDiagnosis(null);
+      setProvisioned(null);
+    },
+    onSuccess: (result) => {
+      if (result.ok) setDiagnosis(result.diagnosis);
+      else setError(result.message);
+    },
+    onError: () => setError("could not check the connection"),
+  });
 
   async function finish(result: { ok: boolean; message: string | null; id: string | null }) {
     if (!result.ok) {
@@ -45,32 +46,37 @@ export function ConnectClusterForm() {
     setName("");
     setConnString("");
     setDiagnosis(null);
+    // The shell first, then the URL: the new cluster has to be in the list
+    // before the selection points at it, or the bar has a moment of finding
+    // nothing under ?cluster= and drawing "No cluster connected" instead.
+    await queryClient.invalidateQueries({ queryKey: queryKeys.shell() });
     if (result.id !== null) await navigate({ to: "/app", search: { cluster: result.id } });
-    await router.invalidate();
   }
 
-  async function onConnectAsIs() {
-    setBusy(true);
-    setError(null);
-    const result = await connectCluster({ data: { name, connectionString: connString } });
-    setBusy(false);
-    await finish(result);
-  }
+  const connectAsIs = useMutation({
+    mutationFn: () => connectCluster({ data: { name, connectionString: connString } }),
+    onMutate: () => setError(null),
+    onSuccess: finish,
+    onError: () => setError("failed to connect cluster"),
+  });
 
   // Consent path: the admin string is used once to create the scoped user and
   // is never stored.
-  async function onProvision() {
-    setBusy(true);
-    setError(null);
-    const result = await provisionCluster({
-      data: { name, adminConnectionString: connString },
-    });
-    setBusy(false);
-    if (result.ok && result.username !== null && result.connectionString !== null) {
-      setProvisioned({ username: result.username, connectionString: result.connectionString });
-    }
-    await finish(result);
-  }
+  const provision = useMutation({
+    mutationFn: () => provisionCluster({ data: { name, adminConnectionString: connString } }),
+    onMutate: () => setError(null),
+    onSuccess: async (result) => {
+      if (result.ok && result.username !== null && result.connectionString !== null) {
+        setProvisioned({ username: result.username, connectionString: result.connectionString });
+      }
+      await finish(result);
+    },
+    onError: () => setError("failed to provision the cluster"),
+  });
+
+  // One flag over three mutations: any of them in flight means the form is
+  // waiting on the api, and the second click would be about stale fields.
+  const busy = check.isPending || connectAsIs.isPending || provision.isPending;
 
   return (
     <Card className="mt-8">
@@ -86,7 +92,7 @@ export function ConnectClusterForm() {
           className="flex flex-wrap items-end gap-3"
           onSubmit={(event) => {
             event.preventDefault();
-            void onCheck();
+            check.mutate(connString);
           }}
         >
           <div className="grid gap-1.5">
@@ -166,18 +172,18 @@ export function ConnectClusterForm() {
                   is kept (encrypted). Revoke it any time with <code>db.dropUser(…)</code>.
                 </p>
                 <div className="mt-3 flex flex-wrap gap-2">
-                  <Button disabled={busy} onClick={() => void onProvision()}>
+                  <Button disabled={busy} onClick={() => provision.mutate()}>
                     {busy ? "Creating…" : "Create a scoped user and connect"}
                   </Button>
                   {diagnosis.ready ? (
-                    <Button variant="outline" disabled={busy} onClick={() => void onConnectAsIs()}>
+                    <Button variant="outline" disabled={busy} onClick={() => connectAsIs.mutate()}>
                       Use these credentials as-is
                     </Button>
                   ) : null}
                 </div>
               </div>
             ) : diagnosis.ready ? (
-              <Button className="mt-3" disabled={busy} onClick={() => void onConnectAsIs()}>
+              <Button className="mt-3" disabled={busy} onClick={() => connectAsIs.mutate()}>
                 Connect
               </Button>
             ) : (
