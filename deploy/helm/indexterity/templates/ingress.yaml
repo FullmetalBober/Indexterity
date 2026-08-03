@@ -28,11 +28,22 @@ spec:
       {{- end }}
   {{- end }}
   rules:
-    # The dashboard. Browsers only ever talk to this host: every api call goes
-    # through the web app's server functions.
+    # One host, two paths. The browser sees a single origin, so the session
+    # cookie it gets from /api/auth is first-party and travels with every other
+    # /api call by itself — no CORS, and nothing to proxy server-side.
+    #
+    # Ingress matches the longest prefix, so /api wins over / regardless of
+    # order; writing it first keeps that obvious to whoever reads this next.
     - host: {{ .Values.ingress.host | quote }}
       http:
         paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "indexterity.fullname" . }}-api
+                port:
+                  number: {{ .Values.api.service.port }}
           - path: /
             pathType: Prefix
             backend:
@@ -44,7 +55,9 @@ spec:
     {{- if not .Values.ingress.api.host }}
     {{- fail "ingress.api.host is required when ingress.api.enabled" }}
     {{- end }}
-    # Optional: the api exposed for programmatic access.
+    # A second hostname for the api is optional in a new sense: the dashboard
+    # does not need it any more. Leave it off unless something outside the
+    # browser actually consumes the api.
     - host: {{ .Values.ingress.api.host | quote }}
       http:
         paths:

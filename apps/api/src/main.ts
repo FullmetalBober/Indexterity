@@ -21,6 +21,14 @@ async function bootstrap(): Promise<void> {
     },
   });
   const app = await NestFactory.create<NestFastifyApplication>(AppModule, adapter);
+  // Everything this service serves lives under /api, so a single reverse proxy
+  // rule can put it on the same origin as the dashboard. better-auth is already
+  // mounted at /api/auth below — it registers straight on Fastify, outside
+  // Nest's prefix, so it is unaffected by this and does not get /api twice.
+  //
+  // Same origin is what lets the browser hold the session cookie itself. Two
+  // origins is why the web app currently proxies every call server-side.
+  app.setGlobalPrefix("api");
   app.useGlobalFilters(new AppExceptionFilter());
   const fastify = app.getHttpAdapter().getInstance();
 

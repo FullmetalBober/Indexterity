@@ -60,7 +60,7 @@ export default defineConfig({
   webServer: [
     {
       command: "node ../api/dist/main.js",
-      url: `${API_URL}/health`,
+      url: `${API_URL}/api/health`,
       env: apiEnv,
       reuseExistingServer: false,
       stdout: "pipe",
