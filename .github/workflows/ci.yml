@@ -5,6 +5,21 @@ on:
     branches: [main]
   pull_request:
 
+# Three caches carry the work between runs, and they answer different questions.
+#
+#   ~/.npm         (setup-node)   what has been downloaded from the registry
+#   node_modules   (this file)    what has been INSTALLED from those downloads
+#   .turbo         (this file)    what has already been built, linted and tested
+#
+# The node_modules key has no restore-keys on purpose. A partial restore against
+# a changed lockfile is the one failure mode worth designing out: it would leave
+# a tree that neither matches the lockfile nor gets repaired, and the resulting
+# breakage looks like a code bug. Exact match or a clean `npm ci`, nothing in
+# between. The turbo cache is the opposite case — it is keyed by content
+# internally, so a stale directory is safe and prefix-restoring it is free.
+env:
+  TURBO_TELEMETRY_DISABLED: 1
+
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -14,7 +29,23 @@ jobs:
         with:
           node-version: "26"
           cache: npm
+      - uses: actions/cache@v4
+        id: modules
+        with:
+          path: |
+            node_modules
+            apps/*/node_modules
+            packages/*/node_modules
+          key: modules-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
       - run: npm ci
+        if: steps.modules.outputs.cache-hit != 'true'
+      - uses: actions/cache@v4
+        with:
+          path: .turbo
+          key: turbo-check-${{ github.sha }}
+          restore-keys: |
+            turbo-check-
+            turbo-
       - run: npm run lint
       - run: npm run version:check
       - run: npm run build
@@ -61,7 +92,26 @@ jobs:
         with:
           node-version: "26"
           cache: npm
+      - uses: actions/cache@v4
+        id: modules
+        with:
+          path: |
+            node_modules
+            apps/*/node_modules
+            packages/*/node_modules
+          key: modules-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
       - run: npm ci
+        if: steps.modules.outputs.cache-hit != 'true'
+      # Each matrix leg keeps its own key so three concurrent saves cannot race
+      # for one, but they all fall back to whatever another leg or `check` last
+      # wrote — the build is identical across them, only the server differs.
+      - uses: actions/cache@v4
+        with:
+          path: .turbo
+          key: turbo-int-${{ matrix.mongo }}-${{ github.sha }}
+          restore-keys: |
+            turbo-int-${{ matrix.mongo }}-
+            turbo-
       - run: npm run build
       - run: npm run db:migrate
       - run: npm run test:int -w @repo/api
@@ -101,8 +151,35 @@ jobs:
         with:
           node-version: "26"
           cache: npm
+      - uses: actions/cache@v4
+        id: modules
+        with:
+          path: |
+            node_modules
+            apps/*/node_modules
+            packages/*/node_modules
+          key: modules-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
       - run: npm ci
+        if: steps.modules.outputs.cache-hit != 'true'
+      # The browser download is the cacheable half. Its system libraries are apt
+      # packages on the runner image and cannot be, so a hit still runs
+      # install-deps — seconds against the download's tens of them.
+      - uses: actions/cache@v4
+        id: browsers
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
       - run: npx playwright install --with-deps chromium
+        if: steps.browsers.outputs.cache-hit != 'true'
+      - run: npx playwright install-deps chromium
+        if: steps.browsers.outputs.cache-hit == 'true'
+      - uses: actions/cache@v4
+        with:
+          path: .turbo
+          key: turbo-e2e-${{ github.sha }}
+          restore-keys: |
+            turbo-e2e-
+            turbo-
       - run: npm run build
       - run: npm run db:migrate
       - run: npm run test:e2e -w @repo/web
@@ -127,6 +204,36 @@ jobs:
           cluster_name: indexterity
           wait: 120s
       - uses: azure/setup-helm@v4
+
+      # The two builds were this workflow's longest step by a wide margin, and
+      # entirely uncached — every run reinstalled every dependency inside both
+      # images from scratch. buildx with the GitHub cache backend reuses the
+      # layers instead, and `scope` is set to the same names the release
+      # workflow uses so the two warm each other rather than keeping separate
+      # copies of identical layers.
+      #
+      # Built here rather than inside kind-test.sh because that script has no
+      # business knowing about buildx: it takes the images as given (PREBUILT)
+      # and gets on with testing the chart.
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/api/Dockerfile
+          tags: indexterity/api:0.1.0
+          load: true
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,scope=api,mode=max
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/web/Dockerfile
+          tags: indexterity/web:0.1.0
+          load: true
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,scope=web,mode=max
+
       - run: deploy/kind-test.sh
         env:
           CTR: docker
+          PREBUILT: "1"

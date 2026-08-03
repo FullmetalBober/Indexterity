@@ -11,6 +11,7 @@
 # Requires: kind, kubectl, helm, podman (or docker).
 # Usage:   deploy/kind-test.sh [--keep]
 #          RELEASE=0.1.0 deploy/kind-test.sh   # the PUBLISHED artifacts instead
+#          PREBUILT=1 deploy/kind-test.sh      # images already in the engine
 #
 # RELEASE mode answers a question the default cannot: does what we shipped
 # work? The default builds from the working tree, so it passes even if the
@@ -96,9 +97,20 @@ if [ -n "$RELEASE" ]; then
     kind load docker-image "ghcr.io/$GHCR_OWNER/indexterity-$img:$RELEASE" --name "$CLUSTER"
   done
 else
-  step "building images"
-  "$CTR" build -f "$ROOT/apps/api/Dockerfile" -t "indexterity/api:$TAG" "$ROOT"
-  "$CTR" build -f "$ROOT/apps/web/Dockerfile" -t "indexterity/web:$TAG" "$ROOT"
+  # PREBUILT: the caller already built and tagged them, and knows how to do it
+  # faster than a bare `build` can — CI uses buildx against a layer cache. The
+  # tags are the contract; where they came from is not this script's business.
+  if [ -z "${PREBUILT:-}" ]; then
+    step "building images"
+    "$CTR" build -f "$ROOT/apps/api/Dockerfile" -t "indexterity/api:$TAG" "$ROOT"
+    "$CTR" build -f "$ROOT/apps/web/Dockerfile" -t "indexterity/web:$TAG" "$ROOT"
+  else
+    step "using prebuilt images"
+    for img in api web; do
+      $CTR image inspect "$(image_ref "$img")" >/dev/null 2>&1 ||
+        { echo "PREBUILT is set but $(image_ref "$img") is not in $CTR"; exit 1; }
+    done
+  fi
 
   step "loading images into the cluster"
   for img in api web; do
