@@ -190,12 +190,41 @@ jobs:
           path: apps/web/playwright-report/
           retention-days: 7
 
-  # Installs the chart into a throwaway Kind cluster. On main only — it builds
-  # both images, so per-PR would cost more than it catches. `helm lint` renders
-  # YAML; this one finds out whether the release actually installs, which is a
+  # Does this change touch what the chart job tests?
+  #
+  # That job was main-only, on the grounds that two image builds per PR cost
+  # more than they catch. True of a PR that moves a React component; false of
+  # one that rewrites how the images are built — and the second kind was
+  # sailing through review with its riskiest job skipped, then running for the
+  # first time on main. The rule is the same rule, applied to the diff instead
+  # of the branch.
+  scope:
+    runs-on: ubuntu-latest
+    outputs:
+      chart: ${{ steps.diff.outputs.chart }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: diff
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "chart=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD")
+          if echo "$changed" | grep -qE '^(deploy/|apps/[a-z]+/Dockerfile|\.github/workflows/ci\.yml)'; then
+            echo "chart=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "chart=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Installs the chart into a throwaway Kind cluster. `helm lint` renders YAML;
+  # this one finds out whether the release actually installs, which is a
   # different question and the one that kept being answered wrong.
   chart:
-    if: github.event_name == 'push'
+    needs: scope
+    if: needs.scope.outputs.chart == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
