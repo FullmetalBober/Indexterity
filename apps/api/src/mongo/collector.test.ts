@@ -45,6 +45,28 @@ describe("equalityConstants", () => {
       {},
     );
   });
+
+  // The only path by which a customer's own data reaches our database. A value
+  // that is not a low-cardinality discriminator is both useless as a partial
+  // filter and the one we should not be holding.
+  it("refuses document identifiers and long values", () => {
+    expect(
+      equalityConstants({
+        _id: "507f1f77bcf86cd799439011",
+        session: "3f2504e0-4f89-11d3-9a0c-0305e82c3301",
+        note: "x".repeat(65),
+        status: "active",
+      }),
+    ).toEqual({ status: "active" });
+  });
+
+  it("keeps short values and numbers whatever they look like", () => {
+    expect(equalityConstants({ tier: "pro", shard: 7, live: true })).toEqual({
+      tier: "pro",
+      shard: 7,
+      live: true,
+    });
+  });
 });
 
 describe("dateRangeCutoff", () => {

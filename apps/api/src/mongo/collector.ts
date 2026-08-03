@@ -265,14 +265,37 @@ function collectPredicates(
   }
 }
 
+// A partial-filter value has to be short enough to be a discriminator. Nothing
+// this long is a status flag or a tenant slug.
+const MAX_CONSTANT_LENGTH = 64;
+// Stringified ObjectIds and UUIDs. Per-document by construction, so one showing
+// up as a "constant" means the sample was too thin to intersect it away, not
+// that a partial index on it would help anyone.
+const IDENTIFIER_SHAPED =
+  /^(?:[0-9a-f]{24}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+
 function isConstant(value: unknown): value is ConstantValue {
-  return typeof value === "string" || typeof value === "number" || typeof value === "boolean";
+  if (typeof value === "number" || typeof value === "boolean") return true;
+  if (typeof value !== "string") return false;
+  return value.length <= MAX_CONSTANT_LENGTH && !IDENTIFIER_SHAPED.test(value);
 }
 
 // Real literal values equality predicates compared against — the partial-index
 // signal. PROFILER ONLY: $queryStats shapifies values into "?type" markers,
 // which must never be mistaken for constants. Handles direct equality and $eq,
 // flattening $and.
+//
+// This is the ONLY path by which a customer's own data — not field names, not
+// counters, but a value out of their documents — reaches the control plane
+// database, so it takes only what a partial index actually needs. A value that
+// survives to become a partialFilterExpression must be a low-cardinality
+// discriminator, and that is exactly what makes the index worth building: the
+// useful values and the safe ones are the same set.
+//
+// Most of the filtering is upstream and free — intersectConstants keeps only
+// fields whose value was IDENTICAL in every sample, so anything per-user or
+// per-request drops out on its own. The rules here catch what a thin sample
+// would otherwise slip through.
 export function equalityConstants(filter: Record<string, unknown>): Record<string, ConstantValue> {
   const constants: Record<string, ConstantValue> = {};
   for (const [field, value] of Object.entries(filter)) {

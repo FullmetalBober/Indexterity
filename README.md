@@ -116,6 +116,13 @@ index from the spec captured at drop time and corrects the ROI headline back
 down. Neither counts as a regression — that number feeds the score, and nothing
 regressed.
 
+Undo is available for as long as the plan keeps history: the spec it rebuilds
+from lives in the audit trail, and the audit trail ages out with everything
+else. A settled recommendation — dropped, rejected, rolled back — is removed
+once it passes the window, along with its actions. Live ones never are, however
+old: an index hidden through a long outage is still waiting on its own observe
+window. The ROI it earned stays either way, unattributed rather than deleted.
+
 **The score.** Every recommendation carries 0–100, and the scale is calibrated
 so 100 is reachable and means "as sure as this engine gets". Drops: the argument
 is worth 55 (redundant), 50 (never used) or 35 (was periodic, went quiet); a
@@ -357,6 +364,23 @@ Both defaults exist because the control plane dials hosts that users name.
 - **Private targets are refused** unless `ALLOW_PRIVATE_CLUSTER_TARGETS=true`.
   Cloud metadata ranges stay blocked either way, DNS and SRV are resolved before
   dialing, and every host in a multi-host string is checked.
+
+### What lands in the control-plane database
+
+Index names, field names, collection names, and counters — sizes, op counts,
+latency totals. Not documents: the provisioned role cannot read them, so there
+is nothing to store.
+
+One exception, and it is deliberate. A **partial index** needs the literal value
+in its filter — `partialFilterExpression: { status: "active" }` cannot be built
+without knowing `"active"` — so equality literals from the profiler can reach
+the database. What survives to get there is narrow: only fields whose value was
+identical in **every** sample, which drops anything per-user or per-request on
+its own, and then only values short enough to be a discriminator, never one
+shaped like an ObjectId or a UUID. The values that are useful as a partial
+filter and the values that are safe to hold are the same set, which is what
+makes the rule easy to keep. `$queryStats` never carries literals at all — it
+shapifies them to `?string` before we see them.
 
 ## Deploy
 

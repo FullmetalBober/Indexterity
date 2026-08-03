@@ -2045,3 +2045,94 @@ describe("retiring a narrowed index", () => {
     ).toHaveLength(0);
   });
 });
+
+// Retention covered the two tables of raw counters and left the two a customer
+// actually reads. Adding them raises the question the FK change exists to
+// answer: the money this product saved must not leave with the row that
+// earned it.
+describe("finished decisions age out, the ROI they earned does not", () => {
+  it("prunes a settled recommendation and keeps its freed bytes", async () => {
+    const session = await signUp("decision-retention");
+    createdEmails.push(session.email);
+    const orgId = await giveRoom(session);
+    const created = await api("/clusters", session, {
+      method: "POST",
+      body: JSON.stringify({ name: "Decision Cluster", connectionString: MONGO_URL }),
+    });
+    const decisionClusterId = asString(asRecord(await created.json()).id);
+    createdClusterIds.push(decisionClusterId);
+    await db.update(organizations).set({ plan: "FREE" }).where(eq(organizations.id, orgId));
+
+    const old = new Date(Date.now() - 120 * 86_400_000);
+    const [settled] = await db
+      .insert(recommendations)
+      .values({
+        clusterId: decisionClusterId,
+        type: "DROP_UNUSED",
+        state: "DROPPED",
+        database: "inttest",
+        collection: "orders",
+        indexName: "stale_1",
+        rationale: "no recorded usage",
+        score: 80,
+        estimatedBytesSaved: 4096,
+        updatedAt: old,
+      })
+      .returning();
+    // Still live, and just as old: an index hidden through a long outage must
+    // not be swept out from under its own observe window.
+    const [live] = await db
+      .insert(recommendations)
+      .values({
+        clusterId: decisionClusterId,
+        type: "DROP_UNUSED",
+        state: "HIDDEN",
+        database: "inttest",
+        collection: "orders",
+        indexName: "hidden_1",
+        rationale: "no recorded usage",
+        score: 80,
+        estimatedBytesSaved: 4096,
+        updatedAt: old,
+      })
+      .returning();
+    if (settled === undefined || live === undefined) throw new Error("insert failed");
+
+    await db.insert(actions).values({
+      recommendationId: settled.id,
+      kind: "DROP",
+      actor: "system",
+      result: "dropped",
+      rollbackToken: { spec: { name: "stale_1" } },
+    });
+    await db.insert(roiMetrics).values({
+      clusterId: decisionClusterId,
+      recommendationId: settled.id,
+      freedBytes: 4096,
+      indexCountDelta: 1,
+      periodStart: old,
+      periodEnd: old,
+    });
+
+    await pruneOldSamples();
+
+    const left = await db
+      .select()
+      .from(recommendations)
+      .where(eq(recommendations.clusterId, decisionClusterId));
+    expect(left.map((row) => row.id)).toEqual([live.id]);
+    // The audit trail and its rollback token went with it — undo is not offered
+    // past the window, which is what the plan already says.
+    expect(
+      await db.select().from(actions).where(eq(actions.recommendationId, settled.id)),
+    ).toHaveLength(0);
+    // But the headline figure is intact, now unattributed.
+    const roi = await db
+      .select()
+      .from(roiMetrics)
+      .where(eq(roiMetrics.clusterId, decisionClusterId));
+    expect(roi).toHaveLength(1);
+    expect(roi[0]?.freedBytes).toBe(4096);
+    expect(roi[0]?.recommendationId).toBeNull();
+  });
+});

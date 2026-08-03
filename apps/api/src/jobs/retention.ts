@@ -9,6 +9,7 @@ import {
   latencySamples,
   lt,
   organizations,
+  recommendations,
   sql,
 } from "../db";
 import { requiredEnv } from "../env";
@@ -109,7 +110,31 @@ export async function pruneOldSamples(): Promise<number> {
         and(inArray(indexSnapshots.clusterId, clusterIds), lt(indexSnapshots.capturedAt, cutoff)),
       )
       .returning({ id: indexSnapshots.id });
-    pruned += samples.length + snapshots.length;
+    // Finished decisions age out on the same clock. Retention used to cover the
+    // two tables of raw counters and leave the two a customer actually reads —
+    // so a plan sold as "90 days of history" kept every recommendation and
+    // every audit line forever. That is both more data than the plan promises
+    // and more than is useful: a recommendation that was dropped, rejected or
+    // rolled back last year answers no question anyone asks.
+    //
+    // Only terminal states. Everything else describes something still live —
+    // an index waiting out its observe window, a build the engine is still
+    // watching — and its row is the only record that it is in flight.
+    //
+    // Actions cascade with their recommendation, so the audit trail and the
+    // rollback token go with it. Undo therefore stops being offered once a drop
+    // passes the window, which is the same promise the plan already makes.
+    const decisions = await db
+      .delete(recommendations)
+      .where(
+        and(
+          inArray(recommendations.clusterId, clusterIds),
+          inArray(recommendations.state, ["DROPPED", "REJECTED", "ROLLED_BACK"]),
+          lt(recommendations.updatedAt, cutoff),
+        ),
+      )
+      .returning({ id: recommendations.id });
+    pruned += samples.length + snapshots.length + decisions.length;
   }
   return pruned + (await pruneDeadLetterJobs());
 }

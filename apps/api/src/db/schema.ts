@@ -294,8 +294,14 @@ export const roiMetrics = pgTable("roi_metrics", {
     .references(() => clusters.id, { onDelete: "cascade" }),
   // Which recommendation earned (or, negative on undo, un-earned) this row —
   // the dashboard's per-index attribution. Null on legacy aggregate rows.
+  //
+  // SET NULL, not cascade: retention prunes finished recommendations once they
+  // pass the plan's history window, and the money this product saved must not
+  // leave with them. The headline sums every row and has always tolerated a
+  // null here; only the per-index attribution list needs the link, and that is
+  // a recent-activity view by nature.
   recommendationId: uuid("recommendation_id").references(() => recommendations.id, {
-    onDelete: "cascade",
+    onDelete: "set null",
   }),
   freedBytes: bigint("freed_bytes", { mode: "number" }).notNull().default(0),
   indexCountDelta: integer("index_count_delta").notNull().default(0),
