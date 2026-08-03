@@ -286,16 +286,22 @@ already carries an `engine` field.
 ```bash
 cp .env.example .env      # then fill secrets
 npm install
-npm run up                # postgres + mongo + api + web + worker, hot reload
-npm run down
+podman-compose up         # postgres + mongo + api + web + worker, hot reload
+# or npm run up           # the same, and recovers from stale container state
 ```
 
-`npm run up` wraps `podman-compose` (or docker's) to work around two things that
-break it here: `node_modules/.bin` shadows nftables' `nft` with `@vercel/nft`,
-which podman's network backend shells out to and then fails on with
-`netavark: nftables error`; and a cleaned `XDG_RUNTIME_DIR` leaves containers
-whose crun state is gone, failing with `cannot open .../exec.fifo` — recreating
-them is the fix, and named volumes mean the databases survive it.
+`podman-compose up` (or `docker compose up`) works directly — `npm run up` is a
+convenience, not a requirement. It adds one thing worth having: when a logout or
+reboot clears `XDG_RUNTIME_DIR` while podman still has containers recorded,
+their crun state is gone and `up` fails with `cannot open .../exec.fifo`. They
+can then only be removed, so the wrapper recreates them and says so. Named
+volumes are untouched by that, so the databases survive — by hand it is
+`podman rm -f` the containers and up again.
+
+It also drops `node_modules/.bin` from PATH, which matters only when compose is
+reached *through* npm: npm prepends that directory, `@vercel/nft` installs an
+`nft` binary there, and podman's network backend shells out to `nft` meaning
+nftables. Typing `podman-compose up` yourself never hits it.
 
 `npm run build` · `npm run typecheck` · `npm run lint` · `npm run test` ·
 `npm run db:generate` · `npm run db:migrate`. Production migrations run the
