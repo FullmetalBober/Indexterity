@@ -374,3 +374,123 @@ export function recommendCreates(
   }
   return candidates;
 }
+
+// An index wider than anything actually asks for.
+//
+// The mirror of the UPDATE rule: that one extends {a} to {a,b} when a query
+// needs both. This one proposes {a,b} in place of {a,b,c} when no observed
+// shape ever reaches the third key. There is no correctness gain — {a,b,c}
+// already serves every {a,b} query — only size and a cheaper write path, since
+// every insert maintains one fewer key.
+//
+// Why it is not simply the redundancy rule in reverse: redundancy is structural
+// and provable from the index list alone, and it always keeps the WIDER index.
+// This is the opposite call and rests entirely on workload evidence, so it is
+// only sound where that evidence is trustworthy — the caller must pass shapes
+// from a real workload source, not an empty list.
+//
+// $indexStats counts hits per index, never per key, so "nothing uses the third
+// key" cannot be read off usage. It has to come from the shapes.
+export interface NarrowCandidate {
+  readonly indexName: string;
+  readonly keys: readonly SortKey[];
+  readonly droppedKeys: readonly string[];
+  // Total executions behind the shapes that actually reach this index. The
+  // measure of how much watching is behind the claim, and the only defence
+  // against narrowing on a thin sample — see analysis/score.ts.
+  readonly observedCount: number;
+  readonly rationale: string;
+}
+
+// Does this shape use this index at all? True when the index's first key is the
+// shape's first ESR key: that is the one position MongoDB cannot work around,
+// since a scan has to start somewhere.
+function reaches(index: IndexSpec, shape: QueryShape): boolean {
+  return index.keys[0]?.field === esrKeys(shape)[0]?.field;
+}
+
+// Every field a shape mentions, in any role. Deliberately NOT the ESR prefix
+// depth: with equality on `a` and a bound on `c`, MongoDB scans {a,b,c} across
+// the whole `b` range and applies the `c` bound inside the index. So `c` is
+// doing work even though nothing matches the index prefix past position 0, and
+// a prefix-depth rule would happily propose dropping it.
+function mentionedFields(shape: QueryShape): string[] {
+  return [...shape.equality, ...shape.sort.map((key) => key.field), ...shape.range];
+}
+
+// An index wider than anything actually asks for.
+//
+// Only TRAILING keys go, and only ones no reaching shape mentions anywhere. A
+// gap in the middle stays: {a,b,c} where nothing uses `b` still needs `b` in
+// place for `c` to be reachable at all.
+export function recommendNarrowing(
+  shapes: readonly QueryShape[],
+  existing: readonly IndexSpec[],
+  options: WorkloadOptions,
+): NarrowCandidate[] {
+  // A one-off query must not pin an index's shape forever, so both sides of the
+  // argument need recurrence. The client filter is applied to only ONE of them,
+  // and the asymmetry is the point: elsewhere, discarding shell traffic makes
+  // the engine do less. Here it would make it do MORE — every discarded shape
+  // is one that can no longer defend a key. So interactive traffic cannot
+  // JUSTIFY narrowing, but it can still PREVENT it. A nightly report run
+  // through mongosh is a person at a prompt by every signal available and a
+  // real recurring query all the same.
+  const recurring = shapes.filter((shape) => shape.count >= options.minCount);
+  const worth = recurring.filter((shape) => isWorthIndexing(shape.clients ?? []));
+  // No evidence, no narrowing. An empty workload makes every index look
+  // over-wide, which is the most expensive possible way to be wrong.
+  if (worth.length === 0) return [];
+
+  const candidates: NarrowCandidate[] = [];
+  for (const index of existing) {
+    // Never-drop indexes keep their shape: a unique constraint or a shard key
+    // makes the trailing keys load-bearing for something other than reads.
+    if (isNeverDrop(index) || index.keys.length < 2) continue;
+    // Rebuilding a text/hashed/2dsphere key from a shape list is not something
+    // to attempt — those keys are not ordinary ordered fields.
+    if (index.keys.some((key) => key.direction !== 1 && key.direction !== -1)) continue;
+
+    const reaching = worth.filter((shape) => reaches(index, shape));
+    // Nothing an application runs reaches it. Either the index is unused —
+    // which the drop side decides with far better evidence than this — or the
+    // workload sample missed it entirely. Both mean silence.
+    if (reaching.length === 0) continue;
+    const touched = new Set(
+      recurring.filter((shape) => reaches(index, shape)).flatMap(mentionedFields),
+    );
+
+    let lastUsed = -1;
+    index.keys.forEach((key, i) => {
+      if (touched.has(key.field)) lastUsed = i;
+    });
+    if (lastUsed < 0 || lastUsed >= index.keys.length - 1) continue;
+
+    const keys = index.keys.slice(0, lastUsed + 1).flatMap((key) =>
+      // Redundant after the guard above, but it is what convinces the compiler
+      // the direction is 1 | -1 rather than a text/hashed marker.
+      key.direction === 1 || key.direction === -1
+        ? [{ field: key.field, direction: key.direction }]
+        : [],
+    );
+    const dropped = index.keys.slice(lastUsed + 1).map((key) => key.field);
+    const plural = dropped.length === 1 ? "key" : "keys";
+    candidates.push({
+      indexName: index.name,
+      keys,
+      droppedKeys: dropped,
+      observedCount: reaching.reduce((sum, shape) => sum + shape.count, 0),
+      rationale:
+        `Replace ${index.name} with an index on {${describe(keys)}} — across every query seen ` +
+        `using it, nothing mentions its trailing ${plural} ` +
+        `${dropped.map((field) => `\`${field}\``).join(", ")}. Same queries served, a smaller ` +
+        `index, and one fewer ${plural} to maintain on every write to this collection. ` +
+        `CAUTION: this rests on the ABSENCE of evidence, so verify against anything that runs ` +
+        `too rarely to reach the workload sample — particularly a query sorting on ` +
+        `${dropped.map((field) => `\`${field}\``).join(" or ")}, which would fall back to an ` +
+        `in-memory sort. The old index is hidden first and restored automatically if reads ` +
+        `regress, but a blocking sort over 100 MB fails outright rather than running slowly.`,
+    });
+  }
+  return candidates;
+}

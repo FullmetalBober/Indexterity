@@ -67,7 +67,9 @@ function set(version) {
       .replace(/^appVersion: .+$/m, `appVersion: "${version}"`),
   );
   console.log(`${version} written to ${PACKAGES.length} package.json files and the chart`);
-  console.log(`next: git commit -am "Release ${version}" && git tag v${version} && git push --tags`);
+  console.log(
+    `next: git commit -am "Release ${version}" && git tag v${version} && git push --tags`,
+  );
 }
 
 function check(expected) {

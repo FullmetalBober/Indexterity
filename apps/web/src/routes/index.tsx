@@ -1,4 +1,5 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
+import { ChevronRightIcon, Undo2Icon } from "lucide-react";
 import { Button } from "~/components/ui/button";
 import { Card, CardContent, CardHeader } from "~/components/ui/card";
 import { jsonLd, seoTags, siteOrigin } from "../lib/seo";
@@ -9,6 +10,8 @@ const TITLE = "Indexterity — automatic MongoDB index management";
 const DESCRIPTION =
   "Find unused, redundant and missing MongoDB indexes, then apply changes through a " +
   "hide → observe → drop pipeline you can always undo. Read-only by default.";
+
+const PIPELINE = ["PROPOSED", "APPROVED", "hidden", "observed", "dropped"];
 
 // Marketing landing at / — fully static (no loader, no api calls), so it
 // renders even when the control plane is down. The dashboard lives at /app.
@@ -176,9 +179,21 @@ function Landing() {
             </Link>
             .
           </p>
-          <p className="mt-6 font-mono text-muted-foreground text-xs">
-            PROPOSED → APPROVED → hidden → observed → dropped · undo anytime
-          </p>
+          {/* The pipeline as a real ordered list rather than a string of
+              arrows: a screen reader announces five steps in order, and the
+              separators are decorative icons it skips entirely. */}
+          <ol className="mt-6 flex flex-wrap items-center justify-center gap-x-1.5 gap-y-1 font-mono text-muted-foreground text-xs">
+            {PIPELINE.map((stage, i) => (
+              <li key={stage} className="flex items-center gap-x-1.5">
+                {i > 0 && <ChevronRightIcon aria-hidden="true" className="size-3 opacity-60" />}
+                {stage}
+              </li>
+            ))}
+            <li className="flex items-center gap-x-1.5 pl-1">
+              <Undo2Icon aria-hidden="true" className="size-3" />
+              undo anytime
+            </li>
+          </ol>
         </section>
 
         <section aria-labelledby="features" className="border-y bg-secondary/50">

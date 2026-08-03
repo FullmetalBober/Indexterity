@@ -8,6 +8,7 @@ import {
 import {
   and,
   eq,
+  inArray,
   indexCooldowns,
   indexSnapshots,
   latencySamples,
@@ -16,7 +17,7 @@ import {
 } from "../db";
 import { activeCooldownKeys, cooldownKey } from "./cooldowns";
 import { jobDb } from "./db";
-import { watchedIndexKeys, watchKey } from "./watched";
+import { pendingRemovalKeys, watchedIndexKeys, watchKey } from "./watched";
 
 // Policy fallback, matching apply/finalize.
 const DEFAULT_OBSERVE_DAYS = 30;
@@ -57,6 +58,9 @@ export async function classifyCluster(clusterId: string): Promise<number> {
     clusterId,
     policy?.observeWindowDays ?? DEFAULT_OBSERVE_DAYS,
   );
+  // Indexes already on their way out. They stay in `inputs` but cannot justify
+  // dropping anything else — see pendingRemovalKeys.
+  const departing = await pendingRemovalKeys(db, clusterId);
   // Full cooldown history (active or expired): each past regression cuts the
   // confidence score of any future proposal for that index.
   const cooldownRows = await db
@@ -135,6 +139,7 @@ export async function classifyCluster(clusterId: string): Promise<number> {
       const replicaFactor = Math.max(1, latest.perMember.length);
       sizes[indexName] = latest.sizeBytes * replicaFactor;
       inputs.push({
+        pendingRemoval: departing.has(watchKey(entry.database, entry.collection, indexName)),
         spec: parseStoredSpec(latest.spec),
         history: sorted.map((snap) => ({
           capturedAt: snap.capturedAt.toISOString(),
@@ -175,6 +180,7 @@ export async function classifyCluster(clusterId: string): Promise<number> {
         type: candidate.type,
         usageClass: candidate.usageClass,
         state: "PROPOSED",
+        source: "CLASSIFY",
         database: entry.database,
         collection: entry.collection,
         indexName: candidate.indexName,
@@ -185,9 +191,50 @@ export async function classifyCluster(clusterId: string): Promise<number> {
     }
   }
 
+  // Only this job's own findings. It used to clear every PROPOSED row for the
+  // cluster, which quietly ate the retirement drops finalize.ts files after a
+  // build graduates — and nothing re-derives those, because the replacement
+  // index is the one that looks redundant next to the original, not the other
+  // way round. Narrowing {a,b,c} to {a,b} depends on that row surviving.
   await db
     .delete(recommendations)
-    .where(and(eq(recommendations.clusterId, clusterId), eq(recommendations.state, "PROPOSED")));
+    .where(
+      and(
+        eq(recommendations.clusterId, clusterId),
+        eq(recommendations.state, "PROPOSED"),
+        eq(recommendations.source, "CLASSIFY"),
+      ),
+    );
   if (toInsert.length > 0) await db.insert(recommendations).values(toInsert);
+
+  // Retirement rows now outlive the sweep, so something has to retract one when
+  // its index goes away — the customer dropping it by hand, or a rename. A
+  // proposal to drop an index that no longer exists can never be actioned and
+  // would sit on the dashboard forever. Only drops: a CREATE names an index
+  // that is MEANT not to exist yet.
+  const live = new Set(rows.map((row) => watchKey(row.database, row.collection, row.indexName)));
+  const stale = await db
+    .select({
+      id: recommendations.id,
+      database: recommendations.database,
+      collection: recommendations.collection,
+      indexName: recommendations.indexName,
+    })
+    .from(recommendations)
+    .where(
+      and(
+        eq(recommendations.clusterId, clusterId),
+        eq(recommendations.state, "PROPOSED"),
+        inArray(recommendations.type, ["DROP_UNUSED", "DROP_REDUNDANT"]),
+      ),
+    );
+  const gone = stale
+    .filter((row) => !live.has(watchKey(row.database, row.collection, row.indexName)))
+    .map((row) => row.id);
+  // An empty snapshot set means the collector has not run (or the cluster went
+  // unreachable), not that every index vanished.
+  if (gone.length > 0 && rows.length > 0) {
+    await db.delete(recommendations).where(inArray(recommendations.id, gone));
+  }
   return toInsert.length;
 }

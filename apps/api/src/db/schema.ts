@@ -53,6 +53,20 @@ export const usageClass = pgEnum("usage_class", [
   "PERIODIC_DEAD",
   "FLAT_ZERO",
 ]);
+// Which producer authored a recommendation. Three jobs write to one table and
+// each rewrites its PROPOSED rows from scratch on every pass, so each has to
+// know which rows are its own to clear.
+//
+//   CLASSIFY - the usage/redundancy engine (classify.ts)
+//   WORKLOAD - the query-shape engine (suggest.ts)
+//   RETIRE   - a one-shot drop for an index a graduated build replaced
+//              (finalize.ts). Derived from a build that already happened, so
+//              nothing re-derives it: if a sweep deletes it, it is gone.
+export const recommendationSource = pgEnum("recommendation_source", [
+  "CLASSIFY",
+  "WORKLOAD",
+  "RETIRE",
+]);
 
 // --- better-auth tables (regenerate with the better-auth CLI to guarantee an
 // exact column match before wiring auth) ---------------------------------
@@ -222,6 +236,7 @@ export const recommendations = pgTable(
     type: recommendationType("type").notNull(),
     usageClass: usageClass("usage_class"),
     state: recommendationState("state").notNull().default("PROPOSED"),
+    source: recommendationSource("source").notNull().default("CLASSIFY"),
     database: text("database").notNull(),
     collection: text("collection").notNull(),
     indexName: text("index_name").notNull(),

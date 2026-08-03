@@ -41,6 +41,11 @@ export function parseStoredSpec(value: unknown): IndexSpec {
 export interface IndexInput {
   readonly spec: IndexSpec;
   readonly history: readonly UsageSnapshot[];
+  // This index already has a drop on the way — proposed, approved or hidden.
+  // It still exists, so it stays in the input list, but it must not be the
+  // reason another index is dropped: "covered by X" stops being true the moment
+  // X leaves, and two indexes can otherwise cover each other out of existence.
+  readonly pendingRemoval?: boolean;
 }
 
 export interface RecommendationCandidate {
@@ -76,7 +81,9 @@ export function recommendForCollection(
     usageHistoryIsTrustworthy(index.history, options, now, activeIntervals);
 
   for (const candidate of eligible) {
-    const covering = indexes.find((other) => isRedundantPrefix(candidate.spec, other.spec));
+    const covering = indexes.find(
+      (other) => other.pendingRemoval !== true && isRedundantPrefix(candidate.spec, other.spec),
+    );
     if (covering !== undefined) {
       redundant.add(candidate.spec.name);
       candidates.push({
@@ -155,7 +162,9 @@ export function recommendForCollection(
   for (const index of indexes) {
     if (!index.spec.unique || index.spec.name === "_id_" || index.spec.isShardKey) continue;
     if (advised.has(index.spec.name)) continue;
-    const wider = indexes.find((other) => isKeyPrefix(index.spec, other.spec));
+    const wider = indexes.find(
+      (other) => other.pendingRemoval !== true && isKeyPrefix(index.spec, other.spec),
+    );
     if (wider === undefined) continue;
     candidates.push({
       type: "ADVISORY_REVIEW",

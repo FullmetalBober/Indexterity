@@ -62,9 +62,7 @@
   },
   "overrides": [
     {
-      "includes": [
-        "apps/api/**"
-      ],
+      "includes": ["apps/api/**"],
       "linter": {
         "rules": {
           "style": {

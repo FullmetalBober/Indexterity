@@ -1,14 +1,16 @@
 import {
   createScore,
   type IndexSpec,
+  narrowScore,
   recommendCreates,
+  recommendNarrowing,
   type ScanSeverity,
   type SortKey,
   scanCost,
   sortOrderAdvisories,
 } from "../analysis";
 import { entitledAutomation } from "../billing/plans";
-import { and, eq, inArray, indexCooldowns, like, or, policies, recommendations } from "../db";
+import { and, eq, indexCooldowns, policies, recommendations } from "../db";
 import { type WorkloadTarget, workloadKey } from "../engine/ports";
 import { openClusterSession } from "./cluster-connection";
 import { activeCooldownKeys, cooldownKey } from "./cooldowns";
@@ -26,6 +28,10 @@ const MIN_COLLECTION_DOCS = 1000;
 // Instant apply (build without human approval) demands stronger recurrence
 // than merely proposing.
 const INSTANT_MIN_COUNT = 5;
+// Narrowing an index means rebuilding it, which costs real IO on a large
+// collection. Below this much reclaimed it is a net loss however sound the
+// reasoning — the churn buys nothing.
+const NARROW_MIN_SAVING_BYTES = 32 * 1024 * 1024;
 
 function proposedName(keys: readonly SortKey[]): string {
   return keys.map((key) => `${key.field}_${key.direction}`).join("_");
@@ -107,6 +113,7 @@ export async function suggestForCluster(clusterId: string): Promise<number> {
             clusterId,
             type: "ADVISORY_REVIEW",
             state: "PROPOSED",
+            source: "WORKLOAD",
             database,
             collection,
             indexName,
@@ -192,6 +199,7 @@ export async function suggestForCluster(clusterId: string): Promise<number> {
           clusterId,
           type: "ADVISORY_REVIEW",
           state: "PROPOSED",
+          source: "WORKLOAD",
           database,
           collection,
           indexName,
@@ -238,6 +246,7 @@ export async function suggestForCluster(clusterId: string): Promise<number> {
           clusterId,
           type: candidate.type,
           state: instant ? "APPROVED" : "PROPOSED",
+          source: "WORKLOAD",
           database,
           collection,
           indexName,
@@ -259,6 +268,50 @@ export async function suggestForCluster(clusterId: string): Promise<number> {
               ? {}
               : { partial: { ...candidate.partialFilter } }),
           },
+        });
+      }
+
+      // The other direction: an index carrying keys nothing asks for. Same
+      // machinery as MERGE — build the shorter index, and once it has survived
+      // its post-build watch, finalize.ts proposes retiring the long one
+      // through the ordinary hide → observe → regression gate.
+      for (const candidate of recommendNarrowing(shapes, existing, WORKLOAD_OPTIONS)) {
+        const indexName = proposedName(candidate.keys);
+        if (cooled.has(cooldownKey(database, collection, indexName))) continue;
+        // An index on exactly these keys already exists, or another candidate
+        // this pass already claimed the name.
+        if (existing.some((idx) => idx.name === indexName)) continue;
+        if (toInsert.some((row) => row.collection === collection && row.indexName === indexName)) {
+          continue;
+        }
+        // What the trailing keys cost, prorated by key count. Crude — key size
+        // varies by field and every entry also carries a record id — but it is
+        // the difference between "reclaims 4 KB" and "reclaims 3 GB", which is
+        // the distinction that decides whether the rebuild is worth it.
+        const currentBytes = sizes[candidate.indexName] ?? 0;
+        const totalKeys = candidate.keys.length + candidate.droppedKeys.length;
+        const saving = Math.round((currentBytes * candidate.droppedKeys.length) / totalKeys);
+        if (saving < NARROW_MIN_SAVING_BYTES) continue;
+        toInsert.push({
+          clusterId,
+          type: "UPDATE",
+          state: "PROPOSED",
+          source: "WORKLOAD",
+          database,
+          collection,
+          indexName,
+          rationale: `${candidate.rationale}${cost}`,
+          score: narrowScore({
+            observedCount: candidate.observedCount,
+            droppedKeys: candidate.droppedKeys.length,
+            totalKeys,
+            sizeBytes: currentBytes,
+            pastRegressions: regressionCounts.get(`${database} ${collection} ${indexName}`) ?? 0,
+          }),
+          // Claimed at retirement, not now: the long index is still there and
+          // still costing until it is actually dropped.
+          estimatedBytesSaved: 0,
+          targetSpec: { keys: encodeKeys(candidate.keys), retire: [candidate.indexName] },
         });
       }
     }
@@ -295,6 +348,7 @@ export async function suggestForCluster(clusterId: string): Promise<number> {
         clusterId,
         type: "CREATE",
         state: "PROPOSED",
+        source: "WORKLOAD",
         database: want.database,
         collection: want.from,
         indexName,
@@ -311,22 +365,15 @@ export async function suggestForCluster(clusterId: string): Promise<number> {
         targetSpec: { keys: [want.foreignField], retire: [] },
       });
     }
+    // This job's own findings, identified by who wrote them rather than by
+    // guessing from the type and a name suffix.
     await db
       .delete(recommendations)
       .where(
         and(
           eq(recommendations.clusterId, clusterId),
           eq(recommendations.state, "PROPOSED"),
-          or(
-            inArray(recommendations.type, ["CREATE", "UPDATE", "MERGE"]),
-            and(
-              eq(recommendations.type, "ADVISORY_REVIEW"),
-              or(
-                like(recommendations.indexName, "%_ttl"),
-                like(recommendations.indexName, "%_sortorder"),
-              ),
-            ),
-          ),
+          eq(recommendations.source, "WORKLOAD"),
         ),
       );
     if (toInsert.length > 0) await db.insert(recommendations).values(toInsert);

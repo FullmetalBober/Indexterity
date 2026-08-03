@@ -105,6 +105,52 @@ export function createScore(signals: CreateSignals): number {
   return clamp(score);
 }
 
+export interface NarrowSignals {
+  // Executions behind the shapes that reach this index (workload.ts).
+  readonly observedCount: number;
+  // Keys being removed, and how many the index has now.
+  readonly droppedKeys: number;
+  readonly totalKeys: number;
+  // Current size of the index, all replica members summed.
+  readonly sizeBytes: number;
+  readonly pastRegressions: number;
+}
+
+// Narrowing scores lower than anything else the engine proposes, and cannot
+// reach RECOMMENDED_AUTO_APPLY_SCORE.
+//
+// Every other finding argues from something observed: this index was never
+// used, that query scanned the collection. Narrowing argues from something NOT
+// observed — no query mentioned the trailing key — and absence of evidence gets
+// weaker the less traffic there was to observe. It is also the one finding that
+// can make a query FAIL rather than slow down, by pushing a sort that the index
+// used to serve into a blocking in-memory sort with a 100 MB ceiling.
+//
+// So the ceiling is deliberate: a human reads this one. What moves the score is
+// how much watching sits behind it and how much it actually buys.
+const NARROW_MAX_SCORE = 60;
+// Executions for full credit on the evidence term. Higher than
+// SIGHTINGS_FOR_FULL_CREDIT because that one asks "is this shape recurring",
+// which a handful of sightings answers, while this asks "have we seen enough of
+// this collection's traffic to trust a gap in it", which they do not.
+const NARROW_SIGHTINGS_FOR_FULL_CREDIT = 500;
+
+export function narrowScore(signals: NarrowSignals): number {
+  let score = 15;
+  score += Math.min(
+    25,
+    Math.floor((25 * signals.observedCount) / NARROW_SIGHTINGS_FOR_FULL_CREDIT),
+  );
+  // How much of the index is dead weight. Dropping two keys of three is a
+  // different proposition from dropping one of five.
+  score += Math.floor((10 * signals.droppedKeys) / Math.max(1, signals.totalKeys));
+  // And what that weight costs. An index worth reclaiming is worth the rebuild.
+  if (signals.sizeBytes >= GB) score += 10;
+  else if (signals.sizeBytes >= 128 * 1024 * 1024) score += 6;
+  score -= signals.pastRegressions * REGRESSION_PENALTY;
+  return Math.min(NARROW_MAX_SCORE, clamp(score));
+}
+
 // What the dashboard suggests as an auto-approval threshold, and why. Set high
 // enough that only the two arguments the engine can prove — redundancy, and
 // idleness across a trustworthy history — clear it with evidence behind them.

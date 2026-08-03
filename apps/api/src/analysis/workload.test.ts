@@ -4,6 +4,7 @@ import {
   esrKeys,
   type QueryShape,
   recommendCreates,
+  recommendNarrowing,
   type SortKey,
   sortOrderAdvisories,
 } from "./workload";
@@ -28,6 +29,7 @@ function idx(name: string, fields: string[]): IndexSpec {
 }
 
 const options = { minCount: 1 };
+const mongosh = { application: "mongosh 2.8.3" };
 const atDesc: SortKey = { field: "at", direction: -1 };
 const bAsc: SortKey = { field: "b", direction: 1 };
 
@@ -406,5 +408,104 @@ describe("sortOrderAdvisories", () => {
 
   it("ignores a shape that is scanning rather than sorting in memory", () => {
     expect(sortOrderAdvisories([shape(["a"], [atDesc], [], 9)], [], options)).toHaveLength(0);
+  });
+});
+
+describe("recommendNarrowing", () => {
+  const wide = idx("a_1_b_1_c_1", ["a", "b", "c"]);
+
+  it("drops trailing keys no observed query mentions", () => {
+    const out = recommendNarrowing([shape(["a"], [bAsc], [], 40)], [wide], options);
+    expect(out).toHaveLength(1);
+    expect(out[0]?.indexName).toBe("a_1_b_1_c_1");
+    expect(out[0]?.keys).toEqual([
+      { field: "a", direction: 1 },
+      { field: "b", direction: 1 },
+    ]);
+    expect(out[0]?.droppedKeys).toEqual(["c"]);
+    expect(out[0]?.observedCount).toBe(40);
+  });
+
+  // The reason this is not a prefix-depth rule. Equality on `a` and a range on
+  // `c` matches the index prefix only at position 0, but mongo still applies
+  // the `c` bound inside the index — the key is working.
+  it("keeps a trailing key a query mentions out of prefix order", () => {
+    expect(recommendNarrowing([shape(["a"], [], ["c"], 40)], [wide], options)).toHaveLength(0);
+  });
+
+  // A hole in the middle stays: `b` has to be there for `c` to be reachable.
+  it("never removes a middle key", () => {
+    const out = recommendNarrowing(
+      [shape(["a"], [], ["c"], 40)],
+      [idx("abcd", ["a", "b", "c", "d"])],
+      options,
+    );
+    expect(out[0]?.keys.map((key) => key.field)).toEqual(["a", "b", "c"]);
+    expect(out[0]?.droppedKeys).toEqual(["d"]);
+  });
+
+  it("says nothing when no shape reaches the index", () => {
+    expect(recommendNarrowing([shape(["z"], [], [], 90)], [wide], options)).toHaveLength(0);
+  });
+
+  // An index nothing touches is a DROP_UNUSED, decided from usage history over
+  // weeks — far better evidence than a workload sample.
+  it("says nothing on an empty workload", () => {
+    expect(recommendNarrowing([], [wide], options)).toHaveLength(0);
+  });
+
+  it("ignores shapes below minCount", () => {
+    const rare = shape(["a"], [bAsc], [], 1);
+    expect(recommendNarrowing([rare], [wide], { minCount: 3 })).toHaveLength(0);
+  });
+
+  // Shell traffic cannot justify narrowing on its own...
+  it("does not narrow on interactive traffic alone", () => {
+    const shell: QueryShape = { ...shape(["a"], [bAsc], [], 40), clients: [mongosh] };
+    expect(recommendNarrowing([shell], [wide], options)).toHaveLength(0);
+  });
+
+  // ...but it still defends a key. A nightly report run through mongosh looks
+  // exactly like a person exploring, and dropping `c` would break it.
+  it("lets interactive traffic protect a trailing key", () => {
+    const app = shape(["a"], [bAsc], [], 90);
+    const shell: QueryShape = { ...shape(["a"], [], ["c"], 30), clients: [mongosh] };
+    expect(recommendNarrowing([app], [wide], options)).toHaveLength(1);
+    expect(recommendNarrowing([app, shell], [wide], options)).toHaveLength(0);
+  });
+
+  it("leaves protected and single-key indexes alone", () => {
+    const unique = { ...wide, unique: true };
+    expect(recommendNarrowing([shape(["a"], [bAsc], [], 40)], [unique], options)).toHaveLength(0);
+    const single = idx("a_1", ["a"]);
+    expect(recommendNarrowing([shape(["a"], [], [], 40)], [single], options)).toHaveLength(0);
+  });
+
+  it("leaves text and hashed indexes alone", () => {
+    const text: IndexSpec = {
+      ...wide,
+      name: "a_1_body_text",
+      keys: [
+        { field: "a", direction: 1 },
+        { field: "body", direction: "text" },
+      ],
+    };
+    expect(recommendNarrowing([shape(["a"], [], [], 40)], [text], options)).toHaveLength(0);
+  });
+
+  // Every key earns its place — nothing to propose.
+  it("says nothing when the whole index is used", () => {
+    const full = shape(["a", "b"], [], ["c"], 40);
+    expect(recommendNarrowing([full], [wide], options)).toHaveLength(0);
+  });
+
+  it("pools evidence across every shape that reaches the index", () => {
+    const out = recommendNarrowing(
+      [shape(["a"], [], [], 30), shape(["a"], [bAsc], [], 12), shape(["z"], [], [], 500)],
+      [wide],
+      options,
+    );
+    expect(out[0]?.observedCount).toBe(42);
+    expect(out[0]?.droppedKeys).toEqual(["c"]);
   });
 });

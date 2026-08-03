@@ -1,3 +1,4 @@
+import { ArrowRightIcon } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { Button } from "~/components/ui/button";
@@ -152,7 +153,7 @@ export function PolicySection({ policy, onSaved }: { policy: PolicyView; onSaved
                   setWindowStart(event.target.value === "" ? null : Number(event.target.value))
                 }
               />
-              <span className="text-muted-foreground">→</span>
+              <ArrowRightIcon aria-hidden="true" className="size-4 text-muted-foreground" />
               <Input
                 aria-label="Change window end hour"
                 type="number"

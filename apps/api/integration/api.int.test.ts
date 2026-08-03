@@ -1932,3 +1932,116 @@ describe("retention follows the plan", () => {
     ).toHaveLength(0);
   });
 });
+
+// Narrowing {a,b,c} to {a,b} leans on two things staying true across a classify
+// pass: the drop of the long index has to survive, and the new short index must
+// not be proposed for a drop of its own while the long one is still there.
+// Get either wrong and the two indexes cover each other out of existence, or
+// the retirement quietly vanishes and the cluster keeps both forever.
+describe("retiring a narrowed index", () => {
+  function spec(name: string, fields: string[]) {
+    return {
+      name,
+      keys: fields.map((field) => ({ field, direction: 1 })),
+      unique: false,
+      ttl: false,
+      partial: false,
+      partialFilter: null,
+      sparse: false,
+      hidden: false,
+      isShardKey: false,
+      collation: null,
+    };
+  }
+
+  it("keeps the retirement and spares the replacement", async () => {
+    const org = asRecord(await (await api("/org", owner)).json());
+    const [row] = await db
+      .insert(clusters)
+      .values({
+        orgId: asString(org.id),
+        name: "Narrow Cluster",
+        sealedDek: Buffer.alloc(1),
+        sealedData: Buffer.alloc(1),
+        keyVersion: 1,
+      })
+      .returning();
+    if (row === undefined) throw new Error("failed to insert cluster");
+    const narrowId = row.id;
+    createdClusterIds.push(narrowId);
+
+    // Both indexes in use, so neither is a DROP_UNUSED on its own merits — the
+    // only finding available is the structural one, which is the point.
+    const base = Date.now() - 10 * 86_400_000;
+    const since = new Date(base - 86_400_000).toISOString();
+    for (const [name, fields] of [
+      ["a_1_b_1_c_1", ["a", "b", "c"]],
+      ["a_1_b_1", ["a", "b"]],
+    ] as const) {
+      await db.insert(indexSnapshots).values(
+        Array.from({ length: 20 }, (_, i) => ({
+          clusterId: narrowId,
+          database: "inttest",
+          collection: "events",
+          indexName: name,
+          spec: spec(name, [...fields]),
+          sizeBytes: 8192,
+          perMember: [{ member: "m1", ops: (i + 1) * 100, since }],
+          capturedAt: new Date(base + i * 43_200_000),
+        })),
+      );
+    }
+    await db.insert(latencySamples).values(
+      Array.from({ length: 20 }, (_, i) => ({
+        clusterId: narrowId,
+        database: "inttest",
+        collection: "events",
+        readOps: (i + 1) * 500,
+        readLatencyMicros: 100,
+        writeOps: 0,
+        writeLatencyMicros: 0,
+        capturedAt: new Date(base + i * 43_200_000),
+      })),
+    );
+
+    // What finalize.ts files once a narrowing build graduates.
+    const [retirement] = await db
+      .insert(recommendations)
+      .values({
+        clusterId: narrowId,
+        type: "DROP_REDUNDANT",
+        state: "PROPOSED",
+        source: "RETIRE",
+        database: "inttest",
+        collection: "events",
+        indexName: "a_1_b_1_c_1",
+        rationale: "Superseded by a_1_b_1, which has now survived its post-build watch.",
+        score: 55,
+        estimatedBytesSaved: 0,
+      })
+      .returning();
+    if (retirement === undefined) throw new Error("failed to insert retirement");
+
+    // Nothing new to find: a_1_b_1 IS a key-prefix of a_1_b_1_c_1, but the
+    // longer index is on its way out and cannot justify dropping anything.
+    expect(await classifyCluster(narrowId)).toBe(0);
+    const after = await db
+      .select()
+      .from(recommendations)
+      .where(eq(recommendations.clusterId, narrowId));
+    expect(after).toHaveLength(1);
+    expect(after[0]?.id).toBe(retirement.id);
+
+    // Someone dropped the long index by hand. The proposal can never be
+    // actioned now, so it has to be retracted rather than sit there forever.
+    await db
+      .delete(indexSnapshots)
+      .where(
+        and(eq(indexSnapshots.clusterId, narrowId), eq(indexSnapshots.indexName, "a_1_b_1_c_1")),
+      );
+    await classifyCluster(narrowId);
+    expect(
+      await db.select().from(recommendations).where(eq(recommendations.clusterId, narrowId)),
+    ).toHaveLength(0);
+  });
+});

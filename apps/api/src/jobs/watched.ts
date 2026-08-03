@@ -54,3 +54,29 @@ export async function watchedIndexKeys(
   }
   return keys;
 }
+
+// Indexes with a drop already on the way: proposed, approved, or hidden and
+// waiting out its observe window.
+//
+// They still exist on the cluster, so they stay in the classify inputs — but
+// they must not be the reason another index is dropped. "Covered by X" stops
+// being true the moment X leaves, and without this two indexes can cover each
+// other out of existence: narrowing {a,b,c} to {a,b} builds the shorter one,
+// and until the longer is actually gone it makes the new one look redundant.
+export async function pendingRemovalKeys(db: Database, clusterId: string): Promise<Set<string>> {
+  const rows = await db
+    .select({
+      database: recommendations.database,
+      collection: recommendations.collection,
+      indexName: recommendations.indexName,
+    })
+    .from(recommendations)
+    .where(
+      and(
+        eq(recommendations.clusterId, clusterId),
+        inArray(recommendations.type, ["DROP_UNUSED", "DROP_REDUNDANT"]),
+        inArray(recommendations.state, ["PROPOSED", "APPROVED", "HIDDEN"]),
+      ),
+    );
+  return new Set(rows.map((row) => watchKey(row.database, row.collection, row.indexName)));
+}

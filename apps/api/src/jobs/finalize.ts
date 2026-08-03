@@ -333,6 +333,11 @@ async function retireSuperseded(
       clusterId,
       type: "DROP_REDUNDANT",
       state: "PROPOSED",
+      // Nothing re-derives this one. Where a MERGE leaves a strict superset
+      // that classify would rediscover on its own, a narrowing leaves the
+      // opposite: next to {a,b}, the index that looks redundant is {a,b} — so
+      // if a sweep takes this row, the long index stays forever.
+      source: "RETIRE",
       database: rec.database,
       collection: rec.collection,
       indexName: name,

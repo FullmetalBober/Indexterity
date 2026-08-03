@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createScore, dropScore, RECOMMENDED_AUTO_APPLY_SCORE } from "./score";
+import { createScore, dropScore, narrowScore, RECOMMENDED_AUTO_APPLY_SCORE } from "./score";
 
 describe("dropScore", () => {
   it("scores a long-dead sizable index high", () => {
@@ -169,5 +169,51 @@ describe("createScore", () => {
     expect(
       createScore({ collscan: true, count: 30, docCount: 50_000, pastRegressions: 2 }),
     ).toBeLessThanOrEqual(10);
+  });
+});
+
+describe("narrowScore", () => {
+  const strong = {
+    observedCount: 5000,
+    droppedKeys: 2,
+    totalKeys: 3,
+    sizeBytes: 4 * 1024 ** 3,
+    pastRegressions: 0,
+  } as const;
+
+  // The whole point of the ceiling: narrowing argues from absence of evidence,
+  // so it always waits for a human however good the case looks.
+  it("cannot reach the recommended auto-apply threshold", () => {
+    expect(narrowScore(strong)).toBeLessThan(RECOMMENDED_AUTO_APPLY_SCORE);
+  });
+
+  it("rewards traffic behind the claim", () => {
+    expect(narrowScore(strong)).toBeGreaterThan(narrowScore({ ...strong, observedCount: 20 }));
+  });
+
+  it("rewards reclaiming more of a bigger index", () => {
+    expect(narrowScore(strong)).toBeGreaterThan(narrowScore({ ...strong, sizeBytes: 1024 }));
+    expect(narrowScore(strong)).toBeGreaterThan(
+      narrowScore({ ...strong, droppedKeys: 1, totalKeys: 6 }),
+    );
+  });
+
+  it("a thin sample on a small index barely registers", () => {
+    expect(
+      narrowScore({
+        observedCount: 3,
+        droppedKeys: 1,
+        totalKeys: 4,
+        sizeBytes: 1024,
+        pastRegressions: 0,
+      }),
+    ).toBeLessThan(25);
+  });
+
+  // The cooldown already blocks re-proposal outright for a period; once it
+  // expires the score has to carry the memory.
+  it("past rollback collapses the score", () => {
+    expect(narrowScore({ ...strong, pastRegressions: 1 })).toBeLessThan(20);
+    expect(narrowScore({ ...strong, pastRegressions: 2 })).toBe(0);
   });
 });
