@@ -115,3 +115,62 @@ describe("dynamicObserveDays — age", () => {
     expect(window.reason).toContain("zero usage across");
   });
 });
+
+// The window answers two questions, and they set its length from opposite
+// ends: "will anything want this again" runs at the cadence of the workload,
+// "did hiding it hurt" runs at the rate the index is queried. Only the first
+// was implemented, so an index being queried every second was watched LONGER
+// than one queried monthly.
+describe("dynamicObserveDays — still-busy indexes", () => {
+  const now = new Date("2026-08-02T00:00:00Z");
+  const day = (n: number) => new Date(now.getTime() - n * 86_400_000).toISOString();
+  const context = { watchingSince: day(300), now };
+
+  const daily = (count: number, quietTail = 0) =>
+    Array.from({ length: count }, (_, i) => ({
+      capturedAt: day(count - i),
+      ops: i < count - quietTail ? 5000 : 0,
+    }));
+
+  // The redundant-drop case: the index is serving traffic right now, and
+  // another index covers it. Hiding it moves that traffic, and the latency
+  // gate sees the result the same day.
+  it("shortens for an index still being queried at the moment of the hide", () => {
+    const window = dynamicObserveDays(daily(60), 30, context);
+    expect(window.days).toBe(7);
+    expect(window.reason).toContain("still in use");
+  });
+
+  // Tenure is a proxy for "there may be a cadence we have not seen". Once the
+  // index is queried every day there is no unseen cadence, so it must not win.
+  it("beats the veteran extension, which would have watched it for 45 days", () => {
+    expect(dynamicObserveDays(daily(60), 30, context).days).toBeLessThan(30);
+  });
+
+  // "Still" is narrow on purpose. Nothing is querying this one any more, so
+  // hiding it produces no verdict quickly — the question is whether the
+  // workload comes back, and that is answered by waiting.
+  it("does not shorten once the traffic has stopped", () => {
+    expect(dynamicObserveDays(daily(60, 8), 30, context).days).toBeGreaterThanOrEqual(30);
+  });
+
+  // A quarterly job runs densely for a week at a time. Dense, but the gaps
+  // between bursts are the whole point, so periodic has to be checked first.
+  it("leaves a quarterly burst to the periodic rule", () => {
+    const burst = [
+      ...Array.from({ length: 7 }, (_, i) => ({ capturedAt: day(97 - i), ops: 900 })),
+      ...Array.from({ length: 7 }, (_, i) => ({ capturedAt: day(7 - i), ops: 900 })),
+    ];
+    const window = dynamicObserveDays(burst, 30, context);
+    expect(window.days).toBeGreaterThan(30);
+    expect(window.reason).toContain("periodic");
+  });
+
+  // A tight policy is already at or below the floor, so there is nothing to
+  // shorten — but the finding still has to stop the veteran rule extending it.
+  it("holds a policy that is already tighter than the floor", () => {
+    const window = dynamicObserveDays(daily(60), 5, context);
+    expect(window.days).toBe(5);
+    expect(window.reason).toBeNull();
+  });
+});

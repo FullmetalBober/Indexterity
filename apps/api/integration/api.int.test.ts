@@ -1600,24 +1600,33 @@ describe("dead-letter retention", () => {
     let freshId: string;
     let liveId: string;
     try {
-      // permanentlyFailJobs is how a job becomes a dead letter for real: it
-      // sets attempts to max_attempts and leaves the row behind.
       const stale = await utils.addJob("collect", { clusterId });
       const fresh = await utils.addJob("collect", { clusterId });
       const live = await utils.addJob("collect", { clusterId });
       staleId = stale.id;
       freshId = fresh.id;
       liveId = live.id;
-      await utils.permanentlyFailJobs([staleId, freshId], "integration");
     } finally {
       await utils.release();
     }
+
+    // Built with SQL rather than permanentlyFailJobs, which is an operator
+    // action with its own intermediate state (it leaves attempts below
+    // max_attempts and the row locked). What accumulates in a real deployment
+    // is a job the worker gave up on: attempts exhausted, lock released. That
+    // is what the prune targets, so that is what the fixture has to be.
+    //
     // Back-dated rather than slept on: the window is the thing under test, and
     // a test that only passes because time passed is not testing it.
-    await jobDb().execute(
-      sql`update graphile_worker._private_jobs set updated_at = now() - interval '91 days'
-          where id::text = ${staleId}`,
-    );
+    const exhaust = (id: string, age: string) =>
+      jobDb().execute(
+        sql`update graphile_worker._private_jobs
+            set attempts = max_attempts, locked_at = null, locked_by = null,
+                updated_at = now() - ${sql.raw(`interval '${age}'`)}
+            where id::text = ${id}`,
+      );
+    await exhaust(staleId, "91 days");
+    await exhaust(freshId, "1 hour");
 
     expect(await pruneDeadLetterJobs()).toBeGreaterThanOrEqual(1);
 

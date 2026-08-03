@@ -26,6 +26,11 @@ const TENURE_MARGIN_DAYS = 1;
 const LONG_TENURE_MULTIPLE = 2;
 // How much longer a long-lived, once-busy index is watched before its drop.
 const VETERAN_MULTIPLE = 1.5;
+// Usage is "dense" when active snapshots are never more than this far apart —
+// something queries it about daily.
+const DENSE_GAP_DAYS = 2;
+// And "recent" when it was still being queried this close to the hide.
+const DENSE_RECENT_DAYS = 3;
 
 // What the caller knows about the cluster as a whole, which one index's history
 // cannot say on its own.
@@ -44,13 +49,38 @@ function daysBetween(a: string, b: string): number {
 // history and its age instead of one flat number. Rules, in order — they do not
 // overlap, since each names a different usage shape:
 //
+// The window does two jobs, and they set its length from opposite ends:
+//
+//   Will anything want this index again?  Answered at the cadence of the
+//   workload — a monthly report needs a month of watching to say anything.
+//   Did hiding it hurt?  Answered at the rate the index is QUERIED. A busy
+//   index produces that verdict in hours; a rarely-used one may produce no
+//   evidence at all in a month.
+//
+// Both point the same way for a sparse index — wait longer. They disagree for
+// a busy one, and there the second wins: no amount of extra waiting adds
+// evidence that arrived on the first day.
+//
 // - PERIODIC usage (a monthly report, a weekly batch): the fixed window can
 //   expire between two runs and drop an index the next run needs. Extend to
 //   2× the largest gap between active snapshots, so at least one full cycle
-//   fits inside the window.
+//   fits inside the window. Checked first, so a quarterly job that runs
+//   densely for a week is read as periodic rather than as busy.
+// - STILL BUSY (queried about daily, and up to the moment we hide it — a
+//   redundant index serving live traffic): hiding it is an experiment that
+//   reports back immediately, because the queries are already arriving.
+//   Waiting a month past the first day adds no evidence, only exposure.
+//   Shorten to the floor.
+//
+//   Note how narrow "still" is: an index that WAS busy and went quiet a week
+//   ago gets no fast verdict from hiding it, since nothing is querying it to
+//   notice. There the question is back to whether the workload returns, which
+//   is a cadence question, and the rules below answer it by waiting.
 // - VETERAN (used at some point, and part of the schema far longer than the
 //   policy window): whatever wanted it may want it again on a cadence longer
-//   than anything we have watched. Extend.
+//   than anything we have watched. Extend. Only reached when usage was NOT
+//   dense — tenure is a proxy for "we might be missing a cadence", and it has
+//   nothing to say once the index is being queried every day.
 // - LONG-PROVEN IDLE (flat zero across history much longer than the policy
 //   window): the history already is the observation — shorten to half the
 //   policy (never under a week).
@@ -104,6 +134,31 @@ export function dynamicObserveDays(
       return {
         days: extended,
         reason: `periodic usage with gaps up to ${gapDays} days — window extended to cover a full cycle`,
+      };
+    }
+
+    // Reached only when the gaps were too small to be a cadence worth waiting
+    // out. Both conditions matter: dense usage means a verdict arrives fast,
+    // and recent usage means there is still traffic to deliver it. Drop either
+    // and hiding the index tells us nothing quickly.
+    const lastActive = active.at(-1);
+    const quietDays =
+      lastActive === undefined
+        ? Number.POSITIVE_INFINITY
+        : (context.now.getTime() - new Date(lastActive.capturedAt).getTime()) / DAY_MS;
+    if (largestGap <= DENSE_GAP_DAYS && quietDays <= DENSE_RECENT_DAYS) {
+      // Returns even when it cannot shorten — a tight policy is already at or
+      // below the floor. This is a positive finding, not a failed attempt at
+      // one: a still-busy index needs no extension, and falling through would
+      // let the veteran rule stretch the window on tenure alone.
+      const days = Math.min(SHORTEN_FLOOR_DAYS, policyDays);
+      return {
+        days,
+        reason:
+          days < policyDays
+            ? `queried steadily and still in use — at that rate a regression shows up within ` +
+              `days of hiding it, so the window is shortened rather than left open`
+            : null,
       };
     }
   }

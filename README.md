@@ -139,15 +139,24 @@ regardless.
 
 **The observe window scales to the index.** `observeWindowDays` is the baseline;
 each pending drop gets its own, decided once at hide time and recorded with its
-reason:
+reason. The window is set by whichever question is still open, and the two run
+on different clocks — *will anything want this again* at the cadence of the
+workload, *did hiding it hurt* at the rate the index is queried:
 
-| the index | window |
-|-----------|--------|
-| periodic usage (monthly report, weekly batch) | 2× the largest activity gap, ≤ 90d |
-| in place ≥ 2× the policy and used in that time | 1.5× the policy, ≤ 90d |
-| zero usage across ≥ 2× the policy | half the policy, ≥ 7d |
-| appeared on our watch, never used since | about as long as it has existed, ≥ 7d |
-| anything else | the policy |
+| the index | window | |
+|-----------|--------|---|
+| periodic usage (monthly report, weekly batch) | 2× the largest activity gap, ≤ 90d | might be wanted next cycle |
+| queried about daily, and still when hidden | 7d | a regression arrives in days, not weeks |
+| in place ≥ 2× the policy and used in that time | 1.5× the policy, ≤ 90d | may have a cadence longer than we have watched |
+| zero usage across ≥ 2× the policy | half the policy, ≥ 7d | the history already was the observation |
+| appeared on our watch, never used since | about as long as it has existed, ≥ 7d | its whole life is on record |
+| anything else | the policy | |
+
+Order matters in the first two rows. A quarterly job that runs densely for a
+week is periodic, not busy, so the cadence rule is checked first. And "still"
+is narrow: an index that *was* busy and went quiet a week ago gets no fast
+verdict from being hidden, because nothing is querying it to notice — that one
+is back to a cadence question, and waiting is the only answer.
 
 The last two handle a hand-made ad-hoc index: created, used once, forgotten. Its
 whole life is on record, so it leaves in about a week instead of a month. Age

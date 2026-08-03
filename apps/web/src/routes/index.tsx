@@ -119,7 +119,7 @@ const FAQ = [
   {
     question: "How long does an index stay hidden before it is dropped?",
     answer:
-      "Thirty days by default, and the window adapts to the index itself: usage with long gaps (a monthly report, a weekly batch) extends it to cover a full cycle, while an index proven idle across a much longer history shortens it. The window chosen for each drop, and why, is recorded in the audit trail.",
+      "Thirty days by default, and the window adapts to the index itself — set by whichever question is still open. Will anything want this again? That runs at the cadence of the workload, so usage with long gaps (a monthly report, a weekly batch) extends the window to cover a full cycle. Did hiding it hurt? That runs at the rate the index is queried, so one still serving traffic when it is hidden answers within days and is watched for a week rather than a month. An index proven idle across a much longer history is shortened too: the history already was the observation. The window chosen for each drop, and why, is recorded in the audit trail.",
   },
   {
     question: "Does it work with Atlas, self-hosted MongoDB and sharded clusters?",
