@@ -6,7 +6,7 @@
 // a cluster's latency series and the dashboard stops paying for the member
 // list. Each child fetches what it draws.
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { createFileRoute, Link, Outlet, useNavigate, useRouter } from "@tanstack/react-router";
+import { createFileRoute, Link, Outlet, useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
 import { AuthForm } from "~/components/app/auth-form";
 import { ClusterBar } from "~/components/app/cluster-bar";
@@ -39,7 +39,6 @@ export const Route = createFileRoute("/app")({
 function AppShell() {
   const data = useShell();
   const { cluster: selected } = Route.useSearch();
-  const router = useRouter();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
@@ -78,11 +77,16 @@ function AppShell() {
               <CardDescription>The API is unreachable right now.</CardDescription>
             </CardHeader>
             <CardContent>
-              {/* The one router.invalidate() left in the app. Everything else
-                  refetches a key; this re-runs every loader on the route,
-                  which is the whole point — nothing was reached, so there is
-                  no key to be more specific about. */}
-              <Button variant="outline" onClick={() => void router.invalidate()}>
+              {/* This was the one router.invalidate() the app was going to
+                  keep, and it cannot be: re-running the loader calls
+                  ensureQueryData, which resolves with the cached "api is
+                  unreachable" and never asks again. The button would look
+                  like a button and do nothing until a full page reload.
+                  Refetching the key is what actually retries. */}
+              <Button
+                variant="outline"
+                onClick={() => void queryClient.invalidateQueries({ queryKey: queryKeys.shell() })}
+              >
                 Retry
               </Button>
             </CardContent>

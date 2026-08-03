@@ -18,13 +18,17 @@ export function createAppQueryClient(): QueryClient {
         // Refetching because a window regained focus buys a round trip to
         // redraw identical numbers.
         refetchOnWindowFocus: false,
-        // Zero on purpose, and load-bearing. A loader run means something
-        // happened that should refresh the page — a cluster connected, a
-        // cluster switched, retry pressed — and ensureQueryData refetches only
-        // what it considers stale. A non-zero staleTime here would make
-        // router.invalidate() silently stop refreshing anything inside the
-        // window. Holding data between renders is what the cache is for;
-        // deciding it is still fresh is not.
+        // Zero on purpose, and load-bearing: it is what makes a query refetch
+        // when the component reading it mounts. Navigating back to the
+        // dashboard, or arriving on it after a mutation elsewhere, refreshes
+        // what it draws because of this and not because of the loader.
+        //
+        // The loader specifically cannot be relied on for that:
+        // ensureQueryData resolves with cached data whenever there IS cached
+        // data, stale or not — it fetches only when the entry is absent. So a
+        // non-zero window here would leave a page showing its previous answer
+        // with nothing to correct it. Holding data between renders is what the
+        // cache is for; deciding it is still fresh is not.
         staleTime: 0,
         // A failed read renders as an empty panel rather than an error, so two
         // more attempts only delay that.
@@ -53,8 +57,15 @@ export const queryKeys = {
 // recommendations on screen until something else happened to move them.
 //
 // This is deliberately the whole cache and nothing less. It is still not
-// router.invalidate(): the loaders are not re-run, the cache refetches what is
-// mounted and drops the rest.
+// router.invalidate(): no loader is re-run.
 export function invalidateSession(client: QueryClient): Promise<void> {
-  return client.invalidateQueries();
+  // What is mounted refetches in place, so the reader keeps looking at
+  // something while the new answer arrives rather than at a blank page.
+  const refetching = client.invalidateQueries();
+  // What is not mounted has to go rather than be marked stale. ensureQueryData
+  // hands back cached data whether it is stale or not, so an entry left here is
+  // an entry the next loader would render — the previous org's recommendations,
+  // under the next org's cluster list.
+  client.removeQueries({ type: "inactive" });
+  return refetching;
 }
