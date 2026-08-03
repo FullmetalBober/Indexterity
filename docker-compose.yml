@@ -75,6 +75,17 @@ services:
     command: sh -c "npm install && npx turbo run dev --filter=@repo/web"
     environment:
       WEB_PORT: "3000"
+      # The web SERVER calls the api, and it runs in this container — so the
+      # address has to be the one this container can reach, not the one the
+      # browser uses. Without it the server falls back to VITE_API_URL and
+      # dials localhost:3001, which here is the web container itself.
+      #
+      # Only /app noticed. The landing page is deliberately static, so it
+      # rendered fine and the stack looked healthy right up until you signed in.
+      API_URL: http://api:3001
+      WEB_ORIGIN: http://localhost:3000
+      # Build-time defaults for the browser bundle. Kept as the host-facing
+      # addresses: that is what a browser on the host actually reaches.
       VITE_API_URL: http://localhost:3001
       VITE_WEB_ORIGIN: http://localhost:3000
     ports:
