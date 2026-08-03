@@ -107,7 +107,11 @@ test.describe("cluster lifecycle", () => {
     await signUpAndLandOnDashboard(page, uniqueEmail("plan"));
     await connectCluster(page, "E2E Plan");
 
+    // The plan lives on the Organization page now; the policy it constrains
+    // lives on the dashboard, so this test crosses between them deliberately.
+    await page.getByRole("link", { name: "Organization" }).click();
     await expect(page.getByText("FREE")).toBeVisible();
+    await page.getByRole("link", { name: "Dashboard" }).click();
 
     // Index suggestions are free, and saving them proves it.
     await page.getByLabel("Workload analysis").check();
@@ -130,7 +134,9 @@ test.describe("cluster lifecycle", () => {
   test("refuses a second cluster on the free plan and says why", async ({ page }) => {
     await signUpAndLandOnDashboard(page, uniqueEmail("quota"));
     await connectCluster(page, "E2E Quota One");
+    await page.getByRole("link", { name: "Organization" }).click();
     await expect(page.getByText(/1 \/ 1 clusters/)).toBeVisible();
+    await page.getByRole("link", { name: "Dashboard" }).click();
 
     await page.getByLabel("Name").fill("E2E Quota Two");
     await page.getByLabel("Connection string").fill(MONGO_URL);
