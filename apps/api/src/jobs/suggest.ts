@@ -18,9 +18,15 @@ import { applyCreatesForCluster } from "./create";
 import { jobDb } from "./db";
 import { planForCluster } from "./plan";
 
-// A shape must recur before it earns a recommendation — someone running a
-// heavy ad-hoc query once or twice must not leave an index behind.
-const WORKLOAD_OPTIONS = { minCount: 3 };
+// A shape must recur before it earns a recommendation, measured two ways.
+//
+// The count stops someone's ad-hoc query leaving an index behind. The rate
+// stops the far quieter mistake: `$queryStats` accumulates for the life of the
+// store, so on a server up for two months, three executions clears a count
+// floor while describing a query that runs roughly never. Fortnightly is the
+// line — loose enough for a weekly report, which is a real workload pattern
+// worth an index, and tight enough that a handful of runs since March is not.
+const WORKLOAD_OPTIONS = { minCount: 3, minPerWeek: 0.5 };
 // A TTL advisory needs a RECURRING delete pattern, not a one-off cleanup.
 const TTL_MIN_DELETES = 3;
 // Below this a collection is too small for a scan to matter at all.
