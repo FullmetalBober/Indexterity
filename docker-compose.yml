@@ -56,7 +56,10 @@ services:
       # Dev targets live on the compose network; sign-up is open for convenience.
       ALLOW_PRIVATE_CLUSTER_TARGETS: "true"
       SIGNUP_MODE: open
-      BETTER_AUTH_URL: http://localhost:3001
+      # The DASHBOARD's origin, not this container's port: better-auth appends
+      # /api/auth itself, and the browser reaches all of it through the proxy on
+      # 3000. It is also what the reset links in emails are built from.
+      BETTER_AUTH_URL: http://localhost:3000
       WEB_ORIGIN: http://localhost:3000
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET}
       MASTER_KEY: ${MASTER_KEY}
@@ -72,6 +75,10 @@ services:
       # web 9466.
       METRICS_ENABLED: "true"
     ports:
+      # Published for curl and the OpenAPI document, not for the browser — the
+      # dashboard reaches the api through the proxy, on the dashboard's origin.
+      # An auth call made straight to this port carries the wrong Origin and is
+      # refused, which is the point.
       - "3001:3001"
       - "9464:9464"
     volumes:
@@ -81,28 +88,46 @@ services:
       postgres:
         condition: service_healthy
 
+  # One origin for the browser, the same shape the ingress gives production:
+  # /api to the api, everything else to the dashboard. The relay the web server
+  # used to run is gone, so this is what makes the session cookie first-party —
+  # and it means `podman-compose up` is not a different topology from the chart.
+  proxy:
+    image: docker.io/library/nginx:1-alpine
+    # nginx resolves both upstreams when it starts and exits if either name does
+    # not resolve yet. depends_on orders the start but does not wait, so losing
+    # that race has to be survivable rather than fatal.
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    volumes:
+      - ./deploy/compose/nginx.conf:/etc/nginx/conf.d/default.conf:ro,z
+    depends_on:
+      - api
+      - web
+
   web:
     image: docker.io/library/node:26-slim
     working_dir: /app
     command: sh -c "npm install && exec npx turbo run dev --filter=@repo/web"
     environment:
       WEB_PORT: "3000"
-      # The web SERVER calls the api, and it runs in this container — so the
-      # address has to be the one this container can reach, not the one the
-      # browser uses. Without it the server falls back to VITE_API_URL and
-      # dials localhost:3001, which here is the web container itself.
+      # The web SERVER's own reads during SSR, which happen in this container —
+      # so the address has to be one this container can reach, not the one the
+      # browser uses. It goes straight to the api rather than back out through
+      # the proxy: there is no cookie to make first-party server-side, only one
+      # to forward.
       #
-      # Only /app noticed. The landing page is deliberately static, so it
-      # rendered fine and the stack looked healthy right up until you signed in.
+      # The browser no longer needs an api address at all. It calls /api on
+      # whatever origin it loaded the page from, which is why the VITE_* pair
+      # that used to be here is gone — a build-time default for a value only the
+      # server reads is what broke this stack in #2.
       API_URL: http://api:3001
       WEB_ORIGIN: http://localhost:3000
-      # Build-time defaults for the browser bundle. Kept as the host-facing
-      # addresses: that is what a browser on the host actually reaches.
-      VITE_API_URL: http://localhost:3001
-      VITE_WEB_ORIGIN: http://localhost:3000
       METRICS_ENABLED: "true"
     ports:
-      - "3000:3000"
+      # Not published on 3000: the proxy owns the browser-facing origin. This is
+      # here for scrapes only.
       - "9466:9464"
     volumes:
       - ./:/app

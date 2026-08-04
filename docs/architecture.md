@@ -718,8 +718,10 @@ All of these are load-bearing:
   serializes loader *return values*, so a loader that fills the cache and
   returns nothing serializes nothing — the browser then hydrates against an
   empty cache, every `useQuery` starts at `undefined`, and every read the server
-  just did is done again. Covered by the e2e test that blocks every
-  `_serverFn` call before loading `/app` and expects the dashboard to draw.
+  just did is done again. Covered by the e2e test that blocks every `/api`
+  call the *browser* could make before loading `/app` and expects the dashboard
+  to draw — the SSR render is unaffected, because the web server dials the api
+  off its own request rather than the page's.
 - **`ensureQueryData` does not refetch stale data.** It resolves with cached
   data whenever there *is* any, stale or not, and fetches only when the entry is
   absent. So re-running a loader is not a refresh: `router.invalidate()` on the
@@ -812,13 +814,67 @@ title/description, canonical, Open Graph and Twitter card, plus
 `{attrs}`). The root route defaults to `noindex, nofollow` and the landing opts
 back in, so the dashboard and the password-reset page can never be indexed —
 new private routes inherit the safe default automatically. Canonical and
-`og:url` come from `WEB_ORIGIN` at runtime (`VITE_WEB_ORIGIN` at build time),
-so one image serves any domain. `robots.txt`, the OG card and the favicon are
+`og:url` come from a constant in `lib/site.ts`, overridable at runtime with
+`SITE_URL`, so one image serves any domain and a preview host cannot make itself
+the canonical copy. `robots.txt`, the OG card and the favicon are
 static assets under `apps/web/public/`.
 
 No `sitemap.xml`: with a single public URL it adds nothing a crawler cannot
 find from `/`, and a static one cannot know the deployment's host. Add one (or
 submit `/` directly) if the marketing site ever grows more pages.
+
+### 14.5 Reaching the api
+
+**The browser calls the api itself.** One oRPC client, `lib/api.ts`, used from
+route loaders during SSR and from the query cache in the browser afterwards —
+the same query function on both sides, so nothing has to know where it is
+running. Three pieces differ, and each is a `createIsomorphicFn` the Start
+compiler resolves per build environment:
+
+| | browser | web server |
+|---|---|---|
+| base URL | `window.location.origin` + `/api` | `API_URL` + `/api`, read at runtime |
+| session | its own first-party cookie, attached by a same-origin fetch | the caller's cookie, forwarded off `getRequest()` |
+| fetch | plain | `instrumentedFetch`, imported *inside* the branch |
+
+That last one is not fussiness. `lib/metrics` installs an OpenTelemetry provider
+at import time (§15.1), so a top-level import would leave the SDK in the client
+graph for tree-shaking to argue about; importing it inside the server branch
+means the client build deletes the branch and the import with it. The built
+bundle is checked for it.
+
+**This replaced 28 `createServerFn` wrappers** across 13 call sites — 22 data
+relays in `lib/app-server.ts` and 6 auth relays in `lib/auth.ts`, every one of
+them a thin proxy from the web server to the api. The relay existed for one
+reason: the api was on another origin, so a browser calling it directly would
+have needed CORS with credentials and `SameSite=None` on the session cookie —
+which is, by definition, a cookie that rides along on cross-site requests.
+Putting both behind one origin removes the reason and the code.
+
+What went with it:
+
+- **`decodeOnce`.** The api percent-encodes the cookie value and `setCookie`
+  encoded it again, so a base64 signature reached the browser double-escaped and
+  every request after signing in was a 401 (issue #16, moot rather than done).
+  The cookie the api sets is now the cookie the browser keeps.
+- **The `{ ok, message }` envelope.** A server function had to catch the api's
+  throw and hand back a value; the hook then unwrapped it. The oRPC client throws
+  `ORPCError` in the same process as the mutation, so `onError` does that work
+  and `lib/queries/errors.ts` holds the one rule it applies — which statuses
+  carry a message written for the reader (`400/402/403/404/409`, plus the ones a
+  given call adds) and which get a generic one, because a 500 must not leak
+  internals.
+- **One network hop per call**, and the second copy of every contract type.
+
+Reads still catch rather than reject: a dead read renders an empty panel, not an
+error page, so `shell`, `pipeline`, `telemetry` and `policy` each own the empty
+shape they fall back to. The shell is the one that distinguishes 401 — signed
+out — from everything else, which is "the api could not be asked".
+
+Auth is `better-auth/react`'s own client (`lib/auth-client.ts`) with no
+`baseURL`: it resolves one from `window.location.origin` and appends
+`/api/auth`, which is where the api serves it. Writing an origin there would be
+a second copy of the deployment's address to keep in step.
 
 ---
 
@@ -827,8 +883,11 @@ submit `/` directly) if the marketing site ever grows more pages.
 - **Separate Dockerfiles** — `apps/api/Dockerfile` and `apps/web/Dockerfile`
   (multi-stage), so api and web deploy independently.
 - **`apps/agent/Dockerfile`** — the distributable agent (phase 2).
-- **docker-compose** (dev) — `postgres` + `api` + `web`, with **hot reload** via
-  bind mounts and Turbo watch. PostgreSQL runs in compose.
+- **docker-compose** (dev) — `postgres` + `api` + `web` + `proxy`, with **hot
+  reload** via bind mounts and Turbo watch. PostgreSQL runs in compose. The
+  nginx `proxy` owns port 3000 and applies the ingress's own rule (`/api` to the
+  api, `/` to the dashboard), so local dev is not a second topology — see §14.5
+  for why the app has no fallback if it is.
 
 ### 15.1 Metrics
 
@@ -892,16 +951,14 @@ On the web side, two more:
   construction is the other half of why it is the seam: **the browser bundle must
   not contain the OpenTelemetry SDK**, so nothing under
   `apps/web/src/lib/metrics` may be imported from a route or a component.
-- **There is no per-server-function instrument, and that is a decision rather than
-  an omission** (see D29). It was built and removed: a server function here is one
-  to three api calls and almost no work of its own, so its duration is those calls
-  plus noise and its outcome is theirs. Naming it required Start's global
-  *function* middleware — request middleware could not, because during SSR a
-  server function is invoked directly with no HTTP request — plus an
-  SSR-guarded import in `src/start.ts` to keep the SDK out of the browser. A
-  second framework seam is too much for a metric that restates another. If a
-  loader grows logic of its own, the note in `instruments.ts` says how to put it
-  back.
+- **There is no per-server-function instrument** (D29), and since D31 there are
+  no server functions either. The decision outlived its subject: a seam that only
+  restates the instrument next to it is not worth its framework wiring. What D31
+  did change is the *scope* of the two that remain —
+  `indexterity_web_api_requests_total` is SSR reads only now, because a reader's
+  own calls no longer pass through this process, and `kind="server_fn"` is gone
+  from the request counter for the same reason. A series that is always zero
+  reads as "no traffic" rather than "no such thing".
 
 Route labels are the route *pattern*, derived from the generated route tree
 (`apps/web/src/lib/metrics/routes.ts`) rather than the path that arrived: a
@@ -1003,6 +1060,7 @@ over it.
 | D16 | **Engine ports** extracted for future PostgreSQL/SQL Server support (§9) | Jul 2026. `IndexCollector`/`IndexExecutor`/`EngineSession` moved to `src/engine/ports.ts`; adapters register per `clusters.engine` (enum ready, MONGODB the only implementation); the pool, jobs, and API speak only the ports. Capability flags (`hideIndexes`, `provisionScopedUsers`) mark where engines genuinely differ — notably PostgreSQL has no reversible hide, so its adapter will need an alternative observe stage. Behavior-preserving: the untouched integration suite (25/25) passed on the refactor | Locked |
 | D17 | **Dynamic observe window** + recurrence floor | Jul 2026. The observe window is decided per drop at hide time from the index's own usage history (`analysis/observe.ts`, stored in `recommendations.observe_days`, reason in the audit trail): periodic usage extends to 2× the largest activity gap (≤ 90d) so a monthly job gets a full cycle inside the window; zero usage across ≥ 2× the baseline shortens to half (≥ 7d). Policy stays the baseline and the fallback. Workload shapes now need ≥ 3 sightings to propose and ≥ 5 for instant apply — a manually-run heavy query once or twice produces nothing | Locked |
 | D27 | Internal packages compile to CJS `dist`; apps consume built output | Predictable dev/prod module resolution; Turbo orders builds via `^build` | Locked |
+| D31 | **The browser calls the api directly; the web server is not a BFF** (§14.5) | Aug 2026. 28 `createServerFn` wrappers existed for one reason — two origins, so a direct call would need CORS with credentials and a `SameSite=None` session cookie. #28 put the api under `/api` on the dashboard's host, which removes the reason, so the wrappers, `decodeOnce` (#16, moot) and one hop per call all go. The alternative was keeping the relay as a documented fallback for split-origin installs, and that was **rejected**: supporting both means maintaining both, and the fallback is the path nothing exercises. So same-origin is a requirement, and every way of running the app applies the same rule — ingress, an nginx service in compose, the vite dev proxy, a node proxy in front of the e2e suite. Two costs, both accepted: the api is publicly reachable, so its rate limiting, origin checks and auth guard are the only line of defence rather than the second (#21 in the same breath); and a self-hoster on two ports has to put a proxy in front. It also unblocks #22 — SSE from the browser straight to the api is materially simpler than streaming through a relay | Locked |
 | D30 | **The chart ships the alerts, not just the metrics** (§15.2) | Aug 2026. Three scrape endpoints and a blank Prometheus is not observability — it leaves every operator to derive the same queries from metric names they have to discover first, and two of those queries are ones a careful person still gets wrong. `increase()` cannot see a dead process: a stopped worker's series go stale, and a stale series matches no `== 0` comparison, so the intuitive "no successes recently" rule is silent in the one case that matters (`absent_over_time` on a gauge only that process reports is what fires). And the schedule lives in the `schedule*` dispatchers, not the per-cluster tasks — `collect` legitimately stops when the last cluster is offboarded, so a rule watching it pages on a successful offboarding. Also folded in: the api's health endpoint answers `ok` without touching Postgres, so a lost database is invisible to both probes and needs an alert of its own. Rules are validated in CI with `promtool`, because a typo'd expression passes `helm lint` and `kubeconform`, installs cleanly, and then never fires | Locked |
 | D29 | **The dashboard server reports three things, and per-function metrics are not one of them** (§15.1) | Aug 2026. D28 covered the api and the worker, which left the layer the reader waits on unmeasured. Most of what the dashboard does is already visible from the api's side — every server function call lands there — so the question was which of the remainder is worth a seam. Three are: render time per route pattern, a response the api never heard about (a loader that threw, a 404), and the api measured from this end of the network, which is the only place a *partial* api failure is recorded at all, because the loaders catch everything and render `EMPTY_PIPELINE` rather than an error. One seam serves all three: `src/server.ts`, SSR-only by construction, which also keeps the SDK out of the browser bundle. Per-function metrics were built, worked, and were **removed**: a server function here is one to three api calls and almost no work of its own, so its duration is those calls plus noise, and naming it cost a second framework seam (global *function* middleware — request middleware cannot see a direct SSR invocation — plus an SSR-guarded import in `src/start.ts`). The instrument that restates another one is the one to cut. Extracting `packages/metrics` came first regardless, so the exporter stays one decision rather than three | Locked |
 | D28 | **Metrics on a second port, instrumented through OpenTelemetry** (§15.1) | Aug 2026. There were none: a service that hides and drops indexes on other people's production clusters could not state how many clusters it currently cannot reach, how long its queue is, how many drops are mid-observe, how often the regression gate fires, or what its dead-letter rate is. OpenTelemetry rather than a Prometheus client library so the exporter is a decision in one file — the chart ships a ServiceMonitor today, and an install that wants an OTLP collector should not need a rewrite. A second port rather than a route under `/api` because the endpoint has no auth and the ingress publishes the api host. Two things fell out of writing it: queue depth belongs in SQL over `graphile_worker.jobs`, not in worker-held counters that vanish on restart and report zero when the worker is *gone*; and the unreachable count has no source other than the worker's own memory, because an unreachable cluster is a handled condition (§7.4.1) that the queue records as a success | Locked |

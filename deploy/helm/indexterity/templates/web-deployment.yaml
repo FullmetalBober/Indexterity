@@ -44,9 +44,9 @@ spec:
             {{- include "indexterity.metricsEnv" . | nindent 12 }}
             - name: PORT
               value: {{ .Values.web.port | quote }}
-            # Read at runtime by the dashboard's server functions, so one image
-            # deploys everywhere. The api stays internal — browsers never call
-            # it directly.
+            # The web server's own reads during SSR, at runtime so one image
+            # deploys everywhere. The browser does not use this and is not told
+            # it: it calls /api on the origin the ingress already routes.
             - name: API_URL
               value: {{ default (include "indexterity.internalApiUrl" .) .Values.web.apiUrl | quote }}
             - name: WEB_ORIGIN

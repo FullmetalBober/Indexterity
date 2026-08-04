@@ -5,16 +5,45 @@
 // and the layout, the dashboard and the org page read it back. Two of them
 // writing the same key with two different query functions is how a cache ends
 // up with two answers for one question.
+//
+// It runs on the web server during SSR and in the browser afterwards, off the
+// same isomorphic client (lib/api.ts). It used to be a server function, which
+// meant the browser asked the web server to ask the api; now it asks the api.
 import { queryOptions, useQuery } from "@tanstack/react-query";
-import { loadAppShell } from "../app-server";
+import { api } from "../api";
+import { isStatus } from "./errors";
 import { queryKeys } from "./keys";
 
-export type Shell = Awaited<ReturnType<typeof loadAppShell>>;
+// Three reads, one answer. They are fetched together because no /app page is
+// useful without all three, and separately from anything about a cluster: which
+// cluster is on screen is a property of the URL, and resolving it here would
+// make every cluster switch a refetch of the org and the member list.
+//
+// A failure is not an error to render. 401 means signed out and anything else
+// means the api could not be asked — both are answers the layout knows how to
+// draw, which is why this catches rather than letting the query reject.
+async function loadShell() {
+  const client = api();
+  try {
+    const [clusters, org, orgs] = await Promise.all([
+      client.listClusters(),
+      client.getOrg(),
+      client.listOrgs(),
+    ]);
+    return { authed: true as const, clusters, org, orgs };
+  } catch (error) {
+    if (isStatus(error, 401)) return { authed: false as const, apiDown: false as const };
+    // The api is unreachable — render a friendly state instead of a 500.
+    return { authed: false as const, apiDown: true as const };
+  }
+}
+
+export type Shell = Awaited<ReturnType<typeof loadShell>>;
 
 export function shellQuery() {
   return queryOptions({
     queryKey: queryKeys.shell(),
-    queryFn: () => loadAppShell(),
+    queryFn: loadShell,
   });
 }
 

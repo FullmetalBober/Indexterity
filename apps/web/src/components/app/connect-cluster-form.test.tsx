@@ -6,11 +6,16 @@ import { renderInApp } from "~/test-utils";
 import { ConnectClusterForm } from "./connect-cluster-form";
 
 const checkConnection = vi.hoisted(() => vi.fn());
-const connectCluster = vi.hoisted(() => vi.fn());
+const createCluster = vi.hoisted(() => vi.fn());
 const provisionCluster = vi.hoisted(() => vi.fn());
 const navigate = vi.hoisted(() => vi.fn());
 
-vi.mock("~/lib/app-server", () => ({ checkConnection, connectCluster, provisionCluster }));
+// The api client, called straight from the mutation hooks — the preflight and
+// both connect paths now answer with the contract's own shapes rather than an
+// { ok, message } envelope a server function built.
+vi.mock("~/lib/api", () => ({
+  api: () => ({ checkConnection, createCluster, provisionCluster }),
+}));
 vi.mock("@tanstack/react-router", () => ({ useNavigate: () => navigate }));
 
 function privilege(key: string, granted: boolean): PrivilegeCheck {
@@ -60,29 +65,30 @@ describe("ConnectClusterForm", () => {
   });
 
   it("checks before it connects, and never stores anything on the check", async () => {
-    checkConnection.mockResolvedValue({ ok: true, diagnosis: diagnosis() });
+    checkConnection.mockResolvedValue(diagnosis());
     const user = userEvent.setup();
     renderInApp(<ConnectClusterForm />);
 
     await check(user);
 
-    expect(checkConnection).toHaveBeenCalledWith({ data: "mongodb://host:27017" });
-    expect(connectCluster).not.toHaveBeenCalled();
+    expect(checkConnection).toHaveBeenCalledWith({ connectionString: "mongodb://host:27017" });
+    expect(createCluster).not.toHaveBeenCalled();
     expect(provisionCluster).not.toHaveBeenCalled();
     expect(screen.getByText("appuser")).toBeInTheDocument();
   });
 
   it("connects with the pasted credentials when they are already enough", async () => {
-    checkConnection.mockResolvedValue({ ok: true, diagnosis: diagnosis() });
-    connectCluster.mockResolvedValue({ ok: true, message: null, id: "c9" });
+    checkConnection.mockResolvedValue(diagnosis());
+    createCluster.mockResolvedValue({ id: "c9", name: "Production" });
     const user = userEvent.setup();
     renderInApp(<ConnectClusterForm />);
 
     await check(user);
     await user.click(screen.getByRole("button", { name: "Connect" }));
 
-    expect(connectCluster).toHaveBeenCalledWith({
-      data: { name: "Production", connectionString: "mongodb://host:27017" },
+    expect(createCluster).toHaveBeenCalledWith({
+      name: "Production",
+      connectionString: "mongodb://host:27017",
     });
     expect(navigate).toHaveBeenCalledWith({ to: "/app", search: { cluster: "c9" } });
   });
@@ -90,7 +96,7 @@ describe("ConnectClusterForm", () => {
   // Provisioning is the recommended path when it is available, and using the
   // admin credentials as-is must stay an explicit second choice.
   it("offers to provision a scoped user when the credentials can create one", async () => {
-    checkConnection.mockResolvedValue({ ok: true, diagnosis: diagnosis({ canProvision: true }) });
+    checkConnection.mockResolvedValue(diagnosis({ canProvision: true }));
     const user = userEvent.setup();
     renderInApp(<ConnectClusterForm />);
 
@@ -105,11 +111,9 @@ describe("ConnectClusterForm", () => {
 
   // The scoped user's string is the only copy the reader ever sees.
   it("shows the provisioned string once, with how to revoke it", async () => {
-    checkConnection.mockResolvedValue({ ok: true, diagnosis: diagnosis({ canProvision: true }) });
+    checkConnection.mockResolvedValue(diagnosis({ canProvision: true }));
     provisionCluster.mockResolvedValue({
-      ok: true,
-      message: null,
-      id: "c9",
+      cluster: { id: "c9", name: "Production" },
       username: "idx_abc",
       connectionString: "mongodb://idx_abc:secret@host:27017",
     });
@@ -124,10 +128,9 @@ describe("ConnectClusterForm", () => {
   });
 
   it("refuses to connect at all when core privileges are missing", async () => {
-    checkConnection.mockResolvedValue({
-      ok: true,
-      diagnosis: diagnosis({ ready: false, canApply: false, missing: ["Index usage stats"] }),
-    });
+    checkConnection.mockResolvedValue(
+      diagnosis({ ready: false, canApply: false, missing: ["Index usage stats"] }),
+    );
     const user = userEvent.setup();
     renderInApp(<ConnectClusterForm />);
 
@@ -140,10 +143,7 @@ describe("ConnectClusterForm", () => {
   // Missing APPLY privileges are survivable — analysis still works — so the
   // reader must still be able to connect.
   it("still allows connecting when only the write privileges are missing", async () => {
-    checkConnection.mockResolvedValue({
-      ok: true,
-      diagnosis: diagnosis({ canApply: false, missing: ["Drop indexes"] }),
-    });
+    checkConnection.mockResolvedValue(diagnosis({ canApply: false, missing: ["Drop indexes"] }));
     const user = userEvent.setup();
     renderInApp(<ConnectClusterForm />);
 
@@ -154,10 +154,9 @@ describe("ConnectClusterForm", () => {
   });
 
   it("reports an unreachable cluster instead of offering to connect", async () => {
-    checkConnection.mockResolvedValue({
-      ok: true,
-      diagnosis: diagnosis({ reachable: false, message: "cluster unreachable — check the host" }),
-    });
+    checkConnection.mockResolvedValue(
+      diagnosis({ reachable: false, message: "cluster unreachable — check the host" }),
+    );
     const user = userEvent.setup();
     renderInApp(<ConnectClusterForm />);
 
@@ -180,7 +179,7 @@ describe("ConnectClusterForm", () => {
   // Editing the string invalidates the verdict — otherwise the reader could
   // connect a different string than the one that was checked.
   it("discards the diagnosis when the connection string is edited", async () => {
-    checkConnection.mockResolvedValue({ ok: true, diagnosis: diagnosis() });
+    checkConnection.mockResolvedValue(diagnosis());
     const user = userEvent.setup();
     renderInApp(<ConnectClusterForm />);
 

@@ -1,14 +1,17 @@
 import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { renderInApp } from "~/test-utils";
+import { apiError, renderInApp } from "~/test-utils";
 import { PolicySection } from "./policy-section";
 
-const savePolicy = vi.hoisted(() => vi.fn());
+const updatePolicy = vi.hoisted(() => vi.fn());
 const toastSuccess = vi.hoisted(() => vi.fn());
 const toastError = vi.hoisted(() => vi.fn());
 
-vi.mock("~/lib/app-server", () => ({ savePolicy }));
+// The api client, which the mutation hook now calls directly. Mocking it rather
+// than a server function means the hook's own error handling — which reason is
+// safe to show — is under test instead of stubbed out with it.
+vi.mock("~/lib/api", () => ({ api: () => ({ updatePolicy }) }));
 vi.mock("sonner", () => ({ toast: { success: toastSuccess, error: toastError } }));
 
 const policy = {
@@ -22,20 +25,15 @@ const policy = {
   inferredWindowReason: null,
 };
 
-// The last argument savePolicy was called with, unwrapped from the server-fn
-// { data } envelope.
+// What was sent to the api on the last save.
 function savedPayload(): Record<string, unknown> {
-  const call: unknown = savePolicy.mock.calls.at(-1)?.[0];
-  if (typeof call !== "object" || call === null || !("data" in call)) {
-    throw new Error("savePolicy was not called with a data envelope");
-  }
-  const { data } = call;
-  if (typeof data !== "object" || data === null) throw new Error("no data");
-  return { ...data };
+  const call: unknown = updatePolicy.mock.calls.at(-1)?.[0];
+  if (typeof call !== "object" || call === null) throw new Error("updatePolicy was not called");
+  return { ...call };
 }
 
 beforeEach(() => {
-  savePolicy.mockResolvedValue({ ok: true });
+  updatePolicy.mockResolvedValue({ ...policy, maxCollectionSizeBytes: null });
 });
 
 describe("PolicySection", () => {
@@ -115,10 +113,9 @@ describe("PolicySection", () => {
   // Two different failures reach here now — not an owner, or the plan does not
   // include what was switched on — so the api's own reason has to come through.
   it("shows the api's reason when a save is refused, and does not claim success", async () => {
-    savePolicy.mockResolvedValue({
-      ok: false,
-      message: "the FREE plan does not include workload analysis",
-    });
+    updatePolicy.mockRejectedValue(
+      apiError(402, "the FREE plan does not include workload analysis"),
+    );
     const user = userEvent.setup();
     const { queryClient } = renderInApp(<PolicySection policy={policy} />);
     const invalidate = vi.spyOn(queryClient, "invalidateQueries");
@@ -130,10 +127,11 @@ describe("PolicySection", () => {
     expect(invalidate).not.toHaveBeenCalled();
   });
 
-  // A rejected promise must land in the same place as { ok: false }, or the
-  // reader gets an unhandled rejection and no feedback at all.
-  it("treats a thrown server function as a failed save", async () => {
-    savePolicy.mockRejectedValue(new Error("network"));
+  // A call that never reached the api must land where a refusal does, or the
+  // reader gets an unhandled rejection and no feedback at all. It carries no
+  // status, so it gets the generic message rather than its own words.
+  it("treats a call that never got an answer as a failed save", async () => {
+    updatePolicy.mockRejectedValue(new Error("network"));
     const user = userEvent.setup();
     renderInApp(<PolicySection policy={policy} />);
 
