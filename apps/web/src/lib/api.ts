@@ -5,6 +5,7 @@ import { OpenAPILink } from "@orpc/openapi-client/fetch";
 import { contract } from "@repo/contracts";
 import { createIsomorphicFn } from "@tanstack/react-start";
 import { getRequest } from "@tanstack/react-start/server";
+import { apiOrigin } from "~/lib/api-origin";
 
 // One client, called from both sides. A route loader uses it during SSR and the
 // same query function uses it in the browser afterwards, which is the whole
@@ -20,13 +21,12 @@ import { getRequest } from "@tanstack/react-start/server";
 // buy and now costs nothing.
 //
 // On the web server that origin is not the api: it dials the api directly, at
-// API_URL, still read at RUNTIME so one image deploys to every environment.
-// There is deliberately no VITE_API_URL fallback any more. A build-time default
-// for a value only the server reads is what broke compose in #2 — the web
-// server fell back to the browser-facing address and dialled itself.
+// API_URL (see lib/api-origin.ts). An SSR read has no cookie to make
+// first-party — only the caller's to forward — so it has no reason to go back
+// out through whatever is serving /api.
 const apiBaseUrl = createIsomorphicFn()
   .client(() => `${window.location.origin}/api`)
-  .server(() => `${process.env.API_URL ?? "http://localhost:3001"}/api`);
+  .server(() => `${apiOrigin()}/api`);
 
 // Only the web server has to say who is asking. It is answering on behalf of a
 // browser, so it forwards that request's cookie; in the browser the cookie is

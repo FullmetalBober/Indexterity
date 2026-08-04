@@ -1,5 +1,6 @@
 import { createStartHandler, defaultStreamHandler } from "@tanstack/react-start/server";
 import { createServerEntry } from "@tanstack/react-start/server-entry";
+import { isApiRequest, passThroughToApi } from "~/lib/api-passthrough";
 import { startMetricsServer } from "~/lib/metrics/provider";
 import { measureRequest } from "~/lib/metrics/requests";
 
@@ -12,6 +13,8 @@ import { measureRequest } from "~/lib/metrics/requests";
 //     down until someone visits the site, which is precisely backwards.
 //   - every response has to be counted, including the ones the api never hears
 //     about: a loader that threw, a 404, a page that rendered slowly.
+//   - /api has to be answerable here, so that one origin is a property of the
+//     app and not of the deployment (see lib/api-passthrough.ts).
 //
 // Nothing here reaches the browser: vite resolves this file for the server
 // environment alone.
@@ -38,6 +41,15 @@ void startMetricsServer({
     console.warn(`metrics: endpoint not started — ${String(error)}`);
   });
 
+// /api is taken before the router sees it — it owns no such route, so leaving
+// it to the router is a 404. Still inside measureRequest, which is how a
+// passthrough that is running when a proxy should have answered first becomes
+// visible rather than silent.
 export default createServerEntry({
-  fetch: (request, ...rest) => measureRequest(request, () => fetch(request, ...rest)),
+  fetch: (request, ...rest) =>
+    measureRequest(request, () =>
+      isApiRequest(new URL(request.url).pathname)
+        ? passThroughToApi(request)
+        : fetch(request, ...rest),
+    ),
 });
