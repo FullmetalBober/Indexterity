@@ -130,6 +130,27 @@ test.describe("cluster lifecycle", () => {
     await expect(page.getByText("Policy saved").first()).toBeVisible();
   });
 
+  // The server fetches everything the page draws, and the browser has to
+  // receive it rather than fetch it again: cutting off every server function
+  // before the page loads leaves only what the SSR payload carried. Without the
+  // query cache in that payload the browser hydrates against an empty one, and
+  // the whole dashboard reverts to its empty shapes for as long as the refetch
+  // takes — which is the failure that made the policy section vanish twice.
+  test("renders from what the server sent, not from a second round trip", async ({ page }) => {
+    await signUpAndLandOnDashboard(page, uniqueEmail("hydration"));
+    await connectCluster(page, "E2E Hydrated");
+    await page.getByLabel("Observe window (days)").fill("14");
+    await page.getByRole("button", { name: "Save policy" }).click();
+    await expect(page.getByText("Policy saved")).toBeVisible();
+
+    await page.route("**/_serverFn/**", (route) => route.abort());
+    await page.goto("/app");
+
+    // The shell, and a per-cluster read that only the loader could have made.
+    await expect(page.getByText("E2E Hydrated", { exact: true })).toBeVisible();
+    await expect(page.getByLabel("Observe window (days)")).toHaveValue("14");
+  });
+
   // The free plan allows one, and the limit must be visible before it is hit.
   test("refuses a second cluster on the free plan and says why", async ({ page }) => {
     await signUpAndLandOnDashboard(page, uniqueEmail("quota"));

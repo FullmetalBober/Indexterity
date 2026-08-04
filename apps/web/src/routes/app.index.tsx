@@ -32,8 +32,8 @@ import {
 } from "~/lib/app-server";
 import { formatTimestamp, useMounted } from "~/lib/hydration";
 import { queryKeys } from "~/lib/query";
+import { useShell } from "~/lib/shell";
 import { LineChart, SERIES_PALETTE } from "../components/latency-chart";
-import { Route as AppRoute } from "./app";
 
 export const Route = createFileRoute("/app/")({
   loaderDeps: ({ search }: { search: { cluster?: string } }) => ({
@@ -84,7 +84,7 @@ const EMPTY = {
 };
 
 function Dashboard() {
-  const shell = AppRoute.useLoaderData();
+  const shell = useShell();
   const { clusterId: id } = Route.useLoaderData();
   const queryClient = useQueryClient();
   const mounted = useMounted();

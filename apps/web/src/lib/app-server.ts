@@ -62,29 +62,31 @@ function isStatus(error: unknown, status: number): boolean {
 //
 // It used to be one loader with the per-cluster reads bolted on, which meant
 // opening the team page fetched a latency series nobody was going to look at.
-export const loadAppShell = createServerFn({ method: "GET" })
-  .validator((selected: unknown): string | null => (typeof selected === "string" ? selected : null))
-  .handler(async ({ data: selected }) => {
-    const api = serverApi();
-    try {
-      const [clusters, org, orgs] = await Promise.all([
-        api.listClusters(),
-        api.getOrg(),
-        api.listOrgs(),
-      ]);
-      return {
-        authed: true as const,
-        clusters,
-        cluster: clusters.find((c) => c.id === selected) ?? clusters[0] ?? null,
-        org: org ?? EMPTY_ORG,
-        orgs,
-      };
-    } catch (error) {
-      if (isStatus(error, 401)) return { authed: false as const, apiDown: false as const };
-      // The api is unreachable — render a friendly state instead of a 500.
-      return { authed: false as const, apiDown: true as const };
-    }
-  });
+//
+// It takes no arguments, and specifically not the selected cluster: which of
+// these clusters is on screen is a property of the URL, and resolving it here
+// would make every cluster switch a refetch of the org and the member list.
+// The shell answers "what exists"; the layout picks one out of it.
+export const loadAppShell = createServerFn({ method: "GET" }).handler(async () => {
+  const api = serverApi();
+  try {
+    const [clusters, org, orgs] = await Promise.all([
+      api.listClusters(),
+      api.getOrg(),
+      api.listOrgs(),
+    ]);
+    return {
+      authed: true as const,
+      clusters,
+      org: org ?? EMPTY_ORG,
+      orgs,
+    };
+  } catch (error) {
+    if (isStatus(error, 401)) return { authed: false as const, apiDown: false as const };
+    // The api is unreachable — render a friendly state instead of a 500.
+    return { authed: false as const, apiDown: true as const };
+  }
+});
 
 // One cluster's data, grouped by what CHANGES it rather than by what draws it.
 //

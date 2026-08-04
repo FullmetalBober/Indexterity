@@ -1,3 +1,4 @@
+import { useMutation } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { toast } from "sonner";
@@ -28,6 +29,12 @@ interface ClusterOption {
 // collection — say so rather than letting them read as current.
 const STALE_AFTER_HOURS = 48;
 
+// Said the same way whether the api refused or never answered, because from the
+// reader's side those are the same event.
+const MODE_FAILED = "Mode change failed (owner only)";
+const DISCONNECT_FAILED = "Disconnect failed (owner only)";
+const ROTATION_FAILED = "rotation failed";
+
 function staleness(lastCollectedAt: string | null): string | null {
   if (lastCollectedAt === null) return "never collected";
   const hours = (Date.now() - new Date(lastCollectedAt).getTime()) / 3_600_000;
@@ -54,51 +61,60 @@ export function ClusterBar({
   // resolves after hydration rather than differing between the two renders.
   const stale = useMounted() ? staleness(cluster.lastCollectedAt) : null;
 
-  async function onToggleMode() {
-    const goingLive = cluster.readOnly;
-    const result = await setClusterMode({
-      data: { clusterId: cluster.id, readOnly: !cluster.readOnly },
-    }).catch(() => ({ ok: false }));
-    if (result.ok)
+  // Each of these used to end in the caller's router.invalidate(). onChanged is
+  // now one key — the shell, which is where a cluster's name, mode and
+  // provisioned user are read from — and it fires only when the api says
+  // something moved. A refused mode change leaves nothing to refetch.
+  const toggleMode = useMutation({
+    mutationFn: (readOnly: boolean) =>
+      setClusterMode({ data: { clusterId: cluster.id, readOnly } }),
+    onSuccess: (result, readOnly) => {
+      if (!result.ok) {
+        toast.error(MODE_FAILED);
+        return;
+      }
       toast.success(
-        goingLive ? "Live mode enabled — the engine may now write" : "Cluster is read-only again",
+        readOnly ? "Cluster is read-only again" : "Live mode enabled — the engine may now write",
       );
-    else toast.error("Mode change failed (owner only)");
-    onChanged();
-  }
+      onChanged();
+    },
+    onError: () => toast.error(MODE_FAILED),
+  });
 
-  async function onRotate() {
-    const result = await rotateConnection({
-      data: { clusterId: cluster.id, connectionString: rotateString },
-    }).catch(() => ({ ok: false, message: "rotation failed" }));
-    if (result.ok) {
+  const rotate = useMutation({
+    mutationFn: (connectionString: string) =>
+      rotateConnection({ data: { clusterId: cluster.id, connectionString } }),
+    onSuccess: (result) => {
+      if (!result.ok) {
+        toast.error(result.message ?? ROTATION_FAILED);
+        return;
+      }
       toast.success("Connection string rotated — history preserved");
       setRotateOpen(false);
       setRotateString("");
-    } else {
-      toast.error(result.message ?? "rotation failed");
-    }
-    onChanged();
-  }
+      onChanged();
+    },
+    onError: () => toast.error(ROTATION_FAILED),
+  });
 
-  async function onDisconnect() {
-    const result = await disconnectCluster({ data: cluster.id }).catch(() => ({
-      ok: false,
-      unhidden: 0,
-      revokeCommand: null,
-    }));
-    if (result.ok) {
+  const disconnect = useMutation({
+    mutationFn: () => disconnectCluster({ data: cluster.id }),
+    onSuccess: async (result) => {
+      if (!result.ok) {
+        // The cluster is still there, so deselecting it would be a lie.
+        toast.error(DISCONNECT_FAILED);
+        return;
+      }
       toast.success(
         result.unhidden > 0
           ? `Disconnected — ${result.unhidden} hidden ${result.unhidden === 1 ? "index" : "indexes"} restored`
           : "Cluster disconnected",
       );
-    } else {
-      toast.error("Disconnect failed (owner only)");
-    }
-    await navigate({ to: "/app", search: {} });
-    onChanged();
-  }
+      await navigate({ to: "/app", search: {} });
+      onChanged();
+    },
+    onError: () => toast.error(DISCONNECT_FAILED),
+  });
 
   return (
     <div className="mt-1 flex flex-wrap items-center gap-2">
@@ -161,10 +177,10 @@ export function ClusterBar({
           title="Enable live mode?"
           description={`The engine will be allowed to modify indexes on "${cluster.name}" — hide, drop and build. Drops still pass the observe window and the regression gate first.`}
           confirmLabel="Go live"
-          onConfirm={() => void onToggleMode()}
+          onConfirm={() => toggleMode.mutate(false)}
         />
       ) : (
-        <Button variant="outline" size="sm" onClick={() => void onToggleMode()}>
+        <Button variant="outline" size="sm" onClick={() => toggleMode.mutate(true)}>
           Make read-only
         </Button>
       )}
@@ -196,14 +212,14 @@ export function ClusterBar({
           </>
         }
         confirmLabel="Disconnect"
-        onConfirm={() => void onDisconnect()}
+        onConfirm={() => disconnect.mutate()}
       />
       {rotateOpen ? (
         <form
           className="flex w-full gap-2 pt-1"
           onSubmit={(event) => {
             event.preventDefault();
-            void onRotate();
+            rotate.mutate(rotateString);
           }}
         >
           <Input

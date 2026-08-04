@@ -1,4 +1,5 @@
 import { createRouter, Link } from "@tanstack/react-router";
+import { setupRouterSsrQueryIntegration } from "@tanstack/react-router-ssr-query";
 import { createAppQueryClient } from "./lib/query";
 import { routeTree } from "./routeTree.gen";
 
@@ -39,13 +40,34 @@ export function getRouter() {
   // the provider reads it back out of context, so server-rendered data and the
   // browser cache are the same entry rather than two that drift apart.
   const queryClient = createAppQueryClient();
-  return createRouter({
+  const router = createRouter({
     routeTree,
     context: { queryClient },
     scrollRestoration: true,
     defaultErrorComponent: AppError,
     defaultNotFoundComponent: NotFound,
   });
+
+  // The server's cache is a different object from the browser's, and nothing
+  // carries one into the other by default: the router serializes loader RETURN
+  // values, and a loader that fills the cache and returns nothing serializes
+  // nothing. So the browser used to hydrate against an empty cache — every
+  // useQuery started at undefined, the page fell back to its empty shapes for
+  // a paint, and every read the server had just done was done again.
+  //
+  // This dehydrates the cache into the SSR payload and hydrates it back, which
+  // is what lets a page read a query instead of loader data. Queries that
+  // resolve after the shell is flushed are streamed in as they land.
+  setupRouterSsrQueryIntegration({
+    router,
+    queryClient,
+    // __root.tsx provides the client, out of router context. Two providers
+    // around the same client would also work; one is easier to reason about,
+    // and that one is where the comment explaining it lives.
+    wrapQueryClient: false,
+  });
+
+  return router;
 }
 
 declare module "@tanstack/react-router" {
