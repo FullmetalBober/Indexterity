@@ -1104,6 +1104,15 @@ over it.
   adopt better-auth's organization plugin: `@Roles()`, `@OrgRoles()` and
   `@RequireActiveOrg()` are unusable while orgs live in our own `members` table,
   and they are most of what the package offers beyond the mount.
+- **`nestjs-trpc`** — considered Aug 2026, **staying on `@orpc/nest`**. tRPC infers
+  the client's types from the server's implementation, which would replace
+  `packages/contracts` — a shared artifact both sides are checked against — with
+  a dependency on the api's internals. It would also cost the REST surface: the
+  contract carries real routes and generates the OpenAPI document that
+  `ingress.api.*` exists to expose, and `/trpc/listClusters?input=…` is not an
+  api anyone wants to consume. No pain reported with oRPC, and subscriptions are
+  not the deciding factor either — the passthrough already streams (§14.5), so
+  #22 does not need a different RPC layer.
 - **Agent mode** — phase 2. Interface designed for it from day one.
 - **Suggest-mode (`CREATE` from workload)** — higher trust tier; needs profiler
   access. Ship cleanup path first.
