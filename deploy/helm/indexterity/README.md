@@ -72,6 +72,35 @@ server functions call the api over the in-cluster Service. Enable
 | `config.storageUsdPerGbMonth` | Your storage price, for the $/month ROI headline |
 | `config.signupMode` | `invite` (default), `open` or `closed`. The first account always bootstraps the install; after that invite-only. `open` lets any stranger register — and every account can make the control plane dial hosts it names |
 | `config.allowPrivateClusterTargets` | Set `true` when the MongoDB you manage is on a private network (the normal self-hosted case). Leave `false` for anything strangers can reach, or accounts can probe your internal network. Cloud metadata stays blocked either way |
+| `metrics.enabled` | Prometheus metrics on port `metrics.port` (9464) for the api and the worker. On by default; the endpoint is never routed by the ingress |
+| `metrics.serviceMonitor.enabled` | One Prometheus Operator ServiceMonitor per workload. Off by default — it needs the `monitoring.coreos.com` CRDs, and a chart that assumes them cannot install without them |
+
+## Metrics
+
+Both the api and the worker serve `/metrics` on port 9464, and they answer
+different questions — scrape both:
+
+| workload | reports |
+|---|---|
+| api | HTTP traffic, and everything read from the control-plane database: clusters under management, recommendations by pipeline state (`HIDDEN` is a drop mid-observe), queue depth per task, the dead-letter backlog, the age of the oldest unclaimed job |
+| worker | job outcomes and durations from graphile-worker's own events, per-cluster tick outcomes, how many clusters it currently cannot reach, regression-gate decisions, drops executed |
+
+With `worker.enabled=false` and `RUN_WORKER=true` on the api instead, the api
+serves both halves.
+
+`metrics.serviceMonitor.enabled=true` installs a ServiceMonitor for each. Without
+the Prometheus Operator, point your own scraper at the `metrics` port on
+`<release>-api` and `<release>-worker-metrics`, or look by hand:
+
+```bash
+kubectl -n indexterity port-forward svc/indexterity-api 9464:9464
+curl -s localhost:9464/metrics | grep indexterity_
+```
+
+The endpoint carries **no authentication**, which is why it is a second port
+rather than a route on the api: an ingress that publishes the api host does not
+publish this, and cluster counts and pipeline state are operator information.
+Keep it in-cluster. `metrics.enabled=false` turns it off entirely.
 
 ## Security defaults
 
@@ -96,6 +125,8 @@ are deliberately restrictive (see `docs/architecture.md` §10.2):
   Postgres.
 - The worker drains its connection pool on `SIGTERM`
   (`terminationGracePeriodSeconds: 60`).
+- **The worker's only Service is `-worker-metrics`**, and it is headless. Nothing
+  calls the worker; it exists so a scrape can find the pod.
 
 ## Validating changes to this chart
 

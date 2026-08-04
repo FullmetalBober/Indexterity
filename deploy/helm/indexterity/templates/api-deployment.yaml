@@ -41,9 +41,14 @@ spec:
           ports:
             - name: http
               containerPort: {{ .Values.api.port }}
+            {{- if .Values.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+            {{- end }}
           env:
             {{- include "indexterity.coreEnv" . | nindent 12 }}
             {{- include "indexterity.mailEnv" . | nindent 12 }}
+            {{- include "indexterity.metricsEnv" . | nindent 12 }}
             - name: API_PORT
               value: {{ .Values.api.port | quote }}
             # Browser auth requests arrive through the dashboard's server

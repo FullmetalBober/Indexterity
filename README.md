@@ -428,6 +428,37 @@ A Helm chart is in [`deploy/helm/indexterity`](./deploy/helm/indexterity) —
 api + dashboard + worker, a pre-upgrade migration hook, ingress, and a
 `helm test`. Bring your own PostgreSQL.
 
+### Metrics
+
+`METRICS_ENABLED=true` serves Prometheus metrics on port 9464 (`METRICS_PORT`),
+from the api and from the worker. The chart turns it on and can install a
+ServiceMonitor per workload; compose publishes them on 9464 and 9465.
+
+They report different halves, so scrape both. The api answers for HTTP traffic
+and for everything readable from the control-plane database; the worker answers
+for what the pipeline did. The five things a service that drops other people's
+indexes has to be able to state:
+
+| question | metric |
+|---|---|
+| how many clusters can we not reach right now | `indexterity_clusters_unreachable` |
+| how long is the job queue | `indexterity_jobs{state="queued"}`, `indexterity_jobs_oldest_queued_age_seconds` |
+| how many drops are mid-observe | `indexterity_recommendations{state="HIDDEN"}` |
+| how often does the regression gate fire | `indexterity_regression_gate_decisions_total{verdict="regressed"}` |
+| what is the dead-letter rate | `rate(indexterity_job_runs_total{outcome="dead_letter"}[1h])`, backlog in `indexterity_jobs{state="dead_letter"}` |
+
+An unreachable cluster is a *handled* condition — the tick is skipped and
+retried, nothing fails — so the queue counters cannot see it and
+`indexterity_cluster_task_runs_total{outcome=...}` is where the six ways a tick
+can end are told apart.
+
+**The endpoint has no auth**, which is why it is a second port instead of a route
+on the api: the ingress routes the api port, so publishing the api host does not
+publish this. Instrumentation is OpenTelemetry (`@opentelemetry/sdk-metrics`)
+with the Prometheus exporter — pointing it at an OTLP collector instead is a
+change to `apps/api/src/metrics/provider.ts` alone. Pod CPU and memory come from
+the platform, not from here.
+
 ## Open
 
 Planned work lives on the [project board](https://github.com/users/FullmetalBober/projects/6),

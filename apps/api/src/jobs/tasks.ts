@@ -1,6 +1,7 @@
 import type { JobHelpers } from "graphile-worker";
 import { isUnreachableError } from "../errors/unreachable";
 import { ALERT_COOLDOWN_MS, alertAllowed, notifyClusterOwners } from "../mail/notify";
+import { recordClusterTask } from "../metrics";
 import { UnsupportedServerError } from "../mongo/executor";
 import { applyCluster } from "./apply";
 import { refreshInferredWindow } from "./change-window";
@@ -41,14 +42,19 @@ export async function runClusterTask(
 ): Promise<void> {
   try {
     await run(clusterId);
+    recordClusterTask(task, clusterId, "ok");
   } catch (error) {
     // Offboarded between scheduling and running. Nothing to do and nobody to
     // tell — the owners deleted it on purpose.
-    if (error instanceof ClusterGoneError) return;
+    if (error instanceof ClusterGoneError) {
+      recordClusterTask(task, clusterId, "gone");
+      return;
+    }
     // The server is too old for the pipeline. No retry can fix a version, so
     // tell the owners once a day and stop — same shape as an unreachable
     // cluster, for the same reason.
     if (error instanceof UnsupportedServerError) {
+      recordClusterTask(task, clusterId, "unsupported");
       deps.logger.warn(`${task}: cluster ${clusterId} — ${error.message}`);
       if (!alertAllowed(`${clusterId}:unsupported`, ALERT_COOLDOWN_MS)) return;
       await deps.alertOwners(clusterId, "cluster version not supported", error.message);
@@ -57,10 +63,17 @@ export async function runClusterTask(
     // Undecryptable credentials need an operator, not a retry and not a
     // customer email — log it every tick so it stays visible, and move on.
     if (error instanceof ClusterCredentialsError) {
+      recordClusterTask(task, clusterId, "credentials");
       deps.logger.error(`${task}: ${error.message}`);
       return;
     }
-    if (!isUnreachableError(error)) throw error;
+    if (!isUnreachableError(error)) {
+      // Rethrown, so graphile-worker retries and eventually dead-letters it —
+      // counted here too, because this is where the kind is known.
+      recordClusterTask(task, clusterId, "error");
+      throw error;
+    }
+    recordClusterTask(task, clusterId, "unreachable");
     deps.logger.warn(
       `${task}: cluster ${clusterId} unreachable — skipped, retrying on the next tick`,
     );

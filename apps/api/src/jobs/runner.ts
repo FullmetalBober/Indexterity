@@ -1,6 +1,7 @@
 import { type Runner, run } from "graphile-worker";
 import { requiredEnv } from "../env";
 import { ALERT_COOLDOWN_MS, alertAllowed, notifyClusterOwners } from "../mail/notify";
+import { instrumentRunner } from "../metrics";
 import { jobDb } from "./db";
 import { finalClusterFailure } from "./failure";
 import { taskList } from "./tasks";
@@ -38,6 +39,9 @@ export async function startWorker(): Promise<Runner> {
     taskList,
     crontab: CRONTAB,
   });
+  // Job counters come off the same events, so they are registered here and
+  // cover the embedded mode below as well as the standalone worker.
+  instrumentRunner(runner);
   // A cluster task that burns its last retry alerts the owners — a dead
   // connection string or revoked user otherwise fails silently forever.
   runner.events.on("job:failed", ({ job, error }) => {

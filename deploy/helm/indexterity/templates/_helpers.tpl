@@ -101,6 +101,16 @@ app.kubernetes.io/component: {{ .component }}
   value: {{ .Values.config.allowPrivateClusterTargets | quote }}
 {{- end -}}
 
+{{/* The metrics endpoint — shared by the api and the worker, which export different halves of it. */}}
+{{- define "indexterity.metricsEnv" -}}
+{{- if .Values.metrics.enabled }}
+- name: METRICS_ENABLED
+  value: "true"
+- name: METRICS_PORT
+  value: {{ .Values.metrics.port | quote }}
+{{- end }}
+{{- end -}}
+
 {{/* SMTP + storage pricing — shared by the api (mail, ROI) and worker (alerts, digest). */}}
 {{- define "indexterity.mailEnv" -}}
 {{- if .Values.smtp.host }}

@@ -67,6 +67,7 @@ Do **not** compete on auto-create on Atlas. Compete on safe cleanup everywhere.
 | Data fetching (web) | **TanStack Query** (+ `@tanstack/react-router-ssr-query`) | every read and every write; the ssr-query package carries the cache across SSR (§14.2) |
 | Job queue | **graphile-worker** | Postgres-backed jobs (no Redis) |
 | Crypto | **@noble/ciphers** | envelope encryption for secrets |
+| Metrics | **OpenTelemetry** (`@opentelemetry/sdk-metrics` + Prometheus exporter) | api and worker each scraped on their own port (§15.1) |
 | Container | **Docker** | separate api/web images, compose for dev |
 
 Postgres stores **our** state. The databases we manage are the customers'
@@ -828,6 +829,52 @@ submit `/` directly) if the marketing site ever grows more pages.
 - **docker-compose** (dev) — `postgres` + `api` + `web`, with **hot reload** via
   bind mounts and Turbo watch. PostgreSQL runs in compose.
 
+### 15.1 Metrics
+
+OpenTelemetry instruments (`src/metrics`), exported to Prometheus on a **second
+port** — 9464 by default, `METRICS_PORT`, opt-in via `METRICS_ENABLED`. The api
+and the worker each serve their own `/metrics`; the chart adds a named port to
+the api Service, a headless Service for the worker (its only one — nothing calls
+the worker), and an optional ServiceMonitor for each.
+
+A separate port rather than a route under `/api`, for the same reason §10 gives
+for everything else: the ingress publishes the api host, the endpoint carries no
+auth, and cluster counts, queue depth and pipeline state are operator
+information. It is reachable in-cluster until someone deliberately exposes it,
+which is also the shape a scrape target is expected to have.
+
+**The two workloads report disjoint sets**, because each can only answer for what
+it sees:
+
+| the api | the worker |
+|---|---|
+| HTTP requests and durations by route *pattern* — never the resolved URL, or one series per cluster id | job outcomes and durations off graphile-worker's own events (`success` / `retry` / `dead_letter`) |
+| Everything read from the control-plane database on collection: clusters, recommendations by state and type, queue depth per task, dead-letter backlog, age of the oldest unclaimed job | per-cluster tick outcomes, the unreachable-cluster count, regression-gate verdicts, drops executed |
+
+With `RUN_WORKER=true` there is one process and it serves both halves.
+
+Three decisions inside that are not obvious:
+
+- **The queue gauges are read from `graphile_worker.jobs`, not counted in the
+  worker.** Counters in the worker reset when it restarts and report nothing at
+  all when there is no worker running — which is the state most worth alerting
+  on. A job's state is a function of its columns (`attempts >= max_attempts` is
+  the dead letter, `locked_at` is running), so it is one grouped query.
+- **Observable instruments for anything that describes state.** A label set that
+  stops existing — the last cluster of an engine disconnected, a task drained —
+  stops being reported, instead of freezing at its final value the way a gauge
+  written as things change would.
+- **The unreachable-cluster count lives in the worker's memory.** Sound for the
+  same reason the alert cooldown is (§13, one replica by design), and it is the
+  only place the answer exists: an unreachable cluster is a *handled* condition
+  (§7.4.1), so the tick succeeds and no queue counter ever sees it. The
+  dispatcher passes the current fleet on every fan-out, so a cluster offboarded
+  while unreachable is forgotten rather than counted forever.
+
+Instrumentation is the vendor-neutral API, so exporting to an OTLP collector
+instead of a scrape endpoint is a change to `src/metrics/provider.ts` alone. Pod
+CPU and memory come from the platform; nothing here duplicates them.
+
 ---
 
 ## 16. Engineering standards
@@ -886,6 +933,7 @@ submit `/` directly) if the marketing site ever grows more pages.
 | D16 | **Engine ports** extracted for future PostgreSQL/SQL Server support (§9) | Jul 2026. `IndexCollector`/`IndexExecutor`/`EngineSession` moved to `src/engine/ports.ts`; adapters register per `clusters.engine` (enum ready, MONGODB the only implementation); the pool, jobs, and API speak only the ports. Capability flags (`hideIndexes`, `provisionScopedUsers`) mark where engines genuinely differ — notably PostgreSQL has no reversible hide, so its adapter will need an alternative observe stage. Behavior-preserving: the untouched integration suite (25/25) passed on the refactor | Locked |
 | D17 | **Dynamic observe window** + recurrence floor | Jul 2026. The observe window is decided per drop at hide time from the index's own usage history (`analysis/observe.ts`, stored in `recommendations.observe_days`, reason in the audit trail): periodic usage extends to 2× the largest activity gap (≤ 90d) so a monthly job gets a full cycle inside the window; zero usage across ≥ 2× the baseline shortens to half (≥ 7d). Policy stays the baseline and the fallback. Workload shapes now need ≥ 3 sightings to propose and ≥ 5 for instant apply — a manually-run heavy query once or twice produces nothing | Locked |
 | D27 | Internal packages compile to CJS `dist`; apps consume built output | Predictable dev/prod module resolution; Turbo orders builds via `^build` | Locked |
+| D28 | **Metrics on a second port, instrumented through OpenTelemetry** (§15.1) | Aug 2026. There were none: a service that hides and drops indexes on other people's production clusters could not state how many clusters it currently cannot reach, how long its queue is, how many drops are mid-observe, how often the regression gate fires, or what its dead-letter rate is. OpenTelemetry rather than a Prometheus client library so the exporter is a decision in one file — the chart ships a ServiceMonitor today, and an install that wants an OTLP collector should not need a rewrite. A second port rather than a route under `/api` because the endpoint has no auth and the ingress publishes the api host. Two things fell out of writing it: queue depth belongs in SQL over `graphile_worker.jobs`, not in worker-held counters that vanish on restart and report zero when the worker is *gone*; and the unreachable count has no source other than the worker's own memory, because an unreachable cluster is a handled condition (§7.4.1) that the queue records as a success | Locked |
 
 ### Deferred / open
 
