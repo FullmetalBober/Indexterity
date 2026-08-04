@@ -7,7 +7,8 @@ create the missing — and proves the result in freed bytes and latency.
 Read-only by default. The one irreversible step, a drop, is gated behind an
 observe window, a pre-flight check, and a read-latency regression test.
 
-Full design and decision log: [`docs/architecture.md`](./docs/architecture.md).
+Full design: the [Architecture](https://github.com/FullmetalBober/Indexterity/wiki/Architecture) page in the wiki. Every
+load-bearing choice and whether it is still open: [`docs/decisions.md`](./docs/decisions.md).
 
 ## How it works
 
@@ -191,7 +192,7 @@ gate and the change-window inference count intervals in.
 
 `serverStatus` is the one privilege that reads beyond index metadata, so it is
 optional: a cluster without it onboards clean and simply loses the first half of
-the probe. [`docs/mongo-user.md`](./docs/mongo-user.md) says exactly what it
+the probe. [Connecting a cluster](https://github.com/FullmetalBober/Indexterity/wiki/Connecting-a-cluster) says exactly what it
 exposes.
 
 **The change window picks itself.** Left unset, the engine buckets the cluster's
@@ -254,7 +255,7 @@ tested is refused too — this engine drops and builds indexes on a live databas
 and a major release is where command behaviour moves. Set
 `ALLOW_UNTESTED_MONGO_VERSION=true` to run ahead of the tested range.
 
-See [`docs/mongo-user.md`](./docs/mongo-user.md) for the exact `createRole`
+See [Connecting a cluster](https://github.com/FullmetalBober/Indexterity/wiki/Connecting-a-cluster) for the exact `createRole`
 snippets. Indexterity never gets document read or write privileges.
 
 **Replica sets** — `$indexStats` is per member; usage sums all of them, so an
@@ -310,7 +311,8 @@ packages/contracts      oRPC + zod contracts shared by api and web
 
 Route loaders are the SSR entry point and write **through** the query client, so
 the server render and the browser read one cache entry; mutations invalidate a
-key rather than re-running loaders. `docs/architecture.md` §14.2 has the four
+key rather than re-running loaders. The wiki's [Architecture](https://github.com/FullmetalBober/Indexterity/wiki/Architecture)
+page, under Web / dashboard, has the four
 keys and the four things that turned out to be load-bearing.
 
 Everything engine-specific sits behind the ports in `src/engine`, so PostgreSQL

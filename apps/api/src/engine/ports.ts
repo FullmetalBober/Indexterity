@@ -3,8 +3,8 @@ import type { IndexSpec, QueryShape, ServerHealth } from "../analysis";
 // The engine-neutral boundary. Everything above this file — the analysis core,
 // the job pipeline, the API — speaks these ports; everything below implements
 // them per database engine. Today MongoDB is the only adapter; the PostgreSQL
-// and SQL Server mappings are documented in docs/architecture.md §"Engine
-// ports" (pg_stat_user_indexes / sys.dm_db_index_usage_stats etc.).
+// and SQL Server mappings are documented on the wiki's Architecture page under
+// Engine ports (pg_stat_user_indexes / sys.dm_db_index_usage_stats etc.).
 //
 // Vocabulary is MongoDB-flavored on purpose ("collection", "database") — a
 // relational adapter maps them (table, schema/database) rather than the whole

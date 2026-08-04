@@ -11,6 +11,7 @@ import {
   useConnectCluster,
   useProvisionCluster,
 } from "~/lib/queries/mutations/cluster";
+import { CLUSTER_USER_DOCS_HREF } from "~/lib/site";
 
 export function ConnectClusterForm() {
   const [name, setName] = useState("");
@@ -171,8 +172,11 @@ export function ConnectClusterForm() {
             ) : (
               <p className="mt-2 text-muted-foreground text-xs">
                 Grant the missing privileges to this user, or paste credentials that can create
-                users and Indexterity will provision a scoped one for you. The exact role is in{" "}
-                <code>docs/architecture.md</code> §10.1.
+                users and Indexterity will provision a scoped one for you.{" "}
+                <a href={CLUSTER_USER_DOCS_HREF} className="underline">
+                  The exact role is here
+                </a>
+                .
               </p>
             )}
           </div>

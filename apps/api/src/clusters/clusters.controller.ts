@@ -69,8 +69,8 @@ export class ClustersController {
 
   // Everything that must be true before the control plane dials a customer
   // host: a supported engine, a mongodb scheme, a per-user budget, and a
-  // target that is not somewhere on our own network (docs/architecture.md
-  // §10.2). Every endpoint that opens a connection goes through here.
+  // target that is not somewhere on our own network (the wiki's Architecture
+  // page, Security). Every endpoint that opens a connection goes through here.
   private async guardDial(
     req: FastifyRequest,
     engine: typeof clusters.$inferSelect.engine,
