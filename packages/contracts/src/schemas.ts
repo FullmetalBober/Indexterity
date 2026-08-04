@@ -231,21 +231,34 @@ export const auditAction = z.object({
 export type AuditAction = z.infer<typeof auditAction>;
 
 // Per-cluster engine knobs. maxCollectionSizeBytes null = no ceiling.
+//
+// The bounds carry messages because inputs.ts derives the policy form's
+// validator from this schema, so each one is read by whoever typed the number
+// as well as by the api that refused it.
 export const clusterPolicy = z.object({
   clusterId: z.uuid(),
   workloadAnalysis: z.boolean(),
   instantCreate: z.boolean(),
-  observeWindowDays: z.number().int().min(1).max(365),
+  observeWindowDays: z
+    .number()
+    .int("Whole days only")
+    .min(1, "At least a day")
+    .max(365, "A year at most"),
   maxCollectionSizeBytes: z.number().int().positive().nullable(),
   // The one auto-approval control: null = nothing auto-approves and a human
   // clicks, 0 = everything does, anything between is a confidence floor.
   // ADVISORY_REVIEW is never auto-approved at any setting.
-  autoApplyScore: z.number().int().min(0).max(100).nullable(),
+  autoApplyScore: z
+    .number()
+    .int("Whole numbers only")
+    .min(0, "0 to 100")
+    .max(100, "0 to 100")
+    .nullable(),
   // Elective changes (hide/build/drop) run only inside this UTC hour window;
   // safety responses never wait. Null hands the choice to the engine, which
   // derives one from observed traffic; start > end wraps midnight.
-  changeWindowStartHour: z.int().min(0).max(23).nullable(),
-  changeWindowEndHour: z.int().min(0).max(23).nullable(),
+  changeWindowStartHour: z.int().min(0, "0 to 23").max(23, "0 to 23").nullable(),
+  changeWindowEndHour: z.int().min(0, "0 to 23").max(23, "0 to 23").nullable(),
 });
 export type ClusterPolicy = z.infer<typeof clusterPolicy>;
 

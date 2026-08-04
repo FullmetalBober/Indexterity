@@ -30,10 +30,10 @@ describe("AuthForm", () => {
     renderInApp(<AuthForm onSignedIn={onSignedIn} />);
 
     await user.type(screen.getByLabelText("Email"), "a@b.test");
-    await user.type(screen.getByLabelText("Password"), "hunter2");
+    await user.type(screen.getByLabelText("Password"), "hunter2-ok");
     await user.click(screen.getByRole("button", { name: "Sign in" }));
 
-    expect(signIn).toHaveBeenCalledWith({ email: "a@b.test", password: "hunter2" });
+    expect(signIn).toHaveBeenCalledWith({ email: "a@b.test", password: "hunter2-ok" });
     expect(onSignedIn).toHaveBeenCalled();
   });
 
@@ -46,12 +46,12 @@ describe("AuthForm", () => {
     await user.click(screen.getByRole("button", { name: "Need an account? Sign up" }));
     await user.type(screen.getByLabelText("Name"), "Ada");
     await user.type(screen.getByLabelText("Email"), "ada@b.test");
-    await user.type(screen.getByLabelText("Password"), "hunter2");
+    await user.type(screen.getByLabelText("Password"), "hunter2-ok");
     await user.click(screen.getByRole("button", { name: "Sign up" }));
 
     expect(signUp).toHaveBeenCalledWith({
       email: "ada@b.test",
-      password: "hunter2",
+      password: "hunter2-ok",
       name: "Ada",
     });
     expect(signIn).not.toHaveBeenCalled();
@@ -64,7 +64,7 @@ describe("AuthForm", () => {
     renderInApp(<AuthForm onSignedIn={onSignedIn} />);
 
     await user.type(screen.getByLabelText("Email"), "a@b.test");
-    await user.type(screen.getByLabelText("Password"), "wrong");
+    await user.type(screen.getByLabelText("Password"), "wrong-password");
     await user.click(screen.getByRole("button", { name: "Sign in" }));
 
     expect(await screen.findByText("invalid email or password")).toBeInTheDocument();
@@ -82,8 +82,9 @@ describe("AuthForm", () => {
     renderInApp(<AuthForm onSignedIn={vi.fn()} />);
 
     await user.click(screen.getByRole("button", { name: "Need an account? Sign up" }));
+    await user.type(screen.getByLabelText("Name"), "Stranger");
     await user.type(screen.getByLabelText("Email"), "stranger@b.test");
-    await user.type(screen.getByLabelText("Password"), "hunter2");
+    await user.type(screen.getByLabelText("Password"), "hunter2-ok");
     await user.click(screen.getByRole("button", { name: "Sign up" }));
 
     const link = await screen.findByRole("link", { name: "request access" });
@@ -99,8 +100,9 @@ describe("AuthForm", () => {
     renderInApp(<AuthForm onSignedIn={vi.fn()} />);
 
     await user.click(screen.getByRole("button", { name: "Need an account? Sign up" }));
+    await user.type(screen.getByLabelText("Name"), "Ada");
     await user.type(screen.getByLabelText("Email"), "a@b.test");
-    await user.type(screen.getByLabelText("Password"), "hunter2");
+    await user.type(screen.getByLabelText("Password"), "hunter2-ok");
     await user.click(screen.getByRole("button", { name: "Sign up" }));
 
     expect(await screen.findByText("that email is already registered")).toBeInTheDocument();
@@ -142,5 +144,49 @@ describe("AuthForm", () => {
     expect(await screen.findByText("request failed")).toBeInTheDocument();
     // Still usable — not stuck behind a disabled button.
     expect(screen.getByRole("button", { name: "Send reset link" })).toBeEnabled();
+  });
+
+  // The rule is better-auth's, read off the api's own input schema, so the field
+  // refuses exactly what the api would rather than sending it and relaying a 400.
+  it("refuses a password the api would refuse, without asking the api", async () => {
+    const user = userEvent.setup();
+    renderInApp(<AuthForm onSignedIn={vi.fn()} />);
+
+    await user.type(screen.getByLabelText("Email"), "a@b.test");
+    await user.type(screen.getByLabelText("Password"), "short");
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+
+    expect(await screen.findByText("At least 8 characters")).toBeInTheDocument();
+    expect(signIn).not.toHaveBeenCalled();
+  });
+
+  it("says an email is not an email before submitting one", async () => {
+    const user = userEvent.setup();
+    renderInApp(<AuthForm onSignedIn={vi.fn()} />);
+
+    await user.type(screen.getByLabelText("Email"), "not-an-email");
+    await user.type(screen.getByLabelText("Password"), "hunter2-ok");
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+
+    expect(await screen.findByText("That does not look like an email address")).toBeInTheDocument();
+    expect(signIn).not.toHaveBeenCalled();
+  });
+
+  // Sign-up's extra rule is sign-up's alone: an empty name must not keep someone
+  // out of the sign-in form they switched back to.
+  it("retires the rules of the mode it left", async () => {
+    const user = userEvent.setup();
+    renderInApp(<AuthForm onSignedIn={vi.fn()} />);
+
+    await user.click(screen.getByRole("button", { name: "Need an account? Sign up" }));
+    await user.click(screen.getByRole("button", { name: "Sign up" }));
+    expect(await screen.findByText("What should we call you?")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Have an account? Sign in" }));
+    await user.type(screen.getByLabelText("Email"), "a@b.test");
+    await user.type(screen.getByLabelText("Password"), "hunter2-ok");
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+
+    expect(signIn).toHaveBeenCalledWith({ email: "a@b.test", password: "hunter2-ok" });
   });
 });

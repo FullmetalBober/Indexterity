@@ -286,8 +286,9 @@ everything; every mutation is owner-only. Invites are one-time tokens with a
 ## Stack
 
 Turbo monorepo · NestJS + Fastify (api) · TanStack Start + TanStack Query +
-shadcn (web) · better-auth · Drizzle + PostgreSQL · oRPC contracts (zod 4) ·
-graphile-worker · Biome · strict TypeScript (no `any`, no `as`, no lint-ignore).
+TanStack Form + shadcn (web) · better-auth · Drizzle + PostgreSQL · oRPC
+contracts (zod 4) · graphile-worker · Biome · strict TypeScript (no `any`, no
+`as`, no lint-ignore).
 
 ```
 apps/api                control plane
@@ -305,8 +306,13 @@ apps/web                dashboard
   src/lib/auth-client   better-auth's own browser client
   src/lib/queries       the query layer: the client, the four keys, one file per
                         key, and mutations/ grouped by what they change
+  src/components/form   TanStack Form bound once to shadcn's Field primitives —
+                        every form in the app is built from these
   src/router.tsx        the one query client, and the SSR dehydrate/hydrate wiring
 packages/contracts      oRPC + zod contracts shared by api and web
+  src/schemas.ts        what the api returns
+  src/inputs.ts         what it accepts — and what the dashboard's forms validate
+                        against, so a field refuses exactly what a route refuses
 ```
 
 Route loaders are the SSR entry point and write **through** the query client, so
@@ -314,6 +320,12 @@ the server render and the browser read one cache entry; mutations invalidate a
 key rather than re-running loaders. The wiki's [Architecture](https://github.com/FullmetalBober/Indexterity/wiki/Architecture)
 page, under Web / dashboard, has the four
 keys and the four things that turned out to be load-bearing.
+
+Forms are TanStack Form, validated against the api's own input schemas from
+`packages/contracts` — so a password the sign-up field accepts is one better-auth
+accepts, and the rule lives in exactly one place. Values reach a mutation with
+`mutate()`, not through the render, which is why nothing in a form needs
+`useState` any more.
 
 Everything engine-specific sits behind the ports in `src/engine`, so PostgreSQL
 and SQL Server adapters can slot in without pipeline changes — the data model

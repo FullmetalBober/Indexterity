@@ -1,10 +1,8 @@
+import { policyKnobsInput } from "@repo/contracts";
 import { ArrowRightIcon } from "lucide-react";
-import { useState } from "react";
-import { Button } from "~/components/ui/button";
+import { useAppForm } from "~/components/form";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
-import { Checkbox } from "~/components/ui/checkbox";
-import { Input } from "~/components/ui/input";
-import { Label } from "~/components/ui/label";
+import { Field, FieldDescription, FieldGroup } from "~/components/ui/field";
 import { Separator } from "~/components/ui/separator";
 import { useSavePolicy } from "~/lib/queries/mutations/policy";
 
@@ -19,52 +17,68 @@ interface PolicyView {
   readonly inferredWindowReason: string | null;
 }
 
-// The engine knobs, owner-editable. Checkbox changes stage locally; Save PUTs.
-export function PolicySection({ policy }: { policy: PolicyView }) {
-  const [workloadAnalysis, setWorkloadAnalysis] = useState(policy.workloadAnalysis);
-  const [instantCreate, setInstantCreate] = useState(policy.instantCreate);
-  const [observeDays, setObserveDays] = useState(policy.observeWindowDays);
-  const [autoScore, setAutoScore] = useState(policy.autoApplyScore);
-  const [windowStart, setWindowStart] = useState(policy.changeWindowStartHour);
-  const [windowEnd, setWindowEnd] = useState(policy.changeWindowEndHour);
+// Each knob's bounds come off the api's own policy schema, so a day count this
+// form accepts is one updatePolicy accepts. The form does not offer a
+// collection-size ceiling, so that knob is dropped from the payload shape here
+// and sent as "no ceiling" by the mutation.
+const KNOBS = policyKnobsInput.shape;
+const PAYLOAD = policyKnobsInput.omit({ maxCollectionSizeBytes: true });
 
+// What the number under the auto-approve box means, which is the whole reason
+// the field is worth a sentence: empty and 0 are opposites, and neither reads
+// that way as a digit in a box.
+function autoScoreHint(score: number | null): string {
+  if (score === null) return "Empty: nothing is approved without you. 70 is a good starting point.";
+  if (score === 0) return "0: every recommendation is approved automatically.";
+  return `Only recommendations scoring ${score} or above.${
+    score > 70 ? " Above ~85 very little qualifies." : ""
+  }`;
+}
+
+// One hour of the change window: in range, and set only if the other one is too.
+// Half a window is meaningless, and used to be silently completed by nulling the
+// hour the reader had just typed — a number vanishing out of a box with no reason
+// given. Refused instead, on whichever box is the empty one. Both hours carry the
+// same bounds, so one schema checks either.
+function hourError(hour: number | null, sibling: number | null): string | undefined {
+  const range = KNOBS.changeWindowStartHour.safeParse(hour);
+  if (!range.success) return range.error.issues[0]?.message;
+  return hour === null && sibling !== null ? "Set both hours, or neither" : undefined;
+}
+
+// What the boxes hold, which is not quite what the api stores: every number can
+// be cleared, and a cleared box is null. Three of them mean something as null;
+// observeWindowDays does not, so the schema on the field refuses it and the save
+// never happens — an empty observe window is an error rather than a value.
+interface PolicyDraft {
+  readonly workloadAnalysis: boolean;
+  readonly instantCreate: boolean;
+  readonly observeWindowDays: number | null;
+  readonly autoApplyScore: number | null;
+  readonly changeWindowStartHour: number | null;
+  readonly changeWindowEndHour: number | null;
+}
+
+// The engine knobs, owner-editable. Field changes stage locally; Save PUTs.
+export function PolicySection({ policy }: { policy: PolicyView }) {
   const save = useSavePolicy();
 
-  function onSave() {
-    save.mutate({
-      clusterId: policy.clusterId,
-      workloadAnalysis,
-      instantCreate,
-      observeWindowDays: observeDays,
-      autoApplyScore: autoScore,
-      // Half-set windows are meaningless — persist only a complete pair.
-      changeWindowStartHour: windowEnd === null ? null : windowStart,
-      changeWindowEndHour: windowStart === null ? null : windowEnd,
-    });
-  }
+  const draft: PolicyDraft = {
+    workloadAnalysis: policy.workloadAnalysis,
+    instantCreate: policy.instantCreate,
+    observeWindowDays: policy.observeWindowDays,
+    autoApplyScore: policy.autoApplyScore,
+    changeWindowStartHour: policy.changeWindowStartHour,
+    changeWindowEndHour: policy.changeWindowEndHour,
+  };
 
-  const toggles: Array<{
-    id: string;
-    label: string;
-    hint: string;
-    value: boolean;
-    set: (v: boolean) => void;
-  }> = [
-    {
-      id: "policy-workload",
-      label: "Workload analysis",
-      hint: "propose CREATE/UPDATE/MERGE from query shapes",
-      value: workloadAnalysis,
-      set: setWorkloadAnalysis,
-    },
-    {
-      id: "policy-instant-create",
-      label: "Instant create",
-      hint: "auto-build critical missing indexes",
-      value: instantCreate,
-      set: setInstantCreate,
-    },
-  ];
+  const form = useAppForm({
+    defaultValues: draft,
+    // Parsed rather than cast: the schema is what narrows the cleared-to-null
+    // numbers back to numbers, and it cannot throw here because a value it would
+    // reject never reaches submit — the same schema is on the field.
+    onSubmit: ({ value }) => save.mutate({ clusterId: policy.clusterId, ...PAYLOAD.parse(value) }),
+  });
 
   return (
     <Card className="mt-8">
@@ -75,101 +89,131 @@ export function PolicySection({ policy }: { policy: PolicyView }) {
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-5">
-        <div className="flex flex-wrap gap-6">
-          {toggles.map((toggle) => (
-            <div key={toggle.label} className="flex items-start gap-2">
-              <Checkbox
-                id={toggle.id}
-                checked={toggle.value}
-                onCheckedChange={(checked) => toggle.set(checked === true)}
-              />
-              <div className="grid gap-0.5 leading-none">
-                <Label htmlFor={toggle.id}>{toggle.label}</Label>
-                <p className="text-muted-foreground text-xs">{toggle.hint}</p>
+        <form
+          className="space-y-5"
+          onSubmit={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            void form.handleSubmit();
+          }}
+        >
+          <div className="flex flex-wrap gap-6">
+            <form.AppField name="workloadAnalysis">
+              {(field) => (
+                <field.CheckboxField
+                  label="Workload analysis"
+                  description="propose CREATE/UPDATE/MERGE from query shapes"
+                />
+              )}
+            </form.AppField>
+            <form.AppField name="instantCreate">
+              {(field) => (
+                <field.CheckboxField
+                  label="Instant create"
+                  description="auto-build critical missing indexes"
+                />
+              )}
+            </form.AppField>
+          </div>
+
+          <Separator />
+
+          <FieldGroup className="flex-row flex-wrap items-end gap-6">
+            <form.AppField
+              name="observeWindowDays"
+              validators={{ onChange: KNOBS.observeWindowDays }}
+            >
+              {(field) => (
+                <field.NumberField
+                  label="Observe window (days)"
+                  className="w-24"
+                  min={1}
+                  max={365}
+                />
+              )}
+            </form.AppField>
+
+            <form.AppField name="autoApplyScore" validators={{ onChange: KNOBS.autoApplyScore }}>
+              {(field) => (
+                <field.NumberField
+                  label="Auto-approve score ≥"
+                  className="w-24"
+                  min={0}
+                  max={100}
+                  placeholder="off"
+                  description={autoScoreHint(field.state.value)}
+                />
+              )}
+            </form.AppField>
+
+            {/* The pair reads as one setting: the first box carries the label,
+                the second only announces itself to a screen reader. */}
+            <Field className="w-auto">
+              <div className="flex items-end gap-2">
+                <form.AppField
+                  name="changeWindowStartHour"
+                  validators={{
+                    onChangeListenTo: ["changeWindowEndHour"],
+                    onChange: ({ value, fieldApi }) =>
+                      hourError(value, fieldApi.form.getFieldValue("changeWindowEndHour")),
+                  }}
+                >
+                  {(field) => (
+                    <field.NumberField
+                      label="Change window (UTC hours)"
+                      className="w-20"
+                      min={0}
+                      max={23}
+                      placeholder="–"
+                    />
+                  )}
+                </form.AppField>
+                <ArrowRightIcon
+                  aria-hidden="true"
+                  className="mb-2.5 size-4 text-muted-foreground"
+                />
+                <form.AppField
+                  name="changeWindowEndHour"
+                  validators={{
+                    onChangeListenTo: ["changeWindowStartHour"],
+                    onChange: ({ value, fieldApi }) =>
+                      hourError(value, fieldApi.form.getFieldValue("changeWindowStartHour")),
+                  }}
+                >
+                  {(field) => (
+                    <field.NumberField
+                      label="Change window end hour"
+                      hideLabel
+                      className="w-20"
+                      min={0}
+                      max={23}
+                      placeholder="–"
+                    />
+                  )}
+                </form.AppField>
               </div>
-            </div>
-          ))}
-        </div>
-
-        <Separator />
-
-        <div className="flex flex-wrap items-end gap-6">
-          <div className="grid gap-1.5">
-            <Label htmlFor="observe-days">Observe window (days)</Label>
-            <Input
-              id="observe-days"
-              type="number"
-              min={1}
-              max={365}
-              className="w-24"
-              value={observeDays}
-              onChange={(event) => setObserveDays(Number(event.target.value))}
-            />
-          </div>
-          <div className="grid gap-1.5">
-            <Label htmlFor="auto-score">Auto-approve score ≥</Label>
-            <Input
-              id="auto-score"
-              type="number"
-              min={0}
-              max={100}
-              placeholder="off"
-              className="w-24"
-              value={autoScore ?? ""}
-              onChange={(event) =>
-                setAutoScore(event.target.value === "" ? null : Number(event.target.value))
-              }
-            />
-            <p className="text-muted-foreground text-xs">
-              {autoScore === null
-                ? "Empty: nothing is approved without you. 70 is a good starting point."
-                : autoScore === 0
-                  ? "0: every recommendation is approved automatically."
-                  : `Only recommendations scoring ${autoScore} or above.${
-                      autoScore > 70 ? " Above ~85 very little qualifies." : ""
-                    }`}
-            </p>
-          </div>
-          <div className="grid gap-1.5">
-            <Label htmlFor="window-start">Change window (UTC hours)</Label>
-            <div className="flex items-center gap-2">
-              <Input
-                id="window-start"
-                type="number"
-                min={0}
-                max={23}
-                placeholder="–"
-                className="w-20"
-                value={windowStart ?? ""}
-                onChange={(event) =>
-                  setWindowStart(event.target.value === "" ? null : Number(event.target.value))
+              <form.Subscribe
+                selector={(state) =>
+                  state.values.changeWindowStartHour === null &&
+                  state.values.changeWindowEndHour === null
                 }
-              />
-              <ArrowRightIcon aria-hidden="true" className="size-4 text-muted-foreground" />
-              <Input
-                aria-label="Change window end hour"
-                type="number"
-                min={0}
-                max={23}
-                placeholder="–"
-                className="w-20"
-                value={windowEnd ?? ""}
-                onChange={(event) =>
-                  setWindowEnd(event.target.value === "" ? null : Number(event.target.value))
+              >
+                {(unset) =>
+                  unset ? (
+                    <FieldDescription>
+                      {policy.inferredWindowReason ??
+                        "Not enough traffic history yet to pick one — changes run at any hour until there is."}
+                    </FieldDescription>
+                  ) : null
                 }
-              />
-            </div>
-            {windowStart === null || windowEnd === null ? (
-              <p className="text-muted-foreground text-xs">
-                {policy.inferredWindowReason ??
-                  "Not enough traffic history yet to pick one — changes run at any hour until there is."}
-              </p>
-            ) : null}
-          </div>
-          <Button onClick={onSave} disabled={save.isPending}>
-            Save policy
-          </Button>
-        </div>
+              </form.Subscribe>
+            </Field>
+
+            <form.AppForm>
+              <form.SubmitButton pending={save.isPending}>Save policy</form.SubmitButton>
+            </form.AppForm>
+          </FieldGroup>
+        </form>
         <p className="text-muted-foreground text-xs">
           Elective changes (hide, build, drop) run only inside the change window; safety rollbacks
           never wait. Leave it empty and Indexterity picks the cluster's quietest six hours itself —

@@ -57,19 +57,45 @@ describe("PolicySection", () => {
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ["policy", "c1"] });
   });
 
-  // A window with only one end is not a window. Persisting half of it would
-  // leave the engine with a start and no stop, or the reverse.
-  it("drops a half-set change window rather than persisting one end", async () => {
+  // A window with only one end is not a window. It used to be silently completed
+  // by nulling the hour that had just been typed, which is a number vanishing out
+  // of a box for no stated reason; the form refuses the save and says which box
+  // is the problem.
+  it("refuses a half-set change window instead of quietly dropping it", async () => {
     const user = userEvent.setup();
     renderInApp(<PolicySection policy={policy} />);
 
     await user.type(screen.getByLabelText("Change window (UTC hours)"), "2");
     await user.click(screen.getByRole("button", { name: "Save policy" }));
 
-    expect(savedPayload()).toMatchObject({
-      changeWindowStartHour: null,
-      changeWindowEndHour: null,
-    });
+    expect(await screen.findByText("Set both hours, or neither")).toBeInTheDocument();
+    expect(updatePolicy).not.toHaveBeenCalled();
+  });
+
+  // And filling the other end clears it, rather than leaving the reader stuck
+  // behind an error about a state they have left.
+  it("saves once the missing end is filled in", async () => {
+    const user = userEvent.setup();
+    renderInApp(<PolicySection policy={policy} />);
+
+    await user.type(screen.getByLabelText("Change window (UTC hours)"), "2");
+    await user.click(screen.getByRole("button", { name: "Save policy" }));
+    await user.type(screen.getByLabelText("Change window end hour"), "6");
+    await user.click(screen.getByRole("button", { name: "Save policy" }));
+
+    expect(savedPayload()).toMatchObject({ changeWindowStartHour: 2, changeWindowEndHour: 6 });
+  });
+
+  // The api's bounds, reported by the field rather than by a 400.
+  it("names an out-of-range hour before the api has to", async () => {
+    const user = userEvent.setup();
+    renderInApp(<PolicySection policy={policy} />);
+
+    await user.type(screen.getByLabelText("Change window (UTC hours)"), "99");
+    await user.click(screen.getByRole("button", { name: "Save policy" }));
+
+    expect(await screen.findByText("0 to 23")).toBeInTheDocument();
+    expect(updatePolicy).not.toHaveBeenCalled();
   });
 
   it("keeps a window once both ends are set", async () => {

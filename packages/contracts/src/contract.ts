@@ -1,13 +1,22 @@
 import { oc } from "@orpc/contract";
 import { z } from "zod";
 import {
+  acceptInviteInput,
+  checkConnectionInput,
+  createClusterInput,
+  createInviteInput,
+  memberRole,
+  policyKnobsInput,
+  provisionClusterInput,
+  renameOrgInput,
+  rotateConnectionInput,
+} from "./inputs.js";
+import {
   auditAction,
   cluster,
   clusterCollections,
-  clusterEngine,
   clusterLatency,
   clusterLatencySeries,
-  clusterPolicy,
   clusterPolicyView,
   clusterRoi,
   connectionDiagnosis,
@@ -91,14 +100,7 @@ export const contract = {
       summary: "Connect a cluster; stores its connection string envelope-encrypted",
     })
     .errors({ BAD_REQUEST: {} })
-    .input(
-      z.object({
-        name: z.string().min(1),
-        connectionString: z.string().min(1),
-        // Defaults to MONGODB — the only engine with an adapter today.
-        engine: clusterEngine.optional(),
-      }),
-    )
+    .input(createClusterInput)
     .output(cluster),
 
   checkConnection: oc
@@ -109,7 +111,7 @@ export const contract = {
         "Report what a connection string may do (owner only) — nothing is stored or written; the onboarding preflight",
     })
     .errors({ BAD_REQUEST: {} })
-    .input(z.object({ connectionString: z.string().min(1), engine: clusterEngine.optional() }))
+    .input(checkConnectionInput)
     .output(connectionDiagnosis),
 
   provisionCluster: oc
@@ -120,7 +122,7 @@ export const contract = {
         "Connect with an admin string used ONCE: creates a least-privilege user on the cluster and stores only that user's string",
     })
     .errors({ BAD_REQUEST: {} })
-    .input(z.object({ name: z.string().min(1), adminConnectionString: z.string().min(1) }))
+    .input(provisionClusterInput)
     .output(provisionedCluster),
 
   deleteCluster: oc
@@ -142,7 +144,7 @@ export const contract = {
         "Replace the cluster's connection string (owner only) — verified against the cluster before it is stored, so history survives credential rotation",
     })
     .errors({ NOT_FOUND: {}, BAD_REQUEST: {} })
-    .input(clusterId.extend({ connectionString: z.string().min(1) }))
+    .input(clusterId.extend(rotateConnectionInput.shape))
     .output(cluster),
 
   setClusterMode: oc
@@ -172,7 +174,7 @@ export const contract = {
       summary: "Replace the cluster's engine knobs (owner only)",
     })
     .errors({ NOT_FOUND: {} })
-    .input(clusterId.extend(clusterPolicy.omit({ clusterId: true }).shape))
+    .input(clusterId.extend(policyKnobsInput.shape))
     .output(clusterPolicyView),
 
   triggerCollect: oc
@@ -227,7 +229,7 @@ export const contract = {
 
   renameOrg: oc
     .route({ method: "PATCH", path: "/org", summary: "Rename the active org (owner only)" })
-    .input(z.object({ name: z.string().min(1).max(120) }))
+    .input(renameOrgInput)
     .output(z.object({ id: z.uuid(), name: z.string() })),
 
   setMemberRole: oc
@@ -237,7 +239,7 @@ export const contract = {
       summary: "Change a member's role (owner only); the last owner cannot be demoted",
     })
     .errors({ NOT_FOUND: {}, CONFLICT: {} })
-    .input(z.object({ userId: z.string().min(1), role: z.enum(["member", "owner"]) }))
+    .input(z.object({ userId: z.string().min(1), role: memberRole }))
     .output(z.object({ userId: z.string(), role: z.string() })),
 
   removeMember: oc
@@ -284,12 +286,12 @@ export const contract = {
       path: "/org/invites",
       summary: "Invite someone into the org; returns the one-time token",
     })
-    .input(z.object({ email: z.email(), role: z.enum(["member", "owner"]) }))
+    .input(createInviteInput)
     .output(createdInvite),
 
   acceptInvite: oc
     .route({ method: "POST", path: "/invites/accept", summary: "Join an org with an invite token" })
     .errors({ NOT_FOUND: {}, CONFLICT: {} })
-    .input(z.object({ token: z.string().min(1) }))
+    .input(acceptInviteInput)
     .output(z.object({ orgId: z.uuid(), orgName: z.string() })),
 };

@@ -1,11 +1,10 @@
-import type { ConnectionDiagnosis } from "@repo/contracts";
+import { type ConnectionDiagnosis, createClusterInput } from "@repo/contracts";
 import { useState } from "react";
 import { PrivilegeList } from "~/components/app/privilege-list";
+import { useAppForm } from "~/components/form";
 import { Alert, AlertDescription, AlertTitle } from "~/components/ui/alert";
 import { Button } from "~/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
-import { Input } from "~/components/ui/input";
-import { Label } from "~/components/ui/label";
 import {
   useCheckConnection,
   useConnectCluster,
@@ -13,9 +12,12 @@ import {
 } from "~/lib/queries/mutations/cluster";
 import { CLUSTER_USER_DOCS_HREF } from "~/lib/site";
 
+// The api's own rules for these two fields, so a string it will refuse for being
+// empty is refused here by the same schema rather than by a second copy of it.
+const NAME = createClusterInput.shape.name;
+const CONNECTION_STRING = createClusterInput.shape.connectionString;
+
 export function ConnectClusterForm() {
-  const [name, setName] = useState("");
-  const [connString, setConnString] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [diagnosis, setDiagnosis] = useState<ConnectionDiagnosis | null>(null);
   const [provisioned, setProvisioned] = useState<{
@@ -32,8 +34,7 @@ export function ConnectClusterForm() {
   // A connect succeeded: empty the form, but keep any provisioned string, which
   // is the only copy the reader will ever see.
   function onConnected() {
-    setName("");
-    setConnString("");
+    form.reset();
     setDiagnosis(null);
   }
 
@@ -47,19 +48,30 @@ export function ConnectClusterForm() {
     onError: setError,
   });
 
-  const connectAsIs = useConnectCluster(
-    { name, connectionString: connString },
-    { onStart, onConnected, onError: setError },
-  );
+  const connectAsIs = useConnectCluster({ onStart, onConnected, onError: setError });
 
-  const provision = useProvisionCluster(
-    { name, adminConnectionString: connString },
-    { onStart, onConnected, onError: setError, onProvisioned: setProvisioned },
-  );
+  const provision = useProvisionCluster({
+    onStart,
+    onConnected,
+    onError: setError,
+    onProvisioned: setProvisioned,
+  });
+
+  const form = useAppForm({
+    defaultValues: { name: "", connectionString: "" },
+    // Submitting is the preflight, not the connect: nothing is stored until the
+    // reader has seen what the string can do and picked one of the answers below.
+    onSubmit: ({ value }) => check.mutate(value.connectionString),
+  });
 
   // One flag over three mutations: any of them in flight means the form is
   // waiting on the api, and the second click would be about stale fields.
   const busy = check.isPending || connectAsIs.isPending || provision.isPending;
+
+  // Read at click time rather than at render: the two buttons under a diagnosis
+  // are not the form's submit, and the form store deliberately does not re-render
+  // this component when a field changes.
+  const credentials = () => form.state.values;
 
   return (
     <Card className="mt-8">
@@ -75,35 +87,33 @@ export function ConnectClusterForm() {
           className="flex flex-wrap items-end gap-3"
           onSubmit={(event) => {
             event.preventDefault();
-            check.mutate(connString);
+            event.stopPropagation();
+            void form.handleSubmit();
           }}
         >
-          <div className="grid gap-1.5">
-            <Label htmlFor="cluster-name">Name</Label>
-            <Input
-              id="cluster-name"
-              className="w-48"
-              placeholder="Production"
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-            />
-          </div>
-          <div className="grid min-w-72 flex-1 gap-1.5">
-            <Label htmlFor="cluster-conn">Connection string</Label>
-            <Input
-              id="cluster-conn"
-              className="font-mono"
-              placeholder="mongodb://user:pass@host:27017"
-              value={connString}
-              onChange={(event) => {
-                setConnString(event.target.value);
-                setDiagnosis(null);
-              }}
-            />
-          </div>
-          <Button type="submit" disabled={busy || name.length === 0 || connString.length === 0}>
-            {busy ? "Checking…" : "Check access"}
-          </Button>
+          <form.AppField name="name" validators={{ onChange: NAME }}>
+            {(field) => <field.TextField label="Name" className="w-48" placeholder="Production" />}
+          </form.AppField>
+          <form.AppField
+            name="connectionString"
+            validators={{ onChange: CONNECTION_STRING }}
+            // A diagnosis describes one exact string. Edit the string and it
+            // describes nothing — better no answer than last string's answer.
+            listeners={{ onChange: () => setDiagnosis(null) }}
+          >
+            {(field) => (
+              <field.TextField
+                label="Connection string"
+                className="font-mono"
+                placeholder="mongodb://user:pass@host:27017"
+              />
+            )}
+          </form.AppField>
+          <form.AppForm>
+            <form.SubmitButton pending={busy}>
+              {busy ? "Checking…" : "Check access"}
+            </form.SubmitButton>
+          </form.AppForm>
         </form>
 
         {error !== null ? (
@@ -155,18 +165,32 @@ export function ConnectClusterForm() {
                   is kept (encrypted). Revoke it any time with <code>db.dropUser(…)</code>.
                 </p>
                 <div className="mt-3 flex flex-wrap gap-2">
-                  <Button disabled={busy} onClick={() => provision.mutate()}>
+                  <Button
+                    disabled={busy}
+                    onClick={() => {
+                      const { name, connectionString } = credentials();
+                      provision.mutate({ name, adminConnectionString: connectionString });
+                    }}
+                  >
                     {busy ? "Creating…" : "Create a scoped user and connect"}
                   </Button>
                   {diagnosis.ready ? (
-                    <Button variant="outline" disabled={busy} onClick={() => connectAsIs.mutate()}>
+                    <Button
+                      variant="outline"
+                      disabled={busy}
+                      onClick={() => connectAsIs.mutate(credentials())}
+                    >
                       Use these credentials as-is
                     </Button>
                   ) : null}
                 </div>
               </div>
             ) : diagnosis.ready ? (
-              <Button className="mt-3" disabled={busy} onClick={() => connectAsIs.mutate()}>
+              <Button
+                className="mt-3"
+                disabled={busy}
+                onClick={() => connectAsIs.mutate(credentials())}
+              >
                 Connect
               </Button>
             ) : (
