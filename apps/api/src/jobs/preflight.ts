@@ -14,8 +14,9 @@ interface DropTarget {
   readonly indexName: string;
 }
 
-// Re-check live Mongo state right before executing a drop (docs/architecture.md
-// §7.4) — the world may have changed since the recommendation was proposed.
+// Re-check live Mongo state right before executing a drop (the wiki's
+// Architecture page, Apply pipeline) — the world may have changed since the
+// recommendation was proposed.
 export async function preflightDrop(
   collector: IndexCollector,
   target: DropTarget,

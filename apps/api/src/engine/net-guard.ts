@@ -163,7 +163,7 @@ async function assertHostname(host: string, options: TargetGuardOptions): Promis
 //
 // Residual risk: DNS can change between this check and the driver's own
 // resolution (rebinding). Pinning would require the driver to accept resolved
-// addresses; documented in docs/architecture.md §10.2.
+// addresses; documented on the wiki's Architecture page, under Security.
 export async function assertTargetsAllowed(
   hosts: readonly string[],
   isSrv: boolean,

@@ -14,3 +14,10 @@ export const CONTACT_EMAIL = "hello@alivlad.com";
 export const REQUEST_ACCESS_HREF = `mailto:${CONTACT_EMAIL}?subject=${encodeURIComponent(
   "Indexterity access request",
 )}`;
+
+// The page with the exact createRole snippets. Named here rather than inline so
+// the onboarding form is not the thing that goes stale when docs move — it
+// already pointed at "docs/architecture.md §10.1", which was a path in a
+// repository the reader of that sentence has no reason to have open.
+export const CLUSTER_USER_DOCS_HREF =
+  "https://github.com/FullmetalBober/Indexterity/wiki/Connecting-a-cluster";

@@ -51,7 +51,7 @@ function encodeKeys(keys: readonly SortKey[]): string[] {
 // Workload analysis (opt-in): read the profiler and propose CREATE/UPDATE/MERGE.
 // A brand-new index on a critical collection, when instantCreate is opted in and
 // the cluster is writable, is auto-approved and built immediately
-// (creates only — never drops; docs/architecture.md §7.5).
+// (creates only — never drops; the wiki's Architecture page, Apply pipeline).
 export async function suggestForCluster(clusterId: string): Promise<number> {
   const db = jobDb();
   const [policy] = await db

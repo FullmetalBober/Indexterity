@@ -153,7 +153,8 @@ Two of them exist because the obvious rule does not work:
 ## Security defaults
 
 Onboarding dials whatever connection string a user supplies, so two defaults
-are deliberately restrictive (see `docs/architecture.md` §10.2):
+are deliberately restrictive (see the wiki's [Architecture](https://github.com/FullmetalBober/Indexterity/wiki/Architecture)
+page, under Security):
 
 - **Sign-up is invite-only.** First account bootstraps; the rest need an invite.
 - **Private and loopback targets are refused.** Self-hosted installs whose

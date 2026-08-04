@@ -3,8 +3,8 @@ import type { ClusterEngine, EngineAdapter } from "./ports";
 
 // The single place a new engine plugs in. A future adapter implements
 // EngineAdapter (see ../mongo/adapter.ts for the reference implementation and
-// docs/architecture.md §"Engine ports" for the PostgreSQL/SQL Server mapping)
-// and replaces its null here.
+// the wiki's Architecture page, Engine ports, for the PostgreSQL/SQL Server
+// mapping) and replaces its null here.
 const adapters: Record<ClusterEngine, EngineAdapter | null> = {
   MONGODB: mongoAdapter,
   POSTGRESQL: null, // planned: pg_stat_user_indexes / pg_stat_statements

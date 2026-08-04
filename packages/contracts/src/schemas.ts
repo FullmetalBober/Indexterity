@@ -13,7 +13,8 @@ export type RecommendationType = z.infer<typeof recommendationType>;
 export const usageClass = z.enum(["CONTINUOUS", "PERIODIC_ALIVE", "PERIODIC_DEAD", "FLAT_ZERO"]);
 export type UsageClass = z.infer<typeof usageClass>;
 
-// Full lifecycle across drop and create pipelines (see docs/architecture.md §7).
+// Full lifecycle across drop and create pipelines (the wiki's Architecture
+// page, Apply pipeline).
 export const recommendationState = z.enum([
   "PROPOSED",
   "APPROVED",
@@ -33,7 +34,7 @@ export type ConnectionMode = z.infer<typeof connectionMode>;
 
 // The database engine behind a cluster. Only MONGODB connects today; the enum
 // is the forward-compatible surface for the planned PostgreSQL/SQL Server
-// adapters (docs/architecture.md §"Engine ports").
+// adapters (the wiki's Architecture page, Engine ports).
 export const clusterEngine = z.enum(["MONGODB", "POSTGRESQL", "MSSQL"]);
 export type ClusterEngine = z.infer<typeof clusterEngine>;
 

@@ -41,7 +41,7 @@ class MongoEngineSession implements EngineSession {
   }
 }
 
-// The reference EngineAdapter (docs/architecture.md §"Engine ports").
+// The reference EngineAdapter (the wiki's Architecture page, Engine ports).
 export const mongoAdapter: EngineAdapter = {
   engine: "MONGODB",
   capabilities: { hideIndexes: true, provisionScopedUsers: true },

@@ -1,8 +1,8 @@
 import { type Db, MongoClient } from "mongodb";
 import { parseServerVersion, type ServerVersion } from "./version";
 
-// Owns a driver client. Created with an index-only role (see docs/architecture.md
-// §10.1) so it cannot read customer documents.
+// Owns a driver client. Created with an index-only role (the wiki's
+// Architecture page, Security) so it cannot read customer documents.
 export class MongoConnection {
   private readonly client: MongoClient;
   private version: ServerVersion | null | undefined;

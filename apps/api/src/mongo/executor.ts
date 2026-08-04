@@ -17,7 +17,7 @@ export class UnsupportedServerError extends Error {
 export type { CreateIndexOptions, IndexExecutor } from "../engine/ports";
 
 // Enforces read-only mode structurally: every write throws unless the cluster
-// was explicitly switched to live mode (docs/architecture.md D11).
+// was explicitly switched to live mode (docs/decisions.md, D11).
 export class MongoIndexExecutor implements IndexExecutor {
   constructor(
     private readonly conn: MongoConnection,
