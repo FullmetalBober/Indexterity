@@ -25,21 +25,13 @@ export const documentDuration = meter.createHistogram("indexterity.web.document.
   advice: { explicitBucketBoundaries: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10] },
 });
 
-// Per server function, named as it is written in the source. A loader that is
-// slow because of one of its three api calls shows up here first.
-export const serverFnCalls = meter.createCounter("indexterity.web.server_fn.calls", {
-  description: "Server function invocations by name and outcome (ok, error).",
-  valueType: ValueType.INT,
-});
-
-export const serverFnDuration = meter.createHistogram(
-  "indexterity.web.server_fn.duration.seconds",
-  {
-    description: "Time a server function took to answer.",
-    unit: "s",
-    advice: { explicitBucketBoundaries: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10] },
-  },
-);
+// There is deliberately no per-server-function instrument. It was written, it
+// worked, and it was removed: a server function here is one to three api calls
+// and almost no work of its own, so its duration is the calls below plus noise,
+// and its outcome is theirs. Naming the function needed Start's global function
+// middleware and an SSR-guarded import in src/start.ts — a whole framework seam
+// for a metric that restated the next one. If a loader ever grows logic of its
+// own, this is the note that says the seam is cheap to put back.
 
 // The api as the dashboard server experiences it — including the hop the api
 // cannot measure, and including the case where it never answered at all. The

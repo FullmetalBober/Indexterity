@@ -450,13 +450,19 @@ retried, nothing fails — so the queue counters cannot see it and
 `indexterity_cluster_task_runs_total{outcome=...}` is where the six ways a tick
 can end are told apart.
 
-The dashboard server reports what the api cannot: `indexterity_web_document_duration_seconds`
-is render time per route pattern, `indexterity_web_server_fn_calls_total{fn,outcome}`
-names the server function (`loadAppShell`, `savePolicy` — from the source, not the
-hashed URL), and `indexterity_web_api_requests_total{procedure,status}` is the api
-measured from the other end of the network, with `status="unreachable"` for the
-case the api can never report itself. A 500 that never reached the api shows up
-as `indexterity_web_requests_total{kind="document",status="500"}`.
+The dashboard server reports what the api cannot. `indexterity_web_document_duration_seconds`
+is render time per route pattern — the thing the reader waits on.
+`indexterity_web_api_requests_total{procedure,status}` is the api measured from
+the other end of the network, with `status="unreachable"` for the case the api can
+never report itself; it matters because the loaders *swallow* api failures and
+render an empty panel, so one procedure returning 500 is otherwise unrecorded. A
+500 that never reached the api at all shows up as
+`indexterity_web_requests_total{kind="document",status="500"}`.
+
+There is no per-server-function metric on purpose. It was built and removed: a
+server function here is one to three api calls and almost no work of its own, so
+its duration is the calls above plus noise. Naming the function needed a second
+framework seam, which is not worth a metric that restates another one.
 
 **The endpoint has no auth**, which is why it is a second port instead of a route
 on the app: an ingress routes the app port, so publishing a host does not publish

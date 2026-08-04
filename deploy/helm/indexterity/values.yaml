@@ -105,8 +105,8 @@ worker:
 #           clusters, recommendations by state, queue depth, dead-letter backlog
 #   worker  job outcomes and durations, the regression gate, drops executed, and
 #           which clusters it currently cannot reach
-#   web     page render time per route, server functions by name, and the api as
-#           the dashboard server experiences it (including "never answered")
+#   web     page render time per route, and the api as the dashboard server
+#           experiences it (including "never answered")
 metrics:
   enabled: true
   port: 9464

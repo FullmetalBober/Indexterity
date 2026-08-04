@@ -84,7 +84,7 @@ it can see — scrape all three:
 |---|---|
 | api | HTTP traffic, and everything read from the control-plane database: clusters under management, recommendations by pipeline state (`HIDDEN` is a drop mid-observe), queue depth per task, the dead-letter backlog, the age of the oldest unclaimed job |
 | worker | job outcomes and durations from graphile-worker's own events, per-cluster tick outcomes, how many clusters it currently cannot reach, regression-gate decisions, drops executed |
-| web | page render time per route pattern, server functions by their source name, and the api as the dashboard server experiences it — including the calls it never answered, which the api itself cannot report |
+| web | page render time per route pattern, and the api as the dashboard server experiences it — including the calls it never answered, which the api itself cannot report and which the loaders otherwise swallow into an empty panel |
 
 With `worker.enabled=false` and `RUN_WORKER=true` on the api instead, the api
 serves the worker's half as well.
