@@ -4,6 +4,7 @@ import type { JsonifiedClient } from "@orpc/openapi-client";
 import { OpenAPILink } from "@orpc/openapi-client/fetch";
 import { contract } from "@repo/contracts";
 import { getRequest } from "@tanstack/react-start/server";
+import { instrumentedFetch } from "~/lib/metrics/upstream";
 
 // serverApi() only ever runs on the web server, so API_URL can be read at
 // RUNTIME — one image deploys to every environment (the Helm chart points it
@@ -22,6 +23,9 @@ export function serverApi(): JsonifiedClient<ContractRouterClient<typeof contrac
   const link = new OpenAPILink(contract, {
     url: `${apiBaseUrl()}/api`,
     headers: () => ({ cookie }),
+    // Times and counts the call. Only ever runs on the web server, same as the
+    // rest of this module.
+    fetch: (request, _init, _options, path) => instrumentedFetch(path, request),
   });
   return createORPCClient(link);
 }

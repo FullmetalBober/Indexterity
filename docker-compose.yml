@@ -67,8 +67,9 @@ services:
       SMTP_USER: ${SMTP_USER}
       SMTP_PASS: ${SMTP_PASS}
       MAIL_FROM: ${MAIL_FROM}
-      # Both containers serve /metrics on 9464 and report different halves of
-      # the picture, so each gets its own host port.
+      # All three containers serve /metrics on 9464 and report different parts of
+      # the picture, so each gets its own host port: api 9464, worker 9465,
+      # web 9466.
       METRICS_ENABLED: "true"
     ports:
       - "3001:3001"
@@ -99,8 +100,10 @@ services:
       # addresses: that is what a browser on the host actually reaches.
       VITE_API_URL: http://localhost:3001
       VITE_WEB_ORIGIN: http://localhost:3000
+      METRICS_ENABLED: "true"
     ports:
       - "3000:3000"
+      - "9466:9464"
     volumes:
       - ./:/app
       - web_node_modules:/app/node_modules

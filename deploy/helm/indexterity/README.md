@@ -72,25 +72,26 @@ server functions call the api over the in-cluster Service. Enable
 | `config.storageUsdPerGbMonth` | Your storage price, for the $/month ROI headline |
 | `config.signupMode` | `invite` (default), `open` or `closed`. The first account always bootstraps the install; after that invite-only. `open` lets any stranger register — and every account can make the control plane dial hosts it names |
 | `config.allowPrivateClusterTargets` | Set `true` when the MongoDB you manage is on a private network (the normal self-hosted case). Leave `false` for anything strangers can reach, or accounts can probe your internal network. Cloud metadata stays blocked either way |
-| `metrics.enabled` | Prometheus metrics on port `metrics.port` (9464) for the api and the worker. On by default; the endpoint is never routed by the ingress |
+| `metrics.enabled` | Prometheus metrics on port `metrics.port` (9464) for all three workloads. On by default; the endpoint is never routed by the ingress |
 | `metrics.serviceMonitor.enabled` | One Prometheus Operator ServiceMonitor per workload. Off by default — it needs the `monitoring.coreos.com` CRDs, and a chart that assumes them cannot install without them |
 
 ## Metrics
 
-Both the api and the worker serve `/metrics` on port 9464, and they answer
-different questions — scrape both:
+All three workloads serve `/metrics` on port 9464, and each answers for what only
+it can see — scrape all three:
 
 | workload | reports |
 |---|---|
 | api | HTTP traffic, and everything read from the control-plane database: clusters under management, recommendations by pipeline state (`HIDDEN` is a drop mid-observe), queue depth per task, the dead-letter backlog, the age of the oldest unclaimed job |
 | worker | job outcomes and durations from graphile-worker's own events, per-cluster tick outcomes, how many clusters it currently cannot reach, regression-gate decisions, drops executed |
+| web | page render time per route pattern, and the api as the dashboard server experiences it — including the calls it never answered, which the api itself cannot report and which the loaders otherwise swallow into an empty panel |
 
 With `worker.enabled=false` and `RUN_WORKER=true` on the api instead, the api
-serves both halves.
+serves the worker's half as well.
 
 `metrics.serviceMonitor.enabled=true` installs a ServiceMonitor for each. Without
 the Prometheus Operator, point your own scraper at the `metrics` port on
-`<release>-api` and `<release>-worker-metrics`, or look by hand:
+`<release>-api`, `<release>-web` and `<release>-worker-metrics`, or look by hand:
 
 ```bash
 kubectl -n indexterity port-forward svc/indexterity-api 9464:9464

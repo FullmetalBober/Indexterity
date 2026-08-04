@@ -2,73 +2,50 @@
 {{- if not .Values.metrics.enabled }}
 {{- fail "metrics.serviceMonitor.enabled is set but metrics.enabled is false — the endpoint it would scrape is not being served" -}}
 {{- end }}
-# One per workload, because the api and the worker export different halves of
-# the picture and are selected by different labels. Requires the Prometheus
-# Operator CRDs; nothing here checks for them, so that a `helm template` run
-# without a cluster still renders.
-apiVersion: monitoring.coreos.com/v1
-kind: ServiceMonitor
-metadata:
-  name: {{ include "indexterity.fullname" . }}-api
-  labels:
-    {{- include "indexterity.labels" . | nindent 4 }}
-    app.kubernetes.io/component: api
-    {{- with .Values.metrics.serviceMonitor.labels }}
-    {{- toYaml . | nindent 4 }}
-    {{- end }}
-spec:
-  namespaceSelector:
-    matchNames:
-      - {{ .Release.Namespace }}
-  selector:
-    matchLabels:
-      {{- include "indexterity.selectorLabels" (dict "root" . "component" "api") | nindent 6 }}
-  endpoints:
-    - port: metrics
-      path: /metrics
-      interval: {{ .Values.metrics.serviceMonitor.interval }}
-      {{- with .Values.metrics.serviceMonitor.scrapeTimeout }}
-      scrapeTimeout: {{ . }}
-      {{- end }}
-      {{- with .Values.metrics.serviceMonitor.relabelings }}
-      relabelings:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      {{- with .Values.metrics.serviceMonitor.metricRelabelings }}
-      metricRelabelings:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+{{/*
+One per workload. Not one for all three: they are selected by their component
+label, and each exports a different half of the picture, so a single monitor
+would hide which of them stopped answering.
+
+Requires the Prometheus Operator CRDs. Nothing here checks for them, so that a
+`helm template` run without a cluster still renders.
+*/}}
+{{- $components := list "api" "web" }}
 {{- if .Values.worker.enabled }}
+{{- $components = append $components "worker" }}
+{{- end }}
+{{- $sm := .Values.metrics.serviceMonitor }}
+{{- range $component := $components }}
 ---
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
-  name: {{ include "indexterity.fullname" . }}-worker
+  name: {{ include "indexterity.fullname" $ }}-{{ $component }}
   labels:
-    {{- include "indexterity.labels" . | nindent 4 }}
-    app.kubernetes.io/component: worker
-    {{- with .Values.metrics.serviceMonitor.labels }}
+    {{- include "indexterity.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $component }}
+    {{- with $sm.labels }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
 spec:
   namespaceSelector:
     matchNames:
-      - {{ .Release.Namespace }}
+      - {{ $.Release.Namespace }}
   selector:
     matchLabels:
-      {{- include "indexterity.selectorLabels" (dict "root" . "component" "worker") | nindent 6 }}
+      {{- include "indexterity.selectorLabels" (dict "root" $ "component" $component) | nindent 6 }}
   endpoints:
     - port: metrics
       path: /metrics
-      interval: {{ .Values.metrics.serviceMonitor.interval }}
-      {{- with .Values.metrics.serviceMonitor.scrapeTimeout }}
+      interval: {{ $sm.interval }}
+      {{- with $sm.scrapeTimeout }}
       scrapeTimeout: {{ . }}
       {{- end }}
-      {{- with .Values.metrics.serviceMonitor.relabelings }}
+      {{- with $sm.relabelings }}
       relabelings:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.metrics.serviceMonitor.metricRelabelings }}
+      {{- with $sm.metricRelabelings }}
       metricRelabelings:
         {{- toYaml . | nindent 8 }}
       {{- end }}

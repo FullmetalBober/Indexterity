@@ -25,6 +25,7 @@ const PACKAGES = [
   "apps/web/package.json",
   "packages/config/package.json",
   "packages/contracts/package.json",
+  "packages/metrics/package.json",
 ];
 const CHART = "deploy/helm/indexterity/Chart.yaml";
 

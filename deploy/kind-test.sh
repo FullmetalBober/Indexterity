@@ -162,7 +162,15 @@ helm upgrade --install indexterity "$CHART" $CHART_ARGS -n "$NS" --wait --timeou
   --set "secrets.masterKey=MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
 
 step "helm test"
-helm test indexterity -n "$NS" --timeout 3m
+# The probe pod echoes after each assertion it passes, so its log names the one
+# that failed — and `helm test` prints none of it. Without this a failure reads
+# only "pod indexterity-test-dashboard failed", which is every assertion at once.
+if ! helm test indexterity -n "$NS" --timeout 3m; then
+  echo "--- test pod log (the last line it echoed is the last assertion that PASSED) ---"
+  # The pod survives a failure: its delete policy only removes it on success.
+  kubectl -n "$NS" logs -l app.kubernetes.io/component=test --tail=-1 || true
+  exit 1
+fi
 
 step "functional check: sign up and connect the in-cluster mongo"
 # The chart's own test only curls two ports. This exercises what the chart is

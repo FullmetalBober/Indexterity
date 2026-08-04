@@ -95,16 +95,18 @@ worker:
   podAnnotations: {}
   extraEnv: []
 
-# Prometheus metrics on a second port, served by the api and by the worker.
-# Never routed by the ingress and carrying no auth: queue depth, cluster counts
-# and pipeline state are operator information, so the endpoint is reachable
+# Prometheus metrics on a second port, served by all three workloads. Never
+# routed by the ingress and carrying no auth: queue depth, cluster counts and
+# pipeline state are operator information, so the endpoint is reachable
 # in-cluster only until you deliberately expose it.
 #
-# The two export different things. The api answers for HTTP traffic and for
-# everything read from the control-plane database (clusters, recommendations by
-# state, queue depth, dead-letter backlog); the worker answers for job outcomes,
-# durations, the regression gate and which clusters it currently cannot reach.
-# Scrape both.
+# Each workload answers for what only it can see, so scrape all three:
+#   api     HTTP traffic, and everything read from the control-plane database —
+#           clusters, recommendations by state, queue depth, dead-letter backlog
+#   worker  job outcomes and durations, the regression gate, drops executed, and
+#           which clusters it currently cannot reach
+#   web     page render time per route, and the api as the dashboard server
+#           experiences it (including "never answered")
 metrics:
   enabled: true
   port: 9464
