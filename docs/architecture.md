@@ -1073,6 +1073,24 @@ over it.
   programmatic compiler API return; also unblocks reverting api to the Nest CLI
   (see D13).
 
+- **`@thallesp/nestjs-better-auth`** — evaluated Aug 2026 (#29), **not adopted**,
+  and the reason is measured rather than argued. On Fastify the module serves
+  better-auth through middie middleware instead of a Fastify route, and
+  `@fastify/rate-limit` only sees routes. Spiked against the real api: every
+  other endpoint still throttles (21 of 25 requests to `/api/clusters` got a 429
+  at a global max of 5), and `/api/auth/sign-in/email` got **none** — the
+  brute-force target is the one surface that loses rate limiting, which is
+  exactly backwards. `AUTH_RATE_LIMIT_MAX` is a documented operator knob and
+  would have to be re-implemented on better-auth's own limiter to adopt this.
+  The body-parser interaction that looked like the risk turned out not to be
+  one: 59 of 60 integration tests passed, so its Fastify JSON parser handles
+  oRPC bodies. The prize was smaller than it looked, too — the module replaces
+  the 34-line mount in `main.ts`, `auth/http.ts` and `auth/session.ts`, about 57
+  lines. `auth.config.ts` is the `betterAuth()` call it takes as *input*, and
+  `tenancy.ts`, `signup-gate.ts` and `cookies.ts` are ours. Revisit if we ever
+  adopt better-auth's organization plugin: `@Roles()`, `@OrgRoles()` and
+  `@RequireActiveOrg()` are unusable while orgs live in our own `members` table,
+  and they are most of what the package offers beyond the mount.
 - **Agent mode** — phase 2. Interface designed for it from day one.
 - **Suggest-mode (`CREATE` from workload)** — higher trust tier; needs profiler
   access. Ship cleanup path first.
