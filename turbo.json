@@ -33,8 +33,7 @@
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
-      "outputs": ["dist/**", ".output/**", ".nitro/**", "src/routeTree.gen.ts"],
-      "env": ["VITE_API_URL", "VITE_WEB_ORIGIN"]
+      "outputs": ["dist/**", ".output/**", ".nitro/**", "src/routeTree.gen.ts"]
     },
     "typecheck": {
       "dependsOn": ["^build"]

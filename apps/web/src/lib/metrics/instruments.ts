@@ -1,10 +1,10 @@
 import { ValueType } from "@opentelemetry/api";
 import { meter } from "./provider";
 
-// What the dashboard server can answer for, which is not what the api can. Every
-// call the server functions make lands on the api and is counted there; these are
-// the numbers that exist nowhere else — how long a page took to render, a 500
-// that never reached the api, and how the api looks from this side of the network.
+// What the dashboard server can answer for, which is not what the api can. The
+// api counts every call it serves; these are the numbers that exist nowhere else
+// — how long a page took to render, a 500 that never reached the api, and how
+// the api looks from this side of the network.
 //
 // Names map to Prometheus by replacing `.` with `_` and appending `_total` to
 // counters, so `indexterity.web.requests` is scraped as
@@ -25,18 +25,17 @@ export const documentDuration = meter.createHistogram("indexterity.web.document.
   advice: { explicitBucketBoundaries: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10] },
 });
 
-// There is deliberately no per-server-function instrument. It was written, it
-// worked, and it was removed: a server function here is one to three api calls
-// and almost no work of its own, so its duration is the calls below plus noise,
-// and its outcome is theirs. Naming the function needed Start's global function
-// middleware and an SSR-guarded import in src/start.ts — a whole framework seam
-// for a metric that restated the next one. If a loader ever grows logic of its
-// own, this is the note that says the seam is cheap to put back.
+// There was a per-server-function instrument here once, and then there were no
+// server functions: the browser calls the api directly and the loaders call it
+// from this process without an HTTP hop of their own. The note it left behind is
+// still the useful one — a seam that only restates the instrument below is not
+// worth its framework wiring.
 
-// The api as the dashboard server experiences it — including the hop the api
-// cannot measure, and including the case where it never answered at all. The
-// same call counted on both sides is the point: the difference between them is
-// the network.
+// The api as the dashboard server experiences it, which is now SSR only: a
+// browser's calls do not pass through this process at all. It still records the
+// hop the api cannot measure, and the case the api can never report — that it
+// never answered. A loader read counted on both sides is the point: the
+// difference between them is the network.
 export const apiRequests = meter.createCounter("indexterity.web.api.requests", {
   description: "Calls to the api by procedure and status (unreachable when it never answered).",
   valueType: ValueType.INT,

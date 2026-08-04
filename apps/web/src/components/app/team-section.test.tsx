@@ -1,7 +1,7 @@
 import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { renderInApp } from "~/test-utils";
+import { apiError, renderInApp } from "~/test-utils";
 import { TeamSection } from "./team-section";
 
 const acceptInvite = vi.hoisted(() => vi.fn());
@@ -13,13 +13,11 @@ const setMemberRole = vi.hoisted(() => vi.fn());
 const toastSuccess = vi.hoisted(() => vi.fn());
 const toastError = vi.hoisted(() => vi.fn());
 
-vi.mock("~/lib/app-server", () => ({
-  acceptInvite,
-  createInvite,
-  leaveOrg,
-  removeMember,
-  renameOrg,
-  setMemberRole,
+// The api client, called straight from the mutation hooks. Refusals arrive as
+// throws carrying a status, which is what decides whether the api's own reason
+// is shown or a generic one is.
+vi.mock("~/lib/api", () => ({
+  api: () => ({ acceptInvite, createInvite, leaveOrg, removeMember, renameOrg, setMemberRole }),
 }));
 vi.mock("sonner", () => ({ toast: { success: toastSuccess, error: toastError } }));
 
@@ -50,12 +48,12 @@ function row(email: string): HTMLElement {
 }
 
 beforeEach(() => {
-  renameOrg.mockResolvedValue({ ok: true });
-  setMemberRole.mockResolvedValue({ ok: true });
-  removeMember.mockResolvedValue({ ok: true });
-  leaveOrg.mockResolvedValue({ ok: true });
-  createInvite.mockResolvedValue({ token: "inv_123" });
-  acceptInvite.mockResolvedValue({ ok: true, message: "joined Acme" });
+  renameOrg.mockResolvedValue({ id: "o1", name: "Acme" });
+  setMemberRole.mockResolvedValue({ userId: "u2", role: "owner" });
+  removeMember.mockResolvedValue({ removed: true });
+  leaveOrg.mockResolvedValue({ left: true });
+  createInvite.mockResolvedValue({ token: "inv_123", email: "new@acme.test", role: "member" });
+  acceptInvite.mockResolvedValue({ orgId: "o2", orgName: "Acme" });
 });
 
 describe("TeamSection", () => {
@@ -73,16 +71,16 @@ describe("TeamSection", () => {
     renderInApp(<TeamSection org={org} />);
 
     await user.click(within(row("member@acme.test")).getByRole("button", { name: "Make owner" }));
-    expect(setMemberRole).toHaveBeenCalledWith({ data: { userId: "u2", role: "owner" } });
+    expect(setMemberRole).toHaveBeenCalledWith({ userId: "u2", role: "owner" });
 
     await user.click(within(row("owner@acme.test")).getByRole("button", { name: "Make member" }));
-    expect(setMemberRole).toHaveBeenCalledWith({ data: { userId: "u1", role: "member" } });
+    expect(setMemberRole).toHaveBeenCalledWith({ userId: "u1", role: "member" });
   });
 
   // The api refuses to demote the last owner. Its reason is the useful one —
   // a generic "failed" would leave the reader guessing.
   it("shows the api's reason when a role change is refused", async () => {
-    setMemberRole.mockResolvedValue({ ok: false, message: "an org must keep one owner" });
+    setMemberRole.mockRejectedValue(apiError(409, "an org must keep one owner"));
     const user = userEvent.setup();
     renderInApp(<TeamSection org={org} />);
 
@@ -99,7 +97,7 @@ describe("TeamSection", () => {
     expect(removeMember).not.toHaveBeenCalled();
 
     await user.click(screen.getByRole("button", { name: "Remove", hidden: false }));
-    expect(removeMember).toHaveBeenCalledWith({ data: "u2" });
+    expect(removeMember).toHaveBeenCalledWith({ userId: "u2" });
   });
 
   it("asks before leaving the org", async () => {
@@ -122,12 +120,12 @@ describe("TeamSection", () => {
     await user.type(screen.getByLabelText("Invite a teammate"), "new@acme.test");
     await user.click(screen.getByRole("button", { name: "Invite" }));
 
-    expect(createInvite).toHaveBeenCalledWith({ data: "new@acme.test" });
+    expect(createInvite).toHaveBeenCalledWith({ email: "new@acme.test", role: "member" });
     expect(await screen.findByText("inv_123")).toBeInTheDocument();
   });
 
   it("reports why an invite token was not accepted", async () => {
-    acceptInvite.mockResolvedValue({ ok: false, message: "invite expired" });
+    acceptInvite.mockRejectedValue(apiError(404, "invite expired"));
     const user = userEvent.setup();
     const { queryClient } = renderInApp(<TeamSection org={org} />);
     const invalidate = vi.spyOn(queryClient, "invalidateQueries");
@@ -186,7 +184,7 @@ describe("TeamSection", () => {
   // An invite that was refused used to leave the reader looking at a form that
   // had visibly done nothing at all.
   it("says so when an invite could not be created", async () => {
-    createInvite.mockResolvedValue({ token: null });
+    createInvite.mockRejectedValue(apiError(402, "seat limit reached"));
     const user = userEvent.setup();
     const { queryClient } = renderInApp(<TeamSection org={org} />);
     const invalidate = vi.spyOn(queryClient, "invalidateQueries");
@@ -210,12 +208,12 @@ describe("TeamSection", () => {
     await user.type(field, "Acme Two");
     await user.click(screen.getByRole("button", { name: "Save" }));
 
-    expect(renameOrg).toHaveBeenCalledWith({ data: "Acme Two" });
+    expect(renameOrg).toHaveBeenCalledWith({ name: "Acme Two" });
     expect(toastSuccess).toHaveBeenCalledWith("Org renamed");
   });
 
   it("says who can rename when the api refuses", async () => {
-    renameOrg.mockResolvedValue({ ok: false });
+    renameOrg.mockRejectedValue(apiError(403, "owner only"));
     const user = userEvent.setup();
     renderInApp(<TeamSection org={org} />);
 

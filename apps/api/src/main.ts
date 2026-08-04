@@ -28,8 +28,10 @@ async function bootstrap(): Promise<void> {
   // mounted at /api/auth below — it registers straight on Fastify, outside
   // Nest's prefix, so it is unaffected by this and does not get /api twice.
   //
-  // Same origin is what lets the browser hold the session cookie itself. Two
-  // origins is why the web app currently proxies every call server-side.
+  // Same origin is what lets the browser hold the session cookie itself, and it
+  // is a requirement rather than an optimisation: the dashboard has no relay to
+  // fall back on, so a deployment that does not route /api here has a dashboard
+  // whose every read 404s.
   app.setGlobalPrefix("api");
   app.useGlobalFilters(new AppExceptionFilter());
   const fastify = app.getHttpAdapter().getInstance();

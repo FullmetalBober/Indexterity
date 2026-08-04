@@ -3,13 +3,19 @@
 // All of these change who is asking, so they invalidate the session rather than
 // a key: every cached answer belonged to the previous identity. The one that
 // does not is the reset-link request, which changes nothing at all.
+//
+// The calls go straight to better-auth on the api, same origin, so the session
+// cookie it sets is this app's cookie. They used to go through server functions
+// that relayed the request and every Set-Cookie back — see lib/auth-client.ts.
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { requestPasswordReset, resetPassword, signIn, signOut, signUp } from "../../auth";
+import { authClient } from "../../auth-client";
 import { invalidateSession } from "../client";
 
+// better-auth answers with { data, error } rather than throwing, so a refusal
+// arrives as a resolved promise and is branched on here. onError underneath is
+// what catches the request that got no answer at all.
 interface Answer {
-  readonly ok: boolean;
-  readonly error: string | null;
+  readonly error: { readonly message?: string } | null;
 }
 
 interface CredentialHandlers {
@@ -22,8 +28,8 @@ function credentialCallbacks(handlers: CredentialHandlers) {
   return {
     onMutate: handlers.onStart,
     onSuccess: (result: Answer) => {
-      if (result.ok) handlers.onSignedIn();
-      else handlers.onError(result.error ?? "authentication failed");
+      if (result.error === null) handlers.onSignedIn();
+      else handlers.onError(result.error.message ?? "authentication failed");
     },
     onError: () => handlers.onError("authentication failed"),
   };
@@ -31,7 +37,7 @@ function credentialCallbacks(handlers: CredentialHandlers) {
 
 export function useSignIn(credentials: { email: string; password: string }, h: CredentialHandlers) {
   return useMutation({
-    mutationFn: () => signIn({ data: credentials }),
+    mutationFn: () => authClient.signIn.email(credentials),
     ...credentialCallbacks(h),
   });
 }
@@ -41,7 +47,7 @@ export function useSignUp(
   h: CredentialHandlers,
 ) {
   return useMutation({
-    mutationFn: () => signUp({ data: credentials }),
+    mutationFn: () => authClient.signUp.email(credentials),
     ...credentialCallbacks(h),
   });
 }
@@ -49,7 +55,7 @@ export function useSignUp(
 export function useSignOut() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: () => signOut(),
+    mutationFn: () => authClient.signOut(),
     // onSettled, not onSuccess: after an attempt at signing out, whether the
     // cookie is gone is the server's answer to give, not ours to assume.
     onSettled: () => invalidateSession(queryClient),
@@ -67,11 +73,20 @@ export function useRequestPasswordReset(
   },
 ) {
   return useMutation({
-    mutationFn: () => requestPasswordReset({ data: email }),
+    // Where the emailed link lands. It is this origin because the reset page is
+    // this app's, and it is named here rather than fixed server-side — as it
+    // was when a server function made this call — because better-auth refuses a
+    // redirect target that is not a trusted origin. The check that mattered was
+    // never that the client could not say it.
+    mutationFn: () =>
+      authClient.requestPasswordReset({
+        email,
+        redirectTo: `${window.location.origin}/reset-password`,
+      }),
     onMutate: handlers.onStart,
-    onSuccess: (sent) => {
-      if (sent.ok) handlers.onSent();
-      else handlers.onError(sent.error ?? "request failed");
+    onSuccess: (sent: Answer) => {
+      if (sent.error === null) handlers.onSent();
+      else handlers.onError(sent.error.message ?? "request failed");
     },
     onError: () => handlers.onError("request failed"),
   });
@@ -88,11 +103,11 @@ export function useResetPassword(
   },
 ) {
   return useMutation({
-    mutationFn: () => resetPassword({ data: reset }),
+    mutationFn: () => authClient.resetPassword(reset),
     onMutate: handlers.onStart,
-    onSuccess: (result) => {
-      if (result.ok) handlers.onDone();
-      else handlers.onError(result.error ?? "reset failed");
+    onSuccess: (result: Answer) => {
+      if (result.error === null) handlers.onDone();
+      else handlers.onError(result.error.message ?? "reset failed");
     },
     onError: () => handlers.onError("reset failed"),
   });

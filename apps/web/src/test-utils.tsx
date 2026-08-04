@@ -1,7 +1,19 @@
+import { ORPCError } from "@orpc/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { type RenderResult, render } from "@testing-library/react";
 import type { ReactElement, ReactNode } from "react";
 import { TooltipProvider } from "~/components/ui/tooltip";
+
+// A refusal from the api, in the shape the oRPC client delivers one: a throw,
+// not a value. It used to arrive as { ok: false, message } because a server
+// function sat in between and caught it; nothing does now.
+//
+// The status is not decoration. The mutation hooks read it to decide whether
+// the api's own words are safe to show, so a test that asserts on wording has
+// to carry the status that makes those words readable.
+export function apiError(status: number, message: string): Error {
+  return new ORPCError("TEST_FAILURE", { status, message });
+}
 
 interface AppRender extends RenderResult {
   // Handed back so a test can watch what a mutation invalidates. That used to be

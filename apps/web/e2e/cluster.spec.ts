@@ -152,8 +152,8 @@ test.describe("cluster lifecycle", () => {
   });
 
   // The server fetches everything the page draws, and the browser has to
-  // receive it rather than fetch it again: cutting off every server function
-  // before the page loads leaves only what the SSR payload carried. Without the
+  // receive it rather than fetch it again: cutting off every api call the
+  // browser could make leaves only what the SSR payload carried. Without the
   // query cache in that payload the browser hydrates against an empty one, and
   // the whole dashboard reverts to its empty shapes for as long as the refetch
   // takes — which is the failure that made the policy section vanish twice.
@@ -164,7 +164,13 @@ test.describe("cluster lifecycle", () => {
     await page.getByRole("button", { name: "Save policy" }).click();
     await expect(page.getByText("Policy saved")).toBeVisible();
 
-    await page.route("**/_serverFn/**", (route) => route.abort());
+    // Every call the BROWSER would make to the api, cut off. The SSR render is
+    // unaffected — the web server dials the api itself, off this page's
+    // request — so whatever still draws came across in the payload. This used
+    // to block "**/_serverFn/**", which stopped matching anything the moment
+    // the server functions went: the test would have kept passing while
+    // proving nothing.
+    await page.route("**/api/**", (route) => route.abort());
     await page.goto("/app");
 
     // The shell, and a per-cluster read that only the loader could have made.

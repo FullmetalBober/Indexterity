@@ -8,12 +8,19 @@ const signIn = vi.hoisted(() => vi.fn());
 const signUp = vi.hoisted(() => vi.fn());
 const requestPasswordReset = vi.hoisted(() => vi.fn());
 
-vi.mock("~/lib/auth", () => ({ signIn, signUp, requestPasswordReset }));
+// better-auth's own client, which is what the form now talks to — no relay in
+// between. It answers with { data, error } rather than throwing, so a refusal
+// is a resolved promise carrying the api's message.
+vi.mock("~/lib/auth-client", () => ({
+  authClient: { signIn: { email: signIn }, signUp: { email: signUp }, requestPasswordReset },
+}));
+
+const OK = { data: {}, error: null };
 
 beforeEach(() => {
-  signIn.mockResolvedValue({ ok: true });
-  signUp.mockResolvedValue({ ok: true });
-  requestPasswordReset.mockResolvedValue({ ok: true });
+  signIn.mockResolvedValue(OK);
+  signUp.mockResolvedValue(OK);
+  requestPasswordReset.mockResolvedValue(OK);
 });
 
 describe("AuthForm", () => {
@@ -26,7 +33,7 @@ describe("AuthForm", () => {
     await user.type(screen.getByLabelText("Password"), "hunter2");
     await user.click(screen.getByRole("button", { name: "Sign in" }));
 
-    expect(signIn).toHaveBeenCalledWith({ data: { email: "a@b.test", password: "hunter2" } });
+    expect(signIn).toHaveBeenCalledWith({ email: "a@b.test", password: "hunter2" });
     expect(onSignedIn).toHaveBeenCalled();
   });
 
@@ -43,13 +50,15 @@ describe("AuthForm", () => {
     await user.click(screen.getByRole("button", { name: "Sign up" }));
 
     expect(signUp).toHaveBeenCalledWith({
-      data: { email: "ada@b.test", password: "hunter2", name: "Ada" },
+      email: "ada@b.test",
+      password: "hunter2",
+      name: "Ada",
     });
     expect(signIn).not.toHaveBeenCalled();
   });
 
   it("keeps the reader on the form and shows why when credentials are wrong", async () => {
-    signIn.mockResolvedValue({ ok: false, error: "invalid email or password" });
+    signIn.mockResolvedValue({ data: null, error: { message: "invalid email or password" } });
     const user = userEvent.setup();
     const onSignedIn = vi.fn();
     renderInApp(<AuthForm onSignedIn={onSignedIn} />);
@@ -65,7 +74,10 @@ describe("AuthForm", () => {
   // This instance ships invite-only, so "sign-up is invite-only" is the most
   // likely rejection a stranger will hit — it has to say what to do next.
   it("offers a way forward when sign-up is invite-only", async () => {
-    signUp.mockResolvedValue({ ok: false, error: "sign-up is invite-only — ask an owner" });
+    signUp.mockResolvedValue({
+      data: null,
+      error: { message: "sign-up is invite-only — ask an owner" },
+    });
     const user = userEvent.setup();
     renderInApp(<AuthForm onSignedIn={vi.fn()} />);
 
@@ -79,7 +91,10 @@ describe("AuthForm", () => {
   });
 
   it("does not offer that on an ordinary failure", async () => {
-    signUp.mockResolvedValue({ ok: false, error: "that email is already registered" });
+    signUp.mockResolvedValue({
+      data: null,
+      error: { message: "that email is already registered" },
+    });
     const user = userEvent.setup();
     renderInApp(<AuthForm onSignedIn={vi.fn()} />);
 
@@ -104,7 +119,14 @@ describe("AuthForm", () => {
     await user.type(screen.getByLabelText("Email"), "who@b.test");
     await user.click(screen.getByRole("button", { name: "Send reset link" }));
 
-    expect(requestPasswordReset).toHaveBeenCalledWith({ data: "who@b.test" });
+    // The reset link lands on this app's page. The origin is named by the
+    // browser now that nothing relays the call server-side; better-auth refuses
+    // a redirect target outside its trusted origins, which is the check that
+    // was doing the work all along.
+    expect(requestPasswordReset).toHaveBeenCalledWith({
+      email: "who@b.test",
+      redirectTo: `${window.location.origin}/reset-password`,
+    });
     expect(await screen.findByText(/If that email has an account/)).toBeInTheDocument();
   });
 

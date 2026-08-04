@@ -7,26 +7,21 @@ import { routeLabeller } from "./routes";
 
 const label = routeLabeller(routeTree);
 
-// Server function calls arrive under this prefix. Read from the build rather than
-// written down, because it is configurable (serverFns.base) and a hard-coded copy
-// would silently misclassify every call if it were ever changed.
-function serverFnBase(): string {
-  const configured: unknown = import.meta.env.TSS_SERVER_FN_BASE;
-  return typeof configured === "string" && configured.length > 0 ? configured : "/_serverFn";
-}
+export type RequestKind = "document" | "asset";
 
-const SERVER_FN_BASE = serverFnBase();
-
-export type RequestKind = "document" | "server_fn" | "asset";
-
-// Three kinds, because they fail and slow down for different reasons and mixing
+// Two kinds, because they fail and slow down for different reasons and mixing
 // them makes every graph a blend of a page render and a static file.
+//
+// There was a third, `server_fn`, matched on the /_serverFn prefix. There are no
+// server functions left — the browser calls the api directly — so it counted
+// nothing, and a series that is always zero reads as "no traffic" rather than
+// "no such thing". What the dashboard server now serves is documents and the
+// files they ask for.
 //
 // Only the build prefix counts as an asset. Guessing from a file extension was
 // tempting and wrong: /wp-login.php is not an asset, it is a page request that
 // the router will answer with a 404 document, and that is what the handler did.
 export function requestKind(pathname: string): RequestKind {
-  if (pathname.startsWith(SERVER_FN_BASE)) return "server_fn";
   if (pathname.startsWith("/_build")) return "asset";
   return "document";
 }

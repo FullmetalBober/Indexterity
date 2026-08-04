@@ -3,7 +3,11 @@ import { createAuth } from "./auth.config";
 import { assertProductionUrl, useSecureCookies } from "./cookies";
 
 const baseURL = process.env.BETTER_AUTH_URL ?? "http://localhost:3001";
-// The dashboard's origin — where browser auth requests come from (via its BFF).
+// The dashboard's origin — where browser auth requests come from. Since the api
+// answers under /api on that same origin, this is usually BETTER_AUTH_URL again;
+// it stays a separate variable because trustedOrigins is the thing that decides
+// which Origin header and which redirect target are acceptable, and that is
+// worth being able to state without inferring it.
 const webOrigin = process.env.WEB_ORIGIN ?? "http://localhost:3000";
 
 assertProductionUrl(baseURL, process.env.NODE_ENV);

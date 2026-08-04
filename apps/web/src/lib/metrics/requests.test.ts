@@ -1,14 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { requestKind } from "./requests";
 
-// Three kinds, and the boundaries between them are the whole content of this
-// decision: a page render, an in-process function call over HTTP, and a static
-// file mean different things when they are slow.
+// Two kinds, and the boundary between them is the whole content of this
+// decision: a page render and a static file mean different things when they are
+// slow. A third, the server function call, went with the server functions.
 describe("classifying a request", () => {
-  it("reads a server function call from its base path", () => {
-    expect(requestKind("/_serverFn/9f2ca1")).toBe("server_fn");
-  });
-
   it("reads build output as an asset", () => {
     expect(requestKind("/_build/assets/app-a1b2c3.js")).toBe("asset");
   });

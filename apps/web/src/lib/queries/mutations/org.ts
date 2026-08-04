@@ -13,16 +13,9 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
-import {
-  acceptInvite,
-  createInvite,
-  leaveOrg,
-  removeMember,
-  renameOrg,
-  setMemberRole,
-  switchOrgFn,
-} from "../../app-server";
+import { api } from "../../api";
 import { invalidateSession } from "../client";
+import { apiMessage } from "../errors";
 import { queryKeys } from "../keys";
 
 function useInvalidateOrg(): () => Promise<void> {
@@ -38,12 +31,8 @@ function useInvalidateSession(): () => Promise<void> {
 export function useRenameOrg() {
   const invalidateOrg = useInvalidateOrg();
   return useMutation({
-    mutationFn: (name: string) => renameOrg({ data: name }),
-    onSuccess: (result) => {
-      if (!result.ok) {
-        toast.error("Rename failed (owner only)");
-        return;
-      }
+    mutationFn: (name: string) => api().renameOrg({ name }),
+    onSuccess: () => {
       toast.success("Org renamed");
       return invalidateOrg();
     },
@@ -55,34 +44,26 @@ export function useSetMemberRole() {
   const invalidateOrg = useInvalidateOrg();
   return useMutation({
     mutationFn: (change: { userId: string; role: "member" | "owner" }) =>
-      setMemberRole({ data: change }),
-    onSuccess: (result, change) => {
-      // The api refuses to demote the last owner, and its reason is the useful
-      // one — a generic "failed" leaves the reader guessing.
-      if (!result.ok) {
-        toast.error(result.message ?? "Role change failed");
-        return;
-      }
+      api().setMemberRole(change),
+    onSuccess: (_result, change) => {
       toast.success(`Role changed to ${change.role}`);
       return invalidateOrg();
     },
-    onError: () => toast.error("Role change failed"),
+    // The api refuses to demote the last owner, and its reason is the useful
+    // one — a generic "failed" leaves the reader guessing.
+    onError: (error) => toast.error(apiMessage(error, "Role change failed")),
   });
 }
 
 export function useRemoveMember() {
   const invalidateOrg = useInvalidateOrg();
   return useMutation({
-    mutationFn: (userId: string) => removeMember({ data: userId }),
-    onSuccess: (result) => {
-      if (!result.ok) {
-        toast.error(result.message ?? "Remove failed");
-        return;
-      }
+    mutationFn: (userId: string) => api().removeMember({ userId }),
+    onSuccess: () => {
       toast.success("Member removed");
       return invalidateOrg();
     },
-    onError: () => toast.error("Remove failed"),
+    onError: (error) => toast.error(apiMessage(error, "Remove failed")),
   });
 }
 
@@ -91,48 +72,42 @@ export function useRemoveMember() {
 export function useCreateInvite({ onToken }: { onToken: (token: string) => void }) {
   const invalidateOrg = useInvalidateOrg();
   return useMutation({
-    mutationFn: (email: string) => createInvite({ data: email }),
-    onSuccess: (result) => {
-      if (result.token === null) {
-        // Used to leave the reader looking at a form that had visibly done
-        // nothing: no token, no error, no way to tell which.
-        toast.error("Invite not created — you may be at your plan's seat limit");
-        return;
-      }
-      onToken(result.token);
+    mutationFn: (email: string) => api().createInvite({ email, role: "member" }),
+    onSuccess: (invite) => {
+      onToken(invite.token);
       return invalidateOrg();
     },
-    onError: () => toast.error("Invite not created"),
+    // Used to leave the reader looking at a form that had visibly done nothing:
+    // no token, no error, no way to tell which.
+    onError: () => toast.error("Invite not created — you may be at your plan's seat limit"),
   });
 }
 
 export function useAcceptInvite({ onAnswer }: { onAnswer: (message: string) => void }) {
   const invalidateSessionCache = useInvalidateSession();
   return useMutation({
-    mutationFn: (token: string) => acceptInvite({ data: token }),
-    onSuccess: (result) => {
-      onAnswer(result.message);
+    mutationFn: (token: string) => api().acceptInvite({ token }),
+    onSuccess: (joined) => {
+      onAnswer(`joined ${joined.orgName}`);
       // Joining can make another org the active one, so this is a session
       // change and not an org change.
-      if (result.ok) return invalidateSessionCache();
+      return invalidateSessionCache();
     },
-    onError: () => onAnswer("could not accept the invite"),
+    // 404 is a token that does not exist or has expired, 409 an org the reader
+    // is already in. Both say what to do next; anything else does not.
+    onError: (error) => onAnswer(apiMessage(error, "could not accept the invite", [404, 409])),
   });
 }
 
 export function useLeaveOrg() {
   const invalidateSessionCache = useInvalidateSession();
   return useMutation({
-    mutationFn: () => leaveOrg({ data: {} }),
-    onSuccess: (result) => {
-      if (!result.ok) {
-        toast.error(result.message ?? "Leave failed");
-        return;
-      }
+    mutationFn: () => api().leaveOrg({}),
+    onSuccess: () => {
       toast.success("Left the org");
       return invalidateSessionCache();
     },
-    onError: () => toast.error("Leave failed"),
+    onError: (error) => toast.error(apiMessage(error, "Leave failed")),
   });
 }
 
@@ -140,18 +115,14 @@ export function useSwitchOrg() {
   const invalidateSessionCache = useInvalidateSession();
   const navigate = useNavigate();
   return useMutation({
-    mutationFn: (orgId: string) => switchOrgFn({ data: orgId }),
-    onSuccess: async (result) => {
-      if (!result.ok) {
-        // Nothing moved, so nothing is refetched and the selection stays.
-        toast.error("Org switch failed");
-        return;
-      }
-      toast.success(`Switched to ${result.name ?? "org"}`);
+    mutationFn: (orgId: string) => api().switchOrg({ orgId }),
+    onSuccess: async (switched) => {
+      toast.success(`Switched to ${switched.name}`);
       // The selected cluster belongs to the previous org — reset the selection.
       await navigate({ to: "/app", search: {} });
       await invalidateSessionCache();
     },
+    // Nothing moved, so nothing is refetched and the selection stays.
     onError: () => toast.error("Org switch failed"),
   });
 }

@@ -34,8 +34,9 @@ helm test indexterity -n indexterity
 ```
 
 The web image does **not** need rebuilding per environment: `API_URL` and
-`WEB_ORIGIN` are read at runtime (the dashboard's server functions are the only
-thing that talks to the api).
+`WEB_ORIGIN` are read at runtime, and the browser bundle contains no api address
+at all — it calls `/api` on whatever origin served the page. `API_URL` is the web
+server's own server-side rendering, nothing else.
 
 ## Back up MASTER_KEY
 
@@ -48,16 +49,24 @@ each one must be re-onboarded. Store it outside the cluster. To rotate, add
 ## What talks to what
 
 ```
-browser ──► ingress ──► web (SSR + server functions) ──► api ──► PostgreSQL
-                                                          ▲         ▲
-                                                worker ───┘─────────┘
-                                                   │
-                                                   └──► customer MongoDB clusters
+                     ┌── /api ──► api ──► PostgreSQL
+browser ──► ingress ─┤              ▲        ▲
+                     └── /  ───► web ┘       │   (SSR reads, in-cluster Service)
+                                             │
+                                  worker ────┴──► customer MongoDB clusters
 ```
 
-The api never needs to be public: browsers only reach the dashboard, whose
-server functions call the api over the in-cluster Service. Enable
-`ingress.api.*` only if you want programmatic API access.
+**One host, two paths, and the ingress is load-bearing.** The browser calls the
+api itself — that is what makes the session cookie first-party — so `/api` must
+reach the api on the *same* host that serves the dashboard. The ingress template
+does this by default and there is no fallback if it does not: a split origin is a
+cookie the api never receives.
+
+The api is therefore publicly reachable on that path. Its rate limiting, origin
+checks and auth guard are the only line of defence now rather than the second one
+behind an unroutable address; nothing about them changed, but their importance
+did. `ingress.api.*` adds a *second* hostname for callers outside the browser and
+stays off by default — the dashboard does not need it.
 
 ## Values worth knowing
 

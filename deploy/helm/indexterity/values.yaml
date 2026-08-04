@@ -29,9 +29,10 @@ api:
     type: ClusterIP
     port: 3001
     annotations: {}
-  # The api only needs to be reachable by the web pods — every browser request
-  # goes through the dashboard's server functions. Expose it publicly only for
-  # programmatic API access (see ingress.api below).
+  # Reached two ways: by the browser, through the ingress at /api on the
+  # dashboard's host (this is what keeps the session cookie first-party), and by
+  # the web pods over this Service for server-side rendering. ingress.api below
+  # adds a second hostname, and is only for callers outside the browser.
   resources:
     requests:
       cpu: 100m
@@ -59,7 +60,9 @@ web:
   # The dashboard's own public origin. REQUIRED when ingress is enabled: the api
   # trusts it for auth requests and session cookies are stored against it.
   publicUrl: ""
-  # Where the web server reaches the api. Defaults to the in-cluster Service.
+  # Where the WEB SERVER reaches the api, for its own server-side rendering.
+  # Defaults to the in-cluster Service. Not what the browser uses — that is
+  # /api on publicUrl, routed by the ingress.
   apiUrl: ""
   # Overrides the canonical URL in the landing page's SEO tags (canonical,
   # og:url, og:image). Leave empty to keep the product's own public domain —

@@ -6,18 +6,16 @@
 // mode is read from the shell — a fact about the cache leaking into a component
 // whose job is drawing badges. What the caller still passes is the local state a
 // mutation cannot know about: a form to close, an error to show.
+//
+// The api's refusals arrive as thrown ORPCErrors now that nothing wraps them in
+// an { ok, message } envelope on the way here, so the reasons are read off the
+// error in onError (see ../errors.ts) rather than off a result.
 import type { ConnectionDiagnosis } from "@repo/contracts";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
-import {
-  checkConnection,
-  connectCluster,
-  disconnectCluster,
-  provisionCluster,
-  rotateConnection,
-  setClusterMode,
-} from "../../app-server";
+import { api } from "../../api";
+import { apiMessage } from "../errors";
 import { queryKeys } from "../keys";
 
 // Said the same way whether the api refused or never answered, because from the
@@ -36,51 +34,44 @@ function useInvalidateShell(): () => Promise<void> {
 export function useSetClusterMode(clusterId: string) {
   const invalidateShell = useInvalidateShell();
   return useMutation({
-    mutationFn: (readOnly: boolean) => setClusterMode({ data: { clusterId, readOnly } }),
-    onSuccess: (result, readOnly) => {
-      // A refused change moved nothing, so there is nothing to refetch.
-      if (!result.ok) {
-        toast.error(MODE_FAILED);
-        return;
-      }
+    mutationFn: (readOnly: boolean) => api().setClusterMode({ clusterId, readOnly }),
+    onSuccess: (_cluster, readOnly) => {
       toast.success(
         readOnly ? "Cluster is read-only again" : "Live mode enabled — the engine may now write",
       );
       return invalidateShell();
     },
+    // A refused change moved nothing, so there is nothing to refetch.
     onError: () => toast.error(MODE_FAILED),
   });
 }
 
+// Credential rotation: verified server-side before storing, so a typo can't
+// brick the cluster; history survives (unlike disconnect + reconnect).
 export function useRotateConnection(clusterId: string, { onRotated }: { onRotated: () => void }) {
   const invalidateShell = useInvalidateShell();
   return useMutation({
     mutationFn: (connectionString: string) =>
-      rotateConnection({ data: { clusterId, connectionString } }),
-    onSuccess: (result) => {
-      if (!result.ok) {
-        toast.error(result.message ?? ROTATION_FAILED);
-        return;
-      }
+      api().rotateConnection({ clusterId, connectionString }),
+    onSuccess: () => {
       toast.success("Connection string rotated — history preserved");
       onRotated();
       return invalidateShell();
     },
-    onError: () => toast.error(ROTATION_FAILED),
+    // 400 names the problem with the string, 404 the cluster, 502 says the
+    // cluster could not be dialled with it — all three are worth reading.
+    onError: (error) => toast.error(apiMessage(error, ROTATION_FAILED, [400, 404, 502])),
   });
 }
 
+// Offboard a cluster: the api restores in-flight hidden indexes, deletes all
+// collected data, and reports how to revoke the provisioned user.
 export function useDisconnectCluster(clusterId: string) {
   const invalidateShell = useInvalidateShell();
   const navigate = useNavigate();
   return useMutation({
-    mutationFn: () => disconnectCluster({ data: clusterId }),
+    mutationFn: () => api().deleteCluster({ clusterId }),
     onSuccess: async (result) => {
-      if (!result.ok) {
-        // The cluster is still there, so deselecting it would be a lie.
-        toast.error(DISCONNECT_FAILED);
-        return;
-      }
       toast.success(
         result.unhidden > 0
           ? `Disconnected — ${result.unhidden} hidden ${result.unhidden === 1 ? "index" : "indexes"} restored`
@@ -89,6 +80,7 @@ export function useDisconnectCluster(clusterId: string) {
       await navigate({ to: "/app", search: {} });
       await invalidateShell();
     },
+    // The cluster is still there, so deselecting it would be a lie.
     onError: () => toast.error(DISCONNECT_FAILED),
   });
 }
@@ -102,20 +94,18 @@ export function useCheckConnection(handlers: {
   onError: (message: string) => void;
 }) {
   return useMutation({
-    mutationFn: (connectionString: string) => checkConnection({ data: connectionString }),
+    mutationFn: (connectionString: string) => api().checkConnection({ connectionString }),
     onMutate: handlers.onStart,
-    onSuccess: (result) => {
-      if (result.ok) handlers.onDiagnosis(result.diagnosis);
-      else handlers.onError(result.message);
-    },
-    onError: () => handlers.onError("could not check the connection"),
+    onSuccess: handlers.onDiagnosis,
+    onError: (error) =>
+      handlers.onError(apiMessage(error, "could not check the connection", [400, 403, 502])),
   });
 }
 
 interface ConnectHandlers {
   readonly onStart: () => void;
   readonly onConnected: () => void;
-  readonly onError: (message: string | null) => void;
+  readonly onError: (message: string) => void;
 }
 
 // The shell first, then the URL: the new cluster has to be in the list before
@@ -124,9 +114,9 @@ interface ConnectHandlers {
 function useLandOnNewCluster() {
   const invalidateShell = useInvalidateShell();
   const navigate = useNavigate();
-  return async (id: string | null) => {
+  return async (id: string) => {
     await invalidateShell();
-    if (id !== null) await navigate({ to: "/app", search: { cluster: id } });
+    await navigate({ to: "/app", search: { cluster: id } });
   };
 }
 
@@ -136,17 +126,13 @@ export function useConnectCluster(
 ) {
   const land = useLandOnNewCluster();
   return useMutation({
-    mutationFn: () => connectCluster({ data: credentials }),
+    mutationFn: () => api().createCluster(credentials),
     onMutate: handlers.onStart,
-    onSuccess: async (result) => {
-      if (!result.ok) {
-        handlers.onError(result.message);
-        return;
-      }
+    onSuccess: async (created) => {
       handlers.onConnected();
-      await land(result.id);
+      await land(created.id);
     },
-    onError: () => handlers.onError("failed to connect cluster"),
+    onError: (error) => handlers.onError(apiMessage(error, "failed to connect cluster")),
   });
 }
 
@@ -161,22 +147,18 @@ export function useProvisionCluster(
 ) {
   const land = useLandOnNewCluster();
   return useMutation({
-    mutationFn: () => provisionCluster({ data: credentials }),
+    mutationFn: () => api().provisionCluster(credentials),
     onMutate: handlers.onStart,
-    onSuccess: async (result) => {
-      if (result.ok && result.username !== null && result.connectionString !== null) {
-        handlers.onProvisioned({
-          username: result.username,
-          connectionString: result.connectionString,
-        });
-      }
-      if (!result.ok) {
-        handlers.onError(result.message);
-        return;
-      }
+    onSuccess: async (created) => {
+      handlers.onProvisioned({
+        username: created.username,
+        connectionString: created.connectionString,
+      });
       handlers.onConnected();
-      await land(result.id);
+      await land(created.cluster.id);
     },
-    onError: () => handlers.onError("failed to provision the cluster"),
+    // 400 bad string, 422 provision denied, 502 unreachable all carry guidance.
+    onError: (error) =>
+      handlers.onError(apiMessage(error, "failed to provision the cluster", [400, 422, 502])),
   });
 }

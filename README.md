@@ -268,9 +268,15 @@ unsharded.
 ## Auth & tenancy
 
 Every endpoint requires a better-auth session and is scoped to the caller's org.
-The dashboard is a BFF: it proxies `/api/auth` to the api so the cookie lives on
-the web origin, then forwards it on every data call. Set `WEB_ORIGIN` (api) and
-`VITE_WEB_ORIGIN` (web) to the dashboard's public origin.
+The browser holds that session itself: the api answers under `/api` on the
+dashboard's own origin, so the cookie is first-party and travels with every call
+without CORS or `SameSite=None`. Set `WEB_ORIGIN` and `BETTER_AUTH_URL` on the
+api to that origin — it is what better-auth trusts for auth requests and
+redirect targets, and what the links in reset emails are built from.
+
+The dashboard used to be a BFF, relaying all 28 calls through the web server
+because the api was on another origin. It is not one any more; see
+[One origin](#deploy) for what that requires of a deployment.
 
 Org creators are **owners**, invited users are **members**. Members read
 everything; every mutation is owner-only. Invites are one-time tokens with a
@@ -293,6 +299,9 @@ apps/web                dashboard
   src/routes/app.tsx    the /app shell — auth gate, cluster bar, org switcher
   src/routes/app.index  the cluster dashboard
   src/routes/app.org    members, roles, invites, plan
+  src/lib/api.ts        one oRPC client, isomorphic: same-origin in the browser,
+                        API_URL with the caller's cookie during SSR
+  src/lib/auth-client   better-auth's own browser client
   src/lib/queries       the query layer: the client, the four keys, one file per
                         key, and mutations/ grouped by what they change
   src/router.tsx        the one query client, and the SSR dehydrate/hydrate wiring
@@ -346,11 +355,14 @@ yet. Migration creates schemas, so migration creates both.
 in CI. Releasing is `git tag v0.2.0 && git push --tags`, and the release
 workflow refuses a tag whose version the tree does not carry.
 
-**Four test layers**, currently 315 api unit, 88 web unit, 55 integration and
+**Four test layers**, currently 321 api unit, 94 web unit, 55 integration and
 19 end-to-end. `npm run test` runs the first two without any infra: the api's
-pure decision engine, and the web app's components in jsdom with the server
-functions mocked at the `~/lib/app-server` boundary — what the browser does
-with an answer, not whether the answer was fetched. `npm run test:int -w
+pure decision engine, and the web app's components in jsdom with the api client
+mocked at the `~/lib/api` boundary — what the browser does with an answer, not
+whether the answer was fetched. That boundary moved when the relay went: it was
+`~/lib/app-server`, and mocking the api client instead puts the mutation hooks'
+own error handling under test rather than stubbing it out alongside the
+transport. `npm run test:int -w
 @repo/api` needs a migrated postgres and a mongo, and CI runs it against **6.0,
 7.0 and 8.x** because the three take different paths through the workload
 collector. `npm run test:e2e` builds both apps and drives a real browser
@@ -412,17 +424,33 @@ docker build -f apps/web/Dockerfile -t indexterity-web .
 ```
 
 One web image serves every environment — `API_URL` and `WEB_ORIGIN` are read at
-runtime. The worker deploys from the api image with
+runtime, and nothing about the api's address is baked into the browser bundle:
+it calls `/api` on whatever origin served the page. `API_URL` is now only the
+web server's own SSR reads. The worker deploys from the api image with
 `CMD ["node", "apps/api/dist/worker.js"]`, or set `RUN_WORKER=true` to embed it
 in the api for a one-container install. Hosted should keep them separate: an api
 rollout would otherwise abort an in-flight index build, and the alert cooldown
 assumes a single worker.
 
-**One origin.** The api serves everything under `/api`, and the ingress puts it
-on the dashboard's host: `/api` to the api, `/` to the web app. That is not
-cosmetic — a browser then sees a single origin, so the session cookie is
+**One origin, and it is required.** The api serves everything under `/api`, and
+the deployment puts it on the dashboard's host: `/api` to the api, `/` to the
+web app. A browser then sees a single origin, so the session cookie is
 first-party and needs neither CORS nor `SameSite=None`. A second hostname for
 the api is still available for callers outside the browser, and off by default.
+
+This is the one thing a deployment has to get right, because the dashboard has
+no fallback path: the browser calls the api itself, and a split origin means a
+cookie the api never receives. Every way of running the app applies the same
+rule — the ingress in Kubernetes, an nginx container in `docker-compose.yml`
+(`deploy/compose/nginx.conf`), the vite dev server's proxy for a bare
+`npm run dev`, and a 40-line node proxy in front of the Playwright suite so the
+tests exercise the real shape. Running web and api on two ports is not a
+supported topology; put a reverse proxy in front, as the compose file does.
+
+The cost is that the api is publicly reachable. Its rate limiting, origin checks
+and auth guard used to be a second line of defence behind an unreachable
+address; they are now the only line. Nothing about them changed, but their
+importance did.
 
 A Helm chart is in [`deploy/helm/indexterity`](./deploy/helm/indexterity) —
 api + dashboard + worker, a pre-upgrade migration hook, ingress, and a
@@ -459,10 +487,12 @@ render an empty panel, so one procedure returning 500 is otherwise unrecorded. A
 500 that never reached the api at all shows up as
 `indexterity_web_requests_total{kind="document",status="500"}`.
 
-There is no per-server-function metric on purpose. It was built and removed: a
-server function here is one to three api calls and almost no work of its own, so
-its duration is the calls above plus noise. Naming the function needed a second
-framework seam, which is not worth a metric that restates another one.
+That api counter is **SSR reads only** since the browser started calling the api
+directly — a reader clicking Approve does not pass through this process at all,
+and the api's own counters are where those land. `kind` on the request counter
+lost its `server_fn` value for the same reason: there are no server functions
+left, and a series that is always zero reads as "no traffic" rather than "no
+such thing".
 
 **The endpoint has no auth**, which is why it is a second port instead of a route
 on the app: an ingress routes the app port, so publishing a host does not publish

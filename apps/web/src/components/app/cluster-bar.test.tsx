@@ -1,17 +1,21 @@
 import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { renderInApp } from "~/test-utils";
+import { apiError, renderInApp } from "~/test-utils";
 import { ClusterBar } from "./cluster-bar";
 
 const setClusterMode = vi.hoisted(() => vi.fn());
 const rotateConnection = vi.hoisted(() => vi.fn());
-const disconnectCluster = vi.hoisted(() => vi.fn());
+const deleteCluster = vi.hoisted(() => vi.fn());
 const navigate = vi.hoisted(() => vi.fn());
 const toastSuccess = vi.hoisted(() => vi.fn());
 const toastError = vi.hoisted(() => vi.fn());
 
-vi.mock("~/lib/app-server", () => ({ setClusterMode, rotateConnection, disconnectCluster }));
+// The api client, called straight from the mutation hooks. A refusal is a throw
+// with a status on it, not an { ok: false } a server function handed back.
+vi.mock("~/lib/api", () => ({
+  api: () => ({ setClusterMode, rotateConnection, deleteCluster }),
+}));
 vi.mock("@tanstack/react-router", () => ({ useNavigate: () => navigate }));
 vi.mock("sonner", () => ({ toast: { success: toastSuccess, error: toastError } }));
 
@@ -29,9 +33,9 @@ beforeEach(() => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
   vi.setSystemTime(NOW);
   navigate.mockResolvedValue(undefined);
-  setClusterMode.mockResolvedValue({ ok: true });
-  rotateConnection.mockResolvedValue({ ok: true });
-  disconnectCluster.mockResolvedValue({ ok: true, unhidden: 0, revokeCommand: null });
+  setClusterMode.mockResolvedValue(cluster);
+  rotateConnection.mockResolvedValue(cluster);
+  deleteCluster.mockResolvedValue({ unhidden: 0, revokeCommand: null });
 });
 
 afterEach(() => {
@@ -67,7 +71,7 @@ describe("ClusterBar", () => {
     expect(setClusterMode).not.toHaveBeenCalled();
 
     await user.click(await screen.findByRole("button", { name: "Go live" }));
-    expect(setClusterMode).toHaveBeenCalledWith({ data: { clusterId: "c1", readOnly: false } });
+    expect(setClusterMode).toHaveBeenCalledWith({ clusterId: "c1", readOnly: false });
   });
 
   // Going back to read-only only ever removes permission, so it needs no gate.
@@ -76,7 +80,7 @@ describe("ClusterBar", () => {
     renderInApp(<ClusterBar cluster={{ ...cluster, readOnly: false }} clusters={[cluster]} />);
 
     await user.click(screen.getByRole("button", { name: "Make read-only" }));
-    expect(setClusterMode).toHaveBeenCalledWith({ data: { clusterId: "c1", readOnly: true } });
+    expect(setClusterMode).toHaveBeenCalledWith({ clusterId: "c1", readOnly: true });
   });
 
   it("asks before disconnecting, and says what happens to hidden indexes", async () => {
@@ -87,7 +91,7 @@ describe("ClusterBar", () => {
     expect(
       await screen.findByText(/Indexes still hidden in an observe window are restored/),
     ).toBeInTheDocument();
-    expect(disconnectCluster).not.toHaveBeenCalled();
+    expect(deleteCluster).not.toHaveBeenCalled();
   });
 
   it("tells the reader how to revoke the scoped user it leaves behind", async () => {
@@ -101,7 +105,7 @@ describe("ClusterBar", () => {
   });
 
   it("reports restored indexes after a disconnect", async () => {
-    disconnectCluster.mockResolvedValue({ ok: true, unhidden: 2, revokeCommand: null });
+    deleteCluster.mockResolvedValue({ unhidden: 2, revokeCommand: null });
     const user = userEvent.setup();
     renderInApp(<ClusterBar cluster={cluster} clusters={[cluster]} />);
 
@@ -111,10 +115,10 @@ describe("ClusterBar", () => {
     expect(navigate).toHaveBeenCalledWith({ to: "/app", search: {} });
   });
 
-  // onChanged refetches the shell. A refused change moved nothing, so asking
-  // for it again is a round trip that redraws the same badge.
+  // A refused change moved nothing, so asking for it again is a round trip
+  // that redraws the same badge.
   it("does not refetch when a mode change is refused", async () => {
-    setClusterMode.mockResolvedValue({ ok: false });
+    setClusterMode.mockRejectedValue(apiError(403, "owner only"));
     const user = userEvent.setup();
     const { queryClient } = renderInApp(<ClusterBar cluster={cluster} clusters={[cluster]} />);
     const invalidate = vi.spyOn(queryClient, "invalidateQueries");
@@ -139,7 +143,7 @@ describe("ClusterBar", () => {
   // Deselecting a cluster that is still connected would report a disconnect
   // that did not happen.
   it("keeps the cluster selected when the disconnect is refused", async () => {
-    disconnectCluster.mockResolvedValue({ ok: false, unhidden: 0, revokeCommand: null });
+    deleteCluster.mockRejectedValue(apiError(403, "owner only"));
     const user = userEvent.setup();
     const { queryClient } = renderInApp(<ClusterBar cluster={cluster} clusters={[cluster]} />);
     const invalidate = vi.spyOn(queryClient, "invalidateQueries");
@@ -163,7 +167,7 @@ describe("ClusterBar", () => {
   });
 
   it("passes the api's own reason through when a rotation is rejected", async () => {
-    rotateConnection.mockResolvedValue({ ok: false, message: "cluster unreachable" });
+    rotateConnection.mockRejectedValue(apiError(502, "cluster unreachable"));
     const user = userEvent.setup();
     renderInApp(<ClusterBar cluster={cluster} clusters={[cluster]} />);
 
