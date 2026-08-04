@@ -1081,14 +1081,20 @@ over it.
   Express-shaped and not what the Fastify path does; that path removes and
   re-registers Fastify's content-type parsers instead.
 
-  The reason for the "no" is measured rather than argued. On Fastify the module serves
-  better-auth through middie middleware instead of a Fastify route, and
-  `@fastify/rate-limit` only sees routes. Spiked against the real api: every
-  other endpoint still throttles (21 of 25 requests to `/api/clusters` got a 429
-  at a global max of 5), and `/api/auth/sign-in/email` got **none** — the
-  brute-force target is the one surface that loses rate limiting, which is
-  exactly backwards. `AUTH_RATE_LIMIT_MAX` is a documented operator knob and
-  would have to be re-implemented on better-auth's own limiter to adopt this.
+  The reason for the "no" is measured. On Fastify the module serves better-auth
+  through middie middleware instead of a Fastify route, and `@fastify/rate-limit`
+  only sees routes — so `AUTH_RATE_LIMIT_MAX`, a documented operator knob set in
+  `.env.example`, the chart and both test harnesses, **silently stops doing
+  anything**. Our own integration test fails, correctly.
+
+  The first measurement said worse than that — 0 of 25 sign-in attempts throttled
+  — and it was wrong, because the spike ran without `NODE_ENV=production`.
+  better-auth enables its own limiter only in production, and with it set the
+  same probe throttles 22 of 25 at better-auth's default 3-per-10s for sensitive
+  endpoints. So adopting would not leave auth unprotected: it would *replace* our
+  bucket with a tighter one we do not control from the environment. Worth knowing
+  on its own account — the production image sets `NODE_ENV=production`, so
+  better-auth's limiter is already running alongside Fastify's today.
   The body-parser interaction that looked like the risk turned out not to be
   one: 59 of 60 integration tests passed, so its Fastify JSON parser handles
   oRPC bodies. The prize was smaller than it looked, too — the module replaces
