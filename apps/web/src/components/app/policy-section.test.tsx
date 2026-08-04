@@ -1,6 +1,7 @@
-import { render, screen } from "@testing-library/react";
+import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { renderInApp } from "~/test-utils";
 import { PolicySection } from "./policy-section";
 
 const savePolicy = vi.hoisted(() => vi.fn());
@@ -41,7 +42,7 @@ describe("PolicySection", () => {
   it("saves the toggles the reader actually set", async () => {
     const user = userEvent.setup();
     const onSaved = vi.fn();
-    render(<PolicySection policy={policy} onSaved={onSaved} />);
+    renderInApp(<PolicySection policy={policy} onSaved={onSaved} />);
 
     await user.click(screen.getByLabelText("Workload analysis"));
     await user.click(screen.getByRole("button", { name: "Save policy" }));
@@ -60,7 +61,7 @@ describe("PolicySection", () => {
   // leave the engine with a start and no stop, or the reverse.
   it("drops a half-set change window rather than persisting one end", async () => {
     const user = userEvent.setup();
-    render(<PolicySection policy={policy} onSaved={vi.fn()} />);
+    renderInApp(<PolicySection policy={policy} onSaved={vi.fn()} />);
 
     await user.type(screen.getByLabelText("Change window (UTC hours)"), "2");
     await user.click(screen.getByRole("button", { name: "Save policy" }));
@@ -73,7 +74,7 @@ describe("PolicySection", () => {
 
   it("keeps a window once both ends are set", async () => {
     const user = userEvent.setup();
-    render(<PolicySection policy={policy} onSaved={vi.fn()} />);
+    renderInApp(<PolicySection policy={policy} onSaved={vi.fn()} />);
 
     await user.type(screen.getByLabelText("Change window (UTC hours)"), "2");
     await user.type(screen.getByLabelText("Change window end hour"), "6");
@@ -89,7 +90,7 @@ describe("PolicySection", () => {
   // everything — so the field must never collapse them.
   it("distinguishes an empty auto-approve score from zero", async () => {
     const user = userEvent.setup();
-    render(<PolicySection policy={policy} onSaved={vi.fn()} />);
+    renderInApp(<PolicySection policy={policy} onSaved={vi.fn()} />);
     const score = screen.getByLabelText("Auto-approve score ≥");
 
     expect(screen.getByText(/nothing is approved without you/)).toBeInTheDocument();
@@ -103,7 +104,7 @@ describe("PolicySection", () => {
 
   it("warns that very little qualifies above the recommended threshold", async () => {
     const user = userEvent.setup();
-    render(<PolicySection policy={policy} onSaved={vi.fn()} />);
+    renderInApp(<PolicySection policy={policy} onSaved={vi.fn()} />);
 
     await user.type(screen.getByLabelText("Auto-approve score ≥"), "90");
     expect(screen.getByText(/Above ~85 very little qualifies/)).toBeInTheDocument();
@@ -118,7 +119,7 @@ describe("PolicySection", () => {
     });
     const user = userEvent.setup();
     const onSaved = vi.fn();
-    render(<PolicySection policy={policy} onSaved={onSaved} />);
+    renderInApp(<PolicySection policy={policy} onSaved={onSaved} />);
 
     await user.click(screen.getByRole("button", { name: "Save policy" }));
 
@@ -132,7 +133,7 @@ describe("PolicySection", () => {
   it("treats a thrown server function as a failed save", async () => {
     savePolicy.mockRejectedValue(new Error("network"));
     const user = userEvent.setup();
-    render(<PolicySection policy={policy} onSaved={vi.fn()} />);
+    renderInApp(<PolicySection policy={policy} onSaved={vi.fn()} />);
 
     await user.click(screen.getByRole("button", { name: "Save policy" }));
 
@@ -141,7 +142,7 @@ describe("PolicySection", () => {
   });
 
   it("explains why there is no inferred window when the engine gave a reason", () => {
-    render(
+    renderInApp(
       <PolicySection
         policy={{ ...policy, inferredWindowReason: "traffic is flat across the day" }}
         onSaved={vi.fn()}

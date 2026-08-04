@@ -39,13 +39,15 @@ export const Route = createFileRoute("/app/")({
   loaderDeps: ({ search }: { search: { cluster?: string } }) => ({
     cluster: search.cluster ?? null,
   }),
-  // The loader writes through the router's query client, so the server render
-  // and the browser cache are one entry. It still fetches on the server, so
-  // first paint does not wait for the browser to boot and ask again.
+  // The loader writes through the router's query client, and the SSR payload
+  // carries that cache into the browser, so the server render and the browser
+  // read one entry. First paint does not wait for the browser to boot and ask
+  // again.
   //
-  // ensureQueryData refetches whatever is stale, and staleTime is zero, so a
-  // router.invalidate() — connect a cluster, switch one — refreshes all three.
-  // A mutation touches only its own key.
+  // Selecting another cluster changes these keys, so it is the key change that
+  // fetches — not this loader re-running. ensureQueryData resolves with cached
+  // data whenever there is any, stale or not; what refreshes an already-cached
+  // key is staleTime 0 refetching on mount, or a mutation invalidating it.
   loader: async ({ deps, context }) => {
     const id = deps.cluster;
     await Promise.all([

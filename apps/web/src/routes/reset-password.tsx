@@ -1,3 +1,4 @@
+import { useMutation } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useState } from "react";
 import { Alert, AlertDescription } from "~/components/ui/alert";
@@ -24,22 +25,24 @@ function ResetPasswordPage() {
   const [confirm, setConfirm] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState(false);
-  const [busy, setBusy] = useState(false);
 
-  async function submit() {
+  const reset = useMutation({
+    mutationFn: () => resetPassword({ data: { token, newPassword: password } }),
+    onMutate: () => setError(null),
+    onSuccess: (result) => {
+      if (result.ok) setDone(true);
+      else setError(result.error ?? "reset failed");
+    },
+    onError: () => setError("reset failed"),
+  });
+
+  function submit() {
+    // Checked here rather than by the api, which only ever sees one password.
     if (password !== confirm) {
       setError("passwords don't match");
       return;
     }
-    setBusy(true);
-    setError(null);
-    const result = await resetPassword({ data: { token, newPassword: password } }).catch(() => ({
-      ok: false,
-      error: "reset failed",
-    }));
-    setBusy(false);
-    if (result.ok) setDone(true);
-    else setError(("error" in result ? result.error : null) ?? "reset failed");
+    reset.mutate();
   }
 
   if (token === "") {
@@ -91,7 +94,7 @@ function ResetPasswordPage() {
             className="flex flex-col gap-4"
             onSubmit={(event) => {
               event.preventDefault();
-              void submit();
+              submit();
             }}
           >
             <div className="grid gap-1.5">
@@ -119,7 +122,7 @@ function ResetPasswordPage() {
                 <AlertDescription>{error}</AlertDescription>
               </Alert>
             ) : null}
-            <Button type="submit" disabled={busy || password.length === 0}>
+            <Button type="submit" disabled={reset.isPending || password.length === 0}>
               Set password
             </Button>
           </form>

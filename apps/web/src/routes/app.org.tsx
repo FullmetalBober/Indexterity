@@ -7,7 +7,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { TeamSection } from "~/components/app/team-section";
-import { queryKeys } from "~/lib/query";
+import { invalidateSession, queryKeys } from "~/lib/query";
 import { useShell } from "~/lib/shell";
 
 export const Route = createFileRoute("/app/org")({
@@ -23,10 +23,15 @@ function OrgPage() {
   if (!shell.authed) return null;
   // Members, roles, invites and the plan all live in the shell, so a change to
   // any of them refetches that one key. The route does not re-run.
+  //
+  // Leaving an org, or joining one, is the exception: the api resolves a
+  // different membership from then on, so the clusters and everything under
+  // them are answers to a question that is no longer being asked.
   return (
     <TeamSection
       org={shell.org}
       onChanged={() => void queryClient.invalidateQueries({ queryKey: queryKeys.shell() })}
+      onActiveOrgChanged={() => void invalidateSession(queryClient)}
     />
   );
 }

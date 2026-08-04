@@ -1,6 +1,7 @@
-import { render, screen } from "@testing-library/react";
+import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { renderInApp } from "~/test-utils";
 import { AuthForm } from "./auth-form";
 
 const signIn = vi.hoisted(() => vi.fn());
@@ -19,7 +20,7 @@ describe("AuthForm", () => {
   it("signs in with what was typed", async () => {
     const user = userEvent.setup();
     const onDone = vi.fn();
-    render(<AuthForm onDone={onDone} />);
+    renderInApp(<AuthForm onDone={onDone} />);
 
     await user.type(screen.getByLabelText("Email"), "a@b.test");
     await user.type(screen.getByLabelText("Password"), "hunter2");
@@ -32,7 +33,7 @@ describe("AuthForm", () => {
   // Sign-up asks for a name; sign-in must not, and must not send one.
   it("asks for a name only when creating an account", async () => {
     const user = userEvent.setup();
-    render(<AuthForm onDone={vi.fn()} />);
+    renderInApp(<AuthForm onDone={vi.fn()} />);
     expect(screen.queryByLabelText("Name")).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Need an account? Sign up" }));
@@ -51,7 +52,7 @@ describe("AuthForm", () => {
     signIn.mockResolvedValue({ ok: false, error: "invalid email or password" });
     const user = userEvent.setup();
     const onDone = vi.fn();
-    render(<AuthForm onDone={onDone} />);
+    renderInApp(<AuthForm onDone={onDone} />);
 
     await user.type(screen.getByLabelText("Email"), "a@b.test");
     await user.type(screen.getByLabelText("Password"), "wrong");
@@ -66,7 +67,7 @@ describe("AuthForm", () => {
   it("offers a way forward when sign-up is invite-only", async () => {
     signUp.mockResolvedValue({ ok: false, error: "sign-up is invite-only — ask an owner" });
     const user = userEvent.setup();
-    render(<AuthForm onDone={vi.fn()} />);
+    renderInApp(<AuthForm onDone={vi.fn()} />);
 
     await user.click(screen.getByRole("button", { name: "Need an account? Sign up" }));
     await user.type(screen.getByLabelText("Email"), "stranger@b.test");
@@ -80,7 +81,7 @@ describe("AuthForm", () => {
   it("does not offer that on an ordinary failure", async () => {
     signUp.mockResolvedValue({ ok: false, error: "that email is already registered" });
     const user = userEvent.setup();
-    render(<AuthForm onDone={vi.fn()} />);
+    renderInApp(<AuthForm onDone={vi.fn()} />);
 
     await user.click(screen.getByRole("button", { name: "Need an account? Sign up" }));
     await user.type(screen.getByLabelText("Email"), "a@b.test");
@@ -95,7 +96,7 @@ describe("AuthForm", () => {
   // otherwise the form is an account-enumeration oracle.
   it("gives the same answer to a reset request whatever the account", async () => {
     const user = userEvent.setup();
-    render(<AuthForm onDone={vi.fn()} />);
+    renderInApp(<AuthForm onDone={vi.fn()} />);
 
     await user.click(screen.getByRole("button", { name: "Forgot password?" }));
     expect(screen.queryByLabelText("Password")).not.toBeInTheDocument();
@@ -110,7 +111,7 @@ describe("AuthForm", () => {
   it("recovers from a reset request that never reached the api", async () => {
     requestPasswordReset.mockRejectedValue(new Error("offline"));
     const user = userEvent.setup();
-    render(<AuthForm onDone={vi.fn()} />);
+    renderInApp(<AuthForm onDone={vi.fn()} />);
 
     await user.click(screen.getByRole("button", { name: "Forgot password?" }));
     await user.type(screen.getByLabelText("Email"), "who@b.test");
