@@ -130,6 +130,27 @@ test.describe("cluster lifecycle", () => {
     await expect(page.getByText("Policy saved").first()).toBeVisible();
   });
 
+  // "None selected" means the first cluster, so /app and /app?cluster=<first>
+  // have to be the same page. They were not: the nav links carry no search
+  // param, so coming back keyed the per-cluster reads on null — and the null
+  // entry still held the answer from before any cluster existed. The dashboard
+  // came back without its policy section. Only a zero staleTime refetching on
+  // every mount was covering it up.
+  test("coming back to the dashboard without the search param keeps the cluster", async ({
+    page,
+  }) => {
+    await signUpAndLandOnDashboard(page, uniqueEmail("reselect"));
+    await connectCluster(page, "E2E Reselect");
+    await expect(page.getByLabel("Workload analysis")).toBeVisible();
+
+    await page.getByRole("link", { name: "Organization" }).click();
+    await expect(page.getByText("FREE")).toBeVisible();
+    await page.getByRole("link", { name: "Dashboard" }).click();
+
+    await expect(page.getByText("E2E Reselect", { exact: true })).toBeVisible();
+    await expect(page.getByLabel("Workload analysis")).toBeVisible();
+  });
+
   // The server fetches everything the page draws, and the browser has to
   // receive it rather than fetch it again: cutting off every server function
   // before the page loads leaves only what the SSR payload carried. Without the

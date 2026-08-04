@@ -64,7 +64,7 @@ Do **not** compete on auto-create on Atlas. Compete on safe cleanup everywhere.
 | Monorepo | **Turbo** | build/task orchestration |
 | Lint/format | **Biome** | one tool, strict |
 | API contracts | **oRPC** (`@orpc/contract` + `@orpc/nest` + OpenAPILink client) | typed contracts shared api ↔ web ↔ agent, zod 4 |
-| Data fetching (web) | **TanStack Query** | pairs with TanStack Start + the oRPC client |
+| Data fetching (web) | **TanStack Query** (+ `@tanstack/react-router-ssr-query`) | every read and every write; the ssr-query package carries the cache across SSR (§14.2) |
 | Job queue | **graphile-worker** | Postgres-backed jobs (no Redis) |
 | Crypto | **@noble/ciphers** | envelope encryption for secrets |
 | Container | **Docker** | separate api/web images, compose for dev |
@@ -664,7 +664,7 @@ Redis + BullMQ only if scale demands it.
 
 ---
 
-## 14. Web / dashboard (TanStack Start + shadcn)
+## 14. Web / dashboard (TanStack Start + Query + shadcn)
 
 ### 14.1 Routes
 
@@ -674,45 +674,90 @@ state, the cluster bar, the org switcher, sign out, and the nav.
 
 | route | renders | loader |
 |---|---|---|
-| `/app` (layout) | shell + `<Outlet/>` | `loadAppShell` — clusters, org, orgs |
+| `/app` (layout) | shell + `<Outlet/>` | `shell` — clusters, org, orgs |
 | `/app` (index) | ROI, recommendations, latency charts, per-collection footprint, policy | pipeline + telemetry + policy |
-| `/app/org` | members, roles, invites, plan | none — reads the layout's org |
+| `/app/org` | members, roles, invites, plan | none — reads the `shell` key |
 
 It was one 452-line route that fetched ten things for every navigation, so
 opening the team page pulled a latency series it never drew. Splitting it is
 what makes `/app/org` cost three calls instead of ten.
 
+Which cluster is on screen is **URL state**, not loader state. `/app` has no
+`loaderDeps`, so selecting another cluster does not refetch the org or the
+member list; the layout picks one out of the cluster list, and "none selected"
+means the first.
+
 ### 14.2 Server state
 
-**TanStack Query owns the dashboard's reads.** Three keys, grouped by what
-*changes* them rather than by what draws them: `pipeline` moves on every
-mutation, `telemetry` when the collector runs hours later, `policy` when
-someone saves the form. Approving a recommendation invalidates one key instead
-of re-running every loader on the route.
+**TanStack Query owns every read and every write.** Four keys, grouped by what
+*changes* them rather than by what draws them:
 
-The route loader is still the SSR entry point, but it **writes through the
-router's query client** (`context.queryClient.ensureQueryData`) rather than
-returning data for the component to re-seed. One cache entry, not a server copy
-and a browser copy that drift.
+| key | moves when |
+|---|---|
+| `shell` | a cluster is connected or disconnected, an org is renamed, a member changes |
+| `pipeline` | every recommendation mutation — approve, undo, un-hide |
+| `telemetry` | the collector runs, hours apart |
+| `policy` | someone saves the policy form |
 
-Three things this cost two attempts to learn, and all three are load-bearing:
+Approving a recommendation invalidates one key. `router.invalidate()` appears
+nowhere in `apps/web/src`.
 
-- `initialData` cannot seed a loader that re-runs — it only fills an *empty*
+Route loaders remain the SSR entry point, but they **write through the router's
+query client** (`context.queryClient.ensureQueryData`) rather than returning
+data for the component to re-seed. One cache entry, not a server copy and a
+browser copy that drift.
+
+#### Things this cost three attempts to learn
+
+All of these are load-bearing:
+
+- **The cache must be dehydrated into the SSR payload.**
+  `@tanstack/react-router-ssr-query` does it, wired in `getRouter()`. The router
+  serializes loader *return values*, so a loader that fills the cache and
+  returns nothing serializes nothing — the browser then hydrates against an
+  empty cache, every `useQuery` starts at `undefined`, and every read the server
+  just did is done again. Covered by the e2e test that blocks every
+  `_serverFn` call before loading `/app` and expects the dashboard to draw.
+- **`ensureQueryData` does not refetch stale data.** It resolves with cached
+  data whenever there *is* any, stale or not, and fetches only when the entry is
+  absent. So re-running a loader is not a refresh: `router.invalidate()` on the
+  "api is unreachable" card produced *zero* requests, and the Retry button did
+  nothing until a full page reload. Refetching the key is what retries.
+- **A key must mean one thing forever.** `["policy", null]` meant *no cluster*
+  before one existed and *cluster X* after, because `null` resolves to "the
+  first cluster" server-side. One entry, two answers. The dashboard loader
+  resolves the id against the `shell` first, by the same rule the cluster bar
+  uses, so the two cannot disagree either.
+- **A session change removes entries, it does not mark them stale.** Signing in,
+  signing out and switching org replace *who is asking*, so `invalidateSession`
+  refetches what is mounted — the reader keeps seeing something — and drops what
+  is not. Marking an unmounted entry stale would not stop the next loader from
+  rendering the previous org's recommendations.
+- **`initialData` cannot seed a loader that re-runs** — it fills only an *empty*
   entry, so after connecting a cluster the cache keeps the pre-connect value.
-- The client is constructed **exactly once**, in `getRouter()`, carried in
-  route context, and read back out by the provider. A second `new QueryClient`
-  in the root component gives the loaders one cache and the components another.
-- `useQuery`, not `useSuspenseQuery`. Sign out and the org link *unmount* this
-  page, and a suspending child lets React hold the previous tree — a signed-out
-  user kept looking at the signed-in dashboard.
-- `staleTime` is `0` deliberately: `ensureQueryData` refetches only what it
-  considers stale, so anything higher makes `router.invalidate()` quietly stop
-  refreshing inside that window.
+- **The client is constructed exactly once**, in `getRouter()`, carried in route
+  context, and read back out by the provider. A second `new QueryClient` in the
+  root component gives the loaders one cache and the components another.
+- **`useQuery`, not `useSuspenseQuery`.** Sign out and the org link *unmount*
+  the dashboard, and a suspending child lets React hold the previous tree — a
+  signed-out user kept looking at the signed-in dashboard.
+- **`staleTime` is 30s**, and the reason is narrow: it is the only setting that
+  decides whether mounting refetches, and mounting is what happens right after
+  hydration. At `0` every page load re-fetched everything the server had just
+  sent (measured: four browser calls per dashboard load, now zero). Half a
+  minute is for changes *someone else* made; own mutations invalidate their key
+  and refetch regardless. It stays under `gcTime`, or an inactive entry is
+  collected while still counted fresh.
 
-**Adoption is partial.** The dashboard's reads are converted; the shell loader
-and fourteen mutations across the org, auth and cluster forms still call server
-functions directly and end in `router.invalidate()`. Tracked in the project
-board, not finished here.
+#### Mutations
+
+Every write is a `useMutation` whose invalidation fires only when the api says
+something moved — a refused mode change has nothing to refetch, and a refused
+disconnect must not deselect a cluster that is still connected. Components own
+the interaction; the route that renders them owns which key to invalidate,
+because only the route knows whether a change is org-scoped (`shell`) or
+session-scoped (everything). `isPending` replaced the hand-rolled `busy` flags
+in the auth, connect and policy forms.
 
 ### 14.3 Components
 
@@ -810,7 +855,7 @@ submit `/` directly) if the marketing site ever grows more pages.
 | D19 | **"Cannot tell" is never spelled "all clear"** | Jul 2026. Losing a cluster for days or weeks used to end badly: `$collStats`/`$indexStats` counters are cumulative since mongod started, so a restart during the observe window made `current − baseline` negative, which failed the minimum-ops check and read as *no regression* — the drop then proceeded on evidence that no longer existed, with the pre-flight's `$indexStats` check equally reset. The gate now returns REGRESSED / STABLE / **UNOBSERVABLE**; an unobservable window un-hides and re-proposes (which also ends the case of an index left hidden through an outage), and the create-side watch re-baselines instead of graduating unchecked. Separately, usage findings now require a continuous, current history (≥ 3 snapshots, no hole over 48h) — during a gap a busy index is indistinguishable from a dead one — and repeat failure alerts are capped at one per cluster+task per day | Locked |
 | D23 | **The observe window scales to the index's age, not just its usage** | Jul 2026. The window already stretched for periodic usage and shrank for long-proven idleness, but both keyed on the history's *span*, which conflated two different things: how long we have watched, and how long the index has existed. A hand-made ad-hoc index — created, used once by whoever made it, forgotten — has a short span, so it got the full flat month before removal, the slowest possible treatment for the clearest possible case. Two rules added: an index that appeared while we were watching and has never been used is observed roughly as long as it has existed (≥ 7d, ≤ policy), since its entire life is on record and there is no hidden history to wait out; and an index in place ≥ 2× the policy window that saw real use gets 1.5× the policy, because whatever wanted it may want it again on a cadence longer than anything recorded. Age is only claimed when the index first appears at least a day after the cluster's earliest snapshot — collection starts at onboarding, so otherwise every index on a new cluster would look newborn and get fast-tracked, which is the warmup hazard rather than a fix for it | Locked |
 | D24 | Api served under `/api`, on the dashboard's origin | The cookie is the whole argument: two origins means CORS plus `SameSite=None`, which by definition attaches the session cookie to cross-site requests. One host with `/api` and `/` path rules makes it first-party instead. Required `setGlobalPrefix("api")` first — better-auth sits on Fastify at `/api/auth`, controllers sat at bare paths, and no single proxy rule covered both | Locked |
-| D25 | Server state through TanStack Query, keyed by what changes it | Three keys — pipeline, telemetry, policy — rather than one blob, so approving a recommendation stops refetching the latency series. The loader writes through the router's query client instead of returning data to re-seed: one cache entry, not two that drift | Locked |
+| D25 | Server state through TanStack Query, keyed by what changes it | Started as three keys — pipeline, telemetry, policy — rather than one blob, so approving a recommendation stops refetching the latency series. Loaders write through the router's query client instead of returning data to re-seed: one cache entry, not two that drift. Extended Aug 2026 to the whole app: a fourth key, `shell`, and every mutation a `useMutation` with a targeted invalidation, so `router.invalidate()` exists nowhere in `apps/web/src`. Three corrections came out of finishing it, all in §14.2. The cache was never reaching the browser — the router serializes loader *return values*, and a loader that fills the cache returns nothing, so every read the server did was done again on hydration (`@tanstack/react-router-ssr-query` fixes it). `ensureQueryData` does **not** refetch stale data, only absent data, which made the "api is unreachable" Retry button measurably inert and means a session change has to *remove* the previous session's entries rather than mark them stale. And a key resolved from "the first cluster" meant two different clusters at two different times, which only a zero `staleTime` was hiding | Revised |
 | D26 | `minCount` is a floor **and** a rate | Three sightings meant two different things: `$queryStats` accumulates for the life of the store, the profiler is a ring a busy collection fills in minutes. Both windows turn out to be measurable — `firstSeenTimestamp` and the oldest `ts` — so both are measured. Fortnightly admits a weekly report and rejects a handful of runs since March | Locked |
 | D22 | **One auto-approval control, not two** | Jul 2026. `autoApply` (boolean) and `autoApplyScore` (threshold) read like a switch and its dial but were mutually exclusive branches, and the boolean won: setting both silently discarded the number the owner had typed directly beneath the checkbox. The boolean also promoted `ADVISORY_REVIEW` rows, which the score path explicitly excluded — and an approved advisory is worse than useless, because `classify` only deletes and re-inserts PROPOSED rows, so it leaves the refresh pool and is never re-evaluated even after the index starts being used again. `autoApply` is deleted: `autoApplyScore` alone means null = a human approves everything, 0 = everything auto-approves, 1-100 = a confidence floor, advisories never at any setting. Strictly more expressive than the pair, and both bugs stop existing rather than being fixed. Migration carries `auto_apply = true` across as threshold 0 — the behaviour that was actually running | Locked |
 | D21 | **The change window picks itself when unset** | Jul 2026. An unset window used to mean "run elective changes at any hour", which is the worst default available: the one moment a drop's brief collection lock is least welcome is peak traffic, and the owners least likely to configure a window are the ones least able to absorb that. The engine now derives one from the cluster's own `latency_samples` — cumulative counters differenced, bucketed into the four 6h slots of the UTC day, quietest slot wins — and re-derives it after every collect so it tracks a workload that moves. Six hours is the honest resolution: collect runs every 6h, so claiming an hour-level window would be precision the evidence does not have. It refuses to guess rather than guessing badly: three clean observations per bucket minimum, the quiet slot must be ≤ 75% of peak (a flat day yields nothing), and intervals crossing a counter reset or a collection gap are discarded. Stored in `inferred_window_*`, apart from the owner's columns, so an explicit setting always wins and clearing it returns to auto instead of freezing the last guess | Locked |

@@ -278,9 +278,9 @@ everything; every mutation is owner-only. Invites are one-time tokens with a
 
 ## Stack
 
-Turbo monorepo · NestJS + Fastify (api) · TanStack Start + shadcn (web) ·
-better-auth · Drizzle + PostgreSQL · oRPC contracts (zod 4) · graphile-worker ·
-Biome · strict TypeScript (no `any`, no `as`, no lint-ignore).
+Turbo monorepo · NestJS + Fastify (api) · TanStack Start + TanStack Query +
+shadcn (web) · better-auth · Drizzle + PostgreSQL · oRPC contracts (zod 4) ·
+graphile-worker · Biome · strict TypeScript (no `any`, no `as`, no lint-ignore).
 
 ```
 apps/api                control plane
@@ -293,9 +293,16 @@ apps/web                dashboard
   src/routes/app.tsx    the /app shell — auth gate, cluster bar, org switcher
   src/routes/app.index  the cluster dashboard
   src/routes/app.org    members, roles, invites, plan
-  src/lib/query.ts      the query client and its keys
+  src/lib/query.ts      the query client, its four keys, and invalidateSession
+  src/lib/shell.ts      the shell query every signed-in page reads
+  src/router.tsx        the one query client, and the SSR dehydrate/hydrate wiring
 packages/contracts      oRPC + zod contracts shared by api and web
 ```
+
+Route loaders are the SSR entry point and write **through** the query client, so
+the server render and the browser read one cache entry; mutations invalidate a
+key rather than re-running loaders. `docs/architecture.md` §14.2 has the four
+keys and the four things that turned out to be load-bearing.
 
 Everything engine-specific sits behind the ports in `src/engine`, so PostgreSQL
 and SQL Server adapters can slot in without pipeline changes — the data model
@@ -339,8 +346,8 @@ yet. Migration creates schemas, so migration creates both.
 in CI. Releasing is `git tag v0.2.0 && git push --tags`, and the release
 workflow refuses a tag whose version the tree does not carry.
 
-**Four test layers**, currently 315 api unit, 83 web unit, 55 integration and
-17 end-to-end. `npm run test` runs the first two without any infra: the api's
+**Four test layers**, currently 315 api unit, 88 web unit, 55 integration and
+19 end-to-end. `npm run test` runs the first two without any infra: the api's
 pure decision engine, and the web app's components in jsdom with the server
 functions mocked at the `~/lib/app-server` boundary — what the browser does
 with an answer, not whether the answer was fetched. `npm run test:int -w
@@ -356,11 +363,13 @@ The layers catch different things, and the top ones are not decoration. The
 end-to-end suite found that the api's session cookie was being percent-encoded
 a second time on its way through the web server, so every request after signing
 in came back 401 — both sides correct on their own, the defect in the hand-off.
-The Kind run found that the chart could not install at all: its migration hook
-referenced a ServiceAccount and a Secret that hooks run before, and the api's
-auth signing key was written into the Secret and never handed to a container.
-`helm lint` passed throughout. Rendering valid YAML and being installable are
-different questions.
+It also found the dashboard drawing itself twice: the server fetched everything,
+the browser hydrated against an empty query cache and fetched it all again. Both
+renders were correct, so only a browser could see it. The Kind run found that the
+chart could not install at all: its migration hook referenced a ServiceAccount
+and a Secret that hooks run before, and the api's auth signing key was written
+into the Secret and never handed to a container. `helm lint` passed throughout.
+Rendering valid YAML and being installable are different questions.
 
 **House rule: the api and the web app run clean.** No errors and no warnings in
 server logs, build output, or the browser console. A warning is a defect — fix

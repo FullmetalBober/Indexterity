@@ -18,18 +18,33 @@ export function createAppQueryClient(): QueryClient {
         // Refetching because a window regained focus buys a round trip to
         // redraw identical numbers.
         refetchOnWindowFocus: false,
-        // Zero on purpose, and load-bearing: it is what makes a query refetch
-        // when the component reading it mounts. Navigating back to the
-        // dashboard, or arriving on it after a mutation elsewhere, refreshes
-        // what it draws because of this and not because of the loader.
+        // This is the only setting that decides whether mounting a component
+        // refetches what it reads, and mounting is what happens right after
+        // hydration — so at zero, every page load asked the api for everything
+        // a second time, milliseconds after the server had asked for it, and
+        // threw the first answer away. The SSR payload carries each entry's
+        // dataUpdatedAt from the server, so any window at all ends that.
         //
-        // The loader specifically cannot be relied on for that:
-        // ensureQueryData resolves with cached data whenever there IS cached
-        // data, stale or not — it fetches only when the entry is absent. So a
-        // non-zero window here would leave a page showing its previous answer
-        // with nothing to correct it. Holding data between renders is what the
-        // cache is for; deciding it is still fresh is not.
-        staleTime: 0,
+        // Thirty seconds, because nothing here needs to be fresher than that
+        // without something saying so:
+        //
+        //   own changes    every mutation invalidates its key, which forces a
+        //                  refetch whatever this is set to
+        //   the collector  runs hours apart
+        //   the worker     ticks in the background
+        //   a teammate     invites, renames, changes a role — the only case
+        //                  this window is really for, and half a minute after
+        //                  a navigation is soon enough to see it
+        //
+        // What makes a window safe at all is that a session change removes the
+        // previous session's entries rather than marking them stale — see
+        // invalidateSession. Without that, signing in would show the last
+        // account's dashboard for the length of this.
+        //
+        // Deliberately under gcTime (5 minutes): a window longer than that
+        // would let an inactive entry be collected while still counted fresh,
+        // which is a window that does nothing.
+        staleTime: 30_000,
         // A failed read renders as an empty panel rather than an error, so two
         // more attempts only delay that.
         retry: 1,
