@@ -67,7 +67,7 @@ Do **not** compete on auto-create on Atlas. Compete on safe cleanup everywhere.
 | Data fetching (web) | **TanStack Query** (+ `@tanstack/react-router-ssr-query`) | every read and every write; the ssr-query package carries the cache across SSR (§14.2) |
 | Job queue | **graphile-worker** | Postgres-backed jobs (no Redis) |
 | Crypto | **@noble/ciphers** | envelope encryption for secrets |
-| Metrics | **OpenTelemetry** (`@opentelemetry/sdk-metrics` + Prometheus exporter, wired once in `packages/metrics`) | api, worker and web each scraped on their own port (§15.1) |
+| Metrics | **OpenTelemetry** (`@opentelemetry/sdk-metrics` + Prometheus exporter, wired once in `packages/metrics`) | api, worker and web each scraped on their own port (§15.1); alerts ship with the chart (§15.2) |
 | Container | **Docker** | separate api/web images, compose for dev |
 
 Postgres stores **our** state. The databases we manage are the customers'
@@ -914,6 +914,37 @@ Instrumentation is the vendor-neutral API, so exporting to an OTLP collector
 instead of a scrape endpoint is a change to `packages/metrics` alone. Pod CPU and
 memory come from the platform; nothing here duplicates them.
 
+### 15.2 Alerts
+
+The chart ships them (`metrics.prometheusRule`, off by default like the
+ServiceMonitor since both need the Operator CRDs), grouped by the question they
+answer: is the schedule running, is work piling up, can we still reach the
+clusters, is the safety pipeline meaningful, is the control plane healthy, what are
+readers seeing. Thresholds are values; the stale-schedule windows are the crontab
+in `jobs/runner.ts` plus room for one missed tick, so the two have to move
+together.
+
+Three of them are the reason this is in the chart rather than left to whoever
+deploys it, because the obvious rule is wrong:
+
+- **`increase()` cannot see a dead process.** When the worker stops, its series go
+  stale — and a stale series matches no `== 0` comparison, so the intuitive
+  "no successes in 30 minutes" rule is silent in precisely the worst case.
+  `absent_over_time(indexterity_clusters_unreachable[10m])` is what fires, keyed on
+  a gauge only the process running the pipeline ever reports.
+- **Alert on the `schedule*` dispatchers, not the per-cluster tasks.**
+  `scheduleCollect` ticks on cron unconditionally; `collect` only runs if a cluster
+  exists, so a rule watching it pages the moment the last one is offboarded.
+- **`IndexterityControlPlaneDatabaseUnreachable` covers a gap in the probes.**
+  `/api/health` returns `ok` without touching Postgres, so neither liveness nor
+  readiness notices a lost database. A rising
+  `indexterity_metrics_scrape_errors_total` does, and it fires with no traffic at
+  all — which is when nobody would otherwise find out.
+
+A rule with a typo installs cleanly and then never fires, which `helm lint` and
+`kubeconform` both accept, so CI renders the chart and runs `promtool check rules`
+over it.
+
 ---
 
 ## 16. Engineering standards
@@ -972,6 +1003,7 @@ memory come from the platform; nothing here duplicates them.
 | D16 | **Engine ports** extracted for future PostgreSQL/SQL Server support (§9) | Jul 2026. `IndexCollector`/`IndexExecutor`/`EngineSession` moved to `src/engine/ports.ts`; adapters register per `clusters.engine` (enum ready, MONGODB the only implementation); the pool, jobs, and API speak only the ports. Capability flags (`hideIndexes`, `provisionScopedUsers`) mark where engines genuinely differ — notably PostgreSQL has no reversible hide, so its adapter will need an alternative observe stage. Behavior-preserving: the untouched integration suite (25/25) passed on the refactor | Locked |
 | D17 | **Dynamic observe window** + recurrence floor | Jul 2026. The observe window is decided per drop at hide time from the index's own usage history (`analysis/observe.ts`, stored in `recommendations.observe_days`, reason in the audit trail): periodic usage extends to 2× the largest activity gap (≤ 90d) so a monthly job gets a full cycle inside the window; zero usage across ≥ 2× the baseline shortens to half (≥ 7d). Policy stays the baseline and the fallback. Workload shapes now need ≥ 3 sightings to propose and ≥ 5 for instant apply — a manually-run heavy query once or twice produces nothing | Locked |
 | D27 | Internal packages compile to CJS `dist`; apps consume built output | Predictable dev/prod module resolution; Turbo orders builds via `^build` | Locked |
+| D30 | **The chart ships the alerts, not just the metrics** (§15.2) | Aug 2026. Three scrape endpoints and a blank Prometheus is not observability — it leaves every operator to derive the same queries from metric names they have to discover first, and two of those queries are ones a careful person still gets wrong. `increase()` cannot see a dead process: a stopped worker's series go stale, and a stale series matches no `== 0` comparison, so the intuitive "no successes recently" rule is silent in the one case that matters (`absent_over_time` on a gauge only that process reports is what fires). And the schedule lives in the `schedule*` dispatchers, not the per-cluster tasks — `collect` legitimately stops when the last cluster is offboarded, so a rule watching it pages on a successful offboarding. Also folded in: the api's health endpoint answers `ok` without touching Postgres, so a lost database is invisible to both probes and needs an alert of its own. Rules are validated in CI with `promtool`, because a typo'd expression passes `helm lint` and `kubeconform`, installs cleanly, and then never fires | Locked |
 | D29 | **The dashboard server reports three things, and per-function metrics are not one of them** (§15.1) | Aug 2026. D28 covered the api and the worker, which left the layer the reader waits on unmeasured. Most of what the dashboard does is already visible from the api's side — every server function call lands there — so the question was which of the remainder is worth a seam. Three are: render time per route pattern, a response the api never heard about (a loader that threw, a 404), and the api measured from this end of the network, which is the only place a *partial* api failure is recorded at all, because the loaders catch everything and render `EMPTY_PIPELINE` rather than an error. One seam serves all three: `src/server.ts`, SSR-only by construction, which also keeps the SDK out of the browser bundle. Per-function metrics were built, worked, and were **removed**: a server function here is one to three api calls and almost no work of its own, so its duration is those calls plus noise, and naming it cost a second framework seam (global *function* middleware — request middleware cannot see a direct SSR invocation — plus an SSR-guarded import in `src/start.ts`). The instrument that restates another one is the one to cut. Extracting `packages/metrics` came first regardless, so the exporter stays one decision rather than three | Locked |
 | D28 | **Metrics on a second port, instrumented through OpenTelemetry** (§15.1) | Aug 2026. There were none: a service that hides and drops indexes on other people's production clusters could not state how many clusters it currently cannot reach, how long its queue is, how many drops are mid-observe, how often the regression gate fires, or what its dead-letter rate is. OpenTelemetry rather than a Prometheus client library so the exporter is a decision in one file — the chart ships a ServiceMonitor today, and an install that wants an OTLP collector should not need a rewrite. A second port rather than a route under `/api` because the endpoint has no auth and the ingress publishes the api host. Two things fell out of writing it: queue depth belongs in SQL over `graphile_worker.jobs`, not in worker-held counters that vanish on restart and report zero when the worker is *gone*; and the unreachable count has no source other than the worker's own memory, because an unreachable cluster is a handled condition (§7.4.1) that the queue records as a success | Locked |
 

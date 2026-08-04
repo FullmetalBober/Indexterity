@@ -121,6 +121,33 @@ metrics:
     scrapeTimeout: ""
     relabelings: []
     metricRelabelings: []
+  # Alerting rules for the failures that are otherwise silent: a schedule that
+  # stopped running, a worker that is gone, observation being thrown away, the api
+  # having lost Postgres. Same CRD requirement as the ServiceMonitor, so also off
+  # by default.
+  #
+  # The stale-schedule windows come from the crontab in jobs/runner.ts — change
+  # one there and the matching threshold here has to move with it.
+  prometheusRule:
+    enabled: false
+    # Extra labels, for an Operator that selects PrometheusRules by label.
+    labels: {}
+    thresholds:
+      # A runnable job no worker has claimed for this long. `apply` and `probe`
+      # tick every five minutes, so fifteen means the worker is down or saturated.
+      queueAgeSeconds: 900
+      # Permanently failed jobs sitting in the queue. Retention prunes them after
+      # a window, so a standing pile is real rather than history.
+      deadLetterBacklog: 5
+      # Fraction of the fleet unreachable at once. One cluster is the customer's
+      # problem and they have already been emailed; half of them is ours.
+      unreachableFleetRatio: 0.5
+      # Auth 429s per second. Either a brute-force attempt or a real customer
+      # behind NAT hitting the shared budget — both want a human.
+      authRateLimited: 0.5
+      # Regression gate rejections per day before it stops looking like bad luck
+      # and starts looking like the engine proposing bad drops.
+      regressionsPerDay: 3
 
 # Runs `node dist/migrate.js` as a pre-install/pre-upgrade hook, before any new
 # pod starts. Disable only if you apply migrations out of band.
