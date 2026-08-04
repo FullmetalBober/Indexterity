@@ -1073,8 +1073,15 @@ over it.
   programmatic compiler API return; also unblocks reverting api to the Nest CLI
   (see D13).
 
-- **`@thallesp/nestjs-better-auth`** — evaluated Aug 2026 (#29), **not adopted**,
-  and the reason is measured rather than argued. On Fastify the module serves
+- **`@thallesp/nestjs-better-auth`** — evaluated Aug 2026 (#29), **not adopted**.
+  It is what better-auth's own NestJS page recommends, but that page is pointing
+  at a community package rather than a first-party integration, and it says the
+  library has "beta support for Fastify" — which is the adapter we run. Its
+  setup instruction (`NestFactory.create(AppModule, { bodyParser: false })`) is
+  Express-shaped and not what the Fastify path does; that path removes and
+  re-registers Fastify's content-type parsers instead.
+
+  The reason for the "no" is measured rather than argued. On Fastify the module serves
   better-auth through middie middleware instead of a Fastify route, and
   `@fastify/rate-limit` only sees routes. Spiked against the real api: every
   other endpoint still throttles (21 of 25 requests to `/api/clusters` got a 429
