@@ -1,4 +1,3 @@
-import { useMutation } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useState } from "react";
 import { Alert, AlertDescription } from "~/components/ui/alert";
@@ -6,7 +5,7 @@ import { Button } from "~/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
 import { Input } from "~/components/ui/input";
 import { Label } from "~/components/ui/label";
-import { resetPassword } from "../lib/auth";
+import { useResetPassword } from "../lib/queries/mutations/auth";
 
 // Landing page for the emailed reset link: better-auth's callback redirects
 // here with ?token=, and the new password is submitted with that token.
@@ -26,15 +25,10 @@ function ResetPasswordPage() {
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState(false);
 
-  const reset = useMutation({
-    mutationFn: () => resetPassword({ data: { token, newPassword: password } }),
-    onMutate: () => setError(null),
-    onSuccess: (result) => {
-      if (result.ok) setDone(true);
-      else setError(result.error ?? "reset failed");
-    },
-    onError: () => setError("reset failed"),
-  });
+  const reset = useResetPassword(
+    { token, newPassword: password },
+    { onStart: () => setError(null), onDone: () => setDone(true), onError: setError },
+  );
 
   function submit() {
     // Checked here rather than by the api, which only ever sees one password.

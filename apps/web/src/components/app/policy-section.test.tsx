@@ -41,8 +41,8 @@ beforeEach(() => {
 describe("PolicySection", () => {
   it("saves the toggles the reader actually set", async () => {
     const user = userEvent.setup();
-    const onSaved = vi.fn();
-    renderInApp(<PolicySection policy={policy} onSaved={onSaved} />);
+    const { queryClient } = renderInApp(<PolicySection policy={policy} />);
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
 
     await user.click(screen.getByLabelText("Workload analysis"));
     await user.click(screen.getByRole("button", { name: "Save policy" }));
@@ -54,14 +54,16 @@ describe("PolicySection", () => {
       observeWindowDays: 30,
     });
     expect(toastSuccess).toHaveBeenCalled();
-    expect(onSaved).toHaveBeenCalled();
+    // Keyed on the cluster the form is showing, which is the cluster the
+    // dashboard resolved — the same entry the form was filled from.
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["policy", "c1"] });
   });
 
   // A window with only one end is not a window. Persisting half of it would
   // leave the engine with a start and no stop, or the reverse.
   it("drops a half-set change window rather than persisting one end", async () => {
     const user = userEvent.setup();
-    renderInApp(<PolicySection policy={policy} onSaved={vi.fn()} />);
+    renderInApp(<PolicySection policy={policy} />);
 
     await user.type(screen.getByLabelText("Change window (UTC hours)"), "2");
     await user.click(screen.getByRole("button", { name: "Save policy" }));
@@ -74,7 +76,7 @@ describe("PolicySection", () => {
 
   it("keeps a window once both ends are set", async () => {
     const user = userEvent.setup();
-    renderInApp(<PolicySection policy={policy} onSaved={vi.fn()} />);
+    renderInApp(<PolicySection policy={policy} />);
 
     await user.type(screen.getByLabelText("Change window (UTC hours)"), "2");
     await user.type(screen.getByLabelText("Change window end hour"), "6");
@@ -90,7 +92,7 @@ describe("PolicySection", () => {
   // everything — so the field must never collapse them.
   it("distinguishes an empty auto-approve score from zero", async () => {
     const user = userEvent.setup();
-    renderInApp(<PolicySection policy={policy} onSaved={vi.fn()} />);
+    renderInApp(<PolicySection policy={policy} />);
     const score = screen.getByLabelText("Auto-approve score ≥");
 
     expect(screen.getByText(/nothing is approved without you/)).toBeInTheDocument();
@@ -104,7 +106,7 @@ describe("PolicySection", () => {
 
   it("warns that very little qualifies above the recommended threshold", async () => {
     const user = userEvent.setup();
-    renderInApp(<PolicySection policy={policy} onSaved={vi.fn()} />);
+    renderInApp(<PolicySection policy={policy} />);
 
     await user.type(screen.getByLabelText("Auto-approve score ≥"), "90");
     expect(screen.getByText(/Above ~85 very little qualifies/)).toBeInTheDocument();
@@ -118,14 +120,14 @@ describe("PolicySection", () => {
       message: "the FREE plan does not include workload analysis",
     });
     const user = userEvent.setup();
-    const onSaved = vi.fn();
-    renderInApp(<PolicySection policy={policy} onSaved={onSaved} />);
+    const { queryClient } = renderInApp(<PolicySection policy={policy} />);
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
 
     await user.click(screen.getByRole("button", { name: "Save policy" }));
 
     expect(toastError).toHaveBeenCalledWith("the FREE plan does not include workload analysis");
     expect(toastSuccess).not.toHaveBeenCalled();
-    expect(onSaved).not.toHaveBeenCalled();
+    expect(invalidate).not.toHaveBeenCalled();
   });
 
   // A rejected promise must land in the same place as { ok: false }, or the
@@ -133,7 +135,7 @@ describe("PolicySection", () => {
   it("treats a thrown server function as a failed save", async () => {
     savePolicy.mockRejectedValue(new Error("network"));
     const user = userEvent.setup();
-    renderInApp(<PolicySection policy={policy} onSaved={vi.fn()} />);
+    renderInApp(<PolicySection policy={policy} />);
 
     await user.click(screen.getByRole("button", { name: "Save policy" }));
 
@@ -145,7 +147,6 @@ describe("PolicySection", () => {
     renderInApp(
       <PolicySection
         policy={{ ...policy, inferredWindowReason: "traffic is flat across the day" }}
-        onSaved={vi.fn()}
       />,
     );
     expect(screen.getByText("traffic is flat across the day")).toBeInTheDocument();

@@ -1,6 +1,6 @@
 import { createRouter, Link } from "@tanstack/react-router";
 import { setupRouterSsrQueryIntegration } from "@tanstack/react-router-ssr-query";
-import { createAppQueryClient } from "./lib/query";
+import { createAppQueryClient } from "./lib/queries/client";
 import { routeTree } from "./routeTree.gen";
 
 // Friendly fallbacks instead of the framework's developer screens.

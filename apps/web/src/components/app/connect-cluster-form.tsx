@@ -1,6 +1,4 @@
 import type { ConnectionDiagnosis } from "@repo/contracts";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { PrivilegeList } from "~/components/app/privilege-list";
 import { Alert, AlertDescription, AlertTitle } from "~/components/ui/alert";
@@ -8,12 +6,13 @@ import { Button } from "~/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
 import { Input } from "~/components/ui/input";
 import { Label } from "~/components/ui/label";
-import { checkConnection, connectCluster, provisionCluster } from "~/lib/app-server";
-import { queryKeys } from "~/lib/query";
+import {
+  useCheckConnection,
+  useConnectCluster,
+  useProvisionCluster,
+} from "~/lib/queries/mutations/cluster";
 
 export function ConnectClusterForm() {
-  const navigate = useNavigate();
-  const queryClient = useQueryClient();
   const [name, setName] = useState("");
   const [connString, setConnString] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -23,56 +22,39 @@ export function ConnectClusterForm() {
     connectionString: string;
   } | null>(null);
 
-  // Preflight: ask the api what these credentials may do before storing them.
-  const check = useMutation({
-    mutationFn: (connectionString: string) => checkConnection({ data: connectionString }),
-    onMutate: () => {
-      setError(null);
-      setDiagnosis(null);
-      setProvisioned(null);
-    },
-    onSuccess: (result) => {
-      if (result.ok) setDiagnosis(result.diagnosis);
-      else setError(result.message);
-    },
-    onError: () => setError("could not check the connection"),
-  });
+  // Every path starts by clearing what the last one said, so a stale error
+  // cannot sit above a fresh answer.
+  function onStart() {
+    setError(null);
+  }
 
-  async function finish(result: { ok: boolean; message: string | null; id: string | null }) {
-    if (!result.ok) {
-      setError(result.message);
-      return;
-    }
+  // A connect succeeded: empty the form, but keep any provisioned string, which
+  // is the only copy the reader will ever see.
+  function onConnected() {
     setName("");
     setConnString("");
     setDiagnosis(null);
-    // The shell first, then the URL: the new cluster has to be in the list
-    // before the selection points at it, or the bar has a moment of finding
-    // nothing under ?cluster= and drawing "No cluster connected" instead.
-    await queryClient.invalidateQueries({ queryKey: queryKeys.shell() });
-    if (result.id !== null) await navigate({ to: "/app", search: { cluster: result.id } });
   }
 
-  const connectAsIs = useMutation({
-    mutationFn: () => connectCluster({ data: { name, connectionString: connString } }),
-    onMutate: () => setError(null),
-    onSuccess: finish,
-    onError: () => setError("failed to connect cluster"),
+  const check = useCheckConnection({
+    onStart: () => {
+      onStart();
+      setDiagnosis(null);
+      setProvisioned(null);
+    },
+    onDiagnosis: setDiagnosis,
+    onError: setError,
   });
 
-  // Consent path: the admin string is used once to create the scoped user and
-  // is never stored.
-  const provision = useMutation({
-    mutationFn: () => provisionCluster({ data: { name, adminConnectionString: connString } }),
-    onMutate: () => setError(null),
-    onSuccess: async (result) => {
-      if (result.ok && result.username !== null && result.connectionString !== null) {
-        setProvisioned({ username: result.username, connectionString: result.connectionString });
-      }
-      await finish(result);
-    },
-    onError: () => setError("failed to provision the cluster"),
-  });
+  const connectAsIs = useConnectCluster(
+    { name, connectionString: connString },
+    { onStart, onConnected, onError: setError },
+  );
+
+  const provision = useProvisionCluster(
+    { name, adminConnectionString: connString },
+    { onStart, onConnected, onError: setError, onProvisioned: setProvisioned },
+  );
 
   // One flag over three mutations: any of them in flight means the form is
   // waiting on the api, and the second click would be about stale fields.

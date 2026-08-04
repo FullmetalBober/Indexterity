@@ -5,9 +5,8 @@
 // A layout route rather than a single page, so the org page stops paying for
 // a cluster's latency series and the dashboard stops paying for the member
 // list. Each child fetches what it draws.
-import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { createFileRoute, Link, Outlet, useNavigate } from "@tanstack/react-router";
-import { toast } from "sonner";
+import { useQueryClient } from "@tanstack/react-query";
+import { createFileRoute, Link, Outlet } from "@tanstack/react-router";
 import { AuthForm } from "~/components/app/auth-form";
 import { ClusterBar } from "~/components/app/cluster-bar";
 import { Button } from "~/components/ui/button";
@@ -19,10 +18,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from "~/components/ui/select";
-import { switchOrgFn } from "~/lib/app-server";
-import { invalidateSession, queryKeys } from "~/lib/query";
-import { shellQuery, useShell } from "~/lib/shell";
-import { signOut } from "../lib/auth";
+import { invalidateSession } from "~/lib/queries/client";
+import { queryKeys } from "~/lib/queries/keys";
+import { useSignOut } from "~/lib/queries/mutations/auth";
+import { useSwitchOrg } from "~/lib/queries/mutations/org";
+import { selectCluster, shellQuery, useShell } from "~/lib/queries/shell";
 
 export const Route = createFileRoute("/app")({
   validateSearch: (search: Record<string, unknown>): { cluster?: string } =>
@@ -39,33 +39,9 @@ export const Route = createFileRoute("/app")({
 function AppShell() {
   const data = useShell();
   const { cluster: selected } = Route.useSearch();
-  const navigate = useNavigate();
   const queryClient = useQueryClient();
-
-  // Signing out and switching org both replace the session the whole cache was
-  // an answer to — see invalidateSession. Signing in, below, is the third.
-  const signOutMutation = useMutation({
-    mutationFn: () => signOut(),
-    // onSettled, not onSuccess: after an attempt at signing out, whether the
-    // cookie is gone is the server's answer to give, not ours to assume.
-    onSettled: () => invalidateSession(queryClient),
-  });
-
-  const switchOrg = useMutation({
-    mutationFn: (orgId: string) => switchOrgFn({ data: orgId }),
-    onSuccess: async (result) => {
-      if (!result.ok) {
-        // Nothing moved, so nothing is refetched and the selection stays.
-        toast.error("Org switch failed");
-        return;
-      }
-      toast.success(`Switched to ${result.name ?? "org"}`);
-      // The selected cluster belongs to the previous org — reset the selection.
-      await navigate({ to: "/app", search: {} });
-      await invalidateSession(queryClient);
-    },
-    onError: () => toast.error("Org switch failed"),
-  });
+  const signOut = useSignOut();
+  const switchOrg = useSwitchOrg();
 
   if (!data.authed) {
     if (data.apiDown) {
@@ -94,13 +70,13 @@ function AppShell() {
         </main>
       );
     }
-    return <AuthForm onDone={() => void invalidateSession(queryClient)} />;
+    // Signing in is a session change like signing out and switching org: every
+    // cached answer belonged to whoever was here before.
+    return <AuthForm onSignedIn={() => void invalidateSession(queryClient)} />;
   }
 
   const { clusters, orgs } = data;
-  // Which of them is on screen comes from the URL, not from the shell: the
-  // shell says what exists, and "none selected" means the first one.
-  const cluster = clusters.find((entry) => entry.id === selected) ?? clusters[0] ?? null;
+  const cluster = selectCluster(clusters, selected);
 
   return (
     <main className="mx-auto max-w-4xl p-8">
@@ -110,11 +86,7 @@ function AppShell() {
           {cluster === null ? (
             <p className="mt-1 text-muted-foreground">No cluster connected</p>
           ) : (
-            <ClusterBar
-              cluster={cluster}
-              clusters={clusters}
-              onChanged={() => void queryClient.invalidateQueries({ queryKey: queryKeys.shell() })}
-            />
+            <ClusterBar cluster={cluster} clusters={clusters} />
           )}
         </div>
         <div className="flex items-center gap-2">
@@ -135,7 +107,7 @@ function AppShell() {
               </SelectContent>
             </Select>
           ) : null}
-          <Button variant="outline" size="sm" onClick={() => signOutMutation.mutate()}>
+          <Button variant="outline" size="sm" onClick={() => signOut.mutate()}>
             Sign out
           </Button>
         </div>

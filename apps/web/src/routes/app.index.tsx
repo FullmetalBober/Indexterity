@@ -4,9 +4,8 @@
 // Everything here is about ONE cluster. The shell around it — which cluster,
 // which org, sign out — belongs to the /app layout, and the org page is its
 // own route, so this loader fetches only what this page draws.
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
-import { toast } from "sonner";
 import { ConnectClusterForm } from "~/components/app/connect-cluster-form";
 import { badgeVariant, DeltaCell, dropsOn, fmtBytes, fmtMicros } from "~/components/app/format";
 import { PolicySection } from "~/components/app/policy-section";
@@ -22,17 +21,16 @@ import {
   TableHeader,
   TableRow,
 } from "~/components/ui/table";
-import {
-  approveRecommendation,
-  loadClusterPolicy,
-  loadPipeline,
-  loadTelemetry,
-  rollbackRecommendation,
-  unhideRecommendation,
-} from "~/lib/app-server";
 import { formatTimestamp, useMounted } from "~/lib/hydration";
-import { queryKeys } from "~/lib/query";
-import { shellQuery, useShell } from "~/lib/shell";
+import {
+  useApproveRecommendation,
+  useRollbackRecommendation,
+  useUnhideRecommendation,
+} from "~/lib/queries/mutations/recommendations";
+import { EMPTY_PIPELINE, pipelineQuery } from "~/lib/queries/pipeline";
+import { EMPTY_POLICY, policyQuery } from "~/lib/queries/policy";
+import { selectCluster, shellQuery, useShell } from "~/lib/queries/shell";
+import { EMPTY_TELEMETRY, telemetryQuery } from "~/lib/queries/telemetry";
 import { LineChart, SERIES_PALETTE } from "../components/latency-chart";
 
 export const Route = createFileRoute("/app/")({
@@ -60,21 +58,11 @@ export const Route = createFileRoute("/app/")({
   // cluster the page is about.
   loader: async ({ deps, context }) => {
     const shell = await context.queryClient.ensureQueryData(shellQuery());
-    const clusters = shell.authed ? shell.clusters : [];
-    const id = (clusters.find((entry) => entry.id === deps.cluster) ?? clusters[0])?.id ?? null;
+    const id = selectCluster(shell.authed ? shell.clusters : [], deps.cluster)?.id ?? null;
     await Promise.all([
-      context.queryClient.ensureQueryData({
-        queryKey: queryKeys.pipeline(id),
-        queryFn: () => loadPipeline({ data: id }),
-      }),
-      context.queryClient.ensureQueryData({
-        queryKey: queryKeys.telemetry(id),
-        queryFn: () => loadTelemetry({ data: id }),
-      }),
-      context.queryClient.ensureQueryData({
-        queryKey: queryKeys.policy(id),
-        queryFn: () => loadClusterPolicy({ data: id }),
-      }),
+      context.queryClient.ensureQueryData(pipelineQuery(id)),
+      context.queryClient.ensureQueryData(telemetryQuery(id)),
+      context.queryClient.ensureQueryData(policyQuery(id)),
     ]);
     return { clusterId: id };
   },
@@ -82,25 +70,9 @@ export const Route = createFileRoute("/app/")({
   component: Dashboard,
 });
 
-// Only reached if the cache were somehow empty; the loader fills it first.
-const EMPTY = {
-  pipeline: {
-    recommendations: [],
-    roi: { freedBytes: 0, indexesDropped: 0, estimatedMonthlyUsd: 0, attribution: [] },
-    activity: [],
-  },
-  telemetry: {
-    latency: { collections: [] },
-    latencySeries: { collections: [] },
-    collectionStats: { collections: [] },
-  },
-  policy: { policy: null },
-};
-
 function Dashboard() {
   const shell = useShell();
   const { clusterId: id } = Route.useLoaderData();
-  const queryClient = useQueryClient();
   const mounted = useMounted();
 
   // The loader already put all three in the cache, so these resolve without
@@ -108,51 +80,13 @@ function Dashboard() {
   // useQuery, not useSuspenseQuery: the loader has already put all three in the
   // cache so there is nothing to wait for, and suspending here would let React
   // hold the previous tree during a navigation that is unmounting this page.
-  const { data: pipeline = EMPTY.pipeline } = useQuery({
-    queryKey: queryKeys.pipeline(id),
-    queryFn: () => loadPipeline({ data: id }),
-  });
-  const { data: telemetry = EMPTY.telemetry } = useQuery({
-    queryKey: queryKeys.telemetry(id),
-    queryFn: () => loadTelemetry({ data: id }),
-  });
-  const { data: policyData = EMPTY.policy } = useQuery({
-    queryKey: queryKeys.policy(id),
-    queryFn: () => loadClusterPolicy({ data: id }),
-  });
+  const { data: pipeline = EMPTY_PIPELINE } = useQuery(pipelineQuery(id));
+  const { data: telemetry = EMPTY_TELEMETRY } = useQuery(telemetryQuery(id));
+  const { data: policyData = EMPTY_POLICY } = useQuery(policyQuery(id));
 
-  const refetchPipeline = () => queryClient.invalidateQueries({ queryKey: queryKeys.pipeline(id) });
-
-  // Each of these used to end in router.invalidate(), which re-ran every
-  // loader on the route to redraw one table.
-  const approve = useMutation({
-    mutationFn: (recId: string) => approveRecommendation({ data: recId }),
-    onSuccess: (result) => {
-      if (result.ok) toast.success("Approved — enters the pipeline on the next tick");
-      else toast.error("Approve failed — are you an owner, and is the API up?");
-      return refetchPipeline();
-    },
-    onError: () => toast.error("Approve failed — are you an owner, and is the API up?"),
-  });
-  const unhide = useMutation({
-    mutationFn: (recId: string) => unhideRecommendation({ data: recId }),
-    onSuccess: (result) => {
-      if (result.ok)
-        toast.success("Index un-hidden — this drop won't be proposed again for 90 days");
-      else toast.error("Could not un-hide — the cluster may be unreachable or read-only");
-      return refetchPipeline();
-    },
-    onError: () => toast.error("Could not un-hide — the cluster may be unreachable or read-only"),
-  });
-  const undo = useMutation({
-    mutationFn: (recId: string) => rollbackRecommendation({ data: recId }),
-    onSuccess: (result) => {
-      if (result.ok) toast.success("Undo complete — the index was rebuilt");
-      else toast.error("Undo failed — the cluster may be unreachable or read-only");
-      return refetchPipeline();
-    },
-    onError: () => toast.error("Undo failed — the cluster may be unreachable or read-only"),
-  });
+  const approve = useApproveRecommendation(id);
+  const unhide = useUnhideRecommendation(id);
+  const undo = useRollbackRecommendation(id);
 
   if (!shell.authed) return null;
 
@@ -438,13 +372,7 @@ function Dashboard() {
           </Table>
         </section>
       ) : null}
-      {policy !== null ? (
-        <PolicySection
-          key={policy.clusterId}
-          policy={policy}
-          onSaved={() => void queryClient.invalidateQueries({ queryKey: queryKeys.policy(id) })}
-        />
-      ) : null}
+      {policy !== null ? <PolicySection key={policy.clusterId} policy={policy} /> : null}
       <ConnectClusterForm />
     </>
   );

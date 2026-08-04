@@ -293,8 +293,8 @@ apps/web                dashboard
   src/routes/app.tsx    the /app shell — auth gate, cluster bar, org switcher
   src/routes/app.index  the cluster dashboard
   src/routes/app.org    members, roles, invites, plan
-  src/lib/query.ts      the query client, its four keys, and invalidateSession
-  src/lib/shell.ts      the shell query every signed-in page reads
+  src/lib/queries       the query layer: the client, the four keys, one file per
+                        key, and mutations/ grouped by what they change
   src/router.tsx        the one query client, and the SSR dehydrate/hydrate wiring
 packages/contracts      oRPC + zod contracts shared by api and web
 ```

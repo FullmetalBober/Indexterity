@@ -1,7 +1,5 @@
-import { useMutation } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
-import { toast } from "sonner";
 import { ConfirmButton } from "~/components/confirm-button";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
@@ -14,8 +12,12 @@ import {
   SelectValue,
 } from "~/components/ui/select";
 import { Tooltip, TooltipContent, TooltipTrigger } from "~/components/ui/tooltip";
-import { disconnectCluster, rotateConnection, setClusterMode } from "~/lib/app-server";
 import { useMounted } from "~/lib/hydration";
+import {
+  useDisconnectCluster,
+  useRotateConnection,
+  useSetClusterMode,
+} from "~/lib/queries/mutations/cluster";
 
 interface ClusterOption {
   readonly id: string;
@@ -28,12 +30,6 @@ interface ClusterOption {
 // Anything older than this means the numbers on screen predate a gap in
 // collection — say so rather than letting them read as current.
 const STALE_AFTER_HOURS = 48;
-
-// Said the same way whether the api refused or never answered, because from the
-// reader's side those are the same event.
-const MODE_FAILED = "Mode change failed (owner only)";
-const DISCONNECT_FAILED = "Disconnect failed (owner only)";
-const ROTATION_FAILED = "rotation failed";
 
 function staleness(lastCollectedAt: string | null): string | null {
   if (lastCollectedAt === null) return "never collected";
@@ -48,11 +44,9 @@ function staleness(lastCollectedAt: string | null): string | null {
 export function ClusterBar({
   cluster,
   clusters,
-  onChanged,
 }: {
   cluster: ClusterOption;
   clusters: readonly ClusterOption[];
-  onChanged: () => void;
 }) {
   const navigate = useNavigate();
   const [rotateOpen, setRotateOpen] = useState(false);
@@ -61,59 +55,13 @@ export function ClusterBar({
   // resolves after hydration rather than differing between the two renders.
   const stale = useMounted() ? staleness(cluster.lastCollectedAt) : null;
 
-  // Each of these used to end in the caller's router.invalidate(). onChanged is
-  // now one key — the shell, which is where a cluster's name, mode and
-  // provisioned user are read from — and it fires only when the api says
-  // something moved. A refused mode change leaves nothing to refetch.
-  const toggleMode = useMutation({
-    mutationFn: (readOnly: boolean) =>
-      setClusterMode({ data: { clusterId: cluster.id, readOnly } }),
-    onSuccess: (result, readOnly) => {
-      if (!result.ok) {
-        toast.error(MODE_FAILED);
-        return;
-      }
-      toast.success(
-        readOnly ? "Cluster is read-only again" : "Live mode enabled — the engine may now write",
-      );
-      onChanged();
-    },
-    onError: () => toast.error(MODE_FAILED),
-  });
-
-  const rotate = useMutation({
-    mutationFn: (connectionString: string) =>
-      rotateConnection({ data: { clusterId: cluster.id, connectionString } }),
-    onSuccess: (result) => {
-      if (!result.ok) {
-        toast.error(result.message ?? ROTATION_FAILED);
-        return;
-      }
-      toast.success("Connection string rotated — history preserved");
+  const toggleMode = useSetClusterMode(cluster.id);
+  const disconnect = useDisconnectCluster(cluster.id);
+  const rotate = useRotateConnection(cluster.id, {
+    onRotated: () => {
       setRotateOpen(false);
       setRotateString("");
-      onChanged();
     },
-    onError: () => toast.error(ROTATION_FAILED),
-  });
-
-  const disconnect = useMutation({
-    mutationFn: () => disconnectCluster({ data: cluster.id }),
-    onSuccess: async (result) => {
-      if (!result.ok) {
-        // The cluster is still there, so deselecting it would be a lie.
-        toast.error(DISCONNECT_FAILED);
-        return;
-      }
-      toast.success(
-        result.unhidden > 0
-          ? `Disconnected — ${result.unhidden} hidden ${result.unhidden === 1 ? "index" : "indexes"} restored`
-          : "Cluster disconnected",
-      );
-      await navigate({ to: "/app", search: {} });
-      onChanged();
-    },
-    onError: () => toast.error(DISCONNECT_FAILED),
   });
 
   return (
