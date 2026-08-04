@@ -4,14 +4,13 @@ Dashboard:
 {{- if .Values.ingress.enabled }}
   {{ include "indexterity.webOrigin" . }}
 {{- else }}
-  WARNING: ingress.enabled is false, and the dashboard needs one origin to work.
-  The browser calls the api itself, at /api on the host that served the page, so
-  a port-forward straight to the web Service reaches a dashboard whose every
-  read and every sign-in 404s. The landing page still renders.
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "indexterity.fullname" . }}-web {{ .Values.web.service.port }}:{{ .Values.web.service.port }}
+  then open http://localhost:{{ .Values.web.service.port }}
 
-  Enable the ingress, or put your own reverse proxy in front with the same two
-  rules it uses: /api to {{ include "indexterity.fullname" . }}-api, / to
-  {{ include "indexterity.fullname" . }}-web. Then set web.publicUrl to that origin.
+  This works without an ingress: the web pods answer /api themselves by
+  forwarding it to the api, so the browser still sees one origin and the session
+  cookie is still first-party. It costs one hop per call, which an ingress /api
+  rule removes. Set web.publicUrl to whatever origin you actually reach it on.
 {{- end }}
 
 Workloads:

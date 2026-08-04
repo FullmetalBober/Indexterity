@@ -52,17 +52,22 @@ each one must be re-onboarded. Store it outside the cluster. To rotate, add
                      ┌── /api ──► api ──► PostgreSQL
 browser ──► ingress ─┤              ▲        ▲
                      └── /  ───► web ┘       │   (SSR reads, in-cluster Service)
-                                             │
+                                 └──────┘    │   (and /api if no ingress rule)
                                   worker ────┴──► customer MongoDB clusters
 ```
 
-**One host, two paths, and the ingress is load-bearing.** The browser calls the
-api itself — that is what makes the session cookie first-party — so `/api` must
-reach the api on the *same* host that serves the dashboard. The ingress template
-does this by default and there is no fallback if it does not: a split origin is a
-cookie the api never receives.
+**One host, two paths.** The browser calls the api itself — that is what makes
+the session cookie first-party — so `/api` has to answer on the same host that
+serves the dashboard. The ingress template does that, and the api answers
+directly.
 
-The api is therefore publicly reachable on that path. Its rate limiting, origin
+Without an ingress it still works: the web pods answer `/api` themselves and
+forward it, so the browser still sees one origin. That costs one hop per call,
+which the ingress rule removes. `indexterity_web_requests_total{kind="api"}` is
+non-zero exactly when the passthrough is carrying calls — a useful check that
+the rule is doing its job.
+
+With the ingress rule in place the api is publicly reachable on that path. Its rate limiting, origin
 checks and auth guard are the only line of defence now rather than the second one
 behind an unroutable address; nothing about them changed, but their importance
 did. `ingress.api.*` adds a *second* hostname for callers outside the browser and

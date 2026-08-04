@@ -89,9 +89,12 @@ services:
         condition: service_healthy
 
   # One origin for the browser, the same shape the ingress gives production:
-  # /api to the api, everything else to the dashboard. The relay the web server
-  # used to run is gone, so this is what makes the session cookie first-party —
-  # and it means `podman-compose up` is not a different topology from the chart.
+  # /api to the api, everything else to the dashboard.
+  #
+  # The app would work without it — the web server answers /api itself when
+  # nothing in front does — but then this stack would be exercising the
+  # one-hop path and never the zero-hop one production runs. The e2e suite
+  # covers the passthrough; this covers the proxy. Both get used.
   proxy:
     image: docker.io/library/nginx:1-alpine
     # nginx resolves both upstreams when it starts and exits if either name does

@@ -876,6 +876,48 @@ Auth is `better-auth/react`'s own client (`lib/auth-client.ts`) with no
 `/api/auth`, which is where the api serves it. Writing an origin there would be
 a second copy of the deployment's address to keep in step.
 
+#### One origin is the app's property, not the deployment's
+
+The browser calling the api needs both on one origin, and that is arranged twice
+over — the difference between them is a hop, not whether it works:
+
+| | `/api` answered by | hops |
+|---|---|---|
+| proxy in front (ingress, compose nginx) | the api | 0 |
+| nothing in front | the dashboard server, forwarding | 1 |
+
+`src/lib/api-passthrough.ts` is the second row: intercepted in `src/server.ts`
+before the router sees it, since the router owns no `/api` route and would 404.
+One transparent forward, streamed rather than buffered so SSE (#22) needs no
+rewrite, with `Set-Cookie` passed through byte for byte — same origin in and
+out, so unlike the relay it replaced there is nothing to re-encode.
+
+This was a deliberate reversal. The first cut made same-origin a **deployment
+requirement** and put the rule in four places: the ingress, compose, the vite
+dev proxy and a node proxy in front of the e2e suite. Moving it into the app
+deleted two of those four and turned "the operator must get this right" into
+"the operator may make this faster". The alternative considered and rejected was
+supporting genuinely split origins, which costs `SameSite=None` (the CSRF
+defence, given up by definition), CORS with credentials, an origin check the
+oRPC pipeline has never needed, and runtime api config in the browser bundle.
+
+Two rules it enforces, both security-relevant:
+
+- **`x-forwarded-*` and `x-real-ip` from the client are stripped** unless
+  `TRUST_PROXY=true`. The api rate-limits per IP off those headers, so
+  forwarding one a browser could have written lets a caller pick a fresh address
+  per request and never reach a limit. Same switch and same reasoning as the
+  api's own.
+- **`Origin` is never rewritten**, because better-auth checks it against
+  `trustedOrigins`.
+
+It is observable on purpose: `indexterity_web_requests_total{kind="api"}` counts
+only what the passthrough answered, so a non-zero rate in a deployment that has
+an ingress `/api` rule is that rule not working — a hop being paid on every call
+that nothing else would report. The e2e suite runs with no proxy at all, which
+is what keeps this path from rotting: the proxy shape is covered by compose and
+the chart.
+
 ---
 
 ## 15. Deployment
@@ -886,8 +928,9 @@ a second copy of the deployment's address to keep in step.
 - **docker-compose** (dev) — `postgres` + `api` + `web` + `proxy`, with **hot
   reload** via bind mounts and Turbo watch. PostgreSQL runs in compose. The
   nginx `proxy` owns port 3000 and applies the ingress's own rule (`/api` to the
-  api, `/` to the dashboard), so local dev is not a second topology — see §14.5
-  for why the app has no fallback if it is.
+  api, `/` to the dashboard), so local dev is not a second topology. Kept even
+  though the passthrough would make it optional: it is what exercises the
+  zero-hop shape, the way the e2e suite exercises the other one (§14.5).
 
 ### 15.1 Metrics
 
@@ -1060,7 +1103,7 @@ over it.
 | D16 | **Engine ports** extracted for future PostgreSQL/SQL Server support (§9) | Jul 2026. `IndexCollector`/`IndexExecutor`/`EngineSession` moved to `src/engine/ports.ts`; adapters register per `clusters.engine` (enum ready, MONGODB the only implementation); the pool, jobs, and API speak only the ports. Capability flags (`hideIndexes`, `provisionScopedUsers`) mark where engines genuinely differ — notably PostgreSQL has no reversible hide, so its adapter will need an alternative observe stage. Behavior-preserving: the untouched integration suite (25/25) passed on the refactor | Locked |
 | D17 | **Dynamic observe window** + recurrence floor | Jul 2026. The observe window is decided per drop at hide time from the index's own usage history (`analysis/observe.ts`, stored in `recommendations.observe_days`, reason in the audit trail): periodic usage extends to 2× the largest activity gap (≤ 90d) so a monthly job gets a full cycle inside the window; zero usage across ≥ 2× the baseline shortens to half (≥ 7d). Policy stays the baseline and the fallback. Workload shapes now need ≥ 3 sightings to propose and ≥ 5 for instant apply — a manually-run heavy query once or twice produces nothing | Locked |
 | D27 | Internal packages compile to CJS `dist`; apps consume built output | Predictable dev/prod module resolution; Turbo orders builds via `^build` | Locked |
-| D31 | **The browser calls the api directly; the web server is not a BFF** (§14.5) | Aug 2026. 28 `createServerFn` wrappers existed for one reason — two origins, so a direct call would need CORS with credentials and a `SameSite=None` session cookie. #28 put the api under `/api` on the dashboard's host, which removes the reason, so the wrappers, `decodeOnce` (#16, moot) and one hop per call all go. The alternative was keeping the relay as a documented fallback for split-origin installs, and that was **rejected**: supporting both means maintaining both, and the fallback is the path nothing exercises. So same-origin is a requirement, and every way of running the app applies the same rule — ingress, an nginx service in compose, the vite dev proxy, a node proxy in front of the e2e suite. Two costs, both accepted: the api is publicly reachable, so its rate limiting, origin checks and auth guard are the only line of defence rather than the second (#21 in the same breath); and a self-hoster on two ports has to put a proxy in front. It also unblocks #22 — SSE from the browser straight to the api is materially simpler than streaming through a relay | Locked |
+| D31 | **The browser calls the api directly; the web server is not a BFF** (§14.5) | Aug 2026. 28 `createServerFn` wrappers existed for one reason — two origins, so a direct call would need CORS with credentials and a `SameSite=None` session cookie. #28 put the api under `/api` on the dashboard's host, which removes the reason, so the wrappers, `decodeOnce` (#16, moot) and one hop per call all go. The alternative was keeping the relay as a documented fallback for split-origin installs, and that was **rejected**: supporting both means maintaining both, and the fallback is the path nothing exercises. Same-origin therefore has to hold, and it is the APP that guarantees it: the dashboard server answers `/api` by forwarding it when nothing in front does (§14.5), so a split-port install still works and a proxy rule becomes a way to remove the hop rather than a prerequisite. The first cut made it a deployment requirement instead, with the rule repeated in four places; moving it into the app deleted two of them. Genuinely split origins were rejected separately — that costs `SameSite=None`, CORS with credentials, and an origin check the oRPC pipeline has never needed. The cost accepted is that the api is publicly reachable, so its rate limiting, origin checks and auth guard are the only line of defence rather than the second (#21 in the same breath). It also unblocks #22 — SSE from the browser straight to the api is materially simpler than streaming through a relay | Locked |
 | D30 | **The chart ships the alerts, not just the metrics** (§15.2) | Aug 2026. Three scrape endpoints and a blank Prometheus is not observability — it leaves every operator to derive the same queries from metric names they have to discover first, and two of those queries are ones a careful person still gets wrong. `increase()` cannot see a dead process: a stopped worker's series go stale, and a stale series matches no `== 0` comparison, so the intuitive "no successes recently" rule is silent in the one case that matters (`absent_over_time` on a gauge only that process reports is what fires). And the schedule lives in the `schedule*` dispatchers, not the per-cluster tasks — `collect` legitimately stops when the last cluster is offboarded, so a rule watching it pages on a successful offboarding. Also folded in: the api's health endpoint answers `ok` without touching Postgres, so a lost database is invisible to both probes and needs an alert of its own. Rules are validated in CI with `promtool`, because a typo'd expression passes `helm lint` and `kubeconform`, installs cleanly, and then never fires | Locked |
 | D29 | **The dashboard server reports three things, and per-function metrics are not one of them** (§15.1) | Aug 2026. D28 covered the api and the worker, which left the layer the reader waits on unmeasured. Most of what the dashboard does is already visible from the api's side — every server function call lands there — so the question was which of the remainder is worth a seam. Three are: render time per route pattern, a response the api never heard about (a loader that threw, a 404), and the api measured from this end of the network, which is the only place a *partial* api failure is recorded at all, because the loaders catch everything and render `EMPTY_PIPELINE` rather than an error. One seam serves all three: `src/server.ts`, SSR-only by construction, which also keeps the SDK out of the browser bundle. Per-function metrics were built, worked, and were **removed**: a server function here is one to three api calls and almost no work of its own, so its duration is those calls plus noise, and naming it cost a second framework seam (global *function* middleware — request middleware cannot see a direct SSR invocation — plus an SSR-guarded import in `src/start.ts`). The instrument that restates another one is the one to cut. Extracting `packages/metrics` came first regardless, so the exporter stays one decision rather than three | Locked |
 | D28 | **Metrics on a second port, instrumented through OpenTelemetry** (§15.1) | Aug 2026. There were none: a service that hides and drops indexes on other people's production clusters could not state how many clusters it currently cannot reach, how long its queue is, how many drops are mid-observe, how often the regression gate fires, or what its dead-letter rate is. OpenTelemetry rather than a Prometheus client library so the exporter is a decision in one file — the chart ships a ServiceMonitor today, and an install that wants an OTLP collector should not need a rewrite. A second port rather than a route under `/api` because the endpoint has no auth and the ingress publishes the api host. Two things fell out of writing it: queue depth belongs in SQL over `graphile_worker.jobs`, not in worker-held counters that vanish on restart and report zero when the worker is *gone*; and the unreachable count has no source other than the worker's own memory, because an unreachable cluster is a handled condition (§7.4.1) that the queue records as a success | Locked |

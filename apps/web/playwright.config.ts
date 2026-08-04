@@ -10,20 +10,21 @@ import { defineConfig, devices } from "@playwright/test";
 // start the api too (../api/dist/main.js). Both must be built first; the
 // test:e2e script does that.
 //
-// Three servers, not two. The browser calls the api directly now, and the
-// session cookie only reaches the api because both answer on ONE origin — so
-// the suite puts the same /api-and-everything-else split in front of them that
-// the ingress does in production and nginx does in compose. The two ports below
-// are internal: nothing in a test addresses them.
+// Two servers and no proxy between them, deliberately. The browser calls the
+// api directly and the session cookie only reaches it because both answer on
+// ONE origin — and here that origin is the dashboard's own, because the web
+// server answers /api itself (src/lib/api-passthrough.ts).
+//
+// That is the topology under test on purpose. Production puts a proxy in front
+// and the passthrough never runs; this suite is what stops the fallback from
+// rotting unnoticed. The proxy shape is covered by compose and the ingress.
 const WEB_PORT = Number(process.env.E2E_WEB_PORT ?? 3210);
 const API_PORT = Number(process.env.E2E_API_PORT ?? 3211);
-const ORIGIN_PORT = Number(process.env.E2E_ORIGIN_PORT ?? 3212);
 
-const WEB_INTERNAL = `http://127.0.0.1:${WEB_PORT}`;
+// Not addressed by any test — the api is reached through the web origin.
 const API_INTERNAL = `http://127.0.0.1:${API_PORT}`;
 
-// The only address the browser knows.
-export const WEB_URL = `http://127.0.0.1:${ORIGIN_PORT}`;
+export const WEB_URL = `http://127.0.0.1:${WEB_PORT}`;
 
 const apiEnv = {
   ...process.env,
@@ -84,7 +85,7 @@ export default defineConfig({
     },
     {
       command: "node .output/server/index.mjs",
-      url: WEB_INTERNAL,
+      url: WEB_URL,
       // API_URL is the web server's own SSR reads, which go straight to the api
       // rather than back out through the proxy — there is no cookie to make
       // first-party server-side, only the caller's to forward.
@@ -93,23 +94,6 @@ export default defineConfig({
         PORT: String(WEB_PORT),
         API_URL: API_INTERNAL,
         WEB_ORIGIN: WEB_URL,
-      },
-      reuseExistingServer: false,
-      stdout: "pipe",
-      stderr: "pipe",
-      timeout: 60_000,
-    },
-    {
-      // Answers on WEB_URL and is the only address the browser uses. Its
-      // readiness check goes through to the api, so it also proves the /api
-      // route is wired before a single test runs.
-      command: "node ./e2e/origin-proxy.mjs",
-      url: `${WEB_URL}/api/health`,
-      env: {
-        ...process.env,
-        E2E_ORIGIN_PORT: String(ORIGIN_PORT),
-        E2E_API_URL: API_INTERNAL,
-        E2E_WEB_URL: WEB_INTERNAL,
       },
       reuseExistingServer: false,
       stdout: "pipe",

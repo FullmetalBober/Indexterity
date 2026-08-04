@@ -356,7 +356,10 @@ in CI. Releasing is `git tag v0.2.0 && git push --tags`, and the release
 workflow refuses a tag whose version the tree does not carry.
 
 **Four test layers**, currently 321 api unit, 94 web unit, 55 integration and
-19 end-to-end. `npm run test` runs the first two without any infra: the api's
+19 end-to-end. The e2e suite deliberately runs with **no proxy in front**, so the
+passthrough is the path under test — the proxy shape is covered by compose and
+the chart, and a fallback nothing exercises is a fallback that is broken when
+someone needs it. `npm run test` runs the first two without any infra: the api's
 pure decision engine, and the web app's components in jsdom with the api client
 mocked at the `~/lib/api` boundary — what the browser does with an answer, not
 whether the answer was fetched. That boundary moved when the relay went: it was
@@ -432,25 +435,37 @@ in the api for a one-container install. Hosted should keep them separate: an api
 rollout would otherwise abort an in-flight index build, and the alert cooldown
 assumes a single worker.
 
-**One origin, and it is required.** The api serves everything under `/api`, and
-the deployment puts it on the dashboard's host: `/api` to the api, `/` to the
-web app. A browser then sees a single origin, so the session cookie is
-first-party and needs neither CORS nor `SameSite=None`. A second hostname for
-the api is still available for callers outside the browser, and off by default.
+**One origin, guaranteed by the app.** The browser calls the api itself, so the
+session cookie only works if both answer on one origin. That is arranged twice
+over, and the difference is a hop rather than whether it works:
 
-This is the one thing a deployment has to get right, because the dashboard has
-no fallback path: the browser calls the api itself, and a split origin means a
-cookie the api never receives. Every way of running the app applies the same
-rule — the ingress in Kubernetes, an nginx container in `docker-compose.yml`
-(`deploy/compose/nginx.conf`), the vite dev server's proxy for a bare
-`npm run dev`, and a 40-line node proxy in front of the Playwright suite so the
-tests exercise the real shape. Running web and api on two ports is not a
-supported topology; put a reverse proxy in front, as the compose file does.
+- **A proxy in front** routes `/api` to the api and `/` to the dashboard. The
+  ingress does this, and so does the nginx service in `docker-compose.yml`
+  (`deploy/compose/nginx.conf`). Zero hops — the api answers directly.
+- **Nothing in front?** The dashboard server answers `/api` itself and forwards
+  it (`src/lib/api-passthrough.ts`). One transparent hop, no configuration, and
+  the cookie is still first-party because the origin never changed.
 
-The cost is that the api is publicly reachable. Its rate limiting, origin checks
-and auth guard used to be a second line of defence behind an unreachable
-address; they are now the only line. Nothing about them changed, but their
-importance did.
+So `helm install` without an ingress works, a port-forward works, and two ports
+on a laptop work. Set up the proxy rule when you want the hop back; the
+`indexterity_web_requests_total{kind="api"}` counter is non-zero exactly when
+you have not, which is how a missing ingress rule stops being silent.
+
+This is *not* the relay that used to live here. That was 28 typed wrappers
+re-setting cookies onto a different origin, which needed hand-rolled decoding to
+survive being encoded twice. This is one pass-through: same origin in and out,
+`Set-Cookie` forwarded byte for byte, nothing to re-encode.
+
+Two things it does not do. It strips `x-forwarded-*` and `x-real-ip` from the
+client unless `TRUST_PROXY=true`, because forwarding a header a browser could
+have written lets a caller pick its own address and never reach the api's
+per-IP rate limit. And it never rewrites `Origin`, which better-auth checks
+against its trusted origins.
+
+The cost of the browser reaching the api at all is that the api is publicly
+reachable. Its rate limiting, origin checks and auth guard used to be a second
+line of defence behind an unreachable address; they are now the only line.
+Nothing about them changed, but their importance did.
 
 A Helm chart is in [`deploy/helm/indexterity`](./deploy/helm/indexterity) —
 api + dashboard + worker, a pre-upgrade migration hook, ingress, and a

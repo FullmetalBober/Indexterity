@@ -6,20 +6,11 @@ import viteReact from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
 export default defineConfig({
-  server: {
-    port: 3000,
-    host: true,
-    // The browser calls the api on whatever origin served the page, so a bare
-    // `turbo dev` on the host — no ingress, no compose proxy — needs the dev
-    // server to forward /api itself. Four lines, and it means every way of
-    // running this app is the same one-origin shape.
-    //
-    // In compose nginx has already routed /api to the api and this never fires;
-    // API_URL is read anyway so the two cannot disagree about where the api is.
-    proxy: {
-      "/api": { target: process.env.API_URL ?? "http://localhost:3001", ws: true },
-    },
-  },
+  // No `server.proxy` for /api. There was one, and the passthrough in
+  // src/server.ts replaced it: dev now takes the same code path a proxy-less
+  // deployment does, so the fallback everyone relies on is the one being
+  // exercised every time anyone runs the app.
+  server: { port: 3000, host: true },
   // shadcn's generated components import through "~" (see components.json);
   // tsconfig already maps it, Vite needs telling too.
   resolve: { alias: { "~": fileURLToPath(new URL("./src", import.meta.url)) } },
