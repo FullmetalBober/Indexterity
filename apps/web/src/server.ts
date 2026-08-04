@@ -17,18 +17,26 @@ import { measureRequest } from "~/lib/metrics/requests";
 // environment alone.
 const fetch = createStartHandler(defaultStreamHandler);
 
-// Off unless METRICS_ENABLED=true. The promise is not awaited because the entry
-// must export a handler synchronously; a scrape that arrives in the millisecond
-// before the port is bound is retried by any scraper.
+// Off unless METRICS_ENABLED=true. Not awaited, because the entry has to export
+// a handler synchronously; a scrape arriving in the millisecond before the port
+// is bound is retried by any scraper.
+//
+// The catch is not decoration. An unhandled rejection ends the process in current
+// Node, so without it a port already in use would take the dashboard down — a
+// telemetry endpoint that can do that is worse than no telemetry endpoint.
 void startMetricsServer({
   info: (message) => console.info(`metrics: ${message}`),
   warn: (message) => console.warn(`metrics: ${message}`),
-}).then((server) => {
-  if (server === null) return;
-  const stop = (): void => void server.stop();
-  process.once("SIGTERM", stop);
-  process.once("SIGINT", stop);
-});
+})
+  .then((server) => {
+    if (server === null) return;
+    const stop = (): void => void server.stop();
+    process.once("SIGTERM", stop);
+    process.once("SIGINT", stop);
+  })
+  .catch((error: unknown) => {
+    console.warn(`metrics: endpoint not started — ${String(error)}`);
+  });
 
 export default createServerEntry({
   fetch: (request, ...rest) => measureRequest(request, () => fetch(request, ...rest)),
