@@ -1,14 +1,12 @@
-import { useMutation } from "@tanstack/react-query";
 import { ArrowRightIcon } from "lucide-react";
 import { useState } from "react";
-import { toast } from "sonner";
 import { Button } from "~/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
 import { Checkbox } from "~/components/ui/checkbox";
 import { Input } from "~/components/ui/input";
 import { Label } from "~/components/ui/label";
 import { Separator } from "~/components/ui/separator";
-import { savePolicy } from "~/lib/app-server";
+import { useSavePolicy } from "~/lib/queries/mutations/policy";
 
 interface PolicyView {
   readonly clusterId: string;
@@ -22,7 +20,7 @@ interface PolicyView {
 }
 
 // The engine knobs, owner-editable. Checkbox changes stage locally; Save PUTs.
-export function PolicySection({ policy, onSaved }: { policy: PolicyView; onSaved: () => void }) {
+export function PolicySection({ policy }: { policy: PolicyView }) {
   const [workloadAnalysis, setWorkloadAnalysis] = useState(policy.workloadAnalysis);
   const [instantCreate, setInstantCreate] = useState(policy.instantCreate);
   const [observeDays, setObserveDays] = useState(policy.observeWindowDays);
@@ -30,35 +28,20 @@ export function PolicySection({ policy, onSaved }: { policy: PolicyView; onSaved
   const [windowStart, setWindowStart] = useState(policy.changeWindowStartHour);
   const [windowEnd, setWindowEnd] = useState(policy.changeWindowEndHour);
 
-  // onSaved refetches the policy key, which the dashboard owns: it is keyed on
-  // the SELECTED cluster, and "none selected" is a different key from the id
-  // this form happens to be showing. Building it here would write to one entry
-  // and read from another.
-  const save = useMutation({
-    mutationFn: () =>
-      savePolicy({
-        data: {
-          clusterId: policy.clusterId,
-          workloadAnalysis,
-          instantCreate,
-          observeWindowDays: observeDays,
-          autoApplyScore: autoScore,
-          // Half-set windows are meaningless — persist only a complete pair.
-          changeWindowStartHour: windowEnd === null ? null : windowStart,
-          changeWindowEndHour: windowStart === null ? null : windowEnd,
-        },
-      }),
-    onSuccess: (result) => {
-      if (!result.ok) {
-        // The api's own reason — a plan limit reads nothing like a role problem.
-        toast.error(result.message ?? "policy not saved");
-        return;
-      }
-      toast.success("Policy saved");
-      onSaved();
-    },
-    onError: () => toast.error("policy not saved"),
-  });
+  const save = useSavePolicy();
+
+  function onSave() {
+    save.mutate({
+      clusterId: policy.clusterId,
+      workloadAnalysis,
+      instantCreate,
+      observeWindowDays: observeDays,
+      autoApplyScore: autoScore,
+      // Half-set windows are meaningless — persist only a complete pair.
+      changeWindowStartHour: windowEnd === null ? null : windowStart,
+      changeWindowEndHour: windowStart === null ? null : windowEnd,
+    });
+  }
 
   const toggles: Array<{
     id: string;
@@ -183,7 +166,7 @@ export function PolicySection({ policy, onSaved }: { policy: PolicyView; onSaved
               </p>
             ) : null}
           </div>
-          <Button onClick={() => save.mutate()} disabled={save.isPending}>
+          <Button onClick={onSave} disabled={save.isPending}>
             Save policy
           </Button>
         </div>

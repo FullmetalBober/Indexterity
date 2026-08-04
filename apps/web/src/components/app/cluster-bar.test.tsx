@@ -50,18 +50,10 @@ async function confirm(
 
 describe("ClusterBar", () => {
   it("shows read-only and live as visually different states", () => {
-    const { rerender } = renderInApp(
-      <ClusterBar cluster={cluster} clusters={[cluster]} onChanged={vi.fn()} />,
-    );
+    const { rerender } = renderInApp(<ClusterBar cluster={cluster} clusters={[cluster]} />);
     expect(screen.getByText("read-only")).toBeInTheDocument();
 
-    rerender(
-      <ClusterBar
-        cluster={{ ...cluster, readOnly: false }}
-        clusters={[cluster]}
-        onChanged={vi.fn()}
-      />,
-    );
+    rerender(<ClusterBar cluster={{ ...cluster, readOnly: false }} clusters={[cluster]} />);
     expect(screen.getByText("live")).toBeInTheDocument();
   });
 
@@ -69,7 +61,7 @@ describe("ClusterBar", () => {
   // not be one stray click away.
   it("asks before enabling live mode", async () => {
     const user = userEvent.setup();
-    renderInApp(<ClusterBar cluster={cluster} clusters={[cluster]} onChanged={vi.fn()} />);
+    renderInApp(<ClusterBar cluster={cluster} clusters={[cluster]} />);
 
     await user.click(screen.getByRole("button", { name: "Go live" }));
     expect(setClusterMode).not.toHaveBeenCalled();
@@ -81,13 +73,7 @@ describe("ClusterBar", () => {
   // Going back to read-only only ever removes permission, so it needs no gate.
   it("goes read-only without a confirmation", async () => {
     const user = userEvent.setup();
-    renderInApp(
-      <ClusterBar
-        cluster={{ ...cluster, readOnly: false }}
-        clusters={[cluster]}
-        onChanged={vi.fn()}
-      />,
-    );
+    renderInApp(<ClusterBar cluster={{ ...cluster, readOnly: false }} clusters={[cluster]} />);
 
     await user.click(screen.getByRole("button", { name: "Make read-only" }));
     expect(setClusterMode).toHaveBeenCalledWith({ data: { clusterId: "c1", readOnly: true } });
@@ -95,7 +81,7 @@ describe("ClusterBar", () => {
 
   it("asks before disconnecting, and says what happens to hidden indexes", async () => {
     const user = userEvent.setup();
-    renderInApp(<ClusterBar cluster={cluster} clusters={[cluster]} onChanged={vi.fn()} />);
+    renderInApp(<ClusterBar cluster={cluster} clusters={[cluster]} />);
 
     await user.click(screen.getByRole("button", { name: "Disconnect" }));
     expect(
@@ -107,11 +93,7 @@ describe("ClusterBar", () => {
   it("tells the reader how to revoke the scoped user it leaves behind", async () => {
     const user = userEvent.setup();
     renderInApp(
-      <ClusterBar
-        cluster={{ ...cluster, provisionedUsername: "idx_abc" }}
-        clusters={[cluster]}
-        onChanged={vi.fn()}
-      />,
+      <ClusterBar cluster={{ ...cluster, provisionedUsername: "idx_abc" }} clusters={[cluster]} />,
     );
 
     await user.click(screen.getByRole("button", { name: "Disconnect" }));
@@ -121,7 +103,7 @@ describe("ClusterBar", () => {
   it("reports restored indexes after a disconnect", async () => {
     disconnectCluster.mockResolvedValue({ ok: true, unhidden: 2, revokeCommand: null });
     const user = userEvent.setup();
-    renderInApp(<ClusterBar cluster={cluster} clusters={[cluster]} onChanged={vi.fn()} />);
+    renderInApp(<ClusterBar cluster={cluster} clusters={[cluster]} />);
 
     await confirm(user, "Disconnect", "Disconnect");
 
@@ -134,13 +116,24 @@ describe("ClusterBar", () => {
   it("does not refetch when a mode change is refused", async () => {
     setClusterMode.mockResolvedValue({ ok: false });
     const user = userEvent.setup();
-    const onChanged = vi.fn();
-    renderInApp(<ClusterBar cluster={cluster} clusters={[cluster]} onChanged={onChanged} />);
+    const { queryClient } = renderInApp(<ClusterBar cluster={cluster} clusters={[cluster]} />);
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
 
     await confirm(user, "Go live", "Go live");
 
     expect(toastError).toHaveBeenCalledWith(expect.stringContaining("owner only"));
-    expect(onChanged).not.toHaveBeenCalled();
+    expect(invalidate).not.toHaveBeenCalled();
+  });
+
+  it("refetches the shell once the mode really changed", async () => {
+    const user = userEvent.setup();
+    const { queryClient } = renderInApp(<ClusterBar cluster={cluster} clusters={[cluster]} />);
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+
+    await confirm(user, "Go live", "Go live");
+
+    // The badge is drawn from the shell, so that is the one key this moves.
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["shell"] });
   });
 
   // Deselecting a cluster that is still connected would report a disconnect
@@ -148,19 +141,19 @@ describe("ClusterBar", () => {
   it("keeps the cluster selected when the disconnect is refused", async () => {
     disconnectCluster.mockResolvedValue({ ok: false, unhidden: 0, revokeCommand: null });
     const user = userEvent.setup();
-    const onChanged = vi.fn();
-    renderInApp(<ClusterBar cluster={cluster} clusters={[cluster]} onChanged={onChanged} />);
+    const { queryClient } = renderInApp(<ClusterBar cluster={cluster} clusters={[cluster]} />);
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
 
     await confirm(user, "Disconnect", "Disconnect");
 
     expect(toastError).toHaveBeenCalledWith(expect.stringContaining("owner only"));
     expect(navigate).not.toHaveBeenCalled();
-    expect(onChanged).not.toHaveBeenCalled();
+    expect(invalidate).not.toHaveBeenCalled();
   });
 
   it("will not rotate to an empty string", async () => {
     const user = userEvent.setup();
-    renderInApp(<ClusterBar cluster={cluster} clusters={[cluster]} onChanged={vi.fn()} />);
+    renderInApp(<ClusterBar cluster={cluster} clusters={[cluster]} />);
 
     await user.click(screen.getByRole("button", { name: "Rotate string" }));
     expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
@@ -172,7 +165,7 @@ describe("ClusterBar", () => {
   it("passes the api's own reason through when a rotation is rejected", async () => {
     rotateConnection.mockResolvedValue({ ok: false, message: "cluster unreachable" });
     const user = userEvent.setup();
-    renderInApp(<ClusterBar cluster={cluster} clusters={[cluster]} onChanged={vi.fn()} />);
+    renderInApp(<ClusterBar cluster={cluster} clusters={[cluster]} />);
 
     await user.click(screen.getByRole("button", { name: "Rotate string" }));
     await user.type(screen.getByRole("textbox"), "mongodb://dead:27017");
@@ -185,11 +178,7 @@ describe("ClusterBar", () => {
   it("warns once collection has been silent for two days", async () => {
     const twoDays = new Date(NOW.getTime() - 50 * 3_600_000).toISOString();
     renderInApp(
-      <ClusterBar
-        cluster={{ ...cluster, lastCollectedAt: twoDays }}
-        clusters={[cluster]}
-        onChanged={vi.fn()}
-      />,
+      <ClusterBar cluster={{ ...cluster, lastCollectedAt: twoDays }} clusters={[cluster]} />,
     );
     expect(await screen.findByText(/last collected 2 days ago/)).toBeInTheDocument();
   });
@@ -197,37 +186,26 @@ describe("ClusterBar", () => {
   it("says nothing while collection is keeping up", () => {
     const recent = new Date(NOW.getTime() - 3 * 3_600_000).toISOString();
     renderInApp(
-      <ClusterBar
-        cluster={{ ...cluster, lastCollectedAt: recent }}
-        clusters={[cluster]}
-        onChanged={vi.fn()}
-      />,
+      <ClusterBar cluster={{ ...cluster, lastCollectedAt: recent }} clusters={[cluster]} />,
     );
     expect(screen.queryByText(/last collected/)).not.toBeInTheDocument();
   });
 
   it("distinguishes never collected from stale", async () => {
     renderInApp(
-      <ClusterBar
-        cluster={{ ...cluster, lastCollectedAt: null }}
-        clusters={[cluster]}
-        onChanged={vi.fn()}
-      />,
+      <ClusterBar cluster={{ ...cluster, lastCollectedAt: null }} clusters={[cluster]} />,
     );
     expect(await screen.findByText(/never collected/)).toBeInTheDocument();
   });
 
   it("offers a switcher only when there is more than one cluster", () => {
-    const { rerender } = renderInApp(
-      <ClusterBar cluster={cluster} clusters={[cluster]} onChanged={vi.fn()} />,
-    );
+    const { rerender } = renderInApp(<ClusterBar cluster={cluster} clusters={[cluster]} />);
     expect(screen.queryByLabelText("Select cluster")).not.toBeInTheDocument();
 
     rerender(
       <ClusterBar
         cluster={cluster}
         clusters={[cluster, { ...cluster, id: "c2", name: "Staging" }]}
-        onChanged={vi.fn()}
       />,
     );
     expect(screen.getByLabelText("Select cluster")).toBeInTheDocument();

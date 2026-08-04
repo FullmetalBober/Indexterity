@@ -749,15 +749,37 @@ All of these are load-bearing:
   and refetch regardless. It stays under `gcTime`, or an inactive entry is
   collected while still counted fresh.
 
+#### Where it lives
+
+All of it is under `src/lib/queries`, which is the app's cache topology and
+nothing else:
+
+```
+lib/queries/
+  client.ts     createAppQueryClient + invalidateSession
+  keys.ts       every key in the app
+  shell.ts      shellQuery(), useShell(), selectCluster()
+  pipeline.ts   telemetry.ts   policy.ts     one queryOptions factory each
+  mutations/
+    auth.ts   cluster.ts   org.ts   policy.ts   recommendations.ts
+```
+
+One factory per key, shared by the loader and the component that draws it. They
+were inline in both places, so each key was written twice — and a key written
+twice is two keys, one of which nothing ever fills.
+
 #### Mutations
 
 Every write is a `useMutation` whose invalidation fires only when the api says
 something moved — a refused mode change has nothing to refetch, and a refused
-disconnect must not deselect a cluster that is still connected. Components own
-the interaction; the route that renders them owns which key to invalidate,
-because only the route knows whether a change is org-scoped (`shell`) or
-session-scoped (everything). `isPending` replaced the hand-rolled `busy` flags
-in the auth, connect and policy forms.
+disconnect must not deselect a cluster that is still connected. `isPending`
+replaced the hand-rolled `busy` flags in the auth, connect and policy forms.
+
+Each hook owns the key it invalidates. Components pass only the local state a
+mutation cannot know about (a form to close, an error to show), which is why
+`ClusterBar`, `TeamSection` and `PolicySection` have no callback props: a member
+list should not have to know that leaving an org invalidates more than renaming
+one.
 
 ### 14.3 Components
 

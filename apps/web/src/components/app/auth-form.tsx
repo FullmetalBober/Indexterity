@@ -1,14 +1,13 @@
-import { useMutation } from "@tanstack/react-query";
 import { useState } from "react";
 import { Alert, AlertDescription } from "~/components/ui/alert";
 import { Button } from "~/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
 import { Input } from "~/components/ui/input";
 import { Label } from "~/components/ui/label";
-import { requestPasswordReset, signIn, signUp } from "~/lib/auth";
+import { useRequestPasswordReset, useSignIn, useSignUp } from "~/lib/queries/mutations/auth";
 import { REQUEST_ACCESS_HREF } from "~/lib/site";
 
-export function AuthForm({ onDone }: { onDone: () => void }) {
+export function AuthForm({ onSignedIn }: { onSignedIn: () => void }) {
   const [mode, setMode] = useState<"in" | "up" | "forgot">("in");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -16,53 +15,30 @@ export function AuthForm({ onDone }: { onDone: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
-  // Both credential paths end the same way, and the only difference between
-  // them is which server function is called.
-  const credentials = {
-    onMutate: () => {
-      setError(null);
-      setNotice(null);
-    },
-    onSuccess: (result: { ok: boolean; error: string | null }) => {
-      if (result.ok) onDone();
-      else setError(result.error);
-    },
-    onError: () => setError("authentication failed"),
+  // Shared by all three: clear whatever the last attempt said before making
+  // another one.
+  const onStart = () => {
+    setError(null);
+    setNotice(null);
   };
+  const credentials = { onStart, onSignedIn, onError: setError };
 
-  const signInMutation = useMutation({
-    mutationFn: () => signIn({ data: { email, password } }),
-    ...credentials,
-  });
-
-  const signUpMutation = useMutation({
-    mutationFn: () => signUp({ data: { email, password, name } }),
-    ...credentials,
-  });
-
-  const forgot = useMutation({
-    mutationFn: () => requestPasswordReset({ data: email }),
-    onMutate: () => {
-      setError(null);
-      setNotice(null);
-    },
-    // The same answer whether or not the account exists — see the test. Only a
-    // failure the api reported is worth showing.
-    onSuccess: (sent) => {
-      if (sent.ok) setNotice("If that email has an account, a reset link is on its way.");
-      else setError(sent.error ?? "request failed");
-    },
-    onError: () => setError("request failed"),
+  const signIn = useSignIn({ email, password }, credentials);
+  const signUp = useSignUp({ email, password, name }, credentials);
+  const forgot = useRequestPasswordReset(email, {
+    onStart,
+    onSent: () => setNotice("If that email has an account, a reset link is on its way."),
+    onError: setError,
   });
 
   // Replaces a busy useState that had to be cleared on all four exits from the
   // old submit(), including the ones that returned early.
-  const busy = signInMutation.isPending || signUpMutation.isPending || forgot.isPending;
+  const busy = signIn.isPending || signUp.isPending || forgot.isPending;
 
   function submit() {
     if (mode === "forgot") forgot.mutate();
-    else if (mode === "in") signInMutation.mutate();
-    else signUpMutation.mutate();
+    else if (mode === "in") signIn.mutate();
+    else signUp.mutate();
   }
 
   return (
