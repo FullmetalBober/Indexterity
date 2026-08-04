@@ -234,6 +234,28 @@ jobs:
           wait: 120s
       - uses: azure/setup-helm@v5
 
+      # The alert rules cannot be exercised by the Kind install — that needs the
+      # Prometheus Operator CRDs — and a rule with a typo'd expression installs
+      # cleanly and then never fires, which is the worst failure available to a
+      # monitoring change. promtool parses every expression instead.
+      - name: alert rules must parse
+        run: |
+          helm template rel deploy/helm/indexterity \
+            --set secrets.databaseUrl=p --set secrets.betterAuthSecret=s \
+            --set secrets.masterKey=k --set config.allowInsecureAuthUrl=true \
+            --set metrics.prometheusRule.enabled=true \
+            | python3 -c "
+          import sys, yaml
+          for doc in yaml.safe_load_all(sys.stdin):
+              if doc and doc.get('kind') == 'PrometheusRule':
+                  yaml.safe_dump({'groups': doc['spec']['groups']}, open('rules.yaml', 'w'), sort_keys=False)
+                  break
+          else:
+              raise SystemExit('no PrometheusRule rendered')
+          "
+          docker run --rm --entrypoint promtool -v "$PWD/rules.yaml:/rules.yaml:ro" \
+            prom/prometheus:v3.6.0 check rules /rules.yaml
+
       # The two builds were this workflow's longest step by a wide margin, and
       # entirely uncached — every run reinstalled every dependency inside both
       # images from scratch. buildx with the GitHub cache backend reuses the

@@ -471,6 +471,17 @@ Prometheus exporter, wired once in `packages/metrics` — pointing it at an OTLP
 collector instead is a change to that one file. Pod CPU and memory come from the
 platform, not from here.
 
+`metrics.prometheusRule.enabled=true` installs 18 alerts with the metrics, because
+a scrape endpoint nobody wrote queries against is a scrape endpoint nobody reads.
+They cover the failures that are otherwise silent — a schedule that stopped
+running logs nothing, since nothing runs. Two are shaped by traps worth knowing:
+`absent_over_time` rather than `increase` for a dead process (a stale series
+matches no `== 0` comparison, so the obvious rule is silent exactly when it
+matters), and the alerts watch the `schedule*` dispatchers rather than the
+per-cluster tasks, which stop legitimately when the last cluster is offboarded.
+`deploy/helm/indexterity/README.md` has the thresholds and the label-selector
+gotcha.
+
 ## Open
 
 Planned work lives on the [project board](https://github.com/users/FullmetalBober/projects/6),

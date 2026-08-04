@@ -74,6 +74,7 @@ server functions call the api over the in-cluster Service. Enable
 | `config.allowPrivateClusterTargets` | Set `true` when the MongoDB you manage is on a private network (the normal self-hosted case). Leave `false` for anything strangers can reach, or accounts can probe your internal network. Cloud metadata stays blocked either way |
 | `metrics.enabled` | Prometheus metrics on port `metrics.port` (9464) for all three workloads. On by default; the endpoint is never routed by the ingress |
 | `metrics.serviceMonitor.enabled` | One Prometheus Operator ServiceMonitor per workload. Off by default — it needs the `monitoring.coreos.com` CRDs, and a chart that assumes them cannot install without them |
+| `metrics.prometheusRule.enabled` | 18 alerting rules for the failures nothing else reports. Same CRD requirement, also off by default. Thresholds under `metrics.prometheusRule.thresholds` |
 
 ## Metrics
 
@@ -102,6 +103,38 @@ The endpoint carries **no authentication**, which is why it is a second port
 rather than a route on the api: an ingress that publishes the api host does not
 publish this, and cluster counts and pipeline state are operator information.
 Keep it in-cluster. `metrics.enabled=false` turns it off entirely.
+
+**If the ServiceMonitors do not appear as targets, it is the label selector**, not
+the chart. A Prometheus Operator adopts only the ServiceMonitors matching its own
+`serviceMonitorSelector` — usually `release: <your-stack-release>`. Ask it what it
+wants, then match:
+
+```bash
+kubectl get prometheus -A -o jsonpath='{range .items[*]}{.metadata.name}{": "}{.spec.serviceMonitorSelector}{"\n"}{end}'
+helm upgrade indexterity … --set metrics.serviceMonitor.labels.release=kube-prometheus-stack
+```
+
+### Alerts
+
+`metrics.prometheusRule.enabled=true` installs a `PrometheusRule` with 18 alerts,
+grouped by the question they answer: is the schedule running, is work piling up,
+can we still reach the clusters, is the safety pipeline meaningful, is the control
+plane healthy, and what are readers seeing. `metrics.prometheusRule.labels` is the
+same escape hatch as above.
+
+Every threshold is under `metrics.prometheusRule.thresholds`, and the
+stale-schedule windows are derived from the crontab in `apps/api/src/jobs/runner.ts`
+— if that schedule changes, these move with it.
+
+Two of them exist because the obvious rule does not work:
+
+- **`IndexterityWorkerNotReporting`** uses `absent_over_time`, not `increase`. When
+  a process dies its series go stale, so `increase(...) == 0` matches nothing and a
+  rule written that way is silent in exactly the case you care about most.
+- **The stale-schedule alerts watch the `schedule*` dispatchers**, not the
+  per-cluster tasks. `scheduleCollect` ticks on cron whether or not a cluster
+  exists; `collect` does not, so alerting on it fires the moment the last cluster
+  is offboarded.
 
 ## Security defaults
 
@@ -134,4 +167,16 @@ are deliberately restrictive (see `docs/architecture.md` §10.2):
 ```bash
 helm lint deploy/helm/indexterity
 helm template rel deploy/helm/indexterity --set secrets.existingSecret=s | kubeconform -strict -
+```
+
+The alert rules need their own check — a typo'd expression installs cleanly and
+then never fires, which `helm lint` and `kubeconform` both accept. CI runs this on
+every chart change:
+
+```bash
+helm template rel deploy/helm/indexterity --set secrets.existingSecret=s \
+  --set metrics.prometheusRule.enabled=true \
+  | yq 'select(.kind == "PrometheusRule") | {"groups": .spec.groups}' > /tmp/rules.yaml
+docker run --rm --entrypoint promtool -v /tmp/rules.yaml:/rules.yaml:ro \
+  prom/prometheus:v3.6.0 check rules /rules.yaml
 ```
