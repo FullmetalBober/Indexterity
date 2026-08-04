@@ -57,8 +57,8 @@ services:
       ALLOW_PRIVATE_CLUSTER_TARGETS: "true"
       SIGNUP_MODE: open
       # The DASHBOARD's origin, not this container's port: better-auth appends
-      # /api/auth itself, and the browser reaches all of it through the proxy on
-      # 3000. It is also what the reset links in emails are built from.
+      # /api/auth itself, and the browser reaches all of it on 3000. It is also
+      # what the reset links in emails are built from.
       BETTER_AUTH_URL: http://localhost:3000
       WEB_ORIGIN: http://localhost:3000
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET}
@@ -75,10 +75,10 @@ services:
       # web 9466.
       METRICS_ENABLED: "true"
     ports:
-      # Published for curl and the OpenAPI document, not for the browser — the
-      # dashboard reaches the api through the proxy, on the dashboard's origin.
-      # An auth call made straight to this port carries the wrong Origin and is
-      # refused, which is the point.
+      # Published for curl and the OpenAPI document, not for the browser. The
+      # dashboard reaches the api at /api on its OWN origin (localhost:3000),
+      # which the web server answers by forwarding. An auth call made straight
+      # to this port carries the wrong Origin and is refused, which is correct.
       - "3001:3001"
       - "9464:9464"
     volumes:
@@ -88,38 +88,16 @@ services:
       postgres:
         condition: service_healthy
 
-  # One origin for the browser, the same shape the ingress gives production:
-  # /api to the api, everything else to the dashboard.
-  #
-  # The app would work without it — the web server answers /api itself when
-  # nothing in front does — but then this stack would be exercising the
-  # one-hop path and never the zero-hop one production runs. The e2e suite
-  # covers the passthrough; this covers the proxy. Both get used.
-  proxy:
-    image: docker.io/library/nginx:1-alpine
-    # nginx resolves both upstreams when it starts and exits if either name does
-    # not resolve yet. depends_on orders the start but does not wait, so losing
-    # that race has to be survivable rather than fatal.
-    restart: unless-stopped
-    ports:
-      - "3000:80"
-    volumes:
-      - ./deploy/compose/nginx.conf:/etc/nginx/conf.d/default.conf:ro,z
-    depends_on:
-      - api
-      - web
-
   web:
     image: docker.io/library/node:26-slim
     working_dir: /app
     command: sh -c "npm install && exec npx turbo run dev --filter=@repo/web"
     environment:
       WEB_PORT: "3000"
-      # The web SERVER's own reads during SSR, which happen in this container —
-      # so the address has to be one this container can reach, not the one the
-      # browser uses. It goes straight to the api rather than back out through
-      # the proxy: there is no cookie to make first-party server-side, only one
-      # to forward.
+      # Two things read this. The web server's own SSR reads, which happen in
+      # this container — so the address has to be one this container can reach,
+      # not the one the browser uses — and the /api passthrough, which forwards
+      # the browser's calls to the same place.
       #
       # The browser no longer needs an api address at all. It calls /api on
       # whatever origin it loaded the page from, which is why the VITE_* pair
@@ -129,8 +107,13 @@ services:
       WEB_ORIGIN: http://localhost:3000
       METRICS_ENABLED: "true"
     ports:
-      # Not published on 3000: the proxy owns the browser-facing origin. This is
-      # here for scrapes only.
+      # The one origin a browser uses, /api included. There was an nginx service
+      # in front of this doing the ingress's /api split; the dashboard server
+      # answers /api itself now (apps/web/src/lib/api-passthrough.ts), so the
+      # container earned nothing but a second copy of the routing rule — in a
+      # different proxy, with different buffering and header defaults, so it did
+      # not reproduce the ingress either.
+      - "3000:3000"
       - "9466:9464"
     volumes:
       - ./:/app

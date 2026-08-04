@@ -439,15 +439,15 @@ assumes a single worker.
 session cookie only works if both answer on one origin. That is arranged twice
 over, and the difference is a hop rather than whether it works:
 
-- **A proxy in front** routes `/api` to the api and `/` to the dashboard. The
-  ingress does this, and so does the nginx service in `docker-compose.yml`
-  (`deploy/compose/nginx.conf`). Zero hops — the api answers directly.
+- **A proxy in front** routes `/api` to the api and `/` to the dashboard, which
+  is what the ingress does. Zero hops — the api answers directly.
 - **Nothing in front?** The dashboard server answers `/api` itself and forwards
   it (`src/lib/api-passthrough.ts`). One transparent hop, no configuration, and
   the cookie is still first-party because the origin never changed.
 
-So `helm install` without an ingress works, a port-forward works, and two ports
-on a laptop work. Set up the proxy rule when you want the hop back; the
+So `helm install` without an ingress works, a port-forward works, `npm run dev`
+works, and compose works — none of them needs a proxy container to put the two
+back on one origin. Set up the proxy rule when you want the hop back; the
 `indexterity_web_requests_total{kind="api"}` counter is non-zero exactly when
 you have not, which is how a missing ingress rule stops being silent.
 
