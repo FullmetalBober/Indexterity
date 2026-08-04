@@ -1073,6 +1073,46 @@ over it.
   programmatic compiler API return; also unblocks reverting api to the Nest CLI
   (see D13).
 
+- **`@thallesp/nestjs-better-auth`** — evaluated Aug 2026 (#29), **not adopted**.
+  It is what better-auth's own NestJS page recommends, but that page is pointing
+  at a community package rather than a first-party integration, and it says the
+  library has "beta support for Fastify" — which is the adapter we run. Its
+  setup instruction (`NestFactory.create(AppModule, { bodyParser: false })`) is
+  Express-shaped and not what the Fastify path does; that path removes and
+  re-registers Fastify's content-type parsers instead.
+
+  The reason for the "no" is measured. On Fastify the module serves better-auth
+  through middie middleware instead of a Fastify route, and `@fastify/rate-limit`
+  only sees routes — so `AUTH_RATE_LIMIT_MAX`, a documented operator knob set in
+  `.env.example`, the chart and both test harnesses, **silently stops doing
+  anything**. Our own integration test fails, correctly.
+
+  The first measurement said worse than that — 0 of 25 sign-in attempts throttled
+  — and it was wrong, because the spike ran without `NODE_ENV=production`.
+  better-auth enables its own limiter only in production, and with it set the
+  same probe throttles 22 of 25 at better-auth's default 3-per-10s for sensitive
+  endpoints. So adopting would not leave auth unprotected: it would *replace* our
+  bucket with a tighter one we do not control from the environment. Worth knowing
+  on its own account — the production image sets `NODE_ENV=production`, so
+  better-auth's limiter is already running alongside Fastify's today.
+  The body-parser interaction that looked like the risk turned out not to be
+  one: 59 of 60 integration tests passed, so its Fastify JSON parser handles
+  oRPC bodies. The prize was smaller than it looked, too — the module replaces
+  the 34-line mount in `main.ts`, `auth/http.ts` and `auth/session.ts`, about 57
+  lines. `auth.config.ts` is the `betterAuth()` call it takes as *input*, and
+  `tenancy.ts`, `signup-gate.ts` and `cookies.ts` are ours. Revisit if we ever
+  adopt better-auth's organization plugin: `@Roles()`, `@OrgRoles()` and
+  `@RequireActiveOrg()` are unusable while orgs live in our own `members` table,
+  and they are most of what the package offers beyond the mount.
+- **`nestjs-trpc`** — considered Aug 2026, **staying on `@orpc/nest`**. tRPC infers
+  the client's types from the server's implementation, which would replace
+  `packages/contracts` — a shared artifact both sides are checked against — with
+  a dependency on the api's internals. It would also cost the REST surface: the
+  contract carries real routes and generates the OpenAPI document that
+  `ingress.api.*` exists to expose, and `/trpc/listClusters?input=…` is not an
+  api anyone wants to consume. No pain reported with oRPC, and subscriptions are
+  not the deciding factor either — the passthrough already streams (§14.5), so
+  #22 does not need a different RPC layer.
 - **Agent mode** — phase 2. Interface designed for it from day one.
 - **Suggest-mode (`CREATE` from workload)** — higher trust tier; needs profiler
   access. Ship cleanup path first.
