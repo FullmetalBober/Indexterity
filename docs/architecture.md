@@ -67,7 +67,7 @@ Do **not** compete on auto-create on Atlas. Compete on safe cleanup everywhere.
 | Data fetching (web) | **TanStack Query** (+ `@tanstack/react-router-ssr-query`) | every read and every write; the ssr-query package carries the cache across SSR (§14.2) |
 | Job queue | **graphile-worker** | Postgres-backed jobs (no Redis) |
 | Crypto | **@noble/ciphers** | envelope encryption for secrets |
-| Metrics | **OpenTelemetry** (`@opentelemetry/sdk-metrics` + Prometheus exporter) | api and worker each scraped on their own port (§15.1) |
+| Metrics | **OpenTelemetry** (`@opentelemetry/sdk-metrics` + Prometheus exporter, wired once in `packages/metrics`) | api, worker and web each scraped on their own port (§15.1) |
 | Container | **Docker** | separate api/web images, compose for dev |
 
 Postgres stores **our** state. The databases we manage are the customers'
@@ -131,6 +131,7 @@ packages/
   contracts/    oRPC contracts + zod 4 schemas (shared types api ↔ web ↔ agent)
   auth/         better-auth config (GitHub + email/password)
   config/       shared tsconfig + Biome config
+  metrics/      OpenTelemetry provider + scrape endpoint (§15.1); instruments stay in the apps
 ```
 
 `packages/core` holds all dangerous logic as **pure functions**:
@@ -831,27 +832,38 @@ submit `/` directly) if the marketing site ever grows more pages.
 
 ### 15.1 Metrics
 
-OpenTelemetry instruments (`src/metrics`), exported to Prometheus on a **second
-port** — 9464 by default, `METRICS_PORT`, opt-in via `METRICS_ENABLED`. The api
-and the worker each serve their own `/metrics`; the chart adds a named port to
-the api Service, a headless Service for the worker (its only one — nothing calls
-the worker), and an optional ServiceMonitor for each.
+OpenTelemetry instruments, exported to Prometheus on a **second port** — 9464 by
+default, `METRICS_PORT`, opt-in via `METRICS_ENABLED`. All three workloads serve
+their own `/metrics`; the chart adds a named port to the api and web Services, a
+headless Service for the worker (its only one — nothing calls the worker), and an
+optional ServiceMonitor for each.
 
 A separate port rather than a route under `/api`, for the same reason §10 gives
-for everything else: the ingress publishes the api host, the endpoint carries no
+for everything else: the ingress publishes the app hosts, the endpoint carries no
 auth, and cluster counts, queue depth and pipeline state are operator
 information. It is reachable in-cluster until someone deliberately exposes it,
 which is also the shape a scrape target is expected to have.
 
-**The two workloads report disjoint sets**, because each can only answer for what
-it sees:
+The OpenTelemetry wiring is `packages/metrics` — one provider, one exporter, one
+`startMetricsServer`. It is a factory rather than a module with an import-time
+provider because **the caller has to own the moment the provider is installed**:
+an instrument binds to whichever provider was global when it was created, so an
+instrument built first is a no-op forever and gives no symptom. Each app has a
+one-line module that calls the factory, and its instruments import the meter from
+there, so module initialisation order does the rest. The instruments themselves
+stay in the apps (`apps/api/src/metrics`, `apps/web/src/lib/metrics`), because
+what to measure is not shared — only how to export it.
 
-| the api | the worker |
-|---|---|
-| HTTP requests and durations by route *pattern* — never the resolved URL, or one series per cluster id | job outcomes and durations off graphile-worker's own events (`success` / `retry` / `dead_letter`) |
-| Everything read from the control-plane database on collection: clusters, recommendations by state and type, queue depth per task, dead-letter backlog, age of the oldest unclaimed job | per-cluster tick outcomes, the unreachable-cluster count, regression-gate verdicts, drops executed |
+**The three workloads report disjoint sets**, because each can only answer for
+what it sees:
 
-With `RUN_WORKER=true` there is one process and it serves both halves.
+| the api | the worker | the web server |
+|---|---|---|
+| HTTP requests and durations by route *pattern* — never the resolved URL, or one series per cluster id | job outcomes and durations off graphile-worker's own events (`success` / `retry` / `dead_letter`) | document render time per route pattern, and every response including the ones the api never hears about |
+| Everything read from the control-plane database on collection: clusters, recommendations by state and type, queue depth per task, dead-letter backlog, age of the oldest unclaimed job | per-cluster tick outcomes, the unreachable-cluster count, regression-gate verdicts, drops executed | server functions by their source name, and the api measured from the other end of the network (`status="unreachable"` when it never answered) |
+
+With `RUN_WORKER=true` there is one process for the first two and it serves both
+halves.
 
 Three decisions inside that are not obvious:
 
@@ -871,9 +883,34 @@ Three decisions inside that are not obvious:
   dispatcher passes the current fleet on every fan-out, so a cluster offboarded
   while unreachable is forgotten rather than counted forever.
 
+On the web side, two more:
+
+- **The dashboard is instrumented at two seams, and each is the only one that can
+  do its job.** `src/server.ts` — a server entry vite builds for the SSR
+  environment alone — starts the listener at boot and counts every response; a
+  listener started lazily would have Prometheus report the target as down until
+  someone visited the site. Per-function metrics come from Start's **function**
+  middleware, not request middleware: during SSR a server function is invoked
+  directly, in process, with no HTTP request, so a request-level hook sees only
+  what the browser calls and silently misses every loader on a first page load.
+  Function middleware also carries the source name, which the URL does not — a
+  server function's path is a sha256 of its file and export.
+- **Nothing metrics-related may be imported from a route or a component.** The
+  browser bundle must not contain the OpenTelemetry SDK. `src/server.ts` is
+  server-only by construction; `src/start.ts` is not — it is loaded for hydration
+  too — so it imports the middleware behind `import.meta.env.SSR`, which vite
+  replaces with `false` in the client build and eliminates.
+
+Route labels are the route *pattern*, derived from the generated route tree
+(`apps/web/src/lib/metrics/routes.ts`) rather than the path that arrived: a
+counter labelled with arbitrary URLs grows a series per scanner request. The
+walk reads properties off route objects, so a test asserts it against the real
+tree — otherwise a framework change would make every request `unmatched` and
+nothing would say so.
+
 Instrumentation is the vendor-neutral API, so exporting to an OTLP collector
-instead of a scrape endpoint is a change to `src/metrics/provider.ts` alone. Pod
-CPU and memory come from the platform; nothing here duplicates them.
+instead of a scrape endpoint is a change to `packages/metrics` alone. Pod CPU and
+memory come from the platform; nothing here duplicates them.
 
 ---
 
@@ -933,6 +970,7 @@ CPU and memory come from the platform; nothing here duplicates them.
 | D16 | **Engine ports** extracted for future PostgreSQL/SQL Server support (§9) | Jul 2026. `IndexCollector`/`IndexExecutor`/`EngineSession` moved to `src/engine/ports.ts`; adapters register per `clusters.engine` (enum ready, MONGODB the only implementation); the pool, jobs, and API speak only the ports. Capability flags (`hideIndexes`, `provisionScopedUsers`) mark where engines genuinely differ — notably PostgreSQL has no reversible hide, so its adapter will need an alternative observe stage. Behavior-preserving: the untouched integration suite (25/25) passed on the refactor | Locked |
 | D17 | **Dynamic observe window** + recurrence floor | Jul 2026. The observe window is decided per drop at hide time from the index's own usage history (`analysis/observe.ts`, stored in `recommendations.observe_days`, reason in the audit trail): periodic usage extends to 2× the largest activity gap (≤ 90d) so a monthly job gets a full cycle inside the window; zero usage across ≥ 2× the baseline shortens to half (≥ 7d). Policy stays the baseline and the fallback. Workload shapes now need ≥ 3 sightings to propose and ≥ 5 for instant apply — a manually-run heavy query once or twice produces nothing | Locked |
 | D27 | Internal packages compile to CJS `dist`; apps consume built output | Predictable dev/prod module resolution; Turbo orders builds via `^build` | Locked |
+| D29 | **The dashboard server is instrumented too, at two seams** (§15.1) | Aug 2026. D28 covered the api and the worker, which left the layer the reader actually waits on unmeasured. Some of it was already visible from the api's side — every server function call lands there — but not render time per route, not a loader that threw without ever calling the api, and not the api's latency as the dashboard experiences it, which is the only measurement that includes the hop and the case where the api never answered. Extracting `packages/metrics` came first so the exporter stays one decision rather than three. Two seams because neither alone is sufficient: `src/server.ts` (SSR-only by construction) starts the listener at boot and counts every response, while per-function metrics need Start's **function** middleware — during SSR a server function is called directly with no HTTP request, so a request-level hook silently misses every loader on a first page load, and the URL carries a sha256 rather than the function's name. The browser bundle must not contain the SDK, so `src/start.ts` imports the middleware behind `import.meta.env.SSR` | Locked |
 | D28 | **Metrics on a second port, instrumented through OpenTelemetry** (§15.1) | Aug 2026. There were none: a service that hides and drops indexes on other people's production clusters could not state how many clusters it currently cannot reach, how long its queue is, how many drops are mid-observe, how often the regression gate fires, or what its dead-letter rate is. OpenTelemetry rather than a Prometheus client library so the exporter is a decision in one file — the chart ships a ServiceMonitor today, and an install that wants an OTLP collector should not need a rewrite. A second port rather than a route under `/api` because the endpoint has no auth and the ingress publishes the api host. Two things fell out of writing it: queue depth belongs in SQL over `graphile_worker.jobs`, not in worker-held counters that vanish on restart and report zero when the worker is *gone*; and the unreachable count has no source other than the worker's own memory, because an unreachable cluster is a handled condition (§7.4.1) that the queue records as a success | Locked |
 
 ### Deferred / open

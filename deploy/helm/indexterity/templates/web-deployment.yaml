@@ -36,7 +36,12 @@ spec:
           ports:
             - name: http
               containerPort: {{ .Values.web.port }}
+            {{- if .Values.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+            {{- end }}
           env:
+            {{- include "indexterity.metricsEnv" . | nindent 12 }}
             - name: PORT
               value: {{ .Values.web.port | quote }}
             # Read at runtime by the dashboard's server functions, so one image

@@ -30,6 +30,11 @@ spec:
           curl -fsS "http://{{ include "indexterity.fullname" . }}-api:{{ .Values.metrics.port }}/metrics" \
             | grep -q "^indexterity_jobs_oldest_queued_age_seconds"
           echo "api metrics ok"
+          # The dashboard server renders a page before it can report one, and the
+          # landing page above was that page.
+          curl -fsS "http://{{ include "indexterity.fullname" . }}-web:{{ .Values.metrics.port }}/metrics" \
+            | grep -q "^indexterity_web_document_duration_seconds_count"
+          echo "web metrics ok"
           {{- if .Values.worker.enabled }}
           curl -fsS "http://{{ include "indexterity.fullname" . }}-worker-metrics:{{ .Values.metrics.port }}/metrics" \
             | grep -q "^target_info"

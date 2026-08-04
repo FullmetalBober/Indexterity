@@ -15,11 +15,13 @@ Workloads:
 
 {{- if .Values.metrics.enabled }}
 
-Metrics: port {{ .Values.metrics.port }} on {{ include "indexterity.fullname" . }}-api
+Metrics: port {{ .Values.metrics.port }} on {{ include "indexterity.fullname" . }}-api,
+{{ include "indexterity.fullname" . }}-web
 {{- if .Values.worker.enabled }} and {{ include "indexterity.fullname" . }}-worker-metrics{{ end }}, path /metrics.
 {{- if .Values.metrics.serviceMonitor.enabled }}
-  A ServiceMonitor is installed for each. Scrape both — the api reports HTTP and
-  control-plane state, the worker reports job outcomes and the pipeline.
+  A ServiceMonitor is installed for each. Scrape them all — the api reports HTTP
+  and control-plane state, the worker job outcomes and the pipeline, the web
+  render time and the api as the dashboard server sees it.
 {{- else }}
   No ServiceMonitor (metrics.serviceMonitor.enabled is false). Point your own
   scraper at those ports, or port-forward one to look:

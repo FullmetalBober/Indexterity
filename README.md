@@ -430,14 +430,12 @@ api + dashboard + worker, a pre-upgrade migration hook, ingress, and a
 
 ### Metrics
 
-`METRICS_ENABLED=true` serves Prometheus metrics on port 9464 (`METRICS_PORT`),
-from the api and from the worker. The chart turns it on and can install a
-ServiceMonitor per workload; compose publishes them on 9464 and 9465.
+`METRICS_ENABLED=true` serves Prometheus metrics on port 9464 (`METRICS_PORT`)
+from all three workloads. The chart turns it on and can install a ServiceMonitor
+per workload; compose publishes them on 9464 (api), 9465 (worker) and 9466 (web).
 
-They report different halves, so scrape both. The api answers for HTTP traffic
-and for everything readable from the control-plane database; the worker answers
-for what the pipeline did. The five things a service that drops other people's
-indexes has to be able to state:
+Each answers for what only it can see, so scrape all three. The five things a
+service that drops other people's indexes has to be able to state:
 
 | question | metric |
 |---|---|
@@ -452,12 +450,20 @@ retried, nothing fails — so the queue counters cannot see it and
 `indexterity_cluster_task_runs_total{outcome=...}` is where the six ways a tick
 can end are told apart.
 
+The dashboard server reports what the api cannot: `indexterity_web_document_duration_seconds`
+is render time per route pattern, `indexterity_web_server_fn_calls_total{fn,outcome}`
+names the server function (`loadAppShell`, `savePolicy` — from the source, not the
+hashed URL), and `indexterity_web_api_requests_total{procedure,status}` is the api
+measured from the other end of the network, with `status="unreachable"` for the
+case the api can never report itself. A 500 that never reached the api shows up
+as `indexterity_web_requests_total{kind="document",status="500"}`.
+
 **The endpoint has no auth**, which is why it is a second port instead of a route
-on the api: the ingress routes the api port, so publishing the api host does not
-publish this. Instrumentation is OpenTelemetry (`@opentelemetry/sdk-metrics`)
-with the Prometheus exporter — pointing it at an OTLP collector instead is a
-change to `apps/api/src/metrics/provider.ts` alone. Pod CPU and memory come from
-the platform, not from here.
+on the app: an ingress routes the app port, so publishing a host does not publish
+this. Instrumentation is OpenTelemetry (`@opentelemetry/sdk-metrics`) with the
+Prometheus exporter, wired once in `packages/metrics` — pointing it at an OTLP
+collector instead is a change to that one file. Pod CPU and memory come from the
+platform, not from here.
 
 ## Open
 
