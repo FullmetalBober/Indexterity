@@ -32,7 +32,7 @@ import {
 } from "~/lib/app-server";
 import { formatTimestamp, useMounted } from "~/lib/hydration";
 import { queryKeys } from "~/lib/query";
-import { useShell } from "~/lib/shell";
+import { shellQuery, useShell } from "~/lib/shell";
 import { LineChart, SERIES_PALETTE } from "../components/latency-chart";
 
 export const Route = createFileRoute("/app/")({
@@ -47,9 +47,21 @@ export const Route = createFileRoute("/app/")({
   // Selecting another cluster changes these keys, so it is the key change that
   // fetches — not this loader re-running. ensureQueryData resolves with cached
   // data whenever there is any, stale or not; what refreshes an already-cached
-  // key is staleTime 0 refetching on mount, or a mutation invalidating it.
+  // key is a mutation invalidating it, or staleTime lapsing on mount.
+  //
+  // Which is why the keys are resolved here against the shell rather than
+  // keyed on the raw search param. "None selected" means the first cluster,
+  // and a key of null therefore MEANT one thing before a cluster existed and
+  // another after — same entry, two answers, and whichever was cached won.
+  // That is a key that lies, and only a zero staleTime constantly refetching
+  // was hiding it. A concrete id means the same cluster forever.
+  //
+  // Same rule as the layout's bar, so the two cannot disagree about which
+  // cluster the page is about.
   loader: async ({ deps, context }) => {
-    const id = deps.cluster;
+    const shell = await context.queryClient.ensureQueryData(shellQuery());
+    const clusters = shell.authed ? shell.clusters : [];
+    const id = (clusters.find((entry) => entry.id === deps.cluster) ?? clusters[0])?.id ?? null;
     await Promise.all([
       context.queryClient.ensureQueryData({
         queryKey: queryKeys.pipeline(id),
