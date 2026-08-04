@@ -6,7 +6,9 @@ import { AppModule } from "./app.module";
 import { auth } from "./auth";
 import { positiveEnv, trustProxySetting } from "./env";
 import { AppExceptionFilter } from "./errors/exception.filter";
+import { jobDb } from "./jobs/db";
 import { embeddedWorkerEnabled, startWorker } from "./jobs/runner";
+import { instrumentHttp, registerControlPlaneGauges, startMetricsServer } from "./metrics";
 
 async function bootstrap(): Promise<void> {
   // Fastify's built-in pino: structured request/response logs with req ids,
@@ -31,6 +33,9 @@ async function bootstrap(): Promise<void> {
   app.setGlobalPrefix("api");
   app.useGlobalFilters(new AppExceptionFilter());
   const fastify = app.getHttpAdapter().getInstance();
+  // Before the routes exist, so the hook sees oRPC, better-auth and the health
+  // check alike.
+  instrumentHttp(fastify);
 
   // Global ceiling per IP, with a tight budget on the auth endpoints — they are
   // the brute-force target (sign-in/sign-up).
@@ -81,6 +86,20 @@ async function bootstrap(): Promise<void> {
   // SIGTERM/SIGINT run the shutdown hooks (pools drained in DatabaseService)
   // instead of hanging until the container runtime SIGKILLs after 10s.
   app.enableShutdownHooks();
+
+  // Its own port, off unless METRICS_ENABLED=true (see metrics/provider.ts). The
+  // control-plane gauges reuse the jobs pool rather than opening a third one;
+  // this process already drains it on shutdown. Started before the embedded
+  // worker below, and before listen, so no measurement predates the endpoint.
+  registerControlPlaneGauges(jobDb, (message) => fastify.log.warn(message));
+  const metrics = await startMetricsServer({
+    info: (message) => fastify.log.info(message),
+    warn: (message) => fastify.log.warn(message),
+  });
+  if (metrics !== null) {
+    process.once("SIGTERM", () => void metrics.stop());
+    process.once("SIGINT", () => void metrics.stop());
+  }
 
   // One-container mode for small and self-hosted installs. Off by default:
   // hosted keeps the worker separate so an api rollout cannot abort an

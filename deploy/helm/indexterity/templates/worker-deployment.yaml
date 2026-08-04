@@ -42,9 +42,15 @@ spec:
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
           command: ["node", "apps/api/dist/worker.js"]
+          {{- if .Values.metrics.enabled }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+          {{- end }}
           env:
             {{- include "indexterity.coreEnv" . | nindent 12 }}
             {{- include "indexterity.mailEnv" . | nindent 12 }}
+            {{- include "indexterity.metricsEnv" . | nindent 12 }}
             - name: WORKER_CONCURRENCY
               value: {{ .Values.worker.concurrency | quote }}
             {{- with .Values.worker.extraEnv }}

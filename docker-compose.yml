@@ -67,8 +67,12 @@ services:
       SMTP_USER: ${SMTP_USER}
       SMTP_PASS: ${SMTP_PASS}
       MAIL_FROM: ${MAIL_FROM}
+      # Both containers serve /metrics on 9464 and report different halves of
+      # the picture, so each gets its own host port.
+      METRICS_ENABLED: "true"
     ports:
       - "3001:3001"
+      - "9464:9464"
     volumes:
       - ./:/app
       - api_node_modules:/app/node_modules
@@ -113,6 +117,9 @@ services:
       MASTER_KEY: ${MASTER_KEY}
       ALLOW_PRIVATE_CLUSTER_TARGETS: "true"
       WORKER_CONCURRENCY: "2"
+      METRICS_ENABLED: "true"
+    ports:
+      - "9465:9464"
     volumes:
       - ./:/app
       - worker_node_modules:/app/node_modules
