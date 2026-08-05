@@ -6,27 +6,13 @@
 // own route, so this loader fetches only what this page draws.
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
+import { ActivityTable } from "~/components/app/activity-table";
+import { CollectionsTable, toCollectionRows } from "~/components/app/collections-table";
 import { ConnectClusterForm } from "~/components/app/connect-cluster-form";
-import { badgeVariant, DeltaCell, dropsOn, fmtBytes, fmtMicros } from "~/components/app/format";
+import { fmtBytes } from "~/components/app/format";
 import { PolicySection } from "~/components/app/policy-section";
-import { ConfirmButton } from "~/components/confirm-button";
-import { Badge } from "~/components/ui/badge";
-import { Button } from "~/components/ui/button";
+import { RecommendationsTable } from "~/components/app/recommendations-table";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "~/components/ui/table";
-import { formatTimestamp, useMounted } from "~/lib/hydration";
-import {
-  useApproveRecommendation,
-  useRollbackRecommendation,
-  useUnhideRecommendation,
-} from "~/lib/queries/mutations/recommendations";
 import { EMPTY_PIPELINE, pipelineQuery } from "~/lib/queries/pipeline";
 import { EMPTY_POLICY, policyQuery } from "~/lib/queries/policy";
 import { selectCluster, shellQuery, useShell } from "~/lib/queries/shell";
@@ -73,7 +59,6 @@ export const Route = createFileRoute("/app/")({
 function Dashboard() {
   const shell = useShell();
   const { clusterId: id } = Route.useLoaderData();
-  const mounted = useMounted();
 
   // The loader already put all three in the cache, so these resolve without
   // suspending. They read rather than fetch.
@@ -83,10 +68,6 @@ function Dashboard() {
   const { data: pipeline = EMPTY_PIPELINE } = useQuery(pipelineQuery(id));
   const { data: telemetry = EMPTY_TELEMETRY } = useQuery(telemetryQuery(id));
   const { data: policyData = EMPTY_POLICY } = useQuery(policyQuery(id));
-
-  const approve = useApproveRecommendation(id);
-  const unhide = useUnhideRecommendation(id);
-  const undo = useRollbackRecommendation(id);
 
   if (!shell.authed) return null;
 
@@ -113,20 +94,9 @@ function Dashboard() {
     points: coll.points.map((point) => ({ t: point.capturedAt, v: point.writeMicros })),
   }));
 
-  // Merge the index footprint (latest snapshot batch) with the windowed
-  // latency summary, keyed by namespace — one row per collection.
-  const latencyByNs = new Map(latency.collections.map((c) => [`${c.database}.${c.collection}`, c]));
-  const statNs = new Set(collectionStats.collections.map((c) => `${c.database}.${c.collection}`));
-  const collectionRows = [
-    ...collectionStats.collections.map((stat) => ({
-      ns: `${stat.database}.${stat.collection}`,
-      stat,
-      lat: latencyByNs.get(`${stat.database}.${stat.collection}`) ?? null,
-    })),
-    ...latency.collections
-      .filter((c) => !statNs.has(`${c.database}.${c.collection}`))
-      .map((lat) => ({ ns: `${lat.database}.${lat.collection}`, stat: null, lat })),
-  ];
+  // Merged by namespace into one row per collection — see collections-table.tsx,
+  // which owns the row shape.
+  const collectionRows = toCollectionRows(collectionStats.collections, latency.collections);
 
   return (
     <>
@@ -181,98 +151,7 @@ function Dashboard() {
         </Card>
       ) : null}
 
-      <Table className="mt-6">
-        <TableHeader>
-          <TableRow>
-            <TableHead>Type</TableHead>
-            <TableHead>Collection</TableHead>
-            <TableHead>Index</TableHead>
-            <TableHead>Score</TableHead>
-            <TableHead>Usage</TableHead>
-            <TableHead>Rationale</TableHead>
-            <TableHead>Action</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {recommendations.map((rec) => (
-            <TableRow key={rec.id}>
-              <TableCell>
-                <Badge variant={badgeVariant(rec.type)}>{rec.type}</Badge>
-              </TableCell>
-              <TableCell className="font-mono text-xs">
-                {rec.database}.{rec.collection}
-              </TableCell>
-              <TableCell className="font-mono text-xs">{rec.indexName}</TableCell>
-              <TableCell className="text-xs">
-                {rec.score}
-                {/* Once a drop is hidden the score is history — it decided
-                    whether to start, and the only open question is when this
-                    ends. The window is per-index, so it is not something a
-                    reader can work out from the policy. */}
-                {dropsOn(rec) === null ? null : (
-                  <span className="block text-muted-foreground">drops {dropsOn(rec)}</span>
-                )}
-              </TableCell>
-              <TableCell>{rec.usageClass ?? "—"}</TableCell>
-              <TableCell className="text-muted-foreground">{rec.rationale}</TableCell>
-              <TableCell>
-                {rec.type === "ADVISORY_REVIEW" ? (
-                  <span className="text-muted-foreground text-xs">review manually</span>
-                ) : rec.state === "PROPOSED" ? (
-                  <ConfirmButton
-                    trigger={
-                      <Button size="sm" variant="secondary">
-                        Approve
-                      </Button>
-                    }
-                    title={`Approve ${rec.indexName}?`}
-                    description={
-                      <>
-                        <p>
-                          {rec.type.startsWith("DROP") || rec.type === "MERGE"
-                            ? "The index is hidden first and observed before anything is dropped — hiding is instant and reversible."
-                            : "The index is built and then watched: if writes regress, the build rolls back automatically."}
-                        </p>
-                        <p className="font-mono text-xs">
-                          {rec.database}.{rec.collection} · {rec.indexName}
-                        </p>
-                      </>
-                    }
-                    confirmLabel="Approve"
-                    onConfirm={() => approve.mutate(rec.id)}
-                  />
-                ) : rec.state === "DROPPED" ? (
-                  <ConfirmButton
-                    trigger={
-                      <Button size="sm" variant="outline">
-                        Undo
-                      </Button>
-                    }
-                    title={`Rebuild ${rec.indexName}?`}
-                    description="The index is recreated from the spec recorded at drop time, and the ROI headline is corrected back down."
-                    confirmLabel="Rebuild"
-                    onConfirm={() => undo.mutate(rec.id)}
-                  />
-                ) : rec.state === "HIDDEN" ? (
-                  <ConfirmButton
-                    trigger={
-                      <Button size="sm" variant="outline">
-                        Keep it
-                      </Button>
-                    }
-                    title={`Cancel the pending drop of ${rec.indexName}?`}
-                    description="The index becomes visible to the query planner again straight away, and this drop is not proposed again for 90 days."
-                    confirmLabel="Un-hide"
-                    onConfirm={() => unhide.mutate(rec.id)}
-                  />
-                ) : (
-                  <span className="text-muted-foreground text-xs">{rec.state}</span>
-                )}
-              </TableCell>
-            </TableRow>
-          ))}
-        </TableBody>
-      </Table>
+      <RecommendationsTable clusterId={id} recommendations={recommendations} />
 
       {chartCollections.length > 0 ? (
         <section className="mt-8 grid gap-6 md:grid-cols-2">
@@ -286,92 +165,20 @@ function Dashboard() {
         </section>
       ) : null}
 
-      {collectionRows.length > 0 ? (
-        <>
-          <h2 className="mt-8 font-semibold text-lg">Collections</h2>
-          <p className="text-muted-foreground text-sm">
-            Index footprint from the latest collect; latency is the current windowed average vs the
-            first sample (negative Δ = faster).
-          </p>
-          <Table className="mt-2">
-            <TableHeader>
-              <TableRow>
-                <TableHead>Collection</TableHead>
-                <TableHead>Indexes</TableHead>
-                <TableHead>Index size</TableHead>
-                <TableHead>Read µs</TableHead>
-                <TableHead>Read Δ</TableHead>
-                <TableHead>Write µs</TableHead>
-                <TableHead>Write Δ</TableHead>
-                <TableHead>Proposed</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {collectionRows.map((row) => (
-                <TableRow key={row.ns}>
-                  <TableCell className="font-mono text-xs">{row.ns}</TableCell>
-                  <TableCell>{row.stat?.indexCount ?? "—"}</TableCell>
-                  <TableCell>
-                    {row.stat === null ? "—" : fmtBytes(row.stat.totalIndexBytes)}
-                  </TableCell>
-                  <TableCell>{fmtMicros(row.lat?.currentReadMicros ?? null)}</TableCell>
-                  <TableCell>
-                    <DeltaCell pct={row.lat?.readDeltaPct ?? null} />
-                  </TableCell>
-                  <TableCell>{fmtMicros(row.lat?.currentWriteMicros ?? null)}</TableCell>
-                  <TableCell>
-                    <DeltaCell pct={row.lat?.writeDeltaPct ?? null} />
-                  </TableCell>
-                  <TableCell>
-                    {row.stat !== null && row.stat.proposedRecommendations > 0 ? (
-                      <Badge variant="secondary">{row.stat.proposedRecommendations}</Badge>
-                    ) : (
-                      <span className="text-muted-foreground text-xs">—</span>
-                    )}
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </>
-      ) : null}
+      <h2 className="mt-8 font-semibold text-lg">Collections</h2>
+      <p className="text-muted-foreground text-sm">
+        Index footprint from the latest collect; latency is the current windowed average vs the
+        first sample (negative Δ = faster).
+      </p>
+      <CollectionsTable rows={collectionRows} />
 
-      {activity.length > 0 ? (
-        <section className="mt-8">
-          <h2 className="font-semibold text-lg">Activity</h2>
-          <p className="text-muted-foreground text-sm">
-            Every executed operation, with its outcome — the immutable audit trail.
-          </p>
-          <Table className="mt-2">
-            <TableHeader>
-              <TableRow>
-                <TableHead>When</TableHead>
-                <TableHead>Op</TableHead>
-                <TableHead>Index</TableHead>
-                <TableHead>Actor</TableHead>
-                <TableHead>Result</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {activity.map((entry) => (
-                <TableRow key={entry.id}>
-                  <TableCell className="whitespace-nowrap text-muted-foreground text-xs">
-                    {formatTimestamp(entry.createdAt, mounted)}
-                  </TableCell>
-                  <TableCell>
-                    <Badge variant="outline">{entry.kind}</Badge>
-                  </TableCell>
-                  <TableCell className="font-mono text-xs">
-                    {entry.database}.{entry.collection} · {entry.indexName}
-                  </TableCell>
-                  <TableCell className="text-muted-foreground text-xs">{entry.actor}</TableCell>
-                  <TableCell className="text-muted-foreground text-xs">{entry.result}</TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </section>
-      ) : null}
+      <section className="mt-8">
+        <h2 className="font-semibold text-lg">Activity</h2>
+        <p className="text-muted-foreground text-sm">
+          Every executed operation, with its outcome — the immutable audit trail.
+        </p>
+        <ActivityTable activity={activity} />
+      </section>
       {policy !== null ? <PolicySection key={policy.clusterId} policy={policy} /> : null}
       <ConnectClusterForm />
     </>
