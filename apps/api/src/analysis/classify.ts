@@ -1,5 +1,12 @@
 import type { UsageClass } from "@repo/contracts";
-import type { UsageSnapshot } from "./types";
+import {
+  observationsOf,
+  sortedRuns,
+  spanEnd,
+  spanStart,
+  totalObservations,
+  type UsageSnapshot,
+} from "./types";
 
 export interface ClassifyOptions {
   // How far back "recent" reaches when deciding alive vs dead, in hours.
@@ -30,6 +37,22 @@ export interface ClassifyOptions {
 
 const HOUR_MS = 3_600_000;
 
+// The gap tolerance, in hours, as a value the WRITER can also see.
+//
+// It has to be shared, because run-length storage puts the two halves of one
+// invariant in different files. A run says "still true throughout
+// [capturedAt, lastSeenAt]", and the gate below only inspects the holes BETWEEN
+// runs — so if the writer were free to extend a run across a week of silence,
+// the hole would vanish inside a row and the gate would find a clean series
+// where there was an outage. The writer therefore refuses to extend across
+// anything longer than this, which makes "no hole inside a run that this gate
+// would have objected to" true by construction rather than by hope.
+//
+// Two days spans a missed collect or two at the 6h cadence without tolerating an
+// outage.
+export const MAX_GAP_HOURS = 48;
+export const MAX_GAP_MS = MAX_GAP_HOURS * HOUR_MS;
+
 function parseTime(value: string | undefined): number | null {
   if (value === undefined) return null;
   const time = Date.parse(value);
@@ -49,9 +72,7 @@ function parseTime(value: string | undefined): number | null {
 // skipped: no evidence either way, and the irreversible step downstream is
 // still guarded by the regression gate.
 export function countersRestartedDuring(history: readonly UsageSnapshot[]): boolean {
-  const sorted = [...history].sort(
-    (a, b) => new Date(a.capturedAt).getTime() - new Date(b.capturedAt).getTime(),
-  );
+  const sorted = sortedRuns(history);
   const first = sorted[0];
   const last = sorted.at(-1);
   if (first === undefined || last === undefined) return false;
@@ -67,12 +88,17 @@ export function countersRestartedDuring(history: readonly UsageSnapshot[]): bool
     }
   }
 
-  const spanMs = new Date(last.capturedAt).getTime() - new Date(first.capturedAt).getTime();
-  const lastCapturedAt = new Date(last.capturedAt).getTime();
+  // Both ends of the WATCHED period, not of the row list: the newest run may
+  // have been extended long past the moment it was first written, and that
+  // stretch is precisely the part being claimed as idle. Measuring to
+  // `capturedAt` instead would understate the window and let a counter younger
+  // than the claim slip through.
+  const spanMs = spanEnd(last) - spanStart(first);
+  const lastSeen = spanEnd(last);
   for (const member of last.perMember) {
     const since = parseTime(member.since);
     if (since === null) continue;
-    if (lastCapturedAt - since < spanMs) return true;
+    if (lastSeen - since < spanMs) return true;
   }
   return false;
 }
@@ -98,32 +124,37 @@ export function usageHistoryIsTrustworthy(
   collectionActiveHours?: number,
 ): boolean {
   if (countersRestartedDuring(history)) return false;
-  if (history.length < options.minHistory) return false;
-  const times = history
-    .map((snapshot) => new Date(snapshot.capturedAt).getTime())
-    .filter((time) => Number.isFinite(time))
-    .sort((a, b) => a - b);
-  if (times.length < options.minHistory) return false;
-  const oldest = times[0];
-  const newestSeen = times.at(-1);
-  if (oldest === undefined || newestSeen === undefined) return false;
-  if (newestSeen - oldest < options.minHistoryDays * 24 * HOUR_MS) return false;
+  const runs = sortedRuns(history);
+  // Collects, not rows. An index idle for a year is a single run, and counting
+  // rows here would refuse the very finding the run-length storage exists to
+  // make cheap.
+  if (totalObservations(runs) < options.minHistory) return false;
+  const first = runs[0];
+  const last = runs.at(-1);
+  if (first === undefined || last === undefined) return false;
+  // The span we actually watched: from the first thing we saw to the last time
+  // anything was confirmed.
+  if (spanEnd(last) - spanStart(first) < options.minHistoryDays * 24 * HOUR_MS) return false;
   // "This index served none of the reads" is only a claim when there were reads
   // to serve. An idle week proves nothing about any index in it.
   if (collectionActiveHours !== undefined && collectionActiveHours < options.minActiveHours) {
     return false;
   }
   const maxGap = options.maxGapHours * HOUR_MS;
-  for (let i = 1; i < times.length; i++) {
-    const previous = times[i - 1];
-    const next = times[i];
+  // Only the holes BETWEEN runs, because a run has none: it is the assertion
+  // that the state held throughout, written by a collector that refuses to
+  // extend across anything longer than MAX_GAP_HOURS. Differencing run starts
+  // instead would read the length of a quiet run as an outage and throw away
+  // every idle index — the exact inversion of the bug this guard exists for.
+  for (let i = 1; i < runs.length; i++) {
+    const previous = runs[i - 1];
+    const next = runs[i];
     if (previous === undefined || next === undefined) continue;
-    if (next - previous > maxGap) return false;
+    if (spanStart(next) - spanEnd(previous) > maxGap) return false;
   }
-  // The newest snapshot must itself be recent, or we are reasoning about a
-  // cluster we have not seen in a while.
-  const newest = times.at(-1);
-  return newest !== undefined && now.getTime() - newest <= maxGap;
+  // And the newest confirmation must itself be recent, or we are reasoning about
+  // a cluster we have not seen in a while.
+  return now.getTime() - spanEnd(last) <= maxGap;
 }
 
 // Sum per-member ops for a snapshot (aggregate across all replica-set members).
@@ -138,19 +169,28 @@ export function classifyUsage(
   history: readonly UsageSnapshot[],
   options: ClassifyOptions,
 ): UsageClass {
-  if (history.length < options.minHistory) return "FLAT_ZERO";
+  const observations = totalObservations(history);
+  if (observations < options.minHistory) return "FLAT_ZERO";
 
-  const totals = history.map(totalOps);
-  const activeCount = totals.filter((ops) => ops > 0).length;
+  // Weighted by observation count, not by row count. A run is one row standing
+  // for many identical collects, and "was the counter moving every time we
+  // looked" is a question about the looks. Counting rows would make a single
+  // quiet run outweigh three hundred busy collects it happens to sit beside.
+  const activeCount = history.reduce(
+    (sum, snapshot) => (totalOps(snapshot) > 0 ? sum + observationsOf(snapshot) : sum),
+    0,
+  );
   if (activeCount === 0) return "FLAT_ZERO";
-  if (activeCount === totals.length) return "CONTINUOUS";
+  if (activeCount === observations) return "CONTINUOUS";
 
-  // Everything captured within recentHours of the newest snapshot, however many
-  // snapshots that turns out to be.
-  const newest = Math.max(...history.map((snapshot) => new Date(snapshot.capturedAt).getTime()));
+  // Everything still standing within recentHours of the newest confirmation,
+  // however many rows that turns out to be. A run counts as recent when its END
+  // falls inside the window: that is when the state was last confirmed, and a
+  // long run reaching into the window was true inside it.
+  const newest = Math.max(...history.map(spanEnd));
   const cutoff = newest - options.recentHours * HOUR_MS;
   const recentlyActive = history.some(
-    (snapshot) => new Date(snapshot.capturedAt).getTime() >= cutoff && totalOps(snapshot) > 0,
+    (snapshot) => spanEnd(snapshot) >= cutoff && totalOps(snapshot) > 0,
   );
   return recentlyActive ? "PERIODIC_ALIVE" : "PERIODIC_DEAD";
 }

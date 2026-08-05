@@ -2,11 +2,13 @@ import {
   type ActivityPoint,
   activeHours,
   type IndexInput,
+  MAX_GAP_HOURS,
   parseStoredSpec,
   recommendForCollection,
 } from "../analysis";
 import {
   and,
+  clusterIndexes,
   eq,
   inArray,
   indexCooldowns,
@@ -54,7 +56,15 @@ const CLASSIFY_OPTIONS = {
   minHistory: 3,
   minHistoryDays: 7,
   minActiveHours: 72,
-  maxGapHours: 48,
+  // The one threshold the STORAGE layer also has to agree with, so it comes from
+  // the shared constant rather than from a literal here. A run asserts that
+  // nothing changed throughout its span and the gate only inspects the holes
+  // between runs, so the collector must refuse to extend across anything this
+  // gate would object to. Two copies of the number would let those two halves
+  // drift apart silently: raise it here alone and the collector keeps breaking
+  // runs the gate would have accepted; raise it there alone and an outage
+  // disappears inside a row.
+  maxGapHours: MAX_GAP_HOURS,
 };
 
 // Read a cluster's snapshots, run the pure engine per collection, and replace
@@ -92,9 +102,24 @@ export async function classifyCluster(clusterId: string): Promise<number> {
     perIndex[row.indexName] = row.regressionCount;
     regressionCounts.set(scope, perIndex);
   }
+  // Identity and shape come from the dimension table now; the time series carries
+  // only what was measured. One join, and it is the whole code cost of having
+  // stopped rewriting a per-index constant on every collect.
   const rows = await db
-    .select()
+    .select({
+      database: clusterIndexes.database,
+      collection: clusterIndexes.collection,
+      indexName: clusterIndexes.indexName,
+      spec: clusterIndexes.spec,
+      sizeBytes: indexSnapshots.sizeBytes,
+      perMember: indexSnapshots.perMember,
+      hinted: indexSnapshots.hinted,
+      capturedAt: indexSnapshots.capturedAt,
+      lastSeenAt: indexSnapshots.lastSeenAt,
+      observations: indexSnapshots.observations,
+    })
     .from(indexSnapshots)
+    .innerJoin(clusterIndexes, eq(indexSnapshots.indexId, clusterIndexes.id))
     .where(eq(indexSnapshots.clusterId, clusterId));
   // Per-collection read counters, for the activity gate.
   const latencyRows = await db
@@ -103,6 +128,8 @@ export async function classifyCluster(clusterId: string): Promise<number> {
       collection: latencySamples.collection,
       readOps: latencySamples.readOps,
       capturedAt: latencySamples.capturedAt,
+      lastSeenAt: latencySamples.lastSeenAt,
+      observations: latencySamples.observations,
     })
     .from(latencySamples)
     .where(eq(latencySamples.clusterId, clusterId));
@@ -110,7 +137,12 @@ export async function classifyCluster(clusterId: string): Promise<number> {
   for (const sample of latencyRows) {
     const key = `${sample.database}\u0000${sample.collection}`;
     const list = activityByCollection.get(key) ?? [];
-    list.push({ capturedAt: sample.capturedAt.toISOString(), readOps: sample.readOps });
+    list.push({
+      capturedAt: sample.capturedAt.toISOString(),
+      lastSeenAt: sample.lastSeenAt.toISOString(),
+      observations: sample.observations,
+      readOps: sample.readOps,
+    });
     activityByCollection.set(key, list);
   }
   type Row = (typeof rows)[number];
@@ -161,6 +193,12 @@ export async function classifyCluster(clusterId: string): Promise<number> {
         spec: parseStoredSpec(latest.spec),
         history: sorted.map((snap) => ({
           capturedAt: snap.capturedAt.toISOString(),
+          // The row covers an interval, not an instant: this state held from
+          // capturedAt to lastSeenAt and was confirmed `observations` times
+          // inside it. Handing the engine only the start would read every quiet
+          // run as a hole and refuse to judge the index at all.
+          lastSeenAt: snap.lastSeenAt.toISOString(),
+          observations: snap.observations,
           perMember: snap.perMember.map((member) => ({
             member: member.member,
             ops: member.ops,
@@ -230,7 +268,20 @@ export async function classifyCluster(clusterId: string): Promise<number> {
   // proposal to drop an index that no longer exists can never be actioned and
   // would sit on the dashboard forever. Only drops: a CREATE names an index
   // that is MEANT not to exist yet.
-  const live = new Set(rows.map((row) => watchKey(row.database, row.collection, row.indexName)));
+  //
+  // "Live" is what the NEWEST collect saw, not what has a row. Having a row
+  // stopped meaning the index exists the moment runs did: a dropped index leaves
+  // its final run behind until retention gets to it, and reading the whole table
+  // as the live set would keep retracting nothing and leave dead proposals up for
+  // the length of the retention window. Every index present at the last collect
+  // had its run extended or started then, so they share that timestamp exactly —
+  // the same fact getCollections leans on.
+  const newestSeen = rows.reduce((latest, row) => Math.max(latest, row.lastSeenAt.getTime()), 0);
+  const live = new Set(
+    rows
+      .filter((row) => row.lastSeenAt.getTime() === newestSeen)
+      .map((row) => watchKey(row.database, row.collection, row.indexName)),
+  );
   const stale = await db
     .select({
       id: recommendations.id,

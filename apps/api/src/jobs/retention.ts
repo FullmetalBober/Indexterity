@@ -2,6 +2,7 @@ import { makeWorkerUtils } from "graphile-worker";
 import { entitlementsFor, type Plan, planFrom } from "../billing/plans";
 import {
   and,
+  clusterIndexes,
   clusters,
   eq,
   inArray,
@@ -98,16 +99,23 @@ export async function pruneOldSamples(): Promise<number> {
     const days = effectiveRetentionDays(plan);
     if (!Number.isFinite(days)) continue;
     const cutoff = new Date(Date.now() - days * DAY_MS);
+    // By when a run ENDED, not when it started. A row covers
+    // [captured_at, last_seen_at], so pruning on the start would delete the run
+    // an idle index is still living in the moment it grew older than the window —
+    // taking with it the only record that we are watching that index at all, and
+    // handing the trust gate a hole where there was none. What ages out is a
+    // stretch of history that finished before the cutoff, which is what the plan
+    // actually promises to forget.
     const samples = await db
       .delete(latencySamples)
       .where(
-        and(inArray(latencySamples.clusterId, clusterIds), lt(latencySamples.capturedAt, cutoff)),
+        and(inArray(latencySamples.clusterId, clusterIds), lt(latencySamples.lastSeenAt, cutoff)),
       )
       .returning({ id: latencySamples.id });
     const snapshots = await db
       .delete(indexSnapshots)
       .where(
-        and(inArray(indexSnapshots.clusterId, clusterIds), lt(indexSnapshots.capturedAt, cutoff)),
+        and(inArray(indexSnapshots.clusterId, clusterIds), lt(indexSnapshots.lastSeenAt, cutoff)),
       )
       .returning({ id: indexSnapshots.id });
     // Finished decisions age out on the same clock. Retention used to cover the
@@ -134,7 +142,28 @@ export async function pruneOldSamples(): Promise<number> {
         ),
       )
       .returning({ id: recommendations.id });
-    pruned += samples.length + snapshots.length + decisions.length;
+    // The dimension rows the deletions above just stranded. Nothing cascades
+    // here — the foreign key runs the other way — so an index dropped from the
+    // cluster a year ago would keep its spec forever, which is the leak this
+    // table would introduce if it were only ever written to.
+    //
+    // Older than the cutoff AND unreferenced, not merely unreferenced. A collect
+    // writes the dimension row before the snapshot that points at it, so a sweep
+    // landing between the two would see a legitimate orphan and delete a row the
+    // insert is about to reference. A row cannot be older than the retention
+    // window and also seconds old, so the age test closes that window rather than
+    // narrowing it.
+    const dimensions = await db
+      .delete(clusterIndexes)
+      .where(
+        and(
+          inArray(clusterIndexes.clusterId, clusterIds),
+          lt(clusterIndexes.createdAt, cutoff),
+          sql`not exists (select 1 from ${indexSnapshots} where ${indexSnapshots.indexId} = ${clusterIndexes.id})`,
+        ),
+      )
+      .returning({ id: clusterIndexes.id });
+    pruned += samples.length + snapshots.length + decisions.length + dimensions.length;
   }
   return pruned + (await pruneDeadLetterJobs());
 }

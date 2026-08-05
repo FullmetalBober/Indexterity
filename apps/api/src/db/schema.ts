@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import {
   bigint,
   boolean,
@@ -10,6 +11,7 @@ import {
   text,
   timestamp,
   unique,
+  uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
 
@@ -234,8 +236,25 @@ export const clusters = pgTable(
   (table) => [index("clusters_org").on(table.orgId)],
 );
 
-export const indexSnapshots = pgTable(
-  "index_snapshots",
+// One index, and the shape it had. The dimension half of the snapshot series:
+// everything about an index that does NOT change between collects lives here
+// once, and the time series carries only the measurement.
+//
+// `spec` was 66% of an index_snapshots row and 2.4x the size of the counter it
+// accompanied, rewritten on every collect for the life of the cluster — 1,460
+// copies a year per index at the 6h cadence, of a value that changes only when
+// somebody rebuilds the index. So does the identity: a (database, collection,
+// index_name) triple is a constant of the index, not an observation of it.
+//
+// Keyed by spec DIGEST, not by identity alone, so a rebuild adds a row rather
+// than overwriting one. Overwriting would be cheaper and would break nothing
+// today — every reader only wants the newest spec — but it would silently
+// re-label the history: a snapshot from before the rebuild would come back
+// joined to the shape the index has now. A dimension row that can lie about the
+// past is worse than the bytes it saves, and rebuilds are rare enough that the
+// extra rows do not register (7 of 211 on the dev database).
+export const clusterIndexes = pgTable(
+  "cluster_indexes",
   {
     id: uuid("id").defaultRandom().primaryKey(),
     clusterId: uuid("cluster_id")
@@ -245,9 +264,80 @@ export const indexSnapshots = pgTable(
     collection: text("collection").notNull(),
     indexName: text("index_name").notNull(),
     spec: jsonb("spec").$type<Record<string, unknown>>().notNull(),
+    // The upsert's conflict target, because the spec itself makes a poor index
+    // key: jsonb compares fine but a fat partialFilterExpression can push a
+    // btree tuple past its size limit, and the failure would land on a collect.
+    //
+    // Generated rather than computed by the writer, which is what makes it
+    // trustworthy. Postgres stores jsonb with its keys sorted, so `spec::text`
+    // is already canonical and two equal specs hash equal however mongo happened
+    // to order the fields. A digest the application computed instead would have
+    // to reproduce that canonical form exactly — every whitespace and number
+    // formatting rule — and the day it drifted the writer would quietly start
+    // inserting a second dimension row for an index that never changed.
+    specDigest: text("spec_digest").notNull().generatedAlwaysAs(sql`md5(spec::text)`),
+    createdAt,
+  },
+  (table) => [
+    uniqueIndex("cluster_indexes_identity").on(
+      table.clusterId,
+      table.database,
+      table.collection,
+      table.indexName,
+      table.specDigest,
+    ),
+    // Every read of the series joins through here, always scoped to a cluster,
+    // and offboarding cascades.
+    index("cluster_indexes_cluster").on(table.clusterId),
+  ],
+);
+
+// One row per distinct COUNTER STATE, not one per collect.
+//
+// An idle index reports byte-identical counters collect after collect, so the
+// old shape spent a row on every look to record that nothing had happened.
+// Instead a row covers the closed interval [capturedAt, lastSeenAt]: the state
+// was first seen at the former and still true at the latter, confirmed
+// `observations` times in between. Storage is then a function of how much the
+// cluster CHANGES rather than of how often we look, which is what makes
+// collecting more often affordable.
+//
+// Skipping the write entirely would have been simpler and wrong. The usage
+// trust gate reads a hole in the series as "we stopped watching, so absence of
+// usage proves nothing" — an idle index with no rows would be
+// indistinguishable from a cluster we lost, and "cannot tell" would get spelled
+// "all clear". `lastSeenAt` is the positive form of the same statement: we
+// looked at T, and it was still this.
+//
+// The invariant that keeps the gap detection honest: a run never spans a hole
+// longer than the classifier's own tolerance (see MAX_GAP_HOURS). An
+// observation further from `lastSeenAt` than that starts a new row even when
+// the counters match, so a hole the classifier would refuse to reason across
+// can never be papered over by extending a run.
+export const indexSnapshots = pgTable(
+  "index_snapshots",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    // Denormalised from cluster_indexes on purpose: it is the equality filter
+    // of every query against this table and the key retention prunes by, and a
+    // join to find it would make both of those a great deal more expensive.
+    clusterId: uuid("cluster_id")
+      .notNull()
+      .references(() => clusters.id, { onDelete: "cascade" }),
+    indexId: uuid("index_id")
+      .notNull()
+      .references(() => clusterIndexes.id, { onDelete: "cascade" }),
+    // As of `lastSeenAt`, not `capturedAt`. Size is not part of what makes a run
+    // — an unused index on a write-heavy collection grows on every insert, and
+    // keying runs on size would collapse nothing in exactly the case worth
+    // collapsing — so it rides along at its newest value. Nothing reads the size
+    // series; every caller wants the current number.
     sizeBytes: bigint("size_bytes", { mode: "number" }).notNull(),
     // `since` is the member's $indexStats counter start — the restart marker.
     // jsonb, so adding it needed no DDL; older rows simply omit the key.
+    //
+    // This is the run's identity: two collects belong to the same row when this
+    // value is byte-identical.
     perMember: jsonb("per_member")
       .$type<Array<{ member: string; ops: number; since?: string }>>()
       .notNull(),
@@ -255,10 +345,37 @@ export const indexSnapshots = pgTable(
     // cannot be hidden — mongod rejects the hint — so the observe stage would
     // break those queries instead of slowing them, and the latency gate would
     // see nothing.
+    //
+    // Sticky within a run: one sighting anywhere in the retained history
+    // protects the index, so extending a run ORs the new reading in rather than
+    // replacing it. A sighting must not be erasable by the next quiet collect.
     hinted: boolean("hinted").notNull().default(false),
     capturedAt: timestamp("captured_at", { withTimezone: true }).notNull().defaultNow(),
+    // When this state was last confirmed still true. Equal to capturedAt for a
+    // run of one.
+    //
+    // Deliberately WITHOUT a default. defaultNow() reads as the obvious choice
+    // and is a trap: a caller that sets only capturedAt then writes a row
+    // claiming a months-old reading was confirmed this instant, which is the one
+    // field the usage trust gate consults to decide whether we were watching. No
+    // default makes every insert say what it means, and the compiler finds the
+    // ones that do not.
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull(),
+    // How many collects saw this exact counter state. The row count stopped
+    // being the sample count the moment runs existed, and several thresholds
+    // are counts of samples (minHistory, the score's history credit) — they read
+    // this instead.
+    observations: integer("observations").notNull().default(1),
   },
-  (table) => [index("index_snapshots_cluster_time").on(table.clusterId, table.capturedAt)],
+  (table) => [
+    // Retention prunes by when a run ENDED: a run that started before the cutoff
+    // and is still being extended is the current state of a live index, and
+    // deleting it would erase the only evidence that we are watching.
+    index("index_snapshots_cluster_time").on(table.clusterId, table.lastSeenAt),
+    // The writer's newest-run-per-index lookup, and the per-index history read
+    // behind the observe window.
+    index("index_snapshots_index_time").on(table.indexId, table.capturedAt.desc()),
+  ],
 );
 
 export const recommendations = pgTable(
@@ -427,6 +544,11 @@ export const indexCooldowns = pgTable(
 
 // Per-collection read/write latency sampled each collect — a time series that
 // shows the app getting faster (or a build/drop regressing it).
+//
+// Run-length like index_snapshots, and for the same reason: an idle collection
+// reports the same four cumulative counters every time. There is no dimension
+// half to split out here, because every column IS a measurement — the namespace
+// stays on the row.
 export const latencySamples = pgTable(
   "latency_samples",
   {
@@ -441,13 +563,21 @@ export const latencySamples = pgTable(
     writeOps: bigint("write_ops", { mode: "number" }).notNull(),
     writeLatencyMicros: bigint("write_latency_micros", { mode: "number" }).notNull(),
     capturedAt: timestamp("captured_at", { withTimezone: true }).notNull().defaultNow(),
+    // See index_snapshots, including why this has no default.
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull(),
+    observations: integer("observations").notNull().default(1),
   },
   (table) => [
-    index("latency_samples_cluster_time").on(table.clusterId, table.capturedAt),
+    // By run end, for the same reason as index_snapshots.
+    index("latency_samples_cluster_time").on(table.clusterId, table.lastSeenAt),
     // The five-minute probe wants the newest sample per namespace, which is a
     // `distinct on (database, collection) order by … captured_at desc`. Without
     // this the planner sorts every row the cluster has ever written, on every
     // probe. Leading with cluster_id because that is always the equality filter.
+    //
+    // Still captured_at, not last_seen_at: runs for one namespace are appended
+    // in time order and never overlap, so the newest run START is the newest run,
+    // and its counters are the current ones however long it has been extended.
     index("latency_samples_cluster_ns_time").on(
       table.clusterId,
       table.database,

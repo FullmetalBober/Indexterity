@@ -88,4 +88,91 @@ describe("activeHours", () => {
     ];
     expect(activeHours(points)).toBe(13);
   });
+  // Run-length storage: the collector stops writing a row per collect once the
+  // counter holds still, and extends the one it has instead.
+  describe("over run-length readings", () => {
+    it("credits a quiet run nothing, however long it is", () => {
+      // Thirty days of collects that never saw the read counter move. One row,
+      // a hundred and twenty looks, and no traffic at all — crediting the run's
+      // own length would let a month of idleness fund the drops the activity
+      // gate exists to withhold.
+      const points: ActivityPoint[] = [
+        {
+          capturedAt: "2026-01-01T00:00:00Z",
+          lastSeenAt: "2026-01-31T00:00:00Z",
+          observations: 120,
+          readOps: 500,
+        },
+      ];
+      expect(activeHours(points)).toBe(0);
+    });
+
+    it("puts the traffic in the gap between two runs", () => {
+      // Quiet for a day, one busy interval, quiet for a day. The reads happened
+      // between the first run's end and the second's start, and nowhere else.
+      const points: ActivityPoint[] = [
+        {
+          capturedAt: "2026-01-01T00:00:00Z",
+          lastSeenAt: "2026-01-02T00:00:00Z",
+          observations: 5,
+          readOps: 0,
+        },
+        {
+          capturedAt: "2026-01-02T06:00:00Z",
+          lastSeenAt: "2026-01-03T06:00:00Z",
+          observations: 5,
+          readOps: 40,
+        },
+      ];
+      // One active interval, the 6h gap between the runs.
+      expect(activeHours(points)).toBe(6);
+    });
+
+    it("matches the point-reading answer for a series with nothing to collapse", () => {
+      // A busy collection's counter moves every collect, so run-length changes
+      // nothing about it — and the arithmetic has to agree.
+      const collapsed: ActivityPoint[] = [
+        {
+          capturedAt: "2026-01-01T00:00:00Z",
+          lastSeenAt: "2026-01-01T00:00:00Z",
+          observations: 1,
+          readOps: 0,
+        },
+        {
+          capturedAt: "2026-01-01T06:00:00Z",
+          lastSeenAt: "2026-01-01T06:00:00Z",
+          observations: 1,
+          readOps: 10,
+        },
+        {
+          capturedAt: "2026-01-01T12:00:00Z",
+          lastSeenAt: "2026-01-01T12:00:00Z",
+          observations: 1,
+          readOps: 20,
+        },
+      ];
+      const points: ActivityPoint[] = [
+        { capturedAt: "2026-01-01T00:00:00Z", readOps: 0 },
+        { capturedAt: "2026-01-01T06:00:00Z", readOps: 10 },
+        { capturedAt: "2026-01-01T12:00:00Z", readOps: 20 },
+      ];
+      expect(activeHours(collapsed)).toBe(activeHours(points));
+    });
+
+    it("takes the cadence from the collects inside a run, not from its length", () => {
+      // Without weighting the median by observation count, this run's span would
+      // vote once as a 30-day "gap" and the cap would balloon, letting the one
+      // real interval be credited far past the cadence.
+      const points: ActivityPoint[] = [
+        {
+          capturedAt: "2026-01-01T00:00:00Z",
+          lastSeenAt: "2026-01-31T00:00:00Z",
+          observations: 121,
+          readOps: 0,
+        },
+        { capturedAt: "2026-01-31T06:00:00Z", readOps: 99 },
+      ];
+      expect(activeHours(points)).toBe(6);
+    });
+  });
 });

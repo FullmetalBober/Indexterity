@@ -218,6 +218,20 @@
       "when": 1785934073075,
       "tag": "0030_thick_captain_marvel",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1785939999493,
+      "tag": "0031_snapshot-dimension",
+      "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1785940038862,
+      "tag": "0032_snapshot-runs",
+      "breakpoints": true
     }
   ]
 }

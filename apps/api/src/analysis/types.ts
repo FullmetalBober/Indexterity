@@ -36,7 +36,139 @@ export interface MemberUsage {
   readonly since?: string;
 }
 
-export interface UsageSnapshot {
+// One reading of a cumulative counter, covering the closed interval
+// [capturedAt, lastSeenAt].
+//
+// The storage layer run-lengths these. An idle index reports byte-identical
+// counters every collect, and an idle collection the same four latency totals, so
+// one row records the state once and extends its END rather than repeating
+// itself — storage becomes a function of how much the cluster CHANGES instead of
+// how often we look at it.
+//
+// Every reader here therefore has to treat a reading as a SPAN and not an
+// instant: the state was first seen at `capturedAt`, was still true at
+// `lastSeenAt`, and was confirmed `observations` times across that span. What
+// happened BETWEEN two readings is the gap `[previous.lastSeenAt, next.capturedAt]`
+// — the only stretch we were not looking.
+//
+// Both fields are optional, and the defaults are exact rather than lenient: one
+// observation IS a run of one, so `lastSeenAt ?? capturedAt` and
+// `observations ?? 1` describe it precisely. That is what lets a caller holding a
+// point reading — a test, an agent shipping a single collect — build one without
+// knowing runs exist. Read them through the helpers below so the default lives
+// in one place.
+export interface Run {
   readonly capturedAt: string;
+  readonly lastSeenAt?: string;
+  readonly observations?: number;
+}
+
+// When the reading was first seen, in ms. NaN for an unparseable stamp, which
+// every caller filters on.
+export function spanStart(run: Run): number {
+  return new Date(run.capturedAt).getTime();
+}
+
+// When it was last confirmed still true, in ms. Never earlier than spanStart —
+// a `lastSeenAt` behind the start would make a run of negative length, so it is
+// treated as the point reading it must have been.
+export function spanEnd(run: Run): number {
+  const start = spanStart(run);
+  if (run.lastSeenAt === undefined) return start;
+  const end = new Date(run.lastSeenAt).getTime();
+  if (!Number.isFinite(end)) return start;
+  return Math.max(start, end);
+}
+
+// How many collects saw this state. At least one: a row exists because
+// something was observed.
+export function observationsOf(run: Run): number {
+  const count = run.observations;
+  if (count === undefined || !Number.isFinite(count)) return 1;
+  return Math.max(1, Math.floor(count));
+}
+
+// Total collects behind a series, which is what the thresholds phrased as sample
+// COUNTS mean. The row count stopped being the sample count the moment runs
+// existed: an index idle for a year is one row and fifteen hundred observations,
+// and reading `history.length` there would refuse to call it unused for want of
+// evidence it has more of than anything else on the cluster.
+export function totalObservations(runs: readonly Run[]): number {
+  return runs.reduce((sum, run) => sum + observationsOf(run), 0);
+}
+
+// Oldest first, with unparseable stamps dropped. Every reader in this directory
+// wants exactly this, and wants it before differencing anything — so the sort key
+// and the bad-stamp policy are stated once here rather than at each of them.
+export function sortedRuns<T extends Run>(runs: readonly T[]): T[] {
+  return [...runs]
+    .filter((run) => Number.isFinite(spanStart(run)))
+    .sort((a, b) => spanStart(a) - spanStart(b));
+}
+
+// Every interval between two consecutive OBSERVATIONS in a series, with the
+// number of observations each interval stands for.
+//
+// This is the one place that knows how a run relates to the collects inside it,
+// and it is the load-bearing assumption of run-length storage: a run of n
+// observations spanning s ms contributes n-1 intervals of s/(n-1), evenly spaced,
+// because the individual stamps are precisely what run-length discarded. Between
+// two runs there is one real interval — from the moment a state was last
+// confirmed to the moment the next was first seen — and that is the only stretch
+// where anything unobserved can have happened.
+//
+// Reading a run's whole length as a single interval is the mistake available here,
+// and it is worth naming because it is wrong in two directions at once: as a
+// "gap" it turns a month of diligent watching into an apparent outage, and as an
+// "interval between sightings" it turns a steady index into a monthly job.
+//
+// Takes an ALREADY SORTED series (sortedRuns), so callers that have sorted for
+// their own loop do not pay for a second sort.
+export function observationGaps(sorted: readonly Run[]): { ms: number; weight: number }[] {
+  const gaps: { ms: number; weight: number }[] = [];
+  for (const [i, run] of sorted.entries()) {
+    const observations = observationsOf(run);
+    const span = spanEnd(run) - spanStart(run);
+    if (observations > 1 && span > 0) {
+      gaps.push({ ms: span / (observations - 1), weight: observations - 1 });
+    }
+    const next = sorted[i + 1];
+    if (next === undefined) continue;
+    const between = spanStart(next) - spanEnd(run);
+    if (between > 0) gaps.push({ ms: between, weight: 1 });
+  }
+  return gaps;
+}
+
+// The typical interval between two consecutive observations, in ms, taken from
+// the data rather than from a configured cadence — the engine is pure and does
+// not know what the scheduler is set to, and a cluster's history can span a
+// cadence change anyway.
+//
+// Weighted, because collapsing a hundred quiet collects into one row must not let
+// the handful of intervals around them outvote the cadence. Reduces to the plain
+// median of consecutive gaps when every run is a point, which is what it was
+// before runs existed.
+export function medianObservationGap(runs: readonly Run[]): number {
+  const gaps = observationGaps(sortedRuns(runs));
+  if (gaps.length === 0) return 0;
+  gaps.sort((a, b) => a.ms - b.ms);
+  const total = gaps.reduce((sum, gap) => sum + gap.weight, 0);
+  let seen = 0;
+  for (const [i, gap] of gaps.entries()) {
+    seen += gap.weight;
+    if (seen * 2 > total) return gap.ms;
+    // Landing exactly on the halfway mark is the even-count case: the median is
+    // the mean of the two middle values, which is what this was before it
+    // learned about weights.
+    if (seen * 2 === total) {
+      const next = gaps[i + 1];
+      return next === undefined ? gap.ms : (gap.ms + next.ms) / 2;
+    }
+  }
+  return gaps[gaps.length - 1]?.ms ?? 0;
+}
+
+export interface UsageSnapshot extends Run {
   readonly perMember: readonly MemberUsage[];
 }

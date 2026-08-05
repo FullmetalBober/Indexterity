@@ -173,4 +173,52 @@ describe("dynamicObserveDays — still-busy indexes", () => {
     expect(window.days).toBe(5);
     expect(window.reason).toBeNull();
   });
+  // Run-length storage. The window is decided from the index's own history, and
+  // that history is now intervals rather than instants.
+  describe("over run-length readings", () => {
+    it("does not read a quiet run as a periodic cadence", () => {
+      // A busy index whose op counter happened to hold still for a fortnight.
+      // Taking the run's whole length as the gap between sightings would call it
+      // a fortnightly job and buy a month of extra observing for a verdict that
+      // is already in — the mistake that looks conservative and is not.
+      const history = [
+        { capturedAt: day(20), lastSeenAt: day(6), observations: 57, ops: 900 },
+        { capturedAt: day(5), lastSeenAt: day(0), observations: 21, ops: 1500 },
+      ];
+      const window = dynamicObserveDays(history, 30, context);
+      expect(window.days).toBe(7);
+      expect(window.reason).toContain("queried steadily");
+    });
+
+    it("measures quiet time from the last confirmation, not the run's start", () => {
+      // Confirmed busy right up to now, in one row that started three weeks ago.
+      // Measuring from capturedAt would age it by the run's length and cost it
+      // the fast verdict a still-busy index has earned.
+      const history = [{ capturedAt: day(21), lastSeenAt: day(0), observations: 85, ops: 900 }];
+      expect(dynamicObserveDays(history, 30, context).days).toBe(7);
+    });
+
+    it("counts a single long idle run as the span it covers", () => {
+      // Ninety days of nothing, in one row. The shortening rule wants a span at
+      // least twice the policy window, and reading one row as one sample would
+      // have withheld it.
+      const history = [{ capturedAt: day(90), lastSeenAt: day(0), observations: 361, ops: 0 }];
+      const window = dynamicObserveDays(history, 30, context);
+      expect(window.days).toBe(15);
+      expect(window.reason).toContain("zero usage across");
+    });
+
+    it("still finds a real cadence in the gaps between runs", () => {
+      // A monthly job: each burst is its own run, and the month between them is
+      // a genuine gap. The periodic rule has to keep firing.
+      const history = [
+        { capturedAt: day(64), lastSeenAt: day(63), observations: 5, ops: 100 },
+        { capturedAt: day(32), lastSeenAt: day(31), observations: 5, ops: 200 },
+        { capturedAt: day(1), lastSeenAt: day(0), observations: 5, ops: 300 },
+      ];
+      const window = dynamicObserveDays(history, 30, context);
+      expect(window.days).toBeGreaterThan(30);
+      expect(window.reason).toContain("periodic");
+    });
+  });
 });

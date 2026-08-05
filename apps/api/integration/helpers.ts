@@ -1,6 +1,15 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
+import {
+  and,
+  clusterIndexes,
+  type Database,
+  eq,
+  indexSnapshots,
+  latencySamples,
+  sql,
+} from "../src/db";
 
 export const API_PORT = Number(process.env.INT_API_PORT ?? 3099);
 // The api serves everything under /api (main.ts setGlobalPrefix), so this is
@@ -89,6 +98,129 @@ export async function signUp(prefix: string): Promise<Session> {
     .map((value) => value.split(";")[0])
     .join("; ");
   return { email, cookie };
+}
+
+// A snapshot fixture, described the way it reads on the cluster rather than the
+// way it is stored. The identity and the spec live in cluster_indexes now, so a
+// test that wants "three snapshots of orders.dyn_1" would otherwise have to
+// upsert a dimension row and thread its id through by hand.
+//
+// `lastSeenAt`/`observations` default to a run of one, which is what a fixture
+// describing a single collect means. A fixture that wants a run — an index idle
+// across a stretch of collects — sets them.
+export interface SnapshotFixture {
+  readonly clusterId: string;
+  readonly database: string;
+  readonly collection: string;
+  readonly indexName: string;
+  readonly spec: Record<string, unknown>;
+  readonly sizeBytes: number;
+  readonly perMember: { member: string; ops: number; since?: string }[];
+  readonly hinted?: boolean;
+  readonly capturedAt: Date;
+  readonly lastSeenAt?: Date;
+  readonly observations?: number;
+}
+
+// Identity plus shape, matching what the writer keys dimension rows by. Stated
+// once, because a fixture that keyed the map differently from the way it looks the
+// id back up fails with "no dimension row" and sends the reader to the wrong file.
+function fixtureKey(fixture: SnapshotFixture): string {
+  return [
+    fixture.clusterId,
+    fixture.database,
+    fixture.collection,
+    fixture.indexName,
+    JSON.stringify(fixture.spec),
+  ].join("|");
+}
+
+export async function insertSnapshots(
+  db: Database,
+  fixtures: readonly SnapshotFixture[],
+): Promise<void> {
+  if (fixtures.length === 0) return;
+  const ids = new Map<string, string>();
+  for (const fixture of fixtures) {
+    const key = fixtureKey(fixture);
+    if (ids.has(key)) continue;
+    await db
+      .insert(clusterIndexes)
+      .values({
+        clusterId: fixture.clusterId,
+        database: fixture.database,
+        collection: fixture.collection,
+        indexName: fixture.indexName,
+        spec: fixture.spec,
+      })
+      .onConflictDoNothing();
+    // One path whether the insert won or a previous scenario already created the
+    // row, and it matches on the digest Postgres generated rather than on a
+    // canonical form reproduced here.
+    const [row] = await db
+      .select({ id: clusterIndexes.id })
+      .from(clusterIndexes)
+      .where(
+        and(
+          eq(clusterIndexes.clusterId, fixture.clusterId),
+          eq(clusterIndexes.database, fixture.database),
+          eq(clusterIndexes.collection, fixture.collection),
+          eq(clusterIndexes.indexName, fixture.indexName),
+          sql`${clusterIndexes.specDigest} = md5(${JSON.stringify(fixture.spec)}::jsonb::text)`,
+        ),
+      );
+    if (row === undefined) throw new Error(`no dimension row for ${fixture.indexName}`);
+    ids.set(key, row.id);
+  }
+
+  await db.insert(indexSnapshots).values(
+    fixtures.map((fixture) => {
+      const indexId = ids.get(fixtureKey(fixture));
+      if (indexId === undefined) throw new Error(`no dimension row for ${fixture.indexName}`);
+      return {
+        clusterId: fixture.clusterId,
+        indexId,
+        sizeBytes: fixture.sizeBytes,
+        perMember: fixture.perMember,
+        hinted: fixture.hinted ?? false,
+        capturedAt: fixture.capturedAt,
+        lastSeenAt: fixture.lastSeenAt ?? fixture.capturedAt,
+        observations: fixture.observations ?? 1,
+      };
+    }),
+  );
+}
+
+// The same for latency_samples, which has no dimension half but does have the
+// run columns. `lastSeenAt` carries no default in the schema on purpose — a row
+// that claims a months-old reading was confirmed this instant is the one lie the
+// trust gate cannot survive — so a fixture describing a single collect says so
+// here instead of leaving it to the database.
+export interface LatencyFixture {
+  readonly clusterId: string;
+  readonly database: string;
+  readonly collection: string;
+  readonly readOps: number;
+  readonly readLatencyMicros: number;
+  readonly writeOps: number;
+  readonly writeLatencyMicros: number;
+  readonly capturedAt: Date;
+  readonly lastSeenAt?: Date;
+  readonly observations?: number;
+}
+
+export async function insertLatency(
+  db: Database,
+  fixtures: readonly LatencyFixture[],
+): Promise<void> {
+  if (fixtures.length === 0) return;
+  await db.insert(latencySamples).values(
+    fixtures.map((fixture) => ({
+      ...fixture,
+      lastSeenAt: fixture.lastSeenAt ?? fixture.capturedAt,
+      observations: fixture.observations ?? 1,
+    })),
+  );
 }
 
 export async function api(

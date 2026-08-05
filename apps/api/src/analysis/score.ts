@@ -14,6 +14,10 @@ import type { ScanSeverity } from "./severity";
 export interface DropSignals {
   // null for redundancy-driven drops (usage isn't the argument there).
   readonly usageClass: UsageClass | null;
+  // Collects behind the finding, not rows in the table. The storage layer
+  // run-lengths an unchanged counter into a single row, so the row count of an
+  // index idle for a year is one — and this term is the evidence-depth credit,
+  // which is exactly backwards from what that index has.
   readonly snapshots: number;
   readonly redundant: boolean;
   readonly sizeBytes: number;

@@ -4,7 +4,7 @@ import { type ClassifyOptions, classifyUsage, usageHistoryIsTrustworthy } from "
 import { isKeyPrefix, isRedundantPrefix } from "./redundancy";
 import { isNeverDrop } from "./safety";
 import { dropScore } from "./score";
-import type { IndexSpec, UsageSnapshot } from "./types";
+import { type IndexSpec, totalObservations, type UsageSnapshot } from "./types";
 
 const directionSchema = z.union([
   z.literal(1),
@@ -93,7 +93,7 @@ export function recommendForCollection(
         rationale: `Key-prefix of ${covering.spec.name}, which already covers it.`,
         score: dropScore({
           usageClass: null,
-          snapshots: candidate.history.length,
+          snapshots: totalObservations(candidate.history),
           redundant: true,
           sizeBytes: sizes[candidate.spec.name] ?? 0,
           pastRegressions: pastRegressions[candidate.spec.name] ?? 0,
@@ -120,7 +120,7 @@ export function recommendForCollection(
           : "No recorded usage across the observation window.",
       score: dropScore({
         usageClass,
-        snapshots: index.history.length,
+        snapshots: totalObservations(index.history),
         redundant: false,
         sizeBytes: sizes[index.spec.name] ?? 0,
         pastRegressions: pastRegressions[index.spec.name] ?? 0,
@@ -147,7 +147,7 @@ export function recommendForCollection(
         "Protected index (unique/TTL/shard/partial/sparse) with no recorded usage — never auto-dropped; review manually.",
       score: dropScore({
         usageClass,
-        snapshots: index.history.length,
+        snapshots: totalObservations(index.history),
         redundant: false,
         sizeBytes: sizes[index.spec.name] ?? 0,
         pastRegressions: pastRegressions[index.spec.name] ?? 0,
@@ -177,7 +177,7 @@ export function recommendForCollection(
         `and dropping this one. Never auto-dropped.`,
       score: dropScore({
         usageClass: null,
-        snapshots: index.history.length,
+        snapshots: totalObservations(index.history),
         redundant: true,
         sizeBytes: sizes[index.spec.name] ?? 0,
         pastRegressions: pastRegressions[index.spec.name] ?? 0,
