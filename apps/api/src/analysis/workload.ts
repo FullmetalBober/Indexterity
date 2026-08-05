@@ -218,7 +218,7 @@ export function sortOrderAdvisories(
         !isNeverDrop(idx) && equalFields(fieldsOf(idx), wanted) && !servesOrder(idx, wantedKeys),
     );
     if (blocker === undefined) continue;
-    const key = `${blocker.name} ${wantedKeys.map((k) => `${k.field}:${k.direction}`).join(",")}`;
+    const key = `${blocker.name}\u0000${wantedKeys.map((k) => `${k.field}:${k.direction}`).join(",")}`;
     if (seen.has(key)) continue;
     seen.add(key);
     out.push({ existingIndex: blocker.name, wantedKeys, count: shape.count });

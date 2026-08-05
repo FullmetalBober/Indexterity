@@ -31,6 +31,7 @@ import { applyCreatesForCluster } from "../src/jobs/create";
 import { closeJobDb, jobDb } from "../src/jobs/db";
 import { finalizeCluster } from "../src/jobs/finalize";
 import { planForCluster } from "../src/jobs/plan";
+import { latestBaselines } from "../src/jobs/probe";
 import { pruneDeadLetterJobs, pruneOldSamples } from "../src/jobs/retention";
 import { suggestForCluster } from "../src/jobs/suggest";
 import { MongoConnection, MongoIndexCollector } from "../src/mongo";
@@ -2167,6 +2168,80 @@ describe("finished decisions age out, the ROI they earned does not", () => {
 //
 // The test is the rule rather than the nine, because the nine are already
 // fixed. What is worth keeping is that the tenth cannot be added quietly.
+// The probe compares live latency against "how fast was this collection before",
+// and before is the NEWEST stored sample. Picking an older row is the way this
+// goes wrong quietly: the comparison is against the wrong baseline and nothing
+// about the resulting finding looks unusual. Worth a test of its own because the
+// query was rewritten to a `distinct on` — it used to read every row for the
+// cluster and choose in JS.
+describe("probe baselines", () => {
+  it("takes the newest sample per namespace, and only one per namespace", async () => {
+    await db.insert(latencySamples).values([
+      // Two namespaces, three captures each, deliberately inserted out of order.
+      {
+        clusterId,
+        database: "bl",
+        collection: "a",
+        readOps: 20,
+        readLatencyMicros: 200,
+        writeOps: 0,
+        writeLatencyMicros: 0,
+        capturedAt: new Date("2026-02-02T00:00:00Z"),
+      },
+      {
+        clusterId,
+        database: "bl",
+        collection: "a",
+        readOps: 30,
+        readLatencyMicros: 300,
+        writeOps: 0,
+        writeLatencyMicros: 0,
+        capturedAt: new Date("2026-02-03T00:00:00Z"),
+      },
+      {
+        clusterId,
+        database: "bl",
+        collection: "a",
+        readOps: 10,
+        readLatencyMicros: 100,
+        writeOps: 0,
+        writeLatencyMicros: 0,
+        capturedAt: new Date("2026-02-01T00:00:00Z"),
+      },
+      {
+        clusterId,
+        database: "bl",
+        collection: "b",
+        readOps: 70,
+        readLatencyMicros: 700,
+        writeOps: 0,
+        writeLatencyMicros: 0,
+        capturedAt: new Date("2026-02-03T00:00:00Z"),
+      },
+      {
+        clusterId,
+        database: "bl",
+        collection: "b",
+        readOps: 90,
+        readLatencyMicros: 900,
+        writeOps: 0,
+        writeLatencyMicros: 0,
+        capturedAt: new Date("2026-02-04T00:00:00Z"),
+      },
+    ]);
+
+    const rows = (await latestBaselines(db, clusterId)).filter((row) => row.database === "bl");
+
+    expect(rows).toHaveLength(2);
+    const byNs = new Map(rows.map((row) => [row.collection, row]));
+    // The 2026-02-03 row for a, not the 02-01 or 02-02 ones.
+    expect(byNs.get("a")?.readOps).toBe(30);
+    expect(byNs.get("a")?.readLatencyMicros).toBe(300);
+    // And the 02-04 row for b, not the 02-03 one.
+    expect(byNs.get("b")?.readOps).toBe(90);
+  });
+});
+
 describe("the control plane's own indexes", () => {
   it("has no foreign key without one", async () => {
     const rows = await db.execute(sql`

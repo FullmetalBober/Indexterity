@@ -442,5 +442,17 @@ export const latencySamples = pgTable(
     writeLatencyMicros: bigint("write_latency_micros", { mode: "number" }).notNull(),
     capturedAt: timestamp("captured_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [index("latency_samples_cluster_time").on(table.clusterId, table.capturedAt)],
+  (table) => [
+    index("latency_samples_cluster_time").on(table.clusterId, table.capturedAt),
+    // The five-minute probe wants the newest sample per namespace, which is a
+    // `distinct on (database, collection) order by … captured_at desc`. Without
+    // this the planner sorts every row the cluster has ever written, on every
+    // probe. Leading with cluster_id because that is always the equality filter.
+    index("latency_samples_cluster_ns_time").on(
+      table.clusterId,
+      table.database,
+      table.collection,
+      table.capturedAt.desc(),
+    ),
+  ],
 );
