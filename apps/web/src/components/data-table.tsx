@@ -28,8 +28,9 @@ import {
   tableFeatures,
   useTable,
 } from "@tanstack/react-table";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { ArrowDownIcon, ArrowUpIcon, ChevronsUpDownIcon, SearchIcon } from "lucide-react";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useRef, useState } from "react";
 import { Button } from "~/components/ui/button";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "~/components/ui/empty";
 import { Input } from "~/components/ui/input";
@@ -101,6 +102,15 @@ interface DataTableProps<TData extends RowData> {
   // what it is, so the caption is screen-reader-only rather than a second title.
   readonly caption: string;
   readonly className?: string;
+  // Set on the tables whose row count is bounded only by how big the customer is:
+  // recommendations (collections × indexes) and the per-collection footprint. The
+  // body gets its own scroll container and only the visible rows are in the DOM.
+  //
+  // `maxHeight` is a MAXIMUM, which is what keeps this from being a visible change
+  // for everyone: a cluster with four collections renders at its natural height
+  // with no scrollbar and looks exactly as it did. Only the long tail caps and
+  // scrolls, and only the long tail was the problem.
+  readonly virtualize?: { readonly maxHeight: number; readonly estimateRowHeight: number };
 }
 
 export function DataTable<TData extends RowData>({
@@ -112,6 +122,7 @@ export function DataTable<TData extends RowData>({
   empty,
   caption,
   className,
+  virtualize,
 }: DataTableProps<TData>) {
   const [sorting, setSorting] = useState<SortingState>(initialSorting);
   const [globalFilter, setGlobalFilter] = useState("");
@@ -131,6 +142,41 @@ export function DataTable<TData extends RowData>({
   });
 
   const rows = table.getRowModel().rows;
+
+  // Rows are kept in the flow and bracketed by two spacer rows, rather than
+  // absolutely positioned the way the virtualizer's own examples do it. That
+  // matters twice over: a `<tr>` taken out of flow stops sharing the table's
+  // column widths, so the columns lose alignment the moment you scroll — and it
+  // stops being a row to a screen reader, which is most of what a `<table>` is
+  // for. Two spacers of the right height buy the same DOM saving and cost the
+  // table nothing.
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => scrollRef.current,
+    // Only the opening guess. Every rendered row reports its real height back
+    // through measureElement below, which it has to: a recommendation's score cell
+    // grows a second line once a drop is scheduled, and its rationale is prose
+    // that wraps to however many lines the window is wide.
+    estimateSize: () => virtualize?.estimateRowHeight ?? 48,
+    overscan: 8,
+    // The server has no scroll element to measure, and without a rect the
+    // virtualizer reports a viewport of zero and renders no rows at all — which
+    // is the SSR failure the raw-HTML e2e test exists to catch. Handing it the
+    // container's own maximum gives the server a screenful to render, and the
+    // client's first render agrees because it starts from the same number.
+    initialRect: { width: 0, height: virtualize?.maxHeight ?? 0 },
+    // Off for the tables that do not ask for it — the audit trail is capped at
+    // fifty server-side, so it has no tail to virtualize.
+    enabled: virtualize !== undefined,
+  });
+
+  const virtualRows = virtualize === undefined ? [] : virtualizer.getVirtualItems();
+  const first = virtualRows[0];
+  const last = virtualRows[virtualRows.length - 1];
+  const padTop = first === undefined ? 0 : first.start;
+  const padBottom = last === undefined ? 0 : virtualizer.getTotalSize() - last.end;
+  const columnCount = table.getAllLeafColumns().length;
 
   // Empty because there is nothing, versus empty because the filter excluded
   // everything, are different facts and get different answers — the second one
@@ -164,63 +210,101 @@ export function DataTable<TData extends RowData>({
         </div>
       )}
 
-      <Table>
-        <TableCaption className="sr-only">{caption}</TableCaption>
-        <TableHeader>
-          {table.getHeaderGroups().map((group) => (
-            <TableRow key={group.id}>
-              {group.headers.map((header) => {
-                const sorted = header.column.getIsSorted();
-                return (
-                  <TableHead key={header.id} aria-sort={ariaSort(sorted)}>
-                    {header.column.getCanSort() ? (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="-ml-2 h-7 px-2 text-muted-foreground has-[>svg]:px-2"
-                        onClick={header.column.getToggleSortingHandler()}
-                      >
+      {/* The scroll container the virtualizer measures. Without `virtualize` there
+          is no container at all and the table sits in the page flow as before. */}
+      <div
+        ref={scrollRef}
+        className={virtualize === undefined ? undefined : "overflow-auto rounded-md border"}
+        style={virtualize === undefined ? undefined : { maxHeight: virtualize.maxHeight }}
+      >
+        <Table>
+          <TableCaption className="sr-only">{caption}</TableCaption>
+          {/* Sticky only when the body scrolls under it: a header that scrolls out
+              of an inner container leaves the reader guessing which column is
+              which, several hundred rows from the top. */}
+          <TableHeader
+            className={virtualize === undefined ? undefined : "sticky top-0 z-10 bg-background"}
+          >
+            {table.getHeaderGroups().map((group) => (
+              <TableRow key={group.id}>
+                {group.headers.map((header) => {
+                  const sorted = header.column.getIsSorted();
+                  return (
+                    <TableHead key={header.id} aria-sort={ariaSort(sorted)}>
+                      {header.column.getCanSort() ? (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="-ml-2 h-7 px-2 text-muted-foreground has-[>svg]:px-2"
+                          onClick={header.column.getToggleSortingHandler()}
+                        >
+                          <table.FlexRender header={header} />
+                          <SortIcon sorted={sorted} />
+                        </Button>
+                      ) : (
                         <table.FlexRender header={header} />
-                        <SortIcon sorted={sorted} />
-                      </Button>
-                    ) : (
-                      <table.FlexRender header={header} />
-                    )}
-                  </TableHead>
-                );
-              })}
-            </TableRow>
-          ))}
-        </TableHeader>
-        <TableBody>
-          {rows.length === 0 ? (
-            <TableRow>
-              <TableCell
-                colSpan={table.getAllLeafColumns().length}
-                className="h-20 text-center text-muted-foreground"
-              >
-                Nothing matches “{globalFilter}”.
-              </TableCell>
-            </TableRow>
-          ) : (
-            rows.map((row) => (
-              <TableRow key={row.id}>
-                {/* getAllCells, not getVisibleCells: that one belongs to
-                    columnVisibilityFeature, and nothing here hides a column, so
-                    registering the feature to call its getter would be paying for
-                    it twice — in the bundle and in a name that promises a control
-                    the reader does not have. */}
-                {row.getAllCells().map((cell) => (
-                  <TableCell key={cell.id}>
-                    <table.FlexRender cell={cell} />
-                  </TableCell>
-                ))}
+                      )}
+                    </TableHead>
+                  );
+                })}
               </TableRow>
-            ))
-          )}
-        </TableBody>
-      </Table>
+            ))}
+          </TableHeader>
+          <TableBody>
+            {rows.length === 0 ? (
+              <TableRow>
+                <TableCell colSpan={columnCount} className="h-20 text-center text-muted-foreground">
+                  Nothing matches “{globalFilter}”.
+                </TableCell>
+              </TableRow>
+            ) : (
+              <>
+                <Spacer height={padTop} columnCount={columnCount} />
+                {(virtualize === undefined
+                  ? rows.map((row, index) => ({ row, index }))
+                  : virtualRows.map((item) => ({ row: rows[item.index], index: item.index }))
+                ).map(({ row, index }) =>
+                  row === undefined ? null : (
+                    <TableRow
+                      key={row.id}
+                      // Both are the virtualizer's contract for measuring a row it
+                      // did not get to size itself: the ref reports the height, the
+                      // index says which row was reported.
+                      data-index={index}
+                      ref={virtualize === undefined ? undefined : virtualizer.measureElement}
+                    >
+                      {/* getAllCells, not getVisibleCells: that one belongs to
+                          columnVisibilityFeature, and nothing here hides a column,
+                          so registering the feature to call its getter would be
+                          paying for it twice — in the bundle and in a name that
+                          promises a control the reader does not have. */}
+                      {row.getAllCells().map((cell) => (
+                        <TableCell key={cell.id}>
+                          <table.FlexRender cell={cell} />
+                        </TableCell>
+                      ))}
+                    </TableRow>
+                  ),
+                )}
+                <Spacer height={padBottom} columnCount={columnCount} />
+              </>
+            )}
+          </TableBody>
+        </Table>
+      </div>
     </div>
+  );
+}
+
+// The height the rows above or below the window would have taken. A real row so
+// the table's own layout keeps working, hidden from assistive tech because it
+// stands for content rather than being any.
+function Spacer({ height, columnCount }: { height: number; columnCount: number }) {
+  if (height <= 0) return null;
+  return (
+    <TableRow aria-hidden="true" className="border-0 hover:bg-transparent">
+      <TableCell colSpan={columnCount} className="p-0" style={{ height }} />
+    </TableRow>
   );
 }
 

@@ -177,6 +177,9 @@ export function RecommendationsTable({
       // Highest confidence first — the ordering a reader would apply by hand.
       initialSorting={[{ id: "score", desc: true }]}
       filterLabel="Filter recommendations"
+      // Unbounded by nature: one row per index worth touching, across every
+      // collection. Sixty-odd is a normal cluster and thousands is a big one.
+      virtualize={{ maxHeight: 640, estimateRowHeight: 64 }}
       empty={{
         title: "No recommendations yet",
         description:

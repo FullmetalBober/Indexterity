@@ -119,6 +119,9 @@ export function CollectionsTable({ rows }: { rows: CollectionRow[] }) {
       // space going", and the answer is at the top rather than found by scrolling.
       initialSorting={[{ id: "indexBytes", desc: true }]}
       filterLabel="Filter collections"
+      // One row per collection, and getCollections applies no limit. Rows here are
+      // single-line, so they estimate smaller than a recommendation's.
+      virtualize={{ maxHeight: 560, estimateRowHeight: 44 }}
       empty={{
         title: "Nothing collected yet",
         description:
