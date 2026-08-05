@@ -1,0 +1,1 @@
+CREATE INDEX "latency_samples_cluster_ns_time" ON "latency_samples" USING btree ("cluster_id","database","collection","captured_at" DESC NULLS LAST);
