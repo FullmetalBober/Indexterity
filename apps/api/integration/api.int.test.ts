@@ -167,6 +167,23 @@ describe("cluster lifecycle", () => {
     createdClusterIds.push(clusterId);
   });
 
+  // Connecting a cluster and then waiting up to six hours for the dashboard to
+  // say anything is what reads as "the collect cadence is too long". One job on
+  // connect answers it without changing the steady-state load, and the queue is
+  // the only place that is observable.
+  it("queues the first collect on connect rather than waiting for the schedule", async () => {
+    // `_private_jobs` rather than the `jobs` view: the view does not expose the
+    // payload, and the payload is the only place the cluster is named.
+    const queued = await db.execute(
+      sql`select count(*)::int as n
+          from graphile_worker._private_jobs j
+          join graphile_worker._private_tasks t on t.id = j.task_id
+          where t.identifier = 'collect'
+            and j.payload->>'clusterId' = ${clusterId}`,
+    );
+    expect(Number(asRecord(queued.rows[0] ?? {}).n)).toBeGreaterThan(0);
+  });
+
   it("owner flips the cluster live", async () => {
     const live = await api(`/clusters/${clusterId}/mode`, owner, {
       method: "PATCH",

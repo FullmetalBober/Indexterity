@@ -1,6 +1,6 @@
 import {
   type ActivityPoint,
-  activeIntervals,
+  activeHours,
   type IndexInput,
   parseStoredSpec,
   recommendForCollection,
@@ -26,16 +26,34 @@ const DEFAULT_OBSERVE_DAYS = 30;
 // A hole larger than this means we stopped watching, so absence of usage
 // proves nothing (see analysis/classify.ts). Two days spans a missed collect
 // or two at the 6h cadence without tolerating an outage.
-// minActiveIntervals: the collection must have served reads in at least this
-// many collect intervals before "this index served none of them" is a claim.
-// Twelve at the 6h cadence is three days of genuine traffic, which an
-// always-on but mostly idle dev cluster can take weeks of calendar time to
-// accumulate — which is exactly the point.
+// Every threshold that stands for a DURATION is written as one. This mattered
+// enough to be worth stating: two of these used to be counts, and a count only
+// means what it says while the cadence stays where it was. `minActiveIntervals:
+// 12` meant "three days of traffic" solely because a collect interval was six
+// hours, and `recentWindow: 3` meant "the last twelve hours" for the same
+// reason. Shortening the cadence would have quietly bought less evidence for the
+// same number — the engine calling an index dead on three hours instead of three
+// days, with nothing failing.
+//
+// minActiveHours: the collection must have served reads for at least this long
+// before "this index served none of them" is a claim. Seventy-two hours is the
+// three days the old twelve intervals bought, and an always-on but mostly idle
+// dev cluster can take weeks of calendar time to accumulate it — which is
+// exactly the point.
+//
+// recentHours: how far back a burst still counts as recent when deciding
+// PERIODIC_ALIVE against the droppable PERIODIC_DEAD. Twelve, because three
+// trailing snapshots six hours apart spanned twelve hours.
+//
+// minHistory stays a COUNT on purpose: it is the number of data points needed to
+// tell a pattern from a flat line, which is a question about samples and not
+// about time. What stops it standing in for a duration is minHistoryDays beside
+// it, which is the durational half of the same gate.
 const CLASSIFY_OPTIONS = {
-  recentWindow: 3,
+  recentHours: 12,
   minHistory: 3,
   minHistoryDays: 7,
-  minActiveIntervals: 12,
+  minActiveHours: 72,
   maxGapHours: 48,
 };
 
@@ -154,7 +172,7 @@ export async function classifyCluster(clusterId: string): Promise<number> {
       });
     }
     const pastRegressions = regressionCounts.get(`${entry.database} ${entry.collection}`) ?? {};
-    const active = activeIntervals(
+    const active = activeHours(
       activityByCollection.get(`${entry.database}\u0000${entry.collection}`) ?? [],
     );
     for (const candidate of recommendForCollection(
