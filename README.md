@@ -286,7 +286,7 @@ everything; every mutation is owner-only. Invites are one-time tokens with a
 ## Stack
 
 Turbo monorepo · NestJS + Fastify (api) · TanStack Start + TanStack Query +
-TanStack Form + TanStack Table + shadcn (web) · better-auth · Drizzle +
+TanStack Form + TanStack Table + TanStack Charts + shadcn (web) · better-auth · Drizzle +
 PostgreSQL · oRPC contracts (zod 4) · graphile-worker · Biome · strict
 TypeScript (no `any`, no `as`, no lint-ignore).
 
@@ -310,6 +310,8 @@ apps/web                dashboard
                         every form in the app is built from these
   src/components/data-table  TanStack Table bound once to shadcn's table
                         primitives; the three dashboard tables are column defs
+  src/components/latency-chart  TanStack Charts behind a props-stable wrapper —
+                        pre-1.0, so churn is contained to this one file
   src/router.tsx        the one query client, and the SSR dehydrate/hydrate wiring
 packages/contracts      oRPC + zod contracts shared by api and web
   src/schemas.ts        what the api returns
@@ -333,6 +335,12 @@ Tables are TanStack Table, sortable and filterable, rendered through the same
 shadcn primitives as before — a column is one object saying how to read a value,
 draw it and sort it, rather than a header cell in one place and a body cell in
 another.
+
+The latency charts are TanStack Charts, which is pre-1.0 and therefore kept behind
+`LineChart`'s unchanged `{title, unit, series}` props: a breaking release is one
+file. It replaced recharts, which cut **65 KiB gzipped** off the client bundle
+(361 KB → 294 KB, measured) and made the charts render server-side — recharts 3
+draws client-only, so the panels used to pop in after hydration.
 
 Everything engine-specific sits behind the ports in `src/engine`, so PostgreSQL
 and SQL Server adapters can slot in without pipeline changes — the data model
