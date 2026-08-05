@@ -27,10 +27,10 @@ function input(indexSpec: IndexSpec, opsPerSnapshot: number[]): IndexInput {
 }
 
 const options = {
-  recentWindow: 3,
+  recentHours: 12,
   minHistory: 3,
   minHistoryDays: 0,
-  minActiveIntervals: 0,
+  minActiveHours: 0,
   maxGapHours: 48,
 };
 // The fixtures' newest snapshot is 2026-01-03; judge from just after it, since

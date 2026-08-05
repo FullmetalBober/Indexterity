@@ -2,55 +2,85 @@ import { describe, expect, it } from "vitest";
 import { classifyUsage, countersRestartedDuring, usageHistoryIsTrustworthy } from "./classify";
 import type { UsageSnapshot } from "./types";
 
-function snap(ops: number): UsageSnapshot {
-  return {
-    capturedAt: "2026-01-01T00:00:00Z",
+// Snapshots at a given cadence, oldest first — because classifyUsage now reads
+// the clock rather than counting rows, a fixture where every snapshot shares a
+// timestamp cannot express "went quiet".
+function series(opsPerSnapshot: readonly number[], hoursApart = 6): UsageSnapshot[] {
+  return opsPerSnapshot.map((ops, i) => ({
+    capturedAt: new Date(Date.UTC(2026, 0, 1, i * hoursApart)).toISOString(),
     perMember: [{ member: "m", ops, since: "2026-01-01T00:00:00Z" }],
-  };
+  }));
 }
 
 const options = {
-  recentWindow: 3,
+  recentHours: 12,
   minHistory: 3,
   minHistoryDays: 0,
-  minActiveIntervals: 0,
+  minActiveHours: 0,
   maxGapHours: 48,
 };
 
 describe("classifyUsage", () => {
   it("FLAT_ZERO below minHistory", () => {
-    expect(classifyUsage([snap(5), snap(5)], options)).toBe("FLAT_ZERO");
+    expect(classifyUsage(series([5, 5]), options)).toBe("FLAT_ZERO");
   });
   it("FLAT_ZERO when every snapshot is idle", () => {
-    expect(classifyUsage([snap(0), snap(0), snap(0)], options)).toBe("FLAT_ZERO");
+    expect(classifyUsage(series([0, 0, 0]), options)).toBe("FLAT_ZERO");
   });
   it("CONTINUOUS when every snapshot is active", () => {
-    expect(classifyUsage([snap(1), snap(2), snap(3)], options)).toBe("CONTINUOUS");
+    expect(classifyUsage(series([1, 2, 3]), options)).toBe("CONTINUOUS");
   });
   it("PERIODIC_ALIVE when the recent window still fires", () => {
-    expect(classifyUsage([snap(5), snap(0), snap(0), snap(3)], options)).toBe("PERIODIC_ALIVE");
+    expect(classifyUsage(series([5, 0, 0, 3]), options)).toBe("PERIODIC_ALIVE");
   });
   it("PERIODIC_DEAD when it fired once then went quiet", () => {
-    expect(classifyUsage([snap(5), snap(0), snap(0), snap(0)], options)).toBe("PERIODIC_DEAD");
+    expect(classifyUsage(series([5, 0, 0, 0]), options)).toBe("PERIODIC_DEAD");
   });
   it("sums ops across replica-set members", () => {
-    const split: UsageSnapshot = {
-      capturedAt: "2026-01-01T00:00:00Z",
+    const split = series([0, 0, 0]).map((snapshot) => ({
+      ...snapshot,
       perMember: [
         { member: "a", ops: 0, since: "" },
         { member: "b", ops: 4, since: "" },
       ],
-    };
-    expect(classifyUsage([split, split, split], options)).toBe("CONTINUOUS");
+    }));
+    expect(classifyUsage(split, options)).toBe("CONTINUOUS");
+  });
+
+  // The reason recentHours is hours. recentWindow:3 meant "the last twelve
+  // hours" only while snapshots were six hours apart; at fifteen minutes the same
+  // three snapshots were forty-five minutes, and a nightly job that had not run
+  // yet today read as PERIODIC_DEAD — which is the droppable class.
+  //
+  // Same traffic, same verdict, whatever the cadence.
+  it.each([
+    ["6h", 6],
+    ["1h", 1],
+    ["15m", 0.25],
+  ])("calls a burst inside the recent window ALIVE at a %s cadence", (_label, hours) => {
+    // Fires in the newest snapshot, whatever the spacing.
+    const history = series([5, 0, 0, 3], hours);
+    expect(classifyUsage(history, options)).toBe("PERIODIC_ALIVE");
+  });
+
+  it("calls a burst older than the recent window DEAD at every cadence", () => {
+    // 40 snapshots six hours apart: the burst is ten days back, far outside 12h.
+    const long = series([5, ...Array.from({ length: 39 }, () => 0)]);
+    expect(classifyUsage(long, options)).toBe("PERIODIC_DEAD");
+    // The same shape at fifteen minutes is only ten hours, so the burst is still
+    // inside the window and the index is still alive. Counting snapshots could
+    // not tell these two apart; hours can.
+    const short = series([5, ...Array.from({ length: 39 }, () => 0)], 0.25);
+    expect(classifyUsage(short, options)).toBe("PERIODIC_ALIVE");
   });
 });
 
 describe("usageHistoryIsTrustworthy", () => {
   const opts = {
-    recentWindow: 3,
+    recentHours: 12,
     minHistory: 3,
     minHistoryDays: 0,
-    minActiveIntervals: 0,
+    minActiveHours: 0,
     maxGapHours: 48,
   };
   const at = (iso: string, ops = 0): UsageSnapshot => ({
@@ -169,10 +199,10 @@ describe("countersRestartedDuring", () => {
 
 describe("usageHistoryIsTrustworthy with restart evidence", () => {
   const opts = {
-    recentWindow: 3,
+    recentHours: 12,
     minHistory: 3,
     minHistoryDays: 0,
-    minActiveIntervals: 0,
+    minActiveHours: 0,
     maxGapHours: 48,
   };
   const now = new Date("2026-03-04T00:00:00Z");
@@ -205,10 +235,10 @@ describe("usageHistoryIsTrustworthy with restart evidence", () => {
 
 describe("warm-up: history span, not just snapshot count", () => {
   const opts = {
-    recentWindow: 3,
+    recentHours: 12,
     minHistory: 3,
     minHistoryDays: 7,
-    minActiveIntervals: 0,
+    minActiveHours: 0,
     maxGapHours: 48,
   };
   // A freshly connected cluster collecting every 6h.
@@ -244,10 +274,10 @@ describe("warm-up: history span, not just snapshot count", () => {
 
 describe("idle databases: activity, not elapsed time", () => {
   const opts = {
-    recentWindow: 3,
+    recentHours: 12,
     minHistory: 3,
     minHistoryDays: 7,
-    minActiveIntervals: 12,
+    minActiveHours: 72,
     maxGapHours: 48,
   };
   // Thirty unbroken days of collects at the 6h cadence — plenty of calendar.
@@ -258,12 +288,20 @@ describe("idle databases: activity, not elapsed time", () => {
   const now = new Date(Date.UTC(2026, 0, 31));
 
   it("refuses a usage claim when the collection was barely queried", () => {
-    // A dev cluster: up for a month, worked on for two afternoons.
-    expect(usageHistoryIsTrustworthy(history, opts, now, 3)).toBe(false);
+    // A dev cluster: up for a month, worked on for two afternoons — eighteen
+    // hours of real traffic against the seventy-two the gate wants.
+    expect(usageHistoryIsTrustworthy(history, opts, now, 18)).toBe(false);
   });
 
   it("accepts once the collection has genuinely been in use", () => {
-    expect(usageHistoryIsTrustworthy(history, opts, now, 40)).toBe(true);
+    expect(usageHistoryIsTrustworthy(history, opts, now, 240)).toBe(true);
+  });
+
+  // Just under and just over, so the boundary is the tested thing rather than a
+  // number picked far from it.
+  it("draws the line at minActiveHours exactly", () => {
+    expect(usageHistoryIsTrustworthy(history, opts, now, 71.9)).toBe(false);
+    expect(usageHistoryIsTrustworthy(history, opts, now, 72)).toBe(true);
   });
 
   it("skips the check when the caller has no activity data to give", () => {

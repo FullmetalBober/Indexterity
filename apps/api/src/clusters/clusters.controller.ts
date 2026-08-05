@@ -1,4 +1,4 @@
-import { Controller, Req } from "@nestjs/common";
+import { Controller, Logger, Req } from "@nestjs/common";
 import { implement } from "@orpc/nest";
 import { ORPCError } from "@orpc/server";
 import { contract } from "@repo/contracts";
@@ -32,6 +32,8 @@ import { Implement } from "../orpc/implement";
 // endpoints that dial a host the user named. Owner-only throughout.
 @Controller()
 export class ClustersController {
+  private readonly log = new Logger(ClustersController.name);
+
   constructor(
     private readonly database: DatabaseService,
     private readonly tenancy: TenancyService,
@@ -64,6 +66,34 @@ export class ClustersController {
       })
       .returning();
     if (row === undefined) throw new Error("failed to create cluster");
+    // Collect once, now, rather than at the next scheduled pass. Connecting a
+    // cluster and then waiting up to six hours for the dashboard to say anything
+    // is the complaint that reads as "the cadence is too long" — and it is a
+    // different problem with a different fix. Shortening the cadence for everyone
+    // would buy this one moment at the cost of every hour afterwards; one job on
+    // connect buys it outright and changes the steady-state load by nothing.
+    //
+    // Queued rather than awaited: a collect walks every collection and can take
+    // minutes on a large cluster, and the caller is waiting on a POST.
+    //
+    // Best-effort on purpose. The insert above has already committed, so a failed
+    // enqueue must not turn a connect that worked into an error the reader cannot
+    // act on — they would see "failed to connect" next to a cluster that is
+    // there. Losing it costs the first collect its head start and nothing else:
+    // the scheduled pass is still behind it, which is exactly where this used to
+    // happen. Logged rather than swallowed, because a queue that cannot be
+    // written to is worth knowing about (§16).
+    try {
+      await this.database.db.execute(
+        sql`select graphile_worker.add_job('collect', json_build_object('clusterId', ${row.id}::text), max_attempts => 3)`,
+      );
+    } catch (error) {
+      this.log.warn(
+        `could not queue the first collect for cluster ${row.id}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
     return row;
   }
 

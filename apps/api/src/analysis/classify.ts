@@ -2,18 +2,26 @@ import type { UsageClass } from "@repo/contracts";
 import type { UsageSnapshot } from "./types";
 
 export interface ClassifyOptions {
-  // How many trailing snapshots define "recent" when deciding alive vs dead.
-  readonly recentWindow: number;
+  // How far back "recent" reaches when deciding alive vs dead, in hours.
+  //
+  // Was a count of trailing snapshots, which made it another threshold that only
+  // meant what it said at the 6h cadence — and the more dangerous of the two,
+  // because this is the line between PERIODIC_ALIVE and PERIODIC_DEAD and
+  // PERIODIC_DEAD is droppable. Three trailing snapshots is twelve hours at six
+  // hours apart and forty-five minutes at fifteen; a nightly job that had simply
+  // not run yet today would have read as decommissioned.
+  readonly recentHours: number;
   // Minimum snapshots required before attempting periodic classification.
   readonly minHistory: number;
   // Minimum span the history must cover before absence of usage counts as
   // evidence. Snapshot count alone is not enough: three collects is eighteen
   // hours at the 6h cadence, and plenty of real work runs less often than that.
   readonly minHistoryDays: number;
-  // Minimum intervals in which the COLLECTION actually served reads. Elapsed
-  // time is the wrong clock for a cluster that is up continuously but only
-  // worked occasionally — see analysis/activity.ts.
-  readonly minActiveIntervals: number;
+  // Minimum HOURS in which the COLLECTION actually served reads. Elapsed time is
+  // the wrong clock for a cluster that is up continuously but only worked
+  // occasionally — see analysis/activity.ts, which also explains why this is
+  // hours and not the interval count it used to be.
+  readonly minActiveHours: number;
   // Largest acceptable hole between consecutive snapshots. A longer one means
   // we stopped watching (cluster unreachable, control plane down), so the
   // history cannot prove absence of usage.
@@ -84,10 +92,10 @@ export function usageHistoryIsTrustworthy(
   history: readonly UsageSnapshot[],
   options: ClassifyOptions,
   now: Date,
-  // How many intervals the collection was actually queried in. Omitted by
-  // callers with no latency history; the check is then skipped rather than
-  // failing closed, since older data has no way to supply it.
-  collectionActiveIntervals?: number,
+  // How many hours the collection was actually queried in. Omitted by callers
+  // with no latency history; the check is then skipped rather than failing
+  // closed, since older data has no way to supply it.
+  collectionActiveHours?: number,
 ): boolean {
   if (countersRestartedDuring(history)) return false;
   if (history.length < options.minHistory) return false;
@@ -102,10 +110,7 @@ export function usageHistoryIsTrustworthy(
   if (newestSeen - oldest < options.minHistoryDays * 24 * HOUR_MS) return false;
   // "This index served none of the reads" is only a claim when there were reads
   // to serve. An idle week proves nothing about any index in it.
-  if (
-    collectionActiveIntervals !== undefined &&
-    collectionActiveIntervals < options.minActiveIntervals
-  ) {
+  if (collectionActiveHours !== undefined && collectionActiveHours < options.minActiveHours) {
     return false;
   }
   const maxGap = options.maxGapHours * HOUR_MS;
@@ -140,7 +145,12 @@ export function classifyUsage(
   if (activeCount === 0) return "FLAT_ZERO";
   if (activeCount === totals.length) return "CONTINUOUS";
 
-  const recent = totals.slice(-options.recentWindow);
-  const recentlyActive = recent.some((ops) => ops > 0);
+  // Everything captured within recentHours of the newest snapshot, however many
+  // snapshots that turns out to be.
+  const newest = Math.max(...history.map((snapshot) => new Date(snapshot.capturedAt).getTime()));
+  const cutoff = newest - options.recentHours * HOUR_MS;
+  const recentlyActive = history.some(
+    (snapshot) => new Date(snapshot.capturedAt).getTime() >= cutoff && totalOps(snapshot) > 0,
+  );
   return recentlyActive ? "PERIODIC_ALIVE" : "PERIODIC_DEAD";
 }

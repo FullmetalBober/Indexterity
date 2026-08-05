@@ -40,8 +40,16 @@ warm-up; the activity requirement is what makes it mean something. An index
 reads zero either because nobody needs it or because nobody touched the
 collection — elapsed time cannot tell those apart, so an always-on but idle dev
 cluster would otherwise accumulate a month of "proof" without doing any work.
-Intervals in which the collection served no reads simply do not count.
+Hours in which the collection served no reads simply do not count.
 Redundancy is structural and unaffected.
+
+Every one of those thresholds is expressed in **hours**, not in collect
+intervals. Two of them used to be interval counts, which meant they only said
+what they appeared to say while the cadence stayed at 6h: shorten it and the
+engine would have started calling indexes dead on three hours of evidence
+instead of three days, with no code change and nothing failing. A newly
+connected cluster is collected immediately rather than at the next scheduled
+pass, which is the part of "6h is too long" that was actually worth fixing.
 
 **Never dropped**, whatever the usage: `_id_`, unique (including unique partial
 and sparse — a constraint is not a performance hint), TTL, and shard-key
