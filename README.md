@@ -444,6 +444,13 @@ and a Secret that hooks run before, and the api's auth signing key was written
 into the Secret and never handed to a container. `helm lint` passed throughout.
 Rendering valid YAML and being installable are different questions.
 
+**A superseded CI run is cancelled, not finished.** Push again to a pull request
+branch and the previous run stops: it is answering about a commit nobody is
+looking at any more, and holding a runner while it does. Pushes to `main` and
+`dev` are exempt — those runs are the record of whether an integration branch is
+sound, and a cancelled one leaves a commit with no verdict. The release workflow
+has no such rule at all, since a half-published release is worse than a slow one.
+
 **House rule: the api and the web app run clean.** No errors and no warnings in
 server logs, build output, or the browser console. A warning is a defect — fix
 the cause, don't silence it. See architecture §16.

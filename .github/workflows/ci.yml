@@ -5,6 +5,28 @@ on:
     branches: [main, dev]
   pull_request:
 
+# A push that supersedes another one leaves the first run answering a question
+# about a commit nobody is looking at any more, while holding the runner the new
+# one is queued behind. That is not a rounding error here: `chart` builds two
+# images and stands up a Kind cluster, and `e2e` plus three `integration` legs
+# each bring up Postgres and Mongo, so a rapid succession of pushes to one pull
+# request multiplies all of it for an answer no one reads.
+#
+# `main` and `dev` are exempt on purpose rather than by omission. Those runs are
+# the record of whether an integration branch is sound, and a cancelled one
+# leaves a commit with no verdict — so pushes there run to completion and only
+# the pull_request runs collapse. Grouping by `github.ref` keeps the two kinds
+# apart on their own: a push is `refs/heads/dev`, a pull request is
+# `refs/pull/<n>/merge`, so neither can cancel the other.
+#
+# release.yml deliberately has none of this. It is tag-driven and publishes
+# images and the chart to ghcr.io; cancelling a publish half way is how a chart
+# ends up naming an image tag that was never pushed, which is the exact failure
+# the RELEASE mode of kind-test.sh exists to catch.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/dev' }}
+
 # Three caches carry the work between runs, and they answer different questions.
 #
 #   ~/.npm         (setup-node)   what has been downloaded from the registry
