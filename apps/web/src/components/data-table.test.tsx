@@ -1,5 +1,6 @@
 import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { type DashboardColumns, DataTable, dashboardColumns } from "~/components/data-table";
 import { renderInApp } from "~/test-utils";
@@ -45,6 +46,37 @@ function namesInOrder(): string[] {
     .getAllByRole("row")
     .slice(1)
     .map((row) => row.querySelectorAll("td")[0]?.textContent ?? "");
+}
+
+// Enough rows to exceed the shimmed 600px viewport at 40px each (see
+// vitest.setup.ts), so a window is genuinely narrower than the data.
+const MANY: Row[] = Array.from({ length: 500 }, (_, index) => ({
+  id: `r${index}`,
+  name: `coll-${String(index).padStart(3, "0")}`,
+  size: index,
+}));
+
+function renderVirtual(rows: Row[] = MANY) {
+  return renderInApp(
+    <DataTable
+      caption="Test rows"
+      columns={columns}
+      data={rows}
+      getRowId={(row) => row.id}
+      initialSorting={[{ id: "name", desc: false }]}
+      filterLabel="Filter rows"
+      empty={{ title: "Nothing here", description: "Not collected yet." }}
+      virtualize={{ maxHeight: 600, estimateRowHeight: 40 }}
+    />,
+  );
+}
+
+// getAllByRole skips anything aria-hidden, so the spacers are already excluded —
+// which is worth knowing twice over: it is why namesInOrder above stays correct
+// under virtualization, and it is the same reason a screen reader never counts a
+// spacer as a row. Reaching them takes an explicit `{ hidden: true }`.
+function dataRows(): HTMLElement[] {
+  return screen.getAllByRole("row").slice(1);
 }
 
 describe("DataTable", () => {
@@ -149,5 +181,88 @@ describe("DataTable", () => {
   it("names the table for a screen reader without showing a second title", () => {
     render();
     expect(screen.getByRole("table")).toHaveAccessibleName("Test rows");
+  });
+});
+
+describe("DataTable, virtualized", () => {
+  // The whole point: 500 rows of data, a screenful of rows in the DOM.
+  it("puts a window in the DOM, not the dataset", () => {
+    renderVirtual();
+
+    const rendered = dataRows().length;
+    expect(rendered).toBeGreaterThan(0);
+    expect(rendered).toBeLessThan(MANY.length / 4);
+  });
+
+  // Sorting is over the row model, not the window — so the top of a 500-row table
+  // has to be the real first row, not the first of whatever happened to be
+  // rendered when the click landed.
+  it("sorts the whole dataset, not the visible window", async () => {
+    const user = userEvent.setup();
+    renderVirtual();
+
+    expect(namesInOrder()[0]).toBe("coll-000");
+    await user.click(screen.getByRole("button", { name: /Name/ }));
+
+    expect(namesInOrder()[0]).toBe("coll-499");
+  });
+
+  it("filters the whole dataset", async () => {
+    const user = userEvent.setup();
+    renderVirtual();
+
+    await user.type(screen.getByLabelText("Filter rows"), "coll-317");
+
+    expect(namesInOrder()).toEqual(["coll-317"]);
+  });
+
+  // The spacers stand in for the rows above and below the window. They must not be
+  // rows to a screen reader, and they must span the table so the columns keep their
+  // widths — a `<tr>` taken out of the flow is what loses column alignment.
+  it("stands the skipped rows in with spacers that span every column", () => {
+    renderVirtual();
+
+    const spacers = screen
+      .getAllByRole("row", { hidden: true })
+      .filter((row) => row.getAttribute("aria-hidden") === "true");
+    expect(spacers.length).toBeGreaterThan(0);
+    for (const spacer of spacers) {
+      const cell = spacer.querySelector("td");
+      expect(cell).toHaveAttribute("colspan", "2");
+    }
+  });
+
+  // The server has no element to measure, so without initialRect the virtualizer
+  // reports a viewport of zero and renders no rows — which is how a virtualized
+  // table silently stops being server-rendered. Proving the rows are in the HTML
+  // is the only way to know initialRect is doing its job; the e2e SSR test cannot
+  // see it, because the e2e cluster has no collected rows to draw.
+  it("server-renders a screenful of rows", () => {
+    const html = renderToString(
+      <DataTable
+        caption="Test rows"
+        columns={columns}
+        data={MANY}
+        getRowId={(row) => row.id}
+        initialSorting={[{ id: "name", desc: false }]}
+        empty={{ title: "Nothing here", description: "Not collected yet." }}
+        virtualize={{ maxHeight: 600, estimateRowHeight: 40 }}
+      />,
+    );
+
+    expect(html).toContain("coll-000");
+    // A window, not the dataset: the last row must not be there.
+    expect(html).not.toContain("coll-499");
+  });
+
+  // Short tables are the common case and must look untouched: no scrollbar, no
+  // spacers, every row present.
+  it("leaves a short table alone", () => {
+    renderVirtual(ROWS);
+
+    expect(namesInOrder()).toEqual(["events", "orders", "users"]);
+    expect(
+      screen.getAllByRole("row", { hidden: true }).filter((r) => r.getAttribute("aria-hidden")),
+    ).toHaveLength(0);
   });
 });

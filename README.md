@@ -286,7 +286,8 @@ everything; every mutation is owner-only. Invites are one-time tokens with a
 ## Stack
 
 Turbo monorepo · NestJS + Fastify (api) · TanStack Start + TanStack Query +
-TanStack Form + TanStack Table + TanStack Charts + shadcn (web) · better-auth · Drizzle +
+TanStack Form + TanStack Table + TanStack Virtual + TanStack Charts + shadcn (web) ·
+better-auth · Drizzle +
 PostgreSQL · oRPC contracts (zod 4) · graphile-worker · Biome · strict
 TypeScript (no `any`, no `as`, no lint-ignore).
 
@@ -309,7 +310,8 @@ apps/web                dashboard
   src/components/form   TanStack Form bound once to shadcn's Field primitives —
                         every form in the app is built from these
   src/components/data-table  TanStack Table bound once to shadcn's table
-                        primitives; the three dashboard tables are column defs
+                        primitives; the three dashboard tables are column defs.
+                        The two unbounded ones virtualize their rows
   src/components/latency-chart  TanStack Charts behind a props-stable wrapper —
                         pre-1.0, so churn is contained to this one file
   src/router.tsx        the one query client, and the SSR dehydrate/hydrate wiring
@@ -338,6 +340,14 @@ Tables are TanStack Table, sortable and filterable, rendered through the same
 shadcn primitives as before — a column is one object saying how to read a value,
 draw it and sort it, rather than a header cell in one place and a body cell in
 another.
+
+The two whose row count is bounded only by how big the customer is —
+recommendations (collections × indexes) and the per-collection footprint —
+virtualize with TanStack Virtual: a screenful of rows in the DOM whatever the
+row count, bracketed by two spacer rows rather than absolutely positioned, so the
+columns stay aligned and a `<table>` stays a table to a screen reader. The height
+is a *maximum*, so a small cluster's table renders at its natural height and looks
+untouched.
 
 The latency charts are TanStack Charts, which is pre-1.0 and therefore kept behind
 `LineChart`'s unchanged `{title, unit, series}` props: a breaking release is one
