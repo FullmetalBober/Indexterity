@@ -286,9 +286,9 @@ everything; every mutation is owner-only. Invites are one-time tokens with a
 ## Stack
 
 Turbo monorepo · NestJS + Fastify (api) · TanStack Start + TanStack Query +
-TanStack Form + shadcn (web) · better-auth · Drizzle + PostgreSQL · oRPC
-contracts (zod 4) · graphile-worker · Biome · strict TypeScript (no `any`, no
-`as`, no lint-ignore).
+TanStack Form + TanStack Table + shadcn (web) · better-auth · Drizzle +
+PostgreSQL · oRPC contracts (zod 4) · graphile-worker · Biome · strict
+TypeScript (no `any`, no `as`, no lint-ignore).
 
 ```
 apps/api                control plane
@@ -308,6 +308,8 @@ apps/web                dashboard
                         key, and mutations/ grouped by what they change
   src/components/form   TanStack Form bound once to shadcn's Field primitives —
                         every form in the app is built from these
+  src/components/data-table  TanStack Table bound once to shadcn's table
+                        primitives; the three dashboard tables are column defs
   src/router.tsx        the one query client, and the SSR dehydrate/hydrate wiring
 packages/contracts      oRPC + zod contracts shared by api and web
   src/schemas.ts        what the api returns
@@ -326,6 +328,11 @@ Forms are TanStack Form, validated against the api's own input schemas from
 accepts, and the rule lives in exactly one place. Values reach a mutation with
 `mutate()`, not through the render, which is why nothing in a form needs
 `useState` any more.
+
+Tables are TanStack Table, sortable and filterable, rendered through the same
+shadcn primitives as before — a column is one object saying how to read a value,
+draw it and sort it, rather than a header cell in one place and a body cell in
+another.
 
 Everything engine-specific sits behind the ports in `src/engine`, so PostgreSQL
 and SQL Server adapters can slot in without pipeline changes — the data model

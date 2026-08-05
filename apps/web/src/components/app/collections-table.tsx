@@ -1,0 +1,129 @@
+import type { CollectionStat, LatencySummary } from "@repo/contracts";
+import { DeltaCell, fmtBytes, fmtMicros } from "~/components/app/format";
+import { type DashboardColumns, DataTable, dashboardColumns } from "~/components/data-table";
+import { Badge } from "~/components/ui/badge";
+
+// One row per collection: the index footprint from the latest snapshot batch and
+// the windowed latency summary, which are two different reads that answer one
+// question. Either side can be missing — a collection can be measured for latency
+// before its first index snapshot, and vice versa.
+export interface CollectionRow {
+  readonly ns: string;
+  readonly stat: CollectionStat | null;
+  readonly lat: LatencySummary | null;
+}
+
+// Merge the two by namespace. Lives here rather than in the route because it is
+// the row shape's own business, and the route was doing it inline between a chart
+// and a table.
+export function toCollectionRows(
+  collectionStats: readonly CollectionStat[],
+  latency: readonly LatencySummary[],
+): CollectionRow[] {
+  const latencyByNs = new Map(latency.map((c) => [`${c.database}.${c.collection}`, c]));
+  const statNs = new Set(collectionStats.map((c) => `${c.database}.${c.collection}`));
+  return [
+    ...collectionStats.map((stat) => {
+      const ns = `${stat.database}.${stat.collection}`;
+      return { ns, stat, lat: latencyByNs.get(ns) ?? null };
+    }),
+    ...latency
+      .filter((c) => !statNs.has(`${c.database}.${c.collection}`))
+      .map((lat) => ({ ns: `${lat.database}.${lat.collection}`, stat: null, lat })),
+  ];
+}
+
+const column = dashboardColumns<CollectionRow>();
+
+// A missing number sorts as -1 rather than as 0: "not measured" is not "zero
+// bytes", and putting the unmeasured rows at one end keeps them out of the middle
+// of a ranking they are not part of.
+function orNull(value: number | null | undefined): number {
+  return value ?? -1;
+}
+
+const columns: DashboardColumns<CollectionRow> = column.columns([
+  column.accessor("ns", {
+    header: "Collection",
+    sortFn: "alphanumeric",
+    cell: (info) => <span className="font-mono text-xs">{info.getValue()}</span>,
+  }),
+  column.accessor((row) => orNull(row.stat?.indexCount), {
+    id: "indexCount",
+    header: "Indexes",
+    sortFn: "basic",
+    sortDescFirst: true,
+    cell: (info) => info.row.original.stat?.indexCount ?? "—",
+  }),
+  column.accessor((row) => orNull(row.stat?.totalIndexBytes), {
+    id: "indexBytes",
+    header: "Index size",
+    sortFn: "basic",
+    // The whole point of this column is finding the expensive collections, so
+    // the first click puts the biggest at the top.
+    sortDescFirst: true,
+    cell: (info) => {
+      const stat = info.row.original.stat;
+      return stat === null ? "—" : fmtBytes(stat.totalIndexBytes);
+    },
+  }),
+  column.accessor((row) => orNull(row.lat?.currentReadMicros), {
+    id: "readMicros",
+    header: "Read µs",
+    sortFn: "basic",
+    sortDescFirst: true,
+    cell: (info) => fmtMicros(info.row.original.lat?.currentReadMicros ?? null),
+  }),
+  column.accessor((row) => orNull(row.lat?.readDeltaPct), {
+    id: "readDelta",
+    header: "Read Δ",
+    sortFn: "basic",
+    cell: (info) => <DeltaCell pct={info.row.original.lat?.readDeltaPct ?? null} />,
+  }),
+  column.accessor((row) => orNull(row.lat?.currentWriteMicros), {
+    id: "writeMicros",
+    header: "Write µs",
+    sortFn: "basic",
+    sortDescFirst: true,
+    cell: (info) => fmtMicros(info.row.original.lat?.currentWriteMicros ?? null),
+  }),
+  column.accessor((row) => orNull(row.lat?.writeDeltaPct), {
+    id: "writeDelta",
+    header: "Write Δ",
+    sortFn: "basic",
+    cell: (info) => <DeltaCell pct={info.row.original.lat?.writeDeltaPct ?? null} />,
+  }),
+  column.accessor((row) => row.stat?.proposedRecommendations ?? 0, {
+    id: "proposed",
+    header: "Proposed",
+    sortFn: "basic",
+    sortDescFirst: true,
+    cell: (info) =>
+      info.getValue() > 0 ? (
+        <Badge variant="secondary">{info.getValue()}</Badge>
+      ) : (
+        <span className="text-muted-foreground text-xs">—</span>
+      ),
+  }),
+]);
+
+export function CollectionsTable({ rows }: { rows: CollectionRow[] }) {
+  return (
+    <DataTable
+      className="mt-2"
+      caption="Per-collection index footprint and latency"
+      columns={columns}
+      data={rows}
+      getRowId={(row) => row.ns}
+      // Biggest index footprint first: this table exists to answer "where is the
+      // space going", and the answer is at the top rather than found by scrolling.
+      initialSorting={[{ id: "indexBytes", desc: true }]}
+      filterLabel="Filter collections"
+      empty={{
+        title: "Nothing collected yet",
+        description:
+          "The footprint appears after the first collect, which runs every six hours from the moment a cluster is connected.",
+      }}
+    />
+  );
+}
