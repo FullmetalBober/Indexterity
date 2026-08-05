@@ -87,6 +87,44 @@ than appending a second entry about the same thing.
   adopt better-auth's organization plugin: `@Roles()`, `@OrgRoles()` and
   `@RequireActiveOrg()` are unusable while orgs live in our own `members` table,
   and they are most of what the package offers beyond the mount.
+- **TanStack DB** (`@tanstack/react-db` 0.1.95 / `db` 0.6.17 /
+  `query-db-collection` 1.2.1) — spiked Aug 2026 (#42), **not adopted**. It fails
+  the gate the issue set for it, and fails it harder than expected: a collection
+  does not merely start empty on the server, `useLiveQuery` **cannot be
+  server-rendered at all**. It calls `useSyncExternalStore` with no
+  `getServerSnapshot`, which React requires on the server — no hook in the package
+  passes one, and `useLiveSuspenseQuery` delegates to `useLiveQuery`, so it
+  inherits the gap.
+
+  Measured on the real app with one collection over `getCollections`, and the cost
+  is not scoped to the panel that used it. React's recoverable-error path reverts
+  the **whole `/app` shell** to client rendering, so the server HTML went from
+  36,660 bytes to 17,127 and `Sign out`, `Collections` and `Policy` all
+  disappeared from it. The dashboard still worked — the dehydrated query cache is
+  independent of the collection, and the collection reads it on the client with
+  **zero** refetches, which is the one part that worked exactly as hoped — but
+  every panel was drawn after hydration instead of arriving drawn. The only symptom
+  was one line per render in the web server's log: `Error in
+  renderToReadableStream: Missing getServerSnapshot`. A warning is a defect (D20).
+
+  Two findings outlive the "no". **The gate named in the issue could not detect
+  this** — `renders from what the server sent` runs with JavaScript on, so it
+  cannot tell server output from a client re-render off the hydrated cache, and it
+  stayed green throughout. A test that reads the raw `/app` response was added
+  beside it. And **the module-level collection the docs describe is unusable here
+  regardless**: `queryClient` is required config, `createAppQueryClient` is
+  per-request on the server, so a module-level collection would serve one tenant's
+  rows into the next tenant's render. A `WeakMap` keyed by client is a workaround,
+  not a shape the library expects.
+
+  Revisit when the React adapter server-renders, and preferably alongside #22:
+  a collection with an SSE sync source updates every live query touching it with
+  no invalidation, which is a real argument the read-side rewrite is not. The rest
+  of the issue's own case was already thin by its own admission — on-demand sync
+  needs filter params no contract in `packages/contracts` takes, differential
+  dataflow is irrelevant at a cluster's row counts, and `roi`, `latencySeries` and
+  `policy` are not collections. The hand-rolled join it would delete is now six
+  lines in `toCollectionRows`, with tests.
 - **`nestjs-trpc`** — considered Aug 2026, **staying on `@orpc/nest`**. tRPC infers
   the client's types from the server's implementation, which would replace
   `packages/contracts` — a shared artifact both sides are checked against — with

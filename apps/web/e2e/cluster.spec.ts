@@ -178,6 +178,28 @@ test.describe("cluster lifecycle", () => {
     await expect(page.getByLabel("Observe window (days)")).toHaveValue("14");
   });
 
+  // The test above runs with JavaScript on, so it cannot tell server output from
+  // a client re-render off the hydrated cache: both look like a drawn dashboard.
+  // That blind spot is not hypothetical — evaluating TanStack DB (#42) reverted
+  // the whole /app shell to client rendering, halving the server HTML, and the
+  // test above stayed green throughout. So this one reads the raw response, which
+  // is the only place the distinction exists.
+  test("server-renders the dashboard itself, not just a shell to fill in", async ({ page }) => {
+    await signUpAndLandOnDashboard(page, uniqueEmail("ssr"));
+    await connectCluster(page, "E2E ServerRendered");
+
+    // Shares the browser context's cookies, so this is the request the browser
+    // makes — but the response before any JavaScript has run.
+    const html = await (await page.request.get("/app")).text();
+
+    // Three markers spread across the tree: the layout, the dashboard route, and
+    // a section below the tables. A recoverable SSR error takes out the whole
+    // shell rather than one panel, so any of them going missing is the signal.
+    expect(html).toContain("Sign out");
+    expect(html).toContain("Collections");
+    expect(html).toContain("Policy");
+  });
+
   // The free plan allows one, and the limit must be visible before it is hit.
   test("refuses a second cluster on the free plan and says why", async ({ page }) => {
     await signUpAndLandOnDashboard(page, uniqueEmail("quota"));
