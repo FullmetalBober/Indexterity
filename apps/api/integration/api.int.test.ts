@@ -2030,7 +2030,13 @@ describe("plan limits", () => {
 // has to be enforced rather than advertised. Two orgs on different plans keep
 // different amounts of the same kind of row.
 describe("retention follows the plan", () => {
-  it("keeps a FREE org's history for less time than a SCALE org's", async () => {
+  // Retention is two separate things now, and this pins both.
+  //
+  // DELETION runs one cutoff for the whole deployment — the longest any plan may
+  // see — so rows outlive the window a given org is entitled to. VISIBILITY is the
+  // per-plan window, applied on every read. That split is what lets an upgrade hand
+  // a customer their history back at once instead of making them wait it out.
+  it("keeps a downgraded org's rows but stops showing them", async () => {
     const session = await signUp("retention");
     createdEmails.push(session.email);
     const orgId = await giveRoom(session);
@@ -2043,36 +2049,84 @@ describe("retention follows the plan", () => {
 
     // 120 days old: inside SCALE's year, outside FREE's 90 days.
     const captured = new Date(Date.now() - 120 * 86_400_000);
-    const sample = () => ({
-      clusterId: retentionClusterId,
-      database: "inttest",
-      collection: "orders",
-      readOps: 1,
-      readLatencyMicros: 1,
-      writeOps: 0,
-      writeLatencyMicros: 0,
-      capturedAt: captured,
-    });
+    await insertLatency(db, [
+      {
+        clusterId: retentionClusterId,
+        database: "retention",
+        collection: "aged",
+        readOps: 1,
+        readLatencyMicros: 1,
+        writeOps: 0,
+        writeLatencyMicros: 0,
+        capturedAt: captured,
+      },
+    ]);
 
-    await insertLatency(db, [sample()]);
+    const visibleCollections = async (): Promise<string[]> => {
+      const body = asRecord(
+        await (await api(`/clusters/${retentionClusterId}/latency`, session)).json(),
+      );
+      const rows = Array.isArray(body.collections) ? body.collections.map(asRecord) : [];
+      return rows.map((row) => asString(row.collection));
+    };
+
+    // On SCALE the row is inside the entitlement, so it is both kept and shown.
     await pruneOldSamples();
-    const keptOnScale = await db
-      .select()
-      .from(latencySamples)
-      .where(eq(latencySamples.clusterId, retentionClusterId));
-    expect(keptOnScale.length).toBeGreaterThan(0);
+    expect(
+      await db
+        .select()
+        .from(latencySamples)
+        .where(eq(latencySamples.clusterId, retentionClusterId)),
+    ).toHaveLength(1);
+    expect(await visibleCollections()).toContain("aged");
 
+    // Downgrade. The row is now outside what FREE may see, but well inside the
+    // deployment's physical window — so it stays on disk and stops being served.
     await db.update(organizations).set({ plan: "FREE" }).where(eq(organizations.id, orgId));
     await pruneOldSamples();
-    const keptOnFree = await db
-      .select()
-      .from(latencySamples)
-      .where(eq(latencySamples.clusterId, retentionClusterId));
-    expect(keptOnFree).toHaveLength(0);
+    expect(
+      await db
+        .select()
+        .from(latencySamples)
+        .where(eq(latencySamples.clusterId, retentionClusterId)),
+    ).toHaveLength(1);
+    expect(await visibleCollections()).not.toContain("aged");
+
+    // Upgrading again returns it immediately — the point of keeping it.
+    await db.update(organizations).set({ plan: "SCALE" }).where(eq(organizations.id, orgId));
+    expect(await visibleCollections()).toContain("aged");
   });
 
-  // Storage is the operator's bill, so RETENTION_DAYS caps every plan. A plan
-  // may keep less than the ceiling; it may never keep more.
+  it("deletes what nobody could ever be entitled to", async () => {
+    const session = await signUp("retention-hard");
+    createdEmails.push(session.email);
+    await giveRoom(session);
+    const created = await api("/clusters", session, {
+      method: "POST",
+      body: JSON.stringify({ name: "Hard Retention Cluster", connectionString: MONGO_URL }),
+    });
+    const hardId = asString(asRecord(await created.json()).id);
+    createdClusterIds.push(hardId);
+
+    // Past the longest plan's window, so no plan could show it and nothing keeps it.
+    await insertLatency(db, [
+      {
+        clusterId: hardId,
+        database: "retention",
+        collection: "ancient",
+        readOps: 1,
+        readLatencyMicros: 1,
+        writeOps: 0,
+        writeLatencyMicros: 0,
+        capturedAt: new Date(Date.now() - 400 * 86_400_000),
+      },
+    ]);
+    await pruneOldSamples();
+    expect(
+      await db.select().from(latencySamples).where(eq(latencySamples.clusterId, hardId)),
+    ).toHaveLength(0);
+  });
+
   it("lets the operator cap a plan that would keep more", async () => {
     const session = await signUp("retention-cap");
     createdEmails.push(session.email);
@@ -2561,6 +2615,59 @@ describe("collecting twice writes almost nothing the second time", () => {
     // And the run kept its start while moving only its end.
     expect(after?.capturedAt.getTime()).toBe(started.getTime());
     expect(after?.observations).toBe(2);
+  });
+
+  // The invariant every reader leans on, held by the database rather than by the
+  // writer's good behaviour. Readers find holes by differencing
+  // `previous.last_seen_at → next.captured_at`, so an overlap is a NEGATIVE gap —
+  // which reads as no gap at all. Exactly the failure this change was careful
+  // about, arriving by the back door.
+  it("refuses two runs for one index that overlap in time", async () => {
+    const spec = {
+      name: "overlap_probe_1",
+      keys: [{ field: "overlap", direction: 1 }],
+      unique: false,
+      ttl: false,
+      partial: false,
+      partialFilter: null,
+      sparse: false,
+      hidden: false,
+      isShardKey: false,
+      collation: null,
+    };
+    const base = Date.now() - 10 * 86_400_000;
+    const fixture = (capturedAt: Date, lastSeenAt: Date, ops: number) => ({
+      clusterId: runClusterId,
+      database: "overlap",
+      collection: "probe",
+      indexName: "overlap_probe_1",
+      spec,
+      sizeBytes: 1024,
+      perMember: [{ member: "m1", ops }],
+      capturedAt,
+      lastSeenAt,
+      observations: 4,
+    });
+
+    // A run covering days 0-3.
+    await insertSnapshots(db, [fixture(new Date(base), new Date(base + 3 * 86_400_000), 0)]);
+    // A second run starting inside it — a clock that stepped back, or two collects
+    // racing. Must not be storable.
+    await expect(
+      insertSnapshots(db, [
+        fixture(new Date(base + 86_400_000), new Date(base + 5 * 86_400_000), 1),
+      ]),
+    ).rejects.toThrow();
+    // And a run that starts after it ends is fine.
+    await insertSnapshots(db, [
+      fixture(new Date(base + 4 * 86_400_000), new Date(base + 6 * 86_400_000), 1),
+    ]);
+    const runs = await db
+      .select({ id: indexSnapshots.id })
+      .from(indexSnapshots)
+      .innerJoin(clusterIndexes, eq(indexSnapshots.indexId, clusterIndexes.id))
+      .where(eq(clusterIndexes.database, "overlap"));
+    expect(runs).toHaveLength(2);
   });
 
   it("keeps a run that is still live and prunes one that ended", async () => {

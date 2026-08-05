@@ -15,6 +15,7 @@ import {
   clusterIndexes,
   desc,
   eq,
+  gte,
   inArray,
   indexSnapshots,
   latencySamples,
@@ -24,6 +25,7 @@ import {
 } from "../db";
 import { DatabaseService } from "../db/database.service";
 import { TenancyService } from "../http/tenancy.service";
+import { historyWindow } from "../jobs/plan";
 import { Implement } from "../orpc/implement";
 
 // Read-only views over what the engine has already decided and recorded: ROI,
@@ -38,10 +40,13 @@ export class InsightsController {
   private async loadLatencyReadings(
     clusterId: string,
   ): Promise<Map<string, { database: string; collection: string; readings: LatencyReading[] }>> {
+    // The plan's window. Rows outlive it — deletion runs one cutoff for the whole
+    // deployment now — so this is what actually enforces the entitlement.
+    const since = await historyWindow(this.database.db, clusterId);
     const rows = await this.database.db
       .select()
       .from(latencySamples)
-      .where(eq(latencySamples.clusterId, clusterId));
+      .where(and(eq(latencySamples.clusterId, clusterId), gte(latencySamples.lastSeenAt, since)));
     const groups = new Map<
       string,
       { database: string; collection: string; readings: LatencyReading[] }

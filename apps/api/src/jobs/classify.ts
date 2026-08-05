@@ -10,6 +10,7 @@ import {
   and,
   clusterIndexes,
   eq,
+  gte,
   inArray,
   indexCooldowns,
   indexSnapshots,
@@ -19,6 +20,7 @@ import {
 } from "../db";
 import { activeCooldownKeys, cooldownKey } from "./cooldowns";
 import { jobDb } from "./db";
+import { historyWindow } from "./plan";
 import { pendingRemovalKeys, watchedIndexKeys, watchKey } from "./watched";
 
 // Policy fallback, matching apply/finalize.
@@ -102,6 +104,11 @@ export async function classifyCluster(clusterId: string): Promise<number> {
     perIndex[row.indexName] = row.regressionCount;
     regressionCounts.set(scope, perIndex);
   }
+  // How far back this cluster's plan lets anything look. Rows outlive the window
+  // they are visible in, so the entitlement is enforced here rather than by having
+  // deleted them — and it is enforced for the ENGINE, not only for the dashboard,
+  // because a longer series is precisely what lets the engine call an index unused.
+  const since = await historyWindow(db, clusterId);
   // Identity and shape come from the dimension table now; the time series carries
   // only what was measured. One join, and it is the whole code cost of having
   // stopped rewriting a per-index constant on every collect.
@@ -120,7 +127,7 @@ export async function classifyCluster(clusterId: string): Promise<number> {
     })
     .from(indexSnapshots)
     .innerJoin(clusterIndexes, eq(indexSnapshots.indexId, clusterIndexes.id))
-    .where(eq(indexSnapshots.clusterId, clusterId));
+    .where(and(eq(indexSnapshots.clusterId, clusterId), gte(indexSnapshots.lastSeenAt, since)));
   // Per-collection read counters, for the activity gate.
   const latencyRows = await db
     .select({
@@ -132,7 +139,7 @@ export async function classifyCluster(clusterId: string): Promise<number> {
       observations: latencySamples.observations,
     })
     .from(latencySamples)
-    .where(eq(latencySamples.clusterId, clusterId));
+    .where(and(eq(latencySamples.clusterId, clusterId), gte(latencySamples.lastSeenAt, since)));
   const activityByCollection = new Map<string, ActivityPoint[]>();
   for (const sample of latencyRows) {
     const key = `${sample.database}\u0000${sample.collection}`;

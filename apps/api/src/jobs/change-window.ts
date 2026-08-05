@@ -1,6 +1,7 @@
 import { inferChangeWindow, type TrafficSample } from "../analysis";
 import { and, type Database, eq, gte, latencySamples, policies, sql } from "../db";
 import { workloadKey } from "../engine/ports";
+import { historyWindow } from "./plan";
 
 // How much history the inference reads. See the comment on the query below.
 const INFERENCE_WINDOW_DAYS = 30;
@@ -26,7 +27,14 @@ export async function refreshInferredWindow(
   // workload that shifts rather than averaging in traffic patterns from last
   // summer. A run that started before the cutoff and is still live has a recent
   // last_seen_at, so it is still included, span and all.
-  const cutoff = new Date(Date.now() - INFERENCE_WINDOW_DAYS * 86_400_000);
+  // The later of the two bounds: the inference's own month, and whatever the plan
+  // is entitled to see. Normally the month wins — no plan retains less than that —
+  // but an operator who set RETENTION_DAYS lower must not have the window inferred
+  // from history nobody is allowed to read.
+  const entitled = await historyWindow(db, clusterId);
+  const cutoff = new Date(
+    Math.max(Date.now() - INFERENCE_WINDOW_DAYS * 86_400_000, entitled.getTime()),
+  );
   const rows = await db
     .select({
       database: latencySamples.database,

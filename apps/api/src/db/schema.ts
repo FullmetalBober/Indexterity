@@ -22,6 +22,15 @@ const bytea = customType<{ data: Buffer; driverData: Buffer }>({
   },
 });
 
+// The closed interval a run-length row covers, derived from its two endpoints so
+// it cannot disagree with them. Exists only to be the range side of an exclusion
+// constraint — nothing selects it, and readers keep using captured_at/last_seen_at.
+const tstzrange = customType<{ data: string; driverData: string }>({
+  dataType() {
+    return "tstzrange";
+  },
+});
+
 const createdAt = timestamp("created_at", { withTimezone: true }).notNull().defaultNow();
 const updatedAt = timestamp("updated_at", { withTimezone: true }).notNull().defaultNow();
 
@@ -366,6 +375,24 @@ export const indexSnapshots = pgTable(
     // are counts of samples (minHistory, the score's history credit) — they read
     // this instead.
     observations: integer("observations").notNull().default(1),
+    // The interval the two columns above describe, as a range, so the database can
+    // enforce the thing they imply: two runs for one index must never overlap.
+    //
+    // Generated, so it cannot drift from its endpoints, and paired with an
+    // EXCLUDE ... USING gist constraint added in the migration (drizzle has no
+    // builder for exclusion constraints). Inclusive bounds on purpose — with '[)'
+    // a run of one would be an EMPTY range, and an empty range overlaps nothing, so
+    // the majority of rows on a busy cluster would go unprotected.
+    //
+    // Overlap is not hypothetical. Two collects racing, or a clock stepping
+    // backwards, can produce a row whose capturedAt precedes the previous run's
+    // end, and the readers difference `previous.lastSeenAt → next.capturedAt` to
+    // find the holes — an overlap there is a NEGATIVE gap, which reads as no gap
+    // at all. Better a loud insert failure than a series that quietly certifies a
+    // window nobody watched.
+    span: tstzrange("span")
+      .notNull()
+      .generatedAlwaysAs(sql`tstzrange(captured_at, last_seen_at, '[]')`),
   },
   (table) => [
     // Retention prunes by when a run ENDED: a run that started before the cutoff
@@ -566,6 +593,10 @@ export const latencySamples = pgTable(
     // See index_snapshots, including why this has no default.
     lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull(),
     observations: integer("observations").notNull().default(1),
+    // Same guard, keyed by namespace instead of index_id. See index_snapshots.
+    span: tstzrange("span")
+      .notNull()
+      .generatedAlwaysAs(sql`tstzrange(captured_at, last_seen_at, '[]')`),
   },
   (table) => [
     // By run end, for the same reason as index_snapshots.

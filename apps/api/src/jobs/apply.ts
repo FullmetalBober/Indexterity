@@ -17,7 +17,7 @@ import { serializeSpec } from "../mongo";
 import { effectiveChangeWindow } from "./change-window";
 import { openClusterSession } from "./cluster-connection";
 import { jobDb } from "./db";
-import { planForCluster } from "./plan";
+import { historyWindow, planForCluster } from "./plan";
 import { preflightDrop } from "./preflight";
 
 const DROP_TYPES = new Set(["DROP_UNUSED", "DROP_REDUNDANT", "MERGE"]);
@@ -105,6 +105,7 @@ export async function applyCluster(clusterId: string): Promise<number> {
     .from(clusterIndexes)
     .where(eq(clusterIndexes.clusterId, clusterId));
   const watchingSince = watch?.since == null ? null : new Date(watch.since).toISOString();
+  const since = await historyWindow(db, clusterId);
 
   const { session, readOnly, release } = await openClusterSession(db, clusterId);
   try {
@@ -154,6 +155,10 @@ export async function applyCluster(clusterId: string): Promise<number> {
             eq(clusterIndexes.database, rec.database),
             eq(clusterIndexes.collection, rec.collection),
             eq(clusterIndexes.indexName, rec.indexName),
+            // The plan's window, applied here rather than by deletion — the observe
+            // length is derived from this history, so an org must not get a window
+            // sized on evidence it is not entitled to.
+            gte(indexSnapshots.lastSeenAt, since),
           ),
         );
       const window = dynamicObserveDays(

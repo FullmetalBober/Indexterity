@@ -236,10 +236,27 @@ deletes anything: an org over its new limit keeps what it has and simply cannot
 add more, and an auto-approve score saved on a paid plan stops being obeyed
 without being erased — it comes back on upgrading.
 
-History is enforced, not advertised: the prune job groups clusters by their
-org's plan and applies a cutoff per group. `RETENTION_DAYS` remains the
-operator's ceiling — storage is their bill, so a plan may keep less than the cap
-but never more.
+History is enforced, not advertised — but **enforced on read, not by deletion**.
+Two questions with different answers: how long rows are *kept*, and how much of
+them a plan may *see*. Deletion runs one cutoff for the whole deployment (the
+longest window any plan could claim), so it sweeps a contiguous range instead of
+hunting rows tenant by tenant. The plan's own window is applied at every read of
+the time-series tables — the engine's reads as much as the dashboard's, since a
+longer series is precisely what lets the engine call an index unused at all.
+
+So **an upgrade returns your history at once.** Before, a free org moving to a
+paid plan got nothing extra until ninety more days had passed, because the rows
+it was newly entitled to had already been deleted. Now they were there all along,
+merely out of view. It costs very little, because run-length storage means an
+idle index is one row whether it is retained for ninety days or a year.
+
+`RETENTION_DAYS` remains the operator's ceiling and caps both halves — storage is
+their bill, so a plan may keep less than the cap but never more. Rows past the
+longest plan's window are deleted outright: nobody could ever be entitled to
+them. Settled recommendations still age out on their own plan's clock, because
+"we kept last year's decisions and merely stopped showing them to you" is a
+different promise from "we deleted them", and that table does not grow per
+collect anyway.
 
 **`SELF_HOSTED` is not a tier anyone buys.** It is the BUSL Additional Use Grant
 expressed as entitlements — one production cluster, everything else on — and it
