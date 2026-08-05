@@ -49,19 +49,22 @@ beforeEach(() => {
 });
 
 describe("ConnectClusterForm", () => {
-  // The whole point of the preflight: nothing is stored until the reader has
-  // seen what the credentials can do.
-  it("will not check until both fields are filled", async () => {
+  // Both fields are required, and the form says which one is missing rather than
+  // greying the button out and leaving the reader to work it out. Nothing is
+  // asked of the api until they are both there.
+  it("names the empty fields rather than checking with them", async () => {
     const user = userEvent.setup();
     renderInApp(<ConnectClusterForm />);
-    const button = screen.getByRole("button", { name: "Check access" });
-    expect(button).toBeDisabled();
+
+    await user.click(screen.getByRole("button", { name: "Check access" }));
+
+    expect(await screen.findByText("Give the cluster a name")).toBeInTheDocument();
+    expect(screen.getByText("Paste a connection string")).toBeInTheDocument();
+    expect(checkConnection).not.toHaveBeenCalled();
 
     await user.type(screen.getByLabelText("Name"), "Production");
-    expect(button).toBeDisabled();
-
     await user.type(screen.getByLabelText("Connection string"), "mongodb://host:27017");
-    expect(button).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Check access" })).toBeEnabled();
   });
 
   it("checks before it connects, and never stores anything on the check", async () => {

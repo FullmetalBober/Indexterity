@@ -35,19 +35,24 @@ function credentialCallbacks(handlers: CredentialHandlers) {
   };
 }
 
-export function useSignIn(credentials: { email: string; password: string }, h: CredentialHandlers) {
+// The credentials arrive with mutate(), not with the hook call. They used to
+// arrive with the hook call because they lived in the component's useState and
+// were therefore current on every render; they now live in a TanStack Form store
+// that deliberately does not re-render the component when they change, so a
+// closure captured at render would submit whatever was typed before the last
+// keystroke. Values belong to the submit, which is when the form hands them over.
+export function useSignIn(h: CredentialHandlers) {
   return useMutation({
-    mutationFn: () => authClient.signIn.email(credentials),
+    mutationFn: (credentials: { email: string; password: string }) =>
+      authClient.signIn.email(credentials),
     ...credentialCallbacks(h),
   });
 }
 
-export function useSignUp(
-  credentials: { email: string; password: string; name: string },
-  h: CredentialHandlers,
-) {
+export function useSignUp(h: CredentialHandlers) {
   return useMutation({
-    mutationFn: () => authClient.signUp.email(credentials),
+    mutationFn: (credentials: { email: string; password: string; name: string }) =>
+      authClient.signUp.email(credentials),
     ...credentialCallbacks(h),
   });
 }
@@ -64,21 +69,18 @@ export function useSignOut() {
 
 // The notice must read the same whether or not the account exists, or the form
 // is an account-enumeration oracle. Only a failure the api reported is shown.
-export function useRequestPasswordReset(
-  email: string,
-  handlers: {
-    onStart: () => void;
-    onSent: () => void;
-    onError: (message: string) => void;
-  },
-) {
+export function useRequestPasswordReset(handlers: {
+  onStart: () => void;
+  onSent: () => void;
+  onError: (message: string) => void;
+}) {
   return useMutation({
     // Where the emailed link lands. It is this origin because the reset page is
     // this app's, and it is named here rather than fixed server-side — as it
     // was when a server function made this call — because better-auth refuses a
     // redirect target that is not a trusted origin. The check that mattered was
     // never that the client could not say it.
-    mutationFn: () =>
+    mutationFn: (email: string) =>
       authClient.requestPasswordReset({
         email,
         redirectTo: `${window.location.origin}/reset-password`,
@@ -94,8 +96,10 @@ export function useRequestPasswordReset(
 
 // Nothing to invalidate: the reader is not signed in, so there is nothing
 // cached about them yet.
+// The token comes from the URL rather than the form, so it stays a hook argument;
+// only the password the reader typed arrives with mutate().
 export function useResetPassword(
-  reset: { token: string; newPassword: string },
+  token: string,
   handlers: {
     onStart: () => void;
     onDone: () => void;
@@ -103,7 +107,7 @@ export function useResetPassword(
   },
 ) {
   return useMutation({
-    mutationFn: () => authClient.resetPassword(reset),
+    mutationFn: (newPassword: string) => authClient.resetPassword({ token, newPassword }),
     onMutate: handlers.onStart,
     onSuccess: (result: Answer) => {
       if (result.error === null) handlers.onDone();

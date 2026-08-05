@@ -1,3 +1,4 @@
+import { PASSWORD_MIN_LENGTH } from "@repo/contracts";
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { APIError } from "better-auth/api";
@@ -57,6 +58,10 @@ export function createAuth(config: AuthConfig) {
     },
     emailAndPassword: {
       enabled: true,
+      // Stated rather than left to better-auth's default (the same 8) because
+      // the sign-up form validates against this exact constant — see
+      // @repo/contracts inputs.ts. A default is not a shared rule.
+      minPasswordLength: PASSWORD_MIN_LENGTH,
       requireEmailVerification: config.requireEmailVerification,
       sendResetPassword: async ({ user, url }) => {
         await sendMail(

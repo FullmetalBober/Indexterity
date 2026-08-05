@@ -1,11 +1,11 @@
+import { acceptInviteInput, createInviteInput, renameOrgInput } from "@repo/contracts";
 import { useState } from "react";
 import { ConfirmButton } from "~/components/confirm-button";
+import { useAppForm } from "~/components/form";
 import { Alert, AlertDescription, AlertTitle } from "~/components/ui/alert";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "~/components/ui/card";
-import { Input } from "~/components/ui/input";
-import { Label } from "~/components/ui/label";
 import { Separator } from "~/components/ui/separator";
 import {
   useAcceptInvite,
@@ -37,12 +37,9 @@ function usage(used: number, limit: number | null): string {
 }
 
 export function TeamSection({ org }: { org: TeamOrg }) {
-  const [inviteEmail, setInviteEmail] = useState("");
   const [inviteToken, setInviteToken] = useState<string | null>(null);
-  const [acceptToken, setAcceptToken] = useState("");
   const [acceptMessage, setAcceptMessage] = useState<string | null>(null);
   const [renaming, setRenaming] = useState(false);
-  const [orgName, setOrgName] = useState(org.name);
 
   const setRole = useSetMemberRole();
   const remove = useRemoveMember();
@@ -51,14 +48,35 @@ export function TeamSection({ org }: { org: TeamOrg }) {
   const invite = useCreateInvite({
     onToken: (token) => {
       setInviteToken(token);
-      setInviteEmail("");
+      inviteForm.reset();
     },
   });
   const accept = useAcceptInvite({
     onAnswer: (message) => {
       setAcceptMessage(message);
-      setAcceptToken("");
+      acceptForm.reset();
     },
+  });
+
+  // Three forms rather than one, because they are three unrelated requests that
+  // happen to share a card: an email that is required to invite is not required
+  // to rename an org, and one form would have to say so per field anyway.
+  const renameForm = useAppForm({
+    defaultValues: { name: org.name },
+    onSubmit: ({ value }) => {
+      setRenaming(false);
+      rename.mutate(value.name);
+    },
+  });
+
+  const inviteForm = useAppForm({
+    defaultValues: { email: "" },
+    onSubmit: ({ value }) => invite.mutate(value.email),
+  });
+
+  const acceptForm = useAppForm({
+    defaultValues: { token: "" },
+    onSubmit: ({ value }) => accept.mutate(value.token),
   });
 
   return (
@@ -76,29 +94,30 @@ export function TeamSection({ org }: { org: TeamOrg }) {
           </span>
           {renaming ? (
             <form
-              className="flex gap-1"
+              className="flex items-start gap-1"
               onSubmit={(event) => {
                 event.preventDefault();
-                setRenaming(false);
-                rename.mutate(orgName);
+                event.stopPropagation();
+                void renameForm.handleSubmit();
               }}
             >
-              <Input
-                aria-label="Organization name"
-                className="h-8 w-48"
-                value={orgName}
-                onChange={(event) => setOrgName(event.target.value)}
-              />
-              <Button type="submit" size="sm">
-                Save
-              </Button>
+              <renameForm.AppField name="name" validators={{ onChange: renameOrgInput.shape.name }}>
+                {(field) => (
+                  <field.TextField label="Organization name" hideLabel className="h-8 w-48" />
+                )}
+              </renameForm.AppField>
+              <renameForm.AppForm>
+                <renameForm.SubmitButton size="sm" pending={rename.isPending}>
+                  Save
+                </renameForm.SubmitButton>
+              </renameForm.AppForm>
             </form>
           ) : (
             <Button
               variant="outline"
               size="sm"
               onClick={() => {
-                setOrgName(org.name);
+                renameForm.reset();
                 setRenaming(true);
               }}
             >
@@ -166,22 +185,31 @@ export function TeamSection({ org }: { org: TeamOrg }) {
 
         <Separator />
 
-        <div className="flex flex-wrap items-end gap-3">
-          <div className="grid gap-1.5">
-            <Label htmlFor="invite-email">Invite a teammate</Label>
-            <Input
-              id="invite-email"
-              type="email"
-              className="w-64"
-              placeholder="teammate@company.com"
-              value={inviteEmail}
-              onChange={(event) => setInviteEmail(event.target.value)}
-            />
-          </div>
-          <Button onClick={() => invite.mutate(inviteEmail)} disabled={invite.isPending}>
-            Invite
-          </Button>
-        </div>
+        <form
+          className="flex flex-wrap items-end gap-3"
+          onSubmit={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            void inviteForm.handleSubmit();
+          }}
+        >
+          <inviteForm.AppField
+            name="email"
+            validators={{ onChange: createInviteInput.shape.email }}
+          >
+            {(field) => (
+              <field.TextField
+                label="Invite a teammate"
+                type="email"
+                className="w-64"
+                placeholder="teammate@company.com"
+              />
+            )}
+          </inviteForm.AppField>
+          <inviteForm.AppForm>
+            <inviteForm.SubmitButton pending={invite.isPending}>Invite</inviteForm.SubmitButton>
+          </inviteForm.AppForm>
+        </form>
         {inviteToken !== null ? (
           <Alert>
             <AlertTitle>Invite created</AlertTitle>
@@ -191,25 +219,32 @@ export function TeamSection({ org }: { org: TeamOrg }) {
           </Alert>
         ) : null}
 
-        <div className="flex flex-wrap items-end gap-3">
-          <div className="grid gap-1.5">
-            <Label htmlFor="accept-token">Have an invite token?</Label>
-            <Input
-              id="accept-token"
-              className="w-64 font-mono"
-              placeholder="Paste an invite token"
-              value={acceptToken}
-              onChange={(event) => setAcceptToken(event.target.value)}
-            />
-          </div>
-          <Button
-            variant="outline"
-            onClick={() => accept.mutate(acceptToken)}
-            disabled={accept.isPending}
+        <form
+          className="flex flex-wrap items-end gap-3"
+          onSubmit={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            void acceptForm.handleSubmit();
+          }}
+        >
+          <acceptForm.AppField
+            name="token"
+            validators={{ onChange: acceptInviteInput.shape.token }}
           >
-            Join org
-          </Button>
-        </div>
+            {(field) => (
+              <field.TextField
+                label="Have an invite token?"
+                className="w-64 font-mono"
+                placeholder="Paste an invite token"
+              />
+            )}
+          </acceptForm.AppField>
+          <acceptForm.AppForm>
+            <acceptForm.SubmitButton variant="outline" pending={accept.isPending}>
+              Join org
+            </acceptForm.SubmitButton>
+          </acceptForm.AppForm>
+        </form>
         {acceptMessage !== null ? (
           <p className="text-muted-foreground text-sm">{acceptMessage}</p>
         ) : null}

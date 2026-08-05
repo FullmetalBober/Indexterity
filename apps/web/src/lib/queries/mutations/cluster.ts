@@ -120,13 +120,14 @@ function useLandOnNewCluster() {
   };
 }
 
-export function useConnectCluster(
-  credentials: { name: string; connectionString: string },
-  handlers: ConnectHandlers,
-) {
+// Credentials arrive with mutate() rather than with the hook call: the form they
+// come from is a TanStack Form store, which does not re-render the component on
+// every keystroke, so a closure captured at render would send stale values.
+export function useConnectCluster(handlers: ConnectHandlers) {
   const land = useLandOnNewCluster();
   return useMutation({
-    mutationFn: () => api().createCluster(credentials),
+    mutationFn: (credentials: { name: string; connectionString: string }) =>
+      api().createCluster(credentials),
     onMutate: handlers.onStart,
     onSuccess: async (created) => {
       handlers.onConnected();
@@ -140,14 +141,14 @@ export function useConnectCluster(
 // never stored. Its string is shown once, so onProvisioned fires before the
 // navigation that clears the form.
 export function useProvisionCluster(
-  credentials: { name: string; adminConnectionString: string },
   handlers: ConnectHandlers & {
     onProvisioned: (user: { username: string; connectionString: string }) => void;
   },
 ) {
   const land = useLandOnNewCluster();
   return useMutation({
-    mutationFn: () => api().provisionCluster(credentials),
+    mutationFn: (credentials: { name: string; adminConnectionString: string }) =>
+      api().provisionCluster(credentials),
     onMutate: handlers.onStart,
     onSuccess: async (created) => {
       handlers.onProvisioned({
