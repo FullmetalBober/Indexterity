@@ -1,26 +1,22 @@
-// The engine knobs for one cluster. Moves only when someone saves the form,
-// which is why it is not part of the pipeline key.
+// The engine knobs for one cluster. Already one endpoint, one key — it just
+// follows the same shape as the others now: the value is the policy itself rather
+// than a `{ policy }` envelope, and a failed read is a query error rather than a
+// null smuggled through as data.
 import type { ClusterPolicyView } from "@repo/contracts";
-import { queryOptions } from "@tanstack/react-query";
+import { queryOptions, useQuery } from "@tanstack/react-query";
 import { api } from "../api";
 import { queryKeys } from "./keys";
-
-export const EMPTY_POLICY: { policy: ClusterPolicyView | null } = { policy: null };
-
-async function loadPolicy(clusterId: string | null): Promise<typeof EMPTY_POLICY> {
-  if (clusterId === null) return EMPTY_POLICY;
-  try {
-    return { policy: await api().getPolicy({ clusterId }) };
-  } catch {
-    // No policy section rather than an error where the form should be. The
-    // dashboard renders the rest of the page either way.
-    return EMPTY_POLICY;
-  }
-}
 
 export function policyQuery(clusterId: string | null) {
   return queryOptions({
     queryKey: queryKeys.policy(clusterId),
-    queryFn: () => loadPolicy(clusterId),
+    queryFn: async () => (clusterId === null ? null : await api().getPolicy({ clusterId })),
   });
+}
+
+// Null means no policy section, which is what the dashboard draws when there is
+// no cluster or the read failed. The rest of the page renders either way.
+export function usePolicy(clusterId: string | null): ClusterPolicyView | null {
+  const { data = null } = useQuery(policyQuery(clusterId));
+  return data;
 }

@@ -4,7 +4,6 @@
 // Everything here is about ONE cluster. The shell around it — which cluster,
 // which org, sign out — belongs to the /app layout, and the org page is its
 // own route, so this loader fetches only what this page draws.
-import { useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { ActivityTable } from "~/components/app/activity-table";
 import { CollectionsTable, toCollectionRows } from "~/components/app/collections-table";
@@ -13,10 +12,24 @@ import { fmtBytes } from "~/components/app/format";
 import { PolicySection } from "~/components/app/policy-section";
 import { RecommendationsTable } from "~/components/app/recommendations-table";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
-import { EMPTY_PIPELINE, pipelineQuery } from "~/lib/queries/pipeline";
-import { EMPTY_POLICY, policyQuery } from "~/lib/queries/policy";
-import { selectCluster, shellQuery, useShell } from "~/lib/queries/shell";
-import { EMPTY_TELEMETRY, telemetryQuery } from "~/lib/queries/telemetry";
+import {
+  activityQuery,
+  recommendationsQuery,
+  roiQuery,
+  useActivity,
+  useRecommendations,
+  useRoi,
+} from "~/lib/queries/pipeline";
+import { policyQuery, usePolicy } from "~/lib/queries/policy";
+import { clustersQuery, NO_CLUSTERS, selectCluster, useShell } from "~/lib/queries/shell";
+import {
+  collectionsQuery,
+  latencyQuery,
+  latencySeriesQuery,
+  useCollections,
+  useLatency,
+  useLatencySeries,
+} from "~/lib/queries/telemetry";
 import { LineChart, SERIES_PALETTE } from "../components/latency-chart";
 
 export const Route = createFileRoute("/app/")({
@@ -33,7 +46,7 @@ export const Route = createFileRoute("/app/")({
   // data whenever there is any, stale or not; what refreshes an already-cached
   // key is a mutation invalidating it, or staleTime lapsing on mount.
   //
-  // Which is why the keys are resolved here against the shell rather than
+  // Which is why the keys are resolved here against the cluster list rather than
   // keyed on the raw search param. "None selected" means the first cluster,
   // and a key of null therefore MEANT one thing before a cluster existed and
   // another after — same entry, two answers, and whichever was cached won.
@@ -42,12 +55,24 @@ export const Route = createFileRoute("/app/")({
   //
   // Same rule as the layout's bar, so the two cannot disagree about which
   // cluster the page is about.
+  //
+  // Every warm is allowed to fail. The reads no longer fold an error into an
+  // empty payload, so a rejection here would take out the whole route instead of
+  // the one panel it belongs to; allSettled leaves the error on its own query,
+  // where the component reading that query draws an empty panel and the six
+  // beside it are unaffected.
   loader: async ({ deps, context }) => {
-    const shell = await context.queryClient.ensureQueryData(shellQuery());
-    const id = selectCluster(shell.authed ? shell.clusters : [], deps.cluster)?.id ?? null;
-    await Promise.all([
-      context.queryClient.ensureQueryData(pipelineQuery(id)),
-      context.queryClient.ensureQueryData(telemetryQuery(id)),
+    const clusters = await context.queryClient
+      .ensureQueryData(clustersQuery())
+      .catch(() => NO_CLUSTERS);
+    const id = selectCluster(clusters, deps.cluster)?.id ?? null;
+    await Promise.allSettled([
+      context.queryClient.ensureQueryData(recommendationsQuery(id)),
+      context.queryClient.ensureQueryData(roiQuery(id)),
+      context.queryClient.ensureQueryData(activityQuery(id)),
+      context.queryClient.ensureQueryData(latencyQuery(id)),
+      context.queryClient.ensureQueryData(latencySeriesQuery(id)),
+      context.queryClient.ensureQueryData(collectionsQuery(id)),
       context.queryClient.ensureQueryData(policyQuery(id)),
     ]);
     return { clusterId: id };
@@ -60,29 +85,30 @@ function Dashboard() {
   const shell = useShell();
   const { clusterId: id } = Route.useLoaderData();
 
-  // The loader already put all three in the cache, so these resolve without
-  // suspending. They read rather than fetch.
-  // useQuery, not useSuspenseQuery: the loader has already put all three in the
-  // cache so there is nothing to wait for, and suspending here would let React
-  // hold the previous tree during a navigation that is unmounting this page.
-  const { data: pipeline = EMPTY_PIPELINE } = useQuery(pipelineQuery(id));
-  const { data: telemetry = EMPTY_TELEMETRY } = useQuery(telemetryQuery(id));
-  const { data: policyData = EMPTY_POLICY } = useQuery(policyQuery(id));
+  // The loader already put each of these in the cache, so they read rather than
+  // fetch. useQuery, not useSuspenseQuery: there is nothing to wait for, and
+  // suspending here would let React hold the previous tree during a navigation
+  // that is unmounting this page. Each hook defaults to empty, so one dead read
+  // costs its own panel and nothing else on the page.
+  const recommendations = useRecommendations(id);
+  const roi = useRoi(id);
+  const activity = useActivity(id);
+  const latency = useLatency(id);
+  const latencySeries = useLatencySeries(id);
+  const collectionStats = useCollections(id);
+  const policy = usePolicy(id);
 
   if (!shell.authed) return null;
 
-  const { recommendations, roi, activity } = pipeline;
-  const { latency, latencySeries, collectionStats } = telemetry;
-  const { policy } = policyData;
   const proposed = recommendations.filter((rec) => rec.state === "PROPOSED");
   const totalSaved = proposed.reduce((sum, rec) => sum + rec.estimatedBytesSaved, 0);
 
   // Top collections by sample count get the four validated palette slots; the
   // rest fold (color follows the collection across both charts).
-  const chartCollections = [...latencySeries.collections]
+  const chartCollections = [...latencySeries]
     .sort((a, b) => b.points.length - a.points.length)
     .slice(0, SERIES_PALETTE.length);
-  const foldedCount = latencySeries.collections.length - chartCollections.length;
+  const foldedCount = latencySeries.length - chartCollections.length;
   const readSeries = chartCollections.map((coll, i) => ({
     label: `${coll.database}.${coll.collection}`,
     color: SERIES_PALETTE[i] ?? "#2a78d6",
@@ -96,7 +122,7 @@ function Dashboard() {
 
   // Merged by namespace into one row per collection — see collections-table.tsx,
   // which owns the row shape.
-  const collectionRows = toCollectionRows(collectionStats.collections, latency.collections);
+  const collectionRows = toCollectionRows(collectionStats, latency);
 
   return (
     <>

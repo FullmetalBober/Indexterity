@@ -1,9 +1,12 @@
 // Everything that changes an org, or which org you are in.
 //
-// Two different blast radii live here, and the difference is the reason this is
+// Three different blast radii live here, and the difference is the reason this is
 // not one hook shape:
 //
-//   the shell     members, roles, invites, the org's name — one key
+//   the org       members, roles, invites — one key, and the team page is the
+//                 only thing that reads it
+//   org + orgs    a rename, because the name appears in the active org AND in the
+//                 switcher's list of the caller's orgs
 //   the session   leaving, joining, switching — the api resolves a DIFFERENT
 //                 membership afterwards, so the clusters and everything under
 //                 them answer a question nobody is asking any more
@@ -20,7 +23,7 @@ import { queryKeys } from "../keys";
 
 function useInvalidateOrg(): () => Promise<void> {
   const queryClient = useQueryClient();
-  return () => queryClient.invalidateQueries({ queryKey: queryKeys.shell() });
+  return () => queryClient.invalidateQueries({ queryKey: queryKeys.org() });
 }
 
 function useInvalidateSession(): () => Promise<void> {
@@ -29,12 +32,18 @@ function useInvalidateSession(): () => Promise<void> {
 }
 
 export function useRenameOrg() {
-  const invalidateOrg = useInvalidateOrg();
+  const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (name: string) => api().renameOrg({ name }),
-    onSuccess: () => {
+    onSuccess: async () => {
       toast.success("Org renamed");
-      return invalidateOrg();
+      // Both, because the name is drawn twice: the team card's title reads the
+      // active org, the switcher reads the list. Invalidating one left the other
+      // showing the old name until something else moved it.
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.org() }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.orgs() }),
+      ]);
     },
     onError: () => toast.error("Rename failed (owner only)"),
   });
