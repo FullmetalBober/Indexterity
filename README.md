@@ -385,6 +385,14 @@ nftables. Typing `podman-compose up` yourself never hits it.
 `npm run db:generate` · `npm run db:migrate`. Production migrations run the
 compiled migrator: `npm run db:deploy -w @repo/api`.
 
+`npm run lint` is Biome plus `scripts/lint-tailwind.mjs`, which fails the build
+on a Tailwind arbitrary value that has a canonical utility (`w-[220px]` is
+`w-55`). That warning comes from the editor's Tailwind integration and nothing
+else — Biome has no rule for it and Tailwind v4 ships no lint binary — so
+without it the rule was observable while typing and unenforceable in CI. Vendored
+`components/ui` is exempt: rewriting registry code forks it, and the next
+`shadcn add` puts it back.
+
 Both install **two** schemas: `public`, which Drizzle owns, and
 `graphile_worker`, which the job queue owns. The queue would install its own on
 first boot, but the api and the worker start together, and anything that queues
