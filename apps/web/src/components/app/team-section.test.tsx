@@ -169,16 +169,34 @@ describe("TeamSection", () => {
     expect(invalidate).toHaveBeenCalledWith();
   });
 
-  // Renaming, inviting and role changes stay inside this org, so they move the
-  // one key the member list is drawn from — not the whole cache.
-  it("refetches only the shell when something inside the org changes", async () => {
+  // Inviting and role changes stay inside this org, so they move the one key the
+  // member list is drawn from — not the whole cache, and not the cluster list.
+  it("refetches only the org when something inside it changes", async () => {
     const user = userEvent.setup();
     const { queryClient } = renderInApp(<TeamSection org={org} />);
     const invalidate = vi.spyOn(queryClient, "invalidateQueries");
 
     await user.click(within(row("member@acme.test")).getByRole("button", { name: "Make owner" }));
 
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["shell"] });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["org"] });
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ["clusters"] });
+  });
+
+  // A rename is the exception: the name is drawn twice, in the card's title from
+  // the active org and in the switcher from the list of the caller's orgs.
+  // Invalidating one left the other showing the old name.
+  it("refetches both the org and the org list on a rename", async () => {
+    const user = userEvent.setup();
+    const { queryClient } = renderInApp(<TeamSection org={org} />);
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+
+    await user.click(screen.getByRole("button", { name: "Rename" }));
+    await user.clear(screen.getByLabelText("Organization name"));
+    await user.type(screen.getByLabelText("Organization name"), "Renamed Co");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["org"] });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["orgs"] });
   });
 
   // An invite that was refused used to leave the reader looking at a form that

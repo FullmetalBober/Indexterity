@@ -19,18 +19,35 @@ import {
   SelectValue,
 } from "~/components/ui/select";
 import { invalidateSession } from "~/lib/queries/client";
-import { queryKeys } from "~/lib/queries/keys";
 import { useSignOut } from "~/lib/queries/mutations/auth";
 import { useSwitchOrg } from "~/lib/queries/mutations/org";
-import { selectCluster, shellQuery, useShell } from "~/lib/queries/shell";
+import {
+  clustersQuery,
+  orgQuery,
+  orgsQuery,
+  refetchShell,
+  selectCluster,
+  useShell,
+} from "~/lib/queries/shell";
 
 export const Route = createFileRoute("/app")({
   validateSearch: (search: Record<string, unknown>): { cluster?: string } =>
     typeof search.cluster === "string" ? { cluster: search.cluster } : {},
-  // No loaderDeps: the shell does not depend on which cluster is selected, so
+  // No loaderDeps: none of these three depend on which cluster is selected, so
   // selecting another one must not re-run this. The child route's loader is
   // keyed on the selection and refetches on its own.
-  loader: ({ context }) => context.queryClient.ensureQueryData(shellQuery()),
+  //
+  // allSettled, because a rejection is an answer here: useShell reads the errors
+  // off the queries and draws the sign-in form for a 401 or the unreachable card
+  // for anything else. Letting one reject out of the loader would replace both
+  // with a route error boundary.
+  loader: async ({ context }) => {
+    await Promise.allSettled([
+      context.queryClient.ensureQueryData(clustersQuery()),
+      context.queryClient.ensureQueryData(orgQuery()),
+      context.queryClient.ensureQueryData(orgsQuery()),
+    ]);
+  },
   // Inherits the root's noindex — everything under /app is behind auth.
   head: () => ({ meta: [{ title: "Dashboard — Indexterity" }] }),
   component: AppShell,
@@ -59,10 +76,7 @@ function AppShell() {
                   unreachable" and never asks again. The button would look
                   like a button and do nothing until a full page reload.
                   Refetching the key is what actually retries. */}
-              <Button
-                variant="outline"
-                onClick={() => void queryClient.invalidateQueries({ queryKey: queryKeys.shell() })}
-              >
+              <Button variant="outline" onClick={() => void refetchShell(queryClient)}>
                 Retry
               </Button>
             </CardContent>

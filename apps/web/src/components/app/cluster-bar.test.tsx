@@ -129,15 +129,35 @@ describe("ClusterBar", () => {
     expect(invalidate).not.toHaveBeenCalled();
   });
 
-  it("refetches the shell once the mode really changed", async () => {
+  it("refetches the cluster list once the mode really changed, and nothing else", async () => {
     const user = userEvent.setup();
     const { queryClient } = renderInApp(<ClusterBar cluster={cluster} clusters={[cluster]} />);
     const invalidate = vi.spyOn(queryClient, "invalidateQueries");
 
     await confirm(user, "Go live", "Go live");
 
-    // The badge is drawn from the shell, so that is the one key this moves.
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["shell"] });
+    // The badge is drawn from the cluster list, so that is the one key this
+    // moves. It used to move `shell`, which held the org and the member list in
+    // the same entry — so going live refetched the team page too.
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["clusters"] });
+    expect(invalidate).toHaveBeenCalledTimes(1);
+  });
+
+  // Disconnecting changes how many clusters the plan has used, and that counter
+  // is part of the ORG payload, not the cluster list — the api resolves plan
+  // usage server-side so a limit can be shown before someone hits it. The old
+  // `shell` key held both in one entry and covered this by accident; with the
+  // keys split it has to be said out loud, and the e2e suite caught it as a
+  // stale "0 / 1 clusters" on the team page.
+  it("refetches the org too, because the plan's cluster count lives there", async () => {
+    const user = userEvent.setup();
+    const { queryClient } = renderInApp(<ClusterBar cluster={cluster} clusters={[cluster]} />);
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+
+    await confirm(user, "Disconnect", "Disconnect");
+
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["clusters"] });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["org"] });
   });
 
   // Deselecting a cluster that is still connected would report a disconnect

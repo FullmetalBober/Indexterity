@@ -2,8 +2,8 @@
 // exists at all.
 //
 // Each hook owns the key it invalidates, which is why none of them takes an
-// onChanged callback. They used to, and the caller had to know that a cluster's
-// mode is read from the shell — a fact about the cache leaking into a component
+// onChanged callback. They used to, and the caller had to know which cache entry
+// a cluster's mode is read from — a fact about the cache leaking into a component
 // whose job is drawing badges. What the caller still passes is the local state a
 // mutation cannot know about: a form to close, an error to show.
 //
@@ -24,22 +24,44 @@ const MODE_FAILED = "Mode change failed (owner only)";
 const DISCONNECT_FAILED = "Disconnect failed (owner only)";
 const ROTATION_FAILED = "rotation failed";
 
-// A cluster's name, mode and provisioned user are all read from the shell, so
-// that is the one key any of this moves.
-function useInvalidateShell(): () => Promise<void> {
+// A cluster's name, mode and provisioned user all live in the cluster list, so
+// that is the only key those three move. It used to be the `shell` key, which held
+// the org and the member list in the same entry — so flipping a cluster to live
+// refetched the team page's data as a side effect.
+function useInvalidateClusters(): () => Promise<void> {
   const queryClient = useQueryClient();
-  return () => queryClient.invalidateQueries({ queryKey: queryKeys.shell() });
+  return () => queryClient.invalidateQueries({ queryKey: queryKeys.clusters() });
+}
+
+// Creating or deleting one moves the org as well, which is not obvious and is
+// worth stating: `plan.clustersUsed` is part of the org payload, because the api
+// resolves the plan's usage server-side so the dashboard can show a limit before
+// someone hits it. So the count that says "1 / 1 clusters" lives under the org
+// key while the list it counts lives under this one.
+//
+// The old `shell` key covered this by accident — one entry held both, so any
+// cluster write refreshed the counter for free. Splitting the keys made the
+// dependency explicit, and it showed up as a stale "0 / 1 clusters" on the team
+// page immediately after connecting a cluster.
+function useInvalidateClusterCount(): () => Promise<void> {
+  const queryClient = useQueryClient();
+  return async () => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: queryKeys.clusters() }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.org() }),
+    ]);
+  };
 }
 
 export function useSetClusterMode(clusterId: string) {
-  const invalidateShell = useInvalidateShell();
+  const invalidateClusters = useInvalidateClusters();
   return useMutation({
     mutationFn: (readOnly: boolean) => api().setClusterMode({ clusterId, readOnly }),
     onSuccess: (_cluster, readOnly) => {
       toast.success(
         readOnly ? "Cluster is read-only again" : "Live mode enabled — the engine may now write",
       );
-      return invalidateShell();
+      return invalidateClusters();
     },
     // A refused change moved nothing, so there is nothing to refetch.
     onError: () => toast.error(MODE_FAILED),
@@ -49,14 +71,14 @@ export function useSetClusterMode(clusterId: string) {
 // Credential rotation: verified server-side before storing, so a typo can't
 // brick the cluster; history survives (unlike disconnect + reconnect).
 export function useRotateConnection(clusterId: string, { onRotated }: { onRotated: () => void }) {
-  const invalidateShell = useInvalidateShell();
+  const invalidateClusters = useInvalidateClusters();
   return useMutation({
     mutationFn: (connectionString: string) =>
       api().rotateConnection({ clusterId, connectionString }),
     onSuccess: () => {
       toast.success("Connection string rotated — history preserved");
       onRotated();
-      return invalidateShell();
+      return invalidateClusters();
     },
     // 400 names the problem with the string, 404 the cluster, 502 says the
     // cluster could not be dialled with it — all three are worth reading.
@@ -67,7 +89,7 @@ export function useRotateConnection(clusterId: string, { onRotated }: { onRotate
 // Offboard a cluster: the api restores in-flight hidden indexes, deletes all
 // collected data, and reports how to revoke the provisioned user.
 export function useDisconnectCluster(clusterId: string) {
-  const invalidateShell = useInvalidateShell();
+  const invalidateClusterCount = useInvalidateClusterCount();
   const navigate = useNavigate();
   return useMutation({
     mutationFn: () => api().deleteCluster({ clusterId }),
@@ -78,7 +100,7 @@ export function useDisconnectCluster(clusterId: string) {
           : "Cluster disconnected",
       );
       await navigate({ to: "/app", search: {} });
-      await invalidateShell();
+      await invalidateClusterCount();
     },
     // The cluster is still there, so deselecting it would be a lie.
     onError: () => toast.error(DISCONNECT_FAILED),
@@ -108,14 +130,14 @@ interface ConnectHandlers {
   readonly onError: (message: string) => void;
 }
 
-// The shell first, then the URL: the new cluster has to be in the list before
-// the selection points at it, or the bar has a moment of finding nothing under
+// The list first, then the URL: the new cluster has to be in the list before the
+// selection points at it, or the bar has a moment of finding nothing under
 // ?cluster= and drawing "No cluster connected".
 function useLandOnNewCluster() {
-  const invalidateShell = useInvalidateShell();
+  const invalidateClusterCount = useInvalidateClusterCount();
   const navigate = useNavigate();
   return async (id: string) => {
-    await invalidateShell();
+    await invalidateClusterCount();
     await navigate({ to: "/app", search: { cluster: id } });
   };
 }

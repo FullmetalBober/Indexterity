@@ -1,7 +1,7 @@
-// Approve, undo, un-hide. All three move the same key and nothing else, which is
-// the whole reason the dashboard's reads were split into three: approving one
-// recommendation used to refetch the latency series and the collection
-// footprint too.
+// Approve, undo, un-hide. Each of them moves exactly three keys: the row itself,
+// the audit trail that records what was done to it, and the ROI headline, which
+// changes as soon as a drop completes or is undone. Nothing else — approving a
+// recommendation does not touch the latency series or the collection footprint.
 import type { Recommendation } from "@repo/contracts";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -30,7 +30,17 @@ function usePipelineMutation(
     // turning a refusal into { ok: false } — a rejection that arrived as a
     // success. The api's refusal now arrives as one, so the "either way" is
     // onSettled rather than a branch.
-    onSettled: () => queryClient.invalidateQueries({ queryKey: queryKeys.pipeline(clusterId) }),
+    //
+    // Three invalidations rather than one blanket key. Naming them is the point:
+    // it is a list of what this write actually moves, and the reader of this file
+    // can check it against the api instead of trusting a grouping.
+    onSettled: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.recommendations(clusterId) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.roi(clusterId) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.activity(clusterId) }),
+      ]);
+    },
   });
 }
 

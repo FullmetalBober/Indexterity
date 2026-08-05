@@ -304,8 +304,8 @@ apps/web                dashboard
   src/lib/api.ts        one oRPC client, isomorphic: same-origin in the browser,
                         API_URL with the caller's cookie during SSR
   src/lib/auth-client   better-auth's own browser client
-  src/lib/queries       the query layer: the client, the four keys, one file per
-                        key, and mutations/ grouped by what they change
+  src/lib/queries       the query layer: the client, one key per api call in
+                        keys.ts, and mutations/ grouped by what they change
   src/components/form   TanStack Form bound once to shadcn's Field primitives —
                         every form in the app is built from these
   src/components/data-table  TanStack Table bound once to shadcn's table
@@ -321,9 +321,12 @@ packages/contracts      oRPC + zod contracts shared by api and web
 
 Route loaders are the SSR entry point and write **through** the query client, so
 the server render and the browser read one cache entry; mutations invalidate a
-key rather than re-running loaders. The wiki's [Architecture](https://github.com/FullmetalBober/Indexterity/wiki/Architecture)
-page, under Web / dashboard, has the four
-keys and the four things that turned out to be load-bearing.
+key rather than re-running loaders. **One key per api call** — a cache entry
+holding three answers is three questions sharing a cache line, and it showed:
+the org page fetched a cluster list it never draws, and a failing latency read
+blanked the collection table beside it. The wiki's [Architecture](https://github.com/FullmetalBober/Indexterity/wiki/Architecture)
+page, under Web / dashboard, has every key and the things that turned out to be
+load-bearing.
 
 Forms are TanStack Form, validated against the api's own input schemas from
 `packages/contracts` — so a password the sign-up field accepts is one better-auth
