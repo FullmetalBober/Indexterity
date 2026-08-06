@@ -9,6 +9,7 @@ import {
   monthlySavingsUsd,
   summarizeLatency,
 } from "../analysis";
+import { runFrom } from "../analysis/types";
 import {
   actions,
   and,
@@ -58,17 +59,15 @@ export class InsightsController {
         collection: row.collection,
         readings: [],
       };
+      // A row stands for every collect that read these same four counters, so the
+      // trend and the chart get the interval and the count rather than inferring a
+      // single look from a single row.
       group.readings.push({
+        ...runFrom(row),
         readOps: row.readOps,
         readLatencyMicros: row.readLatencyMicros,
         writeOps: row.writeOps,
         writeLatencyMicros: row.writeLatencyMicros,
-        capturedAt: row.capturedAt.toISOString(),
-        // A row stands for every collect that read these same four counters, so
-        // the trend and the chart get the interval and the count rather than
-        // inferring a single look from a single row.
-        lastSeenAt: row.lastSeenAt.toISOString(),
-        observations: row.observations,
       });
       groups.set(key, group);
     }

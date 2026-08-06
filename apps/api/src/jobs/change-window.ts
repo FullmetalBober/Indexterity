@@ -1,4 +1,5 @@
 import { inferChangeWindow, type TrafficSample } from "../analysis";
+import { runFrom } from "../analysis/types";
 import { and, type Database, eq, gte, latencySamples, policies, sql } from "../db";
 import { workloadKey } from "../engine/ports";
 import { historyWindow } from "./plan";
@@ -42,6 +43,7 @@ export async function refreshInferredWindow(
       capturedAt: latencySamples.capturedAt,
       lastSeenAt: latencySamples.lastSeenAt,
       observations: latencySamples.observations,
+      maxGapMs: latencySamples.maxGapMs,
       ops: sql<number>`${latencySamples.readOps} + ${latencySamples.writeOps}`,
     })
     .from(latencySamples)
@@ -59,12 +61,7 @@ export async function refreshInferredWindow(
   for (const row of rows) {
     const key = workloadKey(row.database, row.collection);
     const series = byNamespace.get(key) ?? [];
-    series.push({
-      capturedAt: row.capturedAt.toISOString(),
-      lastSeenAt: row.lastSeenAt.toISOString(),
-      observations: row.observations,
-      ops: Number(row.ops),
-    });
+    series.push({ ...runFrom(row), ops: Number(row.ops) });
     byNamespace.set(key, series);
   }
   const inferred = inferChangeWindow([...byNamespace.values()]);

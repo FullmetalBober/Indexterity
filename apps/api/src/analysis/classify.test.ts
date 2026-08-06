@@ -130,6 +130,55 @@ describe("usageHistoryIsTrustworthy", () => {
     ];
     expect(usageHistoryIsTrustworthy(history, opts, now)).toBe(true);
   });
+
+  // A run says "unchanged throughout", so a hole INSIDE one is invisible to the
+  // between-runs check — the gate would read a single row spanning an outage as a
+  // month of diligent watching. The collector refuses to build such a run, and
+  // these are about not having to take its word for it.
+  it("rejects a run whose own interior has a hole in it", () => {
+    const history: UsageSnapshot[] = [
+      {
+        capturedAt: "2026-02-01T00:00:00Z",
+        lastSeenAt: "2026-03-03T00:00:00Z",
+        observations: 100,
+        // Somewhere in that month we went dark for three weeks. Evenly spaced, the
+        // interior would look like eight-hour intervals and pass.
+        maxGapMs: 21 * 24 * 3_600_000,
+        perMember: [{ member: "m", ops: 0, since: "" }],
+      },
+    ];
+    expect(usageHistoryIsTrustworthy(history, opts, now)).toBe(false);
+  });
+
+  it("accepts a long quiet run that really was watched throughout", () => {
+    const history: UsageSnapshot[] = [
+      {
+        capturedAt: "2026-02-01T00:00:00Z",
+        lastSeenAt: "2026-03-03T00:00:00Z",
+        observations: 124,
+        // The 6h cadence, with one missed collect. Exactly the case run-length
+        // storage exists to make cheap, and it must still be droppable.
+        maxGapMs: 12 * 3_600_000,
+        perMember: [{ member: "m", ops: 0, since: "" }],
+      },
+    ];
+    expect(usageHistoryIsTrustworthy(history, opts, now)).toBe(true);
+  });
+
+  it("trusts a run that cannot say, which is every row written before the column", () => {
+    // Absent maxGapMs reads as zero rather than as suspicious: the alternative
+    // fails closed on the entire existing history and stops the engine proposing
+    // anything until a year of rows has rolled over.
+    const history: UsageSnapshot[] = [
+      {
+        capturedAt: "2026-02-01T00:00:00Z",
+        lastSeenAt: "2026-03-03T00:00:00Z",
+        observations: 124,
+        perMember: [{ member: "m", ops: 0, since: "" }],
+      },
+    ];
+    expect(usageHistoryIsTrustworthy(history, opts, now)).toBe(true);
+  });
 });
 
 describe("countersRestartedDuring", () => {

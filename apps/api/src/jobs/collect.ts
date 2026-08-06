@@ -91,8 +91,8 @@ interface DimensionRow {
 // state nothing is missing and this is a single select.
 // It does mean reading every stored spec back on every collect, which is the one
 // cost this design pays rather than removes — roughly 240 bytes per index. The
-// alternative is reproducing Postgres' generated `md5(spec::text)` in JS, and the
-// day that canonical form drifted the writer would start quietly inserting a
+// alternative is reproducing Postgres' generated `sha256(spec::text)` in JS, and
+// the day that canonical form drifted the writer would start quietly inserting a
 // second dimension row for an index that never changed. Re-reading a constant is
 // the cheaper thing to be wrong about.
 async function dimensionIds(
@@ -232,6 +232,15 @@ async function recordSnapshots(
       update ${indexSnapshots} as s
       set last_seen_at = ${now},
           observations = s.observations + 1,
+          -- The widest interior gap this run has ever had. Every SET expression
+          -- sees the OLD row, so s.last_seen_at here is still the previous
+          -- confirmation and the difference is the interval we are now closing.
+          -- Recorded so the trust gate can check a run's interior itself instead
+          -- of taking extendsRun's ceiling on faith.
+          max_gap_ms = greatest(
+            s.max_gap_ms,
+            (extract(epoch from (${now}::timestamptz - s.last_seen_at)) * 1000)::bigint
+          ),
           size_bytes = v.size_bytes,
           hinted = s.hinted or v.hinted
       from unnest(
@@ -291,7 +300,12 @@ async function recordLatency(
   if (extend.length > 0) {
     await db
       .update(latencySamples)
-      .set({ lastSeenAt: now, observations: sql`${latencySamples.observations} + 1` })
+      .set({
+        lastSeenAt: now,
+        observations: sql`${latencySamples.observations} + 1`,
+        // See recordSnapshots: widest interior gap, evaluated against the old row.
+        maxGapMs: sql`greatest(${latencySamples.maxGapMs}, (extract(epoch from (${now}::timestamptz - ${latencySamples.lastSeenAt})) * 1000)::bigint)`,
+      })
       .where(inArray(latencySamples.id, extend));
   }
   if (insert.length > 0) await db.insert(latencySamples).values(insert);

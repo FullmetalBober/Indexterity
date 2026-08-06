@@ -284,7 +284,17 @@ export const clusterIndexes = pgTable(
     // to reproduce that canonical form exactly — every whitespace and number
     // formatting rule — and the day it drifted the writer would quietly start
     // inserting a second dimension row for an index that never changed.
-    specDigest: text("spec_digest").notNull().generatedAlwaysAs(sql`md5(spec::text)`),
+    //
+    // sha256, not md5, and not for secrecy — nobody is attacking this. A collision
+    // here silently MERGES two different index shapes into one dimension row, so
+    // every snapshot of one would be reported under the other's spec and the
+    // redundancy engine would reason about an index that does not exist. Odds are
+    // negligible either way; the difference is that md5's failure is reachable by
+    // construction and silent when it lands, which is the wrong trade against 32
+    // extra bytes on a table holding a few hundred rows.
+    specDigest: text("spec_digest")
+      .notNull()
+      .generatedAlwaysAs(sql`encode(sha256(spec::text::bytea), 'hex')`),
     createdAt,
   },
   (table) => [
@@ -375,6 +385,23 @@ export const indexSnapshots = pgTable(
     // are counts of samples (minHistory, the score's history credit) — they read
     // this instead.
     observations: integer("observations").notNull().default(1),
+    // The largest interval between two consecutive observations INSIDE this run,
+    // in ms. Zero for a run of one, which has no interior.
+    //
+    // Exists so the trust gate can VERIFY there was no hole rather than trust that
+    // there wasn't. A run asserts the counter held throughout its span, and the
+    // readers only inspect the holes BETWEEN runs — which is sound exactly as long
+    // as the collector refuses to extend across a gap the gate would object to.
+    // That made a safety property depend on a constant shared between two modules
+    // agreeing forever, with nothing in the data to check it against. One number,
+    // maintained on extend as greatest(previous, now - last_seen_at), turns it into
+    // something the reader can test for itself.
+    //
+    // bigint rather than integer on purpose: int4 tops out at about 24 days of ms,
+    // and the whole point here is to stop relying on the writer's ceiling holding —
+    // a check that silently overflows when the thing it guards against happens is
+    // not a check.
+    maxGapMs: bigint("max_gap_ms", { mode: "number" }).notNull().default(0),
     // The interval the two columns above describe, as a range, so the database can
     // enforce the thing they imply: two runs for one index must never overlap.
     //
@@ -593,6 +620,8 @@ export const latencySamples = pgTable(
     // See index_snapshots, including why this has no default.
     lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull(),
     observations: integer("observations").notNull().default(1),
+    // See index_snapshots.
+    maxGapMs: bigint("max_gap_ms", { mode: "number" }).notNull().default(0),
     // Same guard, keyed by namespace instead of index_id. See index_snapshots.
     span: tstzrange("span")
       .notNull()

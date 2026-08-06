@@ -166,7 +166,7 @@ export async function insertSnapshots(
           eq(clusterIndexes.database, fixture.database),
           eq(clusterIndexes.collection, fixture.collection),
           eq(clusterIndexes.indexName, fixture.indexName),
-          sql`${clusterIndexes.specDigest} = md5(${JSON.stringify(fixture.spec)}::jsonb::text)`,
+          sql`${clusterIndexes.specDigest} = encode(sha256(${JSON.stringify(fixture.spec)}::jsonb::text::bytea), 'hex')`,
         ),
       );
     if (row === undefined) throw new Error(`no dimension row for ${fixture.indexName}`);

@@ -61,6 +61,40 @@ export interface Run {
   readonly capturedAt: string;
   readonly lastSeenAt?: string;
   readonly observations?: number;
+  // The largest interval between two consecutive observations INSIDE this run, in
+  // ms. Zero, or absent, for a run of one — it has no interior.
+  //
+  // A run asserts the state held throughout its span, and the readers here only
+  // inspect the holes BETWEEN runs. That is sound precisely while the collector
+  // refuses to extend a run across a hole this file would object to, which made a
+  // safety property rest on a constant shared between two modules staying in
+  // agreement, with nothing in the data to check it against. This is that check:
+  // the gate can ask a run how bad its own interior was rather than assume.
+  readonly maxGapMs?: number;
+}
+
+// Build a Run from a database row.
+//
+// The optional fields above are what let a caller holding a point reading write
+// `{ capturedAt }` and mean it. The cost is that a DB read site can omit them by
+// accident and get a silently plausible point reading — a year-long run collapsing
+// to the instant it began, which reads as an ancient snapshot rather than as an
+// error. Every read of the two run-length tables goes through here so that the
+// mapping is stated once and a new one cannot quietly leave a field out.
+export function runFrom(row: {
+  capturedAt: Date | string;
+  lastSeenAt: Date | string;
+  observations: number;
+  maxGapMs: number;
+}): Required<Run> {
+  const iso = (value: Date | string): string =>
+    typeof value === "string" ? value : value.toISOString();
+  return {
+    capturedAt: iso(row.capturedAt),
+    lastSeenAt: iso(row.lastSeenAt),
+    observations: row.observations,
+    maxGapMs: row.maxGapMs,
+  };
 }
 
 // When the reading was first seen, in ms. NaN for an unparseable stamp, which
@@ -78,6 +112,15 @@ export function spanEnd(run: Run): number {
   const end = new Date(run.lastSeenAt).getTime();
   if (!Number.isFinite(end)) return start;
   return Math.max(start, end);
+}
+
+// The widest hole inside a run, in ms. Zero when unknown, which is the honest
+// answer for a point reading and for rows written before the column existed: a run
+// of one has no interior, and a caller that cannot say has nothing to declare.
+export function interiorGap(run: Run): number {
+  const gap = run.maxGapMs;
+  if (gap === undefined || !Number.isFinite(gap) || gap < 0) return 0;
+  return gap;
 }
 
 // How many collects saw this state. At least one: a row exists because

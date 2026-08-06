@@ -509,6 +509,15 @@ positive form of the claim — **we looked at `lastSeenAt`, and it was still thi
 and the collector refuses to extend one across a hole the classifier would object
 to, so an outage still shows up as an outage.
 
+Two things hold that rather than one. The collector's refusal is the first, but it
+put half of a safety invariant in a different file from the half that depends on
+it, with nothing in the data to check against — so each run also records the widest
+gap inside its own span, and the classifier *asks* rather than assumes. Overlap is
+ruled out by the database itself, with an exclusion constraint over the interval
+each row covers: readers find holes by differencing one run's end against the
+next's start, so an overlap would be a *negative* gap, which reads as no gap at
+all.
+
 One exception, and it is deliberate. A **partial index** needs the literal value
 in its filter — `partialFilterExpression: { status: "active" }` cannot be built
 without knowing `"active"` — so equality literals from the profiler can reach

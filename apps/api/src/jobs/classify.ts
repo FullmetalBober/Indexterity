@@ -6,6 +6,7 @@ import {
   parseStoredSpec,
   recommendForCollection,
 } from "../analysis";
+import { runFrom } from "../analysis/types";
 import {
   and,
   clusterIndexes,
@@ -124,6 +125,7 @@ export async function classifyCluster(clusterId: string): Promise<number> {
       capturedAt: indexSnapshots.capturedAt,
       lastSeenAt: indexSnapshots.lastSeenAt,
       observations: indexSnapshots.observations,
+      maxGapMs: indexSnapshots.maxGapMs,
     })
     .from(indexSnapshots)
     .innerJoin(clusterIndexes, eq(indexSnapshots.indexId, clusterIndexes.id))
@@ -137,6 +139,7 @@ export async function classifyCluster(clusterId: string): Promise<number> {
       capturedAt: latencySamples.capturedAt,
       lastSeenAt: latencySamples.lastSeenAt,
       observations: latencySamples.observations,
+      maxGapMs: latencySamples.maxGapMs,
     })
     .from(latencySamples)
     .where(and(eq(latencySamples.clusterId, clusterId), gte(latencySamples.lastSeenAt, since)));
@@ -144,12 +147,7 @@ export async function classifyCluster(clusterId: string): Promise<number> {
   for (const sample of latencyRows) {
     const key = `${sample.database}\u0000${sample.collection}`;
     const list = activityByCollection.get(key) ?? [];
-    list.push({
-      capturedAt: sample.capturedAt.toISOString(),
-      lastSeenAt: sample.lastSeenAt.toISOString(),
-      observations: sample.observations,
-      readOps: sample.readOps,
-    });
+    list.push({ ...runFrom(sample), readOps: sample.readOps });
     activityByCollection.set(key, list);
   }
   type Row = (typeof rows)[number];

@@ -1,5 +1,6 @@
 import type { UsageClass } from "@repo/contracts";
 import {
+  interiorGap,
   observationsOf,
   sortedRuns,
   spanEnd,
@@ -39,14 +40,17 @@ const HOUR_MS = 3_600_000;
 
 // The gap tolerance, in hours, as a value the WRITER can also see.
 //
-// It has to be shared, because run-length storage puts the two halves of one
-// invariant in different files. A run says "still true throughout
-// [capturedAt, lastSeenAt]", and the gate below only inspects the holes BETWEEN
-// runs — so if the writer were free to extend a run across a week of silence,
-// the hole would vanish inside a row and the gate would find a clean series
-// where there was an outage. The writer therefore refuses to extend across
-// anything longer than this, which makes "no hole inside a run that this gate
-// would have objected to" true by construction rather than by hope.
+// It is shared because run-length storage puts the two halves of one invariant in
+// different files. A run says "still true throughout [capturedAt, lastSeenAt]", so
+// a writer free to extend across a week of silence would hide the hole inside a row
+// and the gate below would find a clean series where there was an outage. The
+// writer therefore refuses to extend across anything longer than this.
+//
+// That refusal is now a first line rather than the only one. Each run also records
+// its own worst interior gap (`Run.maxGapMs`) and the gate checks it, so the
+// property holds even if these two halves drift apart — which is the point, since
+// "two modules agree about a constant forever" is not something the data could
+// confirm and a safety property should not need faith.
 //
 // Two days spans a missed collect or two at the 6h cadence without tolerating an
 // outage.
@@ -141,16 +145,26 @@ export function usageHistoryIsTrustworthy(
     return false;
   }
   const maxGap = options.maxGapHours * HOUR_MS;
-  // Only the holes BETWEEN runs, because a run has none: it is the assertion
-  // that the state held throughout, written by a collector that refuses to
-  // extend across anything longer than MAX_GAP_HOURS. Differencing run starts
-  // instead would read the length of a quiet run as an outage and throw away
-  // every idle index — the exact inversion of the bug this guard exists for.
-  for (let i = 1; i < runs.length; i++) {
-    const previous = runs[i - 1];
-    const next = runs[i];
-    if (previous === undefined || next === undefined) continue;
-    if (spanStart(next) - spanEnd(previous) > maxGap) return false;
+  // Two kinds of hole, and both have to be checked.
+  //
+  // BETWEEN runs, the obvious one: from the moment a state was last confirmed to
+  // the moment the next was first seen. Differencing run STARTS instead would read
+  // the length of a quiet run as an outage and throw away every idle index — the
+  // exact inversion of the bug this guard exists for.
+  //
+  // And INSIDE a run, which is the one that is easy to miss. A run asserts the
+  // state held throughout its span, so it looks by construction hole-free; that
+  // assertion is only as good as the collector's refusal to extend across a gap
+  // this function would object to. Trusting it meant a safety property rested on
+  // MAX_GAP_HOURS meaning the same thing in two modules forever, with nothing in
+  // the data to check against — so each run now carries its own worst interior gap
+  // and is asked rather than believed. Rows written before the column existed
+  // report zero and are trusted exactly as they were.
+  for (const [i, run] of runs.entries()) {
+    if (interiorGap(run) > maxGap) return false;
+    const next = runs[i + 1];
+    if (next === undefined) continue;
+    if (spanStart(next) - spanEnd(run) > maxGap) return false;
   }
   // And the newest confirmation must itself be recent, or we are reasoning about
   // a cluster we have not seen in a while.

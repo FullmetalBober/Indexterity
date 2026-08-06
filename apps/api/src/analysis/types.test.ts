@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  interiorGap,
   medianObservationGap,
   observationsOf,
   type Run,
+  runFrom,
   spanEnd,
   spanStart,
   totalObservations,
@@ -25,6 +27,54 @@ describe("a point reading is a run of one", () => {
   it("counts as one observation", () => {
     expect(observationsOf(point)).toBe(1);
     expect(totalObservations([point, point, point])).toBe(3);
+  });
+});
+
+describe("interiorGap", () => {
+  it("is zero for a run that has no interior to speak of", () => {
+    expect(interiorGap({ capturedAt: iso(0) })).toBe(0);
+    expect(interiorGap({ capturedAt: iso(0), maxGapMs: 0 })).toBe(0);
+  });
+
+  it("reports what the run recorded", () => {
+    expect(interiorGap({ capturedAt: iso(0), maxGapMs: 6 * HOUR_MS })).toBe(6 * HOUR_MS);
+  });
+
+  it("treats nonsense as nothing to declare, not as a hole", () => {
+    // Failing OPEN here is deliberate. A negative or NaN gap is a bug in the
+    // writer, and the gate would then refuse every finding on the cluster; the
+    // between-runs check still stands, so the safety floor does not move.
+    expect(interiorGap({ capturedAt: iso(0), maxGapMs: -1 })).toBe(0);
+    expect(interiorGap({ capturedAt: iso(0), maxGapMs: Number.NaN })).toBe(0);
+  });
+});
+
+describe("runFrom", () => {
+  // The point of the mapper: the fields are optional so a point reading stays a
+  // one-liner, which means a DB read site can leave them out and get a silently
+  // plausible answer — a year-long run collapsing to the instant it began. Going
+  // through here makes that impossible to do by omission.
+  it("carries every run field across, from Dates", () => {
+    const run = runFrom({
+      capturedAt: new Date(iso(0)),
+      lastSeenAt: new Date(iso(24)),
+      observations: 5,
+      maxGapMs: 6 * HOUR_MS,
+    });
+    expect(run).toEqual({
+      capturedAt: iso(0),
+      lastSeenAt: iso(24),
+      observations: 5,
+      maxGapMs: 6 * HOUR_MS,
+    });
+    expect(spanEnd(run) - spanStart(run)).toBe(24 * HOUR_MS);
+    expect(interiorGap(run)).toBe(6 * HOUR_MS);
+  });
+
+  it("leaves an already-serialized row alone", () => {
+    expect(
+      runFrom({ capturedAt: iso(0), lastSeenAt: iso(1), observations: 2, maxGapMs: 0 }),
+    ).toEqual({ capturedAt: iso(0), lastSeenAt: iso(1), observations: 2, maxGapMs: 0 });
   });
 });
 

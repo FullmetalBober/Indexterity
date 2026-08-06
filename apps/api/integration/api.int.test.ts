@@ -2526,6 +2526,17 @@ describe("collecting twice writes almost nothing the second time", () => {
     // the index has been idle, which is most of the evidence behind a drop.
     for (const row of extended) {
       expect(row.lastSeenAt.getTime()).toBeGreaterThan(row.capturedAt.getTime());
+      // And it records how wide its own interior grew, so the trust gate can check
+      // for a hole inside the run instead of taking the collector's ceiling on
+      // faith. Two collects back to back, so the interval is small but real —
+      // exactly the span between the two lastSeenAt values.
+      expect(row.maxGapMs).toBeGreaterThan(0);
+      expect(row.maxGapMs).toBeLessThanOrEqual(row.lastSeenAt.getTime() - row.capturedAt.getTime());
+    }
+    // A run of one has no interior and must say so, rather than inheriting a
+    // neighbour's number.
+    for (const row of after.filter((candidate) => candidate.observations === 1)) {
+      expect(row.maxGapMs).toBe(0);
     }
   });
 

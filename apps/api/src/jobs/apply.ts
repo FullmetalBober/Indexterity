@@ -1,4 +1,5 @@
 import { dynamicObserveDays, inChangeWindow } from "../analysis";
+import { runFrom } from "../analysis/types";
 import { entitledAutomation } from "../billing/plans";
 import {
   actions,
@@ -141,6 +142,7 @@ export async function applyCluster(clusterId: string): Promise<number> {
           capturedAt: indexSnapshots.capturedAt,
           lastSeenAt: indexSnapshots.lastSeenAt,
           observations: indexSnapshots.observations,
+          maxGapMs: indexSnapshots.maxGapMs,
           perMember: indexSnapshots.perMember,
         })
         .from(indexSnapshots)
@@ -163,9 +165,7 @@ export async function applyCluster(clusterId: string): Promise<number> {
         );
       const window = dynamicObserveDays(
         historyRows.map((row) => ({
-          capturedAt: row.capturedAt.toISOString(),
-          lastSeenAt: row.lastSeenAt.toISOString(),
-          observations: row.observations,
+          ...runFrom(row),
           ops: row.perMember.reduce((sum, member) => sum + member.ops, 0),
         })),
         policy?.observeWindowDays ?? DEFAULT_OBSERVE_DAYS,
