@@ -3,6 +3,8 @@ import { ConfigModule } from "@nestjs/config";
 import { ORPCModule } from "@orpc/nest";
 import { ClustersController } from "./clusters/clusters.controller";
 import { DatabaseService } from "./db/database.service";
+import { ClusterEventsService } from "./events/cluster-events.service";
+import { EventsController } from "./events/events.controller";
 import { HealthController } from "./health/health.controller";
 import { TenancyService } from "./http/tenancy.service";
 import { InsightsController } from "./insights/insights.controller";
@@ -22,7 +24,8 @@ import { RecommendationsController } from "./recommendations/recommendations.con
     InsightsController,
     PolicyController,
     OrgController,
+    EventsController,
   ],
-  providers: [DatabaseService, TenancyService],
+  providers: [DatabaseService, TenancyService, ClusterEventsService],
 })
 export class AppModule {}

@@ -1,5 +1,6 @@
 import type { JobHelpers } from "graphile-worker";
 import { isUnreachableError } from "../errors/unreachable";
+import { emitPassFinished } from "../events/emit";
 import { ALERT_COOLDOWN_MS, alertAllowed, notifyClusterOwners } from "../mail/notify";
 import { recordClusterTask } from "../metrics";
 import { UnsupportedServerError } from "../mongo/executor";
@@ -18,12 +19,13 @@ import { probeCluster } from "./probe";
 import { pruneOldSamples } from "./retention";
 import { suggestForCluster } from "./suggest";
 
-// What a cluster task needs from the outside world, narrowed to two functions
-// so the decision below is testable without a queue or a database. Structurally
-// satisfied by graphile-worker's own logger.
+// What a cluster task needs from the outside world, narrowed to three
+// functions so the decision below is testable without a queue or a database.
+// The logger is structurally satisfied by graphile-worker's own.
 export interface ClusterTaskDeps {
   readonly logger: { warn(message: string): void; error(message: string): void };
   readonly alertOwners: (clusterId: string, subject: string, body: string) => Promise<void>;
+  readonly emitPassFinished: (clusterId: string, task: string) => Promise<void>;
 }
 
 // A customer cluster can be unreachable for days — maintenance, a rotated
@@ -43,6 +45,10 @@ export async function runClusterTask(
   try {
     await run(clusterId);
     recordClusterTask(task, clusterId, "ok");
+    // Only the ok outcome: a skipped tick changed nothing, so there is nothing
+    // for a dashboard to refetch. Best-effort by construction (emit.ts) — a
+    // lost nudge must not turn a landed pass into a retried one.
+    await deps.emitPassFinished(clusterId, task);
   } catch (error) {
     // Offboarded between scheduling and running. Nothing to do and nobody to
     // tell — the owners deleted it on purpose.
@@ -100,6 +106,7 @@ function depsFor(helpers: JobHelpers): ClusterTaskDeps {
         helpers.logger.error(`alert for cluster ${clusterId} failed: ${String(error)}`);
       }
     },
+    emitPassFinished: (clusterId, task) => emitPassFinished(jobDb(), clusterId, task),
   };
 }
 

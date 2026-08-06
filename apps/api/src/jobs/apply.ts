@@ -14,6 +14,7 @@ import {
   recommendations,
   sql,
 } from "../db";
+import { emitClusterEvent } from "../events/emit";
 import { serializeSpec } from "../mongo";
 import { effectiveChangeWindow } from "./change-window";
 import { openClusterSession } from "./cluster-connection";
@@ -192,6 +193,9 @@ export async function applyCluster(clusterId: string): Promise<number> {
             : `ok; observing ${window.days} days — ${window.reason}`,
         rollbackToken: check.spec === null ? null : { spec: serializeSpec(check.spec) },
       });
+      // At the transition, not at the end of the pass: a pass hiding several
+      // indexes can hold a dashboard's stale row for the length of the loop.
+      await emitClusterEvent(db, { clusterId, kind: "DROP_HIDDEN", task: null });
       hidden += 1;
     }
     return hidden;

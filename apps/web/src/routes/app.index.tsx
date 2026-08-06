@@ -13,6 +13,7 @@ import { latencyCharts } from "~/components/app/latency-series";
 import { PolicySection } from "~/components/app/policy-section";
 import { RecommendationsTable } from "~/components/app/recommendations-table";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
+import { useLiveClusterEvents } from "~/lib/queries/live";
 import {
   activityQuery,
   recommendationsQuery,
@@ -85,6 +86,12 @@ export const Route = createFileRoute("/app/")({
 function Dashboard() {
   const shell = useShell();
   const { clusterId: id } = Route.useLoaderData();
+
+  // The live half of everything below: the worker's events for THIS cluster,
+  // answered by invalidating the same keys the loader warmed. A worker pass
+  // shows up without a reload; switching clusters swaps the subscription with
+  // the id.
+  useLiveClusterEvents(id);
 
   // The loader already put each of these in the cache, so they read rather than
   // fetch. useQuery, not useSuspenseQuery: there is nothing to wait for, and

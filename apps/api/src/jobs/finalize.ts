@@ -1,5 +1,6 @@
 import { evaluateRegression, inChangeWindow } from "../analysis";
 import { actions, and, eq, inArray, policies, recommendations, roiMetrics } from "../db";
+import { emitClusterEvent } from "../events/emit";
 import { notifyClusterOwners } from "../mail/notify";
 import { recordDrop, recordRegressionVerdict } from "../metrics";
 import { serializeSpec } from "../mongo";
@@ -115,6 +116,7 @@ export async function finalizeCluster(clusterId: string): Promise<number> {
           .set({ baselineWriteOps: null, baselineWriteLatency: null, updatedAt: new Date() })
           .where(eq(recommendations.id, rec.id));
         await retireSuperseded(db, clusterId, rec);
+        await emitClusterEvent(db, { clusterId, kind: "BUILD_GRADUATED", task: null });
         continue;
       }
       if (verdict !== "REGRESSED") continue;
@@ -147,6 +149,7 @@ export async function finalizeCluster(clusterId: string): Promise<number> {
         `rolled back ${rec.indexName}`,
         `The index ${rec.indexName} on ${rec.database}.${rec.collection} slowed writes after being built, so it was dropped automatically. It is cooling down until ${day}.`,
       );
+      await emitClusterEvent(db, { clusterId, kind: "REGRESSION_FIRED", task: null });
     }
     for (const rec of due) {
       // Regression gate: did hiding this index slow the collection's reads
@@ -214,6 +217,7 @@ export async function finalizeCluster(clusterId: string): Promise<number> {
             `kept ${rec.indexName} (regression)`,
             `Hiding ${rec.indexName} on ${rec.database}.${rec.collection} slowed reads during the observe window, so the drop was aborted and the index un-hidden. It is cooling down until ${day}.`,
           );
+          await emitClusterEvent(db, { clusterId, kind: "REGRESSION_FIRED", task: null });
           continue;
         }
       }

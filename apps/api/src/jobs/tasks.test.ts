@@ -11,14 +11,17 @@ function recorder(): {
   warns: string[];
   errors: string[];
   alerts: string[];
+  emitted: string[];
 } {
   const warns: string[] = [];
   const errors: string[] = [];
   const alerts: string[] = [];
+  const emitted: string[] = [];
   return {
     warns,
     errors,
     alerts,
+    emitted,
     deps: {
       logger: {
         warn: (message) => void warns.push(message),
@@ -26,6 +29,10 @@ function recorder(): {
       },
       alertOwners: (clusterId, subject) => {
         alerts.push(`${clusterId}:${subject}`);
+        return Promise.resolve();
+      },
+      emitPassFinished: (clusterId, task) => {
+        emitted.push(`${clusterId}:${task}`);
         return Promise.resolve();
       },
     },
@@ -63,6 +70,17 @@ describe("runClusterTask", () => {
     expect(ran).toBe(CLUSTER);
     expect(log.warns).toHaveLength(0);
     expect(log.alerts).toHaveLength(0);
+    // The landed pass is announced, so the dashboard can refetch what it wrote.
+    expect(log.emitted).toEqual([`${CLUSTER}:collect`]);
+  });
+
+  it("announces nothing for a tick that changed nothing", async () => {
+    const log = recorder();
+    await runClusterTask("collect", CLUSTER, log.deps, () => Promise.reject(unreachable()));
+    await runClusterTask("collect", CLUSTER, log.deps, () => {
+      throw new ClusterGoneError(CLUSTER);
+    });
+    expect(log.emitted).toHaveLength(0);
   });
 
   it("swallows an unreachable cluster and alerts the owners once", async () => {
