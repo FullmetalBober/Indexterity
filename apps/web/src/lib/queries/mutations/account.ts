@@ -39,9 +39,15 @@ export function useChangePassword({ onDone }: { onDone: () => void }) {
     onSuccess: async () => {
       toast.success("Password changed");
       onDone();
-      // Revoking the others also rotates THIS session's token server-side, so
-      // the list is wrong either way it was asked for.
-      await queryClient.invalidateQueries({ queryKey: queryKeys.mySessions() });
+      // Revoking the others rotates THIS session's token server-side too, so
+      // both reads are wrong: the list holds dead sessions, and "me" holds the
+      // retired token — which is what the list marks the current row against.
+      // Stale, the one session left would wear a Revoke button instead of
+      // "this device".
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.me() }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.mySessions() }),
+      ]);
     },
     // 400 carries better-auth's own reason — a wrong current password says so,
     // and "failed" would send the reader off to reset a password they know.

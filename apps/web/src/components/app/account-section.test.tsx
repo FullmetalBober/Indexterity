@@ -126,6 +126,23 @@ describe("password", () => {
     });
   });
 
+  it("drops the cached token the current-session mark is judged against", async () => {
+    const user = userEvent.setup();
+    const { queryClient } = renderSection();
+    // Both reads are stale after a change that can rotate the session: the list
+    // holds dead sessions, and "me" holds the token the current row is marked
+    // against.
+    queryClient.setQueryData(["me"], me);
+    queryClient.setQueryData(["my-sessions"], [currentSession]);
+    await user.type(screen.getByLabelText("Current password"), "old-password");
+    await user.type(screen.getByLabelText("New password"), "new-password-1");
+    await user.type(screen.getByLabelText("Repeat it"), "new-password-1");
+    await user.click(screen.getByRole("button", { name: "Change password" }));
+    expect(changePassword).toHaveBeenCalled();
+    expect(queryClient.getQueryState(["me"])?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(["my-sessions"])?.isInvalidated).toBe(true);
+  });
+
   it("refuses a mismatched confirmation without calling the api", async () => {
     const user = userEvent.setup();
     renderSection();
