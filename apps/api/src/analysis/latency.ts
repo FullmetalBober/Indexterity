@@ -18,8 +18,33 @@ export interface LatencyTrend {
 }
 
 // Average latency per op over the interval between two cumulative readings.
+//
+// Null when either delta is impossible, and a NEGATIVE micros delta is impossible:
+// these are cumulative totals, so they only ever go up while the same mongod is
+// running. `$collStats` latencyStats resets to zero when it restarts, and the next
+// reading is then smaller than the one before it — differencing the pair yields
+// negative latency, which was reported to the customer as a very fast collection.
+// Observed in the wild at -6,803 µs/op, on 81 of 98 collections at once, because a
+// restart resets every namespace on the cluster together.
+//
+// There is no `since` to check the way index usage has (see classify.ts's
+// countersRestartedDuring) — latencyStats carries no counter-start stamp at all, so
+// the total having fallen IS the evidence, and the only evidence.
+//
+// Null rather than zero or the absolute value: we do not know what the latency was
+// across that interval, and the honest shape of not knowing is a gap. Zero would
+// read as an infinitely fast collection and an absolute value would invent a
+// measurement out of two unrelated counter runs.
+//
+// Scope, so nobody reads this as more than it is: these two functions feed the
+// dashboard only (insights.controller.ts). The regression gate that decides whether
+// a hidden index actually gets dropped does not come through here — finalize.ts runs
+// its own comparison and already returns UNOBSERVABLE across a restart. So the
+// engine knew about resets and the display did not, which is the whole of the bug.
 function windowAvg(deltaMicros: number, deltaOps: number): number | null {
-  return deltaOps > 0 ? deltaMicros / deltaOps : null;
+  if (deltaOps <= 0) return null;
+  if (deltaMicros < 0) return null;
+  return deltaMicros / deltaOps;
 }
 
 export interface LatencyPoint {

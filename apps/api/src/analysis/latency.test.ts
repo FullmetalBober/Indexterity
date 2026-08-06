@@ -52,6 +52,51 @@ describe("summarizeLatency", () => {
   });
 });
 
+// A mongod restart zeroes $collStats latencyStats, so the next reading is SMALLER
+// than the one before it. Differencing the pair gives negative latency, which was
+// shown to the customer as an extremely fast collection — observed at -6,803 µs/op
+// across 81 of 98 collections on one cluster, because a restart resets every
+// namespace together. There is no `since` to check the way index usage has: the
+// total having fallen is the only evidence there is.
+describe("summarizeLatency across a counter reset", () => {
+  it("refuses to report negative latency when the read total falls", () => {
+    // The real numbers from the cluster that surfaced this.
+    const restarted = [reading(13, 36_627, 0, 0, 0), reading(15, 23_020, 0, 0, 1)];
+    const trend = summarizeLatency(restarted);
+    expect(trend.currentReadMicros).toBeNull();
+    expect(trend.baselineReadMicros).toBeNull();
+    expect(trend.readDeltaPct).toBeNull();
+  });
+
+  it("does the same for writes", () => {
+    const restarted = [reading(0, 0, 40, 80_000, 0), reading(0, 0, 45, 9_000, 1)];
+    expect(summarizeLatency(restarted).currentWriteMicros).toBeNull();
+  });
+
+  it("keeps the windows either side of the reset", () => {
+    // Rose, reset, rose again. The two good intervals still count; only the one
+    // spanning the reset is unknown, so a restart costs one window and not the
+    // whole history.
+    const across = [
+      reading(100, 100_000, 0, 0, 0),
+      reading(200, 220_000, 0, 0, 1),
+      reading(10, 8_000, 0, 0, 2),
+      reading(30, 32_000, 0, 0, 3),
+    ];
+    const trend = summarizeLatency(across);
+    expect(trend.baselineReadMicros).toBe(1200);
+    expect(trend.currentReadMicros).toBe(1200);
+    expect(trend.samples).toBe(4);
+  });
+
+  it("still reports zero micros over real ops, which is not a reset", () => {
+    // A delta of exactly zero is a legitimate reading — ops that cost nothing
+    // measurable — and must not be swept up with the negatives.
+    const flat = [reading(100, 50_000, 0, 0, 0), reading(200, 50_000, 0, 0, 1)];
+    expect(summarizeLatency(flat).currentReadMicros).toBe(0);
+  });
+});
+
 describe("latencyPoints", () => {
   it("emits one windowed point per consecutive pair, later timestamp", () => {
     const points = latencyPoints(series);
@@ -67,6 +112,12 @@ describe("latencyPoints", () => {
       writeMicros: 7000,
     });
   });
+  it("gaps the chart across a counter reset rather than plotting it below zero", () => {
+    const points = latencyPoints([reading(13, 36_627, 0, 0, 0), reading(15, 23_020, 0, 0, 1)]);
+    expect(points).toHaveLength(1);
+    expect(points[0]?.readMicros).toBeNull();
+  });
+
   it("nulls a channel whose ops did not advance", () => {
     const points = latencyPoints([
       reading(100, 100_000, 5, 1000, 0),
