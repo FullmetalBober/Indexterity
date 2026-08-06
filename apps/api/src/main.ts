@@ -4,6 +4,7 @@ import { NestFactory } from "@nestjs/core";
 import { FastifyAdapter, type NestFastifyApplication } from "@nestjs/platform-fastify";
 import { AppModule } from "./app.module";
 import { auth } from "./auth";
+import { sessionCookiesFor } from "./auth/session";
 import { positiveEnv, trustProxySetting } from "./env";
 import { AppExceptionFilter } from "./errors/exception.filter";
 import { jobDb } from "./jobs/db";
@@ -51,6 +52,21 @@ async function bootstrap(): Promise<void> {
     timeWindow: "1 minute",
   });
 
+  // When resolving the session refreshed the session-cache cookie
+  // (auth.config.ts), hand the refreshed cookie to the browser. Without this,
+  // only better-auth's own routes could re-arm the cache, and the dashboard
+  // barely calls them — its traffic is the oRPC routes below, so the cache
+  // would expire maxAge after sign-in and every request after that would be
+  // back on postgres. Before listen, so the hook attaches to Nest's routes;
+  // synchronous, because an async onSend races handlers that reply.send()
+  // without returning the reply (see auth/session.ts).
+  fastify.addHook("onSend", (request, reply, _payload, done) => {
+    for (const cookie of sessionCookiesFor(request)) {
+      reply.header("set-cookie", cookie);
+    }
+    done();
+  });
+
   // Mount better-auth at /api/auth/*. Build a web Request from Fastify's parsed
   // request (reusing its JSON body), hand it to better-auth, forward the Response.
   fastify.all(
@@ -81,7 +97,11 @@ async function bootstrap(): Promise<void> {
         if (key.toLowerCase() !== "set-cookie") reply.header(key, value);
       });
       for (const cookie of response.headers.getSetCookie()) reply.header("set-cookie", cookie);
-      reply.send(response.body ? await response.text() : null);
+      // Returned, not just called: an async handler that sends without
+      // returning the reply makes Fastify send a second time when the promise
+      // resolves — a logged warning that turns fatal the moment any onSend
+      // hook gives the race somewhere to land.
+      return reply.send(response.body ? await response.text() : null);
     },
   );
 

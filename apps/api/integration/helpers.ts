@@ -82,7 +82,8 @@ export async function stopApi(child: ChildProcess): Promise<void> {
 
 export interface Session {
   readonly email: string;
-  readonly cookie: string;
+  // Mutable on purpose: adoptCookies moves it forward the way a browser would.
+  cookie: string;
 }
 
 function cookieOf(res: Response): string {
@@ -90,6 +91,32 @@ function cookieOf(res: Response): string {
     .getSetCookie()
     .map((value) => value.split(";")[0])
     .join("; ");
+}
+
+// Adopt the response's set-cookie headers the way a browser would: replace by
+// name, drop what it expired. The session cache (auth.config.ts cookieCache)
+// is re-signed whenever the session changes — set-active, create-org,
+// accept-invitation — and refreshed on ordinary api responses; a session
+// pinned to the cookies sign-up handed it would keep presenting the stale
+// cache and be answered from it for up to its maxAge.
+function adoptCookies(session: Session | null, res: Response): void {
+  if (session === null) return;
+  const setCookies = res.headers.getSetCookie();
+  if (setCookies.length === 0) return;
+  const jar = new Map(
+    session.cookie
+      .split("; ")
+      .filter((pair) => pair !== "")
+      .map((pair) => [pair.split("=")[0], pair]),
+  );
+  for (const raw of setCookies) {
+    const pair = raw.split(";")[0] ?? "";
+    const name = pair.split("=")[0];
+    if (name === undefined || name === "") continue;
+    if (/;\s*max-age=0\s*(;|$)/i.test(raw)) jar.delete(name);
+    else jar.set(name, pair);
+  }
+  session.cookie = [...jar.values()].join("; ");
 }
 
 // better-auth's own endpoints, which sit on Fastify at /api/auth — outside
@@ -100,7 +127,7 @@ export async function authPost(
   body: unknown,
   base: string = API_BASE,
 ): Promise<Response> {
-  return fetch(`${base}/api/auth${path}`, {
+  const res = await fetch(`${base}/api/auth${path}`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -109,6 +136,8 @@ export async function authPost(
     },
     body: JSON.stringify(body),
   });
+  adoptCookies(session, res);
+  return res;
 }
 
 // Unique by construction. A slug is required and unique, nothing routes by it,
@@ -301,7 +330,7 @@ export async function api(
   session: Session | null,
   init?: RequestInit,
 ): Promise<Response> {
-  return fetch(`${API_ROOT}${path}`, {
+  const res = await fetch(`${API_ROOT}${path}`, {
     ...init,
     headers: {
       // Only claim a JSON body when one is sent — fastify 400s on an empty
@@ -311,4 +340,6 @@ export async function api(
       ...init?.headers,
     },
   });
+  adoptCookies(session, res);
+  return res;
 }
