@@ -46,6 +46,23 @@ function series(days: number, perBucket: readonly number[], startDay = 1): Traff
   return samples;
 }
 
+// The same shape at an HOURLY cadence: a reading every hour, with each bucket's
+// traffic spread evenly over the six hours it covers. Eight times the readings of
+// `series` for the same wall-clock time, which is exactly what must not change the
+// evidence bar.
+function hourly(days: number, perBucket: readonly number[], startDay = 1): TrafficSample[] {
+  const samples: TrafficSample[] = [];
+  let ops = 0;
+  for (let day = 0; day < days; day++) {
+    for (let hour = 0; hour < 24; hour++) {
+      const date = new Date(Date.UTC(2026, 6, startDay + day, hour, 0, 0));
+      samples.push({ capturedAt: date.toISOString(), ops });
+      ops += (perBucket[Math.floor(hour / 6)] ?? 0) / 6;
+    }
+  }
+  return samples;
+}
+
 // A run-length reading: the same counter seen at every collect from `from` to
 // `to`, six hours apart.
 function quietRun(from: Date, to: Date, ops: number): TrafficSample {
@@ -72,6 +89,39 @@ describe("inferChangeWindow", () => {
     const inferred = inferChangeWindow([series(5, [900, 1000, 40, 800])]);
     expect(inferred?.startHour).toBe(12);
     expect(inferred?.endHour).toBe(18);
+  });
+
+  // The floor is watched HOURS, not a count of readings, so it has to mean the same
+  // thing at any cadence. It was a count of 3, which was three days only while a
+  // collect happened every 6h and each bucket saw one interval a day; at an hourly
+  // cadence the same 3 would have been cleared in twelve hours, and the engine would
+  // have applied elective index changes at what it wrongly believed was the quiet
+  // hour, off half a day of traffic.
+  //
+  // Asserted as an equivalence rather than against a hardcoded number of days: the
+  // property is that sampling the same wall-clock time more often buys no evidence,
+  // and pinning the exact boundary would only pin this fixture's tail bucket, which
+  // gets one interval fewer because the series has to end somewhere.
+  it("buys no evidence by sampling the same days more often", () => {
+    const shape = [50, 800, 1000, 600];
+    for (const days of [1, 2, 3, 4, 5]) {
+      const atSixHourly = inferChangeWindow([series(days, shape)]);
+      const atHourly = inferChangeWindow([hourly(days, shape)]);
+      // Eight times the readings over the same days, and the same verdict.
+      expect(atHourly === null, `${days} day(s): hourly should match 6h`).toBe(
+        atSixHourly === null,
+      );
+      if (atSixHourly !== null && atHourly !== null) {
+        expect(atHourly.startHour).toBe(atSixHourly.startHour);
+        expect(atHourly.endHour).toBe(atSixHourly.endHour);
+      }
+    }
+  });
+
+  it("refuses a single day however finely it was sampled", () => {
+    // The concrete regression: 24 readings in one day used to clear a floor meant
+    // to stand for three.
+    expect(inferChangeWindow([hourly(1, [50, 800, 1000, 600])])).toBeNull();
   });
 
   it("stays silent on a flat day rather than inventing a window", () => {
