@@ -1,11 +1,11 @@
-import { and, type Database, eq, gt, invites, isNull, sql, user } from "../db";
+import { and, type Database, eq, gt, invites, sql, user } from "../db";
 
 // Who may create an account.
 //   invite  — the default. The FIRST account is always allowed (someone has to
 //             bootstrap the install); after that an address needs a pending,
 //             unexpired invite. Note this gates ACCOUNT CREATION only: joining
-//             an org still requires the invite token itself, so knowing an
-//             invited address buys nothing.
+//             an org still requires being signed in AS the invited address, so
+//             knowing one buys nothing.
 //   open    — anyone (development, or a deliberately public instance).
 //   closed  — nobody new, not even the first user.
 export type SignupMode = "invite" | "open" | "closed";
@@ -51,7 +51,7 @@ export async function evaluateSignup(db: Database, email: string): Promise<Signu
     .where(
       and(
         eq(invites.email, email.toLowerCase()),
-        isNull(invites.acceptedAt),
+        eq(invites.status, "pending"),
         gt(invites.expiresAt, new Date()),
       ),
     )

@@ -41,12 +41,16 @@ import {
   API_BASE,
   API_PORT,
   api,
+  authPost,
+  createOrg,
   databaseUrl,
   insertLatency,
   insertSnapshots,
   MONGO_URL,
   type Session,
+  sessionFrom,
   signUp,
+  signUpWithoutOrg,
   startApi,
   stopApi,
   WEB_ORIGIN,
@@ -69,6 +73,7 @@ let server: ChildProcess;
 let db: ReturnType<typeof createDatabase>;
 let mongo: MongoConnection;
 let owner: Session;
+let ownerOrgId: string;
 let member: Session;
 let switcher: Session;
 let clusterId: string;
@@ -101,7 +106,7 @@ beforeAll(async () => {
   // This suite is about the engine, not billing: it connects several clusters
   // to one org, which no free plan would allow. The plan limits have their own
   // tests below, on their own orgs, at their own plans.
-  await giveRoom(owner);
+  ownerOrgId = await giveRoom(owner);
 });
 
 // Move a session's org onto the top plan, so quota is never what a test fails
@@ -257,30 +262,77 @@ describe("tenancy, invites and roles", () => {
   it("keeps a fresh account isolated", async () => {
     member = await signUp("member");
     createdEmails.push(member.email);
+    createdOrgIds.push(asString(asRecord(await (await api("/org", member)).json()).id));
     const list: unknown = await (await api("/clusters", member)).json();
     expect(Array.isArray(list) && list.length === 0).toBe(true);
   });
 
-  it("invites the member into the org (single-use token)", async () => {
-    const inviteRes = await api("/org/invites", owner, {
+  // Signing up no longer conjures an organization behind the first GET, so this
+  // is a real state the api has to answer for rather than a transient one.
+  it("answers a member of no organization with emptiness, not an error", async () => {
+    const orphan = await signUpWithoutOrg("orphan");
+    createdEmails.push(orphan.email);
+
+    const clusters = await api("/clusters", orphan);
+    expect(clusters.status).toBe(200);
+    expect(await clusters.json()).toEqual([]);
+    const orgs = await api("/orgs", orphan);
+    expect(orgs.status).toBe(200);
+    expect(await orgs.json()).toEqual([]);
+    const org = await api("/org", orphan);
+    expect(org.status).toBe(200);
+    expect(await org.json()).toBeNull();
+
+    // But a mutation says so, rather than inventing somewhere to put it.
+    const connect = await api("/clusters", orphan, {
       method: "POST",
-      body: JSON.stringify({ email: member.email, role: "member" }),
+      body: JSON.stringify({ name: "Nowhere", connectionString: MONGO_URL }),
+    });
+    expect(connect.status).toBe(403);
+    expect(asString(asRecord(await connect.json()).message)).toContain("create an organization");
+
+    createdOrgIds.push(await createOrg(orphan, "Orphan Org"));
+    const after = await api("/org", orphan);
+    expect(asRecord(await after.json()).name).toBe("Orphan Org");
+  });
+
+  // The free tier is one free cluster per org; without a cap on orgs it is one
+  // free cluster per org times as many orgs as you care to make.
+  it("refuses a second free organization with 402", async () => {
+    const farmer = await signUpWithoutOrg("farmer");
+    createdEmails.push(farmer.email);
+    createdOrgIds.push(await createOrg(farmer, "Farm One"));
+
+    const second = await authPost("/organization/create", farmer, {
+      name: "Farm Two",
+      slug: `farm-two-${Date.now().toString(36)}`,
+    });
+    expect(second.status).toBe(402);
+    const message = asString(asRecord(await second.json()).message);
+    expect(message).toContain("FREE");
+    expect(message).toContain("organizations");
+  });
+
+  it("invites the member into the org, and the invitation is spent once", async () => {
+    const inviteRes = await authPost("/organization/invite-member", owner, {
+      email: member.email,
+      role: "member",
     });
     expect(inviteRes.status).toBe(200);
-    const token = asString(asRecord(await inviteRes.json()).token);
+    const invitationId = asString(asRecord(await inviteRes.json()).id);
 
-    await api("/org", member); // materialize the shell org
-    const accept = await api("/invites/accept", member, {
-      method: "POST",
-      body: JSON.stringify({ token }),
-    });
+    // The invitation is listed to the person it names — the id is not a
+    // credential any more, so it can be.
+    const mine = await (await api("/invites", member)).json();
+    const ids = Array.isArray(mine) ? mine.map((entry) => asRecord(entry).id) : [];
+    expect(ids).toContain(invitationId);
+
+    const accept = await authPost("/organization/accept-invitation", member, { invitationId });
     expect(accept.status).toBe(200);
 
-    const reuse = await api("/invites/accept", member, {
-      method: "POST",
-      body: JSON.stringify({ token }),
-    });
-    expect(reuse.status).toBe(409);
+    // Spent: the second attempt finds nothing pending under that id.
+    const reuse = await authPost("/organization/accept-invitation", member, { invitationId });
+    expect(reuse.status).toBe(400);
 
     const list: unknown = await (await api("/clusters", member)).json();
     const seesCluster =
@@ -292,6 +344,19 @@ describe("tenancy, invites and roles", () => {
     expect(seesCluster).toBe(true);
   });
 
+  it("refuses an invitation addressed to somebody else", async () => {
+    const stranger = await signUp("stranger");
+    createdEmails.push(stranger.email);
+    createdOrgIds.push(asString(asRecord(await (await api("/org", stranger)).json()).id));
+    const inviteRes = await authPost("/organization/invite-member", owner, {
+      email: `nobody-${Date.now()}@int.test`,
+      role: "member",
+    });
+    const invitationId = asString(asRecord(await inviteRes.json()).id);
+    const stolen = await authPost("/organization/accept-invitation", stranger, { invitationId });
+    expect(stolen.status).toBe(403);
+  });
+
   it("blocks members from every mutation (403) but not reads", async () => {
     const mode = await api(`/clusters/${clusterId}/mode`, member, {
       method: "PATCH",
@@ -301,9 +366,11 @@ describe("tenancy, invites and roles", () => {
       method: "POST",
       body: JSON.stringify({ name: "nope", connectionString: MONGO_URL }),
     });
-    const invite = await api("/org/invites", member, {
-      method: "POST",
-      body: JSON.stringify({ email: "x@int.test", role: "member" }),
+    // The plugin's own permission check: the `member` role has no
+    // invitation:create, so this is a 403 for the same reason as the rest.
+    const invite = await authPost("/organization/invite-member", member, {
+      email: "x@int.test",
+      role: "member",
     });
     const policy = await api(`/clusters/${clusterId}/policy`, member, {
       method: "PUT",
@@ -457,7 +524,6 @@ describe("org switcher", () => {
   it("switches the active org and rescopes every request", async () => {
     switcher = await signUp("switcher");
     createdEmails.push(switcher.email);
-    // A cluster in the shell org keeps it from being collapsed on invite-accept.
     const own = await api("/clusters", switcher, {
       method: "POST",
       body: JSON.stringify({ name: "Switcher Own", connectionString: MONGO_URL }),
@@ -467,30 +533,21 @@ describe("org switcher", () => {
     const ownOrg = asRecord(await (await api("/org", switcher)).json());
     createdOrgIds.push(asString(ownOrg.id));
 
-    const inviteRes = await api("/org/invites", owner, {
-      method: "POST",
-      body: JSON.stringify({ email: switcher.email, role: "member" }),
+    const inviteRes = await authPost("/organization/invite-member", owner, {
+      email: switcher.email,
+      role: "member",
     });
-    const token = asString(asRecord(await inviteRes.json()).token);
-    const accept = await api("/invites/accept", switcher, {
-      method: "POST",
-      body: JSON.stringify({ token }),
-    });
+    const invitationId = asString(asRecord(await inviteRes.json()).id);
+    const accept = await authPost("/organization/accept-invitation", switcher, { invitationId });
     expect(accept.status).toBe(200);
 
-    // Two orgs now; the oldest (own shell) is active until a switch.
+    // Two orgs now, and accepting an invitation moves you into the org you were
+    // invited to — the plugin sets it active, which is what the click meant.
+    const ownerOrg = asRecord(await (await api("/org", owner)).json());
     const orgsBody = await (await api("/orgs", switcher)).json();
     const orgList = Array.isArray(orgsBody) ? orgsBody.map(asRecord) : [];
     expect(orgList).toHaveLength(2);
-    expect(orgList.find((entry) => entry.active === true)?.orgId).toBe(asString(ownOrg.id));
-
-    const ownerOrg = asRecord(await (await api("/org", owner)).json());
-    const switchRes = await api("/orgs/switch", switcher, {
-      method: "POST",
-      body: JSON.stringify({ orgId: asString(ownerOrg.id) }),
-    });
-    expect(switchRes.status).toBe(200);
-    expect(asRecord(await switchRes.json()).active).toBe(true);
+    expect(orgList.find((entry) => entry.active === true)?.orgId).toBe(asString(ownerOrg.id));
 
     // Every subsequent request is scoped to the switched-to org.
     const clustersAfter = await (await api("/clusters", switcher)).json();
@@ -499,6 +556,46 @@ describe("org switcher", () => {
       : [];
     expect(names).toContain("Int Cluster");
     expect(names).not.toContain("Switcher Own");
+
+    // And back, which is the switcher proper.
+    const back = await authPost("/organization/set-active", switcher, {
+      organizationId: asString(ownOrg.id),
+    });
+    expect(back.status).toBe(200);
+    const mine = await (await api("/clusters", switcher)).json();
+    const myNames = Array.isArray(mine) ? mine.map((entry) => asRecord(entry).name) : [];
+    expect(myNames).toContain("Switcher Own");
+    expect(myNames).not.toContain("Int Cluster");
+  });
+
+  // Deleting an org is the one verb that reaches past our own tables, so it has
+  // its own scenario: the rows go, the session that was in it survives.
+  it("deletes an org, taking its clusters and leaving the owner able to make another", async () => {
+    const deleter = await signUp("deleter");
+    createdEmails.push(deleter.email);
+    const orgId = asString(asRecord(await (await api("/org", deleter)).json()).id);
+    const created = await api("/clusters", deleter, {
+      method: "POST",
+      body: JSON.stringify({ name: "Doomed Cluster", connectionString: MONGO_URL }),
+    });
+    expect(created.status).toBe(200);
+    const doomedId = asString(asRecord(await created.json()).id);
+
+    const deleted = await authPost("/organization/delete", deleter, { organizationId: orgId });
+    expect(deleted.status).toBe(200);
+
+    expect(await db.select().from(clusters).where(eq(clusters.id, doomedId))).toHaveLength(0);
+    expect(await db.select().from(organizations).where(eq(organizations.id, orgId))).toHaveLength(
+      0,
+    );
+
+    // Still signed in, and now in no org at all.
+    const org = await api("/org", deleter);
+    expect(org.status).toBe(200);
+    expect(await org.json()).toBeNull();
+
+    // The free slot came back with it.
+    createdOrgIds.push(await createOrg(deleter, "Second Try"));
   });
 });
 
@@ -543,9 +640,9 @@ describe("SSRF guard and sign-up gate (second api with production defaults)", ()
 
     // An invited address gets through. Invite from the main instance (shared db).
     const invitee = `invited-${Date.now()}@int.test`;
-    const invite = await api("/org/invites", owner, {
-      method: "POST",
-      body: JSON.stringify({ email: invitee, role: "member" }),
+    const invite = await authPost("/organization/invite-member", owner, {
+      email: invitee,
+      role: "member",
     });
     expect(invite.status).toBe(200);
     const allowed = await post("/api/auth/sign-up/email", null, {
@@ -555,13 +652,10 @@ describe("SSRF guard and sign-up gate (second api with production defaults)", ()
     });
     expect(allowed.status).toBe(200);
     createdEmails.push(email, invitee);
-    guardedOwner = {
-      email: invitee,
-      cookie: allowed.headers
-        .getSetCookie()
-        .map((value) => value.split(";")[0])
-        .join("; "),
-    };
+    guardedOwner = sessionFrom(invitee, allowed);
+    // The dial guards below are owner-only, and an owner needs somewhere to be
+    // the owner OF. Created against this instance, on the shared database.
+    createdOrgIds.push(await createOrg(guardedOwner, "Guarded Org", BASE));
   });
 
   afterAll(async () => {
@@ -775,20 +869,43 @@ describe("cluster offboarding", () => {
   });
 });
 
+// The rules the api used to implement twice, in two places, with two different
+// error messages. They are the plugin's now — which is the point of the change,
+// and exactly why they are still tested here rather than taken on trust.
 describe("org management", () => {
   it("renames the org (owner only)", async () => {
-    const denied = await api("/org", member, {
-      method: "PATCH",
-      body: JSON.stringify({ name: "Nope Corp" }),
+    const denied = await authPost("/organization/update", member, {
+      data: { name: "Nope Corp" },
     });
     expect(denied.status).toBe(403);
-    const renamed = await api("/org", owner, {
-      method: "PATCH",
-      body: JSON.stringify({ name: "Renamed Intcorp" }),
+    const renamed = await authPost("/organization/update", owner, {
+      data: { name: "Renamed Intcorp" },
     });
     expect(renamed.status).toBe(200);
     const org = asRecord(await (await api("/org", owner)).json());
     expect(org.name).toBe("Renamed Intcorp");
+  });
+
+  // The plan lives on the org, and only set-plan.ts (or, one day, a webhook) may
+  // write it. `input: false` on the additional fields is what keeps an owner
+  // from posting themselves onto SCALE through the endpoint that renames it.
+  it("will not let an owner set their own plan through the plugin", async () => {
+    const upgrader = await signUp("upgrader");
+    createdEmails.push(upgrader.email);
+    const orgId = asString(asRecord(await (await api("/org", upgrader)).json()).id);
+    createdOrgIds.push(orgId);
+
+    const res = await authPost("/organization/update", upgrader, {
+      data: { name: "Still Free", plan: "SCALE" },
+    });
+    // Accepted as a rename; `plan` is simply not in the body schema.
+    expect(res.status).toBe(200);
+    const [org] = await db
+      .select({ plan: organizations.plan, name: organizations.name })
+      .from(organizations)
+      .where(eq(organizations.id, orgId));
+    expect(org?.name).toBe("Still Free");
+    expect(org?.plan).toBe("FREE");
   });
 
   it("guards the last owner and round-trips a role change", async () => {
@@ -799,34 +916,43 @@ describe("org management", () => {
     const memberRow = rows.find((entry) => entry.email === member.email);
     if (ownerRow === undefined || memberRow === undefined) throw new Error("rows missing");
 
-    // Demoting the sole owner is refused.
-    const selfDemote = await api(`/org/members/${asString(ownerRow.userId)}`, owner, {
-      method: "PATCH",
-      body: JSON.stringify({ role: "member" }),
+    // Demoting the sole owner is refused — by the plugin, once, instead of by
+    // two hand-written guards with two different messages.
+    const selfDemote = await authPost("/organization/update-member-role", owner, {
+      memberId: asString(ownerRow.memberId),
+      role: "member",
     });
-    expect(selfDemote.status).toBe(409);
+    expect(selfDemote.status).toBe(400);
+
+    // A role we do not have is refused too: owner and member, and no third rung
+    // half the api would not understand.
+    const admin = await authPost("/organization/update-member-role", owner, {
+      memberId: asString(memberRow.memberId),
+      role: "admin",
+    });
+    expect(admin.status).toBe(400);
 
     // Promote, then demote back.
-    const promote = await api(`/org/members/${asString(memberRow.userId)}`, owner, {
-      method: "PATCH",
-      body: JSON.stringify({ role: "owner" }),
+    const promote = await authPost("/organization/update-member-role", owner, {
+      memberId: asString(memberRow.memberId),
+      role: "owner",
     });
     expect(promote.status).toBe(200);
-    const demote = await api(`/org/members/${asString(memberRow.userId)}`, owner, {
-      method: "PATCH",
-      body: JSON.stringify({ role: "member" }),
+    const demote = await authPost("/organization/update-member-role", owner, {
+      memberId: asString(memberRow.memberId),
+      role: "member",
     });
     expect(demote.status).toBe(200);
   });
 
-  it("removes a member, who falls back to a fresh shell org", async () => {
+  it("removes a member, who is then in no org of this one's", async () => {
     const ownerOrg = asRecord(await (await api("/org", owner)).json());
     const memberRow = (Array.isArray(ownerOrg.members) ? ownerOrg.members.map(asRecord) : []).find(
       (entry) => entry.email === member.email,
     );
     if (memberRow === undefined) throw new Error("member row missing");
-    const removed = await api(`/org/members/${asString(memberRow.userId)}`, owner, {
-      method: "DELETE",
+    const removed = await authPost("/organization/remove-member", owner, {
+      memberIdOrEmail: asString(memberRow.memberId),
     });
     expect(removed.status).toBe(200);
     const after = asRecord(await (await api("/org", owner)).json());
@@ -835,19 +961,24 @@ describe("org management", () => {
     );
     expect(emails).not.toContain(member.email);
 
-    // The removed member's next request lazily creates a fresh shell org...
-    const shell = asRecord(await (await api("/org", member)).json());
-    createdOrgIds.push(asString(shell.id));
-    expect(Array.isArray(shell.members) && shell.members.length === 1).toBe(true);
+    // They fall back to the org they made at sign-up rather than to a shell the
+    // api invented for them...
+    const own = asRecord(await (await api("/org", member)).json());
+    expect(own.name).toBe("member Org");
+    expect(Array.isArray(own.members) && own.members.length === 1).toBe(true);
     // ...where they are the sole owner, so leaving is refused.
-    const leave = await api("/org/leave", member, { method: "POST", body: JSON.stringify({}) });
-    expect(leave.status).toBe(409);
+    const leave = await authPost("/organization/leave", member, {
+      organizationId: asString(own.id),
+    });
+    expect(leave.status).toBe(400);
   });
 
   it("lets a non-last-owner leave, falling back to their own org", async () => {
-    // switcher's active org is the owner's (from the switch test); they are a
-    // plain member there, so leaving works and rescopes them to their own org.
-    const leave = await api("/org/leave", switcher, { method: "POST", body: JSON.stringify({}) });
+    // switcher is a plain member of the owner's org (from the switch test), so
+    // leaving works and rescopes them to their own.
+    const leave = await authPost("/organization/leave", switcher, {
+      organizationId: ownerOrgId,
+    });
     expect(leave.status).toBe(200);
     const clustersAfter = await (await api("/clusters", switcher)).json();
     const names = Array.isArray(clustersAfter)
@@ -2006,16 +2137,18 @@ describe("plan limits", () => {
 
     // FREE allows 3 seats and the owner is one, so two invites fit.
     for (const who of ["seat-a", "seat-b"]) {
-      const res = await api("/org/invites", session, {
-        method: "POST",
-        body: JSON.stringify({ email: `${who}@example.test`, role: "member" }),
+      const res = await authPost("/organization/invite-member", session, {
+        email: `${who}-${Date.now()}@example.test`,
+        role: "member",
       });
       expect(res.status).toBe(200);
     }
-    const third = await api("/org/invites", session, {
-      method: "POST",
-      body: JSON.stringify({ email: "seat-c@example.test", role: "member" }),
+    const third = await authPost("/organization/invite-member", session, {
+      email: `seat-c-${Date.now()}@example.test`,
+      role: "member",
     });
+    // 402 with our own message, not the plugin's bare 403: the limit is a plan,
+    // and every plan refusal here names the limit and what to do about it.
     expect(third.status).toBe(402);
     expect(asString(asRecord(await third.json()).message)).toContain("members");
 

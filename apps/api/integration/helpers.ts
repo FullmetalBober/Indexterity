@@ -85,6 +85,64 @@ export interface Session {
   readonly cookie: string;
 }
 
+function cookieOf(res: Response): string {
+  return res.headers
+    .getSetCookie()
+    .map((value) => value.split(";")[0])
+    .join("; ");
+}
+
+// better-auth's own endpoints, which sit on Fastify at /api/auth — outside
+// Nest's controllers and so outside `api()`. Every org mutation lives here now.
+export async function authPost(
+  path: string,
+  session: Session | null,
+  body: unknown,
+  base: string = API_BASE,
+): Promise<Response> {
+  return fetch(`${base}/api/auth${path}`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      origin: WEB_ORIGIN,
+      ...(session === null ? {} : { cookie: session.cookie }),
+    },
+    body: JSON.stringify(body),
+  });
+}
+
+// Unique by construction. A slug is required and unique, nothing routes by it,
+// and a suite that reruns against the same database would otherwise collide
+// with its own previous run on the second `owner-org`.
+export function uniqueSlug(name: string): string {
+  const base =
+    name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "") || "org";
+  return `${base}-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6).toString(36)}`;
+}
+
+export async function createOrg(
+  session: Session,
+  name: string,
+  base: string = API_BASE,
+): Promise<string> {
+  const res = await authPost(
+    "/organization/create",
+    session,
+    { name, slug: uniqueSlug(name) },
+    base,
+  );
+  if (res.status !== 200) throw new Error(`create org failed: ${res.status} ${await res.text()}`);
+  return ((await res.json()) as { id: string }).id;
+}
+
+// Sign up AND make an organization, because signing up no longer makes one.
+//
+// The api used to insert "My Org" behind the first authenticated request, so a
+// session was all a test needed. Creating an org is a verb now, and everything
+// below the org — connecting a cluster, reading a policy — refuses without one.
 export async function signUp(prefix: string): Promise<Session> {
   const email = `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1e6)}@int.test`;
   const res = await fetch(`${API_BASE}/api/auth/sign-up/email`, {
@@ -93,11 +151,26 @@ export async function signUp(prefix: string): Promise<Session> {
     body: JSON.stringify({ email, password: "password12345", name: prefix }),
   });
   if (res.status !== 200) throw new Error(`sign-up failed: ${res.status}`);
-  const cookie = res.headers
-    .getSetCookie()
-    .map((value) => value.split(";")[0])
-    .join("; ");
-  return { email, cookie };
+  const session: Session = { email, cookie: cookieOf(res) };
+  await createOrg(session, `${prefix} Org`);
+  return session;
+}
+
+// An account with no organization at all — the state a fresh sign-up is in
+// before it makes one, and the one the dashboard draws a create screen for.
+export async function signUpWithoutOrg(prefix: string): Promise<Session> {
+  const email = `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1e6)}@int.test`;
+  const res = await fetch(`${API_BASE}/api/auth/sign-up/email`, {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: WEB_ORIGIN },
+    body: JSON.stringify({ email, password: "password12345", name: prefix }),
+  });
+  if (res.status !== 200) throw new Error(`sign-up failed: ${res.status}`);
+  return { email, cookie: cookieOf(res) };
+}
+
+export function sessionFrom(email: string, res: Response): Session {
+  return { email, cookie: cookieOf(res) };
 }
 
 // A snapshot fixture, described the way it reads on the cluster rather than the

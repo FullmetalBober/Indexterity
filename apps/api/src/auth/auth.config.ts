@@ -1,9 +1,11 @@
+import { randomUUID } from "node:crypto";
 import { PASSWORD_MIN_LENGTH } from "@repo/contracts";
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { APIError } from "better-auth/api";
 import { createDatabase, schema } from "../db";
 import { sendMail } from "../mail/mailer";
+import { organizationPlugin } from "./organization";
 import { evaluateSignup } from "./signup-gate";
 
 export interface AuthConfig {
@@ -22,6 +24,8 @@ export interface AuthConfig {
   readonly requireEmailVerification: boolean;
   // A trusted proxy sits in front, so forwarded client addresses are real.
   readonly trustProxy: boolean;
+  // The dashboard's origin, for the link in an invitation email.
+  readonly webOrigin: string;
 }
 
 // GitHub OAuth + email/password, backed by the Drizzle/Postgres control-plane DB.
@@ -36,11 +40,31 @@ export function createAuth(config: AuthConfig) {
     // this is what keeps the cookie off plaintext.
     advanced: {
       useSecureCookies: config.secureCookies,
+      // Every id this deployment mints is a UUID, including better-auth's own.
+      //
+      // The organization plugin's tables ARE our tenancy tables, whose keys are
+      // `uuid` and are referenced by a cascading `org_id` on three others; the
+      // alternative was retyping that key and every `z.uuid()` in the contracts
+      // while live rows pointed at it. Handing better-auth a generator costs one
+      // line and makes user/session/account ids uuids too, which is harmless —
+      // those columns are text, and existing rows keep the ids they have.
+      //
+      // A function rather than the built-in `"uuid"` setting, which means
+      // something else: it tells the adapter the DATABASE will generate the id,
+      // and `user`, `session`, `account` and `verification` have text keys with
+      // no default to generate one.
+      database: { generateId: () => randomUUID() },
       // Only when the deployment says a proxy is in front. Reading a forwarded
       // header otherwise lets a client pick its own address and never reach a
       // rate limit.
       ...(config.trustProxy ? { ipAddress: { ipAddressHeaders: ["x-forwarded-for"] } } : {}),
     },
+    plugins: [
+      organizationPlugin(db, {
+        webOrigin: config.webOrigin,
+        requireEmailVerification: config.requireEmailVerification,
+      }),
+    ],
     databaseHooks: {
       user: {
         create: {

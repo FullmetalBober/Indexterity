@@ -9,6 +9,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, Outlet } from "@tanstack/react-router";
 import { AuthForm } from "~/components/app/auth-form";
 import { ClusterBar } from "~/components/app/cluster-bar";
+import { CreateOrgCard } from "~/components/app/create-org-card";
 import { Button } from "~/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
 import {
@@ -23,6 +24,7 @@ import { useSignOut } from "~/lib/queries/mutations/auth";
 import { useSwitchOrg } from "~/lib/queries/mutations/org";
 import {
   clustersQuery,
+  myInvitesQuery,
   orgQuery,
   orgsQuery,
   refetchShell,
@@ -46,6 +48,7 @@ export const Route = createFileRoute("/app")({
       context.queryClient.ensureQueryData(clustersQuery()),
       context.queryClient.ensureQueryData(orgQuery()),
       context.queryClient.ensureQueryData(orgsQuery()),
+      context.queryClient.ensureQueryData(myInvitesQuery()),
     ]);
   },
   // Inherits the root's noindex — everything under /app is behind auth.
@@ -89,7 +92,25 @@ function AppShell() {
     return <AuthForm onSignedIn={() => void invalidateSession(queryClient)} />;
   }
 
-  const { clusters, orgs } = data;
+  const { clusters, orgs, invites } = data;
+
+  // Signed in and in no organization — a state that did not exist while the api
+  // conjured one behind the first request. There is nothing under /app to draw
+  // without one: no clusters to list, no plan to spend, no team to be on.
+  if (orgs.length === 0) {
+    return (
+      <main className="p-6 lg:p-8">
+        <h1 className="font-semibold text-2xl">Indexterity</h1>
+        <CreateOrgCard invites={invites} />
+        <div className="mt-4 flex justify-center">
+          <Button variant="ghost" size="sm" onClick={() => signOut.mutate()}>
+            Sign out
+          </Button>
+        </div>
+      </main>
+    );
+  }
+
   const cluster = selectCluster(clusters, selected);
 
   return (

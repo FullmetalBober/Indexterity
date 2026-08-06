@@ -1,5 +1,10 @@
 // Everything that changes an org, or which org you are in.
 //
+// None of it is an api call any more. better-auth's organization plugin owns
+// create, rename, delete, invite, accept, reject, role, remove, leave and
+// switch; what is left here is the part react-query cares about — which cached
+// answers each of those makes wrong.
+//
 // Three different blast radii live here, and the difference is the reason this is
 // not one hook shape:
 //
@@ -7,19 +12,54 @@
 //                 only thing that reads it
 //   org + orgs    a rename, because the name appears in the active org AND in the
 //                 switcher's list of the caller's orgs
-//   the session   leaving, joining, switching — the api resolves a DIFFERENT
-//                 membership afterwards, so the clusters and everything under
-//                 them answer a question nobody is asking any more
+//   the session   creating, deleting, leaving, joining, switching — a DIFFERENT
+//                 org answers everything afterwards, so the clusters and
+//                 everything under them answer a question nobody is asking
 //
 // The components used to choose between them through two callback props, which
 // meant a member list had to know what a cache is.
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
-import { api } from "../../api";
+import { authClient } from "../../auth-client";
 import { invalidateSession } from "../client";
-import { apiMessage } from "../errors";
+import { AuthApiError, apiMessage } from "../errors";
 import { queryKeys } from "../keys";
+
+// better-auth's client resolves to `{ data, error }` rather than rejecting, and
+// a useMutation with no rejection has no onError. This is the adapter, and it is
+// the only place that shape is unwrapped.
+async function unwrap<T>(
+  call: PromiseLike<{
+    data: T | null;
+    error: { message?: string | undefined; status: number; code?: string | undefined } | null;
+  }>,
+): Promise<T> {
+  const { data, error } = await call;
+  if (error !== null && error !== undefined) {
+    throw new AuthApiError(error.message ?? "request failed", error.status, error.code);
+  }
+  return data as T;
+}
+
+// A slug is required and unique and nothing routes by it — it exists because the
+// plugin resolves organizations by one. Derived from the name so the common case
+// reads like the org; useCreateOrg retries with a suffix when the clean one is
+// taken, rather than making a reader invent a second name for the same company.
+export function slugify(name: string): string {
+  const base = name
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48)
+    .replace(/-+$/g, "");
+  return base === "" ? "org" : base;
+}
+
+function suffixed(slug: string): string {
+  return `${slug}-${Math.random().toString(36).slice(2, 8)}`;
+}
 
 function useInvalidateOrg(): () => Promise<void> {
   const queryClient = useQueryClient();
@@ -31,10 +71,39 @@ function useInvalidateSession(): () => Promise<void> {
   return () => invalidateSession(queryClient);
 }
 
+// Creating one, which used to happen TO you rather than be something you did:
+// the api inserted "My Org" behind your first authenticated request.
+export function useCreateOrg() {
+  const invalidateSessionCache = useInvalidateSession();
+  return useMutation({
+    mutationFn: async (name: string) => {
+      const slug = slugify(name);
+      try {
+        return await unwrap(authClient.organization.create({ name, slug }));
+      } catch (error) {
+        // The clean slug is global, so the second company called Acme would
+        // otherwise be told its name is taken — which it is not, and which the
+        // reader can neither see nor fix, because the slug is never shown.
+        if (error instanceof AuthApiError && error.status === 400) {
+          return await unwrap(authClient.organization.create({ name, slug: suffixed(slug) }));
+        }
+        throw error;
+      }
+    },
+    onSuccess: async (created) => {
+      toast.success(`Created ${created.name}`);
+      // The plugin makes the new org active, so this is a session change.
+      await invalidateSessionCache();
+    },
+    // 402 is the free-org cap, and it names the plan and the remedy.
+    onError: (error) => toast.error(apiMessage(error, "Could not create the organization")),
+  });
+}
+
 export function useRenameOrg() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (name: string) => api().renameOrg({ name }),
+    mutationFn: (name: string) => unwrap(authClient.organization.update({ data: { name } })),
     onSuccess: async () => {
       toast.success("Org renamed");
       // Both, because the name is drawn twice: the team card's title reads the
@@ -45,20 +114,38 @@ export function useRenameOrg() {
         queryClient.invalidateQueries({ queryKey: queryKeys.orgs() }),
       ]);
     },
-    onError: () => toast.error("Rename failed (owner only)"),
+    onError: (error) => toast.error(apiMessage(error, "Rename failed (owner only)")),
+  });
+}
+
+// The dangerous one. The dialog above it types the org's name out in full and
+// lists the provisioned users the deletion cannot revoke — see TeamSection.
+export function useDeleteOrg() {
+  const invalidateSessionCache = useInvalidateSession();
+  const navigate = useNavigate();
+  return useMutation({
+    mutationFn: (organizationId: string) =>
+      unwrap(authClient.organization.delete({ organizationId })),
+    onSuccess: async () => {
+      toast.success("Organization deleted");
+      // Whatever cluster was selected belonged to it.
+      await navigate({ to: "/app", search: {} });
+      await invalidateSessionCache();
+    },
+    onError: (error) => toast.error(apiMessage(error, "Delete failed (owner only)")),
   });
 }
 
 export function useSetMemberRole() {
   const invalidateOrg = useInvalidateOrg();
   return useMutation({
-    mutationFn: (change: { userId: string; role: "member" | "owner" }) =>
-      api().setMemberRole(change),
+    mutationFn: (change: { memberId: string; role: "member" | "owner" }) =>
+      unwrap(authClient.organization.updateMemberRole(change)),
     onSuccess: (_result, change) => {
       toast.success(`Role changed to ${change.role}`);
       return invalidateOrg();
     },
-    // The api refuses to demote the last owner, and its reason is the useful
+    // The plugin refuses to demote the last owner, and its reason is the useful
     // one — a generic "failed" leaves the reader guessing.
     onError: (error) => toast.error(apiMessage(error, "Role change failed")),
   });
@@ -67,7 +154,8 @@ export function useSetMemberRole() {
 export function useRemoveMember() {
   const invalidateOrg = useInvalidateOrg();
   return useMutation({
-    mutationFn: (userId: string) => api().removeMember({ userId }),
+    mutationFn: (memberIdOrEmail: string) =>
+      unwrap(authClient.organization.removeMember({ memberIdOrEmail })),
     onSuccess: () => {
       toast.success("Member removed");
       return invalidateOrg();
@@ -76,42 +164,69 @@ export function useRemoveMember() {
   });
 }
 
-// The token is shown once and never again, so it goes to the caller rather than
-// into a toast that scrolls away.
-export function useCreateInvite({ onToken }: { onToken: (token: string) => void }) {
+// No token comes back and none is shown. The invitation goes to the address, and
+// only that address can accept it — so there is nothing here for the inviter to
+// copy, and nothing to leak if they did.
+export function useCreateInvite({ onSent }: { onSent: (email: string) => void }) {
   const invalidateOrg = useInvalidateOrg();
   return useMutation({
-    mutationFn: (email: string) => api().createInvite({ email, role: "member" }),
-    onSuccess: (invite) => {
-      onToken(invite.token);
-      return invalidateOrg();
+    mutationFn: (email: string) =>
+      unwrap(authClient.organization.inviteMember({ email, role: "member" })),
+    onSuccess: async (_invite, email) => {
+      onSent(email);
+      await invalidateOrg();
     },
     // Used to leave the reader looking at a form that had visibly done nothing:
-    // no token, no error, no way to tell which.
-    onError: () => toast.error("Invite not created — you may be at your plan's seat limit"),
+    // no token, no error, no way to tell which. 402 is the seat limit and names
+    // the plan and the remedy.
+    onError: (error) =>
+      toast.error(apiMessage(error, "Invite not sent — you may be at your plan's seat limit")),
   });
 }
 
-export function useAcceptInvite({ onAnswer }: { onAnswer: (message: string) => void }) {
+export function useCancelInvite() {
+  const invalidateOrg = useInvalidateOrg();
+  return useMutation({
+    mutationFn: (invitationId: string) =>
+      unwrap(authClient.organization.cancelInvitation({ invitationId })),
+    onSuccess: () => {
+      toast.success("Invite cancelled");
+      return invalidateOrg();
+    },
+    onError: (error) => toast.error(apiMessage(error, "Could not cancel that invite")),
+  });
+}
+
+// Accepting one addressed to you. The plugin makes that org the active one,
+// which is what the click meant, so this is a session change and not an org one.
+export function useAcceptInvite() {
   const invalidateSessionCache = useInvalidateSession();
   return useMutation({
-    mutationFn: (token: string) => api().acceptInvite({ token }),
-    onSuccess: (joined) => {
-      onAnswer(`joined ${joined.orgName}`);
-      // Joining can make another org the active one, so this is a session
-      // change and not an org change.
-      return invalidateSessionCache();
+    mutationFn: (invitationId: string) =>
+      unwrap(authClient.organization.acceptInvitation({ invitationId })),
+    onSuccess: async () => {
+      toast.success("Joined the organization");
+      await invalidateSessionCache();
     },
-    // 404 is a token that does not exist or has expired, 409 an org the reader
-    // is already in. Both say what to do next; anything else does not.
-    onError: (error) => onAnswer(apiMessage(error, "could not accept the invite", [404, 409])),
+    onError: (error) => toast.error(apiMessage(error, "Could not accept that invitation")),
+  });
+}
+
+export function useRejectInvite() {
+  const invalidateSessionCache = useInvalidateSession();
+  return useMutation({
+    mutationFn: (invitationId: string) =>
+      unwrap(authClient.organization.rejectInvitation({ invitationId })),
+    onSuccess: () => invalidateSessionCache(),
+    onError: (error) => toast.error(apiMessage(error, "Could not decline that invitation")),
   });
 }
 
 export function useLeaveOrg() {
   const invalidateSessionCache = useInvalidateSession();
   return useMutation({
-    mutationFn: () => api().leaveOrg({}),
+    mutationFn: (organizationId: string) =>
+      unwrap(authClient.organization.leave({ organizationId })),
     onSuccess: () => {
       toast.success("Left the org");
       return invalidateSessionCache();
@@ -124,9 +239,10 @@ export function useSwitchOrg() {
   const invalidateSessionCache = useInvalidateSession();
   const navigate = useNavigate();
   return useMutation({
-    mutationFn: (orgId: string) => api().switchOrg({ orgId }),
+    mutationFn: (organizationId: string) =>
+      unwrap(authClient.organization.setActive({ organizationId })),
     onSuccess: async (switched) => {
-      toast.success(`Switched to ${switched.name}`);
+      toast.success(`Switched to ${switched?.name ?? "the org"}`);
       // The selected cluster belongs to the previous org — reset the selection.
       await navigate({ to: "/app", search: {} });
       await invalidateSessionCache();

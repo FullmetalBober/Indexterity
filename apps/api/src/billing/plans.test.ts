@@ -67,6 +67,28 @@ describe("withinLimit", () => {
     expect(withinLimit("FREE", "members", 2).allowed).toBe(true);
     expect(withinLimit("FREE", "members", 3).allowed).toBe(false);
   });
+
+  // Orgs became something you make rather than something that happens to you,
+  // and one free cluster per org times unlimited orgs is not a free tier.
+  it("allows one free organization per person and no more", () => {
+    expect(withinLimit("FREE", "organizations", 0).allowed).toBe(true);
+    expect(withinLimit("FREE", "organizations", 1).allowed).toBe(false);
+  });
+
+  it("does not cap organizations on a plan somebody is paying for", () => {
+    expect(withinLimit("SCALE", "organizations", 50).allowed).toBe(true);
+    // Nor on a self-hosted install, where nobody is farming anybody.
+    expect(withinLimit("SELF_HOSTED", "organizations", 50).allowed).toBe(true);
+  });
+
+  // The other two meters are facts about an org; this one is a fact about the
+  // reader, and "this organization has 1 organizations" would be nonsense.
+  it("addresses the org cap to the person holding them", () => {
+    const verdict = withinLimit("FREE", "organizations", 1);
+    expect(verdict.reason).toContain("you already have 1");
+    expect(verdict.reason).toContain("paid plan");
+    expect(verdict.reason).not.toContain("this organization has");
+  });
 });
 
 // Seeing what to do is free on every plan — a recommendation nobody can see

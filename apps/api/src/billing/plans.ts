@@ -22,7 +22,23 @@ export interface Entitlements {
   readonly maxClusters: number;
   // People in the org. Generous — charging per seat on a tool one DBA operates
   // punishes exactly the teams who would share the audit trail.
+  //
+  // Counted as members PLUS outstanding invites, which is why the plugin's own
+  // `membershipLimit` is left unset: it counts members only, so an org could
+  // invite past its plan and spend the seat on whoever clicked the link. One
+  // limit with one name — see TenancyService.requireRoomFor.
   readonly maxMembers: number;
+  // How many organizations ONE PERSON may hold on this plan. The only meter
+  // counted per user rather than per org, and the only one that exists because
+  // orgs became creatable.
+  //
+  // A free tier is one free cluster per org; without this, it is one free
+  // cluster per org times as many orgs as you care to make, which is not a free
+  // tier but a free product. The gate reads the plan a NEW org would land on
+  // (defaultOrgPlan) and counts how many the caller already owns on it, so
+  // upgrading an org frees the free slot again — one free org per person, and
+  // paid ones are as many as you pay for.
+  readonly maxOrgs: number;
   // The create side (workloadAnalysis) — proposing new indexes from the query
   // workload. Free: knowing what to do is the part that makes the tool worth
   // trying, and a recommendation nobody can see sells nothing.
@@ -45,6 +61,7 @@ const ENTITLEMENTS: Record<Plan, Entitlements> = {
   FREE: {
     maxClusters: 1,
     maxMembers: 3,
+    maxOrgs: 1,
     workloadAnalysis: true,
     autoApply: false,
     retentionDays: 90,
@@ -52,6 +69,7 @@ const ENTITLEMENTS: Record<Plan, Entitlements> = {
   PRO: {
     maxClusters: 5,
     maxMembers: 15,
+    maxOrgs: 5,
     workloadAnalysis: true,
     autoApply: true,
     retentionDays: 183,
@@ -59,6 +77,7 @@ const ENTITLEMENTS: Record<Plan, Entitlements> = {
   SCALE: {
     maxClusters: Number.POSITIVE_INFINITY,
     maxMembers: Number.POSITIVE_INFINITY,
+    maxOrgs: Number.POSITIVE_INFINITY,
     workloadAnalysis: true,
     autoApply: true,
     retentionDays: 365,
@@ -74,6 +93,7 @@ const ENTITLEMENTS: Record<Plan, Entitlements> = {
   SELF_HOSTED: {
     maxClusters: 1,
     maxMembers: Number.POSITIVE_INFINITY,
+    maxOrgs: Number.POSITIVE_INFINITY,
     workloadAnalysis: true,
     autoApply: true,
     retentionDays: 365,
@@ -137,20 +157,35 @@ function describe(limit: number): string {
   return Number.isFinite(limit) ? String(limit) : "unlimited";
 }
 
+// The meters a plan caps. `organizations` is the odd one out: it counts what a
+// PERSON holds, the other two what an org uses.
+export type Meter = "clusters" | "members" | "organizations";
+
+const METERS: Record<Meter, (entitlements: Entitlements) => number> = {
+  clusters: (entitlements) => entitlements.maxClusters,
+  members: (entitlements) => entitlements.maxMembers,
+  organizations: (entitlements) => entitlements.maxOrgs,
+};
+
+export function limitFor(plan: Plan, what: Meter): number {
+  return METERS[what](entitlementsFor(plan));
+}
+
 // Adding one more of something the plan caps. `current` is what already exists.
-export function withinLimit(
-  plan: Plan,
-  what: "clusters" | "members",
-  current: number,
-): LimitVerdict {
-  const limit =
-    what === "clusters" ? entitlementsFor(plan).maxClusters : entitlementsFor(plan).maxMembers;
+export function withinLimit(plan: Plan, what: Meter, current: number): LimitVerdict {
+  const limit = limitFor(plan, what);
   if (current < limit) return ALLOWED;
+  // Two different sentences, because two different things are full. An org over
+  // its cluster cap is a fact about the org; a person holding their one free org
+  // is a fact about them, and "this organization has 1 organizations" would be
+  // both wrong and confusing.
+  const [holder, remedy] =
+    what === "organizations"
+      ? ["you already have", "Delete one, or move an existing one to a paid plan."]
+      : ["this organization has", "Remove one, or move to a plan with room for more."];
   return {
     allowed: false,
-    reason:
-      `the ${plan} plan allows ${describe(limit)} ${what} and this organization has ${current}. ` +
-      `Remove one, or move to a plan with room for more.`,
+    reason: `the ${plan} plan allows ${describe(limit)} ${what} and ${holder} ${current}. ${remedy}`,
   };
 }
 

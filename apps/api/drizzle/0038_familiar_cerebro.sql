@@ -1,0 +1,1 @@
+CREATE INDEX "session_active_org" ON "session" USING btree ("active_organization_id");

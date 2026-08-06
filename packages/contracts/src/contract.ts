@@ -1,14 +1,10 @@
 import { oc } from "@orpc/contract";
 import { z } from "zod";
 import {
-  acceptInviteInput,
   checkConnectionInput,
   createClusterInput,
-  createInviteInput,
-  memberRole,
   policyKnobsInput,
   provisionClusterInput,
-  renameOrgInput,
   rotateConnectionInput,
 } from "./inputs.js";
 import {
@@ -20,7 +16,7 @@ import {
   clusterPolicyView,
   clusterRoi,
   connectionDiagnosis,
-  createdInvite,
+  myInvite,
   offboardResult,
   orgInfo,
   orgSummary,
@@ -219,48 +215,24 @@ export const contract = {
     .input(z.object({ id: z.uuid() }))
     .output(recommendation),
 
+  // The two org reads the dashboard needs and better-auth's organization plugin
+  // does not answer.
+  //
+  // Everything that CHANGES an org — create, rename, delete, invite, accept,
+  // role, remove, leave, switch — moved onto the plugin's own endpoints under
+  // /api/auth/organization/*, and the seven routes that used to be here went
+  // with it. These two stayed because neither is about membership: one carries
+  // the plan and what it has left, which is ours and not a plugin concept, and
+  // the other carries the caller's role per org, which `organization.list` does
+  // not return.
   getOrg: oc
     .route({
       method: "GET",
       path: "/org",
-      summary: "The caller's active org: members and pending invites",
+      summary:
+        "The caller's active org: plan, usage, members, pending invites — null when they are in none",
     })
-    .output(orgInfo),
-
-  renameOrg: oc
-    .route({ method: "PATCH", path: "/org", summary: "Rename the active org (owner only)" })
-    .input(renameOrgInput)
-    .output(z.object({ id: z.uuid(), name: z.string() })),
-
-  setMemberRole: oc
-    .route({
-      method: "PATCH",
-      path: "/org/members/{userId}",
-      summary: "Change a member's role (owner only); the last owner cannot be demoted",
-    })
-    .errors({ NOT_FOUND: {}, CONFLICT: {} })
-    .input(z.object({ userId: z.string().min(1), role: memberRole }))
-    .output(z.object({ userId: z.string(), role: z.string() })),
-
-  removeMember: oc
-    .route({
-      method: "DELETE",
-      path: "/org/members/{userId}",
-      summary: "Remove a member from the active org (owner only; use leave for yourself)",
-    })
-    .errors({ NOT_FOUND: {}, CONFLICT: {} })
-    .input(z.object({ userId: z.string().min(1) }))
-    .output(z.object({ removed: z.boolean() })),
-
-  leaveOrg: oc
-    .route({
-      method: "POST",
-      path: "/org/leave",
-      summary: "Leave the active org; the last owner must transfer ownership first",
-    })
-    .errors({ CONFLICT: {} })
-    .input(z.object({}))
-    .output(z.object({ left: z.boolean() })),
+    .output(orgInfo.nullable()),
 
   listOrgs: oc
     .route({
@@ -270,28 +242,15 @@ export const contract = {
     })
     .output(z.array(orgSummary)),
 
-  switchOrg: oc
+  // Answered outside any org on purpose: someone in no organization at all is
+  // exactly who needs to see they have been invited to one. The plugin's own
+  // list-user-invitations returns rows without the org's name, which is the only
+  // part a reader can act on.
+  listMyInvites: oc
     .route({
-      method: "POST",
-      path: "/orgs/switch",
-      summary: "Make another of the caller's orgs the active one",
+      method: "GET",
+      path: "/invites",
+      summary: "Pending invitations addressed to the caller, from any org",
     })
-    .errors({ NOT_FOUND: {} })
-    .input(z.object({ orgId: z.uuid() }))
-    .output(orgSummary),
-
-  createInvite: oc
-    .route({
-      method: "POST",
-      path: "/org/invites",
-      summary: "Invite someone into the org; returns the one-time token",
-    })
-    .input(createInviteInput)
-    .output(createdInvite),
-
-  acceptInvite: oc
-    .route({ method: "POST", path: "/invites/accept", summary: "Join an org with an invite token" })
-    .errors({ NOT_FOUND: {}, CONFLICT: {} })
-    .input(acceptInviteInput)
-    .output(z.object({ orgId: z.uuid(), orgName: z.string() })),
+    .output(z.array(myInvite)),
 };

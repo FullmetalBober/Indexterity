@@ -13,8 +13,30 @@ import { ORPCError } from "@orpc/client";
 // Everything else keeps a generic message — a 500 must not leak internals.
 const READABLE_STATUSES = [400, 402, 403, 404, 409];
 
+// better-auth's client does not throw: every call resolves to `{ data, error }`.
+// A mutation needs a rejection to have an onError at all, so `unwrap` in
+// mutations/org.ts turns the second half into one of these — and it carries the
+// same two fields the rules below read, so an invite refused by the plugin is
+// reported exactly like one refused by the api.
+export class AuthApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code: string | undefined,
+  ) {
+    super(message);
+    this.name = "AuthApiError";
+  }
+}
+
+function statusOf(error: unknown): number | null {
+  if (error instanceof ORPCError) return error.status;
+  if (error instanceof AuthApiError) return error.status;
+  return null;
+}
+
 export function isStatus(error: unknown, status: number): boolean {
-  return error instanceof ORPCError && error.status === status;
+  return statusOf(error) === status;
 }
 
 // The api's own words when the status says they were meant for the reader, and
@@ -26,5 +48,8 @@ export function apiMessage(
   fallback: string,
   readable: readonly number[] = READABLE_STATUSES,
 ): string {
-  return error instanceof ORPCError && readable.includes(error.status) ? error.message : fallback;
+  const status = statusOf(error);
+  return status !== null && readable.includes(status) && error instanceof Error
+    ? error.message
+    : fallback;
 }
