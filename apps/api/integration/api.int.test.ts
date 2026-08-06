@@ -17,6 +17,7 @@ import {
   policies,
   recommendations,
   roiMetrics,
+  session,
   sql,
   user,
   verification,
@@ -597,6 +598,47 @@ describe("org switcher", () => {
 
     // The free slot came back with it.
     createdOrgIds.push(await createOrg(deleter, "Second Try"));
+  });
+});
+
+describe("session cookie cache", () => {
+  // The two halves of #77 that only show up over real HTTP: an ordinary api
+  // response re-arms the cache when resolving the session had to touch
+  // postgres, and a request presenting a fresh cache is answered without
+  // postgres — demonstrated by deleting the session row underneath it, which
+  // is also the revocation trade auth.config.ts signs up for.
+  it("re-arms the cache on an ordinary response, then answers from it alone", async () => {
+    const rider = await signUpWithoutOrg("cookie-cache");
+    createdEmails.push(rider.email);
+
+    // Shed the cache cookie sign-up set, as a browser would at its maxAge.
+    rider.cookie = rider.cookie
+      .split("; ")
+      .filter((pair) => !pair.includes("session_data"))
+      .join("; ");
+
+    // The miss falls through to postgres, and the response carries the
+    // re-signed cache cookie back — the forwarding under test (main.ts).
+    const rearmed = await api("/orgs", rider);
+    expect(rearmed.status).toBe(200);
+    expect(rider.cookie).toContain("session_data");
+
+    // Revoke behind the browser's back: the row is gone, the cookie answers.
+    const [account] = await db
+      .select({ id: user.id })
+      .from(user)
+      .where(eq(user.email, rider.email));
+    await db.delete(session).where(eq(session.userId, asString(account?.id)));
+    const cached = await api("/orgs", rider);
+    expect(cached.status).toBe(200);
+
+    // Without the cache the token goes back to postgres, which says no.
+    rider.cookie = rider.cookie
+      .split("; ")
+      .filter((pair) => !pair.includes("session_data"))
+      .join("; ");
+    const refused = await api("/orgs", rider);
+    expect(refused.status).toBe(401);
   });
 });
 

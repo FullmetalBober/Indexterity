@@ -106,9 +106,11 @@ than appending a second entry about the same thing.
   call to fetch a role `resolveMembership` already returns beside the org id the
   handler actually needs — which a decorator cannot hand it. What the package
   gets genuinely right is the one thing worth taking: its `AuthGuard` resolves
-  the session **once** per request and attaches it, where the api resolves it up
-  to three times. That is a twenty-line guard of our own plus
-  `session.cookieCache`, and it does not require the mount.
+  the session **once** per request and attaches it, where the api resolved it up
+  to three times. Taken without the mount (#77): `requireSession` memoizes the
+  resolution per request in `auth/session.ts`, and `session.cookieCache` keeps
+  the common case off postgres entirely, re-armed on ordinary responses by the
+  `onSend` hook in `main.ts`.
 - **TanStack DB** (`@tanstack/react-db` 0.1.95 / `db` 0.6.17 /
   `query-db-collection` 1.2.1) — spiked Aug 2026 (#42), **not adopted**. It fails
   the gate the issue set for it, and fails it harder than expected: a collection

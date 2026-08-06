@@ -357,6 +357,18 @@ expiry, emailed when `SMTP_*` is configured and a logged no-op otherwise.
 replaced a `members.is_active` flag), so two browsers can sit in two different
 orgs.
 
+**Deciding who is asking is cheap.** The session resolves once per request
+(memoized in `auth/session.ts` — some endpoints ask more than once), and usually
+without touching postgres: `session.cookieCache` carries it in a five-minute
+signed cookie. A session change invalidates that cookie in the same response —
+switching orgs re-signs it, and every other org mutation expires it (better-auth
+stops at the session row there, so `auth.config.ts` closes the gap in an after
+hook) — and the api re-arms it on ordinary responses. Membership and role are
+still read fresh on every request, so removals and role changes bite
+immediately. The trade is revocation: a session torn down behind the browser's
+back keeps answering for up to the window — sign-out is not that case, it clears
+both cookies in the same response.
+
 **Deleting an org is the dangerous verb**, because an org is not a row. Cascades
 take the clusters and everything under them; they touch nothing on the
 customer's servers. So the delete runs the same restoration a disconnect does —

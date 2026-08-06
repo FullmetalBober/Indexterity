@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import { PASSWORD_MIN_LENGTH } from "@repo/contracts";
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
-import { APIError } from "better-auth/api";
+import { APIError, createAuthMiddleware } from "better-auth/api";
+import { expireCookie } from "better-auth/cookies";
 import { createDatabase, schema } from "../db";
 import { sendMail } from "../mail/mailer";
 import { organizationPlugin } from "./organization";
@@ -36,6 +37,28 @@ export function createAuth(config: AuthConfig) {
     secret: config.secret,
     baseURL: config.baseURL,
     trustedOrigins: [...config.trustedOrigins],
+    session: {
+      // The session rides a second, short-lived HMAC-signed cookie, so the
+      // common request decides who is asking without touching postgres.
+      // Freshness is not lost where it matters: membership and role are read
+      // from `members` on every request regardless (auth/tenancy.ts), and a
+      // session change invalidates the cookie in the same response — set-active
+      // re-signs it, everything else goes through the hooks.after below. The
+      // onSend hook in main.ts is what keeps the cache warm in between: it
+      // forwards the re-armed cookie whenever resolving a request had to fall
+      // through to postgres.
+      //
+      // The trade is revocation: a session revoked server-side keeps answering
+      // for up to maxAge on a browser that still holds the cookie. Sign-out is
+      // not that case — better-auth clears both session cookies in the same
+      // response — so five minutes buys the round trip back on nearly every
+      // request and is only ever stale for a session torn down behind the
+      // browser's back, which nothing here does today.
+      cookieCache: {
+        enabled: true,
+        maxAge: 60 * 5,
+      },
+    },
     // SameSite=Lax (better-auth's default) is what stops cross-site mutations;
     // this is what keeps the cookie off plaintext.
     advanced: {
@@ -65,6 +88,33 @@ export function createAuth(config: AuthConfig) {
         requireEmailVerification: config.requireEmailVerification,
       }),
     ],
+    // The cookie cache must not outlive a session row it disagrees with. Only
+    // set-active re-signs the cookie itself; organization.create, delete and
+    // accept-invitation change the row's activeOrganizationId WITHOUT
+    // re-signing — the plugin's adapter stops at `updateSession`, which never
+    // sees the request, so neither it nor a database hook can reach the
+    // response's cookies. Measured, not assumed: with only cookieCache
+    // enabled, invite-member 400s ORGANIZATION_NOT_FOUND right after creating
+    // an org (the cached null shadows the row), and an accepted invitee stays
+    // scoped to their old org for maxAge (the cached id names an org they are
+    // genuinely in, so nothing falls through).
+    //
+    // By behaviour rather than by route name, so a plugin upgrade cannot
+    // reopen the gap: after any organization mutation, if the response is not
+    // already carrying a re-signed cache cookie, expire it. The caller's next
+    // request falls through to postgres and the onSend hook in main.ts re-arms
+    // the cache with what the row now says. On routes that did not touch the
+    // session this costs that caller one extra read; on set-active, the fresh
+    // cookie is already in the response and is kept.
+    hooks: {
+      after: createAuthMiddleware(async (ctx) => {
+        if (ctx.method !== "POST" || !ctx.path.startsWith("/organization/")) return;
+        const sessionData = ctx.context.authCookies.sessionData;
+        const pending = ctx.context.responseHeaders?.getSetCookie() ?? [];
+        const reSigned = pending.some((cookie) => cookie.startsWith(`${sessionData.name}=`));
+        if (!reSigned) expireCookie(ctx, sessionData);
+      }),
+    },
     databaseHooks: {
       user: {
         create: {
