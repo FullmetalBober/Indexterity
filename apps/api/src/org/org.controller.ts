@@ -4,8 +4,7 @@ import { contract } from "@repo/contracts";
 import type { FastifyRequest } from "fastify";
 import { requireSession } from "../auth/session";
 import { resolveMembership } from "../auth/tenancy";
-import { defaultOrgPlan, entitlementsFor, planFrom } from "../billing/plans";
-import { orgsHeldBy } from "../billing/usage";
+import { entitlementsFor, planFrom } from "../billing/plans";
 import { provisionedUsersIn } from "../clusters/offboard";
 import { and, asc, clusters, eq, gt, invites, members, organizations, user } from "../db";
 import { DatabaseService } from "../db/database.service";
@@ -53,7 +52,7 @@ export class OrgController {
         .limit(1);
       if (org === undefined) return null;
 
-      const [memberRows, clusterRows, pending, provisionedUsers, held] = await Promise.all([
+      const [memberRows, clusterRows, pending, provisionedUsers] = await Promise.all([
         this.database.db
           .select({
             memberId: members.id,
@@ -80,7 +79,6 @@ export class OrgController {
             ),
           ),
         provisionedUsersIn(this.database.db, orgId),
-        orgsHeldBy(this.database.db, session.userId),
       ]);
 
       const plan = planFrom(org.plan);
@@ -100,10 +98,6 @@ export class OrgController {
           // Seats are members plus outstanding invites — the same count the
           // limit is enforced on, so the number on screen matches the refusal.
           membersUsed: memberRows.length + pending.length,
-          // Counted against the plan a NEW org would land on, not this org's,
-          // because that is the plan the create gate reads.
-          maxOrgs: OrgController.cap(entitlementsFor(defaultOrgPlan()).maxOrgs),
-          orgsUsed: held,
         },
         members: memberRows,
         pendingInvites: pending.map((invite) => ({

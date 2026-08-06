@@ -1,7 +1,7 @@
 import { APIError } from "better-auth/api";
 import { organization } from "better-auth/plugins";
-import { defaultOrgPlan, planFrom, withinLimit } from "../billing/plans";
-import { orgsHeldBy, seatsUsed } from "../billing/usage";
+import { planFrom, withinLimit } from "../billing/plans";
+import { seatsUsed } from "../billing/usage";
 import { restoreHiddenIndexes } from "../clusters/offboard";
 import { clusters, type Database, eq, organizations } from "../db";
 import { sendMail } from "../mail/mailer";
@@ -123,18 +123,17 @@ export function organizationPlugin(db: Database, config: OrganizationPluginConfi
       },
     },
     organizationHooks: {
-      beforeCreateOrganization: async ({ organization: incoming, user }) => {
+      beforeCreateOrganization: async ({ organization: incoming }) => {
         const slug = incoming.slug ?? "";
         if (!SLUG.test(slug)) {
           throw new APIError("BAD_REQUEST", {
             message: "slug must be lowercase letters, digits and hyphens",
           });
         }
-        // The free tier is one free cluster per org. Without this it is one free
-        // cluster per org times as many orgs as you care to make.
-        const plan = defaultOrgPlan();
-        const verdict = withinLimit(plan, "organizations", await orgsHeldBy(db, user.id));
-        if (!verdict.allowed) throw planLimit(verdict.reason ?? "plan limit");
+        // No cap on how many. A plan is bought per organization, so a limit
+        // here would be a limit on how much a customer may buy — and the thing
+        // it would protect, the free tier, is protected by the cluster cap that
+        // applies inside every org one at a time.
       },
 
       beforeCreateInvitation: async ({ invitation }) => {

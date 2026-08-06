@@ -32,10 +32,6 @@ interface TeamOrg {
     readonly autoApply: boolean;
     readonly clustersUsed: number;
     readonly membersUsed: number;
-    // How many orgs this READER may hold, and does. The only limit on the page
-    // that is not about this org.
-    readonly maxOrgs: number | null;
-    readonly orgsUsed: number;
   };
   readonly members: readonly {
     memberId: string;
@@ -80,9 +76,6 @@ export function TeamSection({ org, invites }: { org: TeamOrg; invites: readonly 
   });
 
   const isOwner = org.role === "owner";
-  // Null is "no cap" — see the note on `usage` above.
-  const hasRoomForAnotherOrg =
-    org.plan.maxOrgs === null || org.plan.orgsUsed < org.plan.maxOrgs;
 
   // Two forms rather than one, because they are two unrelated requests that
   // happen to share a card: an email that is required to invite is not required
@@ -110,8 +103,7 @@ export function TeamSection({ org, invites }: { org: TeamOrg; invites: readonly 
           <Badge variant="outline">{org.plan.plan}</Badge>
           <span className="text-muted-foreground text-xs">
             {usage(org.plan.clustersUsed, org.plan.maxClusters)} clusters ·{" "}
-            {usage(org.plan.membersUsed, org.plan.maxMembers)} seats ·{" "}
-            {usage(org.plan.orgsUsed, org.plan.maxOrgs)} orgs
+            {usage(org.plan.membersUsed, org.plan.maxMembers)} seats
             {org.plan.autoApply ? "" : " · changes need your approval"}
           </span>
           {isOwner && renaming ? (
@@ -307,18 +299,12 @@ export function TeamSection({ org, invites }: { org: TeamOrg; invites: readonly 
 
         <Separator />
         {/* Making the NEXT one. The create screen only appears to someone who
-            belongs to nowhere, so without this a plan that allows five orgs
-            offers exactly one — an entitlement nobody can spend. Not owner-only:
-            it is the reader's own allowance, not this org's. */}
-        {hasRoomForAnotherOrg ? (
-          <CreateOrgForm label="Start another organization" submitLabel="Create" />
-        ) : (
-          <p className="text-muted-foreground text-sm">
-            The {org.plan.plan} plan allows {org.plan.maxOrgs}{" "}
-            {org.plan.maxOrgs === 1 ? "organization" : "organizations"} per person and you have{" "}
-            {org.plan.orgsUsed}. Moving one to a paid plan frees the slot.
-          </p>
-        )}
+            belongs to nowhere, so without this the dashboard offers exactly one
+            organization per account. There is no cap: a plan is bought per org,
+            so limiting how many you may make would limit how much you may buy.
+            Not owner-only either — a member of somebody else's org may still
+            start their own. */}
+        <CreateOrgForm label="Start another organization" submitLabel="Create" />
       </CardContent>
     </Card>
   );

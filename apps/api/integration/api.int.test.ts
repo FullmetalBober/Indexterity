@@ -296,21 +296,22 @@ describe("tenancy, invites and roles", () => {
     expect(asRecord(await after.json()).name).toBe("Orphan Org");
   });
 
-  // The free tier is one free cluster per org; without a cap on orgs it is one
-  // free cluster per org times as many orgs as you care to make.
-  it("refuses a second free organization with 402", async () => {
-    const farmer = await signUpWithoutOrg("farmer");
-    createdEmails.push(farmer.email);
-    createdOrgIds.push(await createOrg(farmer, "Farm One"));
+  // A plan is bought per organization, so how many you hold is not metered —
+  // limiting it would limit how much a customer may buy. What holds the free
+  // tier is the cluster cap, applied inside each org one at a time.
+  it("does not cap how many organizations one person makes", async () => {
+    const many = await signUpWithoutOrg("many-orgs");
+    createdEmails.push(many.email);
+    createdOrgIds.push(await createOrg(many, "Orgs One"));
+    createdOrgIds.push(await createOrg(many, "Orgs Two"));
+    createdOrgIds.push(await createOrg(many, "Orgs Three"));
 
-    const second = await authPost("/organization/create", farmer, {
-      name: "Farm Two",
-      slug: `farm-two-${Date.now().toString(36)}`,
-    });
-    expect(second.status).toBe(402);
-    const message = asString(asRecord(await second.json()).message);
-    expect(message).toContain("FREE");
-    expect(message).toContain("organizations");
+    const orgs = await (await api("/orgs", many)).json();
+    expect(Array.isArray(orgs) ? orgs.length : 0).toBe(3);
+    // Each lands on the default plan and is metered on its own.
+    const org = asRecord(await (await api("/org", many)).json());
+    expect(asRecord(org.plan).plan).toBe("FREE");
+    expect(asRecord(org.plan).maxClusters).toBe(1);
   });
 
   it("invites the member into the org, and the invitation is spent once", async () => {

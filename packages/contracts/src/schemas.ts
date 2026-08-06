@@ -298,12 +298,6 @@ export const planInfo = z.object({
   autoApply: z.boolean(),
   clustersUsed: z.number(),
   membersUsed: z.number(),
-  // How many organizations this person may hold on the plan a new one would
-  // land on, and how many they already do. Sent so the create-org button can
-  // say why it is refusing before it refuses — the only limit counted per
-  // reader rather than per org.
-  maxOrgs: z.number().nullable(),
-  orgsUsed: z.number(),
 });
 export type PlanInfo = z.infer<typeof planInfo>;
 

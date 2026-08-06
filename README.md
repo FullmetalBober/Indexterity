@@ -224,12 +224,18 @@ history, and an explicit setting always wins.
 
 ## Plans
 
-| | clusters | seats | orgs per person | index suggestions | unattended changes | history |
-|---|---|---|---|---|---|---|
-| **FREE** | 1 | 3 | 1 | yes | — | 90 days |
-| **PRO** | 5 | 15 | 5 | yes | yes | 183 days |
-| **SCALE** | unlimited | unlimited | unlimited | yes | yes | 365 days |
-| **SELF_HOSTED** | 1 | unlimited | unlimited | yes | yes | 365 days |
+| | clusters | seats | index suggestions | unattended changes | history |
+|---|---|---|---|---|---|
+| **FREE** | 1 | 3 | yes | — | 90 days |
+| **PRO** | 5 | 15 | yes | yes | 183 days |
+| **SCALE** | unlimited | unlimited | yes | yes | 365 days |
+| **SELF_HOSTED** | 1 | unlimited | yes | yes | 365 days |
+
+**A plan is per organization.** Every number above is that org's, so a customer
+with a free side project and a paid production team holds two orgs on two plans
+and is billed for one of them. How many organizations you make is therefore
+**not** metered — capping it would cap how much you can buy — and the free tier
+is held by the cluster limit, applied inside each org one at a time.
 
 **Free gives away the analysis and sells the automation.** Every plan sees every
 recommendation, with the reasoning, and can approve any of them by hand. What a
@@ -249,14 +255,6 @@ there is one limit with one name. A downgrade never deletes anything: an org
 over its new limit keeps what it has and simply cannot add more, and an
 auto-approve score saved on a paid plan stops being obeyed without being erased
 — it comes back on upgrading.
-
-**Orgs per person is the one limit counted per reader**, and it exists because
-orgs became something you make. One free cluster per org times as many orgs as
-you care to make is not a free tier, it is a free product. The gate reads the
-plan a *new* org would land on (`DEFAULT_ORG_PLAN`, `FREE` on the hosted
-deployment) and counts how many the caller already owns on it — so upgrading an
-org frees the free slot again, and a self-hosted install, where nobody is
-farming anyone, is uncapped.
 
 History is enforced, not advertised — but **enforced on read, not by deletion**.
 Two questions with different answers: how long rows are *kept*, and how much of
@@ -346,9 +344,8 @@ possible: an org appeared as a side effect of the first authenticated request,
 called `My Org`, and an empty one was quietly deleted again when its owner
 accepted an invite. A fresh account now belongs to nothing and lands on a
 create-org screen, which is also where an invitation waiting for it appears.
-Making the *next* one lives on the organization page beside the plan, which
-shows what is left of your allowance — a plan that permits five orgs and a
-dashboard that only offers the first is an entitlement nobody can spend.
+Making the *next* one lives on the organization page, and nothing limits how
+many — see **Plans** for why.
 
 **Invitations are addressed, not bearer.** They used to be a one-time token
 mailed out and pasted back, which meant whoever held the string could join. The
@@ -490,8 +487,8 @@ yet. Migration creates schemas, so migration creates both.
 in CI. Releasing is `git tag v0.2.0 && git push --tags`, and the release
 workflow refuses a tag whose version the tree does not carry.
 
-**Four test layers**, currently 395 api unit, 182 web unit, 75 integration and
-22 end-to-end. The e2e suite deliberately runs with **no proxy in front**, so the
+**Four test layers**, currently 392 api unit, 184 web unit, 75 integration and
+23 end-to-end. The e2e suite deliberately runs with **no proxy in front**, so the
 passthrough is the path under test — the proxy shape is covered by compose and
 the chart, and a fallback nothing exercises is a fallback that is broken when
 someone needs it. `npm run test` runs the first two without any infra: the api's

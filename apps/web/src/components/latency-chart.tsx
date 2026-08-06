@@ -2,6 +2,12 @@ import { defineChart, lineY } from "@tanstack/charts";
 import { tooltip } from "@tanstack/charts/tooltip";
 import { Chart } from "@tanstack/react-charts/tooltip";
 import { scaleLinear, scaleUtc } from "d3-scale";
+import { useEffect, useState } from "react";
+
+// The chart's own height, in px. Named because the placeholder below has to
+// reserve exactly it — a box of a different size would move the page when the
+// chart replaced it, which is the thing the placeholder exists to avoid.
+const CHART_HEIGHT = 200;
 
 // MongoDB-family categorical slots, green first — validated with the dataviz
 // scripts/validate_palette.js (light mode): lightness band, chroma, CVD +
@@ -61,6 +67,24 @@ export function LineChart({
   unit: string;
   series: readonly ChartSeries[];
 }) {
+  // The chart is drawn only in the browser, and this is not a preference.
+  //
+  // TanStack Charts pre-renders its SVG at a fixed `initialWidth` (640 by
+  // default) and only learns the real width from a layout effect after mount.
+  // The markup it emits carries `viewBox="0 0 640 …"` and `width="100%"`, so
+  // until that effect runs the browser letterboxes a 640-wide drawing inside
+  // whatever the column actually is — on a 1080p screen each of these columns is
+  // about 900px, so the chart sat squeezed in the middle with dead space either
+  // side, then snapped to full width when React hydrated.
+  //
+  // Every fixed guess is wrong at some viewport, so there is no number to tune.
+  // A reserved empty box of exactly CHART_HEIGHT is honest instead: nothing
+  // moves when the real chart arrives, and nobody is shown a chart drawn to the
+  // wrong scale. Nothing is lost from the server render — this is behind auth,
+  // and the SVG was never the readable part anyway.
+  const [measured, setMeasured] = useState(false);
+  useEffect(() => setMeasured(true), []);
+
   const samples = toSamples(series);
   const withValues = samples.filter((sample) => sample.value !== null);
   // Two points is the minimum that draws a line rather than a dot, and a series
@@ -137,12 +161,16 @@ export function LineChart({
           ))}
         </div>
       </div>
-      <Chart
-        className="mt-1 w-full text-xs"
-        height={200}
-        definition={definition}
-        ariaLabel={`${title} per collection, in ${unit}`}
-      />
+      {measured ? (
+        <Chart
+          className="mt-1 w-full text-xs"
+          height={CHART_HEIGHT}
+          definition={definition}
+          ariaLabel={`${title} per collection, in ${unit}`}
+        />
+      ) : (
+        <div className="mt-1 w-full" style={{ height: CHART_HEIGHT }} aria-hidden="true" />
+      )}
     </div>
   );
 }

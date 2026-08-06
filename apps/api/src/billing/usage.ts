@@ -1,5 +1,4 @@
-import { and, type Database, eq, invites, members, ne, organizations } from "../db";
-import { defaultOrgPlan } from "./plans";
+import { and, type Database, eq, invites, members, ne } from "../db";
 
 // How much of a plan is already spent. plans.ts says what the limits ARE and
 // stays pure; this counts against them, and needs the database to do it.
@@ -38,26 +37,4 @@ export async function seatsUsed(
       ),
   ]);
   return current.length + pending.length;
-}
-
-// How many organizations one person already holds on the plan a NEW org would
-// land on — the only meter counted per user rather than per org.
-//
-// Owner-only, deliberately: being invited into three orgs must not use up the
-// one you are entitled to make. And keyed on `defaultOrgPlan()` rather than on
-// every org you belong to, because upgrading an org is meant to free the free
-// slot again — one free org per person, paid ones as many as you pay for.
-export async function orgsHeldBy(db: Database, userId: string): Promise<number> {
-  const rows = await db
-    .select({ id: organizations.id })
-    .from(members)
-    .innerJoin(organizations, eq(members.orgId, organizations.id))
-    .where(
-      and(
-        eq(members.userId, userId),
-        eq(members.role, "owner"),
-        eq(organizations.plan, defaultOrgPlan()),
-      ),
-    );
-  return rows.length;
 }

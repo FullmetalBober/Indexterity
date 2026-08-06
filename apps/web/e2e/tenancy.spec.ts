@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 import {
   connectCluster,
   createOrgAndLandOnDashboard,
+  E2E_ORG_PREFIX,
   PASSWORD,
   signUpAndLandOnDashboard,
   uniqueEmail,
@@ -93,6 +94,39 @@ test.describe("tenancy", () => {
 
     await createOrgAndLandOnDashboard(page);
     await expect(page.getByText("No cluster connected")).toBeVisible();
+  });
+
+  // Switching org had no coverage at all, which is how a report of "the
+  // dashboard is empty after switching" had nothing to check itself against.
+  // This asserts the whole move: the bar, the cluster list under it, and the
+  // panels — the layout derives the selected cluster from the live list while
+  // the dashboard reads the one its loader resolved, and those are two different
+  // sources that have to agree.
+  test("switching org re-points the dashboard, not just the bar", async ({ page }) => {
+    await signUpAndLandOnDashboard(page, uniqueEmail("switch"));
+    await connectCluster(page, "Switch Cluster A");
+    await expect(page.getByText("Switch Cluster A", { exact: true })).toBeVisible();
+
+    // A second org, made from the org page. The plugin makes it active.
+    await page.getByRole("link", { name: "Organization" }).click();
+    const second = `${E2E_ORG_PREFIX}second-${Date.now()}`;
+    await page.getByLabel("Start another organization").fill(second);
+    await page.getByRole("button", { name: "Create" }).click();
+    await expect(page.getByText(`Team — ${second}`)).toBeVisible();
+
+    await page.getByRole("link", { name: "Dashboard" }).click();
+    await expect(page.getByText("No cluster connected")).toBeVisible();
+    await connectCluster(page, "Switch Cluster B");
+    await expect(page.getByText("Switch Cluster B", { exact: true })).toBeVisible();
+
+    // Back to the first org. Everything below the bar has to follow.
+    await page.getByLabel("Switch organization").click();
+    await page.getByRole("option", { name: /owner/ }).first().click();
+
+    await expect(page.getByText("Switch Cluster A", { exact: true })).toBeVisible();
+    await expect(page.getByText("Switch Cluster B", { exact: true })).toBeHidden();
+    // The panels under the bar are about that cluster, not blank.
+    await expect(page.getByText("Collections")).toBeVisible();
   });
 
   // Deleting an org takes its clusters and drops the owner back to the create

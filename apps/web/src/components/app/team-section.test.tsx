@@ -333,15 +333,10 @@ describe("TeamSection", () => {
   });
 
   // The create screen only appears to somebody who belongs to nowhere, so
-  // without this a plan that allows five orgs offers exactly one.
-  it("lets a reader with room start another organization", async () => {
+  // without this the dashboard offers exactly one organization per account.
+  it("lets a reader start another organization", async () => {
     const user = userEvent.setup();
-    renderInApp(
-      <TeamSection
-        org={{ ...org, plan: { ...org.plan, plan: "PRO", maxOrgs: 5, orgsUsed: 1 } }}
-        invites={[]}
-      />,
-    );
+    renderInApp(<TeamSection org={org} invites={[]} />);
 
     await user.type(screen.getByLabelText("Start another organization"), "Second Co");
     await user.click(screen.getByRole("button", { name: "Create" }));
@@ -349,23 +344,11 @@ describe("TeamSection", () => {
     expect(createOrg).toHaveBeenCalledWith({ name: "Second Co", slug: "second-co" });
   });
 
-  // At the cap it says which plan and what to do, rather than offering a field
-  // whose only outcome is a 402.
-  it("explains the org cap instead of offering a form that would be refused", () => {
-    renderInApp(<TeamSection org={org} invites={[]} />);
-    expect(screen.queryByLabelText("Start another organization")).not.toBeInTheDocument();
-    expect(screen.getByText(/FREE plan allows 1 organization per person/)).toBeInTheDocument();
-  });
-
-  // Your own allowance, not this org's — a member of somebody else's org may
-  // still make their own.
-  it("offers it to a member too", () => {
-    renderInApp(
-      <TeamSection
-        org={{ ...org, role: "member", plan: { ...org.plan, maxOrgs: 5, orgsUsed: 1 } }}
-        invites={[]}
-      />,
-    );
+  // No cap, on any plan: a plan is bought per org, so limiting how many you may
+  // make would limit how much you may buy. And not owner-only either — a member
+  // of somebody else's org may still start their own.
+  it("offers it on the free plan, and to a member", () => {
+    renderInApp(<TeamSection org={{ ...org, role: "member" }} invites={[]} />);
     expect(screen.getByLabelText("Start another organization")).toBeInTheDocument();
   });
 
@@ -375,7 +358,6 @@ describe("TeamSection", () => {
     expect(screen.getByText("FREE")).toBeInTheDocument();
     expect(screen.getByText(/0 \/ 1 clusters/)).toBeInTheDocument();
     expect(screen.getByText(/3 \/ 3 seats/)).toBeInTheDocument();
-    expect(screen.getByText(/1 \/ 1 orgs/)).toBeInTheDocument();
     expect(screen.getByText(/changes need your approval/)).toBeInTheDocument();
   });
 
