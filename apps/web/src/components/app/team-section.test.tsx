@@ -11,6 +11,7 @@ const inviteMember = vi.hoisted(() => vi.fn());
 const leave = vi.hoisted(() => vi.fn());
 const rejectInvitation = vi.hoisted(() => vi.fn());
 const removeMember = vi.hoisted(() => vi.fn());
+const createOrg = vi.hoisted(() => vi.fn());
 const update = vi.hoisted(() => vi.fn());
 const updateMemberRole = vi.hoisted(() => vi.fn());
 const toastSuccess = vi.hoisted(() => vi.fn());
@@ -26,6 +27,7 @@ vi.mock("~/lib/auth-client", () => ({
     organization: {
       acceptInvitation,
       cancelInvitation,
+      create: createOrg,
       delete: deleteOrg,
       inviteMember,
       leave,
@@ -51,6 +53,8 @@ const org = {
     autoApply: false,
     clustersUsed: 0,
     membersUsed: 3,
+    maxOrgs: 1,
+    orgsUsed: 1,
   },
   members: [
     { memberId: "m1", userId: "u1", email: "owner@acme.test", name: "Owner One", role: "owner" },
@@ -74,6 +78,7 @@ function row(email: string): HTMLElement {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  createOrg.mockResolvedValue(authOk({ id: "o2", name: "Second Co" }));
   update.mockResolvedValue(authOk({ id: "o1", name: "Acme" }));
   updateMemberRole.mockResolvedValue(authOk({ id: "m2", role: "owner" }));
   removeMember.mockResolvedValue(authOk({ member: { id: "m2" } }));
@@ -327,12 +332,50 @@ describe("TeamSection", () => {
     expect(screen.getByRole("button", { name: "Leave org" })).toBeInTheDocument();
   });
 
+  // The create screen only appears to somebody who belongs to nowhere, so
+  // without this a plan that allows five orgs offers exactly one.
+  it("lets a reader with room start another organization", async () => {
+    const user = userEvent.setup();
+    renderInApp(
+      <TeamSection
+        org={{ ...org, plan: { ...org.plan, plan: "PRO", maxOrgs: 5, orgsUsed: 1 } }}
+        invites={[]}
+      />,
+    );
+
+    await user.type(screen.getByLabelText("Start another organization"), "Second Co");
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    expect(createOrg).toHaveBeenCalledWith({ name: "Second Co", slug: "second-co" });
+  });
+
+  // At the cap it says which plan and what to do, rather than offering a field
+  // whose only outcome is a 402.
+  it("explains the org cap instead of offering a form that would be refused", () => {
+    renderInApp(<TeamSection org={org} invites={[]} />);
+    expect(screen.queryByLabelText("Start another organization")).not.toBeInTheDocument();
+    expect(screen.getByText(/FREE plan allows 1 organization per person/)).toBeInTheDocument();
+  });
+
+  // Your own allowance, not this org's — a member of somebody else's org may
+  // still make their own.
+  it("offers it to a member too", () => {
+    renderInApp(
+      <TeamSection
+        org={{ ...org, role: "member", plan: { ...org.plan, maxOrgs: 5, orgsUsed: 1 } }}
+        invites={[]}
+      />,
+    );
+    expect(screen.getByLabelText("Start another organization")).toBeInTheDocument();
+  });
+
   // A limit nobody can see until they hit it turns into a support email.
   it("shows the plan and what is left of it", () => {
     renderInApp(<TeamSection org={org} invites={[]} />);
     expect(screen.getByText("FREE")).toBeInTheDocument();
     expect(screen.getByText(/0 \/ 1 clusters/)).toBeInTheDocument();
     expect(screen.getByText(/3 \/ 3 seats/)).toBeInTheDocument();
+    expect(screen.getByText(/1 \/ 1 orgs/)).toBeInTheDocument();
     expect(screen.getByText(/changes need your approval/)).toBeInTheDocument();
   });
 

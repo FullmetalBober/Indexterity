@@ -346,6 +346,9 @@ possible: an org appeared as a side effect of the first authenticated request,
 called `My Org`, and an empty one was quietly deleted again when its owner
 accepted an invite. A fresh account now belongs to nothing and lands on a
 create-org screen, which is also where an invitation waiting for it appears.
+Making the *next* one lives on the organization page beside the plan, which
+shows what is left of your allowance — a plan that permits five orgs and a
+dashboard that only offers the first is an entitlement nobody can spend.
 
 **Invitations are addressed, not bearer.** They used to be a one-time token
 mailed out and pasted back, which meant whoever held the string could join. The

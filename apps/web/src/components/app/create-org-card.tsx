@@ -1,9 +1,8 @@
-import { createOrgInput, type MyInvite } from "@repo/contracts";
+import type { MyInvite } from "@repo/contracts";
+import { CreateOrgForm } from "~/components/app/create-org-form";
 import { Invitations } from "~/components/app/invitations";
-import { useAppForm } from "~/components/form";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
 import { Separator } from "~/components/ui/separator";
-import { useCreateOrg } from "~/lib/queries/mutations/org";
 
 // What a signed-in reader sees when they belong to no organization.
 //
@@ -14,13 +13,6 @@ import { useCreateOrg } from "~/lib/queries/mutations/org";
 // person who was invited before they signed up finds the invitation, since
 // accepting one is the other way to end up in an org.
 export function CreateOrgCard({ invites }: { invites: readonly MyInvite[] }) {
-  const create = useCreateOrg();
-
-  const form = useAppForm({
-    defaultValues: { name: "" },
-    onSubmit: ({ value }) => create.mutate(value.name),
-  });
-
   return (
     <Card className="mx-auto mt-16 max-w-lg">
       <CardHeader>
@@ -31,23 +23,7 @@ export function CreateOrgCard({ invites }: { invites: readonly MyInvite[] }) {
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
-        <form
-          className="flex flex-wrap items-end gap-3"
-          onSubmit={(event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            void form.handleSubmit();
-          }}
-        >
-          <form.AppField name="name" validators={{ onChange: createOrgInput.shape.name }}>
-            {(field) => (
-              <field.TextField label="Organization name" className="w-64" placeholder="Acme" />
-            )}
-          </form.AppField>
-          <form.AppForm>
-            <form.SubmitButton pending={create.isPending}>Create</form.SubmitButton>
-          </form.AppForm>
-        </form>
+        <CreateOrgForm />
 
         {invites.length > 0 ? (
           <>

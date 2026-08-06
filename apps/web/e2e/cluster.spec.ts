@@ -110,7 +110,7 @@ test.describe("cluster lifecycle", () => {
     // The plan lives on the Organization page now; the policy it constrains
     // lives on the dashboard, so this test crosses between them deliberately.
     await page.getByRole("link", { name: "Organization" }).click();
-    await expect(page.getByText("FREE")).toBeVisible();
+    await expect(page.getByText("FREE", { exact: true })).toBeVisible();
     await page.getByRole("link", { name: "Dashboard" }).click();
 
     // Index suggestions are free, and saving them proves it.
@@ -144,7 +144,7 @@ test.describe("cluster lifecycle", () => {
     await expect(page.getByLabel("Workload analysis")).toBeVisible();
 
     await page.getByRole("link", { name: "Organization" }).click();
-    await expect(page.getByText("FREE")).toBeVisible();
+    await expect(page.getByText("FREE", { exact: true })).toBeVisible();
     await page.getByRole("link", { name: "Dashboard" }).click();
 
     await expect(page.getByText("E2E Reselect", { exact: true })).toBeVisible();
