@@ -87,17 +87,28 @@ than appending a second entry about the same thing.
   the 34-line mount in `main.ts`, `auth/http.ts` and `auth/session.ts`, about 57
   lines. `auth.config.ts` is the `betterAuth()` call it takes as *input*, and
   `tenancy.ts`, `signup-gate.ts` and `cookies.ts` are ours. **Revisited Aug 2026
-  (#71) and still no.** The condition set here — "revisit if we ever adopt
-  better-auth's organization plugin" — was met, and the conclusion did not
-  change: the plugin's tables ARE `organizations`/`members`/`invites`, mapped
-  onto the existing column names, so `@OrgRoles()` and `@RequireActiveOrg()`
-  would now work. They are still not worth the mount, because the questions the
-  api asks are not the ones they answer. `TenancyService` returns an **org id**
-  that every query is then scoped by, and it resolves that id through a fallback
-  the plugin has no notion of (an `activeOrganizationId` naming an org you have
-  since been removed from falls through to your oldest membership). A decorator
-  that gates a handler cannot hand it a tenant, so every controller would keep
-  the service and gain an annotation that restates one of its lines.
+  (#71) and still no**, checked against the package rather than against this
+  note. The condition set here — "revisit if we ever adopt better-auth's
+  organization plugin" — was met, and the reasons changed while the answer did
+  not. **The measured blocker is unchanged**: at 2.7.0 the mount is still
+  `httpAdapter.use(...)`, middie middleware rather than a Fastify route, and
+  `@fastify/rate-limit` only sees routes — so `AUTH_RATE_LIMIT_MAX` becomes a
+  silent no-op and better-auth's non-configurable 3-per-10s replaces it. That
+  version predates the spike, so #50 measured this code. It matters more now
+  than it did, not less: #54 is open precisely because the auth limit already
+  reports a number that is not the one that applies. **And the org decorators
+  turn out to be wrong for us rather than merely unhelpful.**
+  `@RequireActiveOrg()` refuses a request whose `session.activeOrganizationId`
+  is null — which here is not a broken session but the normal one: never
+  switched, or switched into an org since deleted, both of which fall through to
+  the caller's oldest membership by design. It would 403 every session that
+  predates the migration. `@OrgRoles("owner")` inherits that, and adds an api
+  call to fetch a role `resolveMembership` already returns beside the org id the
+  handler actually needs — which a decorator cannot hand it. What the package
+  gets genuinely right is the one thing worth taking: its `AuthGuard` resolves
+  the session **once** per request and attaches it, where the api resolves it up
+  to three times. That is a twenty-line guard of our own plus
+  `session.cookieCache`, and it does not require the mount.
 - **TanStack DB** (`@tanstack/react-db` 0.1.95 / `db` 0.6.17 /
   `query-db-collection` 1.2.1) — spiked Aug 2026 (#42), **not adopted**. It fails
   the gate the issue set for it, and fails it harder than expected: a collection
