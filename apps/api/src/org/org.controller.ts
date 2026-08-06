@@ -168,6 +168,9 @@ export class OrgController {
             // compares it rather than a way that happens to work today.
             eq(invites.email, me.email.toLowerCase()),
             eq(invites.status, "pending"),
+            // The plugin's own list-user-invitations filters on status alone, so
+            // it shows expired invitations as joinable and the 400 arrives on the
+            // click. An invitation nobody can accept is not pending.
             gt(invites.expiresAt, new Date()),
           ),
         )

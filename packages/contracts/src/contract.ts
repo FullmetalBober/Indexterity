@@ -243,9 +243,17 @@ export const contract = {
     .output(z.array(orgSummary)),
 
   // Answered outside any org on purpose: someone in no organization at all is
-  // exactly who needs to see they have been invited to one. The plugin's own
-  // list-user-invitations returns rows without the org's name, which is the only
-  // part a reader can act on.
+  // exactly who needs to see they have been invited to one.
+  //
+  // The plugin has `list-user-invitations`, and it returns everything this does
+  // including the org's name. It is not used because it refuses outright unless
+  // `user.emailVerified` — unconditionally, not gated on the plugin's own
+  // `requireEmailVerificationOnInvitation`, which we set from the deployment's
+  // posture. On an install that does not require verification (dev, the e2e
+  // suite, a self-hosted instance behind SSO) every reader would get a 403 on
+  // page load for a list that is not a secret: the invitations are addressed to
+  // them, and accepting one still goes through the plugin, where that
+  // verification rule belongs and is applied.
   listMyInvites: oc
     .route({
       method: "GET",
