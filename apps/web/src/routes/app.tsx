@@ -93,7 +93,19 @@ function AppShell() {
   const cluster = selectCluster(clusters, selected);
 
   return (
-    <main className="mx-auto max-w-4xl p-8">
+    // No width ceiling: the page is nothing but tables and time series, and both
+    // want every pixel. `max-w-4xl` is a reading measure — right for the prose on the
+    // landing page, wrong here, where it left 832px for a collections table that
+    // wants 1040 and a recommendations table that wants 1168, so the rightmost
+    // columns sat outside the viewport at every screen size. The padding is the only
+    // inset now.
+    //
+    // The cost is real on a very wide monitor: a row a metre long is a row you track
+    // with a finger. Two things keep it honest — the tables set their column widths
+    // as proportions, so the slack lands mostly on the namespace rather than
+    // stretching the numbers, and every table stays sorted by the column that
+    // matters, so the answer is at the top rather than at the far right.
+    <main className="p-6 lg:p-8">
       <div className="flex items-start justify-between">
         <div>
           <h1 className="font-semibold text-2xl">Indexterity</h1>

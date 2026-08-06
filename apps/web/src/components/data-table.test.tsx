@@ -265,4 +265,61 @@ describe("DataTable, virtualized", () => {
       screen.getAllByRole("row", { hidden: true }).filter((r) => r.getAttribute("aria-hidden")),
     ).toHaveLength(0);
   });
+
+  // ONE scroll container, not two.
+  //
+  // The table primitive wraps every table in its own `overflow-x-auto`, so putting
+  // a vertical scroller around it left the two axes on different boxes: the
+  // horizontal scrollbar belonged to the full height of the table rather than to
+  // the screenful in view, which on a long table puts it hundreds of pixels below
+  // the fold. A reader who cannot see the right-hand columns then has no gesture
+  // that reaches them.
+  it("does not leave a second scroll container inside the first", () => {
+    const { container } = renderVirtual();
+
+    const outer = container.querySelector("[style*='max-height']");
+    expect(outer?.className).toContain("overflow-auto");
+    // Flattened by a rule on the outer box rather than by forking the primitive,
+    // which is what its data-slot is for.
+    expect(outer?.className).toContain("[&_[data-slot=table-container]]:overflow-visible");
+    expect(container.querySelector("[data-slot=table-container]")).not.toBeNull();
+  });
+});
+
+// Widths are what stop a virtualized table shifting sideways as it scrolls:
+// `table-layout: auto` sizes columns from the rows currently rendered, and under
+// virtualization that is only ever the window. Scroll a long value into view and
+// every column after it moves.
+describe("DataTable, column widths", () => {
+  it("fixes the layout and states each width once, in order", () => {
+    const { container } = renderInApp(
+      <DataTable
+        caption="Test rows"
+        columns={columns}
+        data={MANY}
+        getRowId={(row) => row.id}
+        initialSorting={[{ id: "name", desc: false }]}
+        empty={{ title: "Nothing here", description: "Not collected yet." }}
+        virtualize={{ maxHeight: 600, estimateRowHeight: 40 }}
+        columnWidths={[300, 96]}
+      />,
+    );
+
+    const table = container.querySelector("table");
+    expect(table?.className).toContain("table-fixed");
+    // A colgroup, not per-cell widths: one declaration per column for the whole
+    // table, which is the only place a width can be stated once and be believed by
+    // rows that are not currently rendered.
+    const cols = [...container.querySelectorAll("colgroup col")];
+    expect(cols.map((col) => (col as HTMLElement).style.width)).toEqual(["300px", "96px"]);
+    // And a floor, so narrow viewports scroll the columns instead of crushing them.
+    expect(table?.style.minWidth).toBe("396px");
+  });
+
+  it("leaves a table that did not ask for widths in auto layout", () => {
+    const { container } = renderVirtual();
+
+    expect(container.querySelector("table")?.className ?? "").not.toContain("table-fixed");
+    expect(container.querySelector("colgroup")).toBeNull();
+  });
 });

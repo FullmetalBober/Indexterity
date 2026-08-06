@@ -104,12 +104,22 @@ function buildColumns(actions: Actions): DashboardColumns<Recommendation> {
       id: "namespace",
       header: "Collection",
       sortFn: "alphanumeric",
-      cell: (info) => <span className="font-mono text-xs">{info.getValue()}</span>,
+      // See collections-table: a fixed column will not grow for a long namespace, so
+      // it truncates and keeps the whole value in the title.
+      cell: (info) => (
+        <span className="block truncate font-mono text-xs" title={info.getValue()}>
+          {info.getValue()}
+        </span>
+      ),
     }),
     column.accessor("indexName", {
       header: "Index",
       sortFn: "alphanumeric",
-      cell: (info) => <span className="font-mono text-xs">{info.getValue()}</span>,
+      cell: (info) => (
+        <span className="block truncate font-mono text-xs" title={info.getValue()}>
+          {info.getValue()}
+        </span>
+      ),
     }),
     column.accessor("score", {
       header: "Score",
@@ -180,6 +190,15 @@ export function RecommendationsTable({
       // Unbounded by nature: one row per index worth touching, across every
       // collection. Sixty-odd is a normal cluster and thousands is a big one.
       virtualize={{ maxHeight: 640, estimateRowHeight: 64 }}
+      // Type, Collection, Index, Score, Usage, Rationale, Action. Rationale takes
+      // the most because it is prose and wraps; the two names after it are the other
+      // unpredictable ones. Fixing these is what stops the table re-laying itself out
+      // as virtualized rows swap — see DataTable's columnWidths.
+      columnWidths={[132, 200, 200, 104, 120, 280, 132]}
+      // The rationale: prose, and the only cell here that reads better on one line than
+      // on three. Capped at a comfortable measure rather than the whole page — a line
+      // much past ninety characters is hard to track back from.
+      flexColumn={{ index: 5, max: 620 }}
       empty={{
         title: "No recommendations yet",
         description:
