@@ -46,7 +46,15 @@ const columns: DashboardColumns<CollectionRow> = column.columns([
   column.accessor("ns", {
     header: "Collection",
     sortFn: "alphanumeric",
-    cell: (info) => <span className="font-mono text-xs">{info.getValue()}</span>,
+    cell: (info) => (
+      // Truncated rather than wrapped: uniform row heights are what keep the
+      // virtualizer's estimates honest, and a namespace is scanned by its tail as
+      // often as its head — so the full value stays available on hover and to a
+      // screen reader instead of being lost.
+      <span className="block truncate font-mono text-xs" title={info.getValue()}>
+        {info.getValue()}
+      </span>
+    ),
   }),
   column.accessor((row) => orNull(row.stat?.indexCount), {
     id: "indexCount",
@@ -122,6 +130,16 @@ export function CollectionsTable({ rows }: { rows: CollectionRow[] }) {
       // One row per collection, and getCollections applies no limit. Rows here are
       // single-line, so they estimate smaller than a recommendation's.
       virtualize={{ maxHeight: 560, estimateRowHeight: 44 }}
+      // Collection, Indexes, Index size, Read µs, Read Δ, Write µs, Write Δ,
+      // Proposed. The namespace gets the lion's share because it is the only column
+      // holding something of unpredictable length — `msb-app.coach-reported-billing`
+      // is not unusual — and everything after it is a short number under a header
+      // that is wider than the value it labels.
+      columnWidths={[340, 92, 116, 100, 92, 104, 92, 104]}
+      // The namespace takes whatever the page has spare — a column holding "3" or "—"
+      // gains nothing from being twice as wide — but only so far: past about 640px the
+      // name is far enough from its own numbers that the row stops reading as one row.
+      flexColumn={{ index: 0, max: 640 }}
       empty={{
         title: "Nothing collected yet",
         description:

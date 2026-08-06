@@ -111,6 +111,47 @@ interface DataTableProps<TData extends RowData> {
   // with no scrollbar and looks exactly as it did. Only the long tail caps and
   // scrolls, and only the long tail was the problem.
   readonly virtualize?: { readonly maxHeight: number; readonly estimateRowHeight: number };
+  // A width in px per leaf column, in order, rendered as a `<colgroup>` and paired
+  // with `table-layout: fixed`.
+  //
+  // Not cosmetic — it is what stops a virtualized table shifting sideways as you
+  // scroll it. `table-layout: auto` sizes each column from the rows currently in
+  // the table, and virtualization means that is only ever the dozen or so rows in
+  // view: scroll a long namespace into the window and the first column widens,
+  // taking every column after it along for the ride. The row is doing nothing
+  // wrong; the table is re-deciding its layout underneath the reader.
+  //
+  // It also settles the row heights, which the virtualizer measures. Widths that
+  // move make cells re-wrap, so a row reports one height and later occupies
+  // another, and `getTotalSize()` ends up describing a table that no longer
+  // exists — the scroll range stops matching the content and the last rows become
+  // unreachable.
+  //
+  // On a table narrower than their sum these are minimums, and the box scrolls.
+  // Wider, and the slack goes to `flexColumn` alone, up to its stated maximum.
+  //
+  // They also make clipping the cells' job: a fixed column does not grow to fit, and
+  // the primitive sets `whitespace-nowrap`, so anything longer than its column spills
+  // straight over the next one — an index name landing on top of a count. Cells are
+  // clipped here rather than at each column, because it is this prop that creates the
+  // problem; a column holding something worth reading in full says so with `truncate`
+  // and a title, which is the only way a clipped identifier stays recoverable.
+  readonly columnWidths?: readonly number[];
+  // Which column absorbs the space left over, as an index into columnWidths. Its own
+  // number becomes a minimum rather than a width.
+  //
+  // Needed because `fixed` shares slack out in PROPORTION to the stated widths, which
+  // on a wide page is the wrong answer for every column here: it left the columns
+  // holding a single digit 250px wide while the namespace — the one that can actually
+  // use the room — got no better treatment. A `<col>` with no width takes the whole
+  // remainder under `fixed`, so naming one column is the whole mechanism.
+  //
+  // `max` is the other half, and leaving it out was its own bug: on a wide monitor the
+  // namespace column ran to 1,800px and a collection's name ended up a long way from
+  // its own numbers. A table does not have to be as wide as the page it sits on. Past
+  // this the table stops growing and the leftover stays leftover — which the page
+  // still spends well, on two charts side by side rather than on one stretched row.
+  readonly flexColumn?: { readonly index: number; readonly max: number };
 }
 
 export function DataTable<TData extends RowData>({
@@ -123,6 +164,8 @@ export function DataTable<TData extends RowData>({
   caption,
   className,
   virtualize,
+  columnWidths,
+  flexColumn,
 }: DataTableProps<TData>) {
   const [sorting, setSorting] = useState<SortingState>(initialSorting);
   const [globalFilter, setGlobalFilter] = useState("");
@@ -159,7 +202,19 @@ export function DataTable<TData extends RowData>({
     // grows a second line once a drop is scheduled, and its rationale is prose
     // that wraps to however many lines the window is wide.
     estimateSize: () => virtualize?.estimateRowHeight ?? 48,
-    overscan: 8,
+    // Two screenfuls of rows either side of the window, derived rather than picked.
+    //
+    // Overscan is the whole answer to flicker while scrolling: rows outside the
+    // window do not exist, so a scroll that outruns the next render paints the
+    // spacer's empty space until React catches up. Eight rows was under half a
+    // screenful here, which a trackpad flick clears in one gesture.
+    //
+    // Derived from the box and the row height because a constant would mean the
+    // wrong thing the moment either changed — eight rows is a third of a screen in
+    // the 44px-row collections table and half a screen in the 64px-row
+    // recommendations one. Two screenfuls is a flick's worth of headroom, and costs
+    // a few dozen `<tr>`s against a dataset of thousands.
+    overscan: Math.ceil((2 * (virtualize?.maxHeight ?? 0)) / (virtualize?.estimateRowHeight ?? 48)),
     // The server has no scroll element to measure, and without a rect the
     // virtualizer reports a viewport of zero and renders no rows at all — which
     // is the SSR failure the raw-HTML e2e test exists to catch. Handing it the
@@ -177,6 +232,9 @@ export function DataTable<TData extends RowData>({
   const padTop = first === undefined ? 0 : first.start;
   const padBottom = last === undefined ? 0 : virtualizer.getTotalSize() - last.end;
   const columnCount = table.getAllLeafColumns().length;
+  // The width the stated columns need, which is the table's floor and the base its
+  // ceiling is measured from.
+  const tableFloor = (columnWidths ?? []).reduce((total, width) => total + width, 0);
 
   // Empty because there is nothing, versus empty because the filter excluded
   // everything, are different facts and get different answers — the second one
@@ -211,13 +269,63 @@ export function DataTable<TData extends RowData>({
       )}
 
       {/* The scroll container the virtualizer measures. Without `virtualize` there
-          is no container at all and the table sits in the page flow as before. */}
+          is no container at all and the table sits in the page flow as before.
+
+          `overflow-visible` on the table primitive's own container is load-bearing.
+          That primitive wraps every table in `overflow-x-auto`, so putting a
+          scrolling box around it produced two nested scrollers: this one owning the
+          vertical axis and that one the horizontal. The horizontal scrollbar then
+          belongs to the FULL height of the table rather than to the screenful in
+          view, so on a long table it sits hundreds of pixels below the fold — and a
+          reader who cannot see the right-hand columns has no way to reach them that
+          looks like scrolling. Flattening it to one box puts both scrollbars on the
+          same viewport and keeps the sticky header stuck to the box actually being
+          scrolled. */}
       <div
         ref={scrollRef}
-        className={virtualize === undefined ? undefined : "overflow-auto rounded-md border"}
+        className={
+          virtualize === undefined
+            ? undefined
+            : // `w-fit max-w-full` so the border hugs the table rather than the page. The
+              // table stops at its own ceiling (see columnWidths/flexColumn) and a box
+              // that kept going left a stretch of empty bordered space beside every
+              // row. Capped at the parent so a narrow viewport still scrolls instead of
+              // overflowing the page.
+              "w-fit max-w-full overflow-auto rounded-md border [&_[data-slot=table-container]]:overflow-visible"
+        }
         style={virtualize === undefined ? undefined : { maxHeight: virtualize.maxHeight }}
       >
-        <Table>
+        <Table
+          className={columnWidths === undefined ? undefined : "table-fixed"}
+          style={
+            columnWidths === undefined
+              ? undefined
+              : // Below the floor the columns would be squeezed rather than scrolled,
+                // and a namespace is not a thing to squeeze. The ceiling is that floor
+                // with the flexible column grown to its maximum: wider than that, and
+                // the only thing gained is distance between a row's name and its
+                // numbers.
+                {
+                  minWidth: tableFloor,
+                  maxWidth:
+                    flexColumn === undefined
+                      ? undefined
+                      : tableFloor - (columnWidths[flexColumn.index] ?? 0) + flexColumn.max,
+                }
+          }
+        >
+          {columnWidths === undefined ? null : (
+            <colgroup>
+              {columnWidths.map((width, index) => (
+                // No width on the flexible one: that is what makes it take the
+                // remainder instead of a proportional share of it.
+                <col
+                  key={`col-${index}`}
+                  style={index === flexColumn?.index ? undefined : { width }}
+                />
+              ))}
+            </colgroup>
+          )}
           <TableCaption className="sr-only">{caption}</TableCaption>
           {/* Sticky only when the body scrolls under it: a header that scrolls out
               of an inner container leaves the reader guessing which column is
@@ -279,7 +387,10 @@ export function DataTable<TData extends RowData>({
                           paying for it twice — in the bundle and in a name that
                           promises a control the reader does not have. */}
                       {row.getAllCells().map((cell) => (
-                        <TableCell key={cell.id}>
+                        <TableCell
+                          key={cell.id}
+                          className={columnWidths === undefined ? undefined : "overflow-hidden"}
+                        >
                           <table.FlexRender cell={cell} />
                         </TableCell>
                       ))}
