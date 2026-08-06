@@ -231,7 +231,8 @@ export function DataTable<TData extends RowData>({
   const last = virtualRows[virtualRows.length - 1];
   const padTop = first === undefined ? 0 : first.start;
   const padBottom = last === undefined ? 0 : virtualizer.getTotalSize() - last.end;
-  const columnCount = table.getAllLeafColumns().length;
+  const leafColumns = table.getAllLeafColumns();
+  const columnCount = leafColumns.length;
   // The width the stated columns need, which is the table's floor and the base its
   // ceiling is measured from.
   const tableFloor = (columnWidths ?? []).reduce((total, width) => total + width, 0);
@@ -316,12 +317,18 @@ export function DataTable<TData extends RowData>({
         >
           {columnWidths === undefined ? null : (
             <colgroup>
-              {columnWidths.map((width, index) => (
-                // No width on the flexible one: that is what makes it take the
-                // remainder instead of a proportional share of it.
+              {leafColumns.map((column, index) => (
+                // Keyed by the column, not by its position: the widths are a
+                // positional list, but a `<col>` stands for a real column and the
+                // column has an id. Also what the lint rule is asking for, and it is
+                // right — a positional key survives a reorder by describing the wrong
+                // column rather than by failing.
+                //
+                // No width on the flexible one: that is what makes it take the whole
+                // remainder rather than a proportional share of it.
                 <col
-                  key={`col-${index}`}
-                  style={index === flexColumn?.index ? undefined : { width }}
+                  key={column.id}
+                  style={index === flexColumn?.index ? undefined : { width: columnWidths[index] }}
                 />
               ))}
             </colgroup>
