@@ -9,11 +9,14 @@ import {
   monthlySavingsUsd,
   summarizeLatency,
 } from "../analysis";
+import { runFrom } from "../analysis/types";
 import {
   actions,
   and,
+  clusterIndexes,
   desc,
   eq,
+  gte,
   inArray,
   indexSnapshots,
   latencySamples,
@@ -23,6 +26,7 @@ import {
 } from "../db";
 import { DatabaseService } from "../db/database.service";
 import { TenancyService } from "../http/tenancy.service";
+import { historyWindow } from "../jobs/plan";
 import { Implement } from "../orpc/implement";
 
 // Read-only views over what the engine has already decided and recorded: ROI,
@@ -37,10 +41,13 @@ export class InsightsController {
   private async loadLatencyReadings(
     clusterId: string,
   ): Promise<Map<string, { database: string; collection: string; readings: LatencyReading[] }>> {
+    // The plan's window. Rows outlive it — deletion runs one cutoff for the whole
+    // deployment now — so this is what actually enforces the entitlement.
+    const since = await historyWindow(this.database.db, clusterId);
     const rows = await this.database.db
       .select()
       .from(latencySamples)
-      .where(eq(latencySamples.clusterId, clusterId));
+      .where(and(eq(latencySamples.clusterId, clusterId), gte(latencySamples.lastSeenAt, since)));
     const groups = new Map<
       string,
       { database: string; collection: string; readings: LatencyReading[] }
@@ -52,12 +59,15 @@ export class InsightsController {
         collection: row.collection,
         readings: [],
       };
+      // A row stands for every collect that read these same four counters, so the
+      // trend and the chart get the interval and the count rather than inferring a
+      // single look from a single row.
       group.readings.push({
+        ...runFrom(row),
         readOps: row.readOps,
         readLatencyMicros: row.readLatencyMicros,
         writeOps: row.writeOps,
         writeLatencyMicros: row.writeLatencyMicros,
-        capturedAt: row.capturedAt.toISOString(),
       });
       groups.set(key, group);
     }
@@ -174,8 +184,16 @@ export class InsightsController {
     });
   }
 
-  // Per-collection index footprint from the latest snapshot batch (one collect
-  // run inserts all its rows in a single statement, so they share a timestamp).
+  // Per-collection index footprint as of the latest collect.
+  //
+  // By `last_seen_at`, not `captured_at`, and the difference is the whole of what
+  // run-length storage changes here. This used to select the newest BATCH of
+  // inserts, which worked because a collect wrote a row per index and they shared
+  // a timestamp. An idle index no longer gets a row per collect — it gets its
+  // existing run extended — so its `captured_at` can be weeks old while the index
+  // is very much still there, and the old comparison would have dropped it from
+  // the footprint. Every index the last collect saw was either extended or
+  // inserted at that moment, so they all share `last_seen_at` instead.
   @Implement(contract.getCollections)
   getCollections(@Req() req: FastifyRequest) {
     return implement(contract.getCollections).handler(async ({ input }) => {
@@ -183,16 +201,21 @@ export class InsightsController {
       if (!(await this.tenancy.ownsCluster(input.clusterId, orgId))) {
         return { clusterId: input.clusterId, collections: [] };
       }
-      // The max(captured_at) comparison must stay in SQL: pg keeps microseconds
+      // The max(last_seen_at) comparison must stay in SQL: pg keeps microseconds
       // and a JS Date round-trip truncates to ms, so re-querying by an equal
       // Date would match nothing.
       const snapshotRows = await this.database.db
-        .select()
+        .select({
+          database: clusterIndexes.database,
+          collection: clusterIndexes.collection,
+          sizeBytes: indexSnapshots.sizeBytes,
+        })
         .from(indexSnapshots)
+        .innerJoin(clusterIndexes, eq(indexSnapshots.indexId, clusterIndexes.id))
         .where(
           and(
             eq(indexSnapshots.clusterId, input.clusterId),
-            sql`${indexSnapshots.capturedAt} = (select max(${indexSnapshots.capturedAt}) from ${indexSnapshots} where ${indexSnapshots.clusterId} = ${input.clusterId})`,
+            sql`${indexSnapshots.lastSeenAt} = (select max(${indexSnapshots.lastSeenAt}) from ${indexSnapshots} where ${indexSnapshots.clusterId} = ${input.clusterId})`,
           ),
         );
       const proposedRows = await this.database.db

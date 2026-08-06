@@ -5,6 +5,7 @@ import { entitledAutomation } from "../src/billing/plans";
 import {
   actions,
   and,
+  clusterIndexes,
   clusters,
   createDatabase,
   eq,
@@ -41,6 +42,8 @@ import {
   API_PORT,
   api,
   databaseUrl,
+  insertLatency,
+  insertSnapshots,
   MONGO_URL,
   type Session,
   signUp,
@@ -917,7 +920,8 @@ describe("dynamic observe window", () => {
     // Usage on day 0, 20, 40 (gaps of 20 days): the policy window here is 7
     // days, which would expire between two runs — expect 2×20 = 40 days.
     const base = Date.now() - 45 * 86_400_000;
-    await db.insert(indexSnapshots).values(
+    await insertSnapshots(
+      db,
       [0, 10, 20, 30, 40].map((day) => ({
         clusterId,
         database: "inttest",
@@ -956,6 +960,26 @@ describe("dynamic observe window", () => {
     await mongo.db("inttest").collection("orders").dropIndex("dyn_1");
   });
 });
+
+// A cluster row with no usable connection string, for scenarios that only touch
+// postgres. Going through POST /clusters would seal a real string and spend a
+// unit of the outbound-dial budget, which is a shared resource across the suite.
+async function bareCluster(name: string): Promise<string> {
+  const org = asRecord(await (await api("/org", owner)).json());
+  const [row] = await db
+    .insert(clusters)
+    .values({
+      orgId: asString(org.id),
+      name,
+      sealedDek: Buffer.alloc(1),
+      sealedData: Buffer.alloc(1),
+      keyVersion: 1,
+    })
+    .returning();
+  if (row === undefined) throw new Error(`failed to insert cluster ${name}`);
+  createdClusterIds.push(row.id);
+  return row.id;
+}
 
 describe("outage resilience", () => {
   it("un-hides and re-proposes instead of dropping when the counters reset", async () => {
@@ -1004,6 +1028,127 @@ describe("outage resilience", () => {
     await mongo.db("inttest").collection("orders").dropIndex("outage_1");
   });
 
+  // The Definition of Done of the change that made storage independent of the
+  // collect cadence. An idle index and a cluster we lost both stop producing new
+  // rows, and the engine has to keep telling them apart: the first is the finding
+  // it exists to make, the second the one it must refuse. What separates them is
+  // that a run is a positive claim — we looked at last_seen_at and it was still
+  // this — where an outage has nothing to say.
+  it("drops an idle index whose run is still being extended", async () => {
+    // Inserted rather than connected: classifyCluster reads only postgres, and
+    // dialing would spend the outbound-dial budget the later scenarios need.
+    const idleId = await bareCluster("Idle Run Cluster");
+
+    const now = Date.now();
+    const monthAgo = now - 30 * 86_400_000;
+    const spec = {
+      name: "idle_run_1",
+      keys: [{ field: "idle", direction: 1 }],
+      unique: false,
+      ttl: false,
+      partial: false,
+      partialFilter: null,
+      sparse: false,
+      hidden: false,
+      isShardKey: false,
+      collation: null,
+    };
+    // ONE row for thirty days of collects, because the counter never moved —
+    // which is the whole storage saving, expressed as a fixture.
+    await insertSnapshots(db, [
+      {
+        clusterId: idleId,
+        database: "inttest",
+        collection: "idlerun",
+        indexName: "idle_run_1",
+        spec,
+        sizeBytes: 8192,
+        perMember: [{ member: "m1", ops: 0, since: new Date(monthAgo - 86_400_000).toISOString() }],
+        capturedAt: new Date(monthAgo),
+        lastSeenAt: new Date(now),
+        observations: 120,
+      },
+    ]);
+    // The collection itself was busy, or the activity gate is right to refuse.
+    await insertLatency(
+      db,
+      Array.from({ length: 120 }, (_, i) => ({
+        clusterId: idleId,
+        database: "inttest",
+        collection: "idlerun",
+        readOps: (i + 1) * 1000,
+        readLatencyMicros: (i + 1) * 100,
+        writeOps: 0,
+        writeLatencyMicros: 0,
+        capturedAt: new Date(monthAgo + i * 6 * 3_600_000),
+      })),
+    );
+
+    expect(await classifyCluster(idleId)).toBe(1);
+    const [proposal] = await db
+      .select()
+      .from(recommendations)
+      .where(eq(recommendations.clusterId, idleId));
+    expect(proposal?.type).toBe("DROP_UNUSED");
+    expect(proposal?.usageClass).toBe("FLAT_ZERO");
+    // And the score reflects a hundred and twenty collects of evidence, not the
+    // one row holding them.
+    expect(proposal?.score ?? 0).toBeGreaterThan(70);
+  });
+
+  it("refuses the same index when its run stopped being extended", async () => {
+    const lostId = await bareCluster("Lost Run Cluster");
+
+    const now = Date.now();
+    const monthAgo = now - 30 * 86_400_000;
+    // Byte-identical to the fixture above in every respect except one: nothing
+    // has confirmed it for three weeks, because that is when the cluster went
+    // away. Same row count, same observation count, same counters.
+    await insertSnapshots(db, [
+      {
+        clusterId: lostId,
+        database: "inttest",
+        collection: "idlerun",
+        indexName: "idle_run_1",
+        spec: {
+          name: "idle_run_1",
+          keys: [{ field: "idle", direction: 1 }],
+          unique: false,
+          ttl: false,
+          partial: false,
+          partialFilter: null,
+          sparse: false,
+          hidden: false,
+          isShardKey: false,
+          collation: null,
+        },
+        sizeBytes: 8192,
+        perMember: [{ member: "m1", ops: 0, since: new Date(monthAgo - 86_400_000).toISOString() }],
+        capturedAt: new Date(monthAgo),
+        lastSeenAt: new Date(now - 21 * 86_400_000),
+        observations: 120,
+      },
+    ]);
+    await insertLatency(
+      db,
+      Array.from({ length: 120 }, (_, i) => ({
+        clusterId: lostId,
+        database: "inttest",
+        collection: "idlerun",
+        readOps: (i + 1) * 1000,
+        readLatencyMicros: (i + 1) * 100,
+        writeOps: 0,
+        writeLatencyMicros: 0,
+        capturedAt: new Date(monthAgo + i * 6 * 3_600_000),
+      })),
+    );
+
+    expect(await classifyCluster(lostId)).toBe(0);
+    expect(
+      await db.select().from(recommendations).where(eq(recommendations.clusterId, lostId)),
+    ).toHaveLength(0);
+  });
+
   it("withholds usage-based drops when the snapshot history has a hole", async () => {
     // A cluster whose only history predates a long gap must not have its
     // indexes declared unused. Fresh cluster, snapshots aged a month.
@@ -1016,7 +1161,8 @@ describe("outage resilience", () => {
     createdClusterIds.push(gappedId);
 
     const old = Date.now() - 30 * 86_400_000;
-    await db.insert(indexSnapshots).values(
+    await insertSnapshots(
+      db,
       [0, 1, 2].map((day) => ({
         clusterId: gappedId,
         database: "inttest",
@@ -1084,7 +1230,7 @@ describe("outage resilience", () => {
     // an index nobody uses.
     const counterStart = new Date(base).toISOString();
     const afterRestart = new Date(base + 2.5 * 86_400_000).toISOString();
-    await db.insert(indexSnapshots).values([
+    await insertSnapshots(db, [
       {
         clusterId: restartId,
         database: "inttest",
@@ -1469,7 +1615,8 @@ describe("an index the engine is still watching", () => {
       collation: null,
     };
     const since = new Date(base - 86_400_000).toISOString();
-    await db.insert(indexSnapshots).values(
+    await insertSnapshots(
+      db,
       Array.from({ length: 20 }, (_, i) => ({
         clusterId: watchId,
         database: "inttest",
@@ -1484,7 +1631,8 @@ describe("an index the engine is still watching", () => {
 
     // The collection has to have been genuinely queried, or the activity gate
     // (correctly) refuses any usage claim about its indexes.
-    await db.insert(latencySamples).values(
+    await insertLatency(
+      db,
       Array.from({ length: 20 }, (_, i) => ({
         clusterId: watchId,
         database: "inttest",
@@ -1559,7 +1707,15 @@ describe("engine-chosen change window", () => {
 
     // Five days of collects at the 6h cadence. Cumulative counters, quiet
     // overnight (00-06 UTC) and busy through the working day.
+    //
+    // Anchored to the last few days rather than to a fixed calendar month: the
+    // inference reads a bounded window of recent history, because the window is
+    // meant to track a workload that shifts. A fixture pinned to June kept working
+    // only until June was far enough back to be excluded.
     const perBucket = [40, 900, 1200, 700];
+    const midnight = new Date();
+    midnight.setUTCHours(0, 0, 0, 0);
+    const start = midnight.getTime() - 6 * 86_400_000;
     let ops = 0;
     const samples = [];
     for (let day = 0; day < 5; day++) {
@@ -1572,12 +1728,12 @@ describe("engine-chosen change window", () => {
           readLatencyMicros: 0,
           writeOps: 0,
           writeLatencyMicros: 0,
-          capturedAt: new Date(Date.UTC(2026, 5, 1 + day, bucket * 6, 0, 0)),
+          capturedAt: new Date(start + day * 86_400_000 + bucket * 6 * 3_600_000),
         });
         ops += perBucket[bucket] ?? 0;
       }
     }
-    await db.insert(latencySamples).values(samples);
+    await insertLatency(db, samples);
 
     // No policies row exists for this cluster — the engine must create one.
     const inferred = await refreshInferredWindow(db, windowClusterId);
@@ -1874,7 +2030,13 @@ describe("plan limits", () => {
 // has to be enforced rather than advertised. Two orgs on different plans keep
 // different amounts of the same kind of row.
 describe("retention follows the plan", () => {
-  it("keeps a FREE org's history for less time than a SCALE org's", async () => {
+  // Retention is two separate things now, and this pins both.
+  //
+  // DELETION runs one cutoff for the whole deployment — the longest any plan may
+  // see — so rows outlive the window a given org is entitled to. VISIBILITY is the
+  // per-plan window, applied on every read. That split is what lets an upgrade hand
+  // a customer their history back at once instead of making them wait it out.
+  it("keeps a downgraded org's rows but stops showing them", async () => {
     const session = await signUp("retention");
     createdEmails.push(session.email);
     const orgId = await giveRoom(session);
@@ -1887,36 +2049,84 @@ describe("retention follows the plan", () => {
 
     // 120 days old: inside SCALE's year, outside FREE's 90 days.
     const captured = new Date(Date.now() - 120 * 86_400_000);
-    const sample = () => ({
-      clusterId: retentionClusterId,
-      database: "inttest",
-      collection: "orders",
-      readOps: 1,
-      readLatencyMicros: 1,
-      writeOps: 0,
-      writeLatencyMicros: 0,
-      capturedAt: captured,
-    });
+    await insertLatency(db, [
+      {
+        clusterId: retentionClusterId,
+        database: "retention",
+        collection: "aged",
+        readOps: 1,
+        readLatencyMicros: 1,
+        writeOps: 0,
+        writeLatencyMicros: 0,
+        capturedAt: captured,
+      },
+    ]);
 
-    await db.insert(latencySamples).values(sample());
+    const visibleCollections = async (): Promise<string[]> => {
+      const body = asRecord(
+        await (await api(`/clusters/${retentionClusterId}/latency`, session)).json(),
+      );
+      const rows = Array.isArray(body.collections) ? body.collections.map(asRecord) : [];
+      return rows.map((row) => asString(row.collection));
+    };
+
+    // On SCALE the row is inside the entitlement, so it is both kept and shown.
     await pruneOldSamples();
-    const keptOnScale = await db
-      .select()
-      .from(latencySamples)
-      .where(eq(latencySamples.clusterId, retentionClusterId));
-    expect(keptOnScale.length).toBeGreaterThan(0);
+    expect(
+      await db
+        .select()
+        .from(latencySamples)
+        .where(eq(latencySamples.clusterId, retentionClusterId)),
+    ).toHaveLength(1);
+    expect(await visibleCollections()).toContain("aged");
 
+    // Downgrade. The row is now outside what FREE may see, but well inside the
+    // deployment's physical window — so it stays on disk and stops being served.
     await db.update(organizations).set({ plan: "FREE" }).where(eq(organizations.id, orgId));
     await pruneOldSamples();
-    const keptOnFree = await db
-      .select()
-      .from(latencySamples)
-      .where(eq(latencySamples.clusterId, retentionClusterId));
-    expect(keptOnFree).toHaveLength(0);
+    expect(
+      await db
+        .select()
+        .from(latencySamples)
+        .where(eq(latencySamples.clusterId, retentionClusterId)),
+    ).toHaveLength(1);
+    expect(await visibleCollections()).not.toContain("aged");
+
+    // Upgrading again returns it immediately — the point of keeping it.
+    await db.update(organizations).set({ plan: "SCALE" }).where(eq(organizations.id, orgId));
+    expect(await visibleCollections()).toContain("aged");
   });
 
-  // Storage is the operator's bill, so RETENTION_DAYS caps every plan. A plan
-  // may keep less than the ceiling; it may never keep more.
+  it("deletes what nobody could ever be entitled to", async () => {
+    const session = await signUp("retention-hard");
+    createdEmails.push(session.email);
+    await giveRoom(session);
+    const created = await api("/clusters", session, {
+      method: "POST",
+      body: JSON.stringify({ name: "Hard Retention Cluster", connectionString: MONGO_URL }),
+    });
+    const hardId = asString(asRecord(await created.json()).id);
+    createdClusterIds.push(hardId);
+
+    // Past the longest plan's window, so no plan could show it and nothing keeps it.
+    await insertLatency(db, [
+      {
+        clusterId: hardId,
+        database: "retention",
+        collection: "ancient",
+        readOps: 1,
+        readLatencyMicros: 1,
+        writeOps: 0,
+        writeLatencyMicros: 0,
+        capturedAt: new Date(Date.now() - 400 * 86_400_000),
+      },
+    ]);
+    await pruneOldSamples();
+    expect(
+      await db.select().from(latencySamples).where(eq(latencySamples.clusterId, hardId)),
+    ).toHaveLength(0);
+  });
+
   it("lets the operator cap a plan that would keep more", async () => {
     const session = await signUp("retention-cap");
     createdEmails.push(session.email);
@@ -1928,16 +2138,18 @@ describe("retention follows the plan", () => {
     const cappedClusterId = asString(asRecord(await created.json()).id);
     createdClusterIds.push(cappedClusterId);
 
-    await db.insert(latencySamples).values({
-      clusterId: cappedClusterId,
-      database: "inttest",
-      collection: "orders",
-      readOps: 1,
-      readLatencyMicros: 1,
-      writeOps: 0,
-      writeLatencyMicros: 0,
-      capturedAt: new Date(Date.now() - 120 * 86_400_000),
-    });
+    await insertLatency(db, [
+      {
+        clusterId: cappedClusterId,
+        database: "inttest",
+        collection: "orders",
+        readOps: 1,
+        readLatencyMicros: 1,
+        writeOps: 0,
+        writeLatencyMicros: 0,
+        capturedAt: new Date(Date.now() - 120 * 86_400_000),
+      },
+    ]);
 
     const previous = process.env.RETENTION_DAYS;
     process.env.RETENTION_DAYS = "7";
@@ -1999,7 +2211,8 @@ describe("retiring a narrowed index", () => {
       ["a_1_b_1_c_1", ["a", "b", "c"]],
       ["a_1_b_1", ["a", "b"]],
     ] as const) {
-      await db.insert(indexSnapshots).values(
+      await insertSnapshots(
+        db,
         Array.from({ length: 20 }, (_, i) => ({
           clusterId: narrowId,
           database: "inttest",
@@ -2012,7 +2225,8 @@ describe("retiring a narrowed index", () => {
         })),
       );
     }
-    await db.insert(latencySamples).values(
+    await insertLatency(
+      db,
       Array.from({ length: 20 }, (_, i) => ({
         clusterId: narrowId,
         database: "inttest",
@@ -2055,10 +2269,12 @@ describe("retiring a narrowed index", () => {
 
     // Someone dropped the long index by hand. The proposal can never be
     // actioned now, so it has to be retracted rather than sit there forever.
+    // Deleting the dimension row cascades to its snapshots, which is what a
+    // retention sweep eventually does to an index nobody collects any more.
     await db
-      .delete(indexSnapshots)
+      .delete(clusterIndexes)
       .where(
-        and(eq(indexSnapshots.clusterId, narrowId), eq(indexSnapshots.indexName, "a_1_b_1_c_1")),
+        and(eq(clusterIndexes.clusterId, narrowId), eq(clusterIndexes.indexName, "a_1_b_1_c_1")),
       );
     await classifyCluster(narrowId);
     expect(
@@ -2176,7 +2392,7 @@ describe("finished decisions age out, the ROI they earned does not", () => {
 // cluster and choose in JS.
 describe("probe baselines", () => {
   it("takes the newest sample per namespace, and only one per namespace", async () => {
-    await db.insert(latencySamples).values([
+    await insertLatency(db, [
       // Two namespaces, three captures each, deliberately inserted out of order.
       {
         clusterId,
@@ -2239,6 +2455,289 @@ describe("probe baselines", () => {
     expect(byNs.get("a")?.readLatencyMicros).toBe(300);
     // And the 02-04 row for b, not the 02-03 one.
     expect(byNs.get("b")?.readOps).toBe(90);
+  });
+});
+
+// Storage used to grow with the collect cadence rather than with the cluster:
+// every look rewrote each index's spec and identity, and rewrote an unchanged
+// counter beside them. Two collects in a row is the smallest experiment that
+// shows both halves fixed — nothing about the cluster changed between them, so
+// nothing new should have been written.
+describe("collecting twice writes almost nothing the second time", () => {
+  let runClusterId = "";
+  let runSession: Session;
+
+  beforeAll(async () => {
+    // Its own account, because this one needs a REAL connection and the
+    // outbound-dial budget is per user — spending another of owner's would be
+    // charged to whichever later scenario happened to run out.
+    runSession = await signUp("runlength");
+    createdEmails.push(runSession.email);
+    await giveRoom(runSession);
+    const res = await api("/clusters", runSession, {
+      method: "POST",
+      body: JSON.stringify({ name: "Run Length Cluster", connectionString: MONGO_URL }),
+    });
+    expect(res.status).toBe(200);
+    runClusterId = asString(asRecord(await res.json()).id);
+    createdClusterIds.push(runClusterId);
+  });
+
+  it("extends the runs it has instead of inserting a row per index", async () => {
+    // Two collects driven from here rather than left to the scheduler: connecting
+    // only enqueues a tick, and the suite runs no worker.
+    await collectCluster(runClusterId);
+    const before = await db
+      .select({ id: indexSnapshots.id })
+      .from(indexSnapshots)
+      .where(eq(indexSnapshots.clusterId, runClusterId));
+    const dimensionsBefore = await db
+      .select({ id: clusterIndexes.id })
+      .from(clusterIndexes)
+      .where(eq(clusterIndexes.clusterId, runClusterId));
+    expect(before.length).toBeGreaterThan(0);
+    // The first look is a run of one for every index it saw.
+    expect(dimensionsBefore.length).toBe(before.length);
+
+    await collectCluster(runClusterId);
+
+    const after = await db
+      .select()
+      .from(indexSnapshots)
+      .where(eq(indexSnapshots.clusterId, runClusterId));
+    const dimensionsAfter = await db
+      .select({ id: clusterIndexes.id })
+      .from(clusterIndexes)
+      .where(eq(clusterIndexes.clusterId, runClusterId));
+
+    // The spec and the identity are constants of the index, so the second look
+    // added no dimension rows at all.
+    expect(dimensionsAfter.length).toBe(dimensionsBefore.length);
+
+    // And most indexes went untouched between the two collects, so their rows
+    // were extended rather than duplicated. Not all — the control plane is
+    // querying this very cluster, so a few counters legitimately moved.
+    const extended = after.filter((row) => row.observations > 1);
+    expect(extended.length).toBeGreaterThan(0);
+    expect(after.length).toBeLessThan(before.length * 2);
+
+    // An extended run keeps the moment the state was FIRST seen and moves only
+    // the moment it was last confirmed. Losing captured_at would erase how long
+    // the index has been idle, which is most of the evidence behind a drop.
+    for (const row of extended) {
+      expect(row.lastSeenAt.getTime()).toBeGreaterThan(row.capturedAt.getTime());
+      // And it records how wide its own interior grew, so the trust gate can check
+      // for a hole inside the run instead of taking the collector's ceiling on
+      // faith. Two collects back to back, so the interval is small but real —
+      // exactly the span between the two lastSeenAt values.
+      expect(row.maxGapMs).toBeGreaterThan(0);
+      expect(row.maxGapMs).toBeLessThanOrEqual(row.lastSeenAt.getTime() - row.capturedAt.getTime());
+    }
+    // A run of one has no interior and must say so, rather than inheriting a
+    // neighbour's number.
+    for (const row of after.filter((candidate) => candidate.observations === 1)) {
+      expect(row.maxGapMs).toBe(0);
+    }
+  });
+
+  it("still reports an extended index in the collection footprint", async () => {
+    // getCollections used to read the newest BATCH of inserts, which an idle
+    // index is no longer part of. Every index the last collect saw shares a
+    // last_seen_at instead, extended or inserted.
+    const res = await api(`/clusters/${runClusterId}/collections`, runSession);
+    expect(res.status).toBe(200);
+    const body = asRecord(await res.json());
+    const collections = Array.isArray(body.collections) ? body.collections : [];
+    expect(collections.length).toBeGreaterThan(0);
+    const counted = collections
+      .map((entry) => asRecord(entry))
+      .reduce((sum, entry) => sum + Number(entry.indexCount), 0);
+    // As many indexes as the newest collect saw — which, since nothing was
+    // dropped between the two, is every index with a dimension row.
+    const dimensions = await db
+      .select({ id: clusterIndexes.id })
+      .from(clusterIndexes)
+      .where(eq(clusterIndexes.clusterId, runClusterId));
+    expect(counted).toBe(dimensions.length);
+  });
+
+  // Extending a run rewrites two columns that are NOT part of what makes the run,
+  // and they behave in opposite directions. Both live in the raw UPDATE, so
+  // nothing but a test holds them in place.
+  it("carries the newest size forward and never forgets a hint sighting", async () => {
+    const spec = {
+      name: "ride_along_1",
+      keys: [{ field: "ride", direction: 1 }],
+      unique: false,
+      ttl: false,
+      partial: false,
+      partialFilter: null,
+      sparse: false,
+      hidden: false,
+      isShardKey: false,
+      collation: null,
+    };
+    const started = new Date(Date.now() - 3 * 86_400_000);
+    await insertSnapshots(db, [
+      {
+        clusterId: runClusterId,
+        database: "ride",
+        collection: "along",
+        indexName: "ride_along_1",
+        spec,
+        sizeBytes: 1024,
+        perMember: [{ member: "m1", ops: 7 }],
+        // Seen being hinted once, three days ago.
+        hinted: true,
+        capturedAt: started,
+        lastSeenAt: started,
+        observations: 1,
+      },
+    ]);
+    const [before] = await db
+      .select({ id: indexSnapshots.id })
+      .from(indexSnapshots)
+      .innerJoin(clusterIndexes, eq(indexSnapshots.indexId, clusterIndexes.id))
+      .where(eq(clusterIndexes.database, "ride"));
+    if (before === undefined) throw new Error("fixture row missing");
+
+    // The same counter seen again, on a bigger index, with no hint in this
+    // profiler window.
+    const now = new Date();
+    await db.execute(sql`
+      update ${indexSnapshots} as s
+      set last_seen_at = ${now},
+          observations = s.observations + 1,
+          size_bytes = v.size_bytes,
+          hinted = s.hinted or v.hinted
+      from unnest(${sql.param([before.id])}::uuid[], ${sql.param([9999])}::bigint[], ${sql.param([false])}::boolean[])
+        as v(id, size_bytes, hinted)
+      where s.id = v.id
+    `);
+
+    const [after] = await db.select().from(indexSnapshots).where(eq(indexSnapshots.id, before.id));
+    // Size is a ride-along, replaced with the live reading, because every caller
+    // wants the current number and nothing reads the size series.
+    expect(after?.sizeBytes).toBe(9999);
+    // Hint is sticky. One sighting anywhere in the retained history is what stops
+    // this index being auto-dropped — hiding a hinted index makes mongod reject
+    // those queries outright — so a later quiet collect must not clear it.
+    expect(after?.hinted).toBe(true);
+    // And the run kept its start while moving only its end.
+    expect(after?.capturedAt.getTime()).toBe(started.getTime());
+    expect(after?.observations).toBe(2);
+  });
+
+  // The invariant every reader leans on, held by the database rather than by the
+  // writer's good behaviour. Readers find holes by differencing
+  // `previous.last_seen_at → next.captured_at`, so an overlap is a NEGATIVE gap —
+  // which reads as no gap at all. Exactly the failure this change was careful
+  // about, arriving by the back door.
+  it("refuses two runs for one index that overlap in time", async () => {
+    const spec = {
+      name: "overlap_probe_1",
+      keys: [{ field: "overlap", direction: 1 }],
+      unique: false,
+      ttl: false,
+      partial: false,
+      partialFilter: null,
+      sparse: false,
+      hidden: false,
+      isShardKey: false,
+      collation: null,
+    };
+    const base = Date.now() - 10 * 86_400_000;
+    const fixture = (capturedAt: Date, lastSeenAt: Date, ops: number) => ({
+      clusterId: runClusterId,
+      database: "overlap",
+      collection: "probe",
+      indexName: "overlap_probe_1",
+      spec,
+      sizeBytes: 1024,
+      perMember: [{ member: "m1", ops }],
+      capturedAt,
+      lastSeenAt,
+      observations: 4,
+    });
+
+    // A run covering days 0-3.
+    await insertSnapshots(db, [fixture(new Date(base), new Date(base + 3 * 86_400_000), 0)]);
+    // A second run starting inside it — a clock that stepped back, or two collects
+    // racing. Must not be storable.
+    await expect(
+      insertSnapshots(db, [
+        fixture(new Date(base + 86_400_000), new Date(base + 5 * 86_400_000), 1),
+      ]),
+    ).rejects.toThrow();
+    // And a run that starts after it ends is fine.
+    await insertSnapshots(db, [
+      fixture(new Date(base + 4 * 86_400_000), new Date(base + 6 * 86_400_000), 1),
+    ]);
+    const runs = await db
+      .select({ id: indexSnapshots.id })
+      .from(indexSnapshots)
+      .innerJoin(clusterIndexes, eq(indexSnapshots.indexId, clusterIndexes.id))
+      .where(eq(clusterIndexes.database, "overlap"));
+    expect(runs).toHaveLength(2);
+  });
+
+  it("keeps a run that is still live and prunes one that ended", async () => {
+    // Retention moved to last_seen_at. On captured_at it would have deleted the
+    // row an idle index is still living in the moment its START aged out —
+    // taking the only evidence that we are watching it, and handing the trust
+    // gate a hole where there was none.
+    const old = new Date(Date.now() - 400 * 86_400_000);
+    const spec = {
+      name: "retain_probe_1",
+      keys: [{ field: "retain", direction: 1 }],
+      unique: false,
+      ttl: false,
+      partial: false,
+      partialFilter: null,
+      sparse: false,
+      hidden: false,
+      isShardKey: false,
+      collation: null,
+    };
+    await insertSnapshots(db, [
+      // Started over a year ago and confirmed a moment ago: live.
+      {
+        clusterId: runClusterId,
+        database: "retain",
+        collection: "live",
+        indexName: "retain_probe_1",
+        spec,
+        sizeBytes: 1024,
+        perMember: [{ member: "m1", ops: 0 }],
+        capturedAt: old,
+        lastSeenAt: new Date(),
+        observations: 500,
+      },
+      // Started and finished over a year ago: history, and prunable.
+      {
+        clusterId: runClusterId,
+        database: "retain",
+        collection: "ended",
+        indexName: "retain_probe_1",
+        spec,
+        sizeBytes: 1024,
+        perMember: [{ member: "m1", ops: 0 }],
+        capturedAt: old,
+        lastSeenAt: old,
+        observations: 1,
+      },
+    ]);
+
+    await pruneOldSamples();
+
+    const left = await db
+      .select({ collection: clusterIndexes.collection })
+      .from(indexSnapshots)
+      .innerJoin(clusterIndexes, eq(indexSnapshots.indexId, clusterIndexes.id))
+      .where(
+        and(eq(indexSnapshots.clusterId, runClusterId), eq(clusterIndexes.database, "retain")),
+      );
+    expect(left.map((row) => row.collection)).toEqual(["live"]);
   });
 });
 

@@ -144,10 +144,15 @@ export class ClustersController {
         .where(eq(clusters.orgId, orgId))
         .orderBy(desc(clusters.createdAt));
       // One grouped query for freshness rather than one per cluster.
+      //
+      // max(last_seen_at), not max(captured_at): a cluster whose indexes are all
+      // idle stops writing new rows and only extends the ones it has, so
+      // captured_at would freeze at the last time anything changed and the
+      // dashboard would report a healthy cluster as last collected weeks ago.
       const freshness = await this.database.db
         .select({
           clusterId: indexSnapshots.clusterId,
-          lastCollectedAt: sql<Date | null>`max(${indexSnapshots.capturedAt})`,
+          lastCollectedAt: sql<Date | null>`max(${indexSnapshots.lastSeenAt})`,
         })
         .from(indexSnapshots)
         .where(

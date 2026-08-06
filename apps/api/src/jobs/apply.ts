@@ -1,8 +1,10 @@
 import { dynamicObserveDays, inChangeWindow } from "../analysis";
+import { runFrom } from "../analysis/types";
 import { entitledAutomation } from "../billing/plans";
 import {
   actions,
   and,
+  clusterIndexes,
   type Database,
   eq,
   gte,
@@ -16,7 +18,7 @@ import { serializeSpec } from "../mongo";
 import { effectiveChangeWindow } from "./change-window";
 import { openClusterSession } from "./cluster-connection";
 import { jobDb } from "./db";
-import { planForCluster } from "./plan";
+import { historyWindow, planForCluster } from "./plan";
 import { preflightDrop } from "./preflight";
 
 const DROP_TYPES = new Set(["DROP_UNUSED", "DROP_REDUNDANT", "MERGE"]);
@@ -92,11 +94,19 @@ export async function applyCluster(clusterId: string): Promise<number> {
   // When collection for this cluster began. An index first seen well after
   // that appeared on our watch, so its age is knowable; one present from the
   // start could be any age at all.
+  //
+  // Read off the DIMENSION table, not the time series. A dimension row is created
+  // the first time an index is seen in a shape, so its min(created_at) is the same
+  // instant the old min(captured_at) found — over one row per index rather than one
+  // per index per collect, and covered by cluster_indexes_cluster. The snapshot
+  // table's own index leads with last_seen_at now, so the old query would have
+  // become a full scan of the cluster's history on every tick inside the window.
   const [watch] = await db
-    .select({ since: sql<Date | null>`min(${indexSnapshots.capturedAt})` })
-    .from(indexSnapshots)
-    .where(eq(indexSnapshots.clusterId, clusterId));
+    .select({ since: sql<Date | null>`min(${clusterIndexes.createdAt})` })
+    .from(clusterIndexes)
+    .where(eq(clusterIndexes.clusterId, clusterId));
   const watchingSince = watch?.since == null ? null : new Date(watch.since).toISOString();
+  const since = await historyWindow(db, clusterId);
 
   const { session, readOnly, release } = await openClusterSession(db, clusterId);
   try {
@@ -128,19 +138,34 @@ export async function applyCluster(clusterId: string): Promise<number> {
       // history: periodic usage extends it (a monthly job must get a chance to
       // run inside the window), long-proven idleness shortens it.
       const historyRows = await db
-        .select()
+        .select({
+          capturedAt: indexSnapshots.capturedAt,
+          lastSeenAt: indexSnapshots.lastSeenAt,
+          observations: indexSnapshots.observations,
+          maxGapMs: indexSnapshots.maxGapMs,
+          perMember: indexSnapshots.perMember,
+        })
         .from(indexSnapshots)
+        .innerJoin(clusterIndexes, eq(indexSnapshots.indexId, clusterIndexes.id))
         .where(
           and(
             eq(indexSnapshots.clusterId, clusterId),
-            eq(indexSnapshots.database, rec.database),
-            eq(indexSnapshots.collection, rec.collection),
-            eq(indexSnapshots.indexName, rec.indexName),
+            // Every cluster_indexes index leads with cluster_id, so without this
+            // the namespace predicates cannot use one and each recommendation in
+            // the loop costs a scan of the whole dimension table.
+            eq(clusterIndexes.clusterId, clusterId),
+            eq(clusterIndexes.database, rec.database),
+            eq(clusterIndexes.collection, rec.collection),
+            eq(clusterIndexes.indexName, rec.indexName),
+            // The plan's window, applied here rather than by deletion — the observe
+            // length is derived from this history, so an org must not get a window
+            // sized on evidence it is not entitled to.
+            gte(indexSnapshots.lastSeenAt, since),
           ),
         );
       const window = dynamicObserveDays(
         historyRows.map((row) => ({
-          capturedAt: row.capturedAt.toISOString(),
+          ...runFrom(row),
           ops: row.perMember.reduce((sum, member) => sum + member.ops, 0),
         })),
         policy?.observeWindowDays ?? DEFAULT_OBSERVE_DAYS,

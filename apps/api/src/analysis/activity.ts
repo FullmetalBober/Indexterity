@@ -22,34 +22,14 @@
 // HOURS, and the engine would start calling indexes dead on it — with no code
 // change and no test failure. Hours mean the same thing at every cadence.
 
-export interface ActivityPoint {
-  readonly capturedAt: string;
+import { medianObservationGap, type Run, sortedRuns, spanEnd, spanStart } from "./types";
+
+export interface ActivityPoint extends Run {
   // Cumulative reads for the collection, as $collStats reports them.
   readonly readOps: number;
 }
 
 const HOUR_MS = 3_600_000;
-
-// The typical gap between samples, taken from the data rather than from a
-// configured cadence — the engine is pure and does not know what the scheduler
-// is set to, and a cluster's history can span a cadence change anyway.
-function medianGap(times: readonly number[]): number {
-  const gaps: number[] = [];
-  for (let i = 1; i < times.length; i++) {
-    const previous = times[i - 1];
-    const current = times[i];
-    if (previous === undefined || current === undefined) continue;
-    gaps.push(current - previous);
-  }
-  if (gaps.length === 0) return 0;
-  gaps.sort((a, b) => a - b);
-  const middle = Math.floor(gaps.length / 2);
-  const lower = gaps[middle - 1];
-  const upper = gaps[middle];
-  if (upper === undefined) return 0;
-  // Even count: the mean of the two middle gaps. Odd: the middle one.
-  return gaps.length % 2 === 0 && lower !== undefined ? (lower + upper) / 2 : upper;
-}
 
 // Hours in which the collection served at least one read.
 //
@@ -64,13 +44,18 @@ function medianGap(times: readonly number[]): number {
 // had moved anywhere inside it, and one outage could manufacture the three days
 // of evidence a drop needs. What is known about a long interval is that the
 // collection was used *somewhere* in it, not that it was used throughout.
+//
+// Run-length changes where the traffic can be, and it is worth being precise
+// about it. A run is a stretch over which the counter did NOT move, so it
+// contributes no active time at all, however long it is and however many
+// collects confirmed it. All the traffic sits in the gaps BETWEEN runs — from
+// the moment a state was last confirmed to the moment the next one was first
+// seen. Crediting a run's own length would be the serious error available here:
+// a collection idle for a month would report a month of activity, and idleness
+// would start funding the drops it is meant to withhold.
 export function activeHours(points: readonly ActivityPoint[]): number {
-  const sorted = [...points]
-    .map((point) => ({ time: new Date(point.capturedAt).getTime(), readOps: point.readOps }))
-    .filter((point) => Number.isFinite(point.time))
-    .sort((a, b) => a.time - b.time);
-
-  const cap = medianGap(sorted.map((point) => point.time));
+  const sorted = sortedRuns(points);
+  const cap = medianObservationGap(sorted);
   if (cap === 0) return 0;
 
   let activeMs = 0;
@@ -79,7 +64,7 @@ export function activeHours(points: readonly ActivityPoint[]): number {
     const current = sorted[i];
     if (previous === undefined || current === undefined) continue;
     const delta = current.readOps - previous.readOps;
-    if (delta > 0) activeMs += Math.min(current.time - previous.time, cap);
+    if (delta > 0) activeMs += Math.min(spanStart(current) - spanEnd(previous), cap);
   }
   return activeMs / HOUR_MS;
 }

@@ -19,7 +19,9 @@ load-bearing choice and whether it is still open: [`docs/decisions.md`](./docs/d
    The admin string is used once and never persisted; only the scoped one is
    stored, sealed with envelope encryption.
 2. **Collect** every 6h via `$indexStats` / `$collStats` — usage, sizes,
-   per-collection read/write latency. Never your documents.
+   per-collection read/write latency. Never your documents. What gets *stored* is
+   only what changed: an index's shape is written once, and an unchanged counter
+   extends the row it already has instead of adding another.
 3. **Decide** with a pure analysis engine (`apps/api/src/analysis` — no I/O, so
    it is unit-tested without a database or a cluster).
 4. **Apply** safely: `hide → observe → drop` for removals, `build` for
@@ -234,10 +236,27 @@ deletes anything: an org over its new limit keeps what it has and simply cannot
 add more, and an auto-approve score saved on a paid plan stops being obeyed
 without being erased — it comes back on upgrading.
 
-History is enforced, not advertised: the prune job groups clusters by their
-org's plan and applies a cutoff per group. `RETENTION_DAYS` remains the
-operator's ceiling — storage is their bill, so a plan may keep less than the cap
-but never more.
+History is enforced, not advertised — but **enforced on read, not by deletion**.
+Two questions with different answers: how long rows are *kept*, and how much of
+them a plan may *see*. Deletion runs one cutoff for the whole deployment (the
+longest window any plan could claim), so it sweeps a contiguous range instead of
+hunting rows tenant by tenant. The plan's own window is applied at every read of
+the time-series tables — the engine's reads as much as the dashboard's, since a
+longer series is precisely what lets the engine call an index unused at all.
+
+So **an upgrade returns your history at once.** Before, a free org moving to a
+paid plan got nothing extra until ninety more days had passed, because the rows
+it was newly entitled to had already been deleted. Now they were there all along,
+merely out of view. It costs very little, because run-length storage means an
+idle index is one row whether it is retained for ninety days or a year.
+
+`RETENTION_DAYS` remains the operator's ceiling and caps both halves — storage is
+their bill, so a plan may keep less than the cap but never more. Rows past the
+longest plan's window are deleted outright: nobody could ever be entitled to
+them. Settled recommendations still age out on their own plan's clock, because
+"we kept last year's decisions and merely stopped showing them to you" is a
+different promise from "we deleted them", and that table does not grow per
+collect anyway.
 
 **`SELF_HOSTED` is not a tier anyone buys.** It is the BUSL Additional Use Grant
 expressed as entitlements — one production cluster, everything else on — and it
@@ -470,6 +489,34 @@ Both defaults exist because the control plane dials hosts that users name.
 Index names, field names, collection names, and counters — sizes, op counts,
 latency totals. Not documents: the provisioned role cannot read them, so there
 is nothing to store.
+
+**And it lands once.** Storage tracks how much a cluster *changes*, not how often
+we look at it. An index's shape and its `(database, collection, name)` are
+constants of the index, so they live in one `cluster_indexes` row rather than
+being rewritten on every collect — the spec alone was two thirds of a snapshot
+row and 2.4× the counter it accompanied. The counter itself is stored as a **run**:
+a row covers `[capturedAt, lastSeenAt]`, and a collect that finds it unchanged
+moves the end forward instead of inserting a duplicate. Simulated over a year at
+the 6h cadence, the two together are **86% smaller** (30% from the shape alone),
+and an index nobody touches costs **one row instead of 1,460**.
+
+That is what makes collecting more often a load question rather than a storage
+bill — but the reason it needed care is the other direction. A hole in the series
+means *"we stopped watching, so absence of usage proves nothing"*, so an idle
+index that simply stopped producing rows would be indistinguishable from a
+cluster we lost, and "cannot tell" would get spelled "all clear". A run is the
+positive form of the claim — **we looked at `lastSeenAt`, and it was still this** —
+and the collector refuses to extend one across a hole the classifier would object
+to, so an outage still shows up as an outage.
+
+Two things hold that rather than one. The collector's refusal is the first, but it
+put half of a safety invariant in a different file from the half that depends on
+it, with nothing in the data to check against — so each run also records the widest
+gap inside its own span, and the classifier *asks* rather than assumes. Overlap is
+ruled out by the database itself, with an exclusion constraint over the interval
+each row covers: readers find holes by differencing one run's end against the
+next's start, so an overlap would be a *negative* gap, which reads as no gap at
+all.
 
 One exception, and it is deliberate. A **partial index** needs the literal value
 in its filter — `partialFilterExpression: { status: "active" }` cannot be built

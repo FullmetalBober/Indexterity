@@ -130,6 +130,55 @@ describe("usageHistoryIsTrustworthy", () => {
     ];
     expect(usageHistoryIsTrustworthy(history, opts, now)).toBe(true);
   });
+
+  // A run says "unchanged throughout", so a hole INSIDE one is invisible to the
+  // between-runs check — the gate would read a single row spanning an outage as a
+  // month of diligent watching. The collector refuses to build such a run, and
+  // these are about not having to take its word for it.
+  it("rejects a run whose own interior has a hole in it", () => {
+    const history: UsageSnapshot[] = [
+      {
+        capturedAt: "2026-02-01T00:00:00Z",
+        lastSeenAt: "2026-03-03T00:00:00Z",
+        observations: 100,
+        // Somewhere in that month we went dark for three weeks. Evenly spaced, the
+        // interior would look like eight-hour intervals and pass.
+        maxGapMs: 21 * 24 * 3_600_000,
+        perMember: [{ member: "m", ops: 0, since: "" }],
+      },
+    ];
+    expect(usageHistoryIsTrustworthy(history, opts, now)).toBe(false);
+  });
+
+  it("accepts a long quiet run that really was watched throughout", () => {
+    const history: UsageSnapshot[] = [
+      {
+        capturedAt: "2026-02-01T00:00:00Z",
+        lastSeenAt: "2026-03-03T00:00:00Z",
+        observations: 124,
+        // The 6h cadence, with one missed collect. Exactly the case run-length
+        // storage exists to make cheap, and it must still be droppable.
+        maxGapMs: 12 * 3_600_000,
+        perMember: [{ member: "m", ops: 0, since: "" }],
+      },
+    ];
+    expect(usageHistoryIsTrustworthy(history, opts, now)).toBe(true);
+  });
+
+  it("trusts a run that cannot say, which is every row written before the column", () => {
+    // Absent maxGapMs reads as zero rather than as suspicious: the alternative
+    // fails closed on the entire existing history and stops the engine proposing
+    // anything until a year of rows has rolled over.
+    const history: UsageSnapshot[] = [
+      {
+        capturedAt: "2026-02-01T00:00:00Z",
+        lastSeenAt: "2026-03-03T00:00:00Z",
+        observations: 124,
+        perMember: [{ member: "m", ops: 0, since: "" }],
+      },
+    ];
+    expect(usageHistoryIsTrustworthy(history, opts, now)).toBe(true);
+  });
 });
 
 describe("countersRestartedDuring", () => {
@@ -311,5 +360,100 @@ describe("idle databases: activity, not elapsed time", () => {
   it("still fails on the older rules regardless of activity", () => {
     const thin = history.slice(0, 2);
     expect(usageHistoryIsTrustworthy(thin, opts, now, 500)).toBe(false);
+  });
+});
+
+// The reason run-length storage needed care rather than just an ALTER TABLE.
+//
+// An index nobody touches now costs ONE row: the counters never move, so the
+// collector extends the run it already has instead of writing another. A cluster
+// nobody could reach also produces no new rows. The two have to stay
+// distinguishable, because the first is the finding this engine exists to make
+// and the second is the one it must refuse — and if a missing row were the only
+// evidence of either, "cannot tell" would get spelled "all clear".
+//
+// What tells them apart is that the run is a POSITIVE statement: it says we
+// looked at lastSeenAt and it was still this. An outage has no such statement to
+// make, so its newest row stops moving and the hole shows up between two runs.
+describe("an idle index and an unwatched index", () => {
+  const opts = {
+    recentHours: 12,
+    minHistory: 3,
+    minHistoryDays: 7,
+    minActiveHours: 0,
+    maxGapHours: 48,
+  };
+  const now = new Date(Date.UTC(2026, 1, 1));
+  const member = { member: "m", ops: 0, since: "2025-01-01T00:00:00Z" };
+
+  // Thirty days of collects at the 6h cadence that never saw the counter move:
+  // one row, a hundred and twenty observations, still being confirmed.
+  const idle: UsageSnapshot[] = [
+    {
+      capturedAt: new Date(Date.UTC(2026, 0, 2)).toISOString(),
+      lastSeenAt: new Date(Date.UTC(2026, 1, 1)).toISOString(),
+      observations: 120,
+      perMember: [member],
+    },
+  ];
+
+  it("trusts the idle one — one row, but a hundred and twenty looks", () => {
+    expect(usageHistoryIsTrustworthy(idle, opts, now)).toBe(true);
+  });
+
+  it("calls the idle one FLAT_ZERO, which is what makes it droppable", () => {
+    expect(classifyUsage(idle, opts)).toBe("FLAT_ZERO");
+  });
+
+  it("refuses the unwatched one, whose run stopped being extended", () => {
+    // Same shape, same counters, same number of looks — but the last
+    // confirmation is three weeks old, because that is when the cluster went
+    // away. Nothing has said "still true" since.
+    const unwatched: UsageSnapshot[] = [
+      {
+        capturedAt: new Date(Date.UTC(2026, 0, 2)).toISOString(),
+        lastSeenAt: new Date(Date.UTC(2026, 0, 11)).toISOString(),
+        observations: 120,
+        perMember: [member],
+      },
+    ];
+    expect(usageHistoryIsTrustworthy(unwatched, opts, now)).toBe(false);
+  });
+
+  it("refuses a series whose hole falls between two runs", () => {
+    // Watched, lost for three weeks, watched again. Each half is a clean run and
+    // the gap between them is the outage — differencing run STARTS would have
+    // missed it, since the first run's own start is recent enough.
+    const interrupted: UsageSnapshot[] = [
+      {
+        capturedAt: new Date(Date.UTC(2026, 0, 1)).toISOString(),
+        lastSeenAt: new Date(Date.UTC(2026, 0, 5)).toISOString(),
+        observations: 16,
+        perMember: [member],
+      },
+      {
+        capturedAt: new Date(Date.UTC(2026, 0, 26)).toISOString(),
+        lastSeenAt: new Date(Date.UTC(2026, 1, 1)).toISOString(),
+        observations: 24,
+        perMember: [{ ...member, ops: 1 }],
+      },
+    ];
+    expect(usageHistoryIsTrustworthy(interrupted, opts, now)).toBe(false);
+  });
+
+  it("does not read the length of a quiet run as a hole", () => {
+    // The inverse mistake, and the one that would have quietly disabled the
+    // engine rather than endangered it: a month-long run differenced against its
+    // own start looks like a month-long gap, and every idle index on every
+    // cluster would have become un-judgeable.
+    expect(usageHistoryIsTrustworthy(idle, { ...opts, maxGapHours: 48 }, now)).toBe(true);
+  });
+
+  it("counts looks rather than rows for minHistory", () => {
+    // One row. Three collects behind it, so it clears a floor of three; two, and
+    // it does not.
+    const twoLooks: UsageSnapshot[] = [{ ...idle[0], observations: 2 } as UsageSnapshot];
+    expect(usageHistoryIsTrustworthy(twoLooks, opts, now)).toBe(false);
+    expect(usageHistoryIsTrustworthy(idle, opts, now)).toBe(true);
   });
 });

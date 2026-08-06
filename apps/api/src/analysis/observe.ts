@@ -1,5 +1,13 @@
-export interface ObserveUsagePoint {
-  readonly capturedAt: string;
+import {
+  observationGaps,
+  type Run,
+  sortedRuns,
+  spanEnd,
+  spanStart,
+  totalObservations,
+} from "./types";
+
+export interface ObserveUsagePoint extends Run {
   // Ops summed across replica-set members for that snapshot.
   readonly ops: number;
 }
@@ -41,8 +49,19 @@ export interface ObserveContext {
   readonly now: Date;
 }
 
-function daysBetween(a: string, b: string): number {
-  return Math.abs(new Date(b).getTime() - new Date(a).getTime()) / DAY_MS;
+// The longest stretch between two consecutive sightings of this index, in days —
+// the cadence the observe window has to be long enough to contain.
+//
+// Both kinds of stretch count, and observationGaps is the single place that knows
+// what they are: the interval between two sightings inside a run, and the gap from
+// one run's end to the next one's start. Taking a run's whole length instead would
+// be the tempting mistake, and an expensive one in the direction that looks safe —
+// a busy index whose counter happened to hold still for a fortnight would read as
+// a fortnightly job and buy a month of extra observing for a verdict already in.
+//
+// Takes the sorted series, since the caller has one.
+function largestSightingGapDays(sorted: readonly ObserveUsagePoint[]): number {
+  return observationGaps(sorted).reduce((largest, gap) => Math.max(largest, gap.ms), 0) / DAY_MS;
 }
 
 // The observe window an index actually deserves, derived from its own usage
@@ -102,9 +121,7 @@ export function dynamicObserveDays(
   policyDays: number,
   context: ObserveContext = { watchingSince: null, now: new Date() },
 ): ObserveWindow {
-  const sorted = [...history].sort(
-    (a, b) => new Date(a.capturedAt).getTime() - new Date(b.capturedAt).getTime(),
-  );
+  const sorted = sortedRuns(history);
   const active = sorted.filter((point) => point.ops > 0);
 
   // Days since the index first appeared in a snapshot, but only when we were
@@ -114,20 +131,15 @@ export function dynamicObserveDays(
     context.watchingSince === null ? null : new Date(context.watchingSince).getTime();
   let knownTenureDays: number | null = null;
   if (first !== undefined && watchStart !== null && Number.isFinite(watchStart)) {
-    const firstSeen = new Date(first.capturedAt).getTime();
+    const firstSeen = spanStart(first);
     if (firstSeen - watchStart >= TENURE_MARGIN_DAYS * DAY_MS) {
       knownTenureDays = (context.now.getTime() - firstSeen) / DAY_MS;
     }
   }
 
-  if (active.length >= 2) {
-    let largestGap = 0;
-    for (let i = 1; i < active.length; i++) {
-      const prev = active[i - 1];
-      const next = active[i];
-      if (prev === undefined || next === undefined) continue;
-      largestGap = Math.max(largestGap, daysBetween(prev.capturedAt, next.capturedAt));
-    }
+  // Two sightings, not two rows: a run of one row can hold a hundred of them.
+  if (totalObservations(active) >= 2) {
+    const largestGap = largestSightingGapDays(active);
     const gapDays = Math.ceil(largestGap);
     const extended = Math.min(2 * gapDays, Math.max(EXTEND_CAP_DAYS, policyDays));
     if (extended > policyDays) {
@@ -142,10 +154,13 @@ export function dynamicObserveDays(
     // and recent usage means there is still traffic to deliver it. Drop either
     // and hiding the index tells us nothing quickly.
     const lastActive = active.at(-1);
+    // How long since it was last CONFIRMED busy, so the end of the run rather
+    // than its start. Measuring from the start would age a still-running index by
+    // however long its counter had been steady and cost it the fast verdict.
     const quietDays =
       lastActive === undefined
         ? Number.POSITIVE_INFINITY
-        : (context.now.getTime() - new Date(lastActive.capturedAt).getTime()) / DAY_MS;
+        : (context.now.getTime() - spanEnd(lastActive)) / DAY_MS;
     if (largestGap <= DENSE_GAP_DAYS && quietDays <= DENSE_RECENT_DAYS) {
       // Returns even when it cannot shorten — a tight policy is already at or
       // below the floor. This is a positive finding, not a failed attempt at
@@ -184,10 +199,12 @@ export function dynamicObserveDays(
     }
   }
 
-  if (active.length === 0 && sorted.length >= 2) {
+  if (active.length === 0 && totalObservations(sorted) >= 2) {
     const last = sorted.at(-1);
     if (first !== undefined && last !== undefined) {
-      const spanDays = Math.floor(daysBetween(first.capturedAt, last.capturedAt));
+      // First sighting to last confirmation — the whole span we watched it do
+      // nothing, which for an index that never moved is one row.
+      const spanDays = Math.floor((spanEnd(last) - spanStart(first)) / DAY_MS);
       if (spanDays >= 2 * policyDays) {
         const shortened = Math.max(
           Math.min(SHORTEN_FLOOR_DAYS, policyDays),

@@ -1,9 +1,10 @@
-export interface LatencyReading {
+import { type Run, sortedRuns, spanEnd, spanStart, totalObservations } from "./types";
+
+export interface LatencyReading extends Run {
   readonly readOps: number;
   readonly readLatencyMicros: number;
   readonly writeOps: number;
   readonly writeLatencyMicros: number;
-  readonly capturedAt: string; // ISO-8601, sorts lexicographically
 }
 
 export interface LatencyTrend {
@@ -29,22 +30,34 @@ export interface LatencyPoint {
 
 // The chartable series behind summarizeLatency: a windowed µs/op average per
 // consecutive pair of cumulative readings, stamped with the later reading's time.
+//
+// A reading that stood for several collects gets a null point at the end of its
+// run. There is no µs/op to report across it — no ops went through — and a null
+// renders as a gap, which is the honest shape: nothing happened here. Without it
+// the series would jump straight over a quiet week and the x-axis would imply the
+// collection was busy throughout.
 export function latencyPoints(readings: readonly LatencyReading[]): LatencyPoint[] {
-  const sorted = [...readings].sort((a, b) => a.capturedAt.localeCompare(b.capturedAt));
+  const sorted = sortedRuns(readings);
   const points: LatencyPoint[] = [];
-  for (let i = 1; i < sorted.length; i++) {
-    const prev = sorted[i - 1];
-    const next = sorted[i];
-    if (prev === undefined || next === undefined) continue;
+  for (const [i, reading] of sorted.entries()) {
+    if (spanEnd(reading) > spanStart(reading)) {
+      points.push({
+        capturedAt: new Date(spanEnd(reading)).toISOString(),
+        readMicros: null,
+        writeMicros: null,
+      });
+    }
+    const next = sorted[i + 1];
+    if (next === undefined) continue;
     points.push({
       capturedAt: next.capturedAt,
       readMicros: windowAvg(
-        next.readLatencyMicros - prev.readLatencyMicros,
-        next.readOps - prev.readOps,
+        next.readLatencyMicros - reading.readLatencyMicros,
+        next.readOps - reading.readOps,
       ),
       writeMicros: windowAvg(
-        next.writeLatencyMicros - prev.writeLatencyMicros,
-        next.writeOps - prev.writeOps,
+        next.writeLatencyMicros - reading.writeLatencyMicros,
+        next.writeOps - reading.writeOps,
       ),
     });
   }
@@ -60,7 +73,7 @@ function deltaPct(baseline: number | null, current: number | null): number | nul
 // before/after trend. The counters are cumulative, so the average latency during
 // an interval is Δmicros / Δops. Negative delta = latency fell = app got faster.
 export function summarizeLatency(readings: readonly LatencyReading[]): LatencyTrend {
-  const sorted = [...readings].sort((a, b) => a.capturedAt.localeCompare(b.capturedAt));
+  const sorted = sortedRuns(readings);
   const reads: number[] = [];
   const writes: number[] = [];
   for (let i = 1; i < sorted.length; i++) {
@@ -83,7 +96,10 @@ export function summarizeLatency(readings: readonly LatencyReading[]): LatencyTr
   const baselineWrite = writes[0] ?? null;
   const currentWrite = writes[writes.length - 1] ?? null;
   return {
-    samples: sorted.length,
+    // Collects, not rows. This number is shown to the customer as how much we
+    // have watched, and run-length storage would otherwise have it fall as the
+    // history got longer.
+    samples: totalObservations(sorted),
     currentReadMicros: currentRead,
     baselineReadMicros: baselineRead,
     readDeltaPct: deltaPct(baselineRead, currentRead),

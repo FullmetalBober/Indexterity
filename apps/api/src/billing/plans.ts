@@ -80,6 +80,40 @@ const ENTITLEMENTS: Record<Plan, Entitlements> = {
   },
 };
 
+// RETENTION_DAYS is the operator's ceiling, not the plan's number. Storage is the
+// operator's bill, so they can cap it; a plan may keep less than the cap but never
+// more. Unset means the plan decides on its own.
+export function operatorCeilingDays(): number {
+  const envDays = Number(process.env.RETENTION_DAYS);
+  return Number.isFinite(envDays) && envDays > 0 ? envDays : Number.POSITIVE_INFINITY;
+}
+
+// How much history a plan may SEE. Applied at every read of the time-series
+// tables (jobs/plan.ts → historyWindow), because history depth is the thing a
+// paid plan buys: a longer series is what lets the engine call an index unused at
+// all, so it has to be enforced rather than advertised.
+export function effectiveRetentionDays(plan: Plan): number {
+  return Math.min(entitlementsFor(plan).retentionDays, operatorCeilingDays());
+}
+
+// How long rows are actually KEPT, for every org on the deployment.
+//
+// One number, not one per plan, and that is the point. Physical deletion used to
+// run a different cutoff per plan, which meant deleting individual rows scattered
+// through the table; visibility is a read filter now, so the only thing deletion
+// has to guarantee is that nobody can be entitled to a row that is gone. The
+// longest any plan may see satisfies that for all of them at once, and it lets a
+// deployment prune by dropping whole time ranges instead of hunting rows.
+//
+// It also means an upgrade returns the customer's history immediately, rather
+// than their having to wait out the new window to accumulate it — the rows were
+// there all along, merely out of view. Cheap because of run-length storage: an
+// idle index is one row whether it is kept for ninety days or a year.
+export function maxRetentionDays(): number {
+  const longest = Math.max(...PLANS.map((plan) => entitlementsFor(plan).retentionDays));
+  return Math.min(longest, operatorCeilingDays());
+}
+
 export function entitlementsFor(plan: Plan): Entitlements {
   return ENTITLEMENTS[plan];
 }

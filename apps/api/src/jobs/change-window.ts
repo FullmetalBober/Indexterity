@@ -1,32 +1,70 @@
 import { inferChangeWindow, type TrafficSample } from "../analysis";
-import { type Database, eq, latencySamples, policies, sql } from "../db";
+import { runFrom } from "../analysis/types";
+import { and, type Database, eq, gte, latencySamples, policies, sql } from "../db";
+import { workloadKey } from "../engine/ports";
+import { historyWindow } from "./plan";
+
+// How much history the inference reads. See the comment on the query below.
+const INFERENCE_WINDOW_DAYS = 30;
 
 // Refresh the engine-chosen change window from this cluster's own traffic.
 //
-// The samples are per collection; the window is a property of the cluster, so
-// ops are summed per capture before the deltas are taken. Runs after every
-// collect — the window tracks a workload that shifts (a launch in a new region,
-// a batch job moved) instead of being decided once at onboarding.
+// The samples are per collection; the window is a property of the cluster, so the
+// per-namespace rates are summed once each has been reduced on its own timeline.
+// Runs after every collect — the window tracks a workload that shifts (a launch in
+// a new region, a batch job moved) instead of being decided once at onboarding.
 //
 // Returns the window it stored, or null when the evidence did not support one.
 export async function refreshInferredWindow(
   db: Database,
   clusterId: string,
 ): Promise<{ startHour: number; endHour: number } | null> {
+  // Bounded, because this no longer aggregates in SQL. The old query grouped by
+  // captured_at and summed, so it returned one row per collect however long the
+  // history was; a per-namespace read returns one row per namespace per run, which
+  // on a 200-collection cluster at a year's retention is two orders of magnitude
+  // more. A month is well past what the inference can use — it needs three clean
+  // intervals per 6h slot, about three days — and it keeps the window tracking a
+  // workload that shifts rather than averaging in traffic patterns from last
+  // summer. A run that started before the cutoff and is still live has a recent
+  // last_seen_at, so it is still included, span and all.
+  // The later of the two bounds: the inference's own month, and whatever the plan
+  // is entitled to see. Normally the month wins — no plan retains less than that —
+  // but an operator who set RETENTION_DAYS lower must not have the window inferred
+  // from history nobody is allowed to read.
+  const entitled = await historyWindow(db, clusterId);
+  const cutoff = new Date(
+    Math.max(Date.now() - INFERENCE_WINDOW_DAYS * 86_400_000, entitled.getTime()),
+  );
   const rows = await db
     .select({
+      database: latencySamples.database,
+      collection: latencySamples.collection,
       capturedAt: latencySamples.capturedAt,
-      ops: sql<number>`sum(${latencySamples.readOps} + ${latencySamples.writeOps})`,
+      lastSeenAt: latencySamples.lastSeenAt,
+      observations: latencySamples.observations,
+      maxGapMs: latencySamples.maxGapMs,
+      ops: sql<number>`${latencySamples.readOps} + ${latencySamples.writeOps}`,
     })
     .from(latencySamples)
-    .where(eq(latencySamples.clusterId, clusterId))
-    .groupBy(latencySamples.capturedAt);
+    .where(and(eq(latencySamples.clusterId, clusterId), gte(latencySamples.lastSeenAt, cutoff)));
 
-  const samples: TrafficSample[] = rows.map((row) => ({
-    capturedAt: row.capturedAt.toISOString(),
-    ops: Number(row.ops),
-  }));
-  const inferred = inferChangeWindow(samples);
+  // Grouped per namespace, not summed per capture, and that is forced rather
+  // than preferred. This used to `group by captured_at` and sum, which recovered
+  // the cluster's total at an instant because every row of a collect shared that
+  // instant. Runs end where each collection's own traffic changes, so the
+  // timestamps no longer line up: a namespace whose run had not ended yet
+  // contributes no row at the boundary, and the summed total would collapse and
+  // recover at every one of them. inferChangeWindow reduces each namespace on its
+  // own timeline and sums the rates at the end, where they are comparable.
+  const byNamespace = new Map<string, TrafficSample[]>();
+  for (const row of rows) {
+    const key = workloadKey(row.database, row.collection);
+    const series = byNamespace.get(key) ?? [];
+    series.push({ ...runFrom(row), ops: Number(row.ops) });
+    byNamespace.set(key, series);
+  }
+  const inferred = inferChangeWindow([...byNamespace.values()]);
 
   // Upsert, not update: a policies row only exists once an owner has saved
   // one, and the engine must still record its choice for every other cluster.
