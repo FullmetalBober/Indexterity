@@ -1,4 +1,4 @@
-import { oc } from "@orpc/contract";
+import { eventIterator, oc } from "@orpc/contract";
 import { z } from "zod";
 import {
   checkConnectionInput,
@@ -11,6 +11,7 @@ import {
   auditAction,
   cluster,
   clusterCollections,
+  clusterEvent,
   clusterLatency,
   clusterLatencySeries,
   clusterPolicyView,
@@ -88,6 +89,23 @@ export const contract = {
     })
     .input(clusterId)
     .output(z.array(auditAction)),
+
+  // GET on purpose, twice over: an event stream reads and changes nothing, and
+  // SSE is what OpenAPILink speaks for an eventIterator over GET — the browser
+  // subscribes with the session cookie it already holds, no relay in between
+  // (decisions D31). NOT_FOUND rather than an empty stream for a cluster the
+  // caller does not own: an empty stream never ends, and a reader hanging on a
+  // cluster that will never speak is worse than being told it is not theirs.
+  listClusterEvents: oc
+    .route({
+      method: "GET",
+      path: "/clusters/{clusterId}/events",
+      summary:
+        "Live cluster events (SSE): a worker pass landed, a drop went hidden, a build graduated, a regression fired",
+    })
+    .errors({ NOT_FOUND: {} })
+    .input(clusterId)
+    .output(eventIterator(clusterEvent)),
 
   createCluster: oc
     .route({

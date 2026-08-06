@@ -17,8 +17,17 @@ export function instrumentHttp(fastify: FastifyInstance): void {
   fastify.addHook("onResponse", (request, reply, done) => {
     const route = routeLabel(request);
     httpRequests.add(1, { method: request.method, route, status: reply.statusCode });
-    // Fastify measures this in milliseconds; the convention is seconds.
-    httpDuration.record(reply.elapsedTime / 1000, { method: request.method, route });
+    // An SSE stream fires this hook when it CLOSES, so its elapsedTime is the
+    // stream's lifetime — minutes, by design — not how long the api took to
+    // answer. Recorded, those minutes would own the latency histogram's tail
+    // and page someone about a p99 that is actually a healthy dashboard left
+    // open. The request is still counted above; only the duration is not a
+    // latency.
+    const contentType = String(reply.getHeader("content-type") ?? "");
+    if (!contentType.startsWith("text/event-stream")) {
+      // Fastify measures this in milliseconds; the convention is seconds.
+      httpDuration.record(reply.elapsedTime / 1000, { method: request.method, route });
+    }
     done();
   });
 }

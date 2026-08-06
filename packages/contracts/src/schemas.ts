@@ -231,6 +231,27 @@ export const auditAction = z.object({
 });
 export type AuditAction = z.infer<typeof auditAction>;
 
+// The per-cluster worker passes, as the schedule names them (jobs/tasks.ts).
+export const clusterTask = z.enum(["collect", "classify", "suggest", "apply", "finalize", "probe"]);
+export type ClusterTask = z.infer<typeof clusterTask>;
+
+// One live event on a cluster's SSE stream (listClusterEvents). The payload is
+// deliberately a signal, not state: the dashboard reacts by invalidating the
+// matching queries and refetching through the same reads it already has, so
+// there is never a second copy of a row to drift from the first.
+//
+// PASS_FINISHED says a worker pass landed and names which, so the client can
+// invalidate what that pass writes and nothing else. The other three are the
+// transitions worth reacting to mid-pass — they move the recommendation table,
+// the audit trail and the ROI headline the moment they happen, not when the
+// whole pass ends.
+export const clusterEvent = z.object({
+  kind: z.enum(["PASS_FINISHED", "DROP_HIDDEN", "BUILD_GRADUATED", "REGRESSION_FIRED"]),
+  // Which pass, for PASS_FINISHED; null on the three transition events.
+  task: clusterTask.nullable(),
+});
+export type ClusterEvent = z.infer<typeof clusterEvent>;
+
 // Per-cluster engine knobs. maxCollectionSizeBytes null = no ceiling.
 //
 // The bounds carry messages because inputs.ts derives the policy form's

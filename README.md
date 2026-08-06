@@ -29,6 +29,11 @@ load-bearing choice and whether it is still open: [`docs/decisions.md`](./docs/d
 5. **Prove ROI**: freed bytes and the $/month they cost, index-count delta, and
    a before/after latency trend per collection.
 
+The dashboard follows the engine live: a pass landing, a drop going hidden, a
+build graduating or a regression firing arrives over SSE and refetches exactly
+the panels it moved — no reload, no polling (the wiki's Architecture page,
+Live updates).
+
 ## What it decides
 
 **Dropping.** Each index gets a usage class from its op-count history
