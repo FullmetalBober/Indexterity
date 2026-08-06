@@ -18,7 +18,7 @@ load-bearing choice and whether it is still open: [`docs/decisions.md`](./docs/d
    (`idx_<hex>`, no `find` on your collections, so it **cannot read documents**).
    The admin string is used once and never persisted; only the scoped one is
    stored, sealed with envelope encryption.
-2. **Collect** every 6h via `$indexStats` / `$collStats` — usage, sizes,
+2. **Collect** hourly via `$indexStats` / `$collStats` — usage, sizes,
    per-collection read/write latency. Never your documents. What gets *stored* is
    only what changed: an index's shape is written once, and an unchanged counter
    extends the row it already has instead of adding another.
@@ -49,9 +49,21 @@ Every one of those thresholds is expressed in **hours**, not in collect
 intervals. Two of them used to be interval counts, which meant they only said
 what they appeared to say while the cadence stayed at 6h: shorten it and the
 engine would have started calling indexes dead on three hours of evidence
-instead of three days, with no code change and nothing failing. A newly
-connected cluster is collected immediately rather than at the next scheduled
-pass, which is the part of "6h is too long" that was actually worth fixing.
+instead of three days, with no code change and nothing failing. That is what
+made the cadence safe to move. A newly connected cluster is also collected
+immediately rather than at the next scheduled pass — the cold start was always a
+separate problem from the cadence, and it has a separate fix.
+
+**The cadence is hourly, and the ceiling on it is one table.** Storing only what
+changed made index history nearly free — measured on real data, 76% of looks
+collapse into an extended run — but `latency_samples` collapses *none* of them.
+`$collStats` totals move on any operation, so a live collection differs at every
+look and there is nothing to run-length: that table grows in step with the
+cadence while index history grows at about a quarter of the rate. Hourly is a
+usable trend where 6h gave four points a day; going shorter is a question for
+`getLatencySeries` becoming bounded and old latency history being rolled up
+first, not a question of load. A collect takes under a second against a hundred
+collections, and about a round trip per collection against a remote cluster.
 
 **Never dropped**, whatever the usage: `_id_`, unique (including unique partial
 and sparse — a constraint is not a performance hint), TTL, and shard-key
@@ -197,8 +209,8 @@ Then per collection: a missing index shows up as average read latency climbing
 while the collection keeps serving traffic. When reads get sharply slower than
 their own baseline, the workload pass runs immediately instead of waiting for the
 hourly one. Only the busiest 20 collections are probed, and the readings are
-never written to `latency_samples` — that table's 6h cadence is what the activity
-gate and the change-window inference count intervals in.
+never written to `latency_samples` — that table's hourly cadence is what the
+activity gate and the change-window inference reason over.
 
 `serverStatus` is the one privilege that reads beyond index metadata, so it is
 optional: a cluster without it onboards clean and simply loses the first half of
@@ -497,7 +509,7 @@ being rewritten on every collect — the spec alone was two thirds of a snapshot
 row and 2.4× the counter it accompanied. The counter itself is stored as a **run**:
 a row covers `[capturedAt, lastSeenAt]`, and a collect that finds it unchanged
 moves the end forward instead of inserting a duplicate. Simulated over a year at
-the 6h cadence, the two together are **86% smaller** (30% from the shape alone),
+the then-current 6h cadence, the two together are **86% smaller** (30% from the shape alone),
 and an index nobody touches costs **one row instead of 1,460**.
 
 That is what makes collecting more often a load question rather than a storage
@@ -660,10 +672,10 @@ server actually walked — not from table size:
 | ≥ 1M walked, or a collection over 100k documents | elevated — auto-approved with `instantCreate`, build waits for the window |
 | anything smaller | routine — proposed for a human |
 
-Workload analysis runs **hourly**, not on the 6h collect cadence, because a
-missing index costs on every execution and most of the old delay was waiting to
-notice. A critical scan now goes from first sighting to built index in minutes
-rather than the better part of a day.
+Workload analysis runs **hourly**, on its own half-hour offset from the collect
+pass rather than behind it, because a missing index costs on every execution and
+most of the old delay was waiting to notice. A critical scan now goes from first
+sighting to built index in minutes rather than the better part of a day.
 
 **A shape must recur, measured two ways.** A count floor of three stops someone's
 ad-hoc query leaving an index behind. A rate floor — once a fortnight — stops the

@@ -33,13 +33,29 @@ export interface InferredWindow {
   readonly reason: string;
 }
 
-// Collect runs every 6h, so the finest slot the evidence supports is a quarter
-// of the day. Four buckets: 00-06, 06-12, 12-18, 18-00 UTC.
+// A quarter of the day: 00-06, 06-12, 12-18, 18-00 UTC. This used to be justified
+// by the collect cadence being 6h, and it no longer is — the cadence is hourly, so
+// the evidence would support finer slots. Left as it is deliberately: how wide a
+// change window should be is a question about how long a change takes and how much
+// disruption an owner will accept, not about how often we sample. Narrowing it is a
+// product decision with its own blast radius, not a side effect of a cadence change.
 const BUCKET_HOURS = 6;
 const BUCKETS = 24 / BUCKET_HOURS;
-// Each bucket needs this many clean intervals before its average means
-// anything — roughly three days of collects.
-const MIN_OBSERVATIONS_PER_BUCKET = 3;
+// How long a slot must have been WATCHED before its average means anything, in
+// hours. Three days of the slot's own width.
+//
+// Hours, not a count of intervals, and that is the whole point. It was `3` intervals,
+// which meant three days only while a collect happened every 6h and each bucket
+// therefore saw one interval a day. At an hourly cadence the same 3 would have been
+// satisfied in twelve hours — the engine picking a change window off half a day of
+// traffic and applying elective index changes at what it wrongly believed was the
+// quiet hour. #66 fixed this class of bug in classify.ts and this one survived it.
+//
+// `slot.hours` counts watched wall-clock time rather than samples, so it means the
+// same thing at any cadence: eighteen hours of a six-hour slot is three days of it,
+// whether that was three readings or three hundred. At the old 6h cadence this is
+// exactly the previous threshold, so nothing about today's behaviour changes.
+const MIN_WATCHED_HOURS_PER_BUCKET = 3 * BUCKET_HOURS;
 // A quiet period has to be genuinely quiet. Below this the day is flat and
 // picking a "best" hour would be dressing up noise as a decision.
 const QUIET_RATIO = 0.75;
@@ -58,18 +74,18 @@ function pad(hour: number): string {
   return `${String(hour).padStart(2, "0")}:00`;
 }
 
-// What one namespace contributes to one slot of the day: ops, the hours they were
-// spread over, and how much separate evidence the slot has.
+// What one namespace contributes to one slot of the day: ops, and the watched hours
+// they were spread over. The hours are both the denominator of the rate and the
+// measure of how much evidence the slot has.
 interface Slot {
   ops: number;
   hours: number;
-  intervals: number;
 }
 
 type BucketTally = Slot[];
 
 function emptyTally(): BucketTally {
-  return Array.from({ length: BUCKETS }, () => ({ ops: 0, hours: 0, intervals: 0 }));
+  return Array.from({ length: BUCKETS }, () => ({ ops: 0, hours: 0 }));
 }
 
 function bucketOf(time: number): number {
@@ -99,7 +115,6 @@ function creditQuietRun(tally: BucketTally, from: number, to: number): void {
     const slot = tally[bucket];
     if (slot === undefined) return;
     slot.hours += (until - cursor) / HOUR_MS;
-    slot.intervals += 1;
     cursor = until;
   }
 }
@@ -129,7 +144,6 @@ function tallyNamespace(samples: readonly TrafficSample[]): BucketTally {
     if (slot === undefined) continue;
     slot.ops += delta;
     slot.hours += spanHours;
-    slot.intervals += 1;
   }
   return tally;
 }
@@ -159,17 +173,18 @@ export function inferChangeWindow(
   const averages: number[] = [];
   for (let bucket = 0; bucket < BUCKETS; bucket++) {
     let rate = 0;
-    // Coverage is a fact about TIME, so it is the best-covered namespace's count
-    // and not the sum: with two hundred collections, summing would clear a floor
-    // meant to represent three days of collects on the strength of a single one.
-    let coverage = 0;
+    // Coverage is a fact about TIME, so it is the best-covered namespace's watched
+    // hours and not the sum: with two hundred collections, summing would clear a
+    // floor meant to represent three days of watching on the strength of one day
+    // seen by two hundred namespaces at once.
+    let watchedHours = 0;
     for (const tally of tallies) {
       const slot = tally[bucket];
       if (slot === undefined) return null;
       if (slot.hours > 0) rate += slot.ops / slot.hours;
-      coverage = Math.max(coverage, slot.intervals);
+      watchedHours = Math.max(watchedHours, slot.hours);
     }
-    if (coverage < MIN_OBSERVATIONS_PER_BUCKET) return null;
+    if (watchedHours < MIN_WATCHED_HOURS_PER_BUCKET) return null;
     averages.push(rate);
   }
 
