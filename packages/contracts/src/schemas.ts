@@ -166,7 +166,8 @@ export const offboardResult = z.object({
 });
 export type OffboardResult = z.infer<typeof offboardResult>;
 
-// One org the caller belongs to — the switcher's option list.
+// One org the caller belongs to — the switcher's option list. `active` is per
+// SESSION, not per user: two browsers can sit in two different orgs.
 export const orgSummary = z.object({
   orgId: z.uuid(),
   name: z.string(),
@@ -272,6 +273,10 @@ export const clusterPolicyView = clusterPolicy.extend({
 export type ClusterPolicyView = z.infer<typeof clusterPolicyView>;
 
 export const orgMember = z.object({
+  // The membership row's id, which is what the plugin's updateMemberRole and
+  // removeMember take — not the user's. One person can be a member of several
+  // orgs, so "which member" is a different question from "which user".
+  memberId: z.uuid(),
   userId: z.string(),
   email: z.string(),
   name: z.string(),
@@ -296,20 +301,49 @@ export const planInfo = z.object({
 });
 export type PlanInfo = z.infer<typeof planInfo>;
 
-export const orgInfo = z.object({
-  id: z.uuid(),
-  name: z.string(),
-  plan: planInfo,
-  members: z.array(orgMember),
-  pendingInvites: z.array(z.object({ email: z.string(), role: z.string(), expiresAt: z.string() })),
+// A least-privilege user Indexterity created on someone else's cluster during
+// admin-string onboarding. Cascades delete our rows; they do not touch these.
+//
+// Carried on the org so the delete dialog can name them BEFORE the org goes,
+// which is the only moment there is anything left to name them from — afterwards
+// the owner has no record of which server the user is on or what it was called.
+export const provisionedUser = z.object({
+  cluster: z.string(),
+  username: z.string(),
+  revokeCommand: z.string(),
 });
-export type OrgInfo = z.infer<typeof orgInfo>;
+export type ProvisionedUser = z.infer<typeof provisionedUser>;
 
-// Returned once at creation — the token is the bearer credential.
-export const createdInvite = z.object({
-  token: z.string(),
-  email: z.string(),
+// An invitation the CALLER has been sent, from any org.
+//
+// The credential changed with the plugin. It used to be a bearer token: an
+// opaque string mailed out, pasted into a box, and good for whoever held it.
+// Now the id is not a secret and only the invited address can accept, so an
+// invitation is something the api can safely SHOW you — which is also why this
+// is a list of your own rather than a field you type into.
+//
+// Read outside any org, because someone with no organization at all is exactly
+// who most needs it.
+export const myInvite = z.object({
+  id: z.uuid(),
+  orgName: z.string(),
   role: z.string(),
   expiresAt: z.string(),
 });
-export type CreatedInvite = z.infer<typeof createdInvite>;
+export type MyInvite = z.infer<typeof myInvite>;
+
+export const orgInfo = z.object({
+  id: z.uuid(),
+  name: z.string(),
+  slug: z.string(),
+  plan: planInfo,
+  // The caller's own role in this org, so the dashboard can draw the owner-only
+  // controls without inferring it from the member list.
+  role: z.string(),
+  members: z.array(orgMember),
+  pendingInvites: z.array(
+    z.object({ id: z.uuid(), email: z.string(), role: z.string(), expiresAt: z.string() }),
+  ),
+  provisionedUsers: z.array(provisionedUser),
+});
+export type OrgInfo = z.infer<typeof orgInfo>;

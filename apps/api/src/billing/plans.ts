@@ -22,6 +22,11 @@ export interface Entitlements {
   readonly maxClusters: number;
   // People in the org. Generous — charging per seat on a tool one DBA operates
   // punishes exactly the teams who would share the audit trail.
+  //
+  // Counted as members PLUS outstanding invites, which is why the plugin's own
+  // `membershipLimit` is left unset: it counts members only, so an org could
+  // invite past its plan and spend the seat on whoever clicked the link. One
+  // limit with one name — see TenancyService.requireRoomFor.
   readonly maxMembers: number;
   // The create side (workloadAnalysis) — proposing new indexes from the query
   // workload. Free: knowing what to do is the part that makes the tool worth
@@ -137,14 +142,23 @@ function describe(limit: number): string {
   return Number.isFinite(limit) ? String(limit) : "unlimited";
 }
 
+// The meters a plan caps. Both are per ORG — how many organizations a person
+// holds is not one of them, deliberately: a plan is bought per org, so capping
+// how many you may make would be capping how much you may buy.
+export type Meter = "clusters" | "members";
+
+const METERS: Record<Meter, (entitlements: Entitlements) => number> = {
+  clusters: (entitlements) => entitlements.maxClusters,
+  members: (entitlements) => entitlements.maxMembers,
+};
+
+export function limitFor(plan: Plan, what: Meter): number {
+  return METERS[what](entitlementsFor(plan));
+}
+
 // Adding one more of something the plan caps. `current` is what already exists.
-export function withinLimit(
-  plan: Plan,
-  what: "clusters" | "members",
-  current: number,
-): LimitVerdict {
-  const limit =
-    what === "clusters" ? entitlementsFor(plan).maxClusters : entitlementsFor(plan).maxMembers;
+export function withinLimit(plan: Plan, what: Meter, current: number): LimitVerdict {
+  const limit = limitFor(plan, what);
   if (current < limit) return ALLOWED;
   return {
     allowed: false,

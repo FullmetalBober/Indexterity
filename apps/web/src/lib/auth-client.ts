@@ -1,3 +1,4 @@
+import { organizationClient } from "better-auth/client/plugins";
 import { createAuthClient } from "better-auth/react";
 
 // better-auth's own client, talking to better-auth.
@@ -17,4 +18,10 @@ import { createAuthClient } from "better-auth/react";
 // in step. Evaluated during SSR too — no window there, and the fallback is the
 // relative "/api/auth" — but nothing calls it from the server: signing in is
 // something a reader does, in a browser.
-export const authClient = createAuthClient();
+// The organization plugin is why this client does more than sign people in.
+// Creating an org, renaming it, deleting it, inviting, accepting, changing a
+// role, removing a member, leaving and switching are all its endpoints now —
+// eight oRPC routes the api used to carry. What the api still answers is the
+// plan and how much of it is spent, which is not a plugin concept (queries/
+// shell.ts).
+export const authClient = createAuthClient({ plugins: [organizationClient()] });

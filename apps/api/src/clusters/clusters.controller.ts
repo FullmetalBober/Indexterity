@@ -4,18 +4,7 @@ import { ORPCError } from "@orpc/server";
 import { contract } from "@repo/contracts";
 import type { FastifyRequest } from "fastify";
 import { requireUserId } from "../auth/session";
-import {
-  and,
-  clusters,
-  desc,
-  envKeyProvider,
-  eq,
-  inArray,
-  indexSnapshots,
-  recommendations,
-  seal,
-  sql,
-} from "../db";
+import { and, clusters, desc, envKeyProvider, eq, inArray, indexSnapshots, seal, sql } from "../db";
 import { DatabaseService } from "../db/database.service";
 import { allowPrivateTargets, assertTargetsAllowed, BlockedTargetError } from "../engine/net-guard";
 import { adapterFor, engineSupported } from "../engine/registry";
@@ -23,10 +12,10 @@ import { currentKeyVersion, masterKeyBytesFor } from "../env";
 import { consumeDialBudget } from "../errors/dial-budget";
 import { mapClusterError, toCluster, toDiagnosis } from "../http/mappers";
 import { TenancyService } from "../http/tenancy.service";
-import { openClusterSession } from "../jobs/cluster-connection";
 import { evictCluster } from "../jobs/connection-pool";
 import { connStringUsername, ProvisionDeniedError, provisionScopedUser } from "../mongo";
 import { Implement } from "../orpc/implement";
+import { restoreHiddenIndexes, revokeCommandFor } from "./offboard";
 
 // Connecting, diagnosing, rotating and disconnecting customer clusters — the
 // endpoints that dial a host the user named. Owner-only throughout.
@@ -137,7 +126,12 @@ export class ClustersController {
   @Implement(contract.listClusters)
   listClusters(@Req() req: FastifyRequest) {
     return implement(contract.listClusters).handler(async () => {
-      const orgId = await this.tenancy.org(req);
+      // Empty rather than an error for a caller who is in no organization yet:
+      // this is one of the three reads the dashboard shell makes before it knows
+      // what to draw, and a 403 there would render "the api is unreachable" to
+      // someone whose api is fine and who simply has no org.
+      const orgId = await this.tenancy.orgOrNull(req);
+      if (orgId === null) return [];
       const rows = await this.database.db
         .select()
         .from(clusters)
@@ -320,45 +314,9 @@ export class ClustersController {
         .where(and(eq(clusters.id, input.clusterId), eq(clusters.orgId, orgId)))
         .limit(1);
       if (row === undefined) throw errors.NOT_FOUND({ message: "cluster not found" });
-      const inFlight = await this.database.db
-        .select()
-        .from(recommendations)
-        .where(
-          and(
-            eq(recommendations.clusterId, input.clusterId),
-            inArray(recommendations.state, ["HIDDEN", "OBSERVE"]),
-          ),
-        );
-      let unhidden = 0;
-      if (inFlight.length > 0) {
-        try {
-          const { session, release } = await openClusterSession(this.database.db, input.clusterId);
-          try {
-            const executor = session.executor(false);
-            for (const rec of inFlight) {
-              try {
-                await executor.unhide(rec.database, rec.collection, rec.indexName);
-                unhidden += 1;
-              } catch {
-                // index already gone — nothing to restore
-              }
-            }
-          } finally {
-            release();
-          }
-        } catch {
-          // cluster unreachable: offboarding still proceeds
-        }
-      }
-      await evictCluster(input.clusterId);
+      const unhidden = await restoreHiddenIndexes(this.database.db, input.clusterId);
       await this.database.db.delete(clusters).where(eq(clusters.id, input.clusterId));
-      return {
-        unhidden,
-        revokeCommand:
-          row.provisionedUsername === null
-            ? null
-            : `db.getSiblingDB("admin").dropUser("${row.provisionedUsername}")`,
-      };
+      return { unhidden, revokeCommand: revokeCommandFor(row.provisionedUsername) };
     });
   }
 

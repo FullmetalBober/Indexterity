@@ -231,6 +231,12 @@ history, and an explicit setting always wins.
 | **SCALE** | unlimited | unlimited | yes | yes | 365 days |
 | **SELF_HOSTED** | 1 | unlimited | yes | yes | 365 days |
 
+**A plan is per organization.** Every number above is that org's, so a customer
+with a free side project and a paid production team holds two orgs on two plans
+and is billed for one of them. How many organizations you make is therefore
+**not** metered — capping it would cap how much you can buy — and the free tier
+is held by the cluster limit, applied inside each org one at a time.
+
 **Free gives away the analysis and sells the automation.** Every plan sees every
 recommendation, with the reasoning, and can approve any of them by hand. What a
 paid plan adds is not having to: `autoApplyScore` (approve by score) and
@@ -242,11 +248,13 @@ The rules live in one table in `apps/api/src/billing/plans.ts`; nothing else
 decides them. Limits are enforced by the api, not drawn in the dashboard, and a
 refusal comes back as **402** rather than 403 — the caller is an owner, so
 "forbidden" would send them looking for a permissions problem they do not have.
-Seats count members plus outstanding invites, so an org cannot invite past its
-plan and leave the refusal for whoever clicks the link. A downgrade never
-deletes anything: an org over its new limit keeps what it has and simply cannot
-add more, and an auto-approve score saved on a paid plan stops being obeyed
-without being erased — it comes back on upgrading.
+Seats count members **plus outstanding invites**, so an org cannot invite past
+its plan and leave the refusal for whoever clicks the link; better-auth's own
+`membershipLimit`, which counts members only, is deliberately left unset so that
+there is one limit with one name. A downgrade never deletes anything: an org
+over its new limit keeps what it has and simply cannot add more, and an
+auto-approve score saved on a paid plan stops being obeyed without being erased
+— it comes back on upgrading.
 
 History is enforced, not advertised — but **enforced on read, not by deletion**.
 Two questions with different answers: how long rows are *kept*, and how much of
@@ -318,9 +326,44 @@ The dashboard used to be a BFF, relaying all 28 calls through the web server
 because the api was on another origin. It is not one any more; see
 [One origin](#deploy) for what that requires of a deployment.
 
-Org creators are **owners**, invited users are **members**. Members read
-everything; every mutation is owner-only. Invites are one-time tokens with a
-7-day expiry, emailed when `SMTP_*` is configured and a logged no-op otherwise.
+Tenancy is **better-auth's `organization` plugin**, mapped onto the tables the
+api already had (`apps/api/src/auth/organization.ts`). Creating, renaming and
+deleting an org, inviting, accepting, changing a role, removing a member,
+leaving and switching are all its endpoints under `/api/auth/organization/*`.
+Two reads stay on the api because the plugin has no opinion about them: `GET
+/api/org`, which carries the plan and how much of it is spent, and `GET
+/api/orgs`, which carries the caller's role in each.
+
+Org creators are **owners**, invited users are **members**, and there is no
+third rung — the plugin's `admin` role is refused, because half the api still
+asks only "are you the owner?". Members read everything; every mutation is
+owner-only.
+
+**You make an organization, and you can delete one.** Neither used to be
+possible: an org appeared as a side effect of the first authenticated request,
+called `My Org`, and an empty one was quietly deleted again when its owner
+accepted an invite. A fresh account now belongs to nothing and lands on a
+create-org screen, which is also where an invitation waiting for it appears.
+Making the *next* one lives on the organization page, and nothing limits how
+many — see **Plans** for why.
+
+**Invitations are addressed, not bearer.** They used to be a one-time token
+mailed out and pasted back, which meant whoever held the string could join. The
+invitation id is not a secret now: accepting requires being signed in as the
+invited address, so the api lists your own invitations to you instead. Seven-day
+expiry, emailed when `SMTP_*` is configured and a logged no-op otherwise.
+
+**The switcher is per session**, not per user (`session.active_organization_id`
+replaced a `members.is_active` flag), so two browsers can sit in two different
+orgs.
+
+**Deleting an org is the dangerous verb**, because an org is not a row. Cascades
+take the clusters and everything under them; they touch nothing on the
+customer's servers. So the delete runs the same restoration a disconnect does —
+any index parked in an observe window is un-hidden first — and the confirmation
+dialog makes you type the org's name and names every least-privilege user
+Indexterity created on your clusters, with the command to drop it. After the
+org is gone there is nothing left to name them from.
 
 ## Stack
 
@@ -444,8 +487,8 @@ yet. Migration creates schemas, so migration creates both.
 in CI. Releasing is `git tag v0.2.0 && git push --tags`, and the release
 workflow refuses a tag whose version the tree does not carry.
 
-**Four test layers**, currently 321 api unit, 94 web unit, 55 integration and
-19 end-to-end. The e2e suite deliberately runs with **no proxy in front**, so the
+**Four test layers**, currently 392 api unit, 184 web unit, 75 integration and
+23 end-to-end. The e2e suite deliberately runs with **no proxy in front**, so the
 passthrough is the path under test — the proxy shape is covered by compose and
 the chart, and a fallback nothing exercises is a fallback that is broken when
 someone needs it. `npm run test` runs the first two without any infra: the api's

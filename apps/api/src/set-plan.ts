@@ -4,7 +4,7 @@ import { requiredEnv } from "./env";
 
 // Move an organization onto a plan.
 //
-//   node apps/api/dist/set-plan.js <org-id|org-name> <PLAN> [note]
+//   node apps/api/dist/set-plan.js <org-id|org-slug|org-name> <PLAN> [note]
 //   node apps/api/dist/set-plan.js                          # list every org
 //
 // This is the whole billing integration today, and it is enough to charge
@@ -33,6 +33,7 @@ async function main(): Promise<void> {
       .select({
         id: organizations.id,
         name: organizations.name,
+        slug: organizations.slug,
         plan: organizations.plan,
         note: organizations.planNote,
       })
@@ -41,9 +42,14 @@ async function main(): Promise<void> {
       console.log("no organizations");
       return;
     }
+    // The slug is on the line because names are not unique and a support email
+    // gives you a name. Two orgs called Acme are one `set-plan.js Acme` away
+    // from an operator having to go and find the ids by hand.
     for (const row of rows) {
       console.log(
-        `${row.id}  ${row.plan.padEnd(6)}  ${row.name}${row.note === null ? "" : `  — ${row.note}`}`,
+        `${row.id}  ${row.plan.padEnd(6)}  ${row.name}  (${row.slug})${
+          row.note === null ? "" : `  — ${row.note}`
+        }`,
       );
     }
     return;
@@ -53,14 +59,17 @@ async function main(): Promise<void> {
     fail(`plan must be one of: ${PLANS.join(", ")}`);
   }
 
-  // Accept an id or a name — an operator reading a support email has the name.
+  // Accept an id, a slug or a name — an operator reading a support email has
+  // the name, and the slug is the one of the three that is unique.
   const rows = await db.select().from(organizations);
-  const matches = rows.filter((row) => row.id === target || row.name === target);
+  const matches = rows.filter(
+    (row) => row.id === target || row.slug === target || row.name === target,
+  );
   if (matches.length === 0) fail(`no organization matching ${JSON.stringify(target)}`);
   if (matches.length > 1) {
     fail(
-      `${matches.length} organizations are named ${JSON.stringify(target)} — use an id:\n` +
-        matches.map((row) => `  ${row.id}`).join("\n"),
+      `${matches.length} organizations are named ${JSON.stringify(target)} — use an id or slug:\n` +
+        matches.map((row) => `  ${row.id}  ${row.slug}`).join("\n"),
     );
   }
   const org = matches[0];

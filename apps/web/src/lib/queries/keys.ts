@@ -17,13 +17,17 @@
 // cluster, so a key of null meant no cluster before one existed and cluster X
 // afterwards: one entry, two answers. See the dashboard loader.
 //
-// The three org-level keys take no cluster: they are the same reads whichever
+// The four org-level keys take no cluster: they are the same reads whichever
 // cluster is selected, so selecting another is a URL change and not a refetch.
 export const queryKeys = {
   // Org level.
   clusters: () => ["clusters"] as const,
   org: () => ["org"] as const,
   orgs: () => ["orgs"] as const,
+  // Invitations addressed to the READER, from any org — the only org-level read
+  // that answers for somebody who is in no org at all, which is exactly who
+  // needs it.
+  myInvites: () => ["my-invites"] as const,
 
   // Per cluster.
   recommendations: (clusterId: string | null) => ["recommendations", clusterId] as const,

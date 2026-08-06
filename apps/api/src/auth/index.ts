@@ -23,4 +23,5 @@ export const auth = createAuth({
   githubClientSecret: process.env.GITHUB_CLIENT_SECRET ?? "",
   requireEmailVerification: process.env.REQUIRE_EMAIL_VERIFICATION === "true",
   trustProxy: trustsProxy(),
+  webOrigin,
 });

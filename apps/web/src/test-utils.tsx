@@ -15,6 +15,22 @@ export function apiError(status: number, message: string): Error {
   return new ORPCError("TEST_FAILURE", { status, message });
 }
 
+// A refusal from better-auth, which delivers one the other way round: every
+// call resolves to `{ data, error }` and nothing is ever thrown. Org mutations
+// go through its client now, so their tests need the shape its client returns
+// rather than the shape oRPC throws.
+export function authOk<T>(data: T): { data: T; error: null } {
+  return { data, error: null };
+}
+
+export function authError(
+  status: number,
+  message: string,
+  code?: string,
+): { data: null; error: { status: number; message: string; code?: string } } {
+  return { data: null, error: { status, message, ...(code === undefined ? {} : { code }) } };
+}
+
 interface AppRender extends RenderResult {
   // Handed back so a test can watch what a mutation invalidates. That used to be
   // observable as a callback prop; now the mutation hooks own the key, and this

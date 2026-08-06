@@ -102,12 +102,27 @@ export const session = pgTable(
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     ipAddress: text("ip_address"),
     userAgent: text("user_agent"),
+    // Which org this session is looking at — the organization plugin's own
+    // switcher state, and per SESSION rather than per user, so two browsers can
+    // sit in two different orgs. It replaced a `members.is_active` flag, which
+    // could not.
+    //
+    // SET NULL rather than cascade: deleting an org must not sign its members
+    // out of the app, only out of that org. A null here falls back to the
+    // caller's oldest membership (auth/tenancy.ts).
+    activeOrganizationId: uuid("active_organization_id").references(() => organizations.id, {
+      onDelete: "set null",
+    }),
     createdAt,
     updatedAt,
   },
-  // Deleting a user cascades here. Without this postgres scans every session
-  // row to find theirs, and this is the table that grows with every sign-in.
-  (table) => [index("session_user").on(table.userId)],
+  // Deleting a user cascades here, and deleting an org nulls the active pointer
+  // — both would otherwise scan every session row, and this is the table that
+  // grows with every sign-in.
+  (table) => [
+    index("session_user").on(table.userId),
+    index("session_active_org").on(table.activeOrganizationId),
+  ],
 );
 
 export const account = pgTable(
@@ -143,9 +158,27 @@ export const verification = pgTable("verification", {
 });
 
 // --- tenancy -------------------------------------------------------------
+//
+// Owned by better-auth's organization plugin (auth/auth.config.ts maps its
+// `organization`/`member`/`invitation` models onto these three tables and their
+// existing column names). Ids stay `uuid` — the plugin is handed a
+// `crypto.randomUUID()` generator instead of its own — because three tables
+// carry a cascading `org_id` and the contracts type it `z.uuid()`; retyping that
+// key is the migration the billing comment below warns about.
+//
+// The plan columns are declared to the plugin as `additionalFields` with
+// `input: false`, so they are readable through it and settable by nobody but us.
 export const organizations = pgTable("organizations", {
   id: uuid("id").defaultRandom().primaryKey(),
   name: text("name").notNull(),
+  // Required and unique by the plugin, which resolves orgs by slug as well as
+  // by id. Derived from the name at creation, deduplicated with a suffix.
+  slug: text("slug").notNull().unique(),
+  logo: text("logo"),
+  // better-auth serialises organization metadata to a JSON *string*, not jsonb.
+  // Nothing of ours reads it — the plan lives in real columns below, because it
+  // is read on nearly every request and wants an index-able one.
+  metadata: text("metadata"),
   // What this org is entitled to — the rules live in billing/plans.ts, this is
   // only which set applies. Text rather than an enum so adding a plan is a
   // constant, not a migration; unrecognised values fall back to FREE.
@@ -175,9 +208,6 @@ export const members = pgTable(
       .notNull()
       .references(() => user.id, { onDelete: "cascade" }),
     role: text("role").notNull().default("member"),
-    // The org switcher's selection. At most one true per user; when none is set
-    // the oldest membership is the active one (the pre-switcher behavior).
-    isActive: boolean("is_active").notNull().default(false),
     createdAt,
   },
   // The tenancy check, which runs on every authenticated request. Queried three
@@ -190,8 +220,12 @@ export const members = pgTable(
   ],
 );
 
-// Pending invitations into an org. The token is the bearer credential (returned
-// once at creation); accepting adds the caller as a member and stamps acceptedAt.
+// Pending invitations into an org, the plugin's `invitation` model.
+//
+// The credential changed with it: this used to hold a bearer token returned once
+// from createInvite and pasted back by whoever received the email, which meant
+// anyone holding the string could join. The invitation id is not a secret now —
+// accepting requires being signed in as the invited address.
 export const invites = pgTable(
   "invites",
   {
@@ -201,18 +235,22 @@ export const invites = pgTable(
       .references(() => organizations.id, { onDelete: "cascade" }),
     email: text("email").notNull(),
     role: text("role").notNull().default("member"),
-    token: text("token").notNull().unique(),
+    // pending | accepted | rejected | canceled. The plugin's lifecycle, and the
+    // reason `accepted_at` went away: three of those four states are not a date.
+    status: text("status").notNull().default("pending"),
     invitedBy: text("invited_by")
       .notNull()
       .references(() => user.id, { onDelete: "cascade" }),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
-    acceptedAt: timestamp("accepted_at", { withTimezone: true }),
     createdAt,
   },
-  // Listing an org's invites, and two cascading foreign keys.
+  // Listing an org's invites, two cascading foreign keys, and — since the
+  // credential became the address rather than a token — listing the invitations
+  // sent to one person, which every signed-in reader now asks on page load.
   (table) => [
     index("invites_org").on(table.orgId),
     index("invites_invited_by").on(table.invitedBy),
+    index("invites_email").on(table.email),
   ],
 );
 

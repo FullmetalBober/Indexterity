@@ -1,5 +1,12 @@
 import { expect, test } from "@playwright/test";
-import { connectCluster, signUpAndLandOnDashboard, uniqueEmail } from "./fixtures";
+import {
+  connectCluster,
+  createOrgAndLandOnDashboard,
+  E2E_ORG_PREFIX,
+  PASSWORD,
+  signUpAndLandOnDashboard,
+  uniqueEmail,
+} from "./fixtures";
 
 // A leak here is one customer seeing another's clusters, so it is worth
 // checking through the browser and not only in the api's own tests: the web
@@ -50,7 +57,7 @@ test.describe("tenancy", () => {
     await second.close();
   });
 
-  test("each new account lands in its own organization", async ({ browser }) => {
+  test("each new account makes its own organization", async ({ browser }) => {
     const first = await browser.newContext();
     const firstPage = await first.newPage();
     const emailA = uniqueEmail("org-a");
@@ -61,9 +68,84 @@ test.describe("tenancy", () => {
     await signUpAndLandOnDashboard(secondPage, uniqueEmail("org-b"));
 
     // The second account's team list must not contain the first account.
+    await secondPage.getByRole("link", { name: "Organization" }).click();
     await expect(secondPage.getByText(`(${emailA})`)).toHaveCount(0);
 
     await first.close();
     await second.close();
+  });
+
+  // A fresh account belongs to nothing. There is no dashboard behind that, and
+  // the api used to hide it by inserting "My Org" on the first request.
+  test("a fresh account is asked to make an organization before anything else", async ({
+    page,
+  }) => {
+    await page.goto("/app");
+    await page.getByRole("button", { name: "Need an account? Sign up" }).click();
+    await page.getByLabel("Name").fill("E2E User");
+    await page.getByLabel("Email").fill(uniqueEmail("no-org"));
+    await page.getByLabel("Password").fill(PASSWORD);
+    await page.getByRole("button", { name: "Sign up" }).click();
+
+    await expect(page.getByText("Make an organization")).toBeVisible();
+    // Signed in, but nothing under /app is drawn yet.
+    await expect(page.getByRole("button", { name: "Sign out" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Dashboard" })).toBeHidden();
+
+    await createOrgAndLandOnDashboard(page);
+    await expect(page.getByText("No cluster connected")).toBeVisible();
+  });
+
+  // Switching org had no coverage at all, which is how a report of "the
+  // dashboard is empty after switching" had nothing to check itself against.
+  // This asserts the whole move: the bar, the cluster list under it, and the
+  // panels — the layout derives the selected cluster from the live list while
+  // the dashboard reads the one its loader resolved, and those are two different
+  // sources that have to agree.
+  test("switching org re-points the dashboard, not just the bar", async ({ page }) => {
+    await signUpAndLandOnDashboard(page, uniqueEmail("switch"));
+    await connectCluster(page, "Switch Cluster A");
+    await expect(page.getByText("Switch Cluster A", { exact: true })).toBeVisible();
+
+    // A second org, made from the org page. The plugin makes it active.
+    await page.getByRole("link", { name: "Organization" }).click();
+    const second = `${E2E_ORG_PREFIX}second-${Date.now()}`;
+    await page.getByLabel("Start another organization").fill(second);
+    await page.getByRole("button", { name: "Create" }).click();
+    await expect(page.getByText(`Team — ${second}`)).toBeVisible();
+
+    await page.getByRole("link", { name: "Dashboard" }).click();
+    await expect(page.getByText("No cluster connected")).toBeVisible();
+    await connectCluster(page, "Switch Cluster B");
+    await expect(page.getByText("Switch Cluster B", { exact: true })).toBeVisible();
+
+    // Back to the first org. Everything below the bar has to follow.
+    await page.getByLabel("Switch organization").click();
+    await page.getByRole("option", { name: /owner/ }).first().click();
+
+    await expect(page.getByText("Switch Cluster A", { exact: true })).toBeVisible();
+    await expect(page.getByText("Switch Cluster B", { exact: true })).toBeHidden();
+    // The panels under the bar are about that cluster, not blank.
+    await expect(page.getByText("Collections")).toBeVisible();
+  });
+
+  // Deleting an org takes its clusters and drops the owner back to the create
+  // screen rather than a broken shell.
+  test("deleting the only org returns to the create screen", async ({ page }) => {
+    const orgName = await signUpAndLandOnDashboard(page, uniqueEmail("delete-org"));
+    await connectCluster(page, "Doomed Cluster");
+    await expect(page.getByText("Doomed Cluster", { exact: true })).toBeVisible();
+
+    await page.getByRole("link", { name: "Organization" }).click();
+    await page.getByRole("button", { name: "Delete org" }).click();
+    // Nothing happens until the org's own name is typed out.
+    const confirm = page.getByRole("button", { name: "Delete this organization" });
+    await expect(confirm).toBeDisabled();
+    await page.getByLabel(/Type/).fill(orgName);
+    await expect(confirm).toBeEnabled();
+    await confirm.click();
+
+    await expect(page.getByText("Make an organization")).toBeVisible();
+    await expect(page.getByText("Doomed Cluster")).toBeHidden();
   });
 });

@@ -1,65 +1,42 @@
-import { defaultOrgPlan } from "../billing/plans";
-import { and, asc, clusters, type Database, desc, eq, members, organizations, sql } from "../db";
+import { and, asc, type Database, eq, members } from "../db";
 
 export interface Membership {
   readonly orgId: string;
   readonly role: string;
 }
 
-// The caller's active membership: the switched-to one (is_active), else the
-// oldest (deterministic when a user belongs to several orgs). Created lazily on
-// first authenticated use so a fresh account always has somewhere to put its
-// clusters. The creator is owner.
-export async function resolveMembership(db: Database, userId: string): Promise<Membership> {
-  const [membership] = await db
+// The caller's active membership, or null when they are in no organization at
+// all — which is now a state the product has, and did not before.
+//
+// It used to create one. The first authenticated request from a fresh account
+// inserted an org called "My Org" and made the caller its owner, which meant an
+// organization was something that happened TO you: a name nobody chose and
+// everybody kept, appearing as a side effect of a GET. Creating one is a verb
+// now (better-auth's `organization.create`), so this only resolves.
+//
+// The switcher's selection lives on the SESSION rather than on the user, so two
+// browsers can sit in two different orgs. An activeOrganizationId that names an
+// org the caller is no longer a member of — removed while signed in, or the org
+// deleted — is ignored rather than obeyed, and falls through to the same
+// deterministic default as a session that never switched: the oldest membership.
+export async function resolveMembership(
+  db: Database,
+  userId: string,
+  activeOrgId: string | null,
+): Promise<Membership | null> {
+  if (activeOrgId !== null) {
+    const [chosen] = await db
+      .select({ orgId: members.orgId, role: members.role })
+      .from(members)
+      .where(and(eq(members.userId, userId), eq(members.orgId, activeOrgId)))
+      .limit(1);
+    if (chosen !== undefined) return chosen;
+  }
+  const [oldest] = await db
     .select({ orgId: members.orgId, role: members.role })
     .from(members)
     .where(eq(members.userId, userId))
-    .orderBy(desc(members.isActive), asc(members.createdAt))
+    .orderBy(asc(members.createdAt))
     .limit(1);
-  if (membership !== undefined) return membership;
-  const [org] = await db
-    .insert(organizations)
-    .values({ name: "My Org", plan: defaultOrgPlan() })
-    .returning({ id: organizations.id });
-  if (org === undefined) throw new Error("failed to create organization");
-  await db.insert(members).values({ orgId: org.id, userId, role: "owner" });
-  return { orgId: org.id, role: "owner" };
-}
-
-export async function resolveOrgId(db: Database, userId: string): Promise<string> {
-  return (await resolveMembership(db, userId)).orgId;
-}
-
-// Join an org from an invite. If the caller's only org is the empty auto-created
-// shell (no clusters, sole member), it is dropped so the invited org becomes the
-// active one; otherwise the membership is added alongside (oldest stays active).
-export async function acceptOrgInvite(
-  db: Database,
-  userId: string,
-  orgId: string,
-  role: string,
-): Promise<"joined" | "already-member"> {
-  const [existing] = await db
-    .select({ id: members.id })
-    .from(members)
-    .where(and(eq(members.userId, userId), eq(members.orgId, orgId)))
-    .limit(1);
-  if (existing !== undefined) return "already-member";
-
-  const mine = await db.select().from(members).where(eq(members.userId, userId));
-  const only = mine.length === 1 ? mine[0] : undefined;
-  if (only !== undefined) {
-    const [clusterCount] = await db
-      .select({ n: sql<number>`count(*)::int` })
-      .from(clusters)
-      .where(eq(clusters.orgId, only.orgId));
-    const shellMembers = await db.select().from(members).where(eq(members.orgId, only.orgId));
-    if ((clusterCount?.n ?? 0) === 0 && shellMembers.length === 1) {
-      // Cascade removes the shell membership too.
-      await db.delete(organizations).where(eq(organizations.id, only.orgId));
-    }
-  }
-  await db.insert(members).values({ orgId, userId, role });
-  return "joined";
+  return oldest ?? null;
 }

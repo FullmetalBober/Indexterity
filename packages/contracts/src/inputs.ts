@@ -19,7 +19,8 @@ import { clusterEngine, clusterPolicy } from "./schemas.js";
 export const clusterName = z.string().min(1, "Give the cluster a name");
 export const connectionString = z.string().min(1, "Paste a connection string");
 export const orgName = z.string().min(1, "An org needs a name").max(120, "120 characters at most");
-export const inviteToken = z.string().min(1, "Paste the invite token");
+// Owner and member, and no third rung — see ORG_ROLES in apps/api/src/auth/
+// organization.ts for why the plugin's `admin` is refused rather than adopted.
 export const memberRole = z.enum(["member", "owner"]);
 export const emailAddress = z.email("That does not look like an email address");
 
@@ -57,10 +58,17 @@ export const rotateConnectionInput = z.object({ connectionString });
 // readable under two different rules.
 export const policyKnobsInput = clusterPolicy.omit({ clusterId: true });
 
-// Org and team.
+// Org and team. Not part of the oRPC contract any more — better-auth's
+// organization plugin owns creating, renaming, inviting and the rest — but the
+// forms still need one place to read the rules from, and the api's hooks refuse
+// exactly these (organization.ts).
+export const createOrgInput = z.object({ name: orgName });
 export const renameOrgInput = z.object({ name: orgName });
 export const createInviteInput = z.object({ email: emailAddress, role: memberRole });
-export const acceptInviteInput = z.object({ token: inviteToken });
+// Nothing routes by slug — it exists because the plugin resolves organizations
+// by one. Derived from the name rather than typed, so this is the shape the
+// derivation has to produce, and the shape the api's hook checks for.
+export const ORG_SLUG = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 
 // Credentials. Not part of the oRPC contract — better-auth owns these routes —
 // but the rules it enforces are still the api's rules, so the forms read them
