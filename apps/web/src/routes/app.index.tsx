@@ -9,6 +9,7 @@ import { ActivityTable } from "~/components/app/activity-table";
 import { CollectionsTable, toCollectionRows } from "~/components/app/collections-table";
 import { ConnectClusterForm } from "~/components/app/connect-cluster-form";
 import { fmtBytes } from "~/components/app/format";
+import { latencyCharts } from "~/components/app/latency-series";
 import { PolicySection } from "~/components/app/policy-section";
 import { RecommendationsTable } from "~/components/app/recommendations-table";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
@@ -103,22 +104,10 @@ function Dashboard() {
   const proposed = recommendations.filter((rec) => rec.state === "PROPOSED");
   const totalSaved = proposed.reduce((sum, rec) => sum + rec.estimatedBytesSaved, 0);
 
-  // Top collections by sample count get the four validated palette slots; the
-  // rest fold (color follows the collection across both charts).
-  const chartCollections = [...latencySeries]
-    .sort((a, b) => b.points.length - a.points.length)
-    .slice(0, SERIES_PALETTE.length);
-  const foldedCount = latencySeries.length - chartCollections.length;
-  const readSeries = chartCollections.map((coll, i) => ({
-    label: `${coll.database}.${coll.collection}`,
-    color: SERIES_PALETTE[i] ?? "#2a78d6",
-    points: coll.points.map((point) => ({ t: point.capturedAt, v: point.readMicros })),
-  }));
-  const writeSeries = chartCollections.map((coll, i) => ({
-    label: `${coll.database}.${coll.collection}`,
-    color: SERIES_PALETTE[i] ?? "#2a78d6",
-    points: coll.points.map((point) => ({ t: point.capturedAt, v: point.writeMicros })),
-  }));
+  // Ranked per metric, not once for both charts — see latency-series.ts for the bug
+  // that made this its own module rather than four lines here.
+  const { readSeries, writeSeries, foldedCount } = latencyCharts(latencySeries, SERIES_PALETTE);
+  const chartedCount = Math.max(readSeries.length, writeSeries.length);
 
   // Merged by namespace into one row per collection — see collections-table.tsx,
   // which owns the row shape.
@@ -179,7 +168,7 @@ function Dashboard() {
 
       <RecommendationsTable clusterId={id} recommendations={recommendations} />
 
-      {chartCollections.length > 0 ? (
+      {chartedCount > 0 ? (
         <section className="mt-8 grid gap-6 md:grid-cols-2">
           <LineChart title="Read latency" unit="µs/op" series={readSeries} />
           <LineChart title="Write latency" unit="µs/op" series={writeSeries} />
