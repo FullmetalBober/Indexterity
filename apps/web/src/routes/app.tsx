@@ -187,6 +187,17 @@ function AppShell() {
         >
           Organization
         </Link>
+        <Link
+          to="/app/account"
+          activeProps={{
+            className: "border-primary border-b-2 font-medium",
+            "aria-current": "page",
+          }}
+          inactiveProps={{ className: "text-muted-foreground" }}
+          className="-mb-px px-1 pb-2"
+        >
+          Account
+        </Link>
       </nav>
 
       <Outlet />

@@ -73,9 +73,18 @@ export const ORG_SLUG = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 // Credentials. Not part of the oRPC contract — better-auth owns these routes —
 // but the rules it enforces are still the api's rules, so the forms read them
 // from the same place as everything else.
+export const userName = z.string().min(1, "What should we call you?");
 export const signInInput = z.object({ email: emailAddress, password });
-export const signUpInput = signInInput.extend({
-  name: z.string().min(1, "What should we call you?"),
-});
+export const signUpInput = signInInput.extend({ name: userName });
 export const requestPasswordResetInput = z.object({ email: emailAddress });
 export const resetPasswordInput = z.object({ password });
+
+// The account page. The name rule is the sign-up form's, because they are the
+// same field of the same row. The current password has no length rule — it is
+// whatever it is, and the api's check is the only one that counts — while the
+// new one is a password like any other being set.
+export const updateNameInput = z.object({ name: userName });
+export const changePasswordInput = z.object({
+  currentPassword: z.string().min(1, "Your current password"),
+  newPassword: password,
+});

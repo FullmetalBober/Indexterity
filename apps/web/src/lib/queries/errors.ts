@@ -14,10 +14,11 @@ import { ORPCError } from "@orpc/client";
 const READABLE_STATUSES = [400, 402, 403, 404, 409];
 
 // better-auth's client does not throw: every call resolves to `{ data, error }`.
-// A mutation needs a rejection to have an onError at all, so `unwrap` in
-// mutations/org.ts turns the second half into one of these — and it carries the
-// same two fields the rules below read, so an invite refused by the plugin is
-// reported exactly like one refused by the api.
+// A mutation needs a rejection to have an onError at all, and a query needs one
+// for its data to be an answer rather than a maybe — so `unwrap` below turns the
+// second half into one of these. It carries the same two fields the rules below
+// read, so an invite refused by the plugin is reported exactly like one refused
+// by the api.
 export class AuthApiError extends Error {
   constructor(
     message: string,
@@ -27,6 +28,21 @@ export class AuthApiError extends Error {
     super(message);
     this.name = "AuthApiError";
   }
+}
+
+// The one place better-auth's `{ data, error }` becomes a throw. Every query and
+// mutation that goes through its client wraps the call in this.
+export async function unwrap<T>(
+  call: PromiseLike<{
+    data: T | null;
+    error: { message?: string | undefined; status: number; code?: string | undefined } | null;
+  }>,
+): Promise<T> {
+  const { data, error } = await call;
+  if (error !== null && error !== undefined) {
+    throw new AuthApiError(error.message ?? "request failed", error.status, error.code);
+  }
+  return data as T;
 }
 
 function statusOf(error: unknown): number | null {
