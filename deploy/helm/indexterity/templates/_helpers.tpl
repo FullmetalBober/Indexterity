@@ -99,6 +99,8 @@ app.kubernetes.io/component: {{ .component }}
   value: {{ .Values.config.logLevel | quote }}
 - name: ALLOW_PRIVATE_CLUSTER_TARGETS
   value: {{ .Values.config.allowPrivateClusterTargets | quote }}
+- name: ALLOW_INSECURE_CLUSTER_TLS
+  value: {{ .Values.config.allowInsecureClusterTls | quote }}
 {{- end -}}
 
 {{/* The metrics endpoint — shared by the api and the worker, which export different halves of it. */}}

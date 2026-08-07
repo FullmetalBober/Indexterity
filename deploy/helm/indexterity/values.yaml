@@ -179,6 +179,18 @@ config:
   # install must leave it false, or any account can probe the internal network.
   # Cloud metadata and other never-a-database ranges stay blocked either way.
   allowPrivateClusterTargets: false
+  # Allow connecting clusters that do not offer validated TLS. Every outbound
+  # connection requires it by default, including the ones the worker makes from
+  # stored credentials — so a cluster connected without it stops being collected
+  # and its owners are told why.
+  #
+  # Deliberately NOT part of allowPrivateClusterTargets above: a VPC-peered or
+  # PrivateLink cluster is a private address that must still be forced to TLS,
+  # so coupling a transport rule to an addressing rule would quietly weaken the
+  # installs that most look like they need the exception. Set this only when the
+  # MongoDB you manage genuinely serves no certificate and the network between
+  # is trusted.
+  allowInsecureClusterTls: false
   # Whether a trusted proxy sits in front of the api. Behind an ingress or a
   # Service, every request arrives from the proxy, so the per-IP rate limits
   # collapse into one shared bucket unless the forwarded address is trusted.
