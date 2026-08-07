@@ -6,6 +6,13 @@ export function badgeVariant(type: string): "secondary" | "destructive" | "defau
   return "outline"; // CREATE / UPDATE / MERGE (additive)
 }
 
+// "2 / 3" while there is a cap, the bare count when there is not. Shared,
+// because the same meter is drawn in two places: the plan summary on the org
+// page, and the warning beside the form that spends it.
+export function usage(used: number, limit: number | null): string {
+  return limit === null ? String(used) : `${used} / ${limit}`;
+}
+
 export function fmtBytes(bytes: number): string {
   if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   return `${(bytes / 1024).toFixed(0)} KB`;
