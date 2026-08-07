@@ -86,6 +86,7 @@ stays off by default — the dashboard does not need it.
 | `config.storageUsdPerGbMonth` | Your storage price, for the $/month ROI headline |
 | `config.signupMode` | `invite` (default), `open` or `closed`. The first account always bootstraps the install; after that invite-only. `open` lets any stranger register — and every account can make the control plane dial hosts it names |
 | `config.allowPrivateClusterTargets` | Set `true` when the MongoDB you manage is on a private network (the normal self-hosted case). Leave `false` for anything strangers can reach, or accounts can probe your internal network. Cloud metadata stays blocked either way |
+| `config.allowInsecureClusterTls` | Set `true` only when the MongoDB you manage genuinely serves no certificate and the network between is trusted. Every outbound connection requires validated TLS otherwise — including the ones the worker makes from stored credentials, so a cluster connected without it stops being collected and its owners are told why. Kept apart from `allowPrivateClusterTargets` on purpose: a VPC-peered or PrivateLink cluster is a private address that must still be forced to TLS |
 | `metrics.enabled` | Prometheus metrics on port `metrics.port` (9464) for all three workloads. On by default; the endpoint is never routed by the ingress |
 | `metrics.serviceMonitor.enabled` | One Prometheus Operator ServiceMonitor per workload. Off by default — it needs the `monitoring.coreos.com` CRDs, and a chart that assumes them cannot install without them |
 | `metrics.prometheusRule.enabled` | 18 alerting rules for the failures nothing else reports. Same CRD requirement, also off by default. Thresholds under `metrics.prometheusRule.thresholds` |
@@ -161,6 +162,12 @@ page, under Security):
   database lives on the cluster network must set
   `config.allowPrivateClusterTargets=true`. Link-local/cloud-metadata,
   multicast and reserved ranges are refused regardless.
+- **Plaintext connections are refused**, and so is TLS whose certificate cannot
+  be verified. `config.allowInsecureClusterTls=true` is the way out, and it is a
+  separate switch from the one above for a reason: an address being private says
+  nothing about whether its transport should be encrypted. Skipping a *specific*
+  certificate check for one cluster — a private CA, an SSH tunnel — is a
+  per-cluster checkbox on the connect form instead, and needs no chart setting.
 
 `helm install` prints a warning when the chosen combination is unsafe.
 

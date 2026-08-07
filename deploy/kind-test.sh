@@ -156,6 +156,7 @@ helm upgrade --install indexterity "$CHART" $CHART_ARGS -n "$NS" --wait --timeou
   --set "api.image.repository=$API_REPO,api.image.tag=$TAG,api.image.pullPolicy=Never,api.replicas=1" \
   --set "web.image.repository=$WEB_REPO,web.image.tag=$TAG,web.image.pullPolicy=Never,web.replicas=1" \
   --set "config.signupMode=open,config.allowPrivateClusterTargets=true" \
+  --set "config.allowInsecureClusterTls=true" \
   --set "config.allowInsecureAuthUrl=true,config.trustProxy=true" \
   --set "secrets.databaseUrl=postgres://indexterity:indexterity@postgres:5432/indexterity" \
   --set "secrets.betterAuthSecret=kind-test-secret-not-for-real-use-0000" \
