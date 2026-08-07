@@ -131,6 +131,17 @@ services:
       MASTER_KEY: ${MASTER_KEY}
       ALLOW_PRIVATE_CLUSTER_TARGETS: "true"
       WORKER_CONCURRENCY: "2"
+      # The alerts a collect or an apply raises are sent from HERE, not from the
+      # api — the jobs run in this container. Without these the worker's mailer
+      # is the no-op branch and every alert is logged and dropped, while the
+      # api's invites and reset mails go out fine, which makes the gap look like
+      # an alerting bug rather than missing config. Helm already gives the
+      # worker deployment the same block (indexterity.mailEnv).
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASS: ${SMTP_PASS}
+      MAIL_FROM: ${MAIL_FROM}
       METRICS_ENABLED: "true"
     ports:
       - "9465:9464"
