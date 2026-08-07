@@ -319,7 +319,21 @@ export const clusters = pgTable(
     createdAt,
   },
   // Every cluster list is scoped to an org, and deleting an org cascades here.
-  (table) => [index("clusters_org").on(table.orgId)],
+  //
+  // The name is unique WITHIN the org, and only exactly (#96). Two clusters
+  // called "staging" are indistinguishable in the nav rail and, worse, in an
+  // alert subject line — `[Indexterity] staging: regression on …` names neither
+  // of them. Per org rather than globally, because one customer calling theirs
+  // "production" must not stop another from doing the same.
+  //
+  // Case is not folded. "Staging" and "staging" are allowed to coexist, and are
+  // told apart everywhere the name is drawn; a lower(name) index would refuse a
+  // rename for looking like one that already exists, which is a rule nobody
+  // asked for.
+  (table) => [
+    index("clusters_org").on(table.orgId),
+    unique("clusters_org_name").on(table.orgId, table.name),
+  ],
 );
 
 // One index, and the shape it had. The dimension half of the snapshot series:

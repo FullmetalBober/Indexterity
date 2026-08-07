@@ -285,8 +285,15 @@
     {
       "idx": 40,
       "version": "7",
-      "when": 1786122917602,
-      "tag": "0040_better_auth_rate_limit",
+      "when": 1786121130528,
+      "tag": "0040_cluster_name_unique_per_org",
+      "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1786128608610,
+      "tag": "0041_better_auth_rate_limit",
       "breakpoints": true
     }
   ]

@@ -26,8 +26,19 @@ vi.mock("~/lib/api", () => ({
 }));
 vi.mock("@tanstack/react-router", () => ({ useNavigate: () => navigate }));
 
-function privilege(key: string, granted: boolean): PrivilegeCheck {
-  return { key, label: key, enables: `${key} does things`, tier: "CORE", granted };
+function privilege(
+  key: string,
+  granted: boolean,
+  tier: PrivilegeCheck["tier"] = "CORE",
+): PrivilegeCheck {
+  return { key, label: key, enables: `${key} does things`, tier, granted };
+}
+
+// The three provisioning checks as the api reports them, all in one state.
+function provisioning(granted: boolean): PrivilegeCheck[] {
+  return ["createRole", "createUser", "grantRole"].map((key) =>
+    privilege(key, granted, "PROVISION"),
+  );
 }
 
 // Room for another cluster unless a test says otherwise — every render draws
@@ -191,6 +202,82 @@ describe("ConnectClusterForm", () => {
 
     expect(screen.getByText("mongodb://idx_abc:secret@host:27017")).toBeInTheDocument();
     expect(screen.getByText(/dropUser\("idx_abc"\)/)).toBeInTheDocument();
+  });
+
+  // #86: this branch used to draw a Connect button and say nothing else, so
+  // "these credentials cannot create users" was indistinguishable from "we could
+  // not tell what they can do" — and the reader was never told the safer path
+  // existed, let alone which grant would open it.
+  it("names the missing action when no scoped user can be offered", async () => {
+    checkConnection.mockResolvedValue(
+      diagnosis({
+        privileges: [
+          privilege("listIndexes", true),
+          privilege("createRole", true, "PROVISION"),
+          privilege("createUser", false, "PROVISION"),
+          privilege("grantRole", false, "PROVISION"),
+        ],
+      }),
+    );
+    const user = userEvent.setup();
+    renderInApp(<ConnectClusterForm plan={plan()} />);
+
+    await check(user);
+
+    // Still connectable — the credentials work, they just cannot make a better
+    // set of credentials.
+    expect(screen.getByRole("button", { name: "Connect" })).toBeEnabled();
+    expect(screen.getByText(/No scoped user was offered/)).toBeInTheDocument();
+    // The exact actions, not "some privileges": the reader has to go and change a
+    // role on their own cluster, and createUser alone is a different grant from
+    // all three. Named in the sentence AND ticked off in the list above it, hence
+    // getAllByText — two mentions of one action is the intent, not a duplicate.
+    const note = screen.getByText(/No scoped user was offered/);
+    expect(note.textContent).toContain("createUser");
+    expect(note.textContent).toContain("grantRole");
+    // And not the one they do have.
+    expect(note.textContent).not.toContain("createRole");
+    // And what connecting as-is costs, which is the part nobody was told.
+    expect(screen.getByText(/stores the string you pasted/)).toBeInTheDocument();
+  });
+
+  // Every provisioning action is granted here and the offer is still withheld,
+  // because a server that asks for no credentials cannot enforce a dedicated
+  // user. Naming a grant would send the reader after a privilege they already
+  // have; the diagnosis message is what explains this one.
+  it("stays quiet about provisioning on a deployment with authentication off", async () => {
+    checkConnection.mockResolvedValue(
+      diagnosis({
+        authEnabled: false,
+        username: null,
+        message: "this deployment has authentication disabled",
+        privileges: [privilege("listIndexes", true), ...provisioning(true)],
+      }),
+    );
+    const user = userEvent.setup();
+    renderInApp(<ConnectClusterForm plan={plan()} />);
+
+    await check(user);
+
+    expect(screen.getByRole("button", { name: "Connect" })).toBeEnabled();
+    expect(screen.queryByText(/No scoped user was offered/)).not.toBeInTheDocument();
+  });
+
+  // The list is the evidence for whichever answer the form gives above it, so the
+  // provisioning actions belong in it either way (#86).
+  it("lists the provisioning actions alongside the engine's own", async () => {
+    checkConnection.mockResolvedValue(
+      diagnosis({ privileges: [privilege("listIndexes", true), ...provisioning(false)] }),
+    );
+    const user = userEvent.setup();
+    renderInApp(<ConnectClusterForm plan={plan()} />);
+
+    await check(user);
+
+    expect(screen.getByText(/To create a scoped user instead/)).toBeInTheDocument();
+    for (const key of ["createRole", "createUser", "grantRole"]) {
+      expect(screen.getAllByText(key).length).toBeGreaterThan(0);
+    }
   });
 
   it("refuses to connect at all when core privileges are missing", async () => {

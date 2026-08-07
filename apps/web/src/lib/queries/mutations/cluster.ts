@@ -23,6 +23,7 @@ import { queryKeys } from "../keys";
 const MODE_FAILED = "Mode change failed (owner only)";
 const DISCONNECT_FAILED = "Disconnect failed (owner only)";
 const ROTATION_FAILED = "rotation failed";
+const RENAME_FAILED = "Rename failed (owner only)";
 
 // A cluster's name, mode and provisioned user all live in the cluster list, so
 // that is the only key those three move. It used to be the `shell` key, which held
@@ -65,6 +66,24 @@ export function useSetClusterMode(clusterId: string) {
     },
     // A refused change moved nothing, so there is nothing to refetch.
     onError: () => toast.error(MODE_FAILED),
+  });
+}
+
+// The name is what the rail, the cluster heading and every alert subject line
+// read, and all three come from the cluster list — so one key covers them.
+//
+// The api refuses a name another cluster in the org already has, which is a 400
+// worth reading: "pick another name" is actionable, "rename failed" is not.
+export function useRenameCluster(clusterId: string, { onRenamed }: { onRenamed: () => void }) {
+  const invalidateClusters = useInvalidateClusters();
+  return useMutation({
+    mutationFn: (name: string) => api().renameCluster({ clusterId, name }),
+    onSuccess: async (cluster) => {
+      toast.success(`Renamed to "${cluster.name}"`);
+      onRenamed();
+      await invalidateClusters();
+    },
+    onError: (error) => toast.error(apiMessage(error, RENAME_FAILED, [400, 404])),
   });
 }
 

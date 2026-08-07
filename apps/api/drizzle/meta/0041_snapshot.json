@@ -1,6 +1,6 @@
 {
-  "id": "cfd1e34b-c3ea-47ab-ae6f-222556074e93",
-  "prevId": "7946a600-1740-4570-a810-8c36123a1176",
+  "id": "4916f309-fec2-4044-af0c-ae5f195d51cb",
+  "prevId": "cfd1e34b-c3ea-47ab-ae6f-222556074e93",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -1405,6 +1405,51 @@
           "nullsNotDistinct": false,
           "columns": [
             "cluster_id"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.rate_limit": {
+      "name": "rate_limit",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "key": {
+          "name": "key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "count": {
+          "name": "count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "last_request": {
+          "name": "last_request",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "rate_limit_key_unique": {
+          "name": "rate_limit_key_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "key"
           ]
         }
       },
