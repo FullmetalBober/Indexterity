@@ -1,4 +1,4 @@
-import type { QueryShape } from "./workload";
+import { executionsPerWeek, type QueryShape } from "./workload";
 
 // How much a missing index is actually costing.
 //
@@ -27,6 +27,16 @@ const LARGE_COLLECTION_DOCS = 100_000;
 // A single execution walking this many documents is severe on its own, even if
 // the shape is new and the running total is still small.
 const CRITICAL_DOCS_PER_EXECUTION = 500_000;
+// The floor for looking at a collection's queries at all, as an ongoing rate.
+//
+// Total-walked answers "how bad has this been"; a rate answers "is it still
+// happening", which is the question eligibility asks. A million documents a
+// week is roughly where an index starts paying for the write it adds to every
+// insert. Measured this way both mistakes a document-count gate makes go away
+// at once: a 900-document collection scanned five hundred times a second is 270
+// billion a week and no longer invisible, and a 50,000-row lookup table scanned
+// twice a day is 700k and no longer worth an index.
+export const MIN_WEEKLY_DOCS_EXAMINED = 1_000_000;
 
 export interface ScanCost {
   readonly severity: ScanSeverity;
@@ -77,6 +87,31 @@ export function scanCost(shape: QueryShape, docCount: number): ScanCost {
     docsExamined: examined,
     summary: `scanning a collection of ${round(docCount)} documents`,
   };
+}
+
+// What this collection's scans cost per week, in documents walked.
+//
+// The same measure `scanCost` grades, expressed as a rate so it can be compared
+// against a floor rather than against the collection's size. Summed across
+// shapes: a collection is worth analysing when its scanning adds up, not only
+// when one shape is bad on its own.
+//
+// Where the source reports no `docsExamined` — `$queryStats` below 8.0, and any
+// entry predating the field — a collection scan walks the whole collection by
+// definition, so the collection size is the per-execution figure. It is the
+// arithmetic a document-count gate was standing in for all along: cost is
+// documents TIMES frequency, and a gate on documents alone knows half of it.
+// The estimate is also the ceiling, so a missing figure errs towards analysing
+// the collection rather than towards ignoring it.
+export function weeklyScanCost(shapes: readonly QueryShape[], docCount: number): number {
+  let total = 0;
+  for (const shape of shapes) {
+    if (!shape.collscan) continue;
+    const examined = shape.docsExamined ?? shape.count * docCount;
+    const perExecution = shape.count > 0 ? examined / shape.count : 0;
+    total += perExecution * executionsPerWeek(shape);
+  }
+  return total;
 }
 
 // A CRITICAL scan is an ongoing cost being paid on every execution. Waiting for
