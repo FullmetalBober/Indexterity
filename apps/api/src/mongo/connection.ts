@@ -1,4 +1,5 @@
 import { type Db, MongoClient } from "mongodb";
+import type { ResolvedConnection } from "./conn-string";
 import { parseServerVersion, type ServerVersion } from "./version";
 
 function stringsAt(hello: object, key: string): string[] {
@@ -75,6 +76,23 @@ export class MongoConnection {
   async replicaMembers(): Promise<string[]> {
     const hello: unknown = await this.client.db("admin").command({ hello: 1 });
     return membersFromHello(hello);
+  }
+
+  // What this client is actually connected with, as opposed to what its string
+  // asked for. Only meaningful after connect(): an SRV deployment publishes
+  // authSource in a DNS TXT record, and the driver merges it into `credentials`
+  // during resolveSRVRecord — before that, `source` is still the database in the
+  // path. `tls` is settled at parse time (the +srv scheme defaults it to true),
+  // but it is read from the same place so there is one answer, not two.
+  //
+  // Feeds directConnectionTo, which has to rebuild a plain mongodb:// string and
+  // would otherwise lose both. Safe to call unconnected — it reports what the
+  // string alone says, which is the honest answer at that point.
+  resolved(): ResolvedConnection {
+    return {
+      tls: this.client.options.tls,
+      authSource: this.client.options.credentials?.source ?? null,
+    };
   }
 
   async listDatabaseNames(): Promise<string[]> {
