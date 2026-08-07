@@ -64,6 +64,7 @@ export function LineChart({
   unit,
   series,
   pending = false,
+  emptyNote,
 }: {
   title: string;
   unit: string;
@@ -73,6 +74,12 @@ export function LineChart({
   // samples yet" is a statement about the cluster, and it used to be made before
   // anybody had asked it anything (#72).
   pending?: boolean;
+  // What kind of nothing this is, when the caller knows. "Not enough samples
+  // yet" is true of a cluster nobody has collected twice, of one that took no
+  // writes, and of one whose counters reset — and reading the same sentence for
+  // all three is what had #85 filed against a working chart. The default stays
+  // for callers with nothing better to say.
+  emptyNote?: string | null;
 }) {
   // The chart is drawn only in the browser, and this is not a preference.
   //
@@ -113,7 +120,9 @@ export function LineChart({
     return (
       <div>
         <h3 className="font-medium text-sm">{title}</h3>
-        <p className="mt-1 text-muted-foreground text-sm">Not enough samples yet.</p>
+        <p className="mt-1 text-muted-foreground text-sm">
+          {emptyNote ?? "Not enough samples yet."}
+        </p>
       </div>
     );
   }

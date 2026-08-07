@@ -121,3 +121,26 @@ describe("LineChart", () => {
     expect(html).not.toContain("Not enough samples yet.");
   });
 });
+
+// "Not enough samples yet" is true of a cluster nobody has collected twice, of
+// one that took no writes, and of one whose counters reset — and saying the same
+// sentence for all three is what let #85 be reported against a working chart.
+describe("LineChart empty note", () => {
+  it("says which kind of nothing this is when the caller knows", () => {
+    render(
+      <LineChart
+        title="Write latency"
+        unit="µs/op"
+        series={[]}
+        emptyNote="No write operations recorded over this history."
+      />,
+    );
+    expect(screen.getByText("No write operations recorded over this history.")).toBeInTheDocument();
+    expect(screen.queryByText("Not enough samples yet.")).not.toBeInTheDocument();
+  });
+
+  it("keeps the generic sentence when it does not", () => {
+    render(<LineChart title="Write latency" unit="µs/op" series={[]} emptyNote={null} />);
+    expect(screen.getByText("Not enough samples yet.")).toBeInTheDocument();
+  });
+});
