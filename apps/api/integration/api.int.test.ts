@@ -8,6 +8,7 @@ import {
   clusterIndexes,
   clusters,
   createDatabase,
+  desc,
   eq,
   inArray,
   indexCooldowns,
@@ -17,6 +18,7 @@ import {
   policies,
   recommendations,
   roiMetrics,
+  securityEvents,
   session,
   sql,
   user,
@@ -122,6 +124,27 @@ afterAll(async () => {
   // The change-window test ran job code in THIS process — release its pools.
   await drainPool();
   await closeJobDb();
+  // Before the orgs and accounts go, not after. Every foreign key on
+  // `security_events` is `set null` on purpose — deleting an org must not erase
+  // the trail of what was done to it — so rows deleted by cascade is exactly what
+  // does NOT happen, and the suite has to remove its own debris while it can
+  // still recognise it.
+  if (createdOrgIds.length > 0) {
+    await db
+      .delete(securityEvents)
+      .where(inArray(securityEvents.orgId, createdOrgIds))
+      .catch(() => {});
+  }
+  if (createdEmails.length > 0) {
+    await db
+      .delete(securityEvents)
+      .where(inArray(securityEvents.actorEmail, createdEmails))
+      .catch(() => {});
+    await db
+      .delete(securityEvents)
+      .where(inArray(securityEvents.target, createdEmails))
+      .catch(() => {});
+  }
   for (const id of createdClusterIds) {
     await db
       .delete(clusters)
@@ -2065,6 +2088,139 @@ describe("engine-chosen change window", () => {
     expect(policy.inferredWindowStartHour).toBe(0);
     expect(policy.inferredWindowEndHour).toBe(6);
     expect(String(policy.inferredWindowReason)).toContain("quietest");
+  });
+});
+
+// The other half of the audit story (#53). `actions` records what the engine did
+// to an index; nothing recorded who signed in, who became an owner, or who took a
+// cluster's credentials — and the mapping from a better-auth route to a row is
+// read off its hook context, which only a real request produces. Late in the file
+// on purpose: the scenarios above have already invited, promoted, demoted,
+// removed, connected, rotated and flipped a mode, so this asserts the trail those
+// left rather than performing them a second time.
+describe("security trail", () => {
+  async function eventsFor(orgId: string) {
+    return (
+      await db
+        .select()
+        .from(securityEvents)
+        .where(eq(securityEvents.orgId, orgId))
+        .orderBy(desc(securityEvents.createdAt))
+    ).map((row) => ({ ...row }));
+  }
+
+  it("records signing in, failing to, and signing out", async () => {
+    const email = `trail-${Date.now()}@int.test`;
+    const signUpRes = await fetch(`${API_BASE}/api/auth/sign-up/email`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: WEB_ORIGIN },
+      body: JSON.stringify({ email, password: "password12345", name: "trail" }),
+    });
+    expect(signUpRes.status).toBe(200);
+    createdEmails.push(email);
+
+    const signIn = async (password: string) =>
+      fetch(`${API_BASE}/api/auth/sign-in/email`, {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: WEB_ORIGIN },
+        body: JSON.stringify({ email, password }),
+      });
+    const good = await signIn("password12345");
+    expect(good.status).toBe(200);
+    const bad = await signIn("not-the-password");
+    expect(bad.status).toBe(401);
+    const out = await fetch(`${API_BASE}/api/auth/sign-out`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: WEB_ORIGIN,
+        cookie: sessionFrom(email, good).cookie,
+      },
+      body: "{}",
+    });
+    expect(out.status).toBe(200);
+
+    const rows = (
+      await db.select().from(securityEvents).where(eq(securityEvents.actorEmail, email))
+    ).map((row) => ({ ...row }));
+    const events = rows.map((row) => row.event);
+    expect(events).toContain("ACCOUNT_CREATED");
+    expect(events).toContain("SIGN_IN");
+    expect(events).toContain("SIGN_OUT");
+
+    // The failed one is credited to nobody — whoever it was did not prove they
+    // were this account — so it is found by target instead.
+    const failed = (
+      await db.select().from(securityEvents).where(eq(securityEvents.target, email))
+    ).map((row) => ({ ...row }));
+    expect(failed.map((row) => row.event)).toContain("SIGN_IN_FAILED");
+    const attempt = failed.find((row) => row.event === "SIGN_IN_FAILED");
+    expect(attempt?.actorUserId).toBeNull();
+    expect(attempt?.actorEmail).toBeNull();
+    // Enough to answer "which client, and was it the same one" without a session
+    // being resolvable at all.
+    expect(attempt?.userAgent === null || typeof attempt?.userAgent === "string").toBe(true);
+  });
+
+  it("records who was invited, promoted and removed, and by whom", async () => {
+    const rows = await eventsFor(ownerOrgId);
+    const events = rows.map((row) => row.event);
+    expect(events).toContain("INVITE_CREATED");
+    expect(events).toContain("MEMBER_ROLE_CHANGED");
+    expect(events).toContain("MEMBER_REMOVED");
+
+    // The point of the table: every one of those names the account that did it.
+    for (const row of rows.filter((entry) => entry.event !== "SIGN_IN_FAILED")) {
+      expect(row.actorUserId).not.toBeNull();
+      expect(row.actorEmail).not.toBeNull();
+    }
+    const promotion = rows.find((row) => row.event === "MEMBER_ROLE_CHANGED");
+    expect(promotion?.actorEmail).toBe(owner.email);
+    expect(promotion?.target).not.toBeNull();
+    expect(promotion?.metadata).toMatchObject({ role: expect.any(String) });
+    const invite = rows.find((row) => row.event === "INVITE_CREATED");
+    expect(invite?.metadata).toMatchObject({ role: expect.any(String) });
+  });
+
+  it("records what was done to a cluster's access", async () => {
+    const rows = await eventsFor(ownerOrgId);
+    const events = rows.map((row) => row.event);
+    expect(events).toContain("CLUSTER_CONNECTED");
+    expect(events).toContain("CLUSTER_MODE_CHANGED");
+    expect(events).toContain("CLUSTER_CREDENTIALS_ROTATED");
+
+    const flip = rows.find((row) => row.event === "CLUSTER_MODE_CHANGED");
+    expect(flip?.clusterId).toBe(clusterId);
+    expect(flip?.metadata).toMatchObject({ readOnly: expect.any(Boolean) });
+    expect(flip?.actorEmail).toBe(owner.email);
+    // The api's own handlers read Fastify's resolved address, which exists whether
+    // or not a proxy is trusted; the better-auth half reads a forwarded header and
+    // records nothing without TRUST_PROXY, which this suite does not set. Two
+    // sources, and the difference is deliberate — see audit/http-actor.ts.
+    expect(flip?.ipAddress).not.toBeNull();
+
+    // Disconnecting deletes the cluster, so the row that records it cannot point
+    // at one — it carries the id in its metadata instead, and it is the only thing
+    // left about that cluster afterwards.
+    const gone = rows.find((row) => row.event === "CLUSTER_DISCONNECTED");
+    if (gone !== undefined) {
+      expect(gone.clusterId).toBeNull();
+      expect(gone.metadata).toMatchObject({ clusterId: expect.any(String) });
+    }
+  });
+
+  // An audit table is read by people who are not meant to be able to use what it
+  // records. A connection string or a session token in `metadata` would hand them
+  // exactly what the rest of this api goes to some trouble to seal.
+  it("copies no credential into the trail", async () => {
+    const rows = await db.select().from(securityEvents);
+    const serialised = JSON.stringify(rows);
+    expect(serialised).not.toContain("mongodb://");
+    expect(serialised).not.toContain("mongodb+srv://");
+    expect(serialised).not.toContain("password12345");
+    for (const row of rows) {
+      expect(JSON.stringify(row.metadata ?? {})).not.toMatch(/token|secret|connectionString/i);
+    }
   });
 });
 

@@ -2,9 +2,11 @@ import { randomUUID } from "node:crypto";
 import { PASSWORD_MIN_LENGTH } from "@repo/contracts";
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
-import { APIError, createAuthMiddleware } from "better-auth/api";
+import { APIError, createAuthMiddleware, getSessionFromCtx } from "better-auth/api";
 import { expireCookie } from "better-auth/cookies";
-import { createDatabase, schema } from "../db";
+import { authTrailEntry, sessionEndedEntry, type TrailActor } from "../audit/auth-trail";
+import { authEventFor, recordSecurityEvent } from "../audit/security-events";
+import { createDatabase, eq, schema, user as userTable } from "../db";
 import { sendMail } from "../mail/mailer";
 import { organizationPlugin } from "./organization";
 import { authRateLimit } from "./rate-limit";
@@ -39,9 +41,72 @@ export interface AuthConfig {
   readonly webOrigin: string;
 }
 
+// Who is making this request, for the security trail. Two sources, because the
+// acts arrive in two shapes and neither covers the other — both measured against
+// the integration suite rather than reasoned about:
+//
+//   A sign-in or sign-up has NO session in the request. Its cookie is in the
+//   response, and the session it just created is on `context.newSession`.
+//
+//   An org act arrives WITH a session and no new one. `ctx.context.session` is
+//   empty in an after-hook even on routes that required one, so it has to be
+//   resolved — `getSessionFromCtx` is better-auth's own resolver, the one its
+//   `sessionMiddleware` uses, so this reads exactly what the endpoint was
+//   authorised against, cookie cache included.
+//
+// Reading only the second made every org event anonymous; reading only the first
+// made every sign-in anonymous. The suite caught each by asserting that no row has
+// a null actor.
+//
+// Null is still a normal answer: a failed sign-in has nobody behind it.
+async function trailActor(
+  ctx: Parameters<typeof getSessionFromCtx>[0] & {
+    context: {
+      newSession?: { session: Record<string, unknown>; user: Record<string, unknown> } | null;
+    };
+  },
+): Promise<TrailActor | null> {
+  const fresh = ctx.context.newSession;
+  if (fresh !== null && fresh !== undefined) return asActor(fresh.user, fresh.session);
+  try {
+    const resolved = await getSessionFromCtx(ctx);
+    return resolved === null ? null : asActor(resolved.user, resolved.session);
+  } catch {
+    // Resolving the actor must not fail the act. A row that says it does not know
+    // who did something is worse than one that names them, and both are better
+    // than a 500 on a sign-in.
+    return null;
+  }
+}
+
+function asActor(
+  user: Record<string, unknown>,
+  session: Record<string, unknown>,
+): TrailActor | null {
+  const userId = user.id;
+  if (typeof userId !== "string") return null;
+  return {
+    userId,
+    email: typeof user.email === "string" ? user.email : null,
+    activeOrgId:
+      typeof session.activeOrganizationId === "string" ? session.activeOrganizationId : null,
+  };
+}
+
 // GitHub OAuth + email/password, backed by the Drizzle/Postgres control-plane DB.
 export function createAuth(config: AuthConfig) {
   const db = createDatabase(config.databaseUrl);
+  // The email is stored alongside the id on every row (`actor_email`), because
+  // `actor_user_id` is `set null` on user deletion and a trail whose actor column
+  // empties when the account goes answers none of the questions it exists for.
+  const emailOf = async (userId: string): Promise<string | null> => {
+    const [row] = await db
+      .select({ email: userTable.email })
+      .from(userTable)
+      .where(eq(userTable.id, userId))
+      .limit(1);
+    return row?.email ?? null;
+  };
   return betterAuth({
     database: drizzleAdapter(db, { provider: "pg", schema }),
     secret: config.secret,
@@ -137,6 +202,26 @@ export function createAuth(config: AuthConfig) {
     // cookie is already in the response and is kept.
     hooks: {
       after: createAuthMiddleware(async (ctx) => {
+        // The security trail (audit/auth-trail.ts). First, and never allowed to
+        // throw: whether the act is recorded must not decide whether it happened,
+        // and a lost row is logged rather than escalated.
+        //
+        // Here rather than in databaseHooks because this is the only place the
+        // ACTOR can be established. `session.create` sees a sign-in and the
+        // organization plugin's after-hooks see a promotion, but the plugin is
+        // handed the member and the org and not the caller — and "who promoted
+        // whom" is the question (#53).
+        //
+        // The path is classified BEFORE the actor is resolved, and that ordering
+        // is the point: resolving one costs a session lookup, and most traffic
+        // through here is `/get-session` on ordinary navigation, which records
+        // nothing. Only the dozen-odd acts pay for it.
+        if (authEventFor(ctx.path, !(ctx.context.returned instanceof Error)) !== null) {
+          const entry = authTrailEntry(ctx, await trailActor(ctx), config.trustProxy);
+          if (entry !== null) {
+            await recordSecurityEvent(db, entry, (message) => ctx.context.logger.warn(message));
+          }
+        }
         if (ctx.method !== "POST" || !ctx.path.startsWith("/organization/")) return;
         const sessionData = ctx.context.authCookies.sessionData;
         const pending = ctx.context.responseHeaders?.getSetCookie() ?? [];
@@ -145,6 +230,43 @@ export function createAuth(config: AuthConfig) {
       }),
     },
     databaseHooks: {
+      session: {
+        delete: {
+          // The one act the after-middleware cannot record: signing out destroys
+          // the session it would have to resolve the actor from, so the trail
+          // would say somebody signed out and not who (#53). The row being
+          // deleted IS the answer.
+          //
+          // Only a sign-out. Revocations delete sessions too and are recorded by
+          // the middleware instead, where the revoker's own session is intact —
+          // and revoking in bulk does not come through here row by row anyway.
+          // A delete with no request behind it (expiry cleanup, a cascade) is not
+          // an act and gets nothing.
+          after: async (endedSession, context) => {
+            const userId = endedSession.userId;
+            const entry = sessionEndedEntry({
+              path: context?.path ?? null,
+              actor:
+                typeof userId === "string"
+                  ? {
+                      userId,
+                      email: await emailOf(userId),
+                      activeOrgId:
+                        typeof endedSession.activeOrganizationId === "string"
+                          ? endedSession.activeOrganizationId
+                          : null,
+                    }
+                  : null,
+              headers: context?.headers,
+              trustProxy: config.trustProxy,
+            });
+            if (entry === null) return;
+            await recordSecurityEvent(db, entry, (message) =>
+              context?.context.logger.warn(message),
+            );
+          },
+        },
+      },
       user: {
         create: {
           // Gates account creation for BOTH email/password and OAuth — the

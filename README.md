@@ -193,6 +193,15 @@ un-hidden first — and the confirmation dialog makes you type the org's name an
 names every least-privilege user Indexterity created on your clusters, with the
 command to drop it.
 
+**Owner-level acts leave a trail.** `actions` records what the engine did to an
+index; `security_events` records the rest — signing in and failing to, signing out,
+revoking a session, promoting and demoting, removing a member, inviting one, an
+invitation accepted, an org made or destroyed, and a cluster connected,
+disconnected, rotated or flipped live. Each row names the account that did it, what
+it was done to, and the client it came from. It does not age out with the plan's
+history window, and nothing cascades into it: deleting an org, a cluster or a user
+cannot erase what was done to it.
+
 Session resolution, the cookie-cache trade and the plugin mapping:
 [Architecture §9.3](https://github.com/FullmetalBober/Indexterity/wiki/Architecture).
 
@@ -209,6 +218,7 @@ apps/api                control plane
   src/engine            engine-neutral ports (collector, executor, session)
   src/mongo             the MongoDB adapter; zod-parses driver output at the boundary
   src/jobs              graphile-worker tasks (collect/classify/suggest/apply/finalize)
+  src/audit             the security trail — who signed in, who changed a role
   src/db                Drizzle schema, client, secret sealing
 apps/web                dashboard
   src/routes/app.tsx    the /app shell — auth gate, org switcher, the nav rail
