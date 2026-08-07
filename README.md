@@ -548,6 +548,27 @@ e2e suites do need one, and they take `MONGO_URL` (defaulting to
 podman run -d --rm --name mongo-test -p 27017:27017 docker.io/library/mongo:8
 ```
 
+That one is for the suites, which run on the host. A cluster you connect **in
+the running stack** needs a different mongod: the api and worker are containers,
+so `localhost` is themselves, and the host is only addressable as
+`host.containers.internal` — which resolves into `169.254.0.0/16`, and
+`src/engine/net-guard.ts` files that range as FORBIDDEN, never dialed even with
+`ALLOW_PRIVATE_CLUSTER_TARGETS`. It shares a subnet with the cloud metadata
+endpoint, so the escape hatch deliberately does not open it. Put the mongod on
+the compose network instead, where the stack's own private subnet is what the
+escape hatch is for:
+
+```bash
+podman run -d --rm --name mongo \
+  --network mongo_optimizer_default --network-alias mongo \
+  docker.io/library/mongo:8
+```
+
+Then connect `mongodb://mongo:27017`. Clusters registered before the demo mongod
+was dropped from compose already hold exactly that string, and start answering
+again the moment something called `mongo` is back on the network — the worker
+logs `cluster <id> unreachable — skipped` on every tick until it is.
+
 A replica set — which is what reproduces anything topology-shaped, since
 `$indexStats` and `$collStats latencyStats` are both per-member — takes several
 mongods, most easily as several processes in one host-network container.
