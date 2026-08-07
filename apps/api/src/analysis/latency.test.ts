@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { type LatencyReading, latencyPoints, summarizeLatency } from "./latency";
+import { type LatencyReading, latencyGaps, latencyPoints, summarizeLatency } from "./latency";
 
 function reading(
   readOps: number,
@@ -125,5 +125,73 @@ describe("latencyPoints", () => {
     ]);
     expect(points[0]?.readMicros).toBe(500);
     expect(points[0]?.writeMicros).toBeNull();
+  });
+});
+
+// The bug was never in these deltas: on a replica set the collector read
+// $collStats from whichever node the connection's read preference picked, and a
+// secondary's write counters sit at zero forever because oplog application is
+// not a client write op. Every window was Δops = 0, every point was null, and
+// the chart said "not enough samples" about a cluster doing 2,500 writes.
+//
+// The collector now sums every member (mongo/collector.ts). What is left for
+// this layer is saying WHICH kind of nothing a null series is, so the two are
+// never confused again.
+describe("latencyGaps", () => {
+  it("reports nothing to explain once a metric has one drawable window", () => {
+    expect(latencyGaps(series)).toEqual({ read: null, write: null });
+  });
+
+  it("names the second collect a lone reading is waiting for", () => {
+    expect(latencyGaps([reading(100, 100_000, 10, 20_000, 0)])).toEqual({
+      read: "AWAITING_SECOND_COLLECT",
+      write: "AWAITING_SECOND_COLLECT",
+    });
+    expect(latencyGaps([])).toEqual({
+      read: "AWAITING_SECOND_COLLECT",
+      write: "AWAITING_SECOND_COLLECT",
+    });
+  });
+
+  // The reported shape, and the one that must not read as "no data": reads move,
+  // writes never do. Per metric, so a working read chart cannot speak for the
+  // write chart beside it.
+  it("separates a busy metric from a still one", () => {
+    expect(
+      latencyGaps([
+        reading(100, 100_000, 0, 0, 0),
+        reading(200, 200_000, 0, 0, 1),
+        reading(300, 260_000, 0, 0, 2),
+      ]),
+    ).toEqual({ read: null, write: "NO_OPS_RECORDED" });
+  });
+
+  // A cumulative total cannot fall while the same mongod runs, so this is a
+  // restart — and the window across it is unmeasurable rather than idle.
+  it("distinguishes a counter reset from a quiet counter", () => {
+    expect(
+      latencyGaps([reading(500, 500_000, 400, 800_000, 0), reading(10, 9_000, 5, 9_000, 1)]),
+    ).toEqual({ read: "COUNTERS_RESET", write: "COUNTERS_RESET" });
+  });
+
+  // One usable window is enough. A restart earlier in the history explains a hole
+  // in a series that is otherwise drawing, and the chart is not empty to explain.
+  it("stays silent when a reset is followed by real windows", () => {
+    expect(
+      latencyGaps([
+        reading(500, 500_000, 400, 800_000, 0),
+        reading(10, 9_000, 5, 9_000, 1),
+        reading(60, 39_000, 25, 49_000, 2),
+      ]),
+    ).toEqual({ read: null, write: null });
+  });
+
+  // Micros falling while ops climbs is impossible in the same run of a mongod —
+  // it takes a restart that happened to land the op count higher. windowAvg nulls
+  // it for exactly that reason, so the gap has to agree.
+  it("calls latency going backwards a reset even when ops advanced", () => {
+    expect(
+      latencyGaps([reading(100, 900_000, 100, 900_000, 0), reading(200, 100_000, 200, 100_000, 1)]),
+    ).toEqual({ read: "COUNTERS_RESET", write: "COUNTERS_RESET" });
   });
 });

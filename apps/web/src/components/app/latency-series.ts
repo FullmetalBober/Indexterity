@@ -1,4 +1,4 @@
-import type { CollectionLatencySeries, LatencySeriesPoint } from "@repo/contracts";
+import type { CollectionLatencySeries, LatencyGap, LatencySeriesPoint } from "@repo/contracts";
 
 // Which collections each latency chart draws, and in what colour.
 //
@@ -22,6 +22,44 @@ export interface LatencyCharts {
   readonly writeSeries: ChartSeries[];
   // Collections on neither chart, for the "+N more" note under them.
   readonly foldedCount: number;
+  // What to say when the chart above has no series at all. Null when it has
+  // some, or when the collector has told us nothing to explain.
+  readonly readNote: string | null;
+  readonly writeNote: string | null;
+}
+
+// Least self-resolving first. A restart is a fact about the cluster and outranks
+// a quiet counter; waiting on a second collect outranks nothing, because it is
+// the one that fixes itself and the only gap a brand-new cluster can report.
+const GAP_RANK: readonly LatencyGap[] = [
+  "COUNTERS_RESET",
+  "NO_OPS_RECORDED",
+  "AWAITING_SECOND_COLLECT",
+];
+
+function noteFor(gap: LatencyGap, metric: "read" | "write"): string {
+  switch (gap) {
+    case "AWAITING_SECOND_COLLECT":
+      return "Waiting on a second collect — a rate needs two readings to compare.";
+    case "NO_OPS_RECORDED":
+      return `No ${metric} operations recorded over this history.`;
+    case "COUNTERS_RESET":
+      return "The server restarted and its counters reset, so this window cannot be measured.";
+  }
+}
+
+// One sentence for the whole chart, from the gaps its collections reported.
+// Null when nobody reported one — an older API that does not send them, or a
+// cluster with no collections at all, both of which the chart's own "not enough
+// samples" already covers honestly.
+function chartNote(
+  collections: readonly CollectionLatencySeries[],
+  gapOf: (series: CollectionLatencySeries) => LatencyGap | null,
+  metric: "read" | "write",
+): string | null {
+  const seen = new Set(collections.map(gapOf).filter((gap): gap is LatencyGap => gap !== null));
+  const gap = GAP_RANK.find((candidate) => seen.has(candidate));
+  return gap === undefined ? null : noteFor(gap, metric);
 }
 
 function namespaceOf(series: CollectionLatencySeries): string {
@@ -84,5 +122,11 @@ export function latencyCharts(
     // Against the union, so the note counts collections that reached NEITHER chart
     // rather than letting one metric's ranking speak for both.
     foldedCount: Math.max(0, collections.length - union.length),
+    // Only for a chart that drew nothing. A chart with a line on it has already
+    // said everything it needs to.
+    readNote:
+      readCollections.length > 0 ? null : chartNote(collections, (one) => one.readGap, "read"),
+    writeNote:
+      writeCollections.length > 0 ? null : chartNote(collections, (one) => one.writeGap, "write"),
   };
 }

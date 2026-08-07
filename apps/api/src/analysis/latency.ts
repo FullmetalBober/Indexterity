@@ -89,6 +89,65 @@ export function latencyPoints(readings: readonly LatencyReading[]): LatencyPoint
   return points;
 }
 
+// Why a metric has nothing to draw, when it has nothing to draw.
+//
+// An empty chart and an unmeasurable one looked identical — both rendered "Not
+// enough samples yet" — and that is what let #85 be reported twice: the panel
+// was stating the collector's blind spot as a fact about the cluster. These are
+// the three shapes a null window can have, and they are read straight back off
+// the same conditions windowAvg nulls on, so the two cannot drift apart.
+export type LatencyGap =
+  // One reading. A window needs two, so this resolves itself on the next collect.
+  | "AWAITING_SECOND_COLLECT"
+  // Readings exist and the counter never moved between any pair of them.
+  | "NO_OPS_RECORDED"
+  // A total fell, which cumulative counters cannot do while the same mongod
+  // runs. Every window spanning the restart is unmeasurable, not zero.
+  | "COUNTERS_RESET";
+
+export interface LatencyGaps {
+  readonly read: LatencyGap | null;
+  readonly write: LatencyGap | null;
+}
+
+function gapFor(
+  sorted: readonly LatencyReading[],
+  ops: (reading: LatencyReading) => number,
+  micros: (reading: LatencyReading) => number,
+): LatencyGap | null {
+  if (sorted.length < 2) return "AWAITING_SECOND_COLLECT";
+  let reset = false;
+  for (let i = 1; i < sorted.length; i++) {
+    const prev = sorted[i - 1];
+    const next = sorted[i];
+    if (prev === undefined || next === undefined) continue;
+    const deltaOps = ops(next) - ops(prev);
+    const deltaMicros = micros(next) - micros(prev);
+    // The same test windowAvg passes on. One drawable window and there is
+    // nothing to explain.
+    if (deltaOps > 0 && deltaMicros >= 0) return null;
+    if (deltaOps < 0 || deltaMicros < 0) reset = true;
+  }
+  return reset ? "COUNTERS_RESET" : "NO_OPS_RECORDED";
+}
+
+// Null per metric when that metric has at least one drawable window.
+export function latencyGaps(readings: readonly LatencyReading[]): LatencyGaps {
+  const sorted = sortedRuns(readings);
+  return {
+    read: gapFor(
+      sorted,
+      (reading) => reading.readOps,
+      (reading) => reading.readLatencyMicros,
+    ),
+    write: gapFor(
+      sorted,
+      (reading) => reading.writeOps,
+      (reading) => reading.writeLatencyMicros,
+    ),
+  };
+}
+
 function deltaPct(baseline: number | null, current: number | null): number | null {
   if (baseline === null || current === null || baseline <= 0) return null;
   return ((current - baseline) / baseline) * 100;
