@@ -26,6 +26,10 @@ export const SECURITY_EVENTS = [
   "TWO_FACTOR_VERIFIED",
   "TWO_FACTOR_FAILED",
   "TWO_FACTOR_CODES_REGENERATED",
+  // The request, not the flip (#83): the flip happens on a GET /verify-email
+  // link indistinguishable by path from ordinary signup verification, and the
+  // request is the act with the actor behind it.
+  "EMAIL_CHANGE_REQUESTED",
   // Membership. The acts that decide who can do everything else.
   "MEMBER_ROLE_CHANGED",
   "MEMBER_REMOVED",
@@ -97,6 +101,7 @@ export function authEventFor(path: string, ok: boolean): SecurityEventName | nul
   if (path === "/two-factor/enable") return "TWO_FACTOR_ENABLED";
   if (path === "/two-factor/disable") return "TWO_FACTOR_DISABLED";
   if (path === "/two-factor/generate-backup-codes") return "TWO_FACTOR_CODES_REGENERATED";
+  if (path === "/change-email") return "EMAIL_CHANGE_REQUESTED";
   // Not in the issue's list, and it belongs there: a sign-up creates a session
   // without a sign-in, so without this the first session an account ever holds
   // would be the one with no row explaining where it came from. The refusal side

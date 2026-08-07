@@ -123,3 +123,5 @@ export const changePasswordInput = z.object({
   currentPassword: z.string().min(1, "Your current password"),
   newPassword: password,
 });
+// The same email rule sign-up applies — a change is a sign-up for the address.
+export const changeEmailInput = z.object({ newEmail: emailAddress });
