@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { resetAlertCooldowns } from "../mail/notify";
+import { InsecureConnectionError } from "../mongo/client";
 import { UnsupportedServerError } from "../mongo/executor";
 import { ClusterCredentialsError, ClusterGoneError } from "./cluster-connection";
 import { type ClusterTaskDeps, runClusterTask } from "./tasks";
@@ -137,5 +138,42 @@ describe("runClusterTask", () => {
     }
     expect(log.warns).toHaveLength(3);
     expect(log.alerts).toEqual([`${CLUSTER}:cluster version not supported`]);
+  });
+});
+
+// A stored string that predates TLS enforcement, or one connected while the
+// deployment allowed plaintext. No retry fixes it — only the owner reconnecting
+// — so it takes the shape of an unsupported version rather than of a failure.
+describe("runClusterTask on a cluster we refuse to dial", () => {
+  beforeEach(() => {
+    resetAlertCooldowns();
+  });
+
+  it("skips the tick, warns every time, and mails the owners once", async () => {
+    const log = recorder();
+    const insecure = new InsecureConnectionError("refusing to connect without validated TLS");
+    for (let i = 0; i < 3; i++) {
+      await expect(
+        runClusterTask("collect", CLUSTER, log.deps, () => Promise.reject(insecure)),
+      ).resolves.toBeUndefined();
+    }
+    expect(log.warns).toHaveLength(3);
+    expect(log.alerts).toEqual([
+      `${CLUSTER}:collect skipped — this cluster's connection string is not using TLS`,
+    ]);
+    // Nothing landed, so nothing for the dashboard to refetch.
+    expect(log.emitted).toHaveLength(0);
+  });
+
+  // The distinction that matters to whoever reads the email: the cluster may be
+  // perfectly healthy and we are declining to dial it. "We could not reach you"
+  // would send them hunting a firewall that is not the problem.
+  it("is not reported as unreachable", async () => {
+    const log = recorder();
+    await runClusterTask("collect", CLUSTER, log.deps, () =>
+      Promise.reject(new InsecureConnectionError("refusing to connect without validated TLS")),
+    );
+    expect(log.alerts.join()).not.toContain("unreachable");
+    expect(log.warns.join()).not.toContain("unreachable");
   });
 });

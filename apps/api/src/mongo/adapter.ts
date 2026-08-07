@@ -1,4 +1,5 @@
 import type { EngineAdapter, EngineSession, IndexCollector, IndexExecutor } from "../engine/ports";
+import { assertTlsEnforced } from "./client";
 import { MongoIndexCollector } from "./collector";
 import { isMongoConnString, mongoHosts } from "./conn-string";
 import { MongoConnection } from "./connection";
@@ -47,6 +48,7 @@ export const mongoAdapter: EngineAdapter = {
   capabilities: { hideIndexes: true, provisionScopedUsers: true },
   isConnString: isMongoConnString,
   hostsOf: mongoHosts,
+  assertSecureTransport: assertTlsEnforced,
   open: async (connectionString: string): Promise<EngineSession> => {
     const conn = new MongoConnection(connectionString);
     await conn.connect();

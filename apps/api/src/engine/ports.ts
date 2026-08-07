@@ -163,6 +163,12 @@ export interface EngineAdapter {
   isConnString(value: string): boolean;
   // Every host the string would dial, for the network guard to vet.
   hostsOf(value: string): { hosts: string[]; isSrv: boolean };
+  // Throws when the string would not connect over validated TLS. Engine-specific
+  // because how transport is expressed is: mongo puts it in the scheme and the
+  // `tls`/`ssl` params, postgres in `sslmode`. The adapter also OWNS the
+  // enforcement — this exists so onboarding can refuse with the reason rather
+  // than discovering it as a failed dial.
+  assertSecureTransport(value: string): void;
   open(connectionString: string): Promise<EngineSession>;
   // Report what these credentials may do, without writing anything.
   diagnose(connectionString: string): Promise<ConnectionDiagnosis>;

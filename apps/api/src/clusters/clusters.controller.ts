@@ -13,7 +13,12 @@ import { consumeDialBudget } from "../errors/dial-budget";
 import { mapClusterError, toCluster, toDiagnosis } from "../http/mappers";
 import { TenancyService } from "../http/tenancy.service";
 import { evictCluster } from "../jobs/connection-pool";
-import { connStringUsername, ProvisionDeniedError, provisionScopedUser } from "../mongo";
+import {
+  connStringUsername,
+  InsecureConnectionError,
+  ProvisionDeniedError,
+  provisionScopedUser,
+} from "../mongo";
 import { Implement } from "../orpc/implement";
 import { restoreHiddenIndexes, revokeCommandFor } from "./offboard";
 
@@ -113,6 +118,23 @@ export class ClustersController {
       await assertTargetsAllowed(hosts, isSrv, { allowPrivate: allowPrivateTargets() });
     } catch (error) {
       if (error instanceof BlockedTargetError) {
+        throw errors.BAD_REQUEST({ message: error.message });
+      }
+      throw error;
+    }
+    // AFTER the address guard, deliberately. A private or loopback target is
+    // refused whatever its transport, and answering "you need TLS" to someone
+    // pointing at 10.0.0.5 would name the wrong problem — and quietly weaken the
+    // SSRF message that is the more severe of the two.
+    //
+    // The enforcement itself lives in mongo/client.ts, because the worker never
+    // comes through here: jobs/connection-pool.ts opens the STORED string. This
+    // is only so onboarding refuses with the reason instead of surfacing the same
+    // refusal as a 502 out of diagnose.
+    try {
+      adapter.assertSecureTransport(value);
+    } catch (error) {
+      if (error instanceof InsecureConnectionError) {
         throw errors.BAD_REQUEST({ message: error.message });
       }
       throw error;

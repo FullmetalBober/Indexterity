@@ -1,4 +1,5 @@
 export * from "./adapter";
+export * from "./client";
 export * from "./collector";
 export * from "./connection";
 export * from "./diagnose";

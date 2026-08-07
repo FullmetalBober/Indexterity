@@ -39,6 +39,8 @@ const apiEnv = {
   SIGNUP_MODE: "open",
   // The suite's mongo is on localhost, which the SSRF guard blocks by design.
   ALLOW_PRIVATE_CLUSTER_TARGETS: "true",
+  // The compose mongo the suite connects serves no TLS.
+  ALLOW_INSECURE_CLUSTER_TLS: "true",
   // Verification would send mail and block sign-in on a link nobody can click.
   REQUIRE_EMAIL_VERIFICATION: "false",
   // The scheduler would start collecting from the test clusters mid-assertion.

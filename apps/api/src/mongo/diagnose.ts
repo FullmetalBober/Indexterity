@@ -1,6 +1,7 @@
-import { type Admin, MongoClient } from "mongodb";
+import type { Admin } from "mongodb";
 import { z } from "zod";
 import type { ConnectionDiagnosis, PrivilegeCheck, PrivilegeTier } from "../engine/ports";
+import { mongoClient } from "./client";
 import {
   hasQueryStatsPlanMetrics,
   parseServerVersion,
@@ -295,7 +296,7 @@ function failure(message: string): ConnectionDiagnosis {
 // (available to any authenticated user) rather than probing commands, so
 // nothing is written just to find out.
 export async function diagnoseConnection(uri: string): Promise<ConnectionDiagnosis> {
-  const client = new MongoClient(uri, { serverSelectionTimeoutMS: 5000 });
+  const client = mongoClient(uri);
   try {
     const admin = client.db("admin");
     // Version first: below the floor nothing else matters, and saying so at
