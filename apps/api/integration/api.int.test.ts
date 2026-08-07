@@ -734,7 +734,7 @@ describe("SSRF guard and sign-up gate (second api with production defaults)", ()
     });
     expect(res.status).toBe(400);
     const body = JSON.stringify(await res.json());
-    expect(body).toContain("validated TLS");
+    expect(body).toContain("without TLS");
     expect(body).toContain("ALLOW_INSECURE_CLUSTER_TLS");
   });
 

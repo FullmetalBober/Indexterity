@@ -18,7 +18,7 @@ test.describe("account page", () => {
     await page.getByRole("link", { name: "Account" }).click();
 
     // The profile card knows who this is.
-    const name = page.getByLabel("Name");
+    const name = page.getByLabel("Name", { exact: true });
     await expect(name).toHaveValue("E2E User");
     await expect(page.getByText(email)).toBeVisible();
 
@@ -56,6 +56,6 @@ test.describe("account page", () => {
       .getByRole("link", { name: "Settings" })
       .click();
     await page.getByRole("link", { name: "Account" }).click();
-    await expect(page.getByLabel("Name")).toHaveValue("E2E Renamed");
+    await expect(page.getByLabel("Name", { exact: true })).toHaveValue("E2E Renamed");
   });
 });

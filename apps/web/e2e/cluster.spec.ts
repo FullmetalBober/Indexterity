@@ -39,7 +39,7 @@ test.describe("cluster lifecycle", () => {
     await signUpAndLandOnDashboard(page, uniqueEmail("preflight"));
     await openConnectForm(page);
 
-    await page.getByLabel("Name").fill("E2E Preflight");
+    await page.getByLabel("Name", { exact: true }).fill("E2E Preflight");
     await page.getByLabel("Connection string").fill(MONGO_URL);
     await page.getByRole("button", { name: "Check access" }).click();
 
@@ -54,7 +54,7 @@ test.describe("cluster lifecycle", () => {
     await signUpAndLandOnDashboard(page, uniqueEmail("unreachable"));
     await openConnectForm(page);
 
-    await page.getByLabel("Name").fill("Nowhere");
+    await page.getByLabel("Name", { exact: true }).fill("Nowhere");
     await page.getByLabel("Connection string").fill("mongodb://127.0.0.1:59999");
     await page.getByRole("button", { name: "Check access" }).click();
 
@@ -66,7 +66,7 @@ test.describe("cluster lifecycle", () => {
     await signUpAndLandOnDashboard(page, uniqueEmail("scheme"));
     await openConnectForm(page);
 
-    await page.getByLabel("Name").fill("Evil");
+    await page.getByLabel("Name", { exact: true }).fill("Evil");
     await page.getByLabel("Connection string").fill("http://169.254.169.254/latest/meta-data");
     await page.getByRole("button", { name: "Check access" }).click();
 
@@ -246,7 +246,7 @@ test.describe("cluster lifecycle", () => {
     await expect(page.getByText(/1 \/ 1 clusters on the FREE plan/)).toBeVisible();
     await expect(page.getByText("No room for another cluster")).toBeVisible();
 
-    await page.getByLabel("Name").fill("E2E Quota Two");
+    await page.getByLabel("Name", { exact: true }).fill("E2E Quota Two");
     await page.getByLabel("Connection string").fill(MONGO_URL);
     await page.getByRole("button", { name: "Check access" }).click();
     await page.getByRole("button", { name: "Connect", exact: true }).click();
