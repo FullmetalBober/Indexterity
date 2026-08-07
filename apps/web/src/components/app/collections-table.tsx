@@ -115,13 +115,14 @@ const columns: DashboardColumns<CollectionRow> = column.columns([
   }),
 ]);
 
-export function CollectionsTable({ rows }: { rows: CollectionRow[] }) {
+export function CollectionsTable({ rows, loading }: { rows: CollectionRow[]; loading: boolean }) {
   return (
     <DataTable
       className="mt-2"
       caption="Per-collection index footprint and latency"
       columns={columns}
       data={rows}
+      loading={loading}
       getRowId={(row) => row.ns}
       // Biggest index footprint first: this table exists to answer "where is the
       // space going", and the answer is at the top rather than found by scrolling.

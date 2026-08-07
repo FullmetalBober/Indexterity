@@ -10,9 +10,10 @@ import { CollectionsTable, toCollectionRows } from "~/components/app/collections
 import { ConnectClusterForm } from "~/components/app/connect-cluster-form";
 import { fmtBytes } from "~/components/app/format";
 import { latencyCharts } from "~/components/app/latency-series";
-import { PolicySection } from "~/components/app/policy-section";
+import { PolicySection, PolicySectionSkeleton } from "~/components/app/policy-section";
 import { RecommendationsTable } from "~/components/app/recommendations-table";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
+import { Skeleton } from "~/components/ui/skeleton";
 import { useLiveClusterEvents } from "~/lib/queries/live";
 import {
   activityQuery,
@@ -56,22 +57,19 @@ export const Route = createFileRoute("/app/")({
   // was hiding it. A concrete id means the same cluster forever.
   //
   // Same rule as the layout's bar, so the two cannot disagree about which
-  // cluster the page is about.
+  // cluster the page is about — and the component below applies it again rather
+  // than reading the answer out of loader data. An id resolved here is an id
+  // frozen at the moment the loader ran, and a session change refetches the
+  // cluster list WITHOUT re-running any loader (see invalidateSession). That is
+  // what #82 was: switching org left this page keyed on the org just left, while
+  // the bar above it moved on. So this resolves which keys to warm and returns
+  // nothing.
   //
   // Every warm is allowed to fail. The reads no longer fold an error into an
   // empty payload, so a rejection here would take out the whole route instead of
   // the one panel it belongs to; allSettled leaves the error on its own query,
   // where the component reading that query draws an empty panel and the six
   // beside it are unaffected.
-  // Warming only. It deliberately returns nothing: an id resolved here is an id
-  // frozen at the moment the loader ran, and a session change refetches the
-  // cluster list WITHOUT re-running any loader (see invalidateSession). That is
-  // what #82 was — switching org left this page keyed on the previous org's
-  // cluster while the bar above it, which re-derives from the live list, moved
-  // on. Two sources for one question, and only one of them could follow.
-  //
-  // The component derives the same id from the same list, so this resolves the
-  // keys to warm and nothing else.
   loader: async ({ deps, context }) => {
     const clusters = await context.queryClient
       .ensureQueryData(clustersQuery())
@@ -131,17 +129,23 @@ function Dashboard() {
 
   if (!shell.authed) return null;
 
-  const proposed = recommendations.filter((rec) => rec.state === "PROPOSED");
+  const proposed = recommendations.data.filter((rec) => rec.state === "PROPOSED");
   const totalSaved = proposed.reduce((sum, rec) => sum + rec.estimatedBytesSaved, 0);
 
   // Ranked per metric, not once for both charts — see latency-series.ts for the bug
   // that made this its own module rather than four lines here.
-  const { readSeries, writeSeries, foldedCount } = latencyCharts(latencySeries, SERIES_PALETTE);
+  const { readSeries, writeSeries, foldedCount } = latencyCharts(
+    latencySeries.data,
+    SERIES_PALETTE,
+  );
   const chartedCount = Math.max(readSeries.length, writeSeries.length);
 
   // Merged by namespace into one row per collection — see collections-table.tsx,
-  // which owns the row shape.
-  const collectionRows = toCollectionRows(collectionStats, latency);
+  // which owns the row shape. Two reads behind one table, so it is waiting until
+  // both have answered — a table drawn from half its inputs is a table that
+  // rewrites itself a moment later.
+  const collectionRows = toCollectionRows(collectionStats.data, latency.data);
+  const collectionsPending = collectionStats.pending || latency.pending;
 
   return (
     <>
@@ -149,25 +153,53 @@ function Dashboard() {
         <Card>
           <CardHeader>
             <CardDescription>Proposed reclaimable</CardDescription>
-            <CardTitle className="text-3xl tabular-nums">{fmtBytes(totalSaved)}</CardTitle>
+            {/* A measured zero and an unknown look identical as a figure — "0 KB"
+                reads as "we looked, there is nothing", which is the same lie the
+                empty states were telling (#72). The number waits. */}
+            {recommendations.pending ? (
+              <Skeleton className="h-9 w-32" />
+            ) : (
+              <CardTitle className="text-3xl tabular-nums">{fmtBytes(totalSaved)}</CardTitle>
+            )}
           </CardHeader>
           <CardContent className="text-muted-foreground text-sm">
-            {proposed.length} recommendation{proposed.length === 1 ? "" : "s"} awaiting review
+            {recommendations.pending ? (
+              <Skeleton className="h-4 w-52" />
+            ) : (
+              <>
+                {proposed.length} recommendation{proposed.length === 1 ? "" : "s"} awaiting review
+              </>
+            )}
           </CardContent>
         </Card>
         <Card>
           <CardHeader>
             <CardDescription>Reclaimed</CardDescription>
-            <CardTitle className="text-3xl tabular-nums">{fmtBytes(roi.freedBytes)}</CardTitle>
+            {roi.pending ? (
+              <Skeleton className="h-9 w-32" />
+            ) : (
+              <CardTitle className="text-3xl tabular-nums">
+                {fmtBytes(roi.data.freedBytes)}
+              </CardTitle>
+            )}
           </CardHeader>
           <CardContent className="text-muted-foreground text-sm">
-            {roi.indexesDropped} index{roi.indexesDropped === 1 ? "" : "es"} dropped · $
-            {roi.estimatedMonthlyUsd.toFixed(2)}/mo
+            {roi.pending ? (
+              <Skeleton className="h-4 w-52" />
+            ) : (
+              <>
+                {roi.data.indexesDropped} index{roi.data.indexesDropped === 1 ? "" : "es"} dropped ·
+                ${roi.data.estimatedMonthlyUsd.toFixed(2)}/mo
+              </>
+            )}
           </CardContent>
         </Card>
       </div>
 
-      {roi.attribution.length > 0 ? (
+      {/* No skeleton: a cluster with nothing dropped yet has no such card at
+          all, so drawing an outline for it would promise a panel that may never
+          arrive — which is the same content-shift, only in the other direction. */}
+      {roi.data.attribution.length > 0 ? (
         <Card className="mt-4">
           <CardHeader>
             <CardTitle className="text-base">Reclaimed by index</CardTitle>
@@ -175,7 +207,7 @@ function Dashboard() {
           </CardHeader>
           <CardContent>
             <ul className="space-y-1 text-sm">
-              {roi.attribution.map((entry) => (
+              {roi.data.attribution.map((entry) => (
                 <li
                   key={entry.recommendationId}
                   className="flex items-baseline justify-between gap-4"
@@ -196,12 +228,30 @@ function Dashboard() {
         </Card>
       ) : null}
 
-      <RecommendationsTable clusterId={id} recommendations={recommendations} />
+      <RecommendationsTable
+        clusterId={id}
+        recommendations={recommendations.data}
+        loading={recommendations.pending}
+      />
 
-      {chartedCount > 0 ? (
+      {/* Drawn while the series read is out, because two charts appearing under
+          the recommendations table is the single biggest jump on this page. Once
+          it has answered, a cluster with nothing to plot goes back to drawing
+          nothing at all rather than to two empty boxes. */}
+      {latencySeries.pending || chartedCount > 0 ? (
         <section className="mt-8 grid gap-6 md:grid-cols-2">
-          <LineChart title="Read latency" unit="µs/op" series={readSeries} />
-          <LineChart title="Write latency" unit="µs/op" series={writeSeries} />
+          <LineChart
+            title="Read latency"
+            unit="µs/op"
+            series={readSeries}
+            pending={latencySeries.pending}
+          />
+          <LineChart
+            title="Write latency"
+            unit="µs/op"
+            series={writeSeries}
+            pending={latencySeries.pending}
+          />
           {foldedCount > 0 ? (
             <p className="text-muted-foreground text-xs md:col-span-2">
               +{foldedCount} more collections — see the table below.
@@ -215,16 +265,24 @@ function Dashboard() {
         Index footprint from the latest collect; latency is the current windowed average vs the
         first sample (negative Δ = faster).
       </p>
-      <CollectionsTable rows={collectionRows} />
+      <CollectionsTable rows={collectionRows} loading={collectionsPending} />
 
       <section className="mt-8">
         <h2 className="font-semibold text-lg">Activity</h2>
         <p className="text-muted-foreground text-sm">
           Every executed operation, with its outcome — the immutable audit trail.
         </p>
-        <ActivityTable activity={activity} />
+        <ActivityTable activity={activity.data} loading={activity.pending} />
       </section>
-      {policy !== null ? <PolicySection key={policy.clusterId} policy={policy} /> : null}
+      {/* Null means three different things — no cluster, a failed read, and not
+          yet — and only the last one gets the outline. The first two still draw
+          nothing, which is the answer the rest of the page gives for a dead
+          read. */}
+      {policy.data !== null ? (
+        <PolicySection key={policy.data.clusterId} policy={policy.data} />
+      ) : policy.pending ? (
+        <PolicySectionSkeleton />
+      ) : null}
       <ConnectClusterForm plan={org?.plan ?? null} />
     </>
   );

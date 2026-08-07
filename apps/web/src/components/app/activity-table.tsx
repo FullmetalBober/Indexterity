@@ -48,7 +48,13 @@ function buildColumns(mounted: boolean): DashboardColumns<AuditAction> {
   ]);
 }
 
-export function ActivityTable({ activity }: { activity: AuditAction[] }) {
+export function ActivityTable({
+  activity,
+  loading,
+}: {
+  activity: AuditAction[];
+  loading: boolean;
+}) {
   const mounted = useMounted();
   const columns = useMemo(() => buildColumns(mounted), [mounted]);
 
@@ -58,6 +64,7 @@ export function ActivityTable({ activity }: { activity: AuditAction[] }) {
       caption="Every executed operation and its outcome"
       columns={columns}
       data={activity}
+      loading={loading}
       getRowId={(entry) => entry.id}
       initialSorting={[{ id: "createdAt", desc: true }]}
       // The one table where filtering earns its place immediately: the trail is

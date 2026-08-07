@@ -4,6 +4,7 @@ import { useAppForm } from "~/components/form";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
 import { Field, FieldDescription, FieldGroup } from "~/components/ui/field";
 import { Separator } from "~/components/ui/separator";
+import { Skeleton } from "~/components/ui/skeleton";
 import { useSavePolicy } from "~/lib/queries/mutations/policy";
 
 interface PolicyView {
@@ -57,6 +58,40 @@ interface PolicyDraft {
   readonly autoApplyScore: number | null;
   readonly changeWindowStartHour: number | null;
   readonly changeWindowEndHour: number | null;
+}
+
+// The section's outline while the policy read is still out.
+//
+// It draws nothing that could be read as a value — no zeroes in the number
+// boxes, no unticked checkboxes — because every knob here says what the engine
+// is allowed to do on somebody's production cluster, and an unticked
+// "Instant create" is a factual claim. What it does keep is the card, the title
+// and the two rows of controls, so the page below it does not jump when the real
+// form arrives (#72).
+export function PolicySectionSkeleton() {
+  return (
+    <Card className="mt-8">
+      <CardHeader>
+        <CardTitle className="text-base">Policy</CardTitle>
+        <CardDescription>
+          The engine knobs for this cluster. Owner-only; the safety gates apply regardless.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-5" aria-hidden="true">
+        <div className="flex flex-wrap gap-6">
+          <Skeleton className="h-5 w-56" />
+          <Skeleton className="h-5 w-44" />
+        </div>
+        <Separator />
+        <div className="flex flex-wrap items-end gap-6">
+          <Skeleton className="h-14 w-24" />
+          <Skeleton className="h-14 w-24" />
+          <Skeleton className="h-14 w-44" />
+        </div>
+        <Skeleton className="h-9 w-28" />
+      </CardContent>
+    </Card>
+  );
 }
 
 // The engine knobs, owner-editable. Field changes stage locally; Save PUTs.

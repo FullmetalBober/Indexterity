@@ -10,6 +10,7 @@ import type { AuditAction, ClusterRoi, Recommendation } from "@repo/contracts";
 import { queryOptions, useQuery } from "@tanstack/react-query";
 import { api } from "../api";
 import { queryKeys } from "./keys";
+import type { Read } from "./read";
 
 // Stable fallbacks for an absent or failed read — see the note in telemetry.ts.
 export const NO_RECOMMENDATIONS: Recommendation[] = [];
@@ -46,17 +47,19 @@ export function activityQuery(clusterId: string | null) {
   });
 }
 
-export function useRecommendations(clusterId: string | null): Recommendation[] {
-  const { data = NO_RECOMMENDATIONS } = useQuery(recommendationsQuery(clusterId));
-  return data;
+// Each returns the payload AND whether this is the first fetch — see read.ts for
+// why the bare payload was not enough.
+export function useRecommendations(clusterId: string | null): Read<Recommendation[]> {
+  const { data = NO_RECOMMENDATIONS, isPending } = useQuery(recommendationsQuery(clusterId));
+  return { data, pending: isPending };
 }
 
-export function useRoi(clusterId: string | null): ClusterRoi {
-  const { data = NO_ROI } = useQuery(roiQuery(clusterId));
-  return data;
+export function useRoi(clusterId: string | null): Read<ClusterRoi> {
+  const { data = NO_ROI, isPending } = useQuery(roiQuery(clusterId));
+  return { data, pending: isPending };
 }
 
-export function useActivity(clusterId: string | null): AuditAction[] {
-  const { data = NO_ACTIVITY } = useQuery(activityQuery(clusterId));
-  return data;
+export function useActivity(clusterId: string | null): Read<AuditAction[]> {
+  const { data = NO_ACTIVITY, isPending } = useQuery(activityQuery(clusterId));
+  return { data, pending: isPending };
 }
