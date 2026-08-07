@@ -258,6 +258,29 @@ describe("cluster lifecycle", () => {
     expect(asRecord(await queued.json()).queued).toBe(true);
   });
 
+  // The roster (#100): the collect that just ran recorded which nodes it saw.
+  // The suite's mongo is a standalone, so the roster is the one honest row a
+  // standalone gets — the multi-member states are covered at the unit level
+  // (nodeFromHello, MemberConnections), where a replica set can be faked.
+  it("serves the node roster the last collect recorded", async () => {
+    const res = await api(`/clusters/${clusterId}/nodes`, owner);
+    expect(res.status).toBe(200);
+    const body = asRecord(await res.json());
+    expect(body.collectedAt).not.toBeNull();
+    const nodes = body.nodes as { host: string; role: string; state: string }[];
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0]?.role).toBe("standalone");
+    expect(nodes[0]?.state).toBe("answered");
+
+    // Another tenant's cluster answers empty, the same shape as never collected.
+    const stranger = await signUp("nodes-stranger");
+    createdEmails.push(stranger.email);
+    createdOrgIds.push(asString(asRecord(await (await api("/org", stranger)).json()).id));
+    const foreign = asRecord(await (await api(`/clusters/${clusterId}/nodes`, stranger)).json());
+    expect(foreign.collectedAt).toBeNull();
+    expect(foreign.nodes).toEqual([]);
+  });
+
   it("serves policy defaults and round-trips an update", async () => {
     const defaults = asRecord(await (await api(`/clusters/${clusterId}/policy`, owner)).json());
     expect(defaults.observeWindowDays).toBe(30);

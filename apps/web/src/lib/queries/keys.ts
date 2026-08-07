@@ -44,5 +44,6 @@ export const queryKeys = {
   latency: (clusterId: string | null) => ["latency", clusterId] as const,
   latencySeries: (clusterId: string | null) => ["latency-series", clusterId] as const,
   collections: (clusterId: string | null) => ["collections", clusterId] as const,
+  nodes: (clusterId: string | null) => ["nodes", clusterId] as const,
   policy: (clusterId: string | null) => ["policy", clusterId] as const,
 };

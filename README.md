@@ -24,9 +24,13 @@ observe window, a pre-flight check, and a read-latency regression test.
    The admin string is used once and never persisted; only the scoped one is
    stored, sealed with envelope encryption.
 2. **Collect** hourly via `$indexStats` / `$collStats` — usage, sizes,
-   per-collection read/write latency. Never your documents. What gets *stored* is
-   only what changed: an index's shape is written once, and an unchanged counter
-   extends the row it already has instead of adding another.
+   per-collection read/write latency, from **every replica-set member** the
+   cluster admits to (secondary-only traffic is invisible from the primary).
+   Never your documents. What gets *stored* is only what changed: an index's
+   shape is written once, and an unchanged counter extends the row it already
+   has instead of adding another. The dashboard's node roster shows which
+   members the last collect saw and which answered — a member that did not is a
+   named blind spot, not a silent zero.
 3. **Decide** with a pure analysis engine (`apps/api/src/analysis` — no I/O, so
    it is unit-tested without a database or a cluster).
 4. **Apply** safely: `hide → observe → drop` for removals, `build` for

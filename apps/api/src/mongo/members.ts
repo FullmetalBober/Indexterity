@@ -3,6 +3,22 @@ import type { TlsOverrides } from "../engine/ports";
 import { directConnectionTo } from "./conn-string";
 import { MongoConnection } from "./connection";
 
+// One member's dial, kept whether or not it worked (#100). `connection` is
+// null exactly when `state` says why there is not one.
+//
+//   answered    — dialled and connected; the connection is live
+//   unreachable — the dial failed (down, partitioned, DNS gone)
+//   refused     — the net guard would not let us dial the address the cluster
+//                 named; a policy fact about this deployment, not a health
+//                 fact about the member
+export type MemberState = "answered" | "unreachable" | "refused";
+
+export interface MemberDial {
+  readonly host: string;
+  readonly state: MemberState;
+  readonly connection: MongoConnection | null;
+}
+
 // Per-member connections for usage collection.
 //
 // `$indexStats` reports for the node that executes it, and the driver sends
@@ -16,7 +32,7 @@ import { MongoConnection } from "./connection";
 // A standalone reports none, and a mongos reports none of its own (its shards'
 // primaries answer the fan-out already), so both cost nothing.
 export class MemberConnections {
-  private opened: MongoConnection[] | null = null;
+  private dialled: MemberDial[] | null = null;
 
   constructor(
     private readonly primary: MongoConnection,
@@ -24,27 +40,25 @@ export class MemberConnections {
     private readonly overrides?: TlsOverrides,
   ) {}
 
-  // Connections to every member except the one the primary client is already
-  // talking to. Opened once and reused for the life of the session.
+  // Connections to every member the set admits to (including the address the
+  // primary client is already on — $indexStats dedupes by host downstream).
+  // Opened once and reused for the life of the session.
   async all(): Promise<MongoConnection[]> {
-    if (this.opened !== null) return this.opened;
-    this.opened = [];
-    const hosts = await this.primary.replicaMembers().catch(() => []);
-    if (hosts.length <= 1) return this.opened;
+    return (await this.dials())
+      .map((dial) => dial.connection)
+      .filter((conn): conn is MongoConnection => conn !== null);
+  }
 
-    // The member list comes from the cluster, which means a hostile or
-    // misconfigured one could name an address we must not dial. It is
-    // user-influenced input like any connection string, so it goes through the
-    // same guard.
-    const allowed: string[] = [];
-    for (const host of hosts) {
-      const ok = await assertTargetsAllowed([host], false, {
-        allowPrivate: allowPrivateTargets(),
-      })
-        .then(() => true)
-        .catch(() => false);
-      if (ok) allowed.push(host);
-    }
+  // Every dial and how it went, which used to be a silent catch: every member
+  // failing for the same systematic reason looked exactly like a standalone
+  // for as long as SRV clusters have been supported, and nothing said so. The
+  // roster (#100) is built from this. Empty for a standalone and a mongos —
+  // neither names members, and the base connection speaks for itself.
+  async dials(): Promise<readonly MemberDial[]> {
+    if (this.dialled !== null) return this.dialled;
+    this.dialled = [];
+    const hosts = await this.primary.replicaMembers().catch(() => []);
+    if (hosts.length <= 1) return this.dialled;
 
     // Taken from the LIVE client, not from the string it was built with. An SRV
     // string carries its tls default in the scheme and its authSource in a DNS
@@ -53,30 +67,41 @@ export class MemberConnections {
     // for members, so the TXT record has already been read and merged.
     const resolved = this.primary.resolved();
 
-    for (const host of allowed) {
+    for (const host of hosts) {
+      // The member list comes from the cluster, which means a hostile or
+      // misconfigured one could name an address we must not dial. It is
+      // user-influenced input like any connection string, so it goes through
+      // the same guard.
+      const ok = await assertTargetsAllowed([host], false, {
+        allowPrivate: allowPrivateTargets(),
+      })
+        .then(() => true)
+        .catch(() => false);
+      if (!ok) {
+        this.dialled.push({ host, state: "refused", connection: null });
+        continue;
+      }
       try {
         const conn = new MongoConnection(
           directConnectionTo(this.connString, host, resolved),
           this.overrides,
         );
         await conn.connect();
-        this.opened.push(conn);
+        this.dialled.push({ host, state: "answered", connection: conn });
       } catch {
         // A member that is down or unreachable is normal: the others still
         // report, and a missing member's counters simply do not contribute.
-        //
-        // It is normal ONE AT A TIME. Every member failing for the same
-        // systematic reason looked exactly like a standalone for as long as SRV
-        // clusters have been supported, and nothing said so — the surfacing is
-        // #100's, but the reason this catch could hide something that large is
-        // worth knowing while reading it.
+        // Recorded rather than swallowed, so the roster can say so.
+        this.dialled.push({ host, state: "unreachable", connection: null });
       }
     }
-    return this.opened;
+    return this.dialled;
   }
 
   async close(): Promise<void> {
-    for (const conn of this.opened ?? []) await conn.close().catch(() => {});
-    this.opened = null;
+    for (const dial of this.dialled ?? []) {
+      if (dial.connection !== null) await dial.connection.close().catch(() => {});
+    }
+    this.dialled = null;
   }
 }

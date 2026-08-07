@@ -41,6 +41,7 @@ export function invalidationKeys(
             queryKeys.collections(clusterId),
             queryKeys.latency(clusterId),
             queryKeys.latencySeries(clusterId),
+            queryKeys.nodes(clusterId),
             queryKeys.clusters(),
           ];
         case "classify":

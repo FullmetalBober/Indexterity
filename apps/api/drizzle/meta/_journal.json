@@ -302,6 +302,13 @@
       "when": 1786129064537,
       "tag": "0042_security_events",
       "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1786134746751,
+      "tag": "0043_cluster_rosters",
+      "breakpoints": true
     }
   ]
 }

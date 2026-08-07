@@ -15,6 +15,7 @@ import {
   clusterEvent,
   clusterLatency,
   clusterLatencySeries,
+  clusterNodes,
   clusterPolicyView,
   clusterRoi,
   connectionDiagnosis,
@@ -81,6 +82,16 @@ export const contract = {
     })
     .input(clusterId)
     .output(clusterCollections),
+
+  getNodes: oc
+    .route({
+      method: "GET",
+      path: "/clusters/{clusterId}/nodes",
+      summary:
+        "The node roster from the last collect: every member the cluster admitted to, its role, and whether it answered",
+    })
+    .input(clusterId)
+    .output(clusterNodes),
 
   listActions: oc
     .route({

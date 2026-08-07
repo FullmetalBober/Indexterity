@@ -77,6 +77,18 @@ export function workloadKey(database: string, collection: string): string {
 
 // Read-only statistics surface — everything the engine needs to decide, and
 // deliberately nothing that can read customer data rows.
+// One node of the cluster as the last collect saw it (#100). Engine-neutral:
+// the roles are what any topology can honestly claim, and a single-server
+// engine is a roster of one "standalone".
+export interface ClusterNode {
+  readonly host: string;
+  readonly role: "primary" | "secondary" | "mongos" | "standalone" | "unknown";
+  // answered — dialled and spoke; unreachable — the dial failed;
+  // refused — this deployment's net guard would not dial the address the
+  // cluster named (policy, not member health).
+  readonly state: "answered" | "unreachable" | "refused";
+}
+
 export interface IndexCollector {
   listCollectionNames(database: string): Promise<string[]>;
   listIndexes(database: string, collection: string): Promise<IndexSpec[]>;
@@ -96,6 +108,11 @@ export interface IndexCollector {
   // Server-wide query-engine counters. Null when the credentials cannot read
   // them — the privilege is optional, and everything else still works.
   collectServerHealth(): Promise<ServerHealth | null>;
+  // Every node this collect could see and how each answered (#100). Null when
+  // even that could not be established; a relational engine reports the one
+  // server it is. No extra privilege: built from the dials the collector
+  // makes anyway, plus each node's own handshake.
+  collectNodes(): Promise<readonly ClusterNode[] | null>;
   // Indexes named explicitly with hint(). Hiding one breaks its queries instead
   // of slowing them, so no latency gate can catch the mistake.
   collectHintedIndexes(database: string, collection: string): Promise<string[]>;

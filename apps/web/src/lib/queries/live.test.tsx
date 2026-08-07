@@ -57,6 +57,7 @@ describe("invalidationKeys", () => {
       queryKeys.collections(CLUSTER),
       queryKeys.latency(CLUSTER),
       queryKeys.latencySeries(CLUSTER),
+      queryKeys.nodes(CLUSTER),
       queryKeys.clusters(),
     ]);
   });
