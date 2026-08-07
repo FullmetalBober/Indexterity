@@ -99,10 +99,14 @@ export function useDisconnectCluster(clusterId: string) {
           ? `Disconnected — ${result.unhidden} hidden ${result.unhidden === 1 ? "index" : "indexes"} restored`
           : "Cluster disconnected",
       );
-      await navigate({ to: "/app", search: {} });
+      // The list first, then the navigation — the same order as landing on a
+      // new cluster, and for the same reason. /app resolves what to show from
+      // the cluster list, and navigating first would resolve it from a list
+      // that still contains the cluster just deleted.
       await invalidateClusterCount();
+      await navigate({ to: "/app" });
     },
-    // The cluster is still there, so deselecting it would be a lie.
+    // The cluster is still there, so leaving its page would be a lie.
     onError: () => toast.error(DISCONNECT_FAILED),
   });
 }
@@ -130,15 +134,15 @@ interface ConnectHandlers {
   readonly onError: (message: string) => void;
 }
 
-// The list first, then the URL: the new cluster has to be in the list before the
-// selection points at it, or the bar has a moment of finding nothing under
-// ?cluster= and drawing "No cluster connected".
+// The list first, then the URL: the cluster's own route redirects away from an
+// id the cluster list does not contain, so navigating before the list has the
+// new one in it would bounce straight back to /app.
 function useLandOnNewCluster() {
   const invalidateClusterCount = useInvalidateClusterCount();
   const navigate = useNavigate();
   return async (id: string) => {
     await invalidateClusterCount();
-    await navigate({ to: "/app", search: { cluster: id } });
+    await navigate({ to: "/app/clusters/$clusterId", params: { clusterId: id } });
   };
 }
 

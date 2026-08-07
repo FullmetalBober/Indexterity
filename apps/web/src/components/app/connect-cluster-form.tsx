@@ -5,7 +5,7 @@ import { PrivilegeList } from "~/components/app/privilege-list";
 import { useAppForm } from "~/components/form";
 import { Alert, AlertDescription, AlertTitle } from "~/components/ui/alert";
 import { Button } from "~/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
+import { Card, CardContent, CardDescription, CardHeader } from "~/components/ui/card";
 import {
   useCheckConnection,
   useConnectCluster,
@@ -83,22 +83,30 @@ export function ConnectClusterForm({ plan }: { plan: PlanInfo | null }) {
 
   return (
     <Card className="mt-8">
+      {/* No title of its own: the page this sits on is called "Connect a
+          cluster" and there is nothing else on it, so a card repeating the
+          heading is a second heading for one thing. */}
       <CardHeader>
         <div className="flex flex-wrap items-baseline justify-between gap-2">
-          <CardTitle className="text-base">Connect a cluster</CardTitle>
+          <CardDescription>
+            Paste any connection string — Indexterity checks what it can do before storing anything.
+            Clusters start in read-only mode.
+          </CardDescription>
           {/* The count belongs beside the form that spends it, not on the org
               page: a limit nobody sees until it refuses them is a 402 in the
               middle of someone's work. */}
           {plan !== null ? (
-            <span className={full ? "text-destructive text-xs" : "text-muted-foreground text-xs"}>
+            <span
+              className={
+                full
+                  ? "shrink-0 text-destructive text-xs"
+                  : "shrink-0 text-muted-foreground text-xs"
+              }
+            >
               {usage(plan.clustersUsed, plan.maxClusters)} clusters on the {plan.plan} plan
             </span>
           ) : null}
         </div>
-        <CardDescription>
-          Paste any connection string — Indexterity checks what it can do before storing anything.
-          Clusters start in read-only mode.
-        </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
         {plan !== null && full ? (

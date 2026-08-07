@@ -58,10 +58,40 @@ export function normalizePathname(pathname: string): string {
   return pathname;
 }
 
+// A pattern's segments, with `$clusterId` and friends standing for "any one
+// segment". The label is still the PATTERN, so the cardinality is the number of
+// routes however many clusters exist — which is the whole reason this file
+// exists.
+function segmentsOf(pattern: string): string[] {
+  return pattern.split("/").filter((segment) => segment !== "");
+}
+
+function matches(patternSegments: readonly string[], pathSegments: readonly string[]): boolean {
+  if (patternSegments.length !== pathSegments.length) return false;
+  return patternSegments.every(
+    (segment, index) => segment.startsWith("$") || segment === pathSegments[index],
+  );
+}
+
 export function routeLabeller(tree: unknown): (pathname: string) => string {
   const patterns = routePatterns(tree);
+  // Static patterns first, so /app/clusters/new is labelled as itself rather
+  // than as /app/clusters/$clusterId — both match, and only one is the route
+  // that answered.
+  const candidates = [...patterns]
+    .map((pattern) => ({ pattern, segments: segmentsOf(pattern) }))
+    .sort(
+      (a, b) =>
+        a.segments.filter((segment) => segment.startsWith("$")).length -
+        b.segments.filter((segment) => segment.startsWith("$")).length,
+    );
+
   return (pathname) => {
     const normalized = normalizePathname(pathname);
-    return patterns.has(normalized) ? normalized : "unmatched";
+    // Exact first: it is the common case and it is a set lookup.
+    if (patterns.has(normalized)) return normalized;
+    const pathSegments = segmentsOf(normalized);
+    const found = candidates.find((candidate) => matches(candidate.segments, pathSegments));
+    return found?.pattern ?? "unmatched";
   };
 }

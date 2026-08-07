@@ -59,6 +59,7 @@ function useInvalidateSession(): () => Promise<void> {
 // the api inserted "My Org" behind your first authenticated request.
 export function useCreateOrg() {
   const invalidateSessionCache = useInvalidateSession();
+  const navigate = useNavigate();
   return useMutation({
     mutationFn: async (name: string) => {
       const slug = slugify(name);
@@ -78,6 +79,11 @@ export function useCreateOrg() {
       toast.success(`Created ${created.name}`);
       // The plugin makes the new org active, so this is a session change.
       await invalidateSessionCache();
+      // And a session change with somewhere to be: a brand-new org has no
+      // clusters, so /app lands on connecting one. Without this, making an org
+      // from the settings page silently swapped which org every other page was
+      // about and left the reader looking at a list.
+      await navigate({ to: "/app" });
     },
     // 402 is the free-org cap, and it names the plan and the remedy.
     onError: (error) => toast.error(apiMessage(error, "Could not create the organization")),
@@ -116,8 +122,8 @@ export function useDeleteOrg() {
       // the navigation reads whatever is cached, and what is cached is the org
       // that no longer exists.
       await invalidateSessionCache();
-      // Whatever cluster was selected belonged to it.
-      await navigate({ to: "/app", search: {} });
+      // Whatever page this was is about an org that no longer exists.
+      await navigate({ to: "/app" });
     },
     onError: (error) => toast.error(apiMessage(error, "Delete failed (owner only)")),
   });
@@ -236,8 +242,10 @@ export function useSwitchOrg() {
       // read the previous org's cluster list, picked a cluster this org does not
       // own, and spent seven requests warming keys for it (#82).
       await invalidateSessionCache();
-      // The selected cluster belongs to the previous org — reset the selection.
-      await navigate({ to: "/app", search: {} });
+      // Whichever cluster page this was, it belongs to the org just left. /app
+      // resolves the new org's first cluster, or the connect page if it has
+      // none.
+      await navigate({ to: "/app" });
     },
     // Nothing moved, so nothing is refetched and the selection stays.
     onError: () => toast.error("Org switch failed"),

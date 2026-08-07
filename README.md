@@ -247,9 +247,9 @@ with a free side project and a paid production team holds two orgs on two plans
 and is billed for one of them. How many organizations you make is therefore
 **not** metered — capping it would cap how much you can buy — and the free tier
 is held by the cluster limit, applied inside each org one at a time. What has
-been spent of that limit is drawn beside the connect form on the dashboard,
-before anything is typed into it: a quota nobody sees until it refuses them is a
-402 in the middle of someone's work.
+been spent of that limit is drawn beside the connect form, before anything is
+typed into it: a quota nobody sees until it refuses them is a 402 in the middle
+of someone's work.
 
 **Free gives away the analysis and sells the automation.** Every plan sees every
 recommendation, with the reasoning, and can approve any of them by hand. What a
@@ -407,10 +407,17 @@ apps/api                control plane
   src/jobs              graphile-worker tasks (collect/classify/suggest/apply/finalize)
   src/db                Drizzle schema, client, secret sealing
 apps/web                dashboard
-  src/routes/app.tsx    the /app shell — auth gate, cluster bar, org switcher
-  src/routes/app.index  the cluster dashboard
-  src/routes/app.org    members, roles, invites, plan
-  src/routes/app.account  the signed-in user: name, password, open sessions
+  src/routes/app.tsx    the /app shell — auth gate, org switcher, the nav rail
+  src/routes/app.index  resolves "no cluster named" — redirects to the first
+                        cluster, or to connecting one
+  src/routes/app.clusters.$clusterId       one cluster: the heading and its tabs
+    …$clusterId.index      overview — ROI, recommendations, latency, collections
+    …$clusterId.settings   policy, mode, credentials, disconnect
+  src/routes/app.clusters.new   connecting a cluster, which is onboarding
+  src/routes/app.settings       organization · organizations · account
+    …settings.index          this org: name, plan, members, roles, invites
+    …settings.organizations  the orgs you belong to, and starting another
+    …settings.account        the signed-in user: name, password, open sessions
   src/lib/api.ts        one oRPC client, isomorphic: same-origin in the browser,
                         API_URL with the caller's cookie during SSR
   src/lib/auth-client   better-auth's own browser client
@@ -429,6 +436,24 @@ packages/contracts      oRPC + zod contracts shared by api and web
   src/inputs.ts         what it accepts — and what the dashboard's forms validate
                         against, so a field refuses exactly what a route refuses
 ```
+
+**A cluster is an address, not a selection.** It used to be `?cluster=`, resolved
+against the cluster list separately by the bar and by every panel — two answers
+to one question, which is how switching org left the page drawing the previous
+org's numbers under the new org's name. `/app/clusters/<id>` is concrete before
+anything reads it, so a cluster-scoped cache key can never mean "whichever is
+first", and a cluster can be bookmarked, opened in a second tab and linked to
+from an alert. `/app` itself is now only the redirect that answers "which one did
+you mean" — the first cluster, or connecting one if there are none.
+
+The rest of the shape follows from what each page is FOR. A dashboard answers
+"how is this cluster doing", so no configuration form lives on it: policy,
+credentials, mode and disconnect are the cluster's own settings tab. Connecting a
+cluster is onboarding rather than a card under the ROI numbers, so it is one link
+from everywhere and the thing an org with no clusters lands on. And your name,
+your password, this org's members and starting another organization are all
+settings — three sub-sections of one page, rather than peers of the dashboard
+they configure.
 
 Route loaders are the SSR entry point and write **through** the query client, so
 the server render and the browser read one cache entry; mutations invalidate a

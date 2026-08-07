@@ -2,7 +2,7 @@ import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { authError, authOk, renderInApp } from "~/test-utils";
-import { TeamSection } from "./team-section";
+import { OrgSection } from "./org-section";
 
 const acceptInvitation = vi.hoisted(() => vi.fn());
 const cancelInvitation = vi.hoisted(() => vi.fn());
@@ -66,10 +66,6 @@ const org = {
   provisionedUsers: [],
 };
 
-const invitesToMe = [
-  { id: "i9", orgName: "Other Co", role: "member", expiresAt: "2026-09-01T00:00:00Z" },
-];
-
 function row(email: string): HTMLElement {
   const item = screen.getByText(`(${email})`).closest("li");
   if (item === null) throw new Error(`no row for ${email}`);
@@ -90,9 +86,9 @@ beforeEach(() => {
   rejectInvitation.mockResolvedValue(authOk({ invitation: { id: "i9" } }));
 });
 
-describe("TeamSection", () => {
+describe("OrgSection", () => {
   it("distinguishes members from people who have only been invited", () => {
-    renderInApp(<TeamSection org={org} invites={[]} />);
+    renderInApp(<OrgSection org={org} />);
     expect(screen.getByText("(owner@acme.test)")).toBeInTheDocument();
     expect(screen.getByText("pending@acme.test")).toBeInTheDocument();
     expect(screen.getByText("invited · member")).toBeInTheDocument();
@@ -105,7 +101,7 @@ describe("TeamSection", () => {
   // several orgs, and the plugin's endpoint asks which membership.
   it("offers to promote a member and demote an owner", async () => {
     const user = userEvent.setup();
-    renderInApp(<TeamSection org={org} invites={[]} />);
+    renderInApp(<OrgSection org={org} />);
 
     await user.click(within(row("member@acme.test")).getByRole("button", { name: "Make owner" }));
     expect(updateMemberRole).toHaveBeenCalledWith({ memberId: "m2", role: "owner" });
@@ -119,7 +115,7 @@ describe("TeamSection", () => {
   it("shows the reason when a role change is refused", async () => {
     updateMemberRole.mockResolvedValue(authError(400, "an org must keep one owner"));
     const user = userEvent.setup();
-    renderInApp(<TeamSection org={org} invites={[]} />);
+    renderInApp(<OrgSection org={org} />);
 
     await user.click(within(row("owner@acme.test")).getByRole("button", { name: "Make member" }));
     expect(toastError).toHaveBeenCalledWith("an org must keep one owner");
@@ -127,7 +123,7 @@ describe("TeamSection", () => {
 
   it("asks before removing someone, and names them", async () => {
     const user = userEvent.setup();
-    renderInApp(<TeamSection org={org} invites={[]} />);
+    renderInApp(<OrgSection org={org} />);
 
     await user.click(within(row("member@acme.test")).getByRole("button", { name: "Remove" }));
     expect(await screen.findByText("Remove member@acme.test?")).toBeInTheDocument();
@@ -139,7 +135,7 @@ describe("TeamSection", () => {
 
   it("asks before leaving the org", async () => {
     const user = userEvent.setup();
-    renderInApp(<TeamSection org={org} invites={[]} />);
+    renderInApp(<OrgSection org={org} />);
 
     await user.click(screen.getByRole("button", { name: "Leave org" }));
     expect(await screen.findByText("Leave Acme?")).toBeInTheDocument();
@@ -154,7 +150,7 @@ describe("TeamSection", () => {
   // answered forty of them today.
   it("will not delete an org until its name is typed out", async () => {
     const user = userEvent.setup();
-    renderInApp(<TeamSection org={org} invites={[]} />);
+    renderInApp(<OrgSection org={org} />);
 
     await user.click(screen.getByRole("button", { name: "Delete org" }));
     expect(await screen.findByText("Delete Acme?")).toBeInTheDocument();
@@ -179,7 +175,7 @@ describe("TeamSection", () => {
   it("names the provisioned users the deletion cannot revoke", async () => {
     const user = userEvent.setup();
     renderInApp(
-      <TeamSection
+      <OrgSection
         org={{
           ...org,
           provisionedUsers: [
@@ -190,7 +186,6 @@ describe("TeamSection", () => {
             },
           ],
         }}
-        invites={[]}
       />,
     );
 
@@ -205,7 +200,7 @@ describe("TeamSection", () => {
   // only that address can accept it.
   it("sends an invitation without handing back a credential", async () => {
     const user = userEvent.setup();
-    renderInApp(<TeamSection org={org} invites={[]} />);
+    renderInApp(<OrgSection org={org} />);
 
     await user.type(screen.getByLabelText("Invite a teammate"), "new@acme.test");
     await user.click(screen.getByRole("button", { name: "Invite" }));
@@ -215,41 +210,9 @@ describe("TeamSection", () => {
     expect(screen.getByText(/new@acme.test can join/)).toBeInTheDocument();
   });
 
-  // Joining lands the caller in a different org, so the answer to every other
-  // question on every other page changed too — not just this member list.
-  it("treats joining another org as more than an org change", async () => {
-    const user = userEvent.setup();
-    const { queryClient } = renderInApp(<TeamSection org={org} invites={invitesToMe} />);
-    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
-    const remove = vi.spyOn(queryClient, "removeQueries");
-
-    await user.click(screen.getByRole("button", { name: "Join" }));
-
-    expect(acceptInvitation).toHaveBeenCalledWith({ invitationId: "i9" });
-    // The whole cache, not one key: a different org answers everything from
-    // here on, so every cached answer is about the old one.
-    expect(invalidate).toHaveBeenCalledWith();
-    await screen.findByText("Other Co", { exact: false });
-    // And what is not mounted is dropped, or the next loader would render it.
-    expect(remove).toHaveBeenCalledWith({ type: "inactive" });
-  });
-
-  it("reports why an invitation could not be accepted", async () => {
-    acceptInvitation.mockResolvedValue(authError(400, "invitation expired"));
-    const user = userEvent.setup();
-    const { queryClient } = renderInApp(<TeamSection org={org} invites={invitesToMe} />);
-    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
-
-    await user.click(screen.getByRole("button", { name: "Join" }));
-
-    expect(toastError).toHaveBeenCalledWith("invitation expired");
-    // Still in the same org, so nothing may be thrown away.
-    expect(invalidate).not.toHaveBeenCalled();
-  });
-
   it("does the same on the way out", async () => {
     const user = userEvent.setup();
-    const { queryClient } = renderInApp(<TeamSection org={org} invites={[]} />);
+    const { queryClient } = renderInApp(<OrgSection org={org} />);
     const invalidate = vi.spyOn(queryClient, "invalidateQueries");
 
     await user.click(screen.getByRole("button", { name: "Leave org" }));
@@ -262,7 +225,7 @@ describe("TeamSection", () => {
   // member list is drawn from — not the whole cache, and not the cluster list.
   it("refetches only the org when something inside it changes", async () => {
     const user = userEvent.setup();
-    const { queryClient } = renderInApp(<TeamSection org={org} invites={[]} />);
+    const { queryClient } = renderInApp(<OrgSection org={org} />);
     const invalidate = vi.spyOn(queryClient, "invalidateQueries");
 
     await user.click(within(row("member@acme.test")).getByRole("button", { name: "Make owner" }));
@@ -276,7 +239,7 @@ describe("TeamSection", () => {
   // Invalidating one left the other showing the old name.
   it("refetches both the org and the org list on a rename", async () => {
     const user = userEvent.setup();
-    const { queryClient } = renderInApp(<TeamSection org={org} invites={[]} />);
+    const { queryClient } = renderInApp(<OrgSection org={org} />);
     const invalidate = vi.spyOn(queryClient, "invalidateQueries");
 
     await user.click(screen.getByRole("button", { name: "Rename" }));
@@ -293,7 +256,7 @@ describe("TeamSection", () => {
   it("says so when an invitation could not be sent", async () => {
     inviteMember.mockResolvedValue(authError(402, "the FREE plan allows 3 members"));
     const user = userEvent.setup();
-    const { queryClient } = renderInApp(<TeamSection org={org} invites={[]} />);
+    const { queryClient } = renderInApp(<OrgSection org={org} />);
     const invalidate = vi.spyOn(queryClient, "invalidateQueries");
 
     await user.type(screen.getByLabelText("Invite a teammate"), "new@acme.test");
@@ -305,7 +268,7 @@ describe("TeamSection", () => {
 
   it("renames the org from the current name, not a stale draft", async () => {
     const user = userEvent.setup();
-    renderInApp(<TeamSection org={org} invites={[]} />);
+    renderInApp(<OrgSection org={org} />);
 
     await user.click(screen.getByRole("button", { name: "Rename" }));
     const field = screen.getByLabelText("Organization name");
@@ -322,7 +285,7 @@ describe("TeamSection", () => {
   // Owner-only controls are the plugin's rule; drawing them for a member would
   // be offering a button whose only outcome is a 403.
   it("hides every owner-only control from a member", () => {
-    renderInApp(<TeamSection org={{ ...org, role: "member" }} invites={[]} />);
+    renderInApp(<OrgSection org={{ ...org, role: "member" }} />);
     expect(screen.queryByRole("button", { name: "Rename" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Delete org" })).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Invite a teammate")).not.toBeInTheDocument();
@@ -332,29 +295,18 @@ describe("TeamSection", () => {
     expect(screen.getByRole("button", { name: "Leave org" })).toBeInTheDocument();
   });
 
-  // The create screen only appears to somebody who belongs to nowhere, so
-  // without this the dashboard offers exactly one organization per account.
-  it("lets a reader start another organization", async () => {
-    const user = userEvent.setup();
-    renderInApp(<TeamSection org={org} invites={[]} />);
-
-    await user.type(screen.getByLabelText("Start another organization"), "Second Co");
-    await user.click(screen.getByRole("button", { name: "Create" }));
-
-    expect(createOrg).toHaveBeenCalledWith({ name: "Second Co", slug: "second-co" });
-  });
-
-  // No cap, on any plan: a plan is bought per org, so limiting how many you may
-  // make would limit how much you may buy. And not owner-only either — a member
-  // of somebody else's org may still start their own.
-  it("offers it on the free plan, and to a member", () => {
-    renderInApp(<TeamSection org={{ ...org, role: "member" }} invites={[]} />);
-    expect(screen.getByLabelText("Start another organization")).toBeInTheDocument();
+  // Making a new organization is not a fact about the one you are in, and this
+  // page is about the one you are in. It is on Settings → Organizations now,
+  // with the rest of the set — see org-list.test.tsx (#81).
+  it("does not offer to start another organization", () => {
+    renderInApp(<OrgSection org={org} />);
+    expect(screen.queryByLabelText("Start another organization")).not.toBeInTheDocument();
+    expect(screen.queryByText("Start another organization")).not.toBeInTheDocument();
   });
 
   // A limit nobody can see until they hit it turns into a support email.
   it("shows the plan and what is left of it", () => {
-    renderInApp(<TeamSection org={org} invites={[]} />);
+    renderInApp(<OrgSection org={org} />);
     expect(screen.getByText("FREE")).toBeInTheDocument();
     expect(screen.getByText(/0 \/ 1 clusters/)).toBeInTheDocument();
     expect(screen.getByText(/3 \/ 3 seats/)).toBeInTheDocument();
@@ -363,7 +315,7 @@ describe("TeamSection", () => {
 
   it("shows a bare count where the plan has no cap", () => {
     renderInApp(
-      <TeamSection
+      <OrgSection
         org={{
           ...org,
           plan: {
@@ -374,7 +326,6 @@ describe("TeamSection", () => {
             autoApply: true,
           },
         }}
-        invites={[]}
       />,
     );
     expect(screen.getByText(/0 clusters/)).toBeInTheDocument();

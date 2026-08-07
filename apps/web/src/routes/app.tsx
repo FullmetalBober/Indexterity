@@ -1,44 +1,33 @@
-// The /app shell: who is signed in, which org and cluster are selected, and
-// the nav between the pages under it. Everything a signed-in page needs and
-// nothing about any one page.
+// The /app shell: who is signed in, which org is active, and the nav between
+// the pages under it. Everything a signed-in page needs and nothing about any
+// one page.
 //
-// A layout route rather than a single page, so the org page stops paying for
-// a cluster's latency series and the dashboard stops paying for the member
+// A layout route rather than a single page, so the settings pages stop paying
+// for a cluster's latency series and a cluster stops paying for the member
 // list. Each child fetches what it draws.
+//
+// It no longer owns which CLUSTER is selected. That was a search param every
+// panel keyed its cache on, and a cluster is a page now — see the note in
+// lib/queries/keys.ts and the routes under /app/clusters.
 import { useQueryClient } from "@tanstack/react-query";
-import { createFileRoute, Link, Outlet } from "@tanstack/react-router";
+import { createFileRoute, Outlet } from "@tanstack/react-router";
+import { AppNav } from "~/components/app/app-nav";
 import { AuthForm } from "~/components/app/auth-form";
-import { ClusterBar } from "~/components/app/cluster-bar";
 import { CreateOrgCard } from "~/components/app/create-org-card";
 import { Button } from "~/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "~/components/ui/select";
 import { invalidateSession } from "~/lib/queries/client";
 import { useSignOut } from "~/lib/queries/mutations/auth";
-import { useSwitchOrg } from "~/lib/queries/mutations/org";
 import {
   clustersQuery,
   myInvitesQuery,
   orgQuery,
   orgsQuery,
   refetchShell,
-  selectCluster,
   useShell,
 } from "~/lib/queries/shell";
 
 export const Route = createFileRoute("/app")({
-  validateSearch: (search: Record<string, unknown>): { cluster?: string } =>
-    typeof search.cluster === "string" ? { cluster: search.cluster } : {},
-  // No loaderDeps: none of these three depend on which cluster is selected, so
-  // selecting another one must not re-run this. The child route's loader is
-  // keyed on the selection and refetches on its own.
-  //
   // allSettled, because a rejection is an answer here: useShell reads the errors
   // off the queries and draws the sign-in form for a 401 or the unreachable card
   // for anything else. Letting one reject out of the loader would replace both
@@ -52,16 +41,14 @@ export const Route = createFileRoute("/app")({
     ]);
   },
   // Inherits the root's noindex — everything under /app is behind auth.
-  head: () => ({ meta: [{ title: "Dashboard — Indexterity" }] }),
+  head: () => ({ meta: [{ title: "Indexterity" }] }),
   component: AppShell,
 });
 
 function AppShell() {
   const data = useShell();
-  const { cluster: selected } = Route.useSearch();
   const queryClient = useQueryClient();
   const signOut = useSignOut();
-  const switchOrg = useSwitchOrg();
 
   if (!data.authed) {
     if (data.apiDown) {
@@ -96,7 +83,9 @@ function AppShell() {
 
   // Signed in and in no organization — a state that did not exist while the api
   // conjured one behind the first request. There is nothing under /app to draw
-  // without one: no clusters to list, no plan to spend, no team to be on.
+  // without one: no clusters to list, no plan to spend, no team to be on. Drawn
+  // instead of the nav and the outlet, because every link in that nav would go
+  // somewhere with the same nothing behind it.
   if (orgs.length === 0) {
     return (
       <main className="p-6 lg:p-8">
@@ -111,96 +100,23 @@ function AppShell() {
     );
   }
 
-  const cluster = selectCluster(clusters, selected);
-
   return (
-    // No width ceiling: the page is nothing but tables and time series, and both
-    // want every pixel. `max-w-4xl` is a reading measure — right for the prose on the
-    // landing page, wrong here, where it left 832px for a collections table that
-    // wants 1040 and a recommendations table that wants 1168, so the rightmost
-    // columns sat outside the viewport at every screen size. The padding is the only
-    // inset now.
+    // No width ceiling on the content column: the pages under it are tables and
+    // time series, and both want every pixel. `max-w-4xl` is a reading measure —
+    // right for the prose on the landing page, wrong here, where it left 832px
+    // for a collections table that wants 1040 and a recommendations table that
+    // wants 1168, so the rightmost columns sat outside the viewport at every
+    // screen size.
     //
-    // The cost is real on a very wide monitor: a row a metre long is a row you track
-    // with a finger. Two things keep it honest — the tables set their column widths
-    // as proportions, so the slack lands mostly on the namespace rather than
-    // stretching the numbers, and every table stays sorted by the column that
-    // matters, so the answer is at the top rather than at the far right.
-    <main className="p-6 lg:p-8">
-      <div className="flex items-start justify-between">
-        <div>
-          <h1 className="font-semibold text-2xl">Indexterity</h1>
-          {cluster === null ? (
-            <p className="mt-1 text-muted-foreground">No cluster connected</p>
-          ) : (
-            <ClusterBar cluster={cluster} clusters={clusters} />
-          )}
-        </div>
-        <div className="flex items-center gap-2">
-          {orgs.length > 1 ? (
-            <Select
-              value={orgs.find((entry) => entry.active)?.orgId ?? ""}
-              onValueChange={(value) => switchOrg.mutate(value)}
-            >
-              <SelectTrigger size="sm" className="w-55" aria-label="Switch organization">
-                <SelectValue placeholder="Organization" />
-              </SelectTrigger>
-              <SelectContent>
-                {orgs.map((entry) => (
-                  <SelectItem key={entry.orgId} value={entry.orgId}>
-                    {entry.name} ({entry.role})
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          ) : null}
-          <Button variant="outline" size="sm" onClick={() => signOut.mutate()}>
-            Sign out
-          </Button>
-        </div>
-      </div>
-
-      {/* activeProps marks the current page for assistive tech, not only in
-          colour — the two links look similar enough that colour alone would
-          not distinguish them. */}
-      <nav aria-label="Dashboard sections" className="mt-4 flex gap-4 border-b text-sm">
-        <Link
-          to="/app"
-          activeOptions={{ exact: true }}
-          activeProps={{
-            className: "border-primary border-b-2 font-medium",
-            "aria-current": "page",
-          }}
-          inactiveProps={{ className: "text-muted-foreground" }}
-          className="-mb-px px-1 pb-2"
-        >
-          Dashboard
-        </Link>
-        <Link
-          to="/app/org"
-          activeProps={{
-            className: "border-primary border-b-2 font-medium",
-            "aria-current": "page",
-          }}
-          inactiveProps={{ className: "text-muted-foreground" }}
-          className="-mb-px px-1 pb-2"
-        >
-          Organization
-        </Link>
-        <Link
-          to="/app/account"
-          activeProps={{
-            className: "border-primary border-b-2 font-medium",
-            "aria-current": "page",
-          }}
-          inactiveProps={{ className: "text-muted-foreground" }}
-          className="-mb-px px-1 pb-2"
-        >
-          Account
-        </Link>
-      </nav>
-
-      <Outlet />
-    </main>
+    // `min-w-0` on the column is what makes the rail beside it hold its width:
+    // a flex child defaults to its content's minimum, and a table wider than the
+    // viewport would otherwise push the whole layout sideways rather than
+    // scrolling inside its own box.
+    <div className="lg:flex lg:items-start">
+      <AppNav clusters={clusters} orgs={orgs} />
+      <main className="min-w-0 flex-1 p-6 lg:p-8">
+        <Outlet />
+      </main>
+    </div>
   );
 }

@@ -26,8 +26,8 @@ export function uniqueEmail(label: string): string {
 export const PASSWORD = "e2e-Passw0rd!";
 
 // Create an account through the UI, make it an organization, and wait for the
-// dashboard. Sign-up is the only way in — there is no seeded user, on purpose:
-// an account that the tests create is an account the app can actually create.
+// app. Sign-up is the only way in — there is no seeded user, on purpose: an
+// account that the tests create is an account the app can actually create.
 //
 // The org step is not scaffolding. A fresh account belongs to nothing now, and
 // the create screen is the first thing it sees; a fixture that skipped it would
@@ -42,8 +42,12 @@ export async function signUpAndLandOnDashboard(page: Page, email: string): Promi
   return createOrgAndLandOnDashboard(page);
 }
 
-// Fill in the create-org screen and wait for the dashboard behind it. Named
-// after the account so two accounts in one test never share a name on screen.
+// Fill in the create-org screen and wait for what is behind it. Named after the
+// account so two accounts in one test never share a name on screen.
+//
+// What is behind it is the connect page, not a dashboard: an org with no
+// clusters has nothing to show, so /app sends it to the one thing there is to
+// do. Waiting on that heading is also what proves the redirect happened.
 export async function createOrgAndLandOnDashboard(page: Page): Promise<string> {
   counter += 1;
   const name = `${E2E_ORG_PREFIX}${Date.now()}-${counter}`;
@@ -55,7 +59,7 @@ export async function createOrgAndLandOnDashboard(page: Page): Promise<string> {
   await expect(page.getByText("Make an organization")).toBeVisible({ timeout: 30_000 });
   await page.getByLabel("Organization name").fill(name);
   await page.getByRole("button", { name: "Create", exact: true }).click();
-  await expect(page.getByRole("link", { name: "Dashboard" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Connect a cluster" })).toBeVisible();
   return name;
 }
 
@@ -67,9 +71,18 @@ export async function signIn(page: Page, email: string): Promise<void> {
   await expect(page.getByRole("button", { name: "Sign out" })).toBeVisible();
 }
 
+// Open the connect page from the rail, wherever the test happens to be. It is
+// one link from every page now — which is the point of #81: connecting the
+// second cluster used to mean finding a form under the first one's numbers.
+export async function openConnectForm(page: Page): Promise<void> {
+  await page.getByRole("link", { name: "Connect a cluster" }).click();
+  await expect(page.getByLabel("Connection string")).toBeVisible();
+}
+
 // Paste the real mongo, run the preflight, and connect. Leaves the page on the
-// dashboard with the new cluster selected.
+// new cluster's own overview.
 export async function connectCluster(page: Page, name: string): Promise<void> {
+  await openConnectForm(page);
   await page.getByLabel("Name").fill(name);
   await page.getByLabel("Connection string").fill(MONGO_URL);
   await page.getByRole("button", { name: "Check access" }).click();
@@ -78,5 +91,16 @@ export async function connectCluster(page: Page, name: string): Promise<void> {
   const asIs = page.getByRole("button", { name: "Use these credentials as-is" });
   await expect(connect.or(asIs)).toBeVisible();
   await ((await connect.isVisible()) ? connect : asIs).click();
-  await expect(page.getByText(name, { exact: true })).toBeVisible();
+  // The cluster's own page, which is the heading rather than a name in a bar.
+  await expect(page.getByRole("heading", { name, exact: true })).toBeVisible();
+}
+
+// The cluster's policy and connection live behind its Settings tab now, not at
+// the bottom of the overview.
+export async function openClusterSettings(page: Page): Promise<void> {
+  await page
+    .getByRole("navigation", { name: "Cluster" })
+    .getByRole("link", { name: "Settings" })
+    .click();
+  await expect(page.getByLabel("Observe window (days)")).toBeVisible();
 }
