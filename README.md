@@ -575,7 +575,7 @@ yet. Migration creates schemas, so migration creates both.
 in CI. Releasing is `git tag v0.2.0 && git push --tags`, and the release
 workflow refuses a tag whose version the tree does not carry.
 
-**Four test layers**, currently 457 api unit, 239 web unit, 81 integration and
+**Four test layers**, currently 457 api unit, 244 web unit, 81 integration and
 24 end-to-end. The e2e suite deliberately runs with **no proxy in front**, so the
 passthrough is the path under test — the proxy shape is covered by compose and
 the chart, and a fallback nothing exercises is a fallback that is broken when
@@ -644,10 +644,12 @@ Both defaults exist because the control plane dials hosts that users name.
   make everyone give up both. Ticking a box writes the option into the string, so
   nobody hand-edits one to match; clearing it removes the option even if it was
   pasted in, so the form cannot show three empty boxes above a string that
-  disables all three. The choice is stored on the cluster and read back on it, so
-  the concession stays visible rather than being made once and forgotten, and
-  every dial is verified against that recorded decision rather than against
-  whatever the string happens to say. There is no box that turns TLS itself off —
+  disables all three. The choice is stored on the cluster, and every dial is verified
+  against that recorded decision rather than against whatever the string happens
+  to say. It is also drawn on the cluster's own heading, beside the read-only
+  badge — a concession is chosen once, at a moment when the only goal is getting
+  the connection to work, and one nobody can see afterwards is one nobody
+  reviews. There is no box that turns TLS itself off —
   that is what the deployment switch is for.
 
   A cluster already stored with a plaintext string skips its passes and mails
