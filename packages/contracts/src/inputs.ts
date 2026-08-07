@@ -16,7 +16,12 @@ import { z } from "zod";
 import { clusterEngine, clusterPolicy, tlsOverrides } from "./schemas.js";
 
 // Fields, shared by whichever inputs use them.
-export const clusterName = z.string().min(1, "Give the cluster a name");
+//
+// Trimmed before the length check, so "   " is an empty name rather than a
+// three-character one — and so `clusters_org_name` means what it says: without
+// this, " staging" and "staging" are two different rows to the constraint and one
+// indistinguishable pair to everybody reading the sidebar (#96).
+export const clusterName = z.string().trim().min(1, "Give the cluster a name");
 export const connectionString = z.string().min(1, "Paste a connection string");
 export const orgName = z.string().min(1, "An org needs a name").max(120, "120 characters at most");
 // Owner and member, and no third rung — see ORG_ROLES in apps/api/src/auth/
@@ -64,6 +69,11 @@ export const rotateConnectionInput = z.object({
   connectionString,
   tlsOverrides: tlsOverrides.optional(),
 });
+
+// The same field as the connect form's, deliberately: a name the create form
+// accepts and the rename form refuses (or the reverse) is the drift this file
+// exists to stop.
+export const renameClusterInput = z.object({ name: clusterName });
 
 // The engine knobs minus the cluster they belong to, which the route carries as
 // a path param. Derived from the output schema so a knob cannot be settable and

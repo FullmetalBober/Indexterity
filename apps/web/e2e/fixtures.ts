@@ -13,6 +13,24 @@ export const E2E_ORG_PREFIX = "e2e-org-";
 
 export const MONGO_URL = process.env.MONGO_URL ?? "mongodb://127.0.0.1:27017";
 
+// An auth-enabled mongod whose user can create users, when the run has one.
+//
+// The MONGO_URL above deliberately has authentication disabled, which is the one
+// state where the scoped-user offer can never appear: every privilege is granted
+// and a dedicated user cannot be enforced, so `canProvision` is false whatever
+// the code does. That is why the provisioning path had no e2e coverage while the
+// fixture's `Connect` / `Use these credentials as-is` branch looked like it did
+// (#86) — the second half never ran.
+//
+// Empty means the tests that need it skip rather than fail. CI runs a second
+// mongo service with a root user for exactly this; locally:
+//
+//   podman run -d --rm --name mongo-auth -p 27018:27017 \
+//     -e MONGO_INITDB_ROOT_USERNAME=root -e MONGO_INITDB_ROOT_PASSWORD=secret \
+//     docker.io/library/mongo:8
+//   export MONGO_ADMIN_URL=mongodb://root:secret@127.0.0.1:27018
+export const MONGO_ADMIN_URL = process.env.MONGO_ADMIN_URL ?? "";
+
 let counter = 0;
 
 // Unique per test AND per run: postgres keeps rows between runs, and a second

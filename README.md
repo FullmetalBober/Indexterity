@@ -161,7 +161,10 @@ reasoning: [Plans and policy](https://github.com/FullmetalBober/Indexterity/wiki
 re-checks the version immediately before running, so a cluster downgraded or
 repointed later cannot be half-changed.
 
-Indexterity never gets document read or write privileges.
+Indexterity never gets document read or write privileges. The preflight lists
+every privilege it looked for, including the three that decide whether it can
+create its own user (`createRole`, `createUser`, `grantRole` on `admin`) — when
+one is missing it says which, rather than quietly keeping the string you pasted.
 [Connecting a cluster](https://github.com/FullmetalBober/Indexterity/wiki/Connecting-a-cluster)
 has the exact `createRole` snippets, what `serverStatus` exposes, which
 replica-set members get read, and what `mongodb+srv://` carries outside its own
@@ -223,7 +226,7 @@ apps/web                dashboard
                         cluster, or to connecting one
   src/routes/app.clusters.$clusterId       one cluster: the heading and its tabs
     …$clusterId.index      overview — ROI, recommendations, latency, collections
-    …$clusterId.settings   policy, mode, credentials, disconnect
+    …$clusterId.settings   name, policy, mode, credentials, disconnect
   src/routes/app.clusters.new   connecting a cluster, which is onboarding
   src/routes/app.settings       organization · organizations · account
   src/lib/api.ts        one oRPC client, isomorphic: same-origin in the browser,

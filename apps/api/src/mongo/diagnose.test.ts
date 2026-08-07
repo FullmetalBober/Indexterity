@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   canProvisionWith,
   evaluatePrivileges,
+  evaluateProvisioning,
   type MongoPrivilege,
   queryStatsAdvisory,
 } from "./diagnose";
@@ -139,6 +140,60 @@ describe("canProvisionWith", () => {
     expect(
       canProvisionWith([{ resource: { db: "admin", collection: "" }, actions: ["createUser"] }]),
     ).toBe(false);
+  });
+
+  // root carries userAdminAnyDatabase, whose privileges arrive on the
+  // anyDatabase resource rather than on `admin` by name. This is the case the
+  // report on #86 suspected was broken; it is not, and the test says so rather
+  // than the next reader having to re-derive it from grantsNamespace.
+  it("is true for anyResource, as root reports it", () => {
+    expect(
+      canProvisionWith([
+        { resource: { anyResource: true }, actions: ["createRole", "createUser", "grantRole"] },
+      ]),
+    ).toBe(true);
+  });
+});
+
+// The half of #86 that was a bug whichever way the detection went: a false
+// `canProvision` has to carry the reason, and the reason is per action.
+describe("evaluateProvisioning", () => {
+  it("names the exact action a partly privileged user is missing", () => {
+    const gaps = evaluateProvisioning([
+      { resource: { db: "admin", collection: "" }, actions: ["createRole", "createUser"] },
+    ]).filter((check) => !check.granted);
+    expect(gaps.map((check) => check.key)).toEqual(["grantRole"]);
+  });
+
+  // What an Atlas cluster's own admin looks like: broad on data, nothing on user
+  // management (Atlas manages users through its UI/API). "Correct answer, badly
+  // delivered" was the likelier half of the report — so the answer now arrives
+  // with all three actions named.
+  it("reports all three for credentials that manage no users at all", () => {
+    const atlasAdmin: MongoPrivilege[] = [
+      { resource: { cluster: true }, actions: ["listDatabases", "serverStatus"] },
+      {
+        resource: { db: "", collection: "" },
+        actions: ["listCollections", "listIndexes", "indexStats", "collStats"],
+      },
+    ];
+    expect(evaluateProvisioning(atlasAdmin).map((check) => check.granted)).toEqual([
+      false,
+      false,
+      false,
+    ]);
+    expect(evaluateProvisioning(atlasAdmin).every((check) => check.tier === "PROVISION")).toBe(
+      true,
+    );
+  });
+
+  // The engine's own requirements and the provisioning ones are answered from one
+  // privilege set but must not bleed into each other: `missing` drives the
+  // dashboard's red alert and createCluster's refusal, and neither is about
+  // whether we could have made our own user.
+  it("does not make a provisioning gap look like a missing engine privilege", () => {
+    expect(missing(enginePrivileges)).toEqual([]);
+    expect(canProvisionWith(enginePrivileges)).toBe(false);
   });
 });
 

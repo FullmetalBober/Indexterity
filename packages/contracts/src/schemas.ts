@@ -91,7 +91,11 @@ export type Cluster = z.infer<typeof cluster>;
 // One privilege the engine needs and whether the credentials have it.
 // CORE = analysis impossible without it; APPLY = analysis-only without it;
 // WORKLOAD = an optional signal source.
-export const privilegeTier = z.enum(["CORE", "APPLY", "WORKLOAD"]);
+// CORE/APPLY/WORKLOAD are what the ENGINE needs. PROVISION is a different
+// question — whether these credentials could create the scoped user for us — and
+// is reported as checks rather than only as the `canProvision` boolean below, so
+// a refused offer can name the action that would unlock it (#86).
+export const privilegeTier = z.enum(["CORE", "APPLY", "WORKLOAD", "PROVISION"]);
 export type PrivilegeTier = z.infer<typeof privilegeTier>;
 
 export const privilegeCheck = z.object({

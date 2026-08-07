@@ -282,6 +282,113 @@ describe("cluster lifecycle", () => {
   });
 });
 
+// A name used to be set once, at connect time, and the only route to a different
+// one was disconnect + reconnect — which deletes every snapshot, recommendation,
+// ROI figure and audit row the cluster had (#96).
+//
+// Its own account, and not because of tenancy: connecting spends the per-user
+// dial budget (10 a minute), and two more connects on the shared `owner` push the
+// scenarios below it over the line. A separate session is the cheap way to keep
+// this describe from being a 429 somewhere else.
+describe("cluster rename", () => {
+  let renamer: Session;
+  let renameId: string;
+
+  it("connects two clusters, one to rename and one to collide with", async () => {
+    renamer = await signUp("renamer");
+    createdEmails.push(renamer.email);
+    createdOrgIds.push(await giveRoom(renamer));
+    for (const name of ["Int Taken", "Int Rename"]) {
+      const res = await api("/clusters", renamer, {
+        method: "POST",
+        body: JSON.stringify({ name, connectionString: MONGO_URL }),
+      });
+      expect(res.status).toBe(200);
+      const id = asString(asRecord(await res.json()).id);
+      createdClusterIds.push(id);
+      if (name === "Int Rename") renameId = id;
+    }
+  });
+
+  it("renames it, and the list says so", async () => {
+    const res = await api(`/clusters/${renameId}`, renamer, {
+      method: "PATCH",
+      body: JSON.stringify({ name: "Int Renamed" }),
+    });
+    expect(res.status).toBe(200);
+    expect(asRecord(await res.json()).name).toBe("Int Renamed");
+
+    const list: unknown = await (await api("/clusters", renamer)).json();
+    const names = Array.isArray(list) ? list.map((entry) => asRecord(entry).name) : [];
+    expect(names).toContain("Int Renamed");
+    expect(names).not.toContain("Int Rename");
+  });
+
+  // The history is the whole reason this endpoint exists rather than "disconnect
+  // and connect again", so the rename has to leave it where it was.
+  it("keeps everything collected about the cluster", async () => {
+    const collected = await collectCluster(renameId);
+    expect(collected).toBeGreaterThan(0);
+    const before = await db
+      .select({ id: indexSnapshots.id })
+      .from(indexSnapshots)
+      .where(eq(indexSnapshots.clusterId, renameId));
+    const res = await api(`/clusters/${renameId}`, renamer, {
+      method: "PATCH",
+      body: JSON.stringify({ name: "Int Renamed Twice" }),
+    });
+    expect(res.status).toBe(200);
+    const after = await db
+      .select({ id: indexSnapshots.id })
+      .from(indexSnapshots)
+      .where(eq(indexSnapshots.clusterId, renameId));
+    expect(after).toHaveLength(before.length);
+  });
+
+  // Two clusters called "staging" are one indistinguishable pair in the sidebar
+  // and, worse, in an alert subject line.
+  it("refuses a name the org is already using, on rename and on connect", async () => {
+    const collision = await api(`/clusters/${renameId}`, renamer, {
+      method: "PATCH",
+      body: JSON.stringify({ name: "Int Taken" }),
+    });
+    expect(collision.status).toBe(400);
+    expect(asString(asRecord(await collision.json()).message)).toContain("already has a cluster");
+
+    // Same rule at the other door, and refused BEFORE anything is dialed.
+    const connect = await api("/clusters", renamer, {
+      method: "POST",
+      body: JSON.stringify({ name: "Int Taken", connectionString: MONGO_URL }),
+    });
+    expect(connect.status).toBe(400);
+  });
+
+  it("refuses a name that is only whitespace", async () => {
+    const blank = await api(`/clusters/${renameId}`, renamer, {
+      method: "PATCH",
+      body: JSON.stringify({ name: "   " }),
+    });
+    expect(blank.status).toBe(400);
+  });
+
+  // Another tenant's cluster is not found rather than forbidden: whether an id
+  // exists is not this caller's to learn.
+  it("does not exist for another organization", async () => {
+    const outsider = await signUp("outsider");
+    createdEmails.push(outsider.email);
+    createdOrgIds.push(asString(asRecord(await (await api("/org", outsider)).json()).id));
+    const res = await api(`/clusters/${renameId}`, outsider, {
+      method: "PATCH",
+      body: JSON.stringify({ name: "Mine Now" }),
+    });
+    expect(res.status).toBe(404);
+    const list: unknown = await (await api("/clusters", renamer)).json();
+    const names = Array.isArray(list) ? list.map((entry) => asRecord(entry).name) : [];
+    expect(names).toContain("Int Renamed Twice");
+    expect(names).not.toContain("Mine Now");
+  });
+});
+
 describe("tenancy, invites and roles", () => {
   it("keeps a fresh account isolated", async () => {
     member = await signUp("member");
@@ -387,6 +494,10 @@ describe("tenancy, invites and roles", () => {
       method: "PATCH",
       body: JSON.stringify({ readOnly: true }),
     });
+    const rename = await api(`/clusters/${clusterId}`, member, {
+      method: "PATCH",
+      body: JSON.stringify({ name: "Theirs" }),
+    });
     const create = await api("/clusters", member, {
       method: "POST",
       body: JSON.stringify({ name: "nope", connectionString: MONGO_URL }),
@@ -409,8 +520,8 @@ describe("tenancy, invites and roles", () => {
         changeWindowEndHour: null,
       }),
     });
-    expect([mode.status, create.status, invite.status, policy.status]).toEqual([
-      403, 403, 403, 403,
+    expect([mode.status, rename.status, create.status, invite.status, policy.status]).toEqual([
+      403, 403, 403, 403, 403,
     ]);
     const read = await api(`/clusters/${clusterId}/policy`, member);
     expect(read.status).toBe(200);

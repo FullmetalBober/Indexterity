@@ -5,6 +5,7 @@ import {
   createClusterInput,
   policyKnobsInput,
   provisionClusterInput,
+  renameClusterInput,
   rotateConnectionInput,
 } from "./inputs.js";
 import {
@@ -159,6 +160,21 @@ export const contract = {
     })
     .errors({ NOT_FOUND: {}, BAD_REQUEST: {} })
     .input(clusterId.extend(rotateConnectionInput.shape))
+    .output(cluster),
+
+  // PATCH on the cluster itself, not on a sub-path: the name IS the cluster's
+  // own attribute, unlike its connection or its mode. Owner-only, like both of
+  // those, and BAD_REQUEST for a name another cluster in the org already has —
+  // the rail and every alert subject line are the reason it has to be unique.
+  renameCluster: oc
+    .route({
+      method: "PATCH",
+      path: "/clusters/{clusterId}",
+      summary:
+        "Rename a cluster (owner only) — the name in the rail, the header and every alert subject; unique within the org",
+    })
+    .errors({ NOT_FOUND: {}, BAD_REQUEST: {} })
+    .input(clusterId.extend(renameClusterInput.shape))
     .output(cluster),
 
   setClusterMode: oc
