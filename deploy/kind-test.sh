@@ -172,7 +172,7 @@ if ! helm test indexterity -n "$NS" --timeout 3m; then
   exit 1
 fi
 
-step "functional check: sign up and connect the in-cluster mongo"
+step "functional check: sign up, make an org, connect the in-cluster mongo"
 # The chart's own test only curls two ports. This exercises what the chart is
 # actually for: migrations applied, MASTER_KEY sealing a credential, and the api
 # reaching a database over cluster DNS.
@@ -180,13 +180,29 @@ kubectl -n "$NS" run kind-check --rm -i --restart=Never --image="$CURL_IMAGE" --
   set -e
   API=http://indexterity-api:3001
   ORIGIN=http://indexterity-web:3000
-  COOKIE=$(curl -s -i -X POST "$API/api/auth/sign-up/email" -H "content-type: application/json" \
+  SET_COOKIE=$(curl -s -i -X POST "$API/api/auth/sign-up/email" -H "content-type: application/json" \
     -H "origin: $ORIGIN" -H "x-forwarded-for: 203.0.113.7" \
     -d "{\"email\":\"kind-check@example.test\",\"password\":\"Kind-Passw0rd!\",\"name\":\"Kind\"}" \
-    | grep -i "^set-cookie:" | sed "s/^[Ss]et-[Cc]ookie: //" | cut -d";" -f1 | tr "\n" ";")
-  [ -n "$COOKIE" ] || { echo "sign-up returned no session cookie"; exit 1; }
-  echo "$COOKIE" | grep -q "__Secure-" || { echo "session cookie is not Secure"; exit 1; }
+    | grep -i "^set-cookie:" | sed "s/^[Ss]et-[Cc]ookie: //")
+  [ -n "$SET_COOKIE" ] || { echo "sign-up returned no session cookie"; exit 1; }
+  echo "$SET_COOKIE" | grep -q "__Secure-" || { echo "session cookie is not Secure"; exit 1; }
+  # The session TOKEN alone, deliberately not the session_data cache cookie
+  # beside it. Creating an org below changes the session row without re-signing
+  # that cache, so the api expires it in the response — which a browser honours
+  # and a shell holding a captured string does not. Replaying the stale copy
+  # would keep answering "belongs to no org" for the length of the cache and
+  # fail the next step. See the hooks.after note in auth/auth.config.ts.
+  COOKIE=$(echo "$SET_COOKIE" | grep -o "__Secure-better-auth\.session_token=[^;]*" | head -n1)
+  [ -n "$COOKIE" ] || { echo "no session_token cookie in the sign-up response"; exit 1; }
   echo "signed up, cookie is Secure"
+  # A fresh account belongs to nowhere. The api stopped conjuring "My Org"
+  # behind the first authenticated request when tenancy moved onto the
+  # organization plugin, so a cluster has nothing to hang off until one is made
+  # on purpose — the same first step the dashboard asks of a new reader.
+  curl -sf -X POST "$API/api/auth/organization/create" -H "cookie: $COOKIE" \
+    -H "content-type: application/json" -H "origin: $ORIGIN" -H "x-forwarded-for: 203.0.113.7" \
+    -d "{\"name\":\"Kind Check\",\"slug\":\"kind-check\"}" > /dev/null
+  echo "made an organization"
   curl -sf -X POST "$API/api/clusters" -H "cookie: $COOKIE" -H "content-type: application/json" \
     -H "origin: $ORIGIN" -H "x-forwarded-for: 203.0.113.7" \
     -d "{\"name\":\"Kind Mongo\",\"connectionString\":\"mongodb://mongo:27017\"}" > /dev/null
