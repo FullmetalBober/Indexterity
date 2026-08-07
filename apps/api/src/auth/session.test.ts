@@ -39,7 +39,12 @@ describe("requireSession", () => {
     const req = request();
     const first = await requireSession(req);
     const second = await requireUserId(req);
-    expect(first).toEqual({ userId: "user-1", activeOrgId: "org-1", signedInAt: SIGNED_IN_AT });
+    expect(first).toEqual({
+      userId: "user-1",
+      activeOrgId: "org-1",
+      signedInAt: SIGNED_IN_AT,
+      twoFactorEnabled: false,
+    });
     expect(second).toBe("user-1");
     expect(getSession).toHaveBeenCalledTimes(1);
   });

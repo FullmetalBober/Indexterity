@@ -199,6 +199,14 @@ more than an hour ago — the dashboard asks for the password again and then
 runs the action you chose. Flipping a cluster back to read-only never does:
 the emergency stop works from however old a session.
 
+**Owner accounts can carry a second factor, and a deployment can demand one.**
+TOTP plus backup codes, enrolled from the account page; with
+`REQUIRE_OWNER_2FA=true` every owner-only mutation — and the org acts that
+decide who has access — refuses until a code has verified. GitHub sign-ins are
+exempt (no password to pair a code with; GitHub enforces its own). Lost device
+and lost codes means whoever runs the install resets it after verifying it's
+you — there is deliberately no self-serve way around a second factor.
+
 **Owner-level acts leave a trail.** `actions` records what the engine did to an
 index; `security_events` records the rest — signing in and failing to, signing out,
 revoking a session, promoting and demoting, removing a member, inviting one, an

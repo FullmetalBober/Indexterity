@@ -1,4 +1,10 @@
-import { positiveEnv, requiredEnv, trustedProxyCidrs, trustsProxy } from "../env";
+import {
+  positiveEnv,
+  requiredEnv,
+  requireOwnerTwoFactor,
+  trustedProxyCidrs,
+  trustsProxy,
+} from "../env";
 import { createAuth } from "./auth.config";
 import { assertProductionUrl, useSecureCookies } from "./cookies";
 
@@ -29,4 +35,5 @@ export const auth = createAuth({
   // reads it too — see auth/rate-limit.ts.
   authRateLimitMax: positiveEnv("AUTH_RATE_LIMIT_MAX", 20),
   webOrigin,
+  requireOwnerTwoFactor: requireOwnerTwoFactor(),
 });

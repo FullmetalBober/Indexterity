@@ -15,7 +15,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
 import { api } from "../../api";
-import { apiMessage, isSessionStale } from "../errors";
+import { apiMessage, isSessionStale, isTwoFactorRequired } from "../errors";
 import { queryKeys } from "../keys";
 
 // Said the same way whether the api refused or never answered, because from the
@@ -74,6 +74,7 @@ export function useSetClusterMode(
     // A refused change moved nothing, so there is nothing to refetch.
     onError: (error, readOnly) => {
       if (isSessionStale(error)) onStale(() => mutation.mutate(readOnly));
+      else if (isTwoFactorRequired(error)) toast.error(apiMessage(error, MODE_FAILED));
       else toast.error(MODE_FAILED);
     },
   });
@@ -117,6 +118,7 @@ export function useRotateConnection(
     // cluster could not be dialled with it — all three are worth reading.
     onError: (error, connectionString) => {
       if (isSessionStale(error)) onStale(() => mutation.mutate(connectionString));
+      else if (isTwoFactorRequired(error)) toast.error(apiMessage(error, ROTATION_FAILED));
       else toast.error(apiMessage(error, ROTATION_FAILED, [400, 404, 502]));
     },
   });
@@ -149,6 +151,7 @@ export function useDisconnectCluster(
     // The cluster is still there, so leaving its page would be a lie.
     onError: (error) => {
       if (isSessionStale(error)) onStale(() => mutation.mutate());
+      else if (isTwoFactorRequired(error)) toast.error(apiMessage(error, DISCONNECT_FAILED));
       else toast.error(DISCONNECT_FAILED);
     },
   });

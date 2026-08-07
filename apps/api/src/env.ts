@@ -31,6 +31,19 @@ export function positiveEnv(name: string, fallback: number): number {
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
+// Whether owners must have a second factor before any owner-only mutation
+// (#55). A deployment posture like SIGNUP_MODE, off by default for the same
+// reason REQUIRE_EMAIL_VERIFICATION is: dev and the test suites should work
+// without every account enrolling an authenticator first. A hosted install
+// should set it — the accounts this gates are the ones that can flip a
+// customer's cluster live.
+//
+// Enrolment itself does not read this: the twoFactor plugin is always on, so
+// anyone can add a second factor before the deployment starts demanding one.
+export function requireOwnerTwoFactor(): boolean {
+  return process.env.REQUIRE_OWNER_2FA === "true";
+}
+
 // Fastify's trustProxy, from the environment.
 //
 // Behind an ingress or a Service every request arrives from the proxy, so

@@ -4,13 +4,15 @@ import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { APIError, createAuthMiddleware, getSessionFromCtx } from "better-auth/api";
 import { expireCookie } from "better-auth/cookies";
+import { twoFactor } from "better-auth/plugins/two-factor";
 import { authTrailEntry, sessionEndedEntry, type TrailActor } from "../audit/auth-trail";
 import { authEventFor, recordSecurityEvent } from "../audit/security-events";
-import { createDatabase, eq, schema, user as userTable } from "../db";
+import { and, createDatabase, eq, members, schema, user as userTable } from "../db";
 import { sendMail } from "../mail/mailer";
 import { organizationPlugin } from "./organization";
 import { authRateLimit } from "./rate-limit";
 import { evaluateSignup } from "./signup-gate";
+import { hasCredentialAccount } from "./two-factor-gate";
 
 export interface AuthConfig {
   readonly databaseUrl: string;
@@ -39,7 +41,21 @@ export interface AuthConfig {
   readonly authRateLimitMax: number;
   // The dashboard's origin, for the link in an invitation email.
   readonly webOrigin: string;
+  // Owners must hold a second factor before the org mutations that decide who
+  // can do everything else (#55). Deployment posture, like SIGNUP_MODE — the
+  // api-side half of the same rule lives in TenancyService.requireOwner.
+  readonly requireOwnerTwoFactor: boolean;
 }
+
+// The org mutations the second-factor rule gates: the ones through which an
+// owner reshapes who may act. Rename, leave and the reads stay open — the rule
+// exists for the acts with someone else's access in them.
+const OWNER_2FA_PATHS = new Set([
+  "/organization/invite-member",
+  "/organization/remove-member",
+  "/organization/update-member-role",
+  "/organization/delete",
+]);
 
 // Who is making this request, for the security trail. Two sources, because the
 // acts arrive in two shapes and neither covers the other — both measured against
@@ -192,6 +208,12 @@ export function createAuth(config: AuthConfig) {
     // See auth/rate-limit.ts for what is left at better-auth's defaults and why.
     rateLimit: authRateLimit(config.authRateLimitMax),
     plugins: [
+      // TOTP and backup codes only — no OTP-over-email. The mailbox is what a
+      // password reset already trusts, so a code sent there is the first
+      // factor wearing a costume, not a second one. `skipVerificationOnEnable`
+      // stays false: `twoFactorEnabled` means a code has actually worked once,
+      // not that a QR was displayed.
+      twoFactor({ issuer: "Indexterity" }),
       organizationPlugin(db, {
         webOrigin: config.webOrigin,
         requireEmailVerification: config.requireEmailVerification,
@@ -216,6 +238,37 @@ export function createAuth(config: AuthConfig) {
     // session this costs that caller one extra read; on set-active, the fresh
     // cookie is already in the response and is kept.
     hooks: {
+      // The org-route half of the owner second-factor rule (#55); the api's
+      // mutations get the same answer from TenancyService.requireOwner. Here
+      // rather than in organizationHooks because those are handed the member
+      // and the org and never the CALLER — the same reason the trail below
+      // resolves its actor here (#53).
+      //
+      // Owner of ANY org, not just the active one: the posture is per account.
+      // Someone who owns org A and is a member of org B must enrol before
+      // acting anywhere — the message tells them how to fix it, and org B's
+      // own permission check still applies after they do. A member everywhere
+      // is left to the plugin, whose "not an owner" is the accurate refusal.
+      before: createAuthMiddleware(async (ctx) => {
+        if (!config.requireOwnerTwoFactor) return;
+        if (ctx.method !== "POST" || !OWNER_2FA_PATHS.has(ctx.path)) return;
+        const resolved = await getSessionFromCtx(ctx);
+        if (resolved === null) return; // the endpoint's own authn answers this
+        const enabled = (resolved.user as { twoFactorEnabled?: unknown }).twoFactorEnabled;
+        if (enabled === true) return;
+        const [owns] = await db
+          .select({ orgId: members.orgId })
+          .from(members)
+          .where(and(eq(members.userId, resolved.user.id), eq(members.role, "owner")))
+          .limit(1);
+        if (owns === undefined) return;
+        if (!(await hasCredentialAccount(db, resolved.user.id))) return;
+        throw new APIError("FORBIDDEN", {
+          message:
+            "owners must add a second factor before changing who has access — Account → Two-factor",
+          code: "TWO_FACTOR_REQUIRED",
+        });
+      }),
       after: createAuthMiddleware(async (ctx) => {
         // The security trail (audit/auth-trail.ts). First, and never allowed to
         // throw: whether the act is recorded must not decide whether it happened,
@@ -237,7 +290,17 @@ export function createAuth(config: AuthConfig) {
             await recordSecurityEvent(db, entry, (message) => ctx.context.logger.warn(message));
           }
         }
-        if (ctx.method !== "POST" || !ctx.path.startsWith("/organization/")) return;
+        // /two-factor/ is in the same boat for the same reason: verify-totp
+        // (the first one) and disable flip `user.twoFactorEnabled`, which the
+        // cached cookie carries a copy of — and requireOwner now reads it, so
+        // a stale false would keep refusing an owner who just enrolled for up
+        // to the cache's maxAge (#55).
+        if (
+          ctx.method !== "POST" ||
+          !(ctx.path.startsWith("/organization/") || ctx.path.startsWith("/two-factor/"))
+        ) {
+          return;
+        }
         const sessionData = ctx.context.authCookies.sessionData;
         const pending = ctx.context.responseHeaders?.getSetCookie() ?? [];
         const reSigned = pending.some((cookie) => cookie.startsWith(`${sessionData.name}=`));
