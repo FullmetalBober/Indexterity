@@ -57,3 +57,27 @@ export function trustProxySetting(): boolean | number | string {
 export function trustsProxy(): boolean {
   return trustProxySetting() !== false;
 }
+
+// The CIDR entries of TRUST_PROXY, for better-auth, which needs to know WHICH
+// hops to distrust rather than only that a proxy exists.
+//
+// Fastify accepts "true" and a hop count as well, and better-auth has no
+// equivalent for either: without a list it trusts a forwarded header only when
+// it carries exactly one address, and behind an ingress the header usually
+// carries two or more (client, ingress). Every hop then goes unresolved, which
+// is not a broken limit but a shared one — every client lands in the same bucket
+// (#54). A CIDR list is the way to get per-client budgets out of it.
+//
+// Pure over its argument so the parsing is testable; `trustedProxyCidrs` is the
+// environment's answer.
+export function cidrEntries(raw: string | undefined): string[] {
+  if (raw === undefined) return [];
+  return raw
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => /^[0-9a-fA-F.:]+(\/\d{1,3})?$/.test(entry) && /[.:]/.test(entry));
+}
+
+export function trustedProxyCidrs(): string[] {
+  return cidrEntries(process.env.TRUST_PROXY);
+}

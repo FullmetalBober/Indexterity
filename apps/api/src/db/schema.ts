@@ -157,6 +157,28 @@ export const verification = pgTable("verification", {
   updatedAt,
 });
 
+// better-auth's rate-limit counters, one row per (client address, auth path).
+//
+// It kept these in this process's memory, which made the limit per pod: the
+// ceiling was really max × replicas, which pod a request landed on decided which
+// bucket it spent, and a rollout handed every attacker their budget back (#54).
+// `rateLimit.storage: "database"` (auth/rate-limit.ts) puts them here instead, so
+// every replica counts against one total.
+//
+// The shape is better-auth's, not ours — the property names are what its adapter
+// looks up, so `lastRequest` cannot be renamed even though the column can.
+// `lastRequest` is epoch milliseconds and declared bigint by better-auth, which
+// is right: it compares it to Date.now(), and 2^31 ms ran out in 1994.
+//
+// No retention job: better-auth deletes rows past the widest window on every
+// write, so the table stays the size of whatever is currently being limited.
+export const rateLimit = pgTable("rate_limit", {
+  id: text("id").primaryKey(),
+  key: text("key").notNull().unique(),
+  count: integer("count").notNull(),
+  lastRequest: bigint("last_request", { mode: "number" }).notNull(),
+});
+
 // --- tenancy -------------------------------------------------------------
 //
 // Owned by better-auth's organization plugin (auth/auth.config.ts maps its

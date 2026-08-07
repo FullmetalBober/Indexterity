@@ -407,6 +407,17 @@ ingress rule stops being silent. The cost is that the api is publicly reachable,
 so its rate limiting, origin checks and auth guard are now the only line of
 defence rather than the second.
 
+Those limits are worth reading precisely, because two limiters answer for them.
+`RATE_LIMIT_MAX` (300/min) is counted in each api process's memory, so it is **per
+replica** and a rolling deploy resets it. `AUTH_RATE_LIMIT_MAX` (20/min) is read
+twice: the same per-replica way for `/api/auth/*`, and by better-auth for the
+credential endpoints, which counts in Postgres — so that half is one budget for the
+whole deployment. Set `TRUST_PROXY` to the CIDR ranges of whatever sits in front,
+not to `true`: better-auth resolves a client address only from a forwarded header
+it can attribute, and without ranges every caller shares one bucket.
+[Architecture §10.5](https://github.com/FullmetalBober/Indexterity/wiki/Architecture)
+has the table.
+
 A Helm chart is in [`deploy/helm/indexterity`](./deploy/helm/indexterity) —
 api + dashboard + worker, a pre-upgrade migration hook, ingress, and a
 `helm test`. Bring your own PostgreSQL.

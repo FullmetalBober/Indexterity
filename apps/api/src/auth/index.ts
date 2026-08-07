@@ -1,4 +1,4 @@
-import { requiredEnv, trustsProxy } from "../env";
+import { positiveEnv, requiredEnv, trustedProxyCidrs, trustsProxy } from "../env";
 import { createAuth } from "./auth.config";
 import { assertProductionUrl, useSecureCookies } from "./cookies";
 
@@ -23,5 +23,10 @@ export const auth = createAuth({
   githubClientSecret: process.env.GITHUB_CLIENT_SECRET ?? "",
   requireEmailVerification: process.env.REQUIRE_EMAIL_VERIFICATION === "true",
   trustProxy: trustsProxy(),
+  trustedProxies: trustedProxyCidrs(),
+  // The same variable main.ts hands @fastify/rate-limit, and the same unit
+  // (attempts a minute). One knob, two limiters, and now the tighter of the two
+  // reads it too — see auth/rate-limit.ts.
+  authRateLimitMax: positiveEnv("AUTH_RATE_LIMIT_MAX", 20),
   webOrigin,
 });
