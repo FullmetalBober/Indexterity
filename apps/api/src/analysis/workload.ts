@@ -56,20 +56,28 @@ export interface QueryShape {
 
 const HOURS_PER_WEEK = 168;
 
+// How often this shape runs, per week.
+//
+// An unmeasurable window is not a rate of zero. Where the source cannot say how
+// long it watched, the count is all there is and the count stands in for the
+// rate — the same judgement made everywhere else a window is missing, rather
+// than a silent refusal to ever act.
+export function executionsPerWeek(shape: QueryShape): number {
+  const hours = shape.observedForHours;
+  if (hours === undefined || hours <= 0) return shape.count;
+  return shape.count / (hours / HOURS_PER_WEEK);
+}
+
 // Does this shape recur often enough to act on?
 //
 // Both tests have to pass, and they catch different mistakes. The count floor
 // rejects the query someone ran twice by hand; the rate rejects the one that
 // ran five times in two months and would otherwise look identical to it.
-//
-// An unmeasurable window is not a rate of zero. Where the source cannot say how
-// long it watched, the count is all there is and the count decides — the same
-// judgement as before, rather than a silent refusal to ever recommend.
 export function isRecurring(shape: QueryShape, options: WorkloadOptions): boolean {
   if (shape.count < options.minCount) return false;
   const hours = shape.observedForHours;
   if (hours === undefined || hours <= 0) return true;
-  return shape.count / (hours / HOURS_PER_WEEK) >= options.minPerWeek;
+  return executionsPerWeek(shape) >= options.minPerWeek;
 }
 
 // The ESR key: Equality fields first, then Sort, then Range — the order that

@@ -93,6 +93,12 @@ that ends in an error rather than slowness, since a blocking sort dies at 100 MB
 The fix is usually extending the index that already found the documents so it
 can order them too.
 
+Which collections get looked at is a question of **cost, not size**: a
+collection earns create-side analysis once its scanning passes a million
+documents a week, whatever it holds. A 900-document collection scanned five
+hundred times a second qualifies; a 50,000-row lookup table scanned twice a day
+does not. Only a trivial floor — 100 documents — is decided on size.
+
 A shape must recur — **3+ sightings** — and must come from something other than a
 person at a prompt. `$queryStats` groups by client and the profiler records
 `appName`, so the same query from `mongosh` and from your app arrive as separate
@@ -747,6 +753,17 @@ quieter mistake: `$queryStats` accumulates for the life of the store, so on a
 server up two months, three executions clears a count floor while describing a
 query that runs roughly never. Both windows are measurable, so both are measured
 (`analysis/workload.ts`).
+
+**Which collections are worth analysing is the same question in the collection's
+units.** It used to be a document count — under a thousand documents, excluded
+before the workload was even fetched — which is a proxy for cost evaluated
+before the cost is knowable. A scan costs documents *times* frequency, so the
+proxy was wrong in both directions at once: a 900-document collection scanned
+five hundred times a second was invisible, and a 50,000-row lookup table
+scanned twice a day sailed through. The gate is now a million documents walked
+per week, measured, with a 100-document floor for collections too small for an
+index to pay for the write it adds. A blocking in-memory sort is exempt — it
+walks no extra documents and still dies at 100 MB.
 
 ## Licence
 

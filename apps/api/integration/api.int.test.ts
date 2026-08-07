@@ -1711,8 +1711,10 @@ describe("workload collection is batched", () => {
       .command({ setParameter: 1, internalQueryStatsRateLimit: -1 })
       .catch(() => {});
 
-    // Two collections, both over MIN_COLLECTION_DOCS so the eligibility pass
-    // keeps them, each queried on a DIFFERENT field.
+    // Two collections, both over the trivial-size floor so the eligibility pass
+    // reads a workload for them, each queried on a DIFFERENT field. Four
+    // executions is nowhere near the cost gate, so no create is expected — what
+    // is under test here is that each namespace gets its own shapes.
     const docs = Array.from({ length: 1200 }, (_, i) => ({ i, status: "open", tier: "gold" }));
     for (const name of ["wl_orders", "wl_carts"]) {
       await mongo.db("inttest").collection(name).deleteMany({});
