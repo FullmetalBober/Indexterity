@@ -11,6 +11,7 @@
 # Requires: kind, kubectl, helm, podman (or docker).
 # Usage:   deploy/kind-test.sh [--keep]
 #          RELEASE=0.1.0 deploy/kind-test.sh   # the PUBLISHED artifacts instead
+#          PREBUILT=1 deploy/kind-test.sh      # images already in the engine
 #
 # RELEASE mode answers a question the default cannot: does what we shipped
 # work? The default builds from the working tree, so it passes even if the
@@ -96,9 +97,20 @@ if [ -n "$RELEASE" ]; then
     kind load docker-image "ghcr.io/$GHCR_OWNER/indexterity-$img:$RELEASE" --name "$CLUSTER"
   done
 else
-  step "building images"
-  "$CTR" build -f "$ROOT/apps/api/Dockerfile" -t "indexterity/api:$TAG" "$ROOT"
-  "$CTR" build -f "$ROOT/apps/web/Dockerfile" -t "indexterity/web:$TAG" "$ROOT"
+  # PREBUILT: the caller already built and tagged them, and knows how to do it
+  # faster than a bare `build` can — CI uses buildx against a layer cache. The
+  # tags are the contract; where they came from is not this script's business.
+  if [ -z "${PREBUILT:-}" ]; then
+    step "building images"
+    "$CTR" build -f "$ROOT/apps/api/Dockerfile" -t "indexterity/api:$TAG" "$ROOT"
+    "$CTR" build -f "$ROOT/apps/web/Dockerfile" -t "indexterity/web:$TAG" "$ROOT"
+  else
+    step "using prebuilt images"
+    for img in api web; do
+      $CTR image inspect "$(image_ref "$img")" >/dev/null 2>&1 ||
+        { echo "PREBUILT is set but $(image_ref "$img") is not in $CTR"; exit 1; }
+    done
+  fi
 
   step "loading images into the cluster"
   for img in api web; do
@@ -144,15 +156,24 @@ helm upgrade --install indexterity "$CHART" $CHART_ARGS -n "$NS" --wait --timeou
   --set "api.image.repository=$API_REPO,api.image.tag=$TAG,api.image.pullPolicy=Never,api.replicas=1" \
   --set "web.image.repository=$WEB_REPO,web.image.tag=$TAG,web.image.pullPolicy=Never,web.replicas=1" \
   --set "config.signupMode=open,config.allowPrivateClusterTargets=true" \
+  --set "config.allowInsecureClusterTls=true" \
   --set "config.allowInsecureAuthUrl=true,config.trustProxy=true" \
   --set "secrets.databaseUrl=postgres://indexterity:indexterity@postgres:5432/indexterity" \
   --set "secrets.betterAuthSecret=kind-test-secret-not-for-real-use-0000" \
   --set "secrets.masterKey=MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
 
 step "helm test"
-helm test indexterity -n "$NS" --timeout 3m
+# The probe pod echoes after each assertion it passes, so its log names the one
+# that failed — and `helm test` prints none of it. Without this a failure reads
+# only "pod indexterity-test-dashboard failed", which is every assertion at once.
+if ! helm test indexterity -n "$NS" --timeout 3m; then
+  echo "--- test pod log (the last line it echoed is the last assertion that PASSED) ---"
+  # The pod survives a failure: its delete policy only removes it on success.
+  kubectl -n "$NS" logs -l app.kubernetes.io/component=test --tail=-1 || true
+  exit 1
+fi
 
-step "functional check: sign up and connect the in-cluster mongo"
+step "functional check: sign up, make an org, connect the in-cluster mongo"
 # The chart's own test only curls two ports. This exercises what the chart is
 # actually for: migrations applied, MASTER_KEY sealing a credential, and the api
 # reaching a database over cluster DNS.
@@ -160,14 +181,30 @@ kubectl -n "$NS" run kind-check --rm -i --restart=Never --image="$CURL_IMAGE" --
   set -e
   API=http://indexterity-api:3001
   ORIGIN=http://indexterity-web:3000
-  COOKIE=$(curl -s -i -X POST "$API/api/auth/sign-up/email" -H "content-type: application/json" \
+  SET_COOKIE=$(curl -s -i -X POST "$API/api/auth/sign-up/email" -H "content-type: application/json" \
     -H "origin: $ORIGIN" -H "x-forwarded-for: 203.0.113.7" \
     -d "{\"email\":\"kind-check@example.test\",\"password\":\"Kind-Passw0rd!\",\"name\":\"Kind\"}" \
-    | grep -i "^set-cookie:" | sed "s/^[Ss]et-[Cc]ookie: //" | cut -d";" -f1 | tr "\n" ";")
-  [ -n "$COOKIE" ] || { echo "sign-up returned no session cookie"; exit 1; }
-  echo "$COOKIE" | grep -q "__Secure-" || { echo "session cookie is not Secure"; exit 1; }
+    | grep -i "^set-cookie:" | sed "s/^[Ss]et-[Cc]ookie: //")
+  [ -n "$SET_COOKIE" ] || { echo "sign-up returned no session cookie"; exit 1; }
+  echo "$SET_COOKIE" | grep -q "__Secure-" || { echo "session cookie is not Secure"; exit 1; }
+  # The session TOKEN alone, deliberately not the session_data cache cookie
+  # beside it. Creating an org below changes the session row without re-signing
+  # that cache, so the api expires it in the response — which a browser honours
+  # and a shell holding a captured string does not. Replaying the stale copy
+  # would keep answering "belongs to no org" for the length of the cache and
+  # fail the next step. See the hooks.after note in auth/auth.config.ts.
+  COOKIE=$(echo "$SET_COOKIE" | grep -o "__Secure-better-auth\.session_token=[^;]*" | head -n1)
+  [ -n "$COOKIE" ] || { echo "no session_token cookie in the sign-up response"; exit 1; }
   echo "signed up, cookie is Secure"
-  curl -sf -X POST "$API/clusters" -H "cookie: $COOKIE" -H "content-type: application/json" \
+  # A fresh account belongs to nowhere. The api stopped conjuring "My Org"
+  # behind the first authenticated request when tenancy moved onto the
+  # organization plugin, so a cluster has nothing to hang off until one is made
+  # on purpose — the same first step the dashboard asks of a new reader.
+  curl -sf -X POST "$API/api/auth/organization/create" -H "cookie: $COOKIE" \
+    -H "content-type: application/json" -H "origin: $ORIGIN" -H "x-forwarded-for: 203.0.113.7" \
+    -d "{\"name\":\"Kind Check\",\"slug\":\"kind-check\"}" > /dev/null
+  echo "made an organization"
+  curl -sf -X POST "$API/api/clusters" -H "cookie: $COOKIE" -H "content-type: application/json" \
     -H "origin: $ORIGIN" -H "x-forwarded-for: 203.0.113.7" \
     -d "{\"name\":\"Kind Mongo\",\"connectionString\":\"mongodb://mongo:27017\"}" > /dev/null
   echo "connected a cluster over cluster DNS"

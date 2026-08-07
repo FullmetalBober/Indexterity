@@ -4,9 +4,12 @@ import { NestFactory } from "@nestjs/core";
 import { FastifyAdapter, type NestFastifyApplication } from "@nestjs/platform-fastify";
 import { AppModule } from "./app.module";
 import { auth } from "./auth";
+import { sessionCookiesFor } from "./auth/session";
 import { positiveEnv, trustProxySetting } from "./env";
 import { AppExceptionFilter } from "./errors/exception.filter";
+import { jobDb } from "./jobs/db";
 import { embeddedWorkerEnabled, startWorker } from "./jobs/runner";
+import { instrumentHttp, registerControlPlaneGauges, startMetricsServer } from "./metrics";
 
 async function bootstrap(): Promise<void> {
   // Fastify's built-in pino: structured request/response logs with req ids,
@@ -21,8 +24,21 @@ async function bootstrap(): Promise<void> {
     },
   });
   const app = await NestFactory.create<NestFastifyApplication>(AppModule, adapter);
+  // Everything this service serves lives under /api, so a single reverse proxy
+  // rule can put it on the same origin as the dashboard. better-auth is already
+  // mounted at /api/auth below — it registers straight on Fastify, outside
+  // Nest's prefix, so it is unaffected by this and does not get /api twice.
+  //
+  // Same origin is what lets the browser hold the session cookie itself, and it
+  // is a requirement rather than an optimisation: the dashboard has no relay to
+  // fall back on, so a deployment that does not route /api here has a dashboard
+  // whose every read 404s.
+  app.setGlobalPrefix("api");
   app.useGlobalFilters(new AppExceptionFilter());
   const fastify = app.getHttpAdapter().getInstance();
+  // Before the routes exist, so the hook sees oRPC, better-auth and the health
+  // check alike.
+  instrumentHttp(fastify);
 
   // Global ceiling per IP, with a tight budget on the auth endpoints — they are
   // the brute-force target (sign-in/sign-up).
@@ -34,6 +50,21 @@ async function bootstrap(): Promise<void> {
   await fastify.register(rateLimit, {
     max: positiveEnv("RATE_LIMIT_MAX", 300),
     timeWindow: "1 minute",
+  });
+
+  // When resolving the session refreshed the session-cache cookie
+  // (auth.config.ts), hand the refreshed cookie to the browser. Without this,
+  // only better-auth's own routes could re-arm the cache, and the dashboard
+  // barely calls them — its traffic is the oRPC routes below, so the cache
+  // would expire maxAge after sign-in and every request after that would be
+  // back on postgres. Before listen, so the hook attaches to Nest's routes;
+  // synchronous, because an async onSend races handlers that reply.send()
+  // without returning the reply (see auth/session.ts).
+  fastify.addHook("onSend", (request, reply, _payload, done) => {
+    for (const cookie of sessionCookiesFor(request)) {
+      reply.header("set-cookie", cookie);
+    }
+    done();
   });
 
   // Mount better-auth at /api/auth/*. Build a web Request from Fastify's parsed
@@ -66,13 +97,31 @@ async function bootstrap(): Promise<void> {
         if (key.toLowerCase() !== "set-cookie") reply.header(key, value);
       });
       for (const cookie of response.headers.getSetCookie()) reply.header("set-cookie", cookie);
-      reply.send(response.body ? await response.text() : null);
+      // Returned, not just called: an async handler that sends without
+      // returning the reply makes Fastify send a second time when the promise
+      // resolves — a logged warning that turns fatal the moment any onSend
+      // hook gives the race somewhere to land.
+      return reply.send(response.body ? await response.text() : null);
     },
   );
 
   // SIGTERM/SIGINT run the shutdown hooks (pools drained in DatabaseService)
   // instead of hanging until the container runtime SIGKILLs after 10s.
   app.enableShutdownHooks();
+
+  // Its own port, off unless METRICS_ENABLED=true (see metrics/provider.ts). The
+  // control-plane gauges reuse the jobs pool rather than opening a third one;
+  // this process already drains it on shutdown. Started before the embedded
+  // worker below, and before listen, so no measurement predates the endpoint.
+  registerControlPlaneGauges(jobDb, (message) => fastify.log.warn(message));
+  const metrics = await startMetricsServer({
+    info: (message) => fastify.log.info(message),
+    warn: (message) => fastify.log.warn(message),
+  });
+  if (metrics !== null) {
+    process.once("SIGTERM", () => void metrics.stop());
+    process.once("SIGINT", () => void metrics.stop());
+  }
 
   // One-container mode for small and self-hosted installs. Off by default:
   // hosted keeps the worker separate so an api rollout cannot abort an

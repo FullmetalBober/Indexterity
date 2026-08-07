@@ -1,4 +1,5 @@
 import { allowPrivateTargets, assertTargetsAllowed } from "../engine/net-guard";
+import type { TlsOverrides } from "../engine/ports";
 import { directConnectionTo } from "./conn-string";
 import { MongoConnection } from "./connection";
 
@@ -20,6 +21,7 @@ export class MemberConnections {
   constructor(
     private readonly primary: MongoConnection,
     private readonly connString: string,
+    private readonly overrides?: TlsOverrides,
   ) {}
 
   // Connections to every member except the one the primary client is already
@@ -44,14 +46,30 @@ export class MemberConnections {
       if (ok) allowed.push(host);
     }
 
+    // Taken from the LIVE client, not from the string it was built with. An SRV
+    // string carries its tls default in the scheme and its authSource in a DNS
+    // TXT record, and retargeting it at one host loses both — see
+    // directConnectionTo. `this.primary` is connected by the time anything asks
+    // for members, so the TXT record has already been read and merged.
+    const resolved = this.primary.resolved();
+
     for (const host of allowed) {
       try {
-        const conn = new MongoConnection(directConnectionTo(this.connString, host));
+        const conn = new MongoConnection(
+          directConnectionTo(this.connString, host, resolved),
+          this.overrides,
+        );
         await conn.connect();
         this.opened.push(conn);
       } catch {
         // A member that is down or unreachable is normal: the others still
         // report, and a missing member's counters simply do not contribute.
+        //
+        // It is normal ONE AT A TIME. Every member failing for the same
+        // systematic reason looked exactly like a standalone for as long as SRV
+        // clusters have been supported, and nothing said so — the surfacing is
+        // #100's, but the reason this catch could hide something that large is
+        // worth knowing while reading it.
       }
     }
     return this.opened;

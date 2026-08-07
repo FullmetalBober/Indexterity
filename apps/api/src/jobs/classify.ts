@@ -1,13 +1,17 @@
 import {
   type ActivityPoint,
-  activeIntervals,
+  activeHours,
   type IndexInput,
+  MAX_GAP_HOURS,
   parseStoredSpec,
   recommendForCollection,
 } from "../analysis";
+import { runFrom } from "../analysis/types";
 import {
   and,
+  clusterIndexes,
   eq,
+  gte,
   inArray,
   indexCooldowns,
   indexSnapshots,
@@ -17,6 +21,7 @@ import {
 } from "../db";
 import { activeCooldownKeys, cooldownKey } from "./cooldowns";
 import { jobDb } from "./db";
+import { historyWindow } from "./plan";
 import { pendingRemovalKeys, watchedIndexKeys, watchKey } from "./watched";
 
 // Policy fallback, matching apply/finalize.
@@ -26,17 +31,43 @@ const DEFAULT_OBSERVE_DAYS = 30;
 // A hole larger than this means we stopped watching, so absence of usage
 // proves nothing (see analysis/classify.ts). Two days spans a missed collect
 // or two at the 6h cadence without tolerating an outage.
-// minActiveIntervals: the collection must have served reads in at least this
-// many collect intervals before "this index served none of them" is a claim.
-// Twelve at the 6h cadence is three days of genuine traffic, which an
-// always-on but mostly idle dev cluster can take weeks of calendar time to
-// accumulate — which is exactly the point.
+// Every threshold that stands for a DURATION is written as one. This mattered
+// enough to be worth stating: two of these used to be counts, and a count only
+// means what it says while the cadence stays where it was. `minActiveIntervals:
+// 12` meant "three days of traffic" solely because a collect interval was six
+// hours, and `recentWindow: 3` meant "the last twelve hours" for the same
+// reason. Shortening the cadence would have quietly bought less evidence for the
+// same number — the engine calling an index dead on three hours instead of three
+// days, with nothing failing.
+//
+// minActiveHours: the collection must have served reads for at least this long
+// before "this index served none of them" is a claim. Seventy-two hours is the
+// three days the old twelve intervals bought, and an always-on but mostly idle
+// dev cluster can take weeks of calendar time to accumulate it — which is
+// exactly the point.
+//
+// recentHours: how far back a burst still counts as recent when deciding
+// PERIODIC_ALIVE against the droppable PERIODIC_DEAD. Twelve, because three
+// trailing snapshots six hours apart spanned twelve hours.
+//
+// minHistory stays a COUNT on purpose: it is the number of data points needed to
+// tell a pattern from a flat line, which is a question about samples and not
+// about time. What stops it standing in for a duration is minHistoryDays beside
+// it, which is the durational half of the same gate.
 const CLASSIFY_OPTIONS = {
-  recentWindow: 3,
+  recentHours: 12,
   minHistory: 3,
   minHistoryDays: 7,
-  minActiveIntervals: 12,
-  maxGapHours: 48,
+  minActiveHours: 72,
+  // The one threshold the STORAGE layer also has to agree with, so it comes from
+  // the shared constant rather than from a literal here. A run asserts that
+  // nothing changed throughout its span and the gate only inspects the holes
+  // between runs, so the collector must refuse to extend across anything this
+  // gate would object to. Two copies of the number would let those two halves
+  // drift apart silently: raise it here alone and the collector keeps breaking
+  // runs the gate would have accepted; raise it there alone and an outage
+  // disappears inside a row.
+  maxGapHours: MAX_GAP_HOURS,
 };
 
 // Read a cluster's snapshots, run the pure engine per collection, and replace
@@ -74,10 +105,31 @@ export async function classifyCluster(clusterId: string): Promise<number> {
     perIndex[row.indexName] = row.regressionCount;
     regressionCounts.set(scope, perIndex);
   }
+  // How far back this cluster's plan lets anything look. Rows outlive the window
+  // they are visible in, so the entitlement is enforced here rather than by having
+  // deleted them — and it is enforced for the ENGINE, not only for the dashboard,
+  // because a longer series is precisely what lets the engine call an index unused.
+  const since = await historyWindow(db, clusterId);
+  // Identity and shape come from the dimension table now; the time series carries
+  // only what was measured. One join, and it is the whole code cost of having
+  // stopped rewriting a per-index constant on every collect.
   const rows = await db
-    .select()
+    .select({
+      database: clusterIndexes.database,
+      collection: clusterIndexes.collection,
+      indexName: clusterIndexes.indexName,
+      spec: clusterIndexes.spec,
+      sizeBytes: indexSnapshots.sizeBytes,
+      perMember: indexSnapshots.perMember,
+      hinted: indexSnapshots.hinted,
+      capturedAt: indexSnapshots.capturedAt,
+      lastSeenAt: indexSnapshots.lastSeenAt,
+      observations: indexSnapshots.observations,
+      maxGapMs: indexSnapshots.maxGapMs,
+    })
     .from(indexSnapshots)
-    .where(eq(indexSnapshots.clusterId, clusterId));
+    .innerJoin(clusterIndexes, eq(indexSnapshots.indexId, clusterIndexes.id))
+    .where(and(eq(indexSnapshots.clusterId, clusterId), gte(indexSnapshots.lastSeenAt, since)));
   // Per-collection read counters, for the activity gate.
   const latencyRows = await db
     .select({
@@ -85,14 +137,17 @@ export async function classifyCluster(clusterId: string): Promise<number> {
       collection: latencySamples.collection,
       readOps: latencySamples.readOps,
       capturedAt: latencySamples.capturedAt,
+      lastSeenAt: latencySamples.lastSeenAt,
+      observations: latencySamples.observations,
+      maxGapMs: latencySamples.maxGapMs,
     })
     .from(latencySamples)
-    .where(eq(latencySamples.clusterId, clusterId));
+    .where(and(eq(latencySamples.clusterId, clusterId), gte(latencySamples.lastSeenAt, since)));
   const activityByCollection = new Map<string, ActivityPoint[]>();
   for (const sample of latencyRows) {
     const key = `${sample.database}\u0000${sample.collection}`;
     const list = activityByCollection.get(key) ?? [];
-    list.push({ capturedAt: sample.capturedAt.toISOString(), readOps: sample.readOps });
+    list.push({ ...runFrom(sample), readOps: sample.readOps });
     activityByCollection.set(key, list);
   }
   type Row = (typeof rows)[number];
@@ -143,6 +198,12 @@ export async function classifyCluster(clusterId: string): Promise<number> {
         spec: parseStoredSpec(latest.spec),
         history: sorted.map((snap) => ({
           capturedAt: snap.capturedAt.toISOString(),
+          // The row covers an interval, not an instant: this state held from
+          // capturedAt to lastSeenAt and was confirmed `observations` times
+          // inside it. Handing the engine only the start would read every quiet
+          // run as a hole and refuse to judge the index at all.
+          lastSeenAt: snap.lastSeenAt.toISOString(),
+          observations: snap.observations,
           perMember: snap.perMember.map((member) => ({
             member: member.member,
             ops: member.ops,
@@ -154,7 +215,7 @@ export async function classifyCluster(clusterId: string): Promise<number> {
       });
     }
     const pastRegressions = regressionCounts.get(`${entry.database} ${entry.collection}`) ?? {};
-    const active = activeIntervals(
+    const active = activeHours(
       activityByCollection.get(`${entry.database}\u0000${entry.collection}`) ?? [],
     );
     for (const candidate of recommendForCollection(
@@ -212,7 +273,20 @@ export async function classifyCluster(clusterId: string): Promise<number> {
   // proposal to drop an index that no longer exists can never be actioned and
   // would sit on the dashboard forever. Only drops: a CREATE names an index
   // that is MEANT not to exist yet.
-  const live = new Set(rows.map((row) => watchKey(row.database, row.collection, row.indexName)));
+  //
+  // "Live" is what the NEWEST collect saw, not what has a row. Having a row
+  // stopped meaning the index exists the moment runs did: a dropped index leaves
+  // its final run behind until retention gets to it, and reading the whole table
+  // as the live set would keep retracting nothing and leave dead proposals up for
+  // the length of the retention window. Every index present at the last collect
+  // had its run extended or started then, so they share that timestamp exactly —
+  // the same fact getCollections leans on.
+  const newestSeen = rows.reduce((latest, row) => Math.max(latest, row.lastSeenAt.getTime()), 0);
+  const live = new Set(
+    rows
+      .filter((row) => row.lastSeenAt.getTime() === newestSeen)
+      .map((row) => watchKey(row.database, row.collection, row.indexName)),
+  );
   const stale = await db
     .select({
       id: recommendations.id,

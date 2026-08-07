@@ -36,16 +36,28 @@ spec:
           ports:
             - name: http
               containerPort: {{ .Values.web.port }}
+            {{- if .Values.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+            {{- end }}
           env:
+            {{- include "indexterity.metricsEnv" . | nindent 12 }}
             - name: PORT
               value: {{ .Values.web.port | quote }}
-            # Read at runtime by the dashboard's server functions, so one image
-            # deploys everywhere. The api stays internal — browsers never call
-            # it directly.
+            # The web server's own reads during SSR, at runtime so one image
+            # deploys everywhere. The browser does not use this and is not told
+            # it: it calls /api on the origin the ingress already routes.
             - name: API_URL
               value: {{ default (include "indexterity.internalApiUrl" .) .Values.web.apiUrl | quote }}
             - name: WEB_ORIGIN
               value: {{ include "indexterity.webOrigin" . | quote }}
+            # Only read when this pod answers /api itself — which it does when
+            # the ingress has no /api rule. Same switch and same reasoning as
+            # the api's: forwarding a header the client could have written lets
+            # a caller pick its own address and never reach a rate limit, so it
+            # is off unless something in front is known to set it.
+            - name: TRUST_PROXY
+              value: {{ include "indexterity.trustProxy" . | quote }}
             {{- with .Values.web.siteUrl }}
             # Canonical/og:url override for forks and indexed staging copies.
             - name: SITE_URL

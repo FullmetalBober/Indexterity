@@ -3,14 +3,31 @@ import type { IndexSpec, QueryShape, ServerHealth } from "../analysis";
 // The engine-neutral boundary. Everything above this file — the analysis core,
 // the job pipeline, the API — speaks these ports; everything below implements
 // them per database engine. Today MongoDB is the only adapter; the PostgreSQL
-// and SQL Server mappings are documented in docs/architecture.md §"Engine
-// ports" (pg_stat_user_indexes / sys.dm_db_index_usage_stats etc.).
+// and SQL Server mappings are documented on the wiki's Architecture page under
+// Engine ports (pg_stat_user_indexes / sys.dm_db_index_usage_stats etc.).
 //
 // Vocabulary is MongoDB-flavored on purpose ("collection", "database") — a
 // relational adapter maps them (table, schema/database) rather than the whole
 // codebase adopting a lowest-common-denominator vocabulary.
 
 export type ClusterEngine = "MONGODB" | "POSTGRESQL" | "MSSQL";
+
+// Which certificate checks a cluster's owner chose to turn off, as checkboxes on
+// the connect form. Carried to every dial so the transport guard verifies
+// against a recorded decision rather than against whatever the string says.
+export interface TlsOverrides {
+  readonly allowInvalidCertificates: boolean;
+  readonly allowInvalidHostnames: boolean;
+  readonly insecure: boolean;
+}
+
+// The strict default, and the value an older client or a scripted connect means
+// by saying nothing.
+export const NO_TLS_OVERRIDES: TlsOverrides = {
+  allowInvalidCertificates: false,
+  allowInvalidHostnames: false,
+  insecure: false,
+};
 
 // One index's usage on one replica-set member ($indexStats is per-member; on a
 // sharded cluster mongos merges every shard's members, tagged by host).
@@ -163,7 +180,17 @@ export interface EngineAdapter {
   isConnString(value: string): boolean;
   // Every host the string would dial, for the network guard to vet.
   hostsOf(value: string): { hosts: string[]; isSrv: boolean };
-  open(connectionString: string): Promise<EngineSession>;
+  // Throws when the string would not connect over TLS, or when it turns off a
+  // certificate check the owner did not consent to. Engine-specific because how
+  // transport is expressed is: mongo puts it in the scheme and the `tls`/`ssl`
+  // params, postgres in `sslmode`. The adapter also OWNS the enforcement — this
+  // exists so onboarding can refuse with the reason rather than discovering it
+  // as a failed dial.
+  assertSecureTransport(value: string, overrides?: TlsOverrides): void;
+  // The owner's checkbox choices written into the string, so what is stored and
+  // what was consented to cannot disagree.
+  applySecureTransport(value: string, overrides: TlsOverrides): string;
+  open(connectionString: string, overrides?: TlsOverrides): Promise<EngineSession>;
   // Report what these credentials may do, without writing anything.
-  diagnose(connectionString: string): Promise<ConnectionDiagnosis>;
+  diagnose(connectionString: string, overrides?: TlsOverrides): Promise<ConnectionDiagnosis>;
 }

@@ -1,0 +1,53 @@
+{{- if .Values.metrics.serviceMonitor.enabled }}
+{{- if not .Values.metrics.enabled }}
+{{- fail "metrics.serviceMonitor.enabled is set but metrics.enabled is false — the endpoint it would scrape is not being served" -}}
+{{- end }}
+{{/*
+One per workload. Not one for all three: they are selected by their component
+label, and each exports a different half of the picture, so a single monitor
+would hide which of them stopped answering.
+
+Requires the Prometheus Operator CRDs. Nothing here checks for them, so that a
+`helm template` run without a cluster still renders.
+*/}}
+{{- $components := list "api" "web" }}
+{{- if .Values.worker.enabled }}
+{{- $components = append $components "worker" }}
+{{- end }}
+{{- $sm := .Values.metrics.serviceMonitor }}
+{{- range $component := $components }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "indexterity.fullname" $ }}-{{ $component }}
+  labels:
+    {{- include "indexterity.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $component }}
+    {{- with $sm.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ $.Release.Namespace }}
+  selector:
+    matchLabels:
+      {{- include "indexterity.selectorLabels" (dict "root" $ "component" $component) | nindent 6 }}
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: {{ $sm.interval }}
+      {{- with $sm.scrapeTimeout }}
+      scrapeTimeout: {{ . }}
+      {{- end }}
+      {{- with $sm.relabelings }}
+      relabelings:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $sm.metricRelabelings }}
+      metricRelabelings:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+{{- end }}

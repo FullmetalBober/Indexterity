@@ -5,6 +5,7 @@ import { entitledAutomation } from "../src/billing/plans";
 import {
   actions,
   and,
+  clusterIndexes,
   clusters,
   createDatabase,
   eq,
@@ -16,6 +17,7 @@ import {
   policies,
   recommendations,
   roiMetrics,
+  session,
   sql,
   user,
   verification,
@@ -31,6 +33,7 @@ import { applyCreatesForCluster } from "../src/jobs/create";
 import { closeJobDb, jobDb } from "../src/jobs/db";
 import { finalizeCluster } from "../src/jobs/finalize";
 import { planForCluster } from "../src/jobs/plan";
+import { latestBaselines } from "../src/jobs/probe";
 import { pruneDeadLetterJobs, pruneOldSamples } from "../src/jobs/retention";
 import { suggestForCluster } from "../src/jobs/suggest";
 import { MongoConnection, MongoIndexCollector } from "../src/mongo";
@@ -39,10 +42,16 @@ import {
   API_BASE,
   API_PORT,
   api,
+  authPost,
+  createOrg,
   databaseUrl,
+  insertLatency,
+  insertSnapshots,
   MONGO_URL,
   type Session,
+  sessionFrom,
   signUp,
+  signUpWithoutOrg,
   startApi,
   stopApi,
   WEB_ORIGIN,
@@ -65,6 +74,7 @@ let server: ChildProcess;
 let db: ReturnType<typeof createDatabase>;
 let mongo: MongoConnection;
 let owner: Session;
+let ownerOrgId: string;
 let member: Session;
 let switcher: Session;
 let clusterId: string;
@@ -97,7 +107,7 @@ beforeAll(async () => {
   // This suite is about the engine, not billing: it connects several clusters
   // to one org, which no free plan would allow. The plan limits have their own
   // tests below, on their own orgs, at their own plans.
-  await giveRoom(owner);
+  ownerOrgId = await giveRoom(owner);
 });
 
 // Move a session's org onto the top plan, so quota is never what a test fails
@@ -165,6 +175,23 @@ describe("cluster lifecycle", () => {
     expect(body.readOnly).toBe(true);
     clusterId = asString(body.id);
     createdClusterIds.push(clusterId);
+  });
+
+  // Connecting a cluster and then waiting up to six hours for the dashboard to
+  // say anything is what reads as "the collect cadence is too long". One job on
+  // connect answers it without changing the steady-state load, and the queue is
+  // the only place that is observable.
+  it("queues the first collect on connect rather than waiting for the schedule", async () => {
+    // `_private_jobs` rather than the `jobs` view: the view does not expose the
+    // payload, and the payload is the only place the cluster is named.
+    const queued = await db.execute(
+      sql`select count(*)::int as n
+          from graphile_worker._private_jobs j
+          join graphile_worker._private_tasks t on t.id = j.task_id
+          where t.identifier = 'collect'
+            and j.payload->>'clusterId' = ${clusterId}`,
+    );
+    expect(Number(asRecord(queued.rows[0] ?? {}).n)).toBeGreaterThan(0);
   });
 
   it("owner flips the cluster live", async () => {
@@ -236,30 +263,78 @@ describe("tenancy, invites and roles", () => {
   it("keeps a fresh account isolated", async () => {
     member = await signUp("member");
     createdEmails.push(member.email);
+    createdOrgIds.push(asString(asRecord(await (await api("/org", member)).json()).id));
     const list: unknown = await (await api("/clusters", member)).json();
     expect(Array.isArray(list) && list.length === 0).toBe(true);
   });
 
-  it("invites the member into the org (single-use token)", async () => {
-    const inviteRes = await api("/org/invites", owner, {
+  // Signing up no longer conjures an organization behind the first GET, so this
+  // is a real state the api has to answer for rather than a transient one.
+  it("answers a member of no organization with emptiness, not an error", async () => {
+    const orphan = await signUpWithoutOrg("orphan");
+    createdEmails.push(orphan.email);
+
+    const clusters = await api("/clusters", orphan);
+    expect(clusters.status).toBe(200);
+    expect(await clusters.json()).toEqual([]);
+    const orgs = await api("/orgs", orphan);
+    expect(orgs.status).toBe(200);
+    expect(await orgs.json()).toEqual([]);
+    const org = await api("/org", orphan);
+    expect(org.status).toBe(200);
+    expect(await org.json()).toBeNull();
+
+    // But a mutation says so, rather than inventing somewhere to put it.
+    const connect = await api("/clusters", orphan, {
       method: "POST",
-      body: JSON.stringify({ email: member.email, role: "member" }),
+      body: JSON.stringify({ name: "Nowhere", connectionString: MONGO_URL }),
+    });
+    expect(connect.status).toBe(403);
+    expect(asString(asRecord(await connect.json()).message)).toContain("create an organization");
+
+    createdOrgIds.push(await createOrg(orphan, "Orphan Org"));
+    const after = await api("/org", orphan);
+    expect(asRecord(await after.json()).name).toBe("Orphan Org");
+  });
+
+  // A plan is bought per organization, so how many you hold is not metered —
+  // limiting it would limit how much a customer may buy. What holds the free
+  // tier is the cluster cap, applied inside each org one at a time.
+  it("does not cap how many organizations one person makes", async () => {
+    const many = await signUpWithoutOrg("many-orgs");
+    createdEmails.push(many.email);
+    createdOrgIds.push(await createOrg(many, "Orgs One"));
+    createdOrgIds.push(await createOrg(many, "Orgs Two"));
+    createdOrgIds.push(await createOrg(many, "Orgs Three"));
+
+    const orgs = await (await api("/orgs", many)).json();
+    expect(Array.isArray(orgs) ? orgs.length : 0).toBe(3);
+    // Each lands on the default plan and is metered on its own.
+    const org = asRecord(await (await api("/org", many)).json());
+    expect(asRecord(org.plan).plan).toBe("FREE");
+    expect(asRecord(org.plan).maxClusters).toBe(1);
+  });
+
+  it("invites the member into the org, and the invitation is spent once", async () => {
+    const inviteRes = await authPost("/organization/invite-member", owner, {
+      email: member.email,
+      role: "member",
     });
     expect(inviteRes.status).toBe(200);
-    const token = asString(asRecord(await inviteRes.json()).token);
+    const invitationId = asString(asRecord(await inviteRes.json()).id);
 
-    await api("/org", member); // materialize the shell org
-    const accept = await api("/invites/accept", member, {
-      method: "POST",
-      body: JSON.stringify({ token }),
-    });
+    // The invitation is listed to the person it names — the id is not a
+    // credential any more, so it can be.
+    const mine = await (await api("/invites", member)).json();
+    const ids = Array.isArray(mine) ? mine.map((entry) => asRecord(entry).id) : [];
+    expect(ids).toContain(invitationId);
+
+    const accept = await authPost("/organization/accept-invitation", member, { invitationId });
     expect(accept.status).toBe(200);
 
-    const reuse = await api("/invites/accept", member, {
-      method: "POST",
-      body: JSON.stringify({ token }),
-    });
-    expect(reuse.status).toBe(409);
+    // Spent: the second attempt finds nothing pending under that id.
+    const reuse = await authPost("/organization/accept-invitation", member, { invitationId });
+    expect(reuse.status).toBe(400);
 
     const list: unknown = await (await api("/clusters", member)).json();
     const seesCluster =
@@ -271,6 +346,19 @@ describe("tenancy, invites and roles", () => {
     expect(seesCluster).toBe(true);
   });
 
+  it("refuses an invitation addressed to somebody else", async () => {
+    const stranger = await signUp("stranger");
+    createdEmails.push(stranger.email);
+    createdOrgIds.push(asString(asRecord(await (await api("/org", stranger)).json()).id));
+    const inviteRes = await authPost("/organization/invite-member", owner, {
+      email: `nobody-${Date.now()}@int.test`,
+      role: "member",
+    });
+    const invitationId = asString(asRecord(await inviteRes.json()).id);
+    const stolen = await authPost("/organization/accept-invitation", stranger, { invitationId });
+    expect(stolen.status).toBe(403);
+  });
+
   it("blocks members from every mutation (403) but not reads", async () => {
     const mode = await api(`/clusters/${clusterId}/mode`, member, {
       method: "PATCH",
@@ -280,9 +368,11 @@ describe("tenancy, invites and roles", () => {
       method: "POST",
       body: JSON.stringify({ name: "nope", connectionString: MONGO_URL }),
     });
-    const invite = await api("/org/invites", member, {
-      method: "POST",
-      body: JSON.stringify({ email: "x@int.test", role: "member" }),
+    // The plugin's own permission check: the `member` role has no
+    // invitation:create, so this is a 403 for the same reason as the rest.
+    const invite = await authPost("/organization/invite-member", member, {
+      email: "x@int.test",
+      role: "member",
     });
     const policy = await api(`/clusters/${clusterId}/policy`, member, {
       method: "PUT",
@@ -436,7 +526,6 @@ describe("org switcher", () => {
   it("switches the active org and rescopes every request", async () => {
     switcher = await signUp("switcher");
     createdEmails.push(switcher.email);
-    // A cluster in the shell org keeps it from being collapsed on invite-accept.
     const own = await api("/clusters", switcher, {
       method: "POST",
       body: JSON.stringify({ name: "Switcher Own", connectionString: MONGO_URL }),
@@ -446,30 +535,21 @@ describe("org switcher", () => {
     const ownOrg = asRecord(await (await api("/org", switcher)).json());
     createdOrgIds.push(asString(ownOrg.id));
 
-    const inviteRes = await api("/org/invites", owner, {
-      method: "POST",
-      body: JSON.stringify({ email: switcher.email, role: "member" }),
+    const inviteRes = await authPost("/organization/invite-member", owner, {
+      email: switcher.email,
+      role: "member",
     });
-    const token = asString(asRecord(await inviteRes.json()).token);
-    const accept = await api("/invites/accept", switcher, {
-      method: "POST",
-      body: JSON.stringify({ token }),
-    });
+    const invitationId = asString(asRecord(await inviteRes.json()).id);
+    const accept = await authPost("/organization/accept-invitation", switcher, { invitationId });
     expect(accept.status).toBe(200);
 
-    // Two orgs now; the oldest (own shell) is active until a switch.
+    // Two orgs now, and accepting an invitation moves you into the org you were
+    // invited to — the plugin sets it active, which is what the click meant.
+    const ownerOrg = asRecord(await (await api("/org", owner)).json());
     const orgsBody = await (await api("/orgs", switcher)).json();
     const orgList = Array.isArray(orgsBody) ? orgsBody.map(asRecord) : [];
     expect(orgList).toHaveLength(2);
-    expect(orgList.find((entry) => entry.active === true)?.orgId).toBe(asString(ownOrg.id));
-
-    const ownerOrg = asRecord(await (await api("/org", owner)).json());
-    const switchRes = await api("/orgs/switch", switcher, {
-      method: "POST",
-      body: JSON.stringify({ orgId: asString(ownerOrg.id) }),
-    });
-    expect(switchRes.status).toBe(200);
-    expect(asRecord(await switchRes.json()).active).toBe(true);
+    expect(orgList.find((entry) => entry.active === true)?.orgId).toBe(asString(ownerOrg.id));
 
     // Every subsequent request is scoped to the switched-to org.
     const clustersAfter = await (await api("/clusters", switcher)).json();
@@ -478,6 +558,87 @@ describe("org switcher", () => {
       : [];
     expect(names).toContain("Int Cluster");
     expect(names).not.toContain("Switcher Own");
+
+    // And back, which is the switcher proper.
+    const back = await authPost("/organization/set-active", switcher, {
+      organizationId: asString(ownOrg.id),
+    });
+    expect(back.status).toBe(200);
+    const mine = await (await api("/clusters", switcher)).json();
+    const myNames = Array.isArray(mine) ? mine.map((entry) => asRecord(entry).name) : [];
+    expect(myNames).toContain("Switcher Own");
+    expect(myNames).not.toContain("Int Cluster");
+  });
+
+  // Deleting an org is the one verb that reaches past our own tables, so it has
+  // its own scenario: the rows go, the session that was in it survives.
+  it("deletes an org, taking its clusters and leaving the owner able to make another", async () => {
+    const deleter = await signUp("deleter");
+    createdEmails.push(deleter.email);
+    const orgId = asString(asRecord(await (await api("/org", deleter)).json()).id);
+    const created = await api("/clusters", deleter, {
+      method: "POST",
+      body: JSON.stringify({ name: "Doomed Cluster", connectionString: MONGO_URL }),
+    });
+    expect(created.status).toBe(200);
+    const doomedId = asString(asRecord(await created.json()).id);
+
+    const deleted = await authPost("/organization/delete", deleter, { organizationId: orgId });
+    expect(deleted.status).toBe(200);
+
+    expect(await db.select().from(clusters).where(eq(clusters.id, doomedId))).toHaveLength(0);
+    expect(await db.select().from(organizations).where(eq(organizations.id, orgId))).toHaveLength(
+      0,
+    );
+
+    // Still signed in, and now in no org at all.
+    const org = await api("/org", deleter);
+    expect(org.status).toBe(200);
+    expect(await org.json()).toBeNull();
+
+    // The free slot came back with it.
+    createdOrgIds.push(await createOrg(deleter, "Second Try"));
+  });
+});
+
+describe("session cookie cache", () => {
+  // The two halves of #77 that only show up over real HTTP: an ordinary api
+  // response re-arms the cache when resolving the session had to touch
+  // postgres, and a request presenting a fresh cache is answered without
+  // postgres — demonstrated by deleting the session row underneath it, which
+  // is also the revocation trade auth.config.ts signs up for.
+  it("re-arms the cache on an ordinary response, then answers from it alone", async () => {
+    const rider = await signUpWithoutOrg("cookie-cache");
+    createdEmails.push(rider.email);
+
+    // Shed the cache cookie sign-up set, as a browser would at its maxAge.
+    rider.cookie = rider.cookie
+      .split("; ")
+      .filter((pair) => !pair.includes("session_data"))
+      .join("; ");
+
+    // The miss falls through to postgres, and the response carries the
+    // re-signed cache cookie back — the forwarding under test (main.ts).
+    const rearmed = await api("/orgs", rider);
+    expect(rearmed.status).toBe(200);
+    expect(rider.cookie).toContain("session_data");
+
+    // Revoke behind the browser's back: the row is gone, the cookie answers.
+    const [account] = await db
+      .select({ id: user.id })
+      .from(user)
+      .where(eq(user.email, rider.email));
+    await db.delete(session).where(eq(session.userId, asString(account?.id)));
+    const cached = await api("/orgs", rider);
+    expect(cached.status).toBe(200);
+
+    // Without the cache the token goes back to postgres, which says no.
+    rider.cookie = rider.cookie
+      .split("; ")
+      .filter((pair) => !pair.includes("session_data"))
+      .join("; ");
+    const refused = await api("/orgs", rider);
+    expect(refused.status).toBe(401);
   });
 });
 
@@ -486,6 +647,9 @@ describe("SSRF guard and sign-up gate (second api with production defaults)", ()
   // SIGNUP_MODE=open so the rest of the suite can use a localhost mongo. This
   // one runs the defaults a hosted deployment gets.
   const PORT = 3098;
+  // Server root, not /api: this suite posts to both better-auth (mounted on
+  // Fastify at /api/auth, outside Nest's prefix) and to Nest routes (/api/...),
+  // so the paths below carry their own prefix.
   const BASE = `http://localhost:${PORT}`;
   let guarded: ChildProcess;
   let guardedOwner: Session;
@@ -503,7 +667,16 @@ describe("SSRF guard and sign-up gate (second api with production defaults)", ()
 
   beforeAll(async () => {
     guarded = await startApi(
-      { ALLOW_PRIVATE_CLUSTER_TARGETS: "false", SIGNUP_MODE: "invite" },
+      {
+        ALLOW_PRIVATE_CLUSTER_TARGETS: "false",
+        // startApi turns this ON for every instance, because the rest of the
+        // suite dials a localhost mongo with no certificate. This instance is
+        // the one running hosted defaults, so it has to turn it back off — with
+        // it on, the transport guard stands down and a plaintext string reaches
+        // the dial instead of being refused.
+        ALLOW_INSECURE_CLUSTER_TLS: "false",
+        SIGNUP_MODE: "invite",
+      },
       PORT,
     );
     // Users already exist (the suite signed some up), so this instance is past
@@ -519,9 +692,9 @@ describe("SSRF guard and sign-up gate (second api with production defaults)", ()
 
     // An invited address gets through. Invite from the main instance (shared db).
     const invitee = `invited-${Date.now()}@int.test`;
-    const invite = await api("/org/invites", owner, {
-      method: "POST",
-      body: JSON.stringify({ email: invitee, role: "member" }),
+    const invite = await authPost("/organization/invite-member", owner, {
+      email: invitee,
+      role: "member",
     });
     expect(invite.status).toBe(200);
     const allowed = await post("/api/auth/sign-up/email", null, {
@@ -531,13 +704,10 @@ describe("SSRF guard and sign-up gate (second api with production defaults)", ()
     });
     expect(allowed.status).toBe(200);
     createdEmails.push(email, invitee);
-    guardedOwner = {
-      email: invitee,
-      cookie: allowed.headers
-        .getSetCookie()
-        .map((value) => value.split(";")[0])
-        .join("; "),
-    };
+    guardedOwner = sessionFrom(invitee, allowed);
+    // The dial guards below are owner-only, and an owner needs somewhere to be
+    // the owner OF. Created against this instance, on the shared database.
+    createdOrgIds.push(await createOrg(guardedOwner, "Guarded Org", BASE));
   });
 
   afterAll(async () => {
@@ -545,7 +715,7 @@ describe("SSRF guard and sign-up gate (second api with production defaults)", ()
   });
 
   it("refuses to dial private addresses, naming the escape hatch", async () => {
-    const res = await post("/clusters/check-connection", guardedOwner, {
+    const res = await post("/api/clusters/check-connection", guardedOwner, {
       connectionString: "mongodb://10.0.0.5:27017",
     });
     expect(res.status).toBe(400);
@@ -554,8 +724,33 @@ describe("SSRF guard and sign-up gate (second api with production defaults)", ()
     expect(body).toContain("ALLOW_PRIVATE_CLUSTER_TARGETS");
   });
 
+  // Ordering, not just presence: the address guard runs first, so a private
+  // target is refused for being private however its transport is spelled. A
+  // PUBLIC plaintext address is where the TLS rule is the one that applies —
+  // 8.8.8.8 is an IP literal, so nothing is resolved and nothing is dialled.
+  it("refuses a public plaintext address, naming the TLS switch", async () => {
+    const res = await post("/api/clusters/check-connection", guardedOwner, {
+      connectionString: "mongodb://8.8.8.8:27017",
+    });
+    expect(res.status).toBe(400);
+    const body = JSON.stringify(await res.json());
+    expect(body).toContain("without TLS");
+    expect(body).toContain("ALLOW_INSECURE_CLUSTER_TLS");
+  });
+
+  // The same address with TLS asked for gets past the string checks and fails
+  // for a reason about the cluster instead — proof the rule is about transport
+  // and not a blanket refusal.
+  it("lets a TLS string through the guards", async () => {
+    const res = await post("/api/clusters/check-connection", guardedOwner, {
+      connectionString: "mongodb://8.8.8.8:27017/?tls=true&connectTimeoutMS=1500",
+    });
+    const body = JSON.stringify(await res.json());
+    expect(body).not.toContain("ALLOW_INSECURE_CLUSTER_TLS");
+  });
+
   it("refuses loopback, so the control plane cannot probe itself", async () => {
-    const res = await post("/clusters/check-connection", guardedOwner, {
+    const res = await post("/api/clusters/check-connection", guardedOwner, {
       connectionString: "mongodb://127.0.0.1:27017",
     });
     expect(res.status).toBe(400);
@@ -563,7 +758,7 @@ describe("SSRF guard and sign-up gate (second api with production defaults)", ()
   });
 
   it("refuses cloud metadata and never stores such a cluster", async () => {
-    const res = await post("/clusters", guardedOwner, {
+    const res = await post("/api/clusters", guardedOwner, {
       name: "metadata",
       connectionString: "mongodb://169.254.169.254:27017",
     });
@@ -574,7 +769,7 @@ describe("SSRF guard and sign-up gate (second api with production defaults)", ()
   });
 
   it("rejects a private host smuggled in beside a public one", async () => {
-    const res = await post("/clusters/check-connection", guardedOwner, {
+    const res = await post("/api/clusters/check-connection", guardedOwner, {
       connectionString: "mongodb://8.8.8.8:27017,192.168.1.10:27017",
     });
     expect(res.status).toBe(400);
@@ -589,7 +784,7 @@ describe("SSRF guard and sign-up gate (second api with production defaults)", ()
     let limited = false;
     let rejections = 0;
     for (let i = 1; i < 20; i++) {
-      const res = await post("/clusters/check-connection", guardedOwner, {
+      const res = await post("/api/clusters/check-connection", guardedOwner, {
         connectionString: `mongodb://10.1.0.${i}:27017`,
       });
       if (res.status === 400) rejections += 1;
@@ -751,20 +946,43 @@ describe("cluster offboarding", () => {
   });
 });
 
+// The rules the api used to implement twice, in two places, with two different
+// error messages. They are the plugin's now — which is the point of the change,
+// and exactly why they are still tested here rather than taken on trust.
 describe("org management", () => {
   it("renames the org (owner only)", async () => {
-    const denied = await api("/org", member, {
-      method: "PATCH",
-      body: JSON.stringify({ name: "Nope Corp" }),
+    const denied = await authPost("/organization/update", member, {
+      data: { name: "Nope Corp" },
     });
     expect(denied.status).toBe(403);
-    const renamed = await api("/org", owner, {
-      method: "PATCH",
-      body: JSON.stringify({ name: "Renamed Intcorp" }),
+    const renamed = await authPost("/organization/update", owner, {
+      data: { name: "Renamed Intcorp" },
     });
     expect(renamed.status).toBe(200);
     const org = asRecord(await (await api("/org", owner)).json());
     expect(org.name).toBe("Renamed Intcorp");
+  });
+
+  // The plan lives on the org, and only set-plan.ts (or, one day, a webhook) may
+  // write it. `input: false` on the additional fields is what keeps an owner
+  // from posting themselves onto SCALE through the endpoint that renames it.
+  it("will not let an owner set their own plan through the plugin", async () => {
+    const upgrader = await signUp("upgrader");
+    createdEmails.push(upgrader.email);
+    const orgId = asString(asRecord(await (await api("/org", upgrader)).json()).id);
+    createdOrgIds.push(orgId);
+
+    const res = await authPost("/organization/update", upgrader, {
+      data: { name: "Still Free", plan: "SCALE" },
+    });
+    // Accepted as a rename; `plan` is simply not in the body schema.
+    expect(res.status).toBe(200);
+    const [org] = await db
+      .select({ plan: organizations.plan, name: organizations.name })
+      .from(organizations)
+      .where(eq(organizations.id, orgId));
+    expect(org?.name).toBe("Still Free");
+    expect(org?.plan).toBe("FREE");
   });
 
   it("guards the last owner and round-trips a role change", async () => {
@@ -775,34 +993,43 @@ describe("org management", () => {
     const memberRow = rows.find((entry) => entry.email === member.email);
     if (ownerRow === undefined || memberRow === undefined) throw new Error("rows missing");
 
-    // Demoting the sole owner is refused.
-    const selfDemote = await api(`/org/members/${asString(ownerRow.userId)}`, owner, {
-      method: "PATCH",
-      body: JSON.stringify({ role: "member" }),
+    // Demoting the sole owner is refused — by the plugin, once, instead of by
+    // two hand-written guards with two different messages.
+    const selfDemote = await authPost("/organization/update-member-role", owner, {
+      memberId: asString(ownerRow.memberId),
+      role: "member",
     });
-    expect(selfDemote.status).toBe(409);
+    expect(selfDemote.status).toBe(400);
+
+    // A role we do not have is refused too: owner and member, and no third rung
+    // half the api would not understand.
+    const admin = await authPost("/organization/update-member-role", owner, {
+      memberId: asString(memberRow.memberId),
+      role: "admin",
+    });
+    expect(admin.status).toBe(400);
 
     // Promote, then demote back.
-    const promote = await api(`/org/members/${asString(memberRow.userId)}`, owner, {
-      method: "PATCH",
-      body: JSON.stringify({ role: "owner" }),
+    const promote = await authPost("/organization/update-member-role", owner, {
+      memberId: asString(memberRow.memberId),
+      role: "owner",
     });
     expect(promote.status).toBe(200);
-    const demote = await api(`/org/members/${asString(memberRow.userId)}`, owner, {
-      method: "PATCH",
-      body: JSON.stringify({ role: "member" }),
+    const demote = await authPost("/organization/update-member-role", owner, {
+      memberId: asString(memberRow.memberId),
+      role: "member",
     });
     expect(demote.status).toBe(200);
   });
 
-  it("removes a member, who falls back to a fresh shell org", async () => {
+  it("removes a member, who is then in no org of this one's", async () => {
     const ownerOrg = asRecord(await (await api("/org", owner)).json());
     const memberRow = (Array.isArray(ownerOrg.members) ? ownerOrg.members.map(asRecord) : []).find(
       (entry) => entry.email === member.email,
     );
     if (memberRow === undefined) throw new Error("member row missing");
-    const removed = await api(`/org/members/${asString(memberRow.userId)}`, owner, {
-      method: "DELETE",
+    const removed = await authPost("/organization/remove-member", owner, {
+      memberIdOrEmail: asString(memberRow.memberId),
     });
     expect(removed.status).toBe(200);
     const after = asRecord(await (await api("/org", owner)).json());
@@ -811,19 +1038,24 @@ describe("org management", () => {
     );
     expect(emails).not.toContain(member.email);
 
-    // The removed member's next request lazily creates a fresh shell org...
-    const shell = asRecord(await (await api("/org", member)).json());
-    createdOrgIds.push(asString(shell.id));
-    expect(Array.isArray(shell.members) && shell.members.length === 1).toBe(true);
+    // They fall back to the org they made at sign-up rather than to a shell the
+    // api invented for them...
+    const own = asRecord(await (await api("/org", member)).json());
+    expect(own.name).toBe("member Org");
+    expect(Array.isArray(own.members) && own.members.length === 1).toBe(true);
     // ...where they are the sole owner, so leaving is refused.
-    const leave = await api("/org/leave", member, { method: "POST", body: JSON.stringify({}) });
-    expect(leave.status).toBe(409);
+    const leave = await authPost("/organization/leave", member, {
+      organizationId: asString(own.id),
+    });
+    expect(leave.status).toBe(400);
   });
 
   it("lets a non-last-owner leave, falling back to their own org", async () => {
-    // switcher's active org is the owner's (from the switch test); they are a
-    // plain member there, so leaving works and rescopes them to their own org.
-    const leave = await api("/org/leave", switcher, { method: "POST", body: JSON.stringify({}) });
+    // switcher is a plain member of the owner's org (from the switch test), so
+    // leaving works and rescopes them to their own.
+    const leave = await authPost("/organization/leave", switcher, {
+      organizationId: ownerOrgId,
+    });
     expect(leave.status).toBe(200);
     const clustersAfter = await (await api("/clusters", switcher)).json();
     const names = Array.isArray(clustersAfter)
@@ -896,7 +1128,8 @@ describe("dynamic observe window", () => {
     // Usage on day 0, 20, 40 (gaps of 20 days): the policy window here is 7
     // days, which would expire between two runs — expect 2×20 = 40 days.
     const base = Date.now() - 45 * 86_400_000;
-    await db.insert(indexSnapshots).values(
+    await insertSnapshots(
+      db,
       [0, 10, 20, 30, 40].map((day) => ({
         clusterId,
         database: "inttest",
@@ -935,6 +1168,26 @@ describe("dynamic observe window", () => {
     await mongo.db("inttest").collection("orders").dropIndex("dyn_1");
   });
 });
+
+// A cluster row with no usable connection string, for scenarios that only touch
+// postgres. Going through POST /clusters would seal a real string and spend a
+// unit of the outbound-dial budget, which is a shared resource across the suite.
+async function bareCluster(name: string): Promise<string> {
+  const org = asRecord(await (await api("/org", owner)).json());
+  const [row] = await db
+    .insert(clusters)
+    .values({
+      orgId: asString(org.id),
+      name,
+      sealedDek: Buffer.alloc(1),
+      sealedData: Buffer.alloc(1),
+      keyVersion: 1,
+    })
+    .returning();
+  if (row === undefined) throw new Error(`failed to insert cluster ${name}`);
+  createdClusterIds.push(row.id);
+  return row.id;
+}
 
 describe("outage resilience", () => {
   it("un-hides and re-proposes instead of dropping when the counters reset", async () => {
@@ -983,6 +1236,127 @@ describe("outage resilience", () => {
     await mongo.db("inttest").collection("orders").dropIndex("outage_1");
   });
 
+  // The Definition of Done of the change that made storage independent of the
+  // collect cadence. An idle index and a cluster we lost both stop producing new
+  // rows, and the engine has to keep telling them apart: the first is the finding
+  // it exists to make, the second the one it must refuse. What separates them is
+  // that a run is a positive claim — we looked at last_seen_at and it was still
+  // this — where an outage has nothing to say.
+  it("drops an idle index whose run is still being extended", async () => {
+    // Inserted rather than connected: classifyCluster reads only postgres, and
+    // dialing would spend the outbound-dial budget the later scenarios need.
+    const idleId = await bareCluster("Idle Run Cluster");
+
+    const now = Date.now();
+    const monthAgo = now - 30 * 86_400_000;
+    const spec = {
+      name: "idle_run_1",
+      keys: [{ field: "idle", direction: 1 }],
+      unique: false,
+      ttl: false,
+      partial: false,
+      partialFilter: null,
+      sparse: false,
+      hidden: false,
+      isShardKey: false,
+      collation: null,
+    };
+    // ONE row for thirty days of collects, because the counter never moved —
+    // which is the whole storage saving, expressed as a fixture.
+    await insertSnapshots(db, [
+      {
+        clusterId: idleId,
+        database: "inttest",
+        collection: "idlerun",
+        indexName: "idle_run_1",
+        spec,
+        sizeBytes: 8192,
+        perMember: [{ member: "m1", ops: 0, since: new Date(monthAgo - 86_400_000).toISOString() }],
+        capturedAt: new Date(monthAgo),
+        lastSeenAt: new Date(now),
+        observations: 120,
+      },
+    ]);
+    // The collection itself was busy, or the activity gate is right to refuse.
+    await insertLatency(
+      db,
+      Array.from({ length: 120 }, (_, i) => ({
+        clusterId: idleId,
+        database: "inttest",
+        collection: "idlerun",
+        readOps: (i + 1) * 1000,
+        readLatencyMicros: (i + 1) * 100,
+        writeOps: 0,
+        writeLatencyMicros: 0,
+        capturedAt: new Date(monthAgo + i * 6 * 3_600_000),
+      })),
+    );
+
+    expect(await classifyCluster(idleId)).toBe(1);
+    const [proposal] = await db
+      .select()
+      .from(recommendations)
+      .where(eq(recommendations.clusterId, idleId));
+    expect(proposal?.type).toBe("DROP_UNUSED");
+    expect(proposal?.usageClass).toBe("FLAT_ZERO");
+    // And the score reflects a hundred and twenty collects of evidence, not the
+    // one row holding them.
+    expect(proposal?.score ?? 0).toBeGreaterThan(70);
+  });
+
+  it("refuses the same index when its run stopped being extended", async () => {
+    const lostId = await bareCluster("Lost Run Cluster");
+
+    const now = Date.now();
+    const monthAgo = now - 30 * 86_400_000;
+    // Byte-identical to the fixture above in every respect except one: nothing
+    // has confirmed it for three weeks, because that is when the cluster went
+    // away. Same row count, same observation count, same counters.
+    await insertSnapshots(db, [
+      {
+        clusterId: lostId,
+        database: "inttest",
+        collection: "idlerun",
+        indexName: "idle_run_1",
+        spec: {
+          name: "idle_run_1",
+          keys: [{ field: "idle", direction: 1 }],
+          unique: false,
+          ttl: false,
+          partial: false,
+          partialFilter: null,
+          sparse: false,
+          hidden: false,
+          isShardKey: false,
+          collation: null,
+        },
+        sizeBytes: 8192,
+        perMember: [{ member: "m1", ops: 0, since: new Date(monthAgo - 86_400_000).toISOString() }],
+        capturedAt: new Date(monthAgo),
+        lastSeenAt: new Date(now - 21 * 86_400_000),
+        observations: 120,
+      },
+    ]);
+    await insertLatency(
+      db,
+      Array.from({ length: 120 }, (_, i) => ({
+        clusterId: lostId,
+        database: "inttest",
+        collection: "idlerun",
+        readOps: (i + 1) * 1000,
+        readLatencyMicros: (i + 1) * 100,
+        writeOps: 0,
+        writeLatencyMicros: 0,
+        capturedAt: new Date(monthAgo + i * 6 * 3_600_000),
+      })),
+    );
+
+    expect(await classifyCluster(lostId)).toBe(0);
+    expect(
+      await db.select().from(recommendations).where(eq(recommendations.clusterId, lostId)),
+    ).toHaveLength(0);
+  });
+
   it("withholds usage-based drops when the snapshot history has a hole", async () => {
     // A cluster whose only history predates a long gap must not have its
     // indexes declared unused. Fresh cluster, snapshots aged a month.
@@ -995,7 +1369,8 @@ describe("outage resilience", () => {
     createdClusterIds.push(gappedId);
 
     const old = Date.now() - 30 * 86_400_000;
-    await db.insert(indexSnapshots).values(
+    await insertSnapshots(
+      db,
       [0, 1, 2].map((day) => ({
         clusterId: gappedId,
         database: "inttest",
@@ -1063,7 +1438,7 @@ describe("outage resilience", () => {
     // an index nobody uses.
     const counterStart = new Date(base).toISOString();
     const afterRestart = new Date(base + 2.5 * 86_400_000).toISOString();
-    await db.insert(indexSnapshots).values([
+    await insertSnapshots(db, [
       {
         clusterId: restartId,
         database: "inttest",
@@ -1370,8 +1745,10 @@ describe("workload collection is batched", () => {
       .command({ setParameter: 1, internalQueryStatsRateLimit: -1 })
       .catch(() => {});
 
-    // Two collections, both over MIN_COLLECTION_DOCS so the eligibility pass
-    // keeps them, each queried on a DIFFERENT field.
+    // Two collections, both over the trivial-size floor so the eligibility pass
+    // reads a workload for them, each queried on a DIFFERENT field. Four
+    // executions is nowhere near the cost gate, so no create is expected — what
+    // is under test here is that each namespace gets its own shapes.
     const docs = Array.from({ length: 1200 }, (_, i) => ({ i, status: "open", tier: "gold" }));
     for (const name of ["wl_orders", "wl_carts"]) {
       await mongo.db("inttest").collection(name).deleteMany({});
@@ -1448,7 +1825,8 @@ describe("an index the engine is still watching", () => {
       collation: null,
     };
     const since = new Date(base - 86_400_000).toISOString();
-    await db.insert(indexSnapshots).values(
+    await insertSnapshots(
+      db,
       Array.from({ length: 20 }, (_, i) => ({
         clusterId: watchId,
         database: "inttest",
@@ -1463,7 +1841,8 @@ describe("an index the engine is still watching", () => {
 
     // The collection has to have been genuinely queried, or the activity gate
     // (correctly) refuses any usage claim about its indexes.
-    await db.insert(latencySamples).values(
+    await insertLatency(
+      db,
       Array.from({ length: 20 }, (_, i) => ({
         clusterId: watchId,
         database: "inttest",
@@ -1538,7 +1917,15 @@ describe("engine-chosen change window", () => {
 
     // Five days of collects at the 6h cadence. Cumulative counters, quiet
     // overnight (00-06 UTC) and busy through the working day.
+    //
+    // Anchored to the last few days rather than to a fixed calendar month: the
+    // inference reads a bounded window of recent history, because the window is
+    // meant to track a workload that shifts. A fixture pinned to June kept working
+    // only until June was far enough back to be excluded.
     const perBucket = [40, 900, 1200, 700];
+    const midnight = new Date();
+    midnight.setUTCHours(0, 0, 0, 0);
+    const start = midnight.getTime() - 6 * 86_400_000;
     let ops = 0;
     const samples = [];
     for (let day = 0; day < 5; day++) {
@@ -1551,12 +1938,12 @@ describe("engine-chosen change window", () => {
           readLatencyMicros: 0,
           writeOps: 0,
           writeLatencyMicros: 0,
-          capturedAt: new Date(Date.UTC(2026, 5, 1 + day, bucket * 6, 0, 0)),
+          capturedAt: new Date(start + day * 86_400_000 + bucket * 6 * 3_600_000),
         });
         ops += perBucket[bucket] ?? 0;
       }
     }
-    await db.insert(latencySamples).values(samples);
+    await insertLatency(db, samples);
 
     // No policies row exists for this cluster — the engine must create one.
     const inferred = await refreshInferredWindow(db, windowClusterId);
@@ -1829,16 +2216,18 @@ describe("plan limits", () => {
 
     // FREE allows 3 seats and the owner is one, so two invites fit.
     for (const who of ["seat-a", "seat-b"]) {
-      const res = await api("/org/invites", session, {
-        method: "POST",
-        body: JSON.stringify({ email: `${who}@example.test`, role: "member" }),
+      const res = await authPost("/organization/invite-member", session, {
+        email: `${who}-${Date.now()}@example.test`,
+        role: "member",
       });
       expect(res.status).toBe(200);
     }
-    const third = await api("/org/invites", session, {
-      method: "POST",
-      body: JSON.stringify({ email: "seat-c@example.test", role: "member" }),
+    const third = await authPost("/organization/invite-member", session, {
+      email: `seat-c-${Date.now()}@example.test`,
+      role: "member",
     });
+    // 402 with our own message, not the plugin's bare 403: the limit is a plan,
+    // and every plan refusal here names the limit and what to do about it.
     expect(third.status).toBe(402);
     expect(asString(asRecord(await third.json()).message)).toContain("members");
 
@@ -1853,7 +2242,13 @@ describe("plan limits", () => {
 // has to be enforced rather than advertised. Two orgs on different plans keep
 // different amounts of the same kind of row.
 describe("retention follows the plan", () => {
-  it("keeps a FREE org's history for less time than a SCALE org's", async () => {
+  // Retention is two separate things now, and this pins both.
+  //
+  // DELETION runs one cutoff for the whole deployment — the longest any plan may
+  // see — so rows outlive the window a given org is entitled to. VISIBILITY is the
+  // per-plan window, applied on every read. That split is what lets an upgrade hand
+  // a customer their history back at once instead of making them wait it out.
+  it("keeps a downgraded org's rows but stops showing them", async () => {
     const session = await signUp("retention");
     createdEmails.push(session.email);
     const orgId = await giveRoom(session);
@@ -1866,36 +2261,84 @@ describe("retention follows the plan", () => {
 
     // 120 days old: inside SCALE's year, outside FREE's 90 days.
     const captured = new Date(Date.now() - 120 * 86_400_000);
-    const sample = () => ({
-      clusterId: retentionClusterId,
-      database: "inttest",
-      collection: "orders",
-      readOps: 1,
-      readLatencyMicros: 1,
-      writeOps: 0,
-      writeLatencyMicros: 0,
-      capturedAt: captured,
-    });
+    await insertLatency(db, [
+      {
+        clusterId: retentionClusterId,
+        database: "retention",
+        collection: "aged",
+        readOps: 1,
+        readLatencyMicros: 1,
+        writeOps: 0,
+        writeLatencyMicros: 0,
+        capturedAt: captured,
+      },
+    ]);
 
-    await db.insert(latencySamples).values(sample());
+    const visibleCollections = async (): Promise<string[]> => {
+      const body = asRecord(
+        await (await api(`/clusters/${retentionClusterId}/latency`, session)).json(),
+      );
+      const rows = Array.isArray(body.collections) ? body.collections.map(asRecord) : [];
+      return rows.map((row) => asString(row.collection));
+    };
+
+    // On SCALE the row is inside the entitlement, so it is both kept and shown.
     await pruneOldSamples();
-    const keptOnScale = await db
-      .select()
-      .from(latencySamples)
-      .where(eq(latencySamples.clusterId, retentionClusterId));
-    expect(keptOnScale.length).toBeGreaterThan(0);
+    expect(
+      await db
+        .select()
+        .from(latencySamples)
+        .where(eq(latencySamples.clusterId, retentionClusterId)),
+    ).toHaveLength(1);
+    expect(await visibleCollections()).toContain("aged");
 
+    // Downgrade. The row is now outside what FREE may see, but well inside the
+    // deployment's physical window — so it stays on disk and stops being served.
     await db.update(organizations).set({ plan: "FREE" }).where(eq(organizations.id, orgId));
     await pruneOldSamples();
-    const keptOnFree = await db
-      .select()
-      .from(latencySamples)
-      .where(eq(latencySamples.clusterId, retentionClusterId));
-    expect(keptOnFree).toHaveLength(0);
+    expect(
+      await db
+        .select()
+        .from(latencySamples)
+        .where(eq(latencySamples.clusterId, retentionClusterId)),
+    ).toHaveLength(1);
+    expect(await visibleCollections()).not.toContain("aged");
+
+    // Upgrading again returns it immediately — the point of keeping it.
+    await db.update(organizations).set({ plan: "SCALE" }).where(eq(organizations.id, orgId));
+    expect(await visibleCollections()).toContain("aged");
   });
 
-  // Storage is the operator's bill, so RETENTION_DAYS caps every plan. A plan
-  // may keep less than the ceiling; it may never keep more.
+  it("deletes what nobody could ever be entitled to", async () => {
+    const session = await signUp("retention-hard");
+    createdEmails.push(session.email);
+    await giveRoom(session);
+    const created = await api("/clusters", session, {
+      method: "POST",
+      body: JSON.stringify({ name: "Hard Retention Cluster", connectionString: MONGO_URL }),
+    });
+    const hardId = asString(asRecord(await created.json()).id);
+    createdClusterIds.push(hardId);
+
+    // Past the longest plan's window, so no plan could show it and nothing keeps it.
+    await insertLatency(db, [
+      {
+        clusterId: hardId,
+        database: "retention",
+        collection: "ancient",
+        readOps: 1,
+        readLatencyMicros: 1,
+        writeOps: 0,
+        writeLatencyMicros: 0,
+        capturedAt: new Date(Date.now() - 400 * 86_400_000),
+      },
+    ]);
+    await pruneOldSamples();
+    expect(
+      await db.select().from(latencySamples).where(eq(latencySamples.clusterId, hardId)),
+    ).toHaveLength(0);
+  });
+
   it("lets the operator cap a plan that would keep more", async () => {
     const session = await signUp("retention-cap");
     createdEmails.push(session.email);
@@ -1907,16 +2350,18 @@ describe("retention follows the plan", () => {
     const cappedClusterId = asString(asRecord(await created.json()).id);
     createdClusterIds.push(cappedClusterId);
 
-    await db.insert(latencySamples).values({
-      clusterId: cappedClusterId,
-      database: "inttest",
-      collection: "orders",
-      readOps: 1,
-      readLatencyMicros: 1,
-      writeOps: 0,
-      writeLatencyMicros: 0,
-      capturedAt: new Date(Date.now() - 120 * 86_400_000),
-    });
+    await insertLatency(db, [
+      {
+        clusterId: cappedClusterId,
+        database: "inttest",
+        collection: "orders",
+        readOps: 1,
+        readLatencyMicros: 1,
+        writeOps: 0,
+        writeLatencyMicros: 0,
+        capturedAt: new Date(Date.now() - 120 * 86_400_000),
+      },
+    ]);
 
     const previous = process.env.RETENTION_DAYS;
     process.env.RETENTION_DAYS = "7";
@@ -1978,7 +2423,8 @@ describe("retiring a narrowed index", () => {
       ["a_1_b_1_c_1", ["a", "b", "c"]],
       ["a_1_b_1", ["a", "b"]],
     ] as const) {
-      await db.insert(indexSnapshots).values(
+      await insertSnapshots(
+        db,
         Array.from({ length: 20 }, (_, i) => ({
           clusterId: narrowId,
           database: "inttest",
@@ -1991,7 +2437,8 @@ describe("retiring a narrowed index", () => {
         })),
       );
     }
-    await db.insert(latencySamples).values(
+    await insertLatency(
+      db,
       Array.from({ length: 20 }, (_, i) => ({
         clusterId: narrowId,
         database: "inttest",
@@ -2034,10 +2481,12 @@ describe("retiring a narrowed index", () => {
 
     // Someone dropped the long index by hand. The proposal can never be
     // actioned now, so it has to be retracted rather than sit there forever.
+    // Deleting the dimension row cascades to its snapshots, which is what a
+    // retention sweep eventually does to an index nobody collects any more.
     await db
-      .delete(indexSnapshots)
+      .delete(clusterIndexes)
       .where(
-        and(eq(indexSnapshots.clusterId, narrowId), eq(indexSnapshots.indexName, "a_1_b_1_c_1")),
+        and(eq(clusterIndexes.clusterId, narrowId), eq(clusterIndexes.indexName, "a_1_b_1_c_1")),
       );
     await classifyCluster(narrowId);
     expect(
@@ -2134,5 +2583,391 @@ describe("finished decisions age out, the ROI they earned does not", () => {
     expect(roi).toHaveLength(1);
     expect(roi[0]?.freedBytes).toBe(4096);
     expect(roi[0]?.recommendationId).toBeNull();
+  });
+});
+
+// An index optimizer whose own control plane was missing nine of them.
+//
+// Every one was a foreign key, and an un-indexed foreign key is not a slow
+// query — it is a scan of the whole child table for each parent row deleted.
+// Retention deletes settled recommendations in bulk, and roi_metrics references
+// them: ten thousand rows took 8.4 seconds to remove, of which 5ms was finding
+// them. With the index, 594ms.
+//
+// The test is the rule rather than the nine, because the nine are already
+// fixed. What is worth keeping is that the tenth cannot be added quietly.
+// The probe compares live latency against "how fast was this collection before",
+// and before is the NEWEST stored sample. Picking an older row is the way this
+// goes wrong quietly: the comparison is against the wrong baseline and nothing
+// about the resulting finding looks unusual. Worth a test of its own because the
+// query was rewritten to a `distinct on` — it used to read every row for the
+// cluster and choose in JS.
+describe("probe baselines", () => {
+  it("takes the newest sample per namespace, and only one per namespace", async () => {
+    await insertLatency(db, [
+      // Two namespaces, three captures each, deliberately inserted out of order.
+      {
+        clusterId,
+        database: "bl",
+        collection: "a",
+        readOps: 20,
+        readLatencyMicros: 200,
+        writeOps: 0,
+        writeLatencyMicros: 0,
+        capturedAt: new Date("2026-02-02T00:00:00Z"),
+      },
+      {
+        clusterId,
+        database: "bl",
+        collection: "a",
+        readOps: 30,
+        readLatencyMicros: 300,
+        writeOps: 0,
+        writeLatencyMicros: 0,
+        capturedAt: new Date("2026-02-03T00:00:00Z"),
+      },
+      {
+        clusterId,
+        database: "bl",
+        collection: "a",
+        readOps: 10,
+        readLatencyMicros: 100,
+        writeOps: 0,
+        writeLatencyMicros: 0,
+        capturedAt: new Date("2026-02-01T00:00:00Z"),
+      },
+      {
+        clusterId,
+        database: "bl",
+        collection: "b",
+        readOps: 70,
+        readLatencyMicros: 700,
+        writeOps: 0,
+        writeLatencyMicros: 0,
+        capturedAt: new Date("2026-02-03T00:00:00Z"),
+      },
+      {
+        clusterId,
+        database: "bl",
+        collection: "b",
+        readOps: 90,
+        readLatencyMicros: 900,
+        writeOps: 0,
+        writeLatencyMicros: 0,
+        capturedAt: new Date("2026-02-04T00:00:00Z"),
+      },
+    ]);
+
+    const rows = (await latestBaselines(db, clusterId)).filter((row) => row.database === "bl");
+
+    expect(rows).toHaveLength(2);
+    const byNs = new Map(rows.map((row) => [row.collection, row]));
+    // The 2026-02-03 row for a, not the 02-01 or 02-02 ones.
+    expect(byNs.get("a")?.readOps).toBe(30);
+    expect(byNs.get("a")?.readLatencyMicros).toBe(300);
+    // And the 02-04 row for b, not the 02-03 one.
+    expect(byNs.get("b")?.readOps).toBe(90);
+  });
+});
+
+// Storage used to grow with the collect cadence rather than with the cluster:
+// every look rewrote each index's spec and identity, and rewrote an unchanged
+// counter beside them. Two collects in a row is the smallest experiment that
+// shows both halves fixed — nothing about the cluster changed between them, so
+// nothing new should have been written.
+describe("collecting twice writes almost nothing the second time", () => {
+  let runClusterId = "";
+  let runSession: Session;
+
+  beforeAll(async () => {
+    // Its own account, because this one needs a REAL connection and the
+    // outbound-dial budget is per user — spending another of owner's would be
+    // charged to whichever later scenario happened to run out.
+    runSession = await signUp("runlength");
+    createdEmails.push(runSession.email);
+    await giveRoom(runSession);
+    const res = await api("/clusters", runSession, {
+      method: "POST",
+      body: JSON.stringify({ name: "Run Length Cluster", connectionString: MONGO_URL }),
+    });
+    expect(res.status).toBe(200);
+    runClusterId = asString(asRecord(await res.json()).id);
+    createdClusterIds.push(runClusterId);
+  });
+
+  it("extends the runs it has instead of inserting a row per index", async () => {
+    // Two collects driven from here rather than left to the scheduler: connecting
+    // only enqueues a tick, and the suite runs no worker.
+    await collectCluster(runClusterId);
+    const before = await db
+      .select({ id: indexSnapshots.id })
+      .from(indexSnapshots)
+      .where(eq(indexSnapshots.clusterId, runClusterId));
+    const dimensionsBefore = await db
+      .select({ id: clusterIndexes.id })
+      .from(clusterIndexes)
+      .where(eq(clusterIndexes.clusterId, runClusterId));
+    expect(before.length).toBeGreaterThan(0);
+    // The first look is a run of one for every index it saw.
+    expect(dimensionsBefore.length).toBe(before.length);
+
+    await collectCluster(runClusterId);
+
+    const after = await db
+      .select()
+      .from(indexSnapshots)
+      .where(eq(indexSnapshots.clusterId, runClusterId));
+    const dimensionsAfter = await db
+      .select({ id: clusterIndexes.id })
+      .from(clusterIndexes)
+      .where(eq(clusterIndexes.clusterId, runClusterId));
+
+    // The spec and the identity are constants of the index, so the second look
+    // added no dimension rows at all.
+    expect(dimensionsAfter.length).toBe(dimensionsBefore.length);
+
+    // And most indexes went untouched between the two collects, so their rows
+    // were extended rather than duplicated. Not all — the control plane is
+    // querying this very cluster, so a few counters legitimately moved.
+    const extended = after.filter((row) => row.observations > 1);
+    expect(extended.length).toBeGreaterThan(0);
+    expect(after.length).toBeLessThan(before.length * 2);
+
+    // An extended run keeps the moment the state was FIRST seen and moves only
+    // the moment it was last confirmed. Losing captured_at would erase how long
+    // the index has been idle, which is most of the evidence behind a drop.
+    for (const row of extended) {
+      expect(row.lastSeenAt.getTime()).toBeGreaterThan(row.capturedAt.getTime());
+      // And it records how wide its own interior grew, so the trust gate can check
+      // for a hole inside the run instead of taking the collector's ceiling on
+      // faith. Two collects back to back, so the interval is small but real —
+      // exactly the span between the two lastSeenAt values.
+      expect(row.maxGapMs).toBeGreaterThan(0);
+      expect(row.maxGapMs).toBeLessThanOrEqual(row.lastSeenAt.getTime() - row.capturedAt.getTime());
+    }
+    // A run of one has no interior and must say so, rather than inheriting a
+    // neighbour's number.
+    for (const row of after.filter((candidate) => candidate.observations === 1)) {
+      expect(row.maxGapMs).toBe(0);
+    }
+  });
+
+  it("still reports an extended index in the collection footprint", async () => {
+    // getCollections used to read the newest BATCH of inserts, which an idle
+    // index is no longer part of. Every index the last collect saw shares a
+    // last_seen_at instead, extended or inserted.
+    const res = await api(`/clusters/${runClusterId}/collections`, runSession);
+    expect(res.status).toBe(200);
+    const body = asRecord(await res.json());
+    const collections = Array.isArray(body.collections) ? body.collections : [];
+    expect(collections.length).toBeGreaterThan(0);
+    const counted = collections
+      .map((entry) => asRecord(entry))
+      .reduce((sum, entry) => sum + Number(entry.indexCount), 0);
+    // As many indexes as the newest collect saw — which, since nothing was
+    // dropped between the two, is every index with a dimension row.
+    const dimensions = await db
+      .select({ id: clusterIndexes.id })
+      .from(clusterIndexes)
+      .where(eq(clusterIndexes.clusterId, runClusterId));
+    expect(counted).toBe(dimensions.length);
+  });
+
+  // Extending a run rewrites two columns that are NOT part of what makes the run,
+  // and they behave in opposite directions. Both live in the raw UPDATE, so
+  // nothing but a test holds them in place.
+  it("carries the newest size forward and never forgets a hint sighting", async () => {
+    const spec = {
+      name: "ride_along_1",
+      keys: [{ field: "ride", direction: 1 }],
+      unique: false,
+      ttl: false,
+      partial: false,
+      partialFilter: null,
+      sparse: false,
+      hidden: false,
+      isShardKey: false,
+      collation: null,
+    };
+    const started = new Date(Date.now() - 3 * 86_400_000);
+    await insertSnapshots(db, [
+      {
+        clusterId: runClusterId,
+        database: "ride",
+        collection: "along",
+        indexName: "ride_along_1",
+        spec,
+        sizeBytes: 1024,
+        perMember: [{ member: "m1", ops: 7 }],
+        // Seen being hinted once, three days ago.
+        hinted: true,
+        capturedAt: started,
+        lastSeenAt: started,
+        observations: 1,
+      },
+    ]);
+    const [before] = await db
+      .select({ id: indexSnapshots.id })
+      .from(indexSnapshots)
+      .innerJoin(clusterIndexes, eq(indexSnapshots.indexId, clusterIndexes.id))
+      .where(eq(clusterIndexes.database, "ride"));
+    if (before === undefined) throw new Error("fixture row missing");
+
+    // The same counter seen again, on a bigger index, with no hint in this
+    // profiler window.
+    const now = new Date();
+    await db.execute(sql`
+      update ${indexSnapshots} as s
+      set last_seen_at = ${now},
+          observations = s.observations + 1,
+          size_bytes = v.size_bytes,
+          hinted = s.hinted or v.hinted
+      from unnest(${sql.param([before.id])}::uuid[], ${sql.param([9999])}::bigint[], ${sql.param([false])}::boolean[])
+        as v(id, size_bytes, hinted)
+      where s.id = v.id
+    `);
+
+    const [after] = await db.select().from(indexSnapshots).where(eq(indexSnapshots.id, before.id));
+    // Size is a ride-along, replaced with the live reading, because every caller
+    // wants the current number and nothing reads the size series.
+    expect(after?.sizeBytes).toBe(9999);
+    // Hint is sticky. One sighting anywhere in the retained history is what stops
+    // this index being auto-dropped — hiding a hinted index makes mongod reject
+    // those queries outright — so a later quiet collect must not clear it.
+    expect(after?.hinted).toBe(true);
+    // And the run kept its start while moving only its end.
+    expect(after?.capturedAt.getTime()).toBe(started.getTime());
+    expect(after?.observations).toBe(2);
+  });
+
+  // The invariant every reader leans on, held by the database rather than by the
+  // writer's good behaviour. Readers find holes by differencing
+  // `previous.last_seen_at → next.captured_at`, so an overlap is a NEGATIVE gap —
+  // which reads as no gap at all. Exactly the failure this change was careful
+  // about, arriving by the back door.
+  it("refuses two runs for one index that overlap in time", async () => {
+    const spec = {
+      name: "overlap_probe_1",
+      keys: [{ field: "overlap", direction: 1 }],
+      unique: false,
+      ttl: false,
+      partial: false,
+      partialFilter: null,
+      sparse: false,
+      hidden: false,
+      isShardKey: false,
+      collation: null,
+    };
+    const base = Date.now() - 10 * 86_400_000;
+    const fixture = (capturedAt: Date, lastSeenAt: Date, ops: number) => ({
+      clusterId: runClusterId,
+      database: "overlap",
+      collection: "probe",
+      indexName: "overlap_probe_1",
+      spec,
+      sizeBytes: 1024,
+      perMember: [{ member: "m1", ops }],
+      capturedAt,
+      lastSeenAt,
+      observations: 4,
+    });
+
+    // A run covering days 0-3.
+    await insertSnapshots(db, [fixture(new Date(base), new Date(base + 3 * 86_400_000), 0)]);
+    // A second run starting inside it — a clock that stepped back, or two collects
+    // racing. Must not be storable.
+    await expect(
+      insertSnapshots(db, [
+        fixture(new Date(base + 86_400_000), new Date(base + 5 * 86_400_000), 1),
+      ]),
+    ).rejects.toThrow();
+    // And a run that starts after it ends is fine.
+    await insertSnapshots(db, [
+      fixture(new Date(base + 4 * 86_400_000), new Date(base + 6 * 86_400_000), 1),
+    ]);
+    const runs = await db
+      .select({ id: indexSnapshots.id })
+      .from(indexSnapshots)
+      .innerJoin(clusterIndexes, eq(indexSnapshots.indexId, clusterIndexes.id))
+      .where(eq(clusterIndexes.database, "overlap"));
+    expect(runs).toHaveLength(2);
+  });
+
+  it("keeps a run that is still live and prunes one that ended", async () => {
+    // Retention moved to last_seen_at. On captured_at it would have deleted the
+    // row an idle index is still living in the moment its START aged out —
+    // taking the only evidence that we are watching it, and handing the trust
+    // gate a hole where there was none.
+    const old = new Date(Date.now() - 400 * 86_400_000);
+    const spec = {
+      name: "retain_probe_1",
+      keys: [{ field: "retain", direction: 1 }],
+      unique: false,
+      ttl: false,
+      partial: false,
+      partialFilter: null,
+      sparse: false,
+      hidden: false,
+      isShardKey: false,
+      collation: null,
+    };
+    await insertSnapshots(db, [
+      // Started over a year ago and confirmed a moment ago: live.
+      {
+        clusterId: runClusterId,
+        database: "retain",
+        collection: "live",
+        indexName: "retain_probe_1",
+        spec,
+        sizeBytes: 1024,
+        perMember: [{ member: "m1", ops: 0 }],
+        capturedAt: old,
+        lastSeenAt: new Date(),
+        observations: 500,
+      },
+      // Started and finished over a year ago: history, and prunable.
+      {
+        clusterId: runClusterId,
+        database: "retain",
+        collection: "ended",
+        indexName: "retain_probe_1",
+        spec,
+        sizeBytes: 1024,
+        perMember: [{ member: "m1", ops: 0 }],
+        capturedAt: old,
+        lastSeenAt: old,
+        observations: 1,
+      },
+    ]);
+
+    await pruneOldSamples();
+
+    const left = await db
+      .select({ collection: clusterIndexes.collection })
+      .from(indexSnapshots)
+      .innerJoin(clusterIndexes, eq(indexSnapshots.indexId, clusterIndexes.id))
+      .where(
+        and(eq(indexSnapshots.clusterId, runClusterId), eq(clusterIndexes.database, "retain")),
+      );
+    expect(left.map((row) => row.collection)).toEqual(["live"]);
+  });
+});
+
+describe("the control plane's own indexes", () => {
+  it("has no foreign key without one", async () => {
+    const rows = await db.execute(sql`
+      select c.conrelid::regclass::text as child, a.attname as column
+      from pg_constraint c
+      join unnest(c.conkey) k(attnum) on true
+      join pg_attribute a on a.attrelid = c.conrelid and a.attnum = k.attnum
+      where c.contype = 'f'
+        and c.connamespace = 'public'::regnamespace
+        and not exists (
+          select 1 from pg_index i
+          where i.indrelid = c.conrelid and i.indkey[0] = a.attnum
+        )
+    `);
+    const unindexed = rows.rows.map((row) => `${String(row.child)}.${String(row.column)}`);
+    expect(unindexed).toEqual([]);
   });
 });

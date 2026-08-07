@@ -102,8 +102,13 @@ const dataSizeDoc = z.object({
 
 const latencyPair = z.object({ ops: z.coerce.number(), latency: z.coerce.number() });
 const latencyStatsDoc = z.object({
+  // Which mongod these counters belong to. $collStats reports it on every doc,
+  // and summing without it double-counts whichever member answers twice — see
+  // sumLatencyStats.
+  host: z.string(),
   latencyStats: z.object({ reads: latencyPair, writes: latencyPair }),
 });
+export type LatencyStatsDoc = z.infer<typeof latencyStatsDoc>;
 
 // config.collections entry on a sharded cluster: `key` is the shard-key pattern.
 // _id is the "db.coll" namespace string (not an ObjectId), so the collection is
@@ -161,8 +166,17 @@ const queryStatsDoc = z.object({
       pipeline: z.array(z.record(z.string(), z.unknown())).optional(),
     }),
   }),
+  // Server's own clock for this snapshot. Preferred over ours as the "now" in
+  // the rate denominator — a control plane whose clock has drifted from the
+  // cluster's should not turn that drift into a workload measurement.
+  asOf: z.coerce.date().optional(),
   metrics: z.object({
     execCount: z.coerce.number(),
+    // When this shape entered the store. The store keeps entries for the life
+    // of the server (or until eviction), so `now - firstSeen` is how long the
+    // shape has been watchable — the denominator that separates "ran five times
+    // this hour" from "ran five times since March".
+    firstSeenTimestamp: z.coerce.date().optional(),
     // Absent before 8.0 — see collectQueryStats. `keysExamined` is the marker
     // the capability check reads, because it is the one that decides whether a
     // shape was scanning.
@@ -172,6 +186,22 @@ const queryStatsDoc = z.object({
     hasSortStage: z.object({ true: z.coerce.number() }).partial().optional(),
   }),
 });
+
+const HOUR_MS = 3_600_000;
+
+// How long a shape has been watchable, as the optional field the analysis reads.
+// Omitted rather than guessed when either end is missing: an absent window
+// leaves the count to decide on its own, whereas a fabricated one would quietly
+// scale every rate by whatever we made up.
+//
+// `until` is the server's clock where it offered one. Falling back to ours is
+// fine for a span of days, and the alternative is no measurement at all.
+function observedFor(from: Date | null, until: Date | null): { observedForHours?: number } {
+  if (from === null) return {};
+  const end = (until ?? new Date()).getTime();
+  const hours = (end - from.getTime()) / HOUR_MS;
+  return hours > 0 ? { observedForHours: hours } : {};
+}
 
 // system.profile entry (lenient — only field names are used downstream).
 //
@@ -418,6 +448,46 @@ async function readIndexStats(
   }
 }
 
+async function readLatencyStats(
+  conn: MongoConnection,
+  database: string,
+  collection: string,
+  readPreference?: "primaryPreferred",
+): Promise<LatencyStatsDoc[]> {
+  const raw = await conn
+    .db(database)
+    .collection(collection)
+    .aggregate([{ $collStats: { latencyStats: {} } }], readPreference ? { readPreference } : {})
+    .toArray();
+  return latencyStatsDoc.array().parse(raw);
+}
+
+// Cluster-wide totals from per-node $collStats docs.
+//
+// Keyed by host, because the same mongod is reached twice on purpose: the base
+// connection's primaryPreferred read lands on the primary, and MemberConnections
+// opens a direct connection to every member INCLUDING that one (its "except the
+// one the primary client is talking to" is a description of intent, not a filter
+// the code applies — collectUsage gets away with it by keying on host too).
+// Summing the raw list would count the primary's writes twice, which is the one
+// number this whole path exists to report.
+//
+// Last doc per host wins: two readings of the same counter seconds apart, and
+// the later one is no less true.
+export function sumLatencyStats(docs: readonly LatencyStatsDoc[]): CollectionLatency {
+  const byHost = new Map<string, LatencyStatsDoc>();
+  for (const doc of docs) byHost.set(doc.host, doc);
+  const reads = { ops: 0, latencyMicros: 0 };
+  const writes = { ops: 0, latencyMicros: 0 };
+  for (const doc of byHost.values()) {
+    reads.ops += doc.latencyStats.reads.ops;
+    reads.latencyMicros += doc.latencyStats.reads.latency;
+    writes.ops += doc.latencyStats.writes.ops;
+    writes.latencyMicros += doc.latencyStats.writes.latency;
+  }
+  return { reads, writes };
+}
+
 export class MongoIndexCollector implements IndexCollector {
   constructor(
     private readonly conn: MongoConnection,
@@ -519,22 +589,42 @@ export class MongoIndexCollector implements IndexCollector {
   }
 
   // Cumulative read + write latency for the collection ($collStats latencyStats),
-  // summed across every shard. The regression + ROI signal. No documents read.
+  // summed across every shard AND every replica-set member. The regression + ROI
+  // signal. No documents read.
+  //
+  // Node-local, exactly like $indexStats — see mongo/members.ts, which has said
+  // so in a comment since per-member usage was added, while this method went on
+  // reading one node. `$collStats` is an aggregation, so the driver routes it by
+  // read preference, and a customer string carrying `readPreference=nearest` or
+  // `secondaryPreferred` (the normal shape for a reporting user, and the shape
+  // members.ts is written for) lands every reading on a secondary.
+  //
+  // A secondary's `writes.ops` is zero and stays zero however busy the primary
+  // is: replication applies the oplog, and the applier is not a client write op,
+  // so it is never counted here. Reads meanwhile look completely normal, because
+  // a secondary really does serve them. Measured on a 3-member 8.0 set after
+  // 2,500 writes — primary writes.ops=2500, both secondaries writes.ops=0.
+  //
+  // Downstream that is indistinguishable from an idle collection: Δops is 0 for
+  // every window, analysis/latency.ts nulls each one, and the write chart ranks
+  // the collection out entirely. Which is #85, reported twice.
+  //
+  // primaryPreferred rather than primary: the primary is the only node that can
+  // answer for writes, but during an election there is no primary, and losing a
+  // whole collect's reads is worse than a stale write counter. On a mongos it
+  // routes the fan-out to the shard primaries, which is what members.ts already
+  // assumed was happening.
   async collectionLatency(database: string, collection: string): Promise<CollectionLatency> {
-    const raw = await this.conn
-      .db(database)
-      .collection(collection)
-      .aggregate([{ $collStats: { latencyStats: {} } }])
-      .toArray();
-    const reads = { ops: 0, latencyMicros: 0 };
-    const writes = { ops: 0, latencyMicros: 0 };
-    for (const doc of latencyStatsDoc.array().parse(raw)) {
-      reads.ops += doc.latencyStats.reads.ops;
-      reads.latencyMicros += doc.latencyStats.reads.latency;
-      writes.ops += doc.latencyStats.writes.ops;
-      writes.latencyMicros += doc.latencyStats.writes.latency;
-    }
-    return { reads, writes };
+    // Not caught: the base connection failing is a real error (a missing
+    // privilege, an unreachable cluster) and the caller decides what that means.
+    // A member failing is not — the others still report.
+    const primary = await readLatencyStats(this.conn, database, collection, "primaryPreferred");
+    const members = await Promise.all(
+      (await (this.members?.all() ?? Promise.resolve([]))).map((conn) =>
+        readLatencyStats(conn, database, collection).catch(() => []),
+      ),
+    );
+    return sumLatencyStats([...primary, ...members.flat()]);
   }
 
   async readLatency(database: string, collection: string): Promise<LatencyPair> {
@@ -547,6 +637,12 @@ export class MongoIndexCollector implements IndexCollector {
   async collectSlowQueries(database: string, collection: string): Promise<QueryShape[]> {
     const ns = `${database}.${collection}`;
     const raw = await this.conn.db(database).collection("system.profile").find({ ns }).toArray();
+    // The ring's reach, not the shape's. system.profile is capped, so the
+    // oldest entry still in it is as far back as anything here can be seen —
+    // the same window for every shape in this namespace. A busy collection
+    // fills the ring in minutes and a quiet one holds weeks, which is precisely
+    // the difference a bare execution count cannot express.
+    let oldest: Date | null = null;
     const shapes = new Map<
       string,
       {
@@ -563,6 +659,7 @@ export class MongoIndexCollector implements IndexCollector {
       }
     >();
     for (const entry of profileDoc.array().parse(raw)) {
+      if (entry.ts !== undefined && (oldest === null || entry.ts < oldest)) oldest = entry.ts;
       let equality: string[] = [];
       let range: string[] = [];
       let sort: SortKey[] = [];
@@ -629,6 +726,7 @@ export class MongoIndexCollector implements IndexCollector {
         prev.constants = intersectConstants(prev.constants, constants);
       }
     }
+    const window = observedFor(oldest, null);
     return [...shapes.values()].map((shape) => ({
       equality: shape.equality,
       sort: shape.sort,
@@ -638,6 +736,7 @@ export class MongoIndexCollector implements IndexCollector {
       count: shape.count,
       docsExamined: shape.docsExamined,
       clients: shape.clients,
+      ...window,
       ...(Object.keys(shape.constants).length > 0 ? { constants: shape.constants } : {}),
       ...(shape.lookups.length > 0 ? { lookups: shape.lookups } : {}),
     }));
@@ -678,6 +777,9 @@ export class MongoIndexCollector implements IndexCollector {
         sortedInMemory: boolean;
         count: number;
         lookups: LookupJoin[];
+        // Earliest across every client this shape merged from — the longest
+        // window, so the most conservative rate.
+        firstSeen: Date | null;
       }
     >();
     const entries = raw.flatMap((doc) => {
@@ -687,6 +789,8 @@ export class MongoIndexCollector implements IndexCollector {
     // Server-wide capability, so any one entry answers it. An empty store says
     // nothing either way and falls through to the same empty result.
     if (!entries.some((entry) => entry.metrics.keysExamined !== undefined)) return new Map();
+    // The server's clock, from whichever entry carries it.
+    const asOf = entries.find((entry) => entry.asOf !== undefined)?.asOf ?? null;
     for (const { key, metrics } of entries) {
       const namespace = workloadKey(key.queryShape.cmdNs.db, key.queryShape.cmdNs.coll);
       if (!wanted.has(namespace)) continue;
@@ -749,6 +853,7 @@ export class MongoIndexCollector implements IndexCollector {
           sortedInMemory,
           count: countedExecs,
           lookups,
+          firstSeen: metrics.firstSeenTimestamp ?? null,
         });
       } else {
         prev.count += countedExecs;
@@ -756,6 +861,10 @@ export class MongoIndexCollector implements IndexCollector {
         prev.clients.push(client);
         prev.collscan = prev.collscan || collscan;
         prev.sortedInMemory = prev.sortedInMemory || sortedInMemory;
+        const seen = metrics.firstSeenTimestamp;
+        if (seen !== undefined && (prev.firstSeen === null || seen < prev.firstSeen)) {
+          prev.firstSeen = seen;
+        }
       }
     }
     for (const shape of shapes.values()) {
@@ -769,6 +878,7 @@ export class MongoIndexCollector implements IndexCollector {
         count: shape.count,
         docsExamined: shape.docsExamined,
         clients: shape.clients,
+        ...observedFor(shape.firstSeen, asOf),
         ...(shape.lookups.length > 0 ? { lookups: shape.lookups } : {}),
       });
       byNamespace.set(shape.namespace, list);

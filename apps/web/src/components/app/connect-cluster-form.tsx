@@ -1,121 +1,240 @@
-import type { ConnectionDiagnosis } from "@repo/contracts";
-import { useNavigate, useRouter } from "@tanstack/react-router";
+import {
+  type ConnectionDiagnosis,
+  createClusterInput,
+  NO_TLS_OVERRIDES,
+  type PlanInfo,
+  type TlsOverrides,
+} from "@repo/contracts";
 import { useState } from "react";
+import { usage } from "~/components/app/format";
 import { PrivilegeList } from "~/components/app/privilege-list";
+import { useAppForm } from "~/components/form";
 import { Alert, AlertDescription, AlertTitle } from "~/components/ui/alert";
 import { Button } from "~/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
-import { Input } from "~/components/ui/input";
+import { Card, CardContent, CardDescription, CardHeader } from "~/components/ui/card";
+import { Checkbox } from "~/components/ui/checkbox";
 import { Label } from "~/components/ui/label";
-import { checkConnection, connectCluster, provisionCluster } from "~/lib/app-server";
+import {
+  useCheckConnection,
+  useConnectCluster,
+  useProvisionCluster,
+} from "~/lib/queries/mutations/cluster";
+import { CLUSTER_USER_DOCS_HREF } from "~/lib/site";
 
-export function ConnectClusterForm() {
-  const router = useRouter();
-  const navigate = useNavigate();
-  const [name, setName] = useState("");
-  const [connString, setConnString] = useState("");
+// The api's own rules for these two fields, so a string it will refuse for being
+// empty is refused here by the same schema rather than by a second copy of it.
+const NAME = createClusterInput.shape.name;
+const CONNECTION_STRING = createClusterInput.shape.connectionString;
+
+// One entry per driver option, spelled out rather than summarised: the reader is
+// being asked to give up a specific protection, so the help text says which.
+const TLS_BOXES: readonly { key: keyof TlsOverrides; label: string; help: string }[] = [
+  {
+    key: "allowInvalidCertificates",
+    label: "Allow an unverified certificate",
+    help: "Self-signed, or signed by a certificate authority we do not carry. The connection is still encrypted; nothing proves who is on the other end.",
+  },
+  {
+    key: "allowInvalidHostnames",
+    label: "Allow a mismatched hostname",
+    help: "The certificate is valid but issued for a different name than the one being dialed — usual with an SSH tunnel or a rewritten DNS name.",
+  },
+  {
+    key: "insecure",
+    label: "Skip every certificate check",
+    help: "The broadest of the three: both of the above, plus expired certificates and no revocation check. Prefer one of the narrower boxes if it is enough.",
+  },
+];
+
+// The plan the clusters are counted against, or null while the org read has not
+// arrived — in which case the quota simply is not drawn. It is a warning, not a
+// gate: the api is the one that refuses, and it refuses on the same numbers.
+export function ConnectClusterForm({ plan }: { plan: PlanInfo | null }) {
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
   const [diagnosis, setDiagnosis] = useState<ConnectionDiagnosis | null>(null);
   const [provisioned, setProvisioned] = useState<{
     username: string;
     connectionString: string;
   } | null>(null);
+  // Which certificate checks the reader is choosing to skip. Outside the form
+  // store deliberately: they are not validated fields, and the two buttons under
+  // a diagnosis read them at click time the same way the credentials are read.
+  const [tls, setTls] = useState<TlsOverrides>(NO_TLS_OVERRIDES);
 
-  // Preflight: ask the api what these credentials may do before storing them.
-  async function onCheck() {
-    setBusy(true);
+  // Every path starts by clearing what the last one said, so a stale error
+  // cannot sit above a fresh answer.
+  function onStart() {
     setError(null);
+  }
+
+  // A connect succeeded: empty the form, but keep any provisioned string, which
+  // is the only copy the reader will ever see.
+  function onConnected() {
+    form.reset();
     setDiagnosis(null);
-    setProvisioned(null);
-    const result = await checkConnection({ data: connString }).catch(() => ({
-      ok: false as const,
-      message: "could not check the connection",
-    }));
-    setBusy(false);
-    if (result.ok) setDiagnosis(result.diagnosis);
-    else setError(result.message);
+    setTls(NO_TLS_OVERRIDES);
   }
 
-  async function finish(result: { ok: boolean; message: string | null; id: string | null }) {
-    if (!result.ok) {
-      setError(result.message);
-      return;
-    }
-    setName("");
-    setConnString("");
+  const check = useCheckConnection({
+    onStart: () => {
+      onStart();
+      setDiagnosis(null);
+      setProvisioned(null);
+    },
+    onDiagnosis: setDiagnosis,
+    onError: setError,
+  });
+
+  const connectAsIs = useConnectCluster({ onStart, onConnected, onError: setError });
+
+  const provision = useProvisionCluster({
+    onStart,
+    onConnected,
+    onError: setError,
+    onProvisioned: setProvisioned,
+  });
+
+  const form = useAppForm({
+    defaultValues: { name: "", connectionString: "" },
+    // Submitting is the preflight, not the connect: nothing is stored until the
+    // reader has seen what the string can do and picked one of the answers below.
+    onSubmit: ({ value }) =>
+      check.mutate({ connectionString: value.connectionString, tlsOverrides: tls }),
+  });
+
+  // One flag over three mutations: any of them in flight means the form is
+  // waiting on the api, and the second click would be about stale fields.
+  const busy = check.isPending || connectAsIs.isPending || provision.isPending;
+
+  // Read at click time rather than at render: the two buttons under a diagnosis
+  // are not the form's submit, and the form store deliberately does not re-render
+  // this component when a field changes.
+  const credentials = () => ({ ...form.state.values, tlsOverrides: tls });
+
+  // A diagnosis describes one exact string, and the boxes are part of the string
+  // that gets checked — so moving one invalidates the answer above exactly the
+  // way editing the connection string does.
+  function setOverride(key: keyof TlsOverrides, value: boolean) {
+    setTls((current) => ({ ...current, [key]: value }));
     setDiagnosis(null);
-    if (result.id !== null) await navigate({ to: "/app", search: { cluster: result.id } });
-    await router.invalidate();
   }
 
-  async function onConnectAsIs() {
-    setBusy(true);
-    setError(null);
-    const result = await connectCluster({ data: { name, connectionString: connString } });
-    setBusy(false);
-    await finish(result);
-  }
-
-  // Consent path: the admin string is used once to create the scoped user and
-  // is never stored.
-  async function onProvision() {
-    setBusy(true);
-    setError(null);
-    const result = await provisionCluster({
-      data: { name, adminConnectionString: connString },
-    });
-    setBusy(false);
-    if (result.ok && result.username !== null && result.connectionString !== null) {
-      setProvisioned({ username: result.username, connectionString: result.connectionString });
-    }
-    await finish(result);
-  }
+  // The meter this form spends, read before a word is typed. Unlimited plans
+  // have a null cap and can never be full.
+  const full = plan !== null && plan.maxClusters !== null && plan.clustersUsed >= plan.maxClusters;
 
   return (
     <Card className="mt-8">
+      {/* No title of its own: the page this sits on is called "Connect a
+          cluster" and there is nothing else on it, so a card repeating the
+          heading is a second heading for one thing. */}
       <CardHeader>
-        <CardTitle className="text-base">Connect a cluster</CardTitle>
-        <CardDescription>
-          Paste any connection string — Indexterity checks what it can do before storing anything.
-          Clusters start in read-only mode.
-        </CardDescription>
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <CardDescription>
+            Paste any connection string — Indexterity checks what it can do before storing anything.
+            Clusters start in read-only mode.
+          </CardDescription>
+          {/* The count belongs beside the form that spends it, not on the org
+              page: a limit nobody sees until it refuses them is a 402 in the
+              middle of someone's work. */}
+          {plan !== null ? (
+            <span
+              className={
+                full
+                  ? "shrink-0 text-destructive text-xs"
+                  : "shrink-0 text-muted-foreground text-xs"
+              }
+            >
+              {usage(plan.clustersUsed, plan.maxClusters)} clusters on the {plan.plan} plan
+            </span>
+          ) : null}
+        </div>
       </CardHeader>
       <CardContent className="space-y-4">
+        {plan !== null && full ? (
+          <Alert variant="destructive">
+            <AlertTitle>No room for another cluster</AlertTitle>
+            {/* Nothing is disabled below. Checking a string stores nothing and
+                is still worth doing, and the api owns the refusal — a button
+                greyed out by a stale count would be a lie either way. */}
+            <AlertDescription>
+              The {plan.plan} plan allows {plan.maxClusters}{" "}
+              {plan.maxClusters === 1 ? "cluster" : "clusters"}. Checking a connection string still
+              works, but connecting one will be refused until you disconnect a cluster or move to a
+              plan with room for more.
+            </AlertDescription>
+          </Alert>
+        ) : null}
+
         <form
           className="flex flex-wrap items-end gap-3"
           onSubmit={(event) => {
             event.preventDefault();
-            void onCheck();
+            event.stopPropagation();
+            void form.handleSubmit();
           }}
         >
-          <div className="grid gap-1.5">
-            <Label htmlFor="cluster-name">Name</Label>
-            <Input
-              id="cluster-name"
-              className="w-48"
-              placeholder="Production"
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-            />
-          </div>
-          <div className="grid min-w-72 flex-1 gap-1.5">
-            <Label htmlFor="cluster-conn">Connection string</Label>
-            <Input
-              id="cluster-conn"
-              className="font-mono"
-              placeholder="mongodb://user:pass@host:27017"
-              value={connString}
-              onChange={(event) => {
-                setConnString(event.target.value);
-                setDiagnosis(null);
-              }}
-            />
-          </div>
-          <Button type="submit" disabled={busy || name.length === 0 || connString.length === 0}>
-            {busy ? "Checking…" : "Check access"}
-          </Button>
+          <form.AppField name="name" validators={{ onChange: NAME }}>
+            {(field) => <field.TextField label="Name" className="w-48" placeholder="Production" />}
+          </form.AppField>
+          <form.AppField
+            name="connectionString"
+            validators={{ onChange: CONNECTION_STRING }}
+            // A diagnosis describes one exact string. Edit the string and it
+            // describes nothing — better no answer than last string's answer.
+            listeners={{ onChange: () => setDiagnosis(null) }}
+          >
+            {(field) => (
+              <field.TextField
+                label="Connection string"
+                className="font-mono"
+                placeholder="mongodb://user:pass@host:27017"
+              />
+            )}
+          </form.AppField>
+          <form.AppForm>
+            <form.SubmitButton pending={busy}>
+              {busy ? "Checking…" : "Check access"}
+            </form.SubmitButton>
+          </form.AppForm>
         </form>
+
+        {/* Under the string, not beside it: these describe the connection the
+            string makes, and each one gives up a check that TLS is otherwise
+            there to perform. Refused outright unless ticked (mongo/client.ts),
+            so this is the only way to connect a cluster whose certificate does
+            not verify — and it stays visible on the cluster afterwards rather
+            than being a decision made once and forgotten.
+
+            Three boxes rather than one "insecure" toggle, because they are not
+            the same concession: a private CA fails certificate validation with a
+            perfectly correct hostname, and an SSH tunnel or a rewritten DNS name
+            fails the hostname check with a genuinely valid certificate. One
+            switch would make everyone give up both. */}
+        <fieldset className="space-y-2">
+          <legend className="font-medium text-sm">
+            Certificate checks{" "}
+            <span className="font-normal text-muted-foreground">
+              — leave these alone unless the connection fails on the certificate
+            </span>
+          </legend>
+          {TLS_BOXES.map((box) => (
+            <div key={box.key} className="flex items-start gap-2">
+              <Checkbox
+                id={`tls-${box.key}`}
+                checked={tls[box.key]}
+                onCheckedChange={(checked) => setOverride(box.key, checked === true)}
+                className="mt-0.5"
+              />
+              <div className="grid gap-0.5 leading-tight">
+                <Label htmlFor={`tls-${box.key}`} className="font-normal text-sm">
+                  {box.label}
+                </Label>
+                <p className="text-muted-foreground text-xs">{box.help}</p>
+              </div>
+            </div>
+          ))}
+        </fieldset>
 
         {error !== null ? (
           <Alert variant="destructive">
@@ -166,25 +285,46 @@ export function ConnectClusterForm() {
                   is kept (encrypted). Revoke it any time with <code>db.dropUser(…)</code>.
                 </p>
                 <div className="mt-3 flex flex-wrap gap-2">
-                  <Button disabled={busy} onClick={() => void onProvision()}>
+                  <Button
+                    disabled={busy}
+                    onClick={() => {
+                      const { name, connectionString, tlsOverrides } = credentials();
+                      provision.mutate({
+                        name,
+                        adminConnectionString: connectionString,
+                        tlsOverrides,
+                      });
+                    }}
+                  >
                     {busy ? "Creating…" : "Create a scoped user and connect"}
                   </Button>
                   {diagnosis.ready ? (
-                    <Button variant="outline" disabled={busy} onClick={() => void onConnectAsIs()}>
+                    <Button
+                      variant="outline"
+                      disabled={busy}
+                      onClick={() => connectAsIs.mutate(credentials())}
+                    >
                       Use these credentials as-is
                     </Button>
                   ) : null}
                 </div>
               </div>
             ) : diagnosis.ready ? (
-              <Button className="mt-3" disabled={busy} onClick={() => void onConnectAsIs()}>
+              <Button
+                className="mt-3"
+                disabled={busy}
+                onClick={() => connectAsIs.mutate(credentials())}
+              >
                 Connect
               </Button>
             ) : (
               <p className="mt-2 text-muted-foreground text-xs">
                 Grant the missing privileges to this user, or paste credentials that can create
-                users and Indexterity will provision a scoped one for you. The exact role is in{" "}
-                <code>docs/architecture.md</code> §10.1.
+                users and Indexterity will provision a scoped one for you.{" "}
+                <a href={CLUSTER_USER_DOCS_HREF} className="underline">
+                  The exact role is here
+                </a>
+                .
               </p>
             )}
           </div>

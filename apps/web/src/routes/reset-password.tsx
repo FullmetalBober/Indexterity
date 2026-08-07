@@ -1,11 +1,11 @@
+import { resetPasswordInput } from "@repo/contracts";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useState } from "react";
+import { useAppForm } from "~/components/form";
 import { Alert, AlertDescription } from "~/components/ui/alert";
-import { Button } from "~/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
-import { Input } from "~/components/ui/input";
-import { Label } from "~/components/ui/label";
-import { resetPassword } from "../lib/auth";
+import { FieldGroup } from "~/components/ui/field";
+import { useResetPassword } from "../lib/queries/mutations/auth";
 
 // Landing page for the emailed reset link: better-auth's callback redirects
 // here with ?token=, and the new password is submitted with that token.
@@ -20,27 +20,19 @@ export const Route = createFileRoute("/reset-password")({
 
 function ResetPasswordPage() {
   const { token } = Route.useSearch();
-  const [password, setPassword] = useState("");
-  const [confirm, setConfirm] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState(false);
-  const [busy, setBusy] = useState(false);
 
-  async function submit() {
-    if (password !== confirm) {
-      setError("passwords don't match");
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    const result = await resetPassword({ data: { token, newPassword: password } }).catch(() => ({
-      ok: false,
-      error: "reset failed",
-    }));
-    setBusy(false);
-    if (result.ok) setDone(true);
-    else setError(("error" in result ? result.error : null) ?? "reset failed");
-  }
+  const reset = useResetPassword(token, {
+    onStart: () => setError(null),
+    onDone: () => setDone(true),
+    onError: setError,
+  });
+
+  const form = useAppForm({
+    defaultValues: { password: "", confirm: "" },
+    onSubmit: ({ value }) => reset.mutate(value.password),
+  });
 
   if (token === "") {
     return (
@@ -91,37 +83,50 @@ function ResetPasswordPage() {
             className="flex flex-col gap-4"
             onSubmit={(event) => {
               event.preventDefault();
-              void submit();
+              event.stopPropagation();
+              void form.handleSubmit();
             }}
           >
-            <div className="grid gap-1.5">
-              <Label htmlFor="new-password">New password</Label>
-              <Input
-                id="new-password"
-                type="password"
-                autoComplete="new-password"
-                value={password}
-                onChange={(event) => setPassword(event.target.value)}
-              />
-            </div>
-            <div className="grid gap-1.5">
-              <Label htmlFor="confirm-password">Repeat it</Label>
-              <Input
-                id="confirm-password"
-                type="password"
-                autoComplete="new-password"
-                value={confirm}
-                onChange={(event) => setConfirm(event.target.value)}
-              />
-            </div>
+            <FieldGroup className="gap-4">
+              <form.AppField
+                name="password"
+                validators={{ onChange: resetPasswordInput.shape.password }}
+              >
+                {(field) => (
+                  <field.TextField
+                    label="New password"
+                    type="password"
+                    autoComplete="new-password"
+                  />
+                )}
+              </form.AppField>
+              <form.AppField
+                name="confirm"
+                validators={{
+                  // The api never sees this one — it is sent a single password —
+                  // so the match is only ever checked here. onChangeListenTo
+                  // re-runs it when the first field moves, so fixing a typo in
+                  // the password clears the mismatch instead of stranding it.
+                  onChangeListenTo: ["password"],
+                  onChange: ({ value, fieldApi }) =>
+                    value === fieldApi.form.getFieldValue("password")
+                      ? undefined
+                      : "The two do not match",
+                }}
+              >
+                {(field) => (
+                  <field.TextField label="Repeat it" type="password" autoComplete="new-password" />
+                )}
+              </form.AppField>
+            </FieldGroup>
             {error !== null ? (
               <Alert variant="destructive">
                 <AlertDescription>{error}</AlertDescription>
               </Alert>
             ) : null}
-            <Button type="submit" disabled={busy || password.length === 0}>
-              Set password
-            </Button>
+            <form.AppForm>
+              <form.SubmitButton pending={reset.isPending}>Set password</form.SubmitButton>
+            </form.AppForm>
           </form>
         </CardContent>
       </Card>

@@ -25,31 +25,31 @@ services:
       timeout: 5s
       retries: 10
 
-  # Local demo target to exercise the collector (NOT a customer cluster).
-  mongo:
-    image: docker.io/library/mongo:8
-    restart: unless-stopped
-    ports:
-      - "27017:27017"
-    volumes:
-      - mongodata:/data/db
-    healthcheck:
-      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-
   api:
     image: docker.io/library/node:26-slim
     working_dir: /app
-    command: sh -c "npm install && npx turbo run dev --filter=@repo/api"
+    # `exec` so the real process becomes PID 1 and podman's SIGTERM reaches it.
+    # Without it `sh` is PID 1, and a non-interactive shell does not forward
+    # signals to the child it is waiting on — so every container ignored stop,
+    # sat out the ten-second grace period, and was SIGKILLed (exit 137). That is
+    # what breaks `down`: the teardown races the stragglers, pod and network
+    # removal fail, and the next `up` reuses a container whose runtime state is
+    # already gone ("cannot open .../exec.fifo").
+    command: sh -c "npm install && exec npx turbo run dev --filter=@repo/api"
     environment:
       DATABASE_URL: postgres://mongo_optimizer:mongo_optimizer@postgres:5432/mongo_optimizer
       API_PORT: "3001"
       # Dev targets live on the compose network; sign-up is open for convenience.
       ALLOW_PRIVATE_CLUSTER_TARGETS: "true"
+      # A local mongod has no certificate, and the integration and e2e suites
+      # dial one on purpose. Never set this in a deployment that dials real
+      # customer databases.
+      ALLOW_INSECURE_CLUSTER_TLS: "true"
       SIGNUP_MODE: open
-      BETTER_AUTH_URL: http://localhost:3001
+      # The DASHBOARD's origin, not this container's port: better-auth appends
+      # /api/auth itself, and the browser reaches all of it on 3000. It is also
+      # what the reset links in emails are built from.
+      BETTER_AUTH_URL: http://localhost:3000
       WEB_ORIGIN: http://localhost:3000
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET}
       MASTER_KEY: ${MASTER_KEY}
@@ -60,8 +60,17 @@ services:
       SMTP_USER: ${SMTP_USER}
       SMTP_PASS: ${SMTP_PASS}
       MAIL_FROM: ${MAIL_FROM}
+      # All three containers serve /metrics on 9464 and report different parts of
+      # the picture, so each gets its own host port: api 9464, worker 9465,
+      # web 9466.
+      METRICS_ENABLED: "true"
     ports:
+      # Published for curl and the OpenAPI document, not for the browser. The
+      # dashboard reaches the api at /api on its OWN origin (localhost:3000),
+      # which the web server answers by forwarding. An auth call made straight
+      # to this port carries the wrong Origin and is refused, which is correct.
       - "3001:3001"
+      - "9464:9464"
     volumes:
       - ./:/app
       - api_node_modules:/app/node_modules
@@ -72,13 +81,30 @@ services:
   web:
     image: docker.io/library/node:26-slim
     working_dir: /app
-    command: sh -c "npm install && npx turbo run dev --filter=@repo/web"
+    command: sh -c "npm install && exec npx turbo run dev --filter=@repo/web"
     environment:
       WEB_PORT: "3000"
-      VITE_API_URL: http://localhost:3001
-      VITE_WEB_ORIGIN: http://localhost:3000
+      # Two things read this. The web server's own SSR reads, which happen in
+      # this container — so the address has to be one this container can reach,
+      # not the one the browser uses — and the /api passthrough, which forwards
+      # the browser's calls to the same place.
+      #
+      # The browser no longer needs an api address at all. It calls /api on
+      # whatever origin it loaded the page from, which is why the VITE_* pair
+      # that used to be here is gone — a build-time default for a value only the
+      # server reads is what broke this stack in #2.
+      API_URL: http://api:3001
+      WEB_ORIGIN: http://localhost:3000
+      METRICS_ENABLED: "true"
     ports:
+      # The one origin a browser uses, /api included. There was an nginx service
+      # in front of this doing the ingress's /api split; the dashboard server
+      # answers /api itself now (apps/web/src/lib/api-passthrough.ts), so the
+      # container earned nothing but a second copy of the routing rule — in a
+      # different proxy, with different buffering and header defaults, so it did
+      # not reproduce the ingress either.
       - "3000:3000"
+      - "9466:9464"
     volumes:
       - ./:/app
       - web_node_modules:/app/node_modules
@@ -89,12 +115,30 @@ services:
   worker:
     image: docker.io/library/node:26-slim
     working_dir: /app
-    command: sh -c "npm install && npx turbo run build --filter=@repo/api^... && npm run worker -w @repo/api"
+    command: sh -c "npm install && npx turbo run build --filter=@repo/api^... && exec npm run worker -w @repo/api"
     environment:
       DATABASE_URL: postgres://mongo_optimizer:mongo_optimizer@postgres:5432/mongo_optimizer
       MASTER_KEY: ${MASTER_KEY}
       ALLOW_PRIVATE_CLUSTER_TARGETS: "true"
+      # A local mongod has no certificate, and the integration and e2e suites
+      # dial one on purpose. Never set this in a deployment that dials real
+      # customer databases.
+      ALLOW_INSECURE_CLUSTER_TLS: "true"
       WORKER_CONCURRENCY: "2"
+      # The alerts a collect or an apply raises are sent from HERE, not from the
+      # api — the jobs run in this container. Without these the worker's mailer
+      # is the no-op branch and every alert is logged and dropped, while the
+      # api's invites and reset mails go out fine, which makes the gap look like
+      # an alerting bug rather than missing config. Helm already gives the
+      # worker deployment the same block (indexterity.mailEnv).
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASS: ${SMTP_PASS}
+      MAIL_FROM: ${MAIL_FROM}
+      METRICS_ENABLED: "true"
+    ports:
+      - "9465:9464"
     volumes:
       - ./:/app
       - worker_node_modules:/app/node_modules
@@ -104,7 +148,6 @@ services:
 
 volumes:
   pgdata18:
-  mongodata:
   api_node_modules:
   web_node_modules:
   worker_node_modules:

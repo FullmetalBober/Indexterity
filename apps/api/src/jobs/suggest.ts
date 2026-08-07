@@ -1,6 +1,9 @@
 import {
   createScore,
+  executionsPerWeek,
   type IndexSpec,
+  isRecurring,
+  MIN_WEEKLY_DOCS_EXAMINED,
   narrowScore,
   recommendCreates,
   recommendNarrowing,
@@ -8,6 +11,7 @@ import {
   type SortKey,
   scanCost,
   sortOrderAdvisories,
+  weeklyScanCost,
 } from "../analysis";
 import { entitledAutomation } from "../billing/plans";
 import { and, eq, indexCooldowns, policies, recommendations } from "../db";
@@ -18,13 +22,23 @@ import { applyCreatesForCluster } from "./create";
 import { jobDb } from "./db";
 import { planForCluster } from "./plan";
 
-// A shape must recur before it earns a recommendation — someone running a
-// heavy ad-hoc query once or twice must not leave an index behind.
-const WORKLOAD_OPTIONS = { minCount: 3 };
+// A shape must recur before it earns a recommendation, measured two ways.
+//
+// The count stops someone's ad-hoc query leaving an index behind. The rate
+// stops the far quieter mistake: `$queryStats` accumulates for the life of the
+// store, so on a server up for two months, three executions clears a count
+// floor while describing a query that runs roughly never. Fortnightly is the
+// line — loose enough for a weekly report, which is a real workload pattern
+// worth an index, and tight enough that a handful of runs since March is not.
+const WORKLOAD_OPTIONS = { minCount: 3, minPerWeek: 0.5 };
 // A TTL advisory needs a RECURRING delete pattern, not a one-off cleanup.
 const TTL_MIN_DELETES = 3;
-// Below this a collection is too small for a scan to matter at all.
-const MIN_COLLECTION_DOCS = 1000;
+// Below this a collection is trivial whatever it costs: a scan of it is a page
+// or two the server is holding anyway, and the index would cost more in write
+// amplification than the scan ever costs to run. It is a floor, not a measure —
+// everything above it is decided by MIN_WEEKLY_DOCS_EXAMINED, which knows what
+// the scanning actually costs.
+const TRIVIAL_COLLECTION_DOCS = 100;
 // Instant apply (build without human approval) demands stronger recurrence
 // than merely proposing.
 const INSTANT_MIN_COUNT = 5;
@@ -45,7 +59,7 @@ function encodeKeys(keys: readonly SortKey[]): string[] {
 // Workload analysis (opt-in): read the profiler and propose CREATE/UPDATE/MERGE.
 // A brand-new index on a critical collection, when instantCreate is opted in and
 // the cluster is writable, is auto-approved and built immediately
-// (creates only — never drops; docs/architecture.md §7.5).
+// (creates only — never drops; the wiki's Architecture page, Apply pipeline).
 export async function suggestForCluster(clusterId: string): Promise<number> {
   const db = jobDb();
   const [policy] = await db
@@ -81,10 +95,12 @@ export async function suggestForCluster(clusterId: string): Promise<number> {
     // Index lists already fetched this run, keyed "db\0coll" — reused when
     // resolving $lookup wants against foreign collections.
     const indexCache = new Map<string, IndexSpec[]>();
-    // $lookup joins seen across all shapes: foreign collection + field -> count.
+    // $lookup joins seen across all shapes: foreign collection + field -> how
+    // often the join runs, as a raw count for the rationale and as a rate for
+    // the cost gate.
     const lookupWants = new Map<
       string,
-      { database: string; from: string; foreignField: string; count: number }
+      { database: string; from: string; foreignField: string; count: number; perWeek: number }
     >();
     const namespaces: WorkloadTarget[] = [];
     for (const database of databases) {
@@ -129,16 +145,20 @@ export async function suggestForCluster(clusterId: string): Promise<number> {
       }
     }
 
-    // Which collections are worth create-side analysis at all. Settled before
-    // the workload read so it can be asked for every namespace in one call —
-    // the store it reads is cluster-wide, so asking per collection would pull
-    // the whole thing once per collection.
+    // Which collections to READ a workload for. Settled before the workload
+    // read so it can be asked for every namespace in one call — the store it
+    // reads is cluster-wide, so asking per collection would pull the whole
+    // thing once per collection.
+    //
+    // Only what is knowable this early belongs here. Whether the queries are
+    // worth acting on is a question about the queries, so it waits until they
+    // have been read.
     const eligible: Array<WorkloadTarget & { docCount: number }> = [];
     for (const { database, collection } of namespaces) {
       // Counts come from $collStats, not the count command — the scoped
       // least-privilege user has no `find` grant, which `count` requires.
       const { dataSizeBytes, docCount } = await collector.collectionStorage(database, collection);
-      if (docCount < MIN_COLLECTION_DOCS) continue;
+      if (docCount < TRIVIAL_COLLECTION_DOCS) continue;
       // Policy ceiling: building an index on a huge collection is the one
       // expensive create-side operation — skip collections above the limit.
       if (policy.maxCollectionSizeBytes !== null && dataSizeBytes > policy.maxCollectionSizeBytes) {
@@ -149,12 +169,9 @@ export async function suggestForCluster(clusterId: string): Promise<number> {
     const workload = await collector.collectWorkload(eligible);
     for (const { database, collection, docCount } of eligible) {
       const shapes = workload.get(workloadKey(database, collection)) ?? [];
-      const [existing, sizes] = await Promise.all([
-        collector.listIndexes(database, collection),
-        collector.indexSizes(database, collection),
-      ]);
-      indexCache.set(`${database}\u0000${collection}`, existing);
-      // Record $lookup joins for the post-loop foreign-side pass.
+      // Record $lookup joins for the post-loop foreign-side pass. Ahead of the
+      // cost gate below: what a join costs is the FOREIGN collection's business,
+      // and a collection nothing scans itself can still drive an expensive one.
       for (const shape of shapes) {
         for (const join of shape.lookups ?? []) {
           const key = `${database}\u0000${join.from}\u0000${join.foreignField}`;
@@ -163,11 +180,31 @@ export async function suggestForCluster(clusterId: string): Promise<number> {
             from: join.from,
             foreignField: join.foreignField,
             count: 0,
+            perWeek: 0,
           };
           prev.count += shape.count;
+          prev.perWeek += executionsPerWeek(shape);
           lookupWants.set(key, prev);
         }
       }
+      // Cost, not size: a collection earns create-side analysis by what its
+      // scanning actually burns per week. This sits here and not up in the
+      // eligibility pass because the eligibility pass runs before the workload
+      // is known, where the only thing left to gate on is a document count —
+      // which answers a different question and gets both directions wrong.
+      //
+      // A blocking sort is the exception. It walks no extra documents and still
+      // ends in an error at 100 MB, so scan cost must not be what excludes it.
+      const weeklyScan = weeklyScanCost(shapes, docCount);
+      const blockingSort = shapes.some(
+        (shape) => shape.sortedInMemory === true && isRecurring(shape, WORKLOAD_OPTIONS),
+      );
+      if (weeklyScan < MIN_WEEKLY_DOCS_EXAMINED && !blockingSort) continue;
+      const [existing, sizes] = await Promise.all([
+        collector.listIndexes(database, collection),
+        collector.indexSizes(database, collection),
+      ]);
+      indexCache.set(`${database}\u0000${collection}`, existing);
       // A new index isn't free: estimate its size from this collection's
       // average existing index, and remind about the extra write per insert.
       const sizeValues = Object.values(sizes);
@@ -329,9 +366,13 @@ export async function suggestForCluster(clusterId: string): Promise<number> {
         indexCache.set(cacheKey, foreignIndexes);
       }
       if (foreignIndexes.some((idx) => idx.keys[0]?.field === want.foreignField)) continue;
-      // Same size gate as other creates — a tiny foreign collection scans cheaply.
+      // Same cost gate as other creates, in the same units. An unindexed join
+      // walks the foreign collection at least once per execution — more, since
+      // it repeats per input document — so size times join rate is the floor of
+      // what it costs, and a floor is enough to decide by.
       const { docCount: foreignDocs } = await collector.collectionStorage(want.database, want.from);
-      if (foreignDocs < MIN_COLLECTION_DOCS) continue;
+      if (foreignDocs < TRIVIAL_COLLECTION_DOCS) continue;
+      if (foreignDocs * want.perWeek < MIN_WEEKLY_DOCS_EXAMINED) continue;
       const indexName = `${want.foreignField}_1`;
       if (cooled.has(cooldownKey(want.database, want.from, indexName))) continue;
       if (

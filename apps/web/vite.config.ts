@@ -6,6 +6,10 @@ import viteReact from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
 export default defineConfig({
+  // No `server.proxy` for /api. There was one, and the passthrough in
+  // src/server.ts replaced it: dev now takes the same code path a proxy-less
+  // deployment does, so the fallback everyone relies on is the one being
+  // exercised every time anyone runs the app.
   server: { port: 3000, host: true },
   // shadcn's generated components import through "~" (see components.json);
   // tsconfig already maps it, Vite needs telling too.

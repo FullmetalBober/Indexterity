@@ -29,9 +29,10 @@ api:
     type: ClusterIP
     port: 3001
     annotations: {}
-  # The api only needs to be reachable by the web pods — every browser request
-  # goes through the dashboard's server functions. Expose it publicly only for
-  # programmatic API access (see ingress.api below).
+  # Reached two ways: by the browser, through the ingress at /api on the
+  # dashboard's host (this is what keeps the session cookie first-party), and by
+  # the web pods over this Service for server-side rendering. ingress.api below
+  # adds a second hostname, and is only for callers outside the browser.
   resources:
     requests:
       cpu: 100m
@@ -59,7 +60,9 @@ web:
   # The dashboard's own public origin. REQUIRED when ingress is enabled: the api
   # trusts it for auth requests and session cookies are stored against it.
   publicUrl: ""
-  # Where the web server reaches the api. Defaults to the in-cluster Service.
+  # Where the WEB SERVER reaches the api, for its own server-side rendering.
+  # Defaults to the in-cluster Service. Not what the browser uses — that is
+  # /api on publicUrl, routed by the ingress.
   apiUrl: ""
   # Overrides the canonical URL in the landing page's SEO tags (canonical,
   # og:url, og:image). Leave empty to keep the product's own public domain —
@@ -95,6 +98,60 @@ worker:
   podAnnotations: {}
   extraEnv: []
 
+# Prometheus metrics on a second port, served by all three workloads. Never
+# routed by the ingress and carrying no auth: queue depth, cluster counts and
+# pipeline state are operator information, so the endpoint is reachable
+# in-cluster only until you deliberately expose it.
+#
+# Each workload answers for what only it can see, so scrape all three:
+#   api     HTTP traffic, and everything read from the control-plane database —
+#           clusters, recommendations by state, queue depth, dead-letter backlog
+#   worker  job outcomes and durations, the regression gate, drops executed, and
+#           which clusters it currently cannot reach
+#   web     page render time per route, and the api as the dashboard server
+#           experiences it (including "never answered")
+metrics:
+  enabled: true
+  port: 9464
+  # A Prometheus Operator ServiceMonitor per workload. Needs the
+  # monitoring.coreos.com CRDs — off by default because a chart that assumes
+  # them fails to install on a cluster that scrapes some other way.
+  serviceMonitor:
+    enabled: false
+    # Extra labels, for an Operator that selects ServiceMonitors by label.
+    labels: {}
+    interval: 30s
+    scrapeTimeout: ""
+    relabelings: []
+    metricRelabelings: []
+  # Alerting rules for the failures that are otherwise silent: a schedule that
+  # stopped running, a worker that is gone, observation being thrown away, the api
+  # having lost Postgres. Same CRD requirement as the ServiceMonitor, so also off
+  # by default.
+  #
+  # The stale-schedule windows come from the crontab in jobs/runner.ts — change
+  # one there and the matching threshold here has to move with it.
+  prometheusRule:
+    enabled: false
+    # Extra labels, for an Operator that selects PrometheusRules by label.
+    labels: {}
+    thresholds:
+      # A runnable job no worker has claimed for this long. `apply` and `probe`
+      # tick every five minutes, so fifteen means the worker is down or saturated.
+      queueAgeSeconds: 900
+      # Permanently failed jobs sitting in the queue. Retention prunes them after
+      # a window, so a standing pile is real rather than history.
+      deadLetterBacklog: 5
+      # Fraction of the fleet unreachable at once. One cluster is the customer's
+      # problem and they have already been emailed; half of them is ours.
+      unreachableFleetRatio: 0.5
+      # Auth 429s per second. Either a brute-force attempt or a real customer
+      # behind NAT hitting the shared budget — both want a human.
+      authRateLimited: 0.5
+      # Regression gate rejections per day before it stops looking like bad luck
+      # and starts looking like the engine proposing bad drops.
+      regressionsPerDay: 3
+
 # Runs `node dist/migrate.js` as a pre-install/pre-upgrade hook, before any new
 # pod starts. Disable only if you apply migrations out of band.
 migrations:
@@ -122,6 +179,18 @@ config:
   # install must leave it false, or any account can probe the internal network.
   # Cloud metadata and other never-a-database ranges stay blocked either way.
   allowPrivateClusterTargets: false
+  # Allow connecting clusters that do not offer validated TLS. Every outbound
+  # connection requires it by default, including the ones the worker makes from
+  # stored credentials — so a cluster connected without it stops being collected
+  # and its owners are told why.
+  #
+  # Deliberately NOT part of allowPrivateClusterTargets above: a VPC-peered or
+  # PrivateLink cluster is a private address that must still be forced to TLS,
+  # so coupling a transport rule to an addressing rule would quietly weaken the
+  # installs that most look like they need the exception. Set this only when the
+  # MongoDB you manage genuinely serves no certificate and the network between
+  # is trusted.
+  allowInsecureClusterTls: false
   # Whether a trusted proxy sits in front of the api. Behind an ingress or a
   # Service, every request arrives from the proxy, so the per-IP rate limits
   # collapse into one shared bucket unless the forwarded address is trusted.

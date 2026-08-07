@@ -1,7 +1,7 @@
 import { Injectable } from "@nestjs/common";
 import { ORPCError } from "@orpc/server";
 import type { FastifyRequest } from "fastify";
-import { requireUserId } from "../auth/session";
+import { requireSession } from "../auth/session";
 import { type Membership, resolveMembership } from "../auth/tenancy";
 import {
   allowsAutoApply,
@@ -10,7 +10,8 @@ import {
   planFrom,
   withinLimit,
 } from "../billing/plans";
-import { and, clusters, eq, invites, isNull, members, organizations } from "../db";
+import { seatsUsed } from "../billing/usage";
+import { and, clusters, eq, organizations } from "../db";
 import { DatabaseService } from "../db/database.service";
 
 // Authn + tenancy, shared by every controller. Was four private methods copied
@@ -20,13 +21,36 @@ import { DatabaseService } from "../db/database.service";
 export class TenancyService {
   constructor(private readonly database: DatabaseService) {}
 
+  // 401 without a valid session; null when the caller is in no organization.
+  async memberOrNull(req: FastifyRequest): Promise<Membership | null> {
+    const session = await requireSession(req);
+    return resolveMembership(this.database.db, session.userId, session.activeOrgId);
+  }
+
   // 401 without a valid session, else the caller's membership.
+  //
+  // "No organization" is a state now that orgs are created on purpose rather
+  // than conjured on first use, and it is not an error the api can fix — the
+  // reader has to make one. The reads the dashboard shell performs answer it
+  // with emptiness instead (listClusters, getOrg, listOrgs); everything else
+  // says so, because a cluster with no org to hold it is not a request that can
+  // succeed.
   async member(req: FastifyRequest): Promise<Membership> {
-    return resolveMembership(this.database.db, await requireUserId(req));
+    const membership = await this.memberOrNull(req);
+    if (membership === null) {
+      throw new ORPCError("FORBIDDEN", {
+        message: "create an organization before connecting anything to it",
+      });
+    }
+    return membership;
   }
 
   async org(req: FastifyRequest): Promise<string> {
     return (await this.member(req)).orgId;
+  }
+
+  async orgOrNull(req: FastifyRequest): Promise<string | null> {
+    return (await this.memberOrNull(req))?.orgId ?? null;
   }
 
   // Mutations (connect cluster, mode, approve, undo, collect) are owner-only;
@@ -59,7 +83,7 @@ export class TenancyService {
     const current =
       what === "clusters"
         ? await this.countClusters(orgId)
-        : await this.countMembersAndInvites(orgId);
+        : await seatsUsed(this.database.db, orgId);
     const verdict = withinLimit(plan, what, current);
     if (!verdict.allowed) {
       throw new ORPCError("PLAN_LIMIT", { status: 402, message: verdict.reason ?? "plan limit" });
@@ -86,21 +110,6 @@ export class TenancyService {
       .from(clusters)
       .where(eq(clusters.orgId, orgId));
     return rows.length;
-  }
-
-  // Pending invites count against the seat limit. They are seats already
-  // promised — not counting them would let an org invite past its plan and
-  // discover the problem only when someone tries to accept, which punishes the
-  // wrong person.
-  private async countMembersAndInvites(orgId: string): Promise<number> {
-    const [current, pending] = await Promise.all([
-      this.database.db.select({ id: members.id }).from(members).where(eq(members.orgId, orgId)),
-      this.database.db
-        .select({ id: invites.id })
-        .from(invites)
-        .where(and(eq(invites.orgId, orgId), isNull(invites.acceptedAt))),
-    ]);
-    return current.length + pending.length;
   }
 
   async ownsCluster(clusterId: string, orgId: string): Promise<boolean> {

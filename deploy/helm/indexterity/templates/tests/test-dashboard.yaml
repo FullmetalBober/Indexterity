@@ -21,5 +21,23 @@ spec:
           set -e
           curl -fsS "http://{{ include "indexterity.fullname" . }}-web:{{ .Values.web.service.port }}/" > /dev/null
           echo "dashboard ok"
-          curl -fsS "http://{{ include "indexterity.fullname" . }}-api:{{ .Values.api.service.port }}/health" > /dev/null
+          curl -fsS "http://{{ include "indexterity.fullname" . }}-api:{{ .Values.api.service.port }}/api/health" > /dev/null
           echo "api ok"
+          {{- if .Values.metrics.enabled }}
+          # Scraping the api is the one check that proves the control-plane
+          # queries run against the deployed database — grep for the queue gauge,
+          # which is the last thing the collector observes.
+          curl -fsS "http://{{ include "indexterity.fullname" . }}-api:{{ .Values.metrics.port }}/metrics" \
+            | grep -q "^indexterity_jobs_oldest_queued_age_seconds"
+          echo "api metrics ok"
+          # The dashboard server renders a page before it can report one, and the
+          # landing page above was that page.
+          curl -fsS "http://{{ include "indexterity.fullname" . }}-web:{{ .Values.metrics.port }}/metrics" \
+            | grep -q "^indexterity_web_document_duration_seconds_count"
+          echo "web metrics ok"
+          {{- if .Values.worker.enabled }}
+          curl -fsS "http://{{ include "indexterity.fullname" . }}-worker-metrics:{{ .Values.metrics.port }}/metrics" \
+            | grep -q "^target_info"
+          echo "worker metrics ok"
+          {{- end }}
+          {{- end }}

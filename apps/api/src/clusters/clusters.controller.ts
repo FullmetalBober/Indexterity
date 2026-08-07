@@ -1,37 +1,34 @@
-import { Controller, Req } from "@nestjs/common";
+import { Controller, Logger, Req } from "@nestjs/common";
 import { implement } from "@orpc/nest";
 import { ORPCError } from "@orpc/server";
 import { contract } from "@repo/contracts";
 import type { FastifyRequest } from "fastify";
 import { requireUserId } from "../auth/session";
-import {
-  and,
-  clusters,
-  desc,
-  envKeyProvider,
-  eq,
-  inArray,
-  indexSnapshots,
-  recommendations,
-  seal,
-  sql,
-} from "../db";
+import { and, clusters, desc, envKeyProvider, eq, inArray, indexSnapshots, seal, sql } from "../db";
 import { DatabaseService } from "../db/database.service";
 import { allowPrivateTargets, assertTargetsAllowed, BlockedTargetError } from "../engine/net-guard";
+import { NO_TLS_OVERRIDES, type TlsOverrides } from "../engine/ports";
 import { adapterFor, engineSupported } from "../engine/registry";
 import { currentKeyVersion, masterKeyBytesFor } from "../env";
 import { consumeDialBudget } from "../errors/dial-budget";
 import { mapClusterError, toCluster, toDiagnosis } from "../http/mappers";
 import { TenancyService } from "../http/tenancy.service";
-import { openClusterSession } from "../jobs/cluster-connection";
 import { evictCluster } from "../jobs/connection-pool";
-import { connStringUsername, ProvisionDeniedError, provisionScopedUser } from "../mongo";
+import {
+  connStringUsername,
+  InsecureConnectionError,
+  ProvisionDeniedError,
+  provisionScopedUser,
+} from "../mongo";
 import { Implement } from "../orpc/implement";
+import { restoreHiddenIndexes, revokeCommandFor } from "./offboard";
 
 // Connecting, diagnosing, rotating and disconnecting customer clusters — the
 // endpoints that dial a host the user named. Owner-only throughout.
 @Controller()
 export class ClustersController {
+  private readonly log = new Logger(ClustersController.name);
+
   constructor(
     private readonly database: DatabaseService,
     private readonly tenancy: TenancyService,
@@ -43,6 +40,7 @@ export class ClustersController {
     engine: typeof clusters.$inferSelect.engine,
     connectionString: string,
     provisionedUsername: string | null,
+    tlsOverrides: TlsOverrides = NO_TLS_OVERRIDES,
   ): Promise<typeof clusters.$inferSelect> {
     const keyVersion = currentKeyVersion();
     const sealed = await seal(
@@ -61,21 +59,51 @@ export class ClustersController {
         sealedData: Buffer.from(sealed.data),
         keyVersion,
         provisionedUsername,
+        tlsOverrides,
       })
       .returning();
     if (row === undefined) throw new Error("failed to create cluster");
+    // Collect once, now, rather than at the next scheduled pass. Connecting a
+    // cluster and then waiting up to six hours for the dashboard to say anything
+    // is the complaint that reads as "the cadence is too long" — and it is a
+    // different problem with a different fix. Shortening the cadence for everyone
+    // would buy this one moment at the cost of every hour afterwards; one job on
+    // connect buys it outright and changes the steady-state load by nothing.
+    //
+    // Queued rather than awaited: a collect walks every collection and can take
+    // minutes on a large cluster, and the caller is waiting on a POST.
+    //
+    // Best-effort on purpose. The insert above has already committed, so a failed
+    // enqueue must not turn a connect that worked into an error the reader cannot
+    // act on — they would see "failed to connect" next to a cluster that is
+    // there. Losing it costs the first collect its head start and nothing else:
+    // the scheduled pass is still behind it, which is exactly where this used to
+    // happen. Logged rather than swallowed, because a queue that cannot be
+    // written to is worth knowing about (§16).
+    try {
+      await this.database.db.execute(
+        sql`select graphile_worker.add_job('collect', json_build_object('clusterId', ${row.id}::text), max_attempts => 3)`,
+      );
+    } catch (error) {
+      this.log.warn(
+        `could not queue the first collect for cluster ${row.id}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
     return row;
   }
 
   // Everything that must be true before the control plane dials a customer
   // host: a supported engine, a mongodb scheme, a per-user budget, and a
-  // target that is not somewhere on our own network (docs/architecture.md
-  // §10.2). Every endpoint that opens a connection goes through here.
+  // target that is not somewhere on our own network (the wiki's Architecture
+  // page, Security). Every endpoint that opens a connection goes through here.
   private async guardDial(
     req: FastifyRequest,
     engine: typeof clusters.$inferSelect.engine,
     value: string,
     errors: { BAD_REQUEST: (options: { message: string }) => Error },
+    overrides: TlsOverrides = NO_TLS_OVERRIDES,
   ): Promise<void> {
     if (!engineSupported(engine)) {
       throw errors.BAD_REQUEST({
@@ -98,6 +126,23 @@ export class ClustersController {
       }
       throw error;
     }
+    // AFTER the address guard, deliberately. A private or loopback target is
+    // refused whatever its transport, and answering "you need TLS" to someone
+    // pointing at 10.0.0.5 would name the wrong problem — and quietly weaken the
+    // SSRF message that is the more severe of the two.
+    //
+    // The enforcement itself lives in mongo/client.ts, because the worker never
+    // comes through here: jobs/connection-pool.ts opens the STORED string. This
+    // is only so onboarding refuses with the reason instead of surfacing the same
+    // refusal as a 502 out of diagnose.
+    try {
+      adapter.assertSecureTransport(value, overrides);
+    } catch (error) {
+      if (error instanceof InsecureConnectionError) {
+        throw errors.BAD_REQUEST({ message: error.message });
+      }
+      throw error;
+    }
   }
 
   // Onboarding preflight: what can these credentials actually do? Nothing is
@@ -107,17 +152,27 @@ export class ClustersController {
   @Implement(contract.listClusters)
   listClusters(@Req() req: FastifyRequest) {
     return implement(contract.listClusters).handler(async () => {
-      const orgId = await this.tenancy.org(req);
+      // Empty rather than an error for a caller who is in no organization yet:
+      // this is one of the three reads the dashboard shell makes before it knows
+      // what to draw, and a 403 there would render "the api is unreachable" to
+      // someone whose api is fine and who simply has no org.
+      const orgId = await this.tenancy.orgOrNull(req);
+      if (orgId === null) return [];
       const rows = await this.database.db
         .select()
         .from(clusters)
         .where(eq(clusters.orgId, orgId))
         .orderBy(desc(clusters.createdAt));
       // One grouped query for freshness rather than one per cluster.
+      //
+      // max(last_seen_at), not max(captured_at): a cluster whose indexes are all
+      // idle stops writing new rows and only extends the ones it has, so
+      // captured_at would freeze at the last time anything changed and the
+      // dashboard would report a healthy cluster as last collected weeks ago.
       const freshness = await this.database.db
         .select({
           clusterId: indexSnapshots.clusterId,
-          lastCollectedAt: sql<Date | null>`max(${indexSnapshots.capturedAt})`,
+          lastCollectedAt: sql<Date | null>`max(${indexSnapshots.lastSeenAt})`,
         })
         .from(indexSnapshots)
         .where(
@@ -142,8 +197,14 @@ export class ClustersController {
     return implement(contract.checkConnection).handler(async ({ input, errors }) => {
       await this.tenancy.requireOwner(req);
       const engine = input.engine ?? "MONGODB";
-      await this.guardDial(req, engine, input.connectionString, errors);
-      return toDiagnosis(await adapterFor(engine).diagnose(input.connectionString));
+      const adapter = adapterFor(engine);
+      // The checkboxes are applied to the string BEFORE anything looks at it, so
+      // the preflight answers for the connection that would actually be stored
+      // rather than for the one that was typed.
+      const overrides = input.tlsOverrides ?? NO_TLS_OVERRIDES;
+      const value = adapter.applySecureTransport(input.connectionString, overrides);
+      await this.guardDial(req, engine, value, errors, overrides);
+      return toDiagnosis(await adapter.diagnose(value, overrides));
     });
   }
 
@@ -155,10 +216,13 @@ export class ClustersController {
       // several seconds connecting to a cluster we are not going to keep.
       await this.tenancy.requireRoomFor(orgId, "clusters");
       const engine = input.engine ?? "MONGODB";
-      await this.guardDial(req, engine, input.connectionString, errors);
+      const adapter = adapterFor(engine);
+      const overrides = input.tlsOverrides ?? NO_TLS_OVERRIDES;
+      const value = adapter.applySecureTransport(input.connectionString, overrides);
+      await this.guardDial(req, engine, value, errors, overrides);
       // Verify before storing: an unusable string must fail at connect time
       // with the reason, not silently collect nothing for a day.
-      const diagnosis = await adapterFor(engine).diagnose(input.connectionString);
+      const diagnosis = await adapter.diagnose(value, overrides);
       if (!diagnosis.reachable) {
         throw new ORPCError("CLUSTER_UNREACHABLE", {
           status: 502,
@@ -173,9 +237,7 @@ export class ClustersController {
             "Indexterity provision a scoped one.",
         });
       }
-      return toCluster(
-        await this.storeCluster(orgId, input.name, engine, input.connectionString, null),
-      );
+      return toCluster(await this.storeCluster(orgId, input.name, engine, value, null, overrides));
     });
   }
 
@@ -190,10 +252,15 @@ export class ClustersController {
       await this.tenancy.requireRoomFor(orgId, "clusters");
       // Provisioning is engine-specific; MONGODB is the only adapter with the
       // capability today (see EngineCapabilities.provisionScopedUsers).
-      await this.guardDial(req, "MONGODB", input.adminConnectionString, errors);
+      const overrides = input.tlsOverrides ?? NO_TLS_OVERRIDES;
+      const adminValue = adapterFor("MONGODB").applySecureTransport(
+        input.adminConnectionString,
+        overrides,
+      );
+      await this.guardDial(req, "MONGODB", adminValue, errors, overrides);
       let provisioned: Awaited<ReturnType<typeof provisionScopedUser>>;
       try {
-        provisioned = await provisionScopedUser(input.adminConnectionString);
+        provisioned = await provisionScopedUser(adminValue, overrides);
       } catch (error) {
         if (error instanceof ProvisionDeniedError) {
           throw new ORPCError("PROVISION_DENIED", { status: 422, message: error.message });
@@ -206,6 +273,7 @@ export class ClustersController {
         "MONGODB",
         provisioned.connectionString,
         provisioned.username,
+        overrides,
       );
       return {
         cluster: toCluster(row),
@@ -231,9 +299,13 @@ export class ClustersController {
         .limit(1);
       if (row === undefined) throw errors.NOT_FOUND({ message: "cluster not found" });
       const adapter = adapterFor(row.engine);
-      await this.guardDial(req, row.engine, input.connectionString, errors);
+      // Unstated on a rotation means "as before": rotating a password should not
+      // silently withdraw a concession the cluster still needs to connect at all.
+      const overrides = input.tlsOverrides ?? row.tlsOverrides;
+      const value = adapter.applySecureTransport(input.connectionString, overrides);
+      await this.guardDial(req, row.engine, value, errors, overrides);
       try {
-        const probe = await adapter.open(input.connectionString);
+        const probe = await adapter.open(value, overrides);
         try {
           await probe.ping();
         } finally {
@@ -285,45 +357,9 @@ export class ClustersController {
         .where(and(eq(clusters.id, input.clusterId), eq(clusters.orgId, orgId)))
         .limit(1);
       if (row === undefined) throw errors.NOT_FOUND({ message: "cluster not found" });
-      const inFlight = await this.database.db
-        .select()
-        .from(recommendations)
-        .where(
-          and(
-            eq(recommendations.clusterId, input.clusterId),
-            inArray(recommendations.state, ["HIDDEN", "OBSERVE"]),
-          ),
-        );
-      let unhidden = 0;
-      if (inFlight.length > 0) {
-        try {
-          const { session, release } = await openClusterSession(this.database.db, input.clusterId);
-          try {
-            const executor = session.executor(false);
-            for (const rec of inFlight) {
-              try {
-                await executor.unhide(rec.database, rec.collection, rec.indexName);
-                unhidden += 1;
-              } catch {
-                // index already gone — nothing to restore
-              }
-            }
-          } finally {
-            release();
-          }
-        } catch {
-          // cluster unreachable: offboarding still proceeds
-        }
-      }
-      await evictCluster(input.clusterId);
+      const unhidden = await restoreHiddenIndexes(this.database.db, input.clusterId);
       await this.database.db.delete(clusters).where(eq(clusters.id, input.clusterId));
-      return {
-        unhidden,
-        revokeCommand:
-          row.provisionedUsername === null
-            ? null
-            : `db.getSiblingDB("admin").dropUser("${row.provisionedUsername}")`,
-      };
+      return { unhidden, revokeCommand: revokeCommandFor(row.provisionedUsername) };
     });
   }
 

@@ -4,7 +4,7 @@ import { type ClassifyOptions, classifyUsage, usageHistoryIsTrustworthy } from "
 import { isKeyPrefix, isRedundantPrefix } from "./redundancy";
 import { isNeverDrop } from "./safety";
 import { dropScore } from "./score";
-import type { IndexSpec, UsageSnapshot } from "./types";
+import { type IndexSpec, totalObservations, type UsageSnapshot } from "./types";
 
 const directionSchema = z.union([
   z.literal(1),
@@ -67,10 +67,10 @@ export function recommendForCollection(
   pastRegressions: Readonly<Record<string, number>> = {},
   // "Now" for the history-freshness check; injected to keep this pure.
   now: Date = new Date(),
-  // Intervals in which this collection actually served reads. Usage findings
-  // need the collection to have been doing something — an idle cluster proves
-  // nothing about any index in it (analysis/activity.ts).
-  activeIntervals?: number,
+  // Hours in which this collection actually served reads. Usage findings need the
+  // collection to have been doing something — an idle cluster proves nothing
+  // about any index in it (analysis/activity.ts).
+  activeHours?: number,
 ): RecommendationCandidate[] {
   const candidates: RecommendationCandidate[] = [];
   const eligible = indexes.filter((index) => !isNeverDrop(index.spec));
@@ -78,7 +78,7 @@ export function recommendForCollection(
   // Usage-based findings need a history we can trust; redundancy is structural
   // and stands on its own.
   const trusted = (index: IndexInput): boolean =>
-    usageHistoryIsTrustworthy(index.history, options, now, activeIntervals);
+    usageHistoryIsTrustworthy(index.history, options, now, activeHours);
 
   for (const candidate of eligible) {
     const covering = indexes.find(
@@ -93,7 +93,7 @@ export function recommendForCollection(
         rationale: `Key-prefix of ${covering.spec.name}, which already covers it.`,
         score: dropScore({
           usageClass: null,
-          snapshots: candidate.history.length,
+          snapshots: totalObservations(candidate.history),
           redundant: true,
           sizeBytes: sizes[candidate.spec.name] ?? 0,
           pastRegressions: pastRegressions[candidate.spec.name] ?? 0,
@@ -120,7 +120,7 @@ export function recommendForCollection(
           : "No recorded usage across the observation window.",
       score: dropScore({
         usageClass,
-        snapshots: index.history.length,
+        snapshots: totalObservations(index.history),
         redundant: false,
         sizeBytes: sizes[index.spec.name] ?? 0,
         pastRegressions: pastRegressions[index.spec.name] ?? 0,
@@ -147,7 +147,7 @@ export function recommendForCollection(
         "Protected index (unique/TTL/shard/partial/sparse) with no recorded usage — never auto-dropped; review manually.",
       score: dropScore({
         usageClass,
-        snapshots: index.history.length,
+        snapshots: totalObservations(index.history),
         redundant: false,
         sizeBytes: sizes[index.spec.name] ?? 0,
         pastRegressions: pastRegressions[index.spec.name] ?? 0,
@@ -177,7 +177,7 @@ export function recommendForCollection(
         `and dropping this one. Never auto-dropped.`,
       score: dropScore({
         usageClass: null,
-        snapshots: index.history.length,
+        snapshots: totalObservations(index.history),
         redundant: true,
         sizeBytes: sizes[index.spec.name] ?? 0,
         pastRegressions: pastRegressions[index.spec.name] ?? 0,

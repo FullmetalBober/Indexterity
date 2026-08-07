@@ -34,8 +34,9 @@ helm test indexterity -n indexterity
 ```
 
 The web image does **not** need rebuilding per environment: `API_URL` and
-`WEB_ORIGIN` are read at runtime (the dashboard's server functions are the only
-thing that talks to the api).
+`WEB_ORIGIN` are read at runtime, and the browser bundle contains no api address
+at all — it calls `/api` on whatever origin served the page. `API_URL` is the web
+server's own server-side rendering, nothing else.
 
 ## Back up MASTER_KEY
 
@@ -48,16 +49,29 @@ each one must be re-onboarded. Store it outside the cluster. To rotate, add
 ## What talks to what
 
 ```
-browser ──► ingress ──► web (SSR + server functions) ──► api ──► PostgreSQL
-                                                          ▲         ▲
-                                                worker ───┘─────────┘
-                                                   │
-                                                   └──► customer MongoDB clusters
+                     ┌── /api ──► api ──► PostgreSQL
+browser ──► ingress ─┤              ▲        ▲
+                     └── /  ───► web ┘       │   (SSR reads, in-cluster Service)
+                                 └──────┘    │   (and /api if no ingress rule)
+                                  worker ────┴──► customer MongoDB clusters
 ```
 
-The api never needs to be public: browsers only reach the dashboard, whose
-server functions call the api over the in-cluster Service. Enable
-`ingress.api.*` only if you want programmatic API access.
+**One host, two paths.** The browser calls the api itself — that is what makes
+the session cookie first-party — so `/api` has to answer on the same host that
+serves the dashboard. The ingress template does that, and the api answers
+directly.
+
+Without an ingress it still works: the web pods answer `/api` themselves and
+forward it, so the browser still sees one origin. That costs one hop per call,
+which the ingress rule removes. `indexterity_web_requests_total{kind="api"}` is
+non-zero exactly when the passthrough is carrying calls — a useful check that
+the rule is doing its job.
+
+With the ingress rule in place the api is publicly reachable on that path. Its rate limiting, origin
+checks and auth guard are the only line of defence now rather than the second one
+behind an unroutable address; nothing about them changed, but their importance
+did. `ingress.api.*` adds a *second* hostname for callers outside the browser and
+stays off by default — the dashboard does not need it.
 
 ## Values worth knowing
 
@@ -72,17 +86,88 @@ server functions call the api over the in-cluster Service. Enable
 | `config.storageUsdPerGbMonth` | Your storage price, for the $/month ROI headline |
 | `config.signupMode` | `invite` (default), `open` or `closed`. The first account always bootstraps the install; after that invite-only. `open` lets any stranger register — and every account can make the control plane dial hosts it names |
 | `config.allowPrivateClusterTargets` | Set `true` when the MongoDB you manage is on a private network (the normal self-hosted case). Leave `false` for anything strangers can reach, or accounts can probe your internal network. Cloud metadata stays blocked either way |
+| `config.allowInsecureClusterTls` | Set `true` only when the MongoDB you manage genuinely serves no certificate and the network between is trusted. Every outbound connection requires validated TLS otherwise — including the ones the worker makes from stored credentials, so a cluster connected without it stops being collected and its owners are told why. Kept apart from `allowPrivateClusterTargets` on purpose: a VPC-peered or PrivateLink cluster is a private address that must still be forced to TLS |
+| `metrics.enabled` | Prometheus metrics on port `metrics.port` (9464) for all three workloads. On by default; the endpoint is never routed by the ingress |
+| `metrics.serviceMonitor.enabled` | One Prometheus Operator ServiceMonitor per workload. Off by default — it needs the `monitoring.coreos.com` CRDs, and a chart that assumes them cannot install without them |
+| `metrics.prometheusRule.enabled` | 18 alerting rules for the failures nothing else reports. Same CRD requirement, also off by default. Thresholds under `metrics.prometheusRule.thresholds` |
+
+## Metrics
+
+All three workloads serve `/metrics` on port 9464, and each answers for what only
+it can see — scrape all three:
+
+| workload | reports |
+|---|---|
+| api | HTTP traffic, and everything read from the control-plane database: clusters under management, recommendations by pipeline state (`HIDDEN` is a drop mid-observe), queue depth per task, the dead-letter backlog, the age of the oldest unclaimed job |
+| worker | job outcomes and durations from graphile-worker's own events, per-cluster tick outcomes, how many clusters it currently cannot reach, regression-gate decisions, drops executed |
+| web | page render time per route pattern, and the api as the dashboard server experiences it — including the calls it never answered, which the api itself cannot report and which the loaders otherwise swallow into an empty panel |
+
+With `worker.enabled=false` and `RUN_WORKER=true` on the api instead, the api
+serves the worker's half as well.
+
+`metrics.serviceMonitor.enabled=true` installs a ServiceMonitor for each. Without
+the Prometheus Operator, point your own scraper at the `metrics` port on
+`<release>-api`, `<release>-web` and `<release>-worker-metrics`, or look by hand:
+
+```bash
+kubectl -n indexterity port-forward svc/indexterity-api 9464:9464
+curl -s localhost:9464/metrics | grep indexterity_
+```
+
+The endpoint carries **no authentication**, which is why it is a second port
+rather than a route on the api: an ingress that publishes the api host does not
+publish this, and cluster counts and pipeline state are operator information.
+Keep it in-cluster. `metrics.enabled=false` turns it off entirely.
+
+**If the ServiceMonitors do not appear as targets, it is the label selector**, not
+the chart. A Prometheus Operator adopts only the ServiceMonitors matching its own
+`serviceMonitorSelector` — usually `release: <your-stack-release>`. Ask it what it
+wants, then match:
+
+```bash
+kubectl get prometheus -A -o jsonpath='{range .items[*]}{.metadata.name}{": "}{.spec.serviceMonitorSelector}{"\n"}{end}'
+helm upgrade indexterity … --set metrics.serviceMonitor.labels.release=kube-prometheus-stack
+```
+
+### Alerts
+
+`metrics.prometheusRule.enabled=true` installs a `PrometheusRule` with 18 alerts,
+grouped by the question they answer: is the schedule running, is work piling up,
+can we still reach the clusters, is the safety pipeline meaningful, is the control
+plane healthy, and what are readers seeing. `metrics.prometheusRule.labels` is the
+same escape hatch as above.
+
+Every threshold is under `metrics.prometheusRule.thresholds`, and the
+stale-schedule windows are derived from the crontab in `apps/api/src/jobs/runner.ts`
+— if that schedule changes, these move with it.
+
+Two of them exist because the obvious rule does not work:
+
+- **`IndexterityWorkerNotReporting`** uses `absent_over_time`, not `increase`. When
+  a process dies its series go stale, so `increase(...) == 0` matches nothing and a
+  rule written that way is silent in exactly the case you care about most.
+- **The stale-schedule alerts watch the `schedule*` dispatchers**, not the
+  per-cluster tasks. `scheduleCollect` ticks on cron whether or not a cluster
+  exists; `collect` does not, so alerting on it fires the moment the last cluster
+  is offboarded.
 
 ## Security defaults
 
 Onboarding dials whatever connection string a user supplies, so two defaults
-are deliberately restrictive (see `docs/architecture.md` §10.2):
+are deliberately restrictive (see the wiki's [Architecture](https://github.com/FullmetalBober/Indexterity/wiki/Architecture)
+page, under Security):
 
 - **Sign-up is invite-only.** First account bootstraps; the rest need an invite.
 - **Private and loopback targets are refused.** Self-hosted installs whose
   database lives on the cluster network must set
   `config.allowPrivateClusterTargets=true`. Link-local/cloud-metadata,
   multicast and reserved ranges are refused regardless.
+- **Plaintext connections are refused**, and so is TLS whose certificate cannot
+  be verified. `config.allowInsecureClusterTls=true` is the way out, and it is a
+  separate switch from the one above for a reason: an address being private says
+  nothing about whether its transport should be encrypted. Skipping a *specific*
+  certificate check for one cluster — a private CA, an SSH tunnel — is a
+  per-cluster checkbox on the connect form instead, and needs no chart setting.
 
 `helm install` prints a warning when the chosen combination is unsafe.
 
@@ -96,10 +181,24 @@ are deliberately restrictive (see `docs/architecture.md` §10.2):
   Postgres.
 - The worker drains its connection pool on `SIGTERM`
   (`terminationGracePeriodSeconds: 60`).
+- **The worker's only Service is `-worker-metrics`**, and it is headless. Nothing
+  calls the worker; it exists so a scrape can find the pod.
 
 ## Validating changes to this chart
 
 ```bash
 helm lint deploy/helm/indexterity
 helm template rel deploy/helm/indexterity --set secrets.existingSecret=s | kubeconform -strict -
+```
+
+The alert rules need their own check — a typo'd expression installs cleanly and
+then never fires, which `helm lint` and `kubeconform` both accept. CI runs this on
+every chart change:
+
+```bash
+helm template rel deploy/helm/indexterity --set secrets.existingSecret=s \
+  --set metrics.prometheusRule.enabled=true \
+  | yq 'select(.kind == "PrometheusRule") | {"groups": .spec.groups}' > /tmp/rules.yaml
+docker run --rm --entrypoint promtool -v /tmp/rules.yaml:/rules.yaml:ro \
+  prom/prometheus:v3.6.0 check rules /rules.yaml
 ```

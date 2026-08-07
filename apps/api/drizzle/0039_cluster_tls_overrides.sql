@@ -1,0 +1,1 @@
+ALTER TABLE "clusters" ADD COLUMN "tls_overrides" jsonb DEFAULT '{"allowInvalidCertificates":false,"allowInvalidHostnames":false,"insecure":false}'::jsonb NOT NULL;

@@ -6,12 +6,43 @@ Dashboard:
 {{- else }}
   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "indexterity.fullname" . }}-web {{ .Values.web.service.port }}:{{ .Values.web.service.port }}
   then open http://localhost:{{ .Values.web.service.port }}
+
+  This works without an ingress: the web pods answer /api themselves by
+  forwarding it to the api, so the browser still sees one origin and the session
+  cookie is still first-party. It costs one hop per call, which an ingress /api
+  rule removes. Set web.publicUrl to whatever origin you actually reach it on.
 {{- end }}
 
 Workloads:
   api     {{ .Values.api.replicas }} replica(s)  — {{ include "indexterity.apiImage" . }}
   web     {{ .Values.web.replicas }} replica(s)  — {{ include "indexterity.webImage" . }}
   worker  {{ if .Values.worker.enabled }}1 replica (cron: collect, apply, finalize, retention, digest){{ else }}DISABLED — nothing is collected or applied on a schedule{{ end }}
+
+{{- if .Values.metrics.enabled }}
+
+Metrics: port {{ .Values.metrics.port }} on {{ include "indexterity.fullname" . }}-api,
+{{ include "indexterity.fullname" . }}-web
+{{- if .Values.worker.enabled }} and {{ include "indexterity.fullname" . }}-worker-metrics{{ end }}, path /metrics.
+{{- if .Values.metrics.serviceMonitor.enabled }}
+  A ServiceMonitor is installed for each. Scrape them all — the api reports HTTP
+  and control-plane state, the worker job outcomes and the pipeline, the web
+  render time and the api as the dashboard server sees it.
+  If they do not show up as targets, match your Operator's serviceMonitorSelector
+  with metrics.serviceMonitor.labels — that is nearly always what it is.
+{{- else }}
+  No ServiceMonitor (metrics.serviceMonitor.enabled is false). Point your own
+  scraper at those ports, or port-forward one to look:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "indexterity.fullname" . }}-api {{ .Values.metrics.port }}:{{ .Values.metrics.port }}
+{{- end }}
+{{- if .Values.metrics.prometheusRule.enabled }}
+  18 alerting rules are installed (metrics.prometheusRule). The critical ones:
+  IndexterityWorkerNotReporting — nothing is running the pipeline at all.
+  IndexterityFleetUnreachable — most clusters unreachable at once, so it is us.
+  IndexterityControlPlaneDatabaseUnreachable — the api lost Postgres, which the
+    health probes do not test and so cannot tell you.
+{{- end }}
+  The endpoint has no auth and is not routed by the ingress. Keep it that way.
+{{- end }}
 
 Sign-up: {{ .Values.config.signupMode }}
 {{- if eq .Values.config.signupMode "invite" }} — the first account bootstraps this install; everyone after needs an invite.
@@ -26,6 +57,13 @@ Sign-up: {{ .Values.config.signupMode }}
 Private cluster targets are ALLOWED: accounts can point Indexterity at
 loopback and RFC1918 addresses. Correct for a self-hosted install whose
 database is on this network; unsafe if strangers can sign up.
+{{- end }}
+{{- if .Values.config.allowInsecureClusterTls }}
+
+TLS is NOT required on cluster connections: Indexterity will dial a MongoDB in
+plaintext, and will accept one whose certificate it cannot verify. Credentials
+and every collection name cross the network in the clear. Correct only for a
+database on a trusted network that serves no certificate.
 {{- end }}
 {{- if not .Values.smtp.host }}
 

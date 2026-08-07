@@ -46,10 +46,39 @@ function series(days: number, perBucket: readonly number[], startDay = 1): Traff
   return samples;
 }
 
+// The same shape at an HOURLY cadence: a reading every hour, with each bucket's
+// traffic spread evenly over the six hours it covers. Eight times the readings of
+// `series` for the same wall-clock time, which is exactly what must not change the
+// evidence bar.
+function hourly(days: number, perBucket: readonly number[], startDay = 1): TrafficSample[] {
+  const samples: TrafficSample[] = [];
+  let ops = 0;
+  for (let day = 0; day < days; day++) {
+    for (let hour = 0; hour < 24; hour++) {
+      const date = new Date(Date.UTC(2026, 6, startDay + day, hour, 0, 0));
+      samples.push({ capturedAt: date.toISOString(), ops });
+      ops += (perBucket[Math.floor(hour / 6)] ?? 0) / 6;
+    }
+  }
+  return samples;
+}
+
+// A run-length reading: the same counter seen at every collect from `from` to
+// `to`, six hours apart.
+function quietRun(from: Date, to: Date, ops: number): TrafficSample {
+  const observations = Math.round((to.getTime() - from.getTime()) / (6 * 3_600_000)) + 1;
+  return {
+    capturedAt: from.toISOString(),
+    lastSeenAt: to.toISOString(),
+    observations,
+    ops,
+  };
+}
+
 describe("inferChangeWindow", () => {
   it("names the quietest six hours", () => {
     // Busy in the working day, near-idle overnight.
-    const inferred = inferChangeWindow(series(5, [50, 800, 1000, 600]));
+    const inferred = inferChangeWindow([series(5, [50, 800, 1000, 600])]);
     expect(inferred?.startHour).toBe(0);
     expect(inferred?.endHour).toBe(6);
     expect(inferred?.reason).toContain("00:00–06:00 UTC");
@@ -57,18 +86,51 @@ describe("inferChangeWindow", () => {
   });
 
   it("finds a quiet bucket that is not midnight", () => {
-    const inferred = inferChangeWindow(series(5, [900, 1000, 40, 800]));
+    const inferred = inferChangeWindow([series(5, [900, 1000, 40, 800])]);
     expect(inferred?.startHour).toBe(12);
     expect(inferred?.endHour).toBe(18);
   });
 
+  // The floor is watched HOURS, not a count of readings, so it has to mean the same
+  // thing at any cadence. It was a count of 3, which was three days only while a
+  // collect happened every 6h and each bucket saw one interval a day; at an hourly
+  // cadence the same 3 would have been cleared in twelve hours, and the engine would
+  // have applied elective index changes at what it wrongly believed was the quiet
+  // hour, off half a day of traffic.
+  //
+  // Asserted as an equivalence rather than against a hardcoded number of days: the
+  // property is that sampling the same wall-clock time more often buys no evidence,
+  // and pinning the exact boundary would only pin this fixture's tail bucket, which
+  // gets one interval fewer because the series has to end somewhere.
+  it("buys no evidence by sampling the same days more often", () => {
+    const shape = [50, 800, 1000, 600];
+    for (const days of [1, 2, 3, 4, 5]) {
+      const atSixHourly = inferChangeWindow([series(days, shape)]);
+      const atHourly = inferChangeWindow([hourly(days, shape)]);
+      // Eight times the readings over the same days, and the same verdict.
+      expect(atHourly === null, `${days} day(s): hourly should match 6h`).toBe(
+        atSixHourly === null,
+      );
+      if (atSixHourly !== null && atHourly !== null) {
+        expect(atHourly.startHour).toBe(atSixHourly.startHour);
+        expect(atHourly.endHour).toBe(atSixHourly.endHour);
+      }
+    }
+  });
+
+  it("refuses a single day however finely it was sampled", () => {
+    // The concrete regression: 24 readings in one day used to clear a floor meant
+    // to stand for three.
+    expect(inferChangeWindow([hourly(1, [50, 800, 1000, 600])])).toBeNull();
+  });
+
   it("stays silent on a flat day rather than inventing a window", () => {
-    expect(inferChangeWindow(series(5, [500, 520, 480, 510]))).toBeNull();
+    expect(inferChangeWindow([series(5, [500, 520, 480, 510])])).toBeNull();
   });
 
   it("stays silent until every bucket has enough observations", () => {
     // Two days is below the three-per-bucket floor.
-    expect(inferChangeWindow(series(2, [50, 800, 1000, 600]))).toBeNull();
+    expect(inferChangeWindow([series(2, [50, 800, 1000, 600])])).toBeNull();
   });
 
   it("ignores a restarted counter instead of reading it as quiet", () => {
@@ -77,7 +139,7 @@ describe("inferChangeWindow", () => {
     const reset = samples.map((sample, i) =>
       i > 8 ? { ...sample, ops: sample.ops - 9000 } : sample,
     );
-    const inferred = inferChangeWindow(reset);
+    const inferred = inferChangeWindow([reset]);
     expect(inferred?.startHour).toBe(0);
   });
 
@@ -89,13 +151,72 @@ describe("inferChangeWindow", () => {
       ...sample,
       ops: sample.ops + 500_000,
     }));
-    const inferred = inferChangeWindow([...before, ...after]);
+    const inferred = inferChangeWindow([[...before, ...after]]);
     expect(inferred?.startHour).toBe(0);
     expect(inferred?.endHour).toBe(6);
   });
 
   it("returns null for an empty or single-sample series", () => {
     expect(inferChangeWindow([])).toBeNull();
-    expect(inferChangeWindow([{ capturedAt: "2026-07-01T00:00:00Z", ops: 10 }])).toBeNull();
+    expect(inferChangeWindow([[]])).toBeNull();
+    expect(inferChangeWindow([[{ capturedAt: "2026-07-01T00:00:00Z", ops: 10 }]])).toBeNull();
+  });
+
+  it("sums the rates of two namespaces rather than reading their run boundaries as outages", () => {
+    // One collection reports every collect; the other is quiet overnight, so its
+    // 00:00–06:00 reading is a single run instead of two rows. Summing by
+    // timestamp would have found the second collection missing at 06:00 and read
+    // a cluster-wide plunge; per-namespace rates do not care.
+    const chatty = series(5, [50, 800, 1000, 600]);
+    const patchy = series(5, [0, 400, 500, 300]).filter(
+      (sample) => new Date(sample.capturedAt).getUTCHours() !== 0,
+    );
+    const inferred = inferChangeWindow([chatty, patchy]);
+    expect(inferred?.startHour).toBe(0);
+    expect(inferred?.endHour).toBe(6);
+  });
+
+  // The reader this change is most likely to break, so it gets the direct test.
+  // A run-length row spanning several buckets has to credit every bucket it
+  // covers: crediting only the one it began in leaves the others without their
+  // three observations, and a cluster with the clearest window imaginable comes
+  // back "not enough history".
+  it("credits every bucket a quiet run covers, not just the one it started in", () => {
+    // Busy 06:00–00:00, dead 00:00–06:00 for five nights. Each night is ONE row.
+    const samples: TrafficSample[] = [];
+    let ops = 0;
+    for (let day = 0; day < 5; day++) {
+      // The overnight run: two collects, same counter, spanning 00:00 to 06:00.
+      samples.push(
+        quietRun(
+          new Date(Date.UTC(2026, 6, 1 + day, 0, 0, 0)),
+          new Date(Date.UTC(2026, 6, 1 + day, 6, 0, 0)),
+          ops,
+        ),
+      );
+      for (const [bucket, traffic] of [800, 1000, 600].entries()) {
+        ops += traffic;
+        samples.push({
+          capturedAt: new Date(Date.UTC(2026, 6, 1 + day, 12 + bucket * 6, 0, 0)).toISOString(),
+          ops,
+        });
+      }
+    }
+    const inferred = inferChangeWindow([samples]);
+    expect(inferred?.startHour).toBe(0);
+    expect(inferred?.endHour).toBe(6);
+  });
+
+  it("does not let a long quiet run pass for traffic in the bucket it began in", () => {
+    // A whole flat week as one row per collect-worth of nothing. There is no
+    // traffic anywhere, so there is no quietest slot to name.
+    const flat = [
+      quietRun(
+        new Date(Date.UTC(2026, 6, 1, 0, 0, 0)),
+        new Date(Date.UTC(2026, 6, 8, 0, 0, 0)),
+        1000,
+      ),
+    ];
+    expect(inferChangeWindow([flat])).toBeNull();
   });
 });

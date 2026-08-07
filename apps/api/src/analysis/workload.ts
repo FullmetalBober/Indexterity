@@ -39,6 +39,11 @@ export interface QueryShape {
   // profiler, and by `$queryStats` from mongo 8.0 (earlier stores carry
   // execution counts only).
   readonly docsExamined?: number;
+  // How long this shape has been watchable, in hours — the denominator that
+  // turns `count` into a rate. $queryStats reports when it first saw each shape;
+  // the profiler's capped ring reports how far back it still holds entries.
+  // Absent when the source cannot say, which is not the same as zero.
+  readonly observedForHours?: number;
   // Who issued this shape. $queryStats groups by client as well as by shape,
   // so a query run from a shell and the same query from an app arrive as
   // separate entries; merged shapes accumulate every client seen. The profiler
@@ -47,6 +52,32 @@ export interface QueryShape {
   readonly constants?: Readonly<Record<string, ConstantValue>>;
   // $lookup joins anywhere in the pipeline (indexed on the FOREIGN collection).
   readonly lookups?: readonly LookupJoin[];
+}
+
+const HOURS_PER_WEEK = 168;
+
+// How often this shape runs, per week.
+//
+// An unmeasurable window is not a rate of zero. Where the source cannot say how
+// long it watched, the count is all there is and the count stands in for the
+// rate — the same judgement made everywhere else a window is missing, rather
+// than a silent refusal to ever act.
+export function executionsPerWeek(shape: QueryShape): number {
+  const hours = shape.observedForHours;
+  if (hours === undefined || hours <= 0) return shape.count;
+  return shape.count / (hours / HOURS_PER_WEEK);
+}
+
+// Does this shape recur often enough to act on?
+//
+// Both tests have to pass, and they catch different mistakes. The count floor
+// rejects the query someone ran twice by hand; the rate rejects the one that
+// ran five times in two months and would otherwise look identical to it.
+export function isRecurring(shape: QueryShape, options: WorkloadOptions): boolean {
+  if (shape.count < options.minCount) return false;
+  const hours = shape.observedForHours;
+  if (hours === undefined || hours <= 0) return true;
+  return executionsPerWeek(shape) >= options.minPerWeek;
 }
 
 // The ESR key: Equality fields first, then Sort, then Range — the order that
@@ -85,7 +116,16 @@ export interface CreateCandidate {
 }
 
 export interface WorkloadOptions {
+  // Absolute floor. Two sightings are a coincidence whatever the window.
   readonly minCount: number;
+  // And a rate, because the floor alone means different things on the two
+  // sources. `$queryStats` accumulates for the life of the store — often
+  // months — so three executions there is a handful of runs and nothing more.
+  // The profiler is a capped ring that a busy collection fills in minutes, so
+  // three executions there can be three a minute. One number, two windows
+  // differing by orders of magnitude, and no way to tell them apart from the
+  // count alone.
+  readonly minPerWeek: number;
 }
 
 function fieldsOf(index: IndexSpec): string[] {
@@ -175,7 +215,7 @@ export function sortOrderAdvisories(
   const out: SortOrderAdvisory[] = [];
   const seen = new Set<string>();
   for (const shape of shapes) {
-    if (shape.sortedInMemory !== true || shape.count < options.minCount) continue;
+    if (shape.sortedInMemory !== true || !isRecurring(shape, options)) continue;
     if (shape.sort.length === 0) continue;
     if (!isWorthIndexing(shape.clients ?? [])) continue;
     const wantedKeys = esrKeys(shape);
@@ -186,7 +226,7 @@ export function sortOrderAdvisories(
         !isNeverDrop(idx) && equalFields(fieldsOf(idx), wanted) && !servesOrder(idx, wantedKeys),
     );
     if (blocker === undefined) continue;
-    const key = `${blocker.name} ${wantedKeys.map((k) => `${k.field}:${k.direction}`).join(",")}`;
+    const key = `${blocker.name}\u0000${wantedKeys.map((k) => `${k.field}:${k.direction}`).join(",")}`;
     if (seen.has(key)) continue;
     seen.add(key);
     out.push({ existingIndex: blocker.name, wantedKeys, count: shape.count });
@@ -225,7 +265,7 @@ export function recommendCreates(
   const wants: Want[] = [];
   for (const shape of shapes) {
     const sorting = shape.sortedInMemory === true;
-    if ((!shape.collscan && !sorting) || shape.count < options.minCount) continue;
+    if ((!shape.collscan && !sorting) || !isRecurring(shape, options)) continue;
     // Someone exploring at a prompt is not a workload. The index would be
     // maintained on every write for years, for queries nobody runs again.
     if (!isWorthIndexing(shape.clients ?? [])) continue;
@@ -436,7 +476,7 @@ export function recommendNarrowing(
   // JUSTIFY narrowing, but it can still PREVENT it. A nightly report run
   // through mongosh is a person at a prompt by every signal available and a
   // real recurring query all the same.
-  const recurring = shapes.filter((shape) => shape.count >= options.minCount);
+  const recurring = shapes.filter((shape) => isRecurring(shape, options));
   const worth = recurring.filter((shape) => isWorthIndexing(shape.clients ?? []));
   // No evidence, no narrowing. An empty workload makes every index look
   // over-wide, which is the most expensive possible way to be wrong.

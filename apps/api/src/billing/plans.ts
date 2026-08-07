@@ -22,6 +22,11 @@ export interface Entitlements {
   readonly maxClusters: number;
   // People in the org. Generous — charging per seat on a tool one DBA operates
   // punishes exactly the teams who would share the audit trail.
+  //
+  // Counted as members PLUS outstanding invites, which is why the plugin's own
+  // `membershipLimit` is left unset: it counts members only, so an org could
+  // invite past its plan and spend the seat on whoever clicked the link. One
+  // limit with one name — see TenancyService.requireRoomFor.
   readonly maxMembers: number;
   // The create side (workloadAnalysis) — proposing new indexes from the query
   // workload. Free: knowing what to do is the part that makes the tool worth
@@ -80,6 +85,40 @@ const ENTITLEMENTS: Record<Plan, Entitlements> = {
   },
 };
 
+// RETENTION_DAYS is the operator's ceiling, not the plan's number. Storage is the
+// operator's bill, so they can cap it; a plan may keep less than the cap but never
+// more. Unset means the plan decides on its own.
+export function operatorCeilingDays(): number {
+  const envDays = Number(process.env.RETENTION_DAYS);
+  return Number.isFinite(envDays) && envDays > 0 ? envDays : Number.POSITIVE_INFINITY;
+}
+
+// How much history a plan may SEE. Applied at every read of the time-series
+// tables (jobs/plan.ts → historyWindow), because history depth is the thing a
+// paid plan buys: a longer series is what lets the engine call an index unused at
+// all, so it has to be enforced rather than advertised.
+export function effectiveRetentionDays(plan: Plan): number {
+  return Math.min(entitlementsFor(plan).retentionDays, operatorCeilingDays());
+}
+
+// How long rows are actually KEPT, for every org on the deployment.
+//
+// One number, not one per plan, and that is the point. Physical deletion used to
+// run a different cutoff per plan, which meant deleting individual rows scattered
+// through the table; visibility is a read filter now, so the only thing deletion
+// has to guarantee is that nobody can be entitled to a row that is gone. The
+// longest any plan may see satisfies that for all of them at once, and it lets a
+// deployment prune by dropping whole time ranges instead of hunting rows.
+//
+// It also means an upgrade returns the customer's history immediately, rather
+// than their having to wait out the new window to accumulate it — the rows were
+// there all along, merely out of view. Cheap because of run-length storage: an
+// idle index is one row whether it is kept for ninety days or a year.
+export function maxRetentionDays(): number {
+  const longest = Math.max(...PLANS.map((plan) => entitlementsFor(plan).retentionDays));
+  return Math.min(longest, operatorCeilingDays());
+}
+
 export function entitlementsFor(plan: Plan): Entitlements {
   return ENTITLEMENTS[plan];
 }
@@ -103,14 +142,23 @@ function describe(limit: number): string {
   return Number.isFinite(limit) ? String(limit) : "unlimited";
 }
 
+// The meters a plan caps. Both are per ORG — how many organizations a person
+// holds is not one of them, deliberately: a plan is bought per org, so capping
+// how many you may make would be capping how much you may buy.
+export type Meter = "clusters" | "members";
+
+const METERS: Record<Meter, (entitlements: Entitlements) => number> = {
+  clusters: (entitlements) => entitlements.maxClusters,
+  members: (entitlements) => entitlements.maxMembers,
+};
+
+export function limitFor(plan: Plan, what: Meter): number {
+  return METERS[what](entitlementsFor(plan));
+}
+
 // Adding one more of something the plan caps. `current` is what already exists.
-export function withinLimit(
-  plan: Plan,
-  what: "clusters" | "members",
-  current: number,
-): LimitVerdict {
-  const limit =
-    what === "clusters" ? entitlementsFor(plan).maxClusters : entitlementsFor(plan).maxMembers;
+export function withinLimit(plan: Plan, what: Meter, current: number): LimitVerdict {
+  const limit = limitFor(plan, what);
   if (current < limit) return ALLOWED;
   return {
     allowed: false,

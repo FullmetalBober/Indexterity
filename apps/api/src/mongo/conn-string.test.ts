@@ -59,3 +59,69 @@ describe("directConnectionTo", () => {
     expect(out).not.toContain("readPreference");
   });
 });
+
+// Rewriting `mongodb+srv://` to `mongodb://` silently discards the two things an
+// SRV string keeps outside its own text: tls (defaulted true by the scheme) and
+// authSource (published in a DNS TXT record). Every per-member connection to an
+// Atlas cluster therefore failed — at the handshake, then at auth — and the catch
+// in members.ts hid it. Measured against a requireTLS + --auth mongod: as-built
+// refused, +tls said "Authentication failed", +tls +authSource connected.
+describe("directConnectionTo carrying resolved SRV options", () => {
+  const ATLAS = "mongodb+srv://idx_ab12:pw@msb-db.hwrel.mongodb.net/msb-app?retryWrites=true";
+  const MEMBER = "msb-db-shard-00-02.hwrel.mongodb.net:27017";
+  const RESOLVED = { tls: true, authSource: "admin" };
+
+  it("carries tls and authSource onto the plain string", () => {
+    const out = directConnectionTo(ATLAS, MEMBER, RESOLVED);
+    expect(out.startsWith("mongodb://")).toBe(true);
+    expect(out).toContain("tls=true");
+    expect(out).toContain("authSource=admin");
+    // Everything the old conversion already got right stays right.
+    expect(out).toContain(MEMBER);
+    expect(out).toContain("directConnection=true");
+    expect(out).toContain("idx_ab12:pw@");
+    expect(out).toContain("retryWrites=true");
+  });
+
+  // The bug, stated as the absence it was: no third argument, no tls, no auth.
+  it("is unchanged when nothing resolved is offered", () => {
+    const out = directConnectionTo(ATLAS, MEMBER);
+    expect(out).not.toContain("tls=");
+    expect(out).not.toContain("authSource=");
+  });
+
+  // The string is the customer's statement and the resolution agrees with it, so
+  // there is nothing to add — and overwriting would be us disagreeing with them.
+  it("does not overrule an explicit tls, ssl or authSource", () => {
+    expect(directConnectionTo(`${ATLAS}&tls=false`, MEMBER, RESOLVED)).toContain("tls=false");
+    // `ssl` is the driver's alias for `tls`; setting tls beside it would leave
+    // the string self-contradictory.
+    const ssl = directConnectionTo(`${ATLAS}&ssl=false`, MEMBER, RESOLVED);
+    expect(ssl).toContain("ssl=false");
+    expect(ssl).not.toContain("tls=");
+    expect(directConnectionTo(`${ATLAS}&authSource=other`, MEMBER, RESOLVED)).toContain(
+      "authSource=other",
+    );
+  });
+
+  it("adds no authSource for a cluster that takes no credentials", () => {
+    const out = directConnectionTo("mongodb+srv://msb-db.hwrel.mongodb.net/msb-app", MEMBER, {
+      tls: true,
+      authSource: null,
+    });
+    expect(out).toContain("tls=true");
+    expect(out).not.toContain("authSource");
+  });
+
+  // A plain string never lost anything: its options are in its own text, and the
+  // conversion copies them across. Adding defaults there would change behaviour
+  // for the clusters that were already working.
+  it("leaves a non-SRV string alone", () => {
+    const out = directConnectionTo("mongodb://u:p@a:27017,b:27017/db?replicaSet=rs0", "b:27017", {
+      tls: true,
+      authSource: "admin",
+    });
+    expect(out).not.toContain("tls=");
+    expect(out).not.toContain("authSource=");
+  });
+});

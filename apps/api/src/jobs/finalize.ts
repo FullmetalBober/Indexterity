@@ -1,6 +1,8 @@
 import { evaluateRegression, inChangeWindow } from "../analysis";
 import { actions, and, eq, inArray, policies, recommendations, roiMetrics } from "../db";
+import { emitClusterEvent } from "../events/emit";
 import { notifyClusterOwners } from "../mail/notify";
+import { recordDrop, recordRegressionVerdict } from "../metrics";
 import { serializeSpec } from "../mongo";
 import { effectiveChangeWindow } from "./change-window";
 import { openClusterSession } from "./cluster-connection";
@@ -85,6 +87,7 @@ export async function finalizeCluster(clusterId: string): Promise<number> {
       const { writes } = await collector.collectionLatency(rec.database, rec.collection);
       const baseline = { ops: rec.baselineWriteOps, latencyMicros: rec.baselineWriteLatency };
       const verdict = evaluateRegression(baseline, writes, REGRESSION_OPTIONS);
+      recordRegressionVerdict("post_build", verdict);
       // The server restarted mid-watch: the baseline is meaningless now. Start
       // the watch again rather than graduating an index nobody ever checked.
       if (verdict === "UNOBSERVABLE") {
@@ -113,6 +116,7 @@ export async function finalizeCluster(clusterId: string): Promise<number> {
           .set({ baselineWriteOps: null, baselineWriteLatency: null, updatedAt: new Date() })
           .where(eq(recommendations.id, rec.id));
         await retireSuperseded(db, clusterId, rec);
+        await emitClusterEvent(db, { clusterId, kind: "BUILD_GRADUATED", task: null });
         continue;
       }
       if (verdict !== "REGRESSED") continue;
@@ -145,6 +149,7 @@ export async function finalizeCluster(clusterId: string): Promise<number> {
         `rolled back ${rec.indexName}`,
         `The index ${rec.indexName} on ${rec.database}.${rec.collection} slowed writes after being built, so it was dropped automatically. It is cooling down until ${day}.`,
       );
+      await emitClusterEvent(db, { clusterId, kind: "REGRESSION_FIRED", task: null });
     }
     for (const rec of due) {
       // Regression gate: did hiding this index slow the collection's reads
@@ -153,6 +158,7 @@ export async function finalizeCluster(clusterId: string): Promise<number> {
         const current = await collector.readLatency(rec.database, rec.collection);
         const baseline = { ops: rec.baselineReadOps, latencyMicros: rec.baselineReadLatency };
         const verdict = evaluateRegression(baseline, current, REGRESSION_OPTIONS);
+        recordRegressionVerdict("observe", verdict);
         // Counters reset (the server restarted, typically while we could not
         // reach it): the window we thought we observed never happened. Put the
         // index back and re-propose — the drop is the one irreversible step, so
@@ -211,6 +217,7 @@ export async function finalizeCluster(clusterId: string): Promise<number> {
             `kept ${rec.indexName} (regression)`,
             `Hiding ${rec.indexName} on ${rec.database}.${rec.collection} slowed reads during the observe window, so the drop was aborted and the index un-hidden. It is cooling down until ${day}.`,
           );
+          await emitClusterEvent(db, { clusterId, kind: "REGRESSION_FIRED", task: null });
           continue;
         }
       }
@@ -221,6 +228,7 @@ export async function finalizeCluster(clusterId: string): Promise<number> {
       if (!check.safe) {
         if (check.spec !== null) {
           await executor.unhide(rec.database, rec.collection, rec.indexName);
+          recordDrop("unhidden");
           await db
             .update(recommendations)
             .set({ state: "PROPOSED", hiddenAt: null, updatedAt: new Date() })
@@ -232,6 +240,7 @@ export async function finalizeCluster(clusterId: string): Promise<number> {
             result: `aborted + un-hidden: ${check.reason}`,
           });
         } else {
+          recordDrop("absent");
           await db
             .update(recommendations)
             .set({ state: "DROPPED", updatedAt: new Date() })
@@ -246,6 +255,9 @@ export async function finalizeCluster(clusterId: string): Promise<number> {
         continue;
       }
       await executor.drop(rec.database, rec.collection, rec.indexName);
+      // After the executor, not before: this counter is the audit of what
+      // actually happened on the cluster, so a drop that threw must not be in it.
+      recordDrop("dropped");
       await db
         .update(recommendations)
         .set({ state: "DROPPED", updatedAt: new Date() })

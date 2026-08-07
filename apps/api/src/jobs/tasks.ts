@@ -1,6 +1,9 @@
 import type { JobHelpers } from "graphile-worker";
 import { isUnreachableError } from "../errors/unreachable";
+import { emitPassFinished } from "../events/emit";
 import { ALERT_COOLDOWN_MS, alertAllowed, notifyClusterOwners } from "../mail/notify";
+import { recordClusterTask } from "../metrics";
+import { InsecureConnectionError } from "../mongo/client";
 import { UnsupportedServerError } from "../mongo/executor";
 import { applyCluster } from "./apply";
 import { refreshInferredWindow } from "./change-window";
@@ -17,12 +20,13 @@ import { probeCluster } from "./probe";
 import { pruneOldSamples } from "./retention";
 import { suggestForCluster } from "./suggest";
 
-// What a cluster task needs from the outside world, narrowed to two functions
-// so the decision below is testable without a queue or a database. Structurally
-// satisfied by graphile-worker's own logger.
+// What a cluster task needs from the outside world, narrowed to three
+// functions so the decision below is testable without a queue or a database.
+// The logger is structurally satisfied by graphile-worker's own.
 export interface ClusterTaskDeps {
   readonly logger: { warn(message: string): void; error(message: string): void };
   readonly alertOwners: (clusterId: string, subject: string, body: string) => Promise<void>;
+  readonly emitPassFinished: (clusterId: string, task: string) => Promise<void>;
 }
 
 // A customer cluster can be unreachable for days — maintenance, a rotated
@@ -41,26 +45,63 @@ export async function runClusterTask(
 ): Promise<void> {
   try {
     await run(clusterId);
+    recordClusterTask(task, clusterId, "ok");
+    // Only the ok outcome: a skipped tick changed nothing, so there is nothing
+    // for a dashboard to refetch. Best-effort by construction (emit.ts) — a
+    // lost nudge must not turn a landed pass into a retried one.
+    await deps.emitPassFinished(clusterId, task);
   } catch (error) {
     // Offboarded between scheduling and running. Nothing to do and nobody to
     // tell — the owners deleted it on purpose.
-    if (error instanceof ClusterGoneError) return;
+    if (error instanceof ClusterGoneError) {
+      recordClusterTask(task, clusterId, "gone");
+      return;
+    }
     // The server is too old for the pipeline. No retry can fix a version, so
     // tell the owners once a day and stop — same shape as an unreachable
     // cluster, for the same reason.
     if (error instanceof UnsupportedServerError) {
+      recordClusterTask(task, clusterId, "unsupported");
       deps.logger.warn(`${task}: cluster ${clusterId} — ${error.message}`);
       if (!alertAllowed(`${clusterId}:unsupported`, ALERT_COOLDOWN_MS)) return;
       await deps.alertOwners(clusterId, "cluster version not supported", error.message);
       return;
     }
+    // The stored string would not connect over validated TLS. Same shape as an
+    // unsupported version and for the same reason: no retry fixes it, only the
+    // owner reconnecting with a TLS string can. Emphatically NOT folded into
+    // "unreachable" — the cluster may be perfectly healthy and we are declining
+    // to dial it, and saying "we could not reach you" would send the owner
+    // hunting a firewall that is not the problem.
+    if (error instanceof InsecureConnectionError) {
+      recordClusterTask(task, clusterId, "insecure");
+      deps.logger.warn(`${task}: cluster ${clusterId} — ${error.message}`);
+      if (!alertAllowed(`${clusterId}:insecure`, ALERT_COOLDOWN_MS)) return;
+      await deps.alertOwners(
+        clusterId,
+        `${task} skipped — this cluster's connection string is not using TLS`,
+        `Indexterity now requires TLS on every connection it makes to a customer database, ` +
+          `and this cluster's stored string would connect in plaintext. The ${task} step did ` +
+          `nothing.\n\n${error.message}\n\nReconnect the cluster with a string that enables ` +
+          `TLS and the pipeline resumes on the next tick. Nothing was executed and nothing ` +
+          `was lost.`,
+      );
+      return;
+    }
     // Undecryptable credentials need an operator, not a retry and not a
     // customer email — log it every tick so it stays visible, and move on.
     if (error instanceof ClusterCredentialsError) {
+      recordClusterTask(task, clusterId, "credentials");
       deps.logger.error(`${task}: ${error.message}`);
       return;
     }
-    if (!isUnreachableError(error)) throw error;
+    if (!isUnreachableError(error)) {
+      // Rethrown, so graphile-worker retries and eventually dead-letters it —
+      // counted here too, because this is where the kind is known.
+      recordClusterTask(task, clusterId, "error");
+      throw error;
+    }
+    recordClusterTask(task, clusterId, "unreachable");
     deps.logger.warn(
       `${task}: cluster ${clusterId} unreachable — skipped, retrying on the next tick`,
     );
@@ -87,6 +128,7 @@ function depsFor(helpers: JobHelpers): ClusterTaskDeps {
         helpers.logger.error(`alert for cluster ${clusterId} failed: ${String(error)}`);
       }
     },
+    emitPassFinished: (clusterId, task) => emitPassFinished(jobDb(), clusterId, task),
   };
 }
 

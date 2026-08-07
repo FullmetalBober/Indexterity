@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { resetAlertCooldowns } from "../mail/notify";
+import { InsecureConnectionError } from "../mongo/client";
 import { UnsupportedServerError } from "../mongo/executor";
 import { ClusterCredentialsError, ClusterGoneError } from "./cluster-connection";
 import { type ClusterTaskDeps, runClusterTask } from "./tasks";
@@ -11,14 +12,17 @@ function recorder(): {
   warns: string[];
   errors: string[];
   alerts: string[];
+  emitted: string[];
 } {
   const warns: string[] = [];
   const errors: string[] = [];
   const alerts: string[] = [];
+  const emitted: string[] = [];
   return {
     warns,
     errors,
     alerts,
+    emitted,
     deps: {
       logger: {
         warn: (message) => void warns.push(message),
@@ -26,6 +30,10 @@ function recorder(): {
       },
       alertOwners: (clusterId, subject) => {
         alerts.push(`${clusterId}:${subject}`);
+        return Promise.resolve();
+      },
+      emitPassFinished: (clusterId, task) => {
+        emitted.push(`${clusterId}:${task}`);
         return Promise.resolve();
       },
     },
@@ -63,6 +71,17 @@ describe("runClusterTask", () => {
     expect(ran).toBe(CLUSTER);
     expect(log.warns).toHaveLength(0);
     expect(log.alerts).toHaveLength(0);
+    // The landed pass is announced, so the dashboard can refetch what it wrote.
+    expect(log.emitted).toEqual([`${CLUSTER}:collect`]);
+  });
+
+  it("announces nothing for a tick that changed nothing", async () => {
+    const log = recorder();
+    await runClusterTask("collect", CLUSTER, log.deps, () => Promise.reject(unreachable()));
+    await runClusterTask("collect", CLUSTER, log.deps, () => {
+      throw new ClusterGoneError(CLUSTER);
+    });
+    expect(log.emitted).toHaveLength(0);
   });
 
   it("swallows an unreachable cluster and alerts the owners once", async () => {
@@ -119,5 +138,42 @@ describe("runClusterTask", () => {
     }
     expect(log.warns).toHaveLength(3);
     expect(log.alerts).toEqual([`${CLUSTER}:cluster version not supported`]);
+  });
+});
+
+// A stored string that predates TLS enforcement, or one connected while the
+// deployment allowed plaintext. No retry fixes it — only the owner reconnecting
+// — so it takes the shape of an unsupported version rather than of a failure.
+describe("runClusterTask on a cluster we refuse to dial", () => {
+  beforeEach(() => {
+    resetAlertCooldowns();
+  });
+
+  it("skips the tick, warns every time, and mails the owners once", async () => {
+    const log = recorder();
+    const insecure = new InsecureConnectionError("refusing to connect without validated TLS");
+    for (let i = 0; i < 3; i++) {
+      await expect(
+        runClusterTask("collect", CLUSTER, log.deps, () => Promise.reject(insecure)),
+      ).resolves.toBeUndefined();
+    }
+    expect(log.warns).toHaveLength(3);
+    expect(log.alerts).toEqual([
+      `${CLUSTER}:collect skipped — this cluster's connection string is not using TLS`,
+    ]);
+    // Nothing landed, so nothing for the dashboard to refetch.
+    expect(log.emitted).toHaveLength(0);
+  });
+
+  // The distinction that matters to whoever reads the email: the cluster may be
+  // perfectly healthy and we are declining to dial it. "We could not reach you"
+  // would send them hunting a firewall that is not the problem.
+  it("is not reported as unreachable", async () => {
+    const log = recorder();
+    await runClusterTask("collect", CLUSTER, log.deps, () =>
+      Promise.reject(new InsecureConnectionError("refusing to connect without validated TLS")),
+    );
+    expect(log.alerts.join()).not.toContain("unreachable");
+    expect(log.warns.join()).not.toContain("unreachable");
   });
 });

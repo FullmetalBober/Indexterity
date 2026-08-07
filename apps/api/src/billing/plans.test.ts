@@ -4,9 +4,11 @@ import {
   allowsWorkloadAnalysis,
   DEFAULT_PLAN,
   defaultOrgPlan,
+  effectiveRetentionDays,
   entitledAutomation,
   entitlementsFor,
   isPlan,
+  maxRetentionDays,
   PLANS,
   type Plan,
   planFrom,
@@ -181,7 +183,44 @@ describe("defaultOrgPlan", () => {
 // is what makes "this index is only used at quarter end" provable rather than
 // a guess.
 describe("retention", () => {
+  const previous = process.env.RETENTION_DAYS;
+  afterEach(() => {
+    if (previous === undefined) delete process.env.RETENTION_DAYS;
+    else process.env.RETENTION_DAYS = previous;
+  });
+
   it("gives PRO half a year", () => {
     expect(entitlementsFor("PRO").retentionDays).toBe(183);
+  });
+
+  // Two questions with different answers now: how much a plan may SEE, and how
+  // long rows are actually KEPT. Deletion runs one cutoff for the whole
+  // deployment so it can sweep a contiguous range; the plan's own window is
+  // applied on every read instead (jobs/plan.ts).
+  it("keeps rows for the longest window any plan could claim", () => {
+    delete process.env.RETENTION_DAYS;
+    const longest = Math.max(...PLANS.map((plan) => entitlementsFor(plan).retentionDays));
+    expect(maxRetentionDays()).toBe(longest);
+    // And nobody can be entitled to a row that has been deleted — the whole
+    // safety property of splitting the two.
+    for (const plan of PLANS) {
+      expect(effectiveRetentionDays(plan)).toBeLessThanOrEqual(maxRetentionDays());
+    }
+  });
+
+  it("lets the operator's ceiling cap both halves", () => {
+    // Storage is the operator's bill, so RETENTION_DAYS caps what is kept AND
+    // what any plan may see. A ceiling that capped only visibility would keep
+    // paying for rows nobody may read.
+    process.env.RETENTION_DAYS = "30";
+    expect(maxRetentionDays()).toBe(30);
+    expect(effectiveRetentionDays("SCALE")).toBe(30);
+    expect(effectiveRetentionDays("FREE")).toBe(30);
+  });
+
+  it("ignores a ceiling above the plans, rather than extending them", () => {
+    process.env.RETENTION_DAYS = "10000";
+    expect(maxRetentionDays()).toBe(365);
+    expect(effectiveRetentionDays("FREE")).toBe(90);
   });
 });

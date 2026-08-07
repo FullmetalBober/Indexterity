@@ -1,17 +1,23 @@
-import { oc } from "@orpc/contract";
+import { eventIterator, oc } from "@orpc/contract";
 import { z } from "zod";
+import {
+  checkConnectionInput,
+  createClusterInput,
+  policyKnobsInput,
+  provisionClusterInput,
+  rotateConnectionInput,
+} from "./inputs.js";
 import {
   auditAction,
   cluster,
   clusterCollections,
-  clusterEngine,
+  clusterEvent,
   clusterLatency,
   clusterLatencySeries,
-  clusterPolicy,
   clusterPolicyView,
   clusterRoi,
   connectionDiagnosis,
-  createdInvite,
+  myInvite,
   offboardResult,
   orgInfo,
   orgSummary,
@@ -84,6 +90,23 @@ export const contract = {
     .input(clusterId)
     .output(z.array(auditAction)),
 
+  // GET on purpose, twice over: an event stream reads and changes nothing, and
+  // SSE is what OpenAPILink speaks for an eventIterator over GET — the browser
+  // subscribes with the session cookie it already holds, no relay in between
+  // (decisions D31). NOT_FOUND rather than an empty stream for a cluster the
+  // caller does not own: an empty stream never ends, and a reader hanging on a
+  // cluster that will never speak is worse than being told it is not theirs.
+  listClusterEvents: oc
+    .route({
+      method: "GET",
+      path: "/clusters/{clusterId}/events",
+      summary:
+        "Live cluster events (SSE): a worker pass landed, a drop went hidden, a build graduated, a regression fired",
+    })
+    .errors({ NOT_FOUND: {} })
+    .input(clusterId)
+    .output(eventIterator(clusterEvent)),
+
   createCluster: oc
     .route({
       method: "POST",
@@ -91,14 +114,7 @@ export const contract = {
       summary: "Connect a cluster; stores its connection string envelope-encrypted",
     })
     .errors({ BAD_REQUEST: {} })
-    .input(
-      z.object({
-        name: z.string().min(1),
-        connectionString: z.string().min(1),
-        // Defaults to MONGODB — the only engine with an adapter today.
-        engine: clusterEngine.optional(),
-      }),
-    )
+    .input(createClusterInput)
     .output(cluster),
 
   checkConnection: oc
@@ -109,7 +125,7 @@ export const contract = {
         "Report what a connection string may do (owner only) — nothing is stored or written; the onboarding preflight",
     })
     .errors({ BAD_REQUEST: {} })
-    .input(z.object({ connectionString: z.string().min(1), engine: clusterEngine.optional() }))
+    .input(checkConnectionInput)
     .output(connectionDiagnosis),
 
   provisionCluster: oc
@@ -120,7 +136,7 @@ export const contract = {
         "Connect with an admin string used ONCE: creates a least-privilege user on the cluster and stores only that user's string",
     })
     .errors({ BAD_REQUEST: {} })
-    .input(z.object({ name: z.string().min(1), adminConnectionString: z.string().min(1) }))
+    .input(provisionClusterInput)
     .output(provisionedCluster),
 
   deleteCluster: oc
@@ -142,7 +158,7 @@ export const contract = {
         "Replace the cluster's connection string (owner only) — verified against the cluster before it is stored, so history survives credential rotation",
     })
     .errors({ NOT_FOUND: {}, BAD_REQUEST: {} })
-    .input(clusterId.extend({ connectionString: z.string().min(1) }))
+    .input(clusterId.extend(rotateConnectionInput.shape))
     .output(cluster),
 
   setClusterMode: oc
@@ -172,7 +188,7 @@ export const contract = {
       summary: "Replace the cluster's engine knobs (owner only)",
     })
     .errors({ NOT_FOUND: {} })
-    .input(clusterId.extend(clusterPolicy.omit({ clusterId: true }).shape))
+    .input(clusterId.extend(policyKnobsInput.shape))
     .output(clusterPolicyView),
 
   triggerCollect: oc
@@ -217,48 +233,24 @@ export const contract = {
     .input(z.object({ id: z.uuid() }))
     .output(recommendation),
 
+  // The two org reads the dashboard needs and better-auth's organization plugin
+  // does not answer.
+  //
+  // Everything that CHANGES an org — create, rename, delete, invite, accept,
+  // role, remove, leave, switch — moved onto the plugin's own endpoints under
+  // /api/auth/organization/*, and the seven routes that used to be here went
+  // with it. These two stayed because neither is about membership: one carries
+  // the plan and what it has left, which is ours and not a plugin concept, and
+  // the other carries the caller's role per org, which `organization.list` does
+  // not return.
   getOrg: oc
     .route({
       method: "GET",
       path: "/org",
-      summary: "The caller's active org: members and pending invites",
+      summary:
+        "The caller's active org: plan, usage, members, pending invites — null when they are in none",
     })
-    .output(orgInfo),
-
-  renameOrg: oc
-    .route({ method: "PATCH", path: "/org", summary: "Rename the active org (owner only)" })
-    .input(z.object({ name: z.string().min(1).max(120) }))
-    .output(z.object({ id: z.uuid(), name: z.string() })),
-
-  setMemberRole: oc
-    .route({
-      method: "PATCH",
-      path: "/org/members/{userId}",
-      summary: "Change a member's role (owner only); the last owner cannot be demoted",
-    })
-    .errors({ NOT_FOUND: {}, CONFLICT: {} })
-    .input(z.object({ userId: z.string().min(1), role: z.enum(["member", "owner"]) }))
-    .output(z.object({ userId: z.string(), role: z.string() })),
-
-  removeMember: oc
-    .route({
-      method: "DELETE",
-      path: "/org/members/{userId}",
-      summary: "Remove a member from the active org (owner only; use leave for yourself)",
-    })
-    .errors({ NOT_FOUND: {}, CONFLICT: {} })
-    .input(z.object({ userId: z.string().min(1) }))
-    .output(z.object({ removed: z.boolean() })),
-
-  leaveOrg: oc
-    .route({
-      method: "POST",
-      path: "/org/leave",
-      summary: "Leave the active org; the last owner must transfer ownership first",
-    })
-    .errors({ CONFLICT: {} })
-    .input(z.object({}))
-    .output(z.object({ left: z.boolean() })),
+    .output(orgInfo.nullable()),
 
   listOrgs: oc
     .route({
@@ -268,28 +260,23 @@ export const contract = {
     })
     .output(z.array(orgSummary)),
 
-  switchOrg: oc
+  // Answered outside any org on purpose: someone in no organization at all is
+  // exactly who needs to see they have been invited to one.
+  //
+  // The plugin has `list-user-invitations`, and it returns everything this does
+  // including the org's name. It is not used because it refuses outright unless
+  // `user.emailVerified` — unconditionally, not gated on the plugin's own
+  // `requireEmailVerificationOnInvitation`, which we set from the deployment's
+  // posture. On an install that does not require verification (dev, the e2e
+  // suite, a self-hosted instance behind SSO) every reader would get a 403 on
+  // page load for a list that is not a secret: the invitations are addressed to
+  // them, and accepting one still goes through the plugin, where that
+  // verification rule belongs and is applied.
+  listMyInvites: oc
     .route({
-      method: "POST",
-      path: "/orgs/switch",
-      summary: "Make another of the caller's orgs the active one",
+      method: "GET",
+      path: "/invites",
+      summary: "Pending invitations addressed to the caller, from any org",
     })
-    .errors({ NOT_FOUND: {} })
-    .input(z.object({ orgId: z.uuid() }))
-    .output(orgSummary),
-
-  createInvite: oc
-    .route({
-      method: "POST",
-      path: "/org/invites",
-      summary: "Invite someone into the org; returns the one-time token",
-    })
-    .input(z.object({ email: z.email(), role: z.enum(["member", "owner"]) }))
-    .output(createdInvite),
-
-  acceptInvite: oc
-    .route({ method: "POST", path: "/invites/accept", summary: "Join an org with an invite token" })
-    .errors({ NOT_FOUND: {}, CONFLICT: {} })
-    .input(z.object({ token: z.string().min(1) }))
-    .output(z.object({ orgId: z.uuid(), orgName: z.string() })),
+    .output(z.array(myInvite)),
 };

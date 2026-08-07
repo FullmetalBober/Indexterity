@@ -8,8 +8,8 @@ import { REQUEST_ACCESS_HREF } from "../lib/site";
 const TITLE = "Indexterity — automatic MongoDB index management";
 // Kept under ~155 characters so search results show it whole.
 const DESCRIPTION =
-  "Find unused, redundant and missing MongoDB indexes, then apply changes through a " +
-  "hide → observe → drop pipeline you can always undo. Read-only by default.";
+  "Find unused, redundant and missing MongoDB indexes and apply the changes through a " +
+  "reversible pipeline that observes before it drops. Read-only by default.";
 
 const PIPELINE = ["PROPOSED", "APPROVED", "hidden", "observed", "dropped"];
 
@@ -57,7 +57,7 @@ const FEATURES = [
   },
   {
     title: "A safety pipeline, not a script",
-    body: "Drops go hide → observe → regression gate → pre-flight → drop. Anything that slows reads is un-hidden, remembered, and cooled down. Undo rebuilds a dropped index from its recorded spec.",
+    body: "A drop is hidden first, observed, then put through a regression gate and a pre-flight before it happens. Anything that slows reads is un-hidden, remembered, and cooled down. Undo rebuilds a dropped index from its recorded spec.",
   },
   {
     title: "Confidence scores",
@@ -65,7 +65,7 @@ const FEATURES = [
   },
   {
     title: "Workload-aware index creation",
-    body: "Recurring query shapes from $queryStats or the profiler become Equality → Sort → Range compounds with correct sort directions, partial indexes for constant filters, and TTL advisories for manual age-based cleanups. Queries that sort in memory count too, not just collection scans.",
+    body: "Recurring query shapes from $queryStats or the profiler become compound indexes in Equality, Sort, Range order with correct sort directions, partial indexes for constant filters, and TTL advisories for manual age-based cleanups. Queries that sort in memory count too, not just collection scans.",
   },
   {
     title: "Proof, not promises",
@@ -137,7 +137,7 @@ const FAQ = [
   {
     question: "Can it create missing indexes, not just drop unused ones?",
     answer:
-      "Yes. Recurring collection scans become index recommendations in Equality → Sort → Range order with correct sort directions, folded together when one index can serve several shapes. So do queries that find their documents through an index and then sort them in memory — invisible to any scan test, and the failure mode that ends in an error rather than slowness. A shape must recur before it counts, so a heavy query someone runs once by hand never leaves an index behind.",
+      "Yes. Recurring collection scans become index recommendations in Equality, Sort, Range order with correct sort directions, folded together when one index can serve several shapes. So do queries that find their documents through an index and then sort them in memory — invisible to any scan test, and the failure mode that ends in an error rather than slowness. A shape must recur before it counts, so a heavy query someone runs once by hand never leaves an index behind.",
   },
 ];
 
@@ -161,8 +161,8 @@ function Landing() {
           </h1>
           <p className="mx-auto mt-6 max-w-2xl text-lg text-muted-foreground">
             Indexterity watches index usage, proposes drops and creates with confidence scores, and
-            applies them through a hide → observe → drop pipeline that can always back out.
-            Read-only until you say otherwise.
+            applies them through a pipeline that hides, observes, then drops, and can always back
+            out. Read-only until you say otherwise.
           </p>
           <div className="mt-8 flex items-center justify-center gap-3">
             <Button asChild size="lg">

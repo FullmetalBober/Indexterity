@@ -1,4 +1,11 @@
-import type { EngineAdapter, EngineSession, IndexCollector, IndexExecutor } from "../engine/ports";
+import type {
+  EngineAdapter,
+  EngineSession,
+  IndexCollector,
+  IndexExecutor,
+  TlsOverrides,
+} from "../engine/ports";
+import { applyTlsOverrides, assertTlsEnforced } from "./client";
 import { MongoIndexCollector } from "./collector";
 import { isMongoConnString, mongoHosts } from "./conn-string";
 import { MongoConnection } from "./connection";
@@ -15,10 +22,14 @@ class MongoEngineSession implements EngineSession {
   constructor(
     private readonly conn: MongoConnection,
     connString: string,
+    overrides?: TlsOverrides,
   ) {
     // Opened lazily on the first usage collection and held for the session's
     // life, so a 3-member set costs 3 connections rather than 3 per collect.
-    this.members = new MemberConnections(conn, connString);
+    // The members inherit the cluster's own consent: they are the same cluster,
+    // reached one node at a time, and a certificate the owner accepted for it is
+    // accepted for its members too.
+    this.members = new MemberConnections(conn, connString, overrides);
     this.collector = new MongoIndexCollector(conn, this.members);
   }
 
@@ -41,16 +52,18 @@ class MongoEngineSession implements EngineSession {
   }
 }
 
-// The reference EngineAdapter (docs/architecture.md §"Engine ports").
+// The reference EngineAdapter (the wiki's Architecture page, Engine ports).
 export const mongoAdapter: EngineAdapter = {
   engine: "MONGODB",
   capabilities: { hideIndexes: true, provisionScopedUsers: true },
   isConnString: isMongoConnString,
   hostsOf: mongoHosts,
-  open: async (connectionString: string): Promise<EngineSession> => {
-    const conn = new MongoConnection(connectionString);
+  assertSecureTransport: assertTlsEnforced,
+  applySecureTransport: applyTlsOverrides,
+  open: async (connectionString: string, overrides?: TlsOverrides): Promise<EngineSession> => {
+    const conn = new MongoConnection(connectionString, overrides);
     await conn.connect();
-    return new MongoEngineSession(conn, connectionString);
+    return new MongoEngineSession(conn, connectionString, overrides);
   },
   diagnose: diagnoseConnection,
 };

@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import {
   bigint,
   boolean,
@@ -10,6 +11,7 @@ import {
   text,
   timestamp,
   unique,
+  uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
 
@@ -17,6 +19,15 @@ import {
 const bytea = customType<{ data: Buffer; driverData: Buffer }>({
   dataType() {
     return "bytea";
+  },
+});
+
+// The closed interval a run-length row covers, derived from its two endpoints so
+// it cannot disagree with them. Exists only to be the range side of an exclusion
+// constraint — nothing selects it, and readers keep using captured_at/last_seen_at.
+const tstzrange = customType<{ data: string; driverData: string }>({
+  dataType() {
+    return "tstzrange";
   },
 });
 
@@ -80,36 +91,62 @@ export const user = pgTable("user", {
   updatedAt,
 });
 
-export const session = pgTable("session", {
-  id: text("id").primaryKey(),
-  token: text("token").notNull().unique(),
-  userId: text("user_id")
-    .notNull()
-    .references(() => user.id, { onDelete: "cascade" }),
-  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
-  ipAddress: text("ip_address"),
-  userAgent: text("user_agent"),
-  createdAt,
-  updatedAt,
-});
+export const session = pgTable(
+  "session",
+  {
+    id: text("id").primaryKey(),
+    token: text("token").notNull().unique(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    ipAddress: text("ip_address"),
+    userAgent: text("user_agent"),
+    // Which org this session is looking at — the organization plugin's own
+    // switcher state, and per SESSION rather than per user, so two browsers can
+    // sit in two different orgs. It replaced a `members.is_active` flag, which
+    // could not.
+    //
+    // SET NULL rather than cascade: deleting an org must not sign its members
+    // out of the app, only out of that org. A null here falls back to the
+    // caller's oldest membership (auth/tenancy.ts).
+    activeOrganizationId: uuid("active_organization_id").references(() => organizations.id, {
+      onDelete: "set null",
+    }),
+    createdAt,
+    updatedAt,
+  },
+  // Deleting a user cascades here, and deleting an org nulls the active pointer
+  // — both would otherwise scan every session row, and this is the table that
+  // grows with every sign-in.
+  (table) => [
+    index("session_user").on(table.userId),
+    index("session_active_org").on(table.activeOrganizationId),
+  ],
+);
 
-export const account = pgTable("account", {
-  id: text("id").primaryKey(),
-  accountId: text("account_id").notNull(),
-  providerId: text("provider_id").notNull(),
-  userId: text("user_id")
-    .notNull()
-    .references(() => user.id, { onDelete: "cascade" }),
-  accessToken: text("access_token"),
-  refreshToken: text("refresh_token"),
-  idToken: text("id_token"),
-  accessTokenExpiresAt: timestamp("access_token_expires_at", { withTimezone: true }),
-  refreshTokenExpiresAt: timestamp("refresh_token_expires_at", { withTimezone: true }),
-  scope: text("scope"),
-  password: text("password"),
-  createdAt,
-  updatedAt,
-});
+export const account = pgTable(
+  "account",
+  {
+    id: text("id").primaryKey(),
+    accountId: text("account_id").notNull(),
+    providerId: text("provider_id").notNull(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    accessToken: text("access_token"),
+    refreshToken: text("refresh_token"),
+    idToken: text("id_token"),
+    accessTokenExpiresAt: timestamp("access_token_expires_at", { withTimezone: true }),
+    refreshTokenExpiresAt: timestamp("refresh_token_expires_at", { withTimezone: true }),
+    scope: text("scope"),
+    password: text("password"),
+    createdAt,
+    updatedAt,
+  },
+  // Cascades on user deletion.
+  (table) => [index("account_user").on(table.userId)],
+);
 
 export const verification = pgTable("verification", {
   id: text("id").primaryKey(),
@@ -121,9 +158,27 @@ export const verification = pgTable("verification", {
 });
 
 // --- tenancy -------------------------------------------------------------
+//
+// Owned by better-auth's organization plugin (auth/auth.config.ts maps its
+// `organization`/`member`/`invitation` models onto these three tables and their
+// existing column names). Ids stay `uuid` — the plugin is handed a
+// `crypto.randomUUID()` generator instead of its own — because three tables
+// carry a cascading `org_id` and the contracts type it `z.uuid()`; retyping that
+// key is the migration the billing comment below warns about.
+//
+// The plan columns are declared to the plugin as `additionalFields` with
+// `input: false`, so they are readable through it and settable by nobody but us.
 export const organizations = pgTable("organizations", {
   id: uuid("id").defaultRandom().primaryKey(),
   name: text("name").notNull(),
+  // Required and unique by the plugin, which resolves orgs by slug as well as
+  // by id. Derived from the name at creation, deduplicated with a suffix.
+  slug: text("slug").notNull().unique(),
+  logo: text("logo"),
+  // better-auth serialises organization metadata to a JSON *string*, not jsonb.
+  // Nothing of ours reads it — the plan lives in real columns below, because it
+  // is read on nearly every request and wants an index-able one.
+  metadata: text("metadata"),
   // What this org is entitled to — the rules live in billing/plans.ts, this is
   // only which set applies. Text rather than an enum so adding a plan is a
   // constant, not a migration; unrecognised values fall back to FREE.
@@ -142,65 +197,128 @@ export const organizations = pgTable("organizations", {
   createdAt,
 });
 
-export const members = pgTable("members", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  orgId: uuid("org_id")
-    .notNull()
-    .references(() => organizations.id, { onDelete: "cascade" }),
-  userId: text("user_id")
-    .notNull()
-    .references(() => user.id, { onDelete: "cascade" }),
-  role: text("role").notNull().default("member"),
-  // The org switcher's selection. At most one true per user; when none is set
-  // the oldest membership is the active one (the pre-switcher behavior).
-  isActive: boolean("is_active").notNull().default(false),
-  createdAt,
-});
+export const members = pgTable(
+  "members",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    role: text("role").notNull().default("member"),
+    createdAt,
+  },
+  // The tenancy check, which runs on every authenticated request. Queried three
+  // ways — by user, by org, and by both — so the composite leads with user and
+  // the org gets its own: the same equality-ordering rule the engine applies to
+  // everyone else's indexes. Both also back a cascading foreign key.
+  (table) => [
+    index("members_user_org").on(table.userId, table.orgId),
+    index("members_org").on(table.orgId),
+  ],
+);
 
-// Pending invitations into an org. The token is the bearer credential (returned
-// once at creation); accepting adds the caller as a member and stamps acceptedAt.
-export const invites = pgTable("invites", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  orgId: uuid("org_id")
-    .notNull()
-    .references(() => organizations.id, { onDelete: "cascade" }),
-  email: text("email").notNull(),
-  role: text("role").notNull().default("member"),
-  token: text("token").notNull().unique(),
-  invitedBy: text("invited_by")
-    .notNull()
-    .references(() => user.id, { onDelete: "cascade" }),
-  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
-  acceptedAt: timestamp("accepted_at", { withTimezone: true }),
-  createdAt,
-});
+// Pending invitations into an org, the plugin's `invitation` model.
+//
+// The credential changed with it: this used to hold a bearer token returned once
+// from createInvite and pasted back by whoever received the email, which meant
+// anyone holding the string could join. The invitation id is not a secret now —
+// accepting requires being signed in as the invited address.
+export const invites = pgTable(
+  "invites",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    email: text("email").notNull(),
+    role: text("role").notNull().default("member"),
+    // pending | accepted | rejected | canceled. The plugin's lifecycle, and the
+    // reason `accepted_at` went away: three of those four states are not a date.
+    status: text("status").notNull().default("pending"),
+    invitedBy: text("invited_by")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt,
+  },
+  // Listing an org's invites, two cascading foreign keys, and — since the
+  // credential became the address rather than a token — listing the invitations
+  // sent to one person, which every signed-in reader now asks on page load.
+  (table) => [
+    index("invites_org").on(table.orgId),
+    index("invites_invited_by").on(table.invitedBy),
+    index("invites_email").on(table.email),
+  ],
+);
 
 // --- managed clusters ----------------------------------------------------
-export const clusters = pgTable("clusters", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  orgId: uuid("org_id")
-    .notNull()
-    .references(() => organizations.id, { onDelete: "cascade" }),
-  name: text("name").notNull(),
-  connectionMode: connectionMode("connection_mode").notNull().default("HOSTED_DIRECT"),
-  // Which adapter dials this cluster (src/engine/registry.ts). Only MONGODB is
-  // implemented today; the column makes the data model engine-ready.
-  engine: clusterEngine("engine").notNull().default("MONGODB"),
-  readOnly: boolean("read_only").notNull().default(true),
-  // The control plane holds the cluster's connection string, envelope-encrypted.
-  // keyVersion selects the master key that sealed it (MASTER_KEY, MASTER_KEY_V2,
-  // …) so the KEK can rotate without re-sealing everything at once.
-  sealedDek: bytea("sealed_dek").notNull(),
-  sealedData: bytea("sealed_data").notNull(),
-  keyVersion: integer("key_version").notNull().default(1),
-  // The least-privilege user Indexterity created on the cluster during
-  // admin-string onboarding; null when the customer pasted a ready-made string.
-  provisionedUsername: text("provisioned_username"),
-  createdAt,
-});
+export const clusters = pgTable(
+  "clusters",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    connectionMode: connectionMode("connection_mode").notNull().default("HOSTED_DIRECT"),
+    // Which adapter dials this cluster (src/engine/registry.ts). Only MONGODB is
+    // implemented today; the column makes the data model engine-ready.
+    engine: clusterEngine("engine").notNull().default("MONGODB"),
+    readOnly: boolean("read_only").notNull().default(true),
+    // The control plane holds the cluster's connection string, envelope-encrypted.
+    // keyVersion selects the master key that sealed it (MASTER_KEY, MASTER_KEY_V2,
+    // …) so the KEK can rotate without re-sealing everything at once.
+    sealedDek: bytea("sealed_dek").notNull(),
+    sealedData: bytea("sealed_data").notNull(),
+    keyVersion: integer("key_version").notNull().default(1),
+    // The least-privilege user Indexterity created on the cluster during
+    // admin-string onboarding; null when the customer pasted a ready-made string.
+    provisionedUsername: text("provisioned_username"),
+    // Which TLS checks the owner turned off when connecting, as checkboxes on the
+    // connect form. Held HERE and not inferred from the sealed string, for two
+    // reasons: every dial is then verified against a recorded decision rather
+    // than against whatever the string happens to say, and the dashboard can
+    // show a concession that would otherwise be invisible once made.
+    //
+    // jsonb with a default, so the column is additive and every existing row
+    // reads as "nothing turned off" — which is what they all are, since until
+    // now the options were refused outright.
+    tlsOverrides: jsonb("tls_overrides")
+      .$type<{
+        allowInvalidCertificates: boolean;
+        allowInvalidHostnames: boolean;
+        insecure: boolean;
+      }>()
+      .notNull()
+      .default({ allowInvalidCertificates: false, allowInvalidHostnames: false, insecure: false }),
+    createdAt,
+  },
+  // Every cluster list is scoped to an org, and deleting an org cascades here.
+  (table) => [index("clusters_org").on(table.orgId)],
+);
 
-export const indexSnapshots = pgTable(
-  "index_snapshots",
+// One index, and the shape it had. The dimension half of the snapshot series:
+// everything about an index that does NOT change between collects lives here
+// once, and the time series carries only the measurement.
+//
+// `spec` was 66% of an index_snapshots row and 2.4x the size of the counter it
+// accompanied, rewritten on every collect for the life of the cluster — 1,460
+// copies a year per index at the 6h cadence, of a value that changes only when
+// somebody rebuilds the index. So does the identity: a (database, collection,
+// index_name) triple is a constant of the index, not an observation of it.
+//
+// Keyed by spec DIGEST, not by identity alone, so a rebuild adds a row rather
+// than overwriting one. Overwriting would be cheaper and would break nothing
+// today — every reader only wants the newest spec — but it would silently
+// re-label the history: a snapshot from before the rebuild would come back
+// joined to the shape the index has now. A dimension row that can lie about the
+// past is worse than the bytes it saves, and rebuilds are rare enough that the
+// extra rows do not register (7 of 211 on the dev database).
+export const clusterIndexes = pgTable(
+  "cluster_indexes",
   {
     id: uuid("id").defaultRandom().primaryKey(),
     clusterId: uuid("cluster_id")
@@ -210,9 +328,90 @@ export const indexSnapshots = pgTable(
     collection: text("collection").notNull(),
     indexName: text("index_name").notNull(),
     spec: jsonb("spec").$type<Record<string, unknown>>().notNull(),
+    // The upsert's conflict target, because the spec itself makes a poor index
+    // key: jsonb compares fine but a fat partialFilterExpression can push a
+    // btree tuple past its size limit, and the failure would land on a collect.
+    //
+    // Generated rather than computed by the writer, which is what makes it
+    // trustworthy. Postgres stores jsonb with its keys sorted, so `spec::text`
+    // is already canonical and two equal specs hash equal however mongo happened
+    // to order the fields. A digest the application computed instead would have
+    // to reproduce that canonical form exactly — every whitespace and number
+    // formatting rule — and the day it drifted the writer would quietly start
+    // inserting a second dimension row for an index that never changed.
+    //
+    // sha256, not md5, and not for secrecy — nobody is attacking this. A collision
+    // here silently MERGES two different index shapes into one dimension row, so
+    // every snapshot of one would be reported under the other's spec and the
+    // redundancy engine would reason about an index that does not exist. Odds are
+    // negligible either way; the difference is that md5's failure is reachable by
+    // construction and silent when it lands, which is the wrong trade against 32
+    // extra bytes on a table holding a few hundred rows.
+    specDigest: text("spec_digest")
+      .notNull()
+      .generatedAlwaysAs(sql`encode(sha256(spec::text::bytea), 'hex')`),
+    createdAt,
+  },
+  (table) => [
+    uniqueIndex("cluster_indexes_identity").on(
+      table.clusterId,
+      table.database,
+      table.collection,
+      table.indexName,
+      table.specDigest,
+    ),
+    // Every read of the series joins through here, always scoped to a cluster,
+    // and offboarding cascades.
+    index("cluster_indexes_cluster").on(table.clusterId),
+  ],
+);
+
+// One row per distinct COUNTER STATE, not one per collect.
+//
+// An idle index reports byte-identical counters collect after collect, so the
+// old shape spent a row on every look to record that nothing had happened.
+// Instead a row covers the closed interval [capturedAt, lastSeenAt]: the state
+// was first seen at the former and still true at the latter, confirmed
+// `observations` times in between. Storage is then a function of how much the
+// cluster CHANGES rather than of how often we look, which is what makes
+// collecting more often affordable.
+//
+// Skipping the write entirely would have been simpler and wrong. The usage
+// trust gate reads a hole in the series as "we stopped watching, so absence of
+// usage proves nothing" — an idle index with no rows would be
+// indistinguishable from a cluster we lost, and "cannot tell" would get spelled
+// "all clear". `lastSeenAt` is the positive form of the same statement: we
+// looked at T, and it was still this.
+//
+// The invariant that keeps the gap detection honest: a run never spans a hole
+// longer than the classifier's own tolerance (see MAX_GAP_HOURS). An
+// observation further from `lastSeenAt` than that starts a new row even when
+// the counters match, so a hole the classifier would refuse to reason across
+// can never be papered over by extending a run.
+export const indexSnapshots = pgTable(
+  "index_snapshots",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    // Denormalised from cluster_indexes on purpose: it is the equality filter
+    // of every query against this table and the key retention prunes by, and a
+    // join to find it would make both of those a great deal more expensive.
+    clusterId: uuid("cluster_id")
+      .notNull()
+      .references(() => clusters.id, { onDelete: "cascade" }),
+    indexId: uuid("index_id")
+      .notNull()
+      .references(() => clusterIndexes.id, { onDelete: "cascade" }),
+    // As of `lastSeenAt`, not `capturedAt`. Size is not part of what makes a run
+    // — an unused index on a write-heavy collection grows on every insert, and
+    // keying runs on size would collapse nothing in exactly the case worth
+    // collapsing — so it rides along at its newest value. Nothing reads the size
+    // series; every caller wants the current number.
     sizeBytes: bigint("size_bytes", { mode: "number" }).notNull(),
     // `since` is the member's $indexStats counter start — the restart marker.
     // jsonb, so adding it needed no DDL; older rows simply omit the key.
+    //
+    // This is the run's identity: two collects belong to the same row when this
+    // value is byte-identical.
     perMember: jsonb("per_member")
       .$type<Array<{ member: string; ops: number; since?: string }>>()
       .notNull(),
@@ -220,10 +419,72 @@ export const indexSnapshots = pgTable(
     // cannot be hidden — mongod rejects the hint — so the observe stage would
     // break those queries instead of slowing them, and the latency gate would
     // see nothing.
+    //
+    // Sticky within a run: one sighting anywhere in the retained history
+    // protects the index, so extending a run ORs the new reading in rather than
+    // replacing it. A sighting must not be erasable by the next quiet collect.
     hinted: boolean("hinted").notNull().default(false),
     capturedAt: timestamp("captured_at", { withTimezone: true }).notNull().defaultNow(),
+    // When this state was last confirmed still true. Equal to capturedAt for a
+    // run of one.
+    //
+    // Deliberately WITHOUT a default. defaultNow() reads as the obvious choice
+    // and is a trap: a caller that sets only capturedAt then writes a row
+    // claiming a months-old reading was confirmed this instant, which is the one
+    // field the usage trust gate consults to decide whether we were watching. No
+    // default makes every insert say what it means, and the compiler finds the
+    // ones that do not.
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull(),
+    // How many collects saw this exact counter state. The row count stopped
+    // being the sample count the moment runs existed, and several thresholds
+    // are counts of samples (minHistory, the score's history credit) — they read
+    // this instead.
+    observations: integer("observations").notNull().default(1),
+    // The largest interval between two consecutive observations INSIDE this run,
+    // in ms. Zero for a run of one, which has no interior.
+    //
+    // Exists so the trust gate can VERIFY there was no hole rather than trust that
+    // there wasn't. A run asserts the counter held throughout its span, and the
+    // readers only inspect the holes BETWEEN runs — which is sound exactly as long
+    // as the collector refuses to extend across a gap the gate would object to.
+    // That made a safety property depend on a constant shared between two modules
+    // agreeing forever, with nothing in the data to check it against. One number,
+    // maintained on extend as greatest(previous, now - last_seen_at), turns it into
+    // something the reader can test for itself.
+    //
+    // bigint rather than integer on purpose: int4 tops out at about 24 days of ms,
+    // and the whole point here is to stop relying on the writer's ceiling holding —
+    // a check that silently overflows when the thing it guards against happens is
+    // not a check.
+    maxGapMs: bigint("max_gap_ms", { mode: "number" }).notNull().default(0),
+    // The interval the two columns above describe, as a range, so the database can
+    // enforce the thing they imply: two runs for one index must never overlap.
+    //
+    // Generated, so it cannot drift from its endpoints, and paired with an
+    // EXCLUDE ... USING gist constraint added in the migration (drizzle has no
+    // builder for exclusion constraints). Inclusive bounds on purpose — with '[)'
+    // a run of one would be an EMPTY range, and an empty range overlaps nothing, so
+    // the majority of rows on a busy cluster would go unprotected.
+    //
+    // Overlap is not hypothetical. Two collects racing, or a clock stepping
+    // backwards, can produce a row whose capturedAt precedes the previous run's
+    // end, and the readers difference `previous.lastSeenAt → next.capturedAt` to
+    // find the holes — an overlap there is a NEGATIVE gap, which reads as no gap
+    // at all. Better a loud insert failure than a series that quietly certifies a
+    // window nobody watched.
+    span: tstzrange("span")
+      .notNull()
+      .generatedAlwaysAs(sql`tstzrange(captured_at, last_seen_at, '[]')`),
   },
-  (table) => [index("index_snapshots_cluster_time").on(table.clusterId, table.capturedAt)],
+  (table) => [
+    // Retention prunes by when a run ENDED: a run that started before the cutoff
+    // and is still being extended is the current state of a live index, and
+    // deleting it would erase the only evidence that we are watching.
+    index("index_snapshots_cluster_time").on(table.clusterId, table.lastSeenAt),
+    // The writer's newest-run-per-index lookup, and the per-index history read
+    // behind the observe window.
+    index("index_snapshots_index_time").on(table.indexId, table.capturedAt.desc()),
+  ],
 );
 
 export const recommendations = pgTable(
@@ -287,27 +548,41 @@ export const actions = pgTable(
   (table) => [index("actions_recommendation").on(table.recommendationId)],
 );
 
-export const roiMetrics = pgTable("roi_metrics", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  clusterId: uuid("cluster_id")
-    .notNull()
-    .references(() => clusters.id, { onDelete: "cascade" }),
-  // Which recommendation earned (or, negative on undo, un-earned) this row —
-  // the dashboard's per-index attribution. Null on legacy aggregate rows.
+export const roiMetrics = pgTable(
+  "roi_metrics",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    clusterId: uuid("cluster_id")
+      .notNull()
+      .references(() => clusters.id, { onDelete: "cascade" }),
+    // Which recommendation earned (or, negative on undo, un-earned) this row —
+    // the dashboard's per-index attribution. Null on legacy aggregate rows.
+    //
+    // SET NULL, not cascade: retention prunes finished recommendations once they
+    // pass the plan's history window, and the money this product saved must not
+    // leave with them. The headline sums every row and has always tolerated a
+    // null here; only the per-index attribution list needs the link, and that is
+    // a recent-activity view by nature.
+    recommendationId: uuid("recommendation_id").references(() => recommendations.id, {
+      onDelete: "set null",
+    }),
+    freedBytes: bigint("freed_bytes", { mode: "number" }).notNull().default(0),
+    indexCountDelta: integer("index_count_delta").notNull().default(0),
+    periodStart: timestamp("period_start", { withTimezone: true }).notNull(),
+    periodEnd: timestamp("period_end", { withTimezone: true }).notNull(),
+  },
+  // The recommendation index is the expensive omission. Retention deletes
+  // settled recommendations in bulk, and every one of them made postgres scan
+  // this whole table to satisfy the SET NULL — 8.4 seconds to remove ten
+  // thousand rows, of which five milliseconds was finding them.
   //
-  // SET NULL, not cascade: retention prunes finished recommendations once they
-  // pass the plan's history window, and the money this product saved must not
-  // leave with them. The headline sums every row and has always tolerated a
-  // null here; only the per-index attribution list needs the link, and that is
-  // a recent-activity view by nature.
-  recommendationId: uuid("recommendation_id").references(() => recommendations.id, {
-    onDelete: "set null",
-  }),
-  freedBytes: bigint("freed_bytes", { mode: "number" }).notNull().default(0),
-  indexCountDelta: integer("index_count_delta").notNull().default(0),
-  periodStart: timestamp("period_start", { withTimezone: true }).notNull(),
-  periodEnd: timestamp("period_end", { withTimezone: true }).notNull(),
-});
+  // The cluster index serves the ROI headline, which sums every row for a
+  // cluster, and the cascade when a cluster is offboarded.
+  (table) => [
+    index("roi_metrics_recommendation").on(table.recommendationId),
+    index("roi_metrics_cluster").on(table.clusterId),
+  ],
+);
 
 export const policies = pgTable("policies", {
   id: uuid("id").defaultRandom().primaryKey(),
@@ -378,6 +653,11 @@ export const indexCooldowns = pgTable(
 
 // Per-collection read/write latency sampled each collect — a time series that
 // shows the app getting faster (or a build/drop regressing it).
+//
+// Run-length like index_snapshots, and for the same reason: an idle collection
+// reports the same four cumulative counters every time. There is no dimension
+// half to split out here, because every column IS a measurement — the namespace
+// stays on the row.
 export const latencySamples = pgTable(
   "latency_samples",
   {
@@ -392,6 +672,32 @@ export const latencySamples = pgTable(
     writeOps: bigint("write_ops", { mode: "number" }).notNull(),
     writeLatencyMicros: bigint("write_latency_micros", { mode: "number" }).notNull(),
     capturedAt: timestamp("captured_at", { withTimezone: true }).notNull().defaultNow(),
+    // See index_snapshots, including why this has no default.
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull(),
+    observations: integer("observations").notNull().default(1),
+    // See index_snapshots.
+    maxGapMs: bigint("max_gap_ms", { mode: "number" }).notNull().default(0),
+    // Same guard, keyed by namespace instead of index_id. See index_snapshots.
+    span: tstzrange("span")
+      .notNull()
+      .generatedAlwaysAs(sql`tstzrange(captured_at, last_seen_at, '[]')`),
   },
-  (table) => [index("latency_samples_cluster_time").on(table.clusterId, table.capturedAt)],
+  (table) => [
+    // By run end, for the same reason as index_snapshots.
+    index("latency_samples_cluster_time").on(table.clusterId, table.lastSeenAt),
+    // The five-minute probe wants the newest sample per namespace, which is a
+    // `distinct on (database, collection) order by … captured_at desc`. Without
+    // this the planner sorts every row the cluster has ever written, on every
+    // probe. Leading with cluster_id because that is always the equality filter.
+    //
+    // Still captured_at, not last_seen_at: runs for one namespace are appended
+    // in time order and never overlap, so the newest run START is the newest run,
+    // and its counters are the current ones however long it has been extended.
+    index("latency_samples_cluster_ns_time").on(
+      table.clusterId,
+      table.database,
+      table.collection,
+      table.capturedAt.desc(),
+    ),
+  ],
 );

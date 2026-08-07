@@ -1,0 +1,240 @@
+{{- if .Values.metrics.prometheusRule.enabled }}
+{{- if not .Values.metrics.enabled }}
+{{- fail "metrics.prometheusRule.enabled is set but metrics.enabled is false — the metrics these rules query are not being served" -}}
+{{- end }}
+{{/*
+Alerts for what is otherwise silent. Nothing here duplicates a log line: a task
+that stops running logs nothing, because nothing runs.
+
+Two things in here are not obvious and are the reason this ships with the chart
+rather than being left to whoever deploys it:
+
+  - increase() CANNOT SEE A DEAD PROCESS. When the worker is gone its series go
+    stale, so `increase(indexterity_job_runs_total[30m]) == 0` matches nothing and
+    the obvious alert is silent in the worst case. The absent_over_time() alerts
+    below are what fire, and they key on gauges only the relevant process reports.
+  - THE DISPATCHERS ARE THE SCHEDULE, not the per-cluster tasks. scheduleCollect
+    ticks on cron whether or not a cluster exists; collect does not. Alerting on
+    the latter fires the moment the last cluster is offboarded.
+
+No expression references a `job` or `pod` label, so these hold however the
+workloads are scraped — including RUN_WORKER=true, where one process reports both
+the api's and the worker's halves.
+*/}}
+{{- $t := .Values.metrics.prometheusRule.thresholds }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "indexterity.fullname" . }}
+  labels:
+    {{- include "indexterity.labels" . | nindent 4 }}
+    {{- with .Values.metrics.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    # Is the engine running at all?
+    - name: indexterity.schedule
+      rules:
+        {{/*
+        One rule per cron entry in jobs/runner.ts. The window is the interval plus
+        room for one missed tick, so a single slow pass does not page anyone.
+        */}}
+        {{- range $task := list
+          (dict "task" "scheduleCollect" "window" "8h"  "every" "6 hours")
+          (dict "task" "scheduleSuggest" "window" "3h"  "every" "hour")
+          (dict "task" "scheduleApply"   "window" "30m" "every" "5 minutes")
+          (dict "task" "scheduleProbe"   "window" "30m" "every" "5 minutes")
+          (dict "task" "scheduleFinalize" "window" "3h" "every" "hour")
+          (dict "task" "retention"       "window" "30h" "every" "day")
+        }}
+        - alert: Indexterity{{ $task.task | title }}Stalled
+          expr: increase(indexterity_job_runs_total{task="{{ $task.task }}",outcome="success"}[{{ $task.window }}]) == 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $task.task }} has not succeeded in {{ $task.window }}"
+            description: >-
+              {{ $task.task }} runs every {{ $task.every }} and has not completed
+              successfully within {{ $task.window }}. Check the worker's logs and
+              indexterity_jobs{state="dead_letter"}. This alert cannot fire if the
+              worker is gone entirely — IndexterityWorkerNotReporting covers that.
+        {{- end }}
+
+        # The hole the alerts above cannot cover: a process that stopped reporting
+        # takes its series with it, so nothing is left to be zero.
+        - alert: IndexterityWorkerNotReporting
+          expr: absent_over_time(indexterity_clusters_unreachable[10m])
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "no workload is reporting the job pipeline"
+            description: >-
+              indexterity_clusters_unreachable is only ever reported by the process
+              that runs the pipeline, so its absence means no worker is being
+              scraped: the deployment is down, or worker.enabled and RUN_WORKER are
+              both off. Nothing is being collected, applied or finalized.
+
+        - alert: IndexterityApiNotReporting
+          expr: absent_over_time(indexterity_jobs_oldest_queued_age_seconds[10m])
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "the api is not reporting control-plane state"
+            description: >-
+              No api replica is being scraped. The dashboard is down with it, since
+              every read goes through the api.
+
+    # Is work piling up?
+    - name: indexterity.queue
+      rules:
+        - alert: IndexterityQueueStalled
+          expr: indexterity_jobs_oldest_queued_age_seconds > {{ $t.queueAgeSeconds }}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "a job has been waiting {{ $t.queueAgeSeconds }}s for a worker"
+            description: >-
+              Jobs are queued and nothing is claiming them. Either the worker is
+              down or WORKER_CONCURRENCY is too low for the number of clusters.
+
+        - alert: IndexterityJobsDeadLettering
+          expr: increase(indexterity_job_runs_total{outcome="dead_letter"}[1h]) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "jobs are burning their last retry"
+            description: >-
+              A task exhausted its five attempts within the last hour. Cluster
+              tasks alert their owners on the way out; anything else is a defect
+              worth reading the worker log for.
+
+        - alert: IndexterityDeadLetterBacklog
+          expr: indexterity_jobs{state="dead_letter"} > {{ $t.deadLetterBacklog }}
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ `{{ $value }}` }} permanently failed jobs are sitting in the queue"
+            description: >-
+              Retention prunes dead-lettered rows after a window, so a standing
+              pile is current rather than history.
+
+    # Can we still reach the clusters we manage?
+    - name: indexterity.fleet
+      rules:
+        # The distinction an operator actually needs: one cluster down is theirs,
+        # half the fleet at once is ours.
+        - alert: IndexterityFleetUnreachable
+          expr: indexterity_clusters_unreachable / scalar(sum(indexterity_clusters_connected)) > {{ $t.unreachableFleetRatio }}
+          for: 15m
+          labels:
+            severity: critical
+          annotations:
+            summary: "most of the fleet is unreachable at once"
+            description: >-
+              More than {{ $t.unreachableFleetRatio }} of managed clusters cannot be
+              reached. That many customers do not break together — suspect our
+              egress, DNS, or ALLOW_PRIVATE_CLUSTER_TARGETS and the network guard.
+              Individual unreachable clusters are normal and their owners are
+              emailed automatically.
+
+        - alert: IndexterityClusterCredentialsUnreadable
+          expr: increase(indexterity_cluster_task_runs_total{outcome="credentials"}[1h]) > 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "a stored connection string cannot be decrypted"
+            description: >-
+              The sealed credential for a cluster will not open with the master key
+              this process has. Check MASTER_KEY / MASTER_KEY_V<n> and
+              MASTER_KEY_VERSION against the key_version on the cluster row. It is
+              logged every tick, which is why it is alerted once instead.
+
+    # Is the safety pipeline still meaningful?
+    - name: indexterity.safety
+      rules:
+        # The pipeline can spin forever while every dashboard reads healthy.
+        - alert: IndexterityObservationLost
+          expr: >-
+            increase(indexterity_regression_gate_decisions_total{verdict="unobservable"}[24h])
+            > increase(indexterity_regression_gate_decisions_total{verdict="stable"}[24h])
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "more observation windows are being thrown away than completed"
+            description: >-
+              UNOBSERVABLE means a cluster's counters reset mid-window, so the
+              drop is re-proposed and starts over. Outnumbering STABLE means the
+              clusters restart faster than the observe window completes and no drop
+              will ever finish. Usually a customer cluster that keeps restarting,
+              or an observe window longer than their maintenance cadence.
+
+        - alert: IndexterityRegressionsSpiking
+          expr: increase(indexterity_regression_gate_decisions_total{verdict="regressed"}[24h]) > {{ $t.regressionsPerDay }}
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "the regression gate is rejecting an unusual number of changes"
+            description: >-
+              Each one is a hide or a build that measurably hurt latency and was
+              rolled back. The safety path is working; the analysis proposing them
+              may not be.
+
+    # The control plane's own health, and what the probes cannot see.
+    - name: indexterity.control-plane
+      rules:
+        # /api/health returns ok unconditionally — it does not touch Postgres — so
+        # neither probe can see this, and it fires with no traffic at all.
+        - alert: IndexterityControlPlaneDatabaseUnreachable
+          expr: increase(indexterity_metrics_scrape_errors_total[15m]) > 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "the api cannot read its own database"
+            description: >-
+              The control-plane gauges could not be refreshed, which means the
+              query failed. The liveness and readiness probes do not test Postgres,
+              so this is the signal that arrives even when nobody is using the
+              dashboard.
+
+        - alert: IndexterityAuthRateLimited
+          expr: rate(indexterity_http_requests_total{route="/api/auth/*",status="429"}[5m]) > {{ $t.authRateLimited }}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "auth requests are being rate limited"
+            description: >-
+              Either a brute-force attempt, or real users behind one NAT address
+              sharing the per-IP budget. Check TRUST_PROXY is set correctly before
+              raising AUTH_RATE_LIMIT_MAX — untrusted forwarding collapses every
+              client into one bucket.
+
+    # What the dashboard's readers are seeing.
+    - name: indexterity.dashboard
+      rules:
+        # The loaders catch everything and render an empty panel, so this failure
+        # reaches no error tracker and no user complaint that names a cause.
+        - alert: IndexterityDashboardApiCallsFailing
+          expr: rate(indexterity_web_api_requests_total{status=~"5..|unreachable"}[5m]) > 0
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "the dashboard's calls to the api are failing"
+            description: >-
+              The dashboard server is getting 5xx or no answer at all from the api.
+              Its loaders swallow this and render empty panels, so readers see a
+              blank dashboard rather than an error. status="unreachable" means the
+              api never answered — check the api pods and the Service.
+{{- end }}

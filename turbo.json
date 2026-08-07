@@ -26,13 +26,14 @@
     "ALLOW_PRIVATE_CLUSTER_TARGETS",
     "STORAGE_USD_PER_GB_MONTH",
     "WORKER_CONCURRENCY",
+    "METRICS_ENABLED",
+    "METRICS_PORT",
     "INT_API_PORT"
   ],
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
-      "outputs": ["dist/**", ".output/**", ".nitro/**"],
-      "env": ["VITE_API_URL", "VITE_WEB_ORIGIN"]
+      "outputs": ["dist/**", ".output/**", ".nitro/**", "src/routeTree.gen.ts"]
     },
     "typecheck": {
       "dependsOn": ["^build"]

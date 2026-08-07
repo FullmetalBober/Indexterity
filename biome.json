@@ -15,6 +15,7 @@
       "!**/.nitro",
       "!**/.turbo",
       "!**/graphify-out",
+      "!.agents",
       "!**/drizzle",
       "!**/routeTree.gen.ts",
       "!**/*.css",

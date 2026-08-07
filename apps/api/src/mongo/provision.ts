@@ -1,7 +1,8 @@
 import { randomBytes } from "node:crypto";
-import { type Db, MongoClient, MongoServerError } from "mongodb";
+import { type Db, MongoServerError } from "mongodb";
 import ConnectionString from "mongodb-connection-string-url";
 import { z } from "zod";
+import { mongoClient, type TlsOverrides } from "./client";
 
 export const ENGINE_ROLE = "indexterityEngine";
 
@@ -115,10 +116,13 @@ async function upsertEngineRole(admin: Db): Promise<void> {
 // Use an admin connection string ONCE to create a least-privilege user the
 // engine will run as, and return that user's connection string. The admin
 // string is never stored; a failed verification drops the user again.
-export async function provisionScopedUser(adminUri: string): Promise<ProvisionedUser> {
+export async function provisionScopedUser(
+  adminUri: string,
+  overrides?: TlsOverrides,
+): Promise<ProvisionedUser> {
   const username = `idx_${randomBytes(6).toString("hex")}`;
   const password = randomBytes(24).toString("base64url");
-  const adminClient = new MongoClient(adminUri, { serverSelectionTimeoutMS: 5000 });
+  const adminClient = mongoClient(adminUri, overrides);
   try {
     const admin = adminClient.db("admin");
     try {
@@ -140,7 +144,7 @@ export async function provisionScopedUser(adminUri: string): Promise<Provisioned
     }
     const connectionString = scopedConnString(adminUri, username, password);
     // Prove the scoped credentials authenticate before storing anything.
-    const probe = new MongoClient(connectionString, { serverSelectionTimeoutMS: 5000 });
+    const probe = mongoClient(connectionString, overrides);
     try {
       await probe.db("admin").command({ ping: 1 });
     } catch (error) {
