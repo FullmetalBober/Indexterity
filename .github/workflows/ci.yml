@@ -162,9 +162,22 @@ jobs:
         image: mongo:8
         ports:
           - "27017:27017"
+      # A second mongod, with authentication on and a user that can create users.
+      # The one above has auth disabled, which is the single state where the
+      # scoped-user offer cannot appear whatever the code does — so the consent
+      # path from D15 had no coverage anywhere (#86). The root user this creates
+      # carries userAdminAnyDatabase, which is what the offer is gated on.
+      mongo-auth:
+        image: mongo:8
+        env:
+          MONGO_INITDB_ROOT_USERNAME: root
+          MONGO_INITDB_ROOT_PASSWORD: e2e-root
+        ports:
+          - "27018:27017"
     env:
       DATABASE_URL: postgres://mongo_optimizer:mongo_optimizer@localhost:5432/mongo_optimizer
       MONGO_URL: mongodb://localhost:27017
+      MONGO_ADMIN_URL: mongodb://root:e2e-root@localhost:27018
       BETTER_AUTH_SECRET: e2e-secret
       MASTER_KEY: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
     steps:

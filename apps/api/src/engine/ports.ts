@@ -125,7 +125,13 @@ export interface IndexExecutor {
 // One privilege the engine needs, and whether these credentials have it.
 // CORE = analysis is impossible without it; APPLY = the cluster can still be
 // analyzed but nothing can be changed; WORKLOAD = an optional signal source.
-export type PrivilegeTier = "CORE" | "APPLY" | "WORKLOAD";
+//
+// PROVISION is not about the engine at all: it is whether these credentials
+// could create the least-privilege user we would rather run as. Reported as
+// checks and not only as `canProvision` below, because a bare `false` renders as
+// nothing and leaves "your user cannot create users" and "we could not tell what
+// your user can do" looking identical (#86).
+export type PrivilegeTier = "CORE" | "APPLY" | "WORKLOAD" | "PROVISION";
 
 export interface PrivilegeCheck {
   readonly key: string;
@@ -144,6 +150,9 @@ export interface ConnectionDiagnosis {
   readonly message: string | null;
   readonly username: string | null;
   readonly authEnabled: boolean;
+  // Every PROVISION check granted — so the offer to create a scoped user is
+  // worth making. The checks themselves are in `privileges`; this is the summary
+  // the form branches on.
   readonly canProvision: boolean;
   readonly ready: boolean;
   readonly canApply: boolean;
