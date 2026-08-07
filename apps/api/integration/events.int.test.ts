@@ -1,15 +1,7 @@
 import type { ChildProcess } from "node:child_process";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { clusters, createDatabase, eq, inArray, organizations, sql, user } from "../src/db";
-import {
-  API_ROOT,
-  api,
-  databaseUrl,
-  type Session,
-  signUp,
-  startApi,
-  stopApi,
-} from "./helpers";
+import { API_ROOT, api, databaseUrl, type Session, signUp, startApi, stopApi } from "./helpers";
 
 // The SSE surface end to end: the same postgres NOTIFY the worker sends, heard
 // by the api's listener, fanned out to a subscribed browser — with the tenancy

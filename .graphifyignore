@@ -1,0 +1,4 @@
+# Vendored third-party skill docs (skills-lock.json) — reference material for
+# the coding agent, not part of this codebase. Graphing them buries the app's
+# ~13k-word corpus under ~700k words of library documentation.
+.agents/
