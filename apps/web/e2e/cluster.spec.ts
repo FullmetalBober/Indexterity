@@ -1,6 +1,7 @@
 import { expect, type Page, test } from "@playwright/test";
 import {
   connectCluster,
+  MONGO_ADMIN_URL,
   MONGO_URL,
   openClusterSettings,
   openConnectForm,
@@ -46,6 +47,14 @@ test.describe("cluster lifecycle", () => {
     // Named privileges, not just a yes/no.
     await expect(page.getByText("Index usage stats ($indexStats)")).toBeVisible();
     await expect(page.getByText("Hide/unhide indexes (collMod)")).toBeVisible();
+    // And what it would take to create a scoped user, which used to be one
+    // invisible boolean — false rendered as nothing at all (#86).
+    await expect(page.getByText(/To create a scoped user instead/)).toBeVisible();
+    await expect(page.getByText("Create a user (createUser)")).toBeVisible();
+    // This mongod has authentication disabled, so every action is available and a
+    // dedicated user still cannot be enforced. Naming a grant here would send the
+    // reader after a privilege they already hold.
+    await expect(page.getByText(/No scoped user was offered/)).toHaveCount(0);
     // Still nothing stored: no cluster in the rail.
     await expect(page.getByText("E2E Preflight")).toHaveCount(0);
   });
@@ -252,6 +261,50 @@ test.describe("cluster lifecycle", () => {
     await page.getByRole("button", { name: "Connect", exact: true }).click();
 
     await expect(page.getByText(/FREE plan allows 1 clusters/)).toBeVisible();
+  });
+
+  // The consent path from D15, which had no test at any layer: the admin string
+  // is used once to create a least-privilege user on the customer's cluster, and
+  // only that user's string is ever stored. Needs credentials that can create
+  // users, which the suite's default mongod cannot have — it runs without
+  // authentication — hence the second server (see MONGO_ADMIN_URL).
+  test.describe("scoped-user provisioning", () => {
+    test.skip(
+      MONGO_ADMIN_URL === "",
+      "needs MONGO_ADMIN_URL: an auth-enabled mongod whose user can create users",
+    );
+
+    test("offers a scoped user for credentials that can create one, and creates it", async ({
+      page,
+    }) => {
+      await signUpAndLandOnDashboard(page, uniqueEmail("provision"));
+      await openConnectForm(page);
+
+      await page.getByLabel("Name", { exact: true }).fill("E2E Provisioned");
+      await page.getByLabel("Connection string").fill(MONGO_ADMIN_URL);
+      await page.getByRole("button", { name: "Check access" }).click();
+
+      // The offer, which is the whole point: not a bare Connect button.
+      await expect(page.getByText(/These credentials can create users/)).toBeVisible();
+      await expect(page.getByText("Create a role (createRole)")).toBeVisible();
+      await expect(page.getByRole("button", { name: "Use these credentials as-is" })).toBeVisible();
+
+      await page.getByRole("button", { name: "Create a scoped user and connect" }).click();
+
+      // A user was created on the cluster and it is the one the cluster now runs
+      // as: the heading is the cluster's own page, and the `idx_…` marker beside
+      // the mode badge is read from the stored row, so the admin string is not
+      // what got kept.
+      await expect(page.getByRole("heading", { name: "E2E Provisioned" })).toBeVisible();
+      await expect(page.getByText(/idx_[0-9a-f]{12}/)).toBeVisible();
+      // NOT asserted here: the "shown once" alert carrying the scoped user's
+      // connection string. It renders in the connect form, and the same success
+      // navigates to the cluster page — which unmounts the form and the only copy
+      // of that string with it. Writing this test is what surfaced it; it is a
+      // separate defect from #86 and wants its own decision about where the
+      // string should live, so this test records the behaviour rather than
+      // asserting the intent.
+    });
   });
 
   test("disconnecting asks first, then removes the cluster", async ({ page }) => {

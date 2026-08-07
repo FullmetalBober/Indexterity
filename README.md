@@ -161,7 +161,10 @@ reasoning: [Plans and policy](https://github.com/FullmetalBober/Indexterity/wiki
 re-checks the version immediately before running, so a cluster downgraded or
 repointed later cannot be half-changed.
 
-Indexterity never gets document read or write privileges.
+Indexterity never gets document read or write privileges. The preflight lists
+every privilege it looked for, including the three that decide whether it can
+create its own user (`createRole`, `createUser`, `grantRole` on `admin`) — when
+one is missing it says which, rather than quietly keeping the string you pasted.
 [Connecting a cluster](https://github.com/FullmetalBober/Indexterity/wiki/Connecting-a-cluster)
 has the exact `createRole` snippets, what `serverStatus` exposes, which
 replica-set members get read, and what `mongodb+srv://` carries outside its own

@@ -46,6 +46,40 @@ const TLS_BOXES: readonly { key: keyof TlsOverrides; label: string; help: string
   },
 ];
 
+// Why no scoped user was offered, on a connection that is otherwise fine.
+//
+// Says which action is missing rather than that one is: `createUser` alone is a
+// different grant from all three, and the reader is being asked to go and change
+// a role on their own cluster. Silent in the one case where the answer is not
+// about a grant at all — a deployment with authentication disabled has every
+// privilege and still cannot enforce a dedicated user, and the diagnosis's own
+// message says so.
+function ProvisioningUnavailable({ diagnosis }: { diagnosis: ConnectionDiagnosis }) {
+  const gaps = diagnosis.privileges.filter(
+    (privilege) => privilege.tier === "PROVISION" && !privilege.granted,
+  );
+  if (!diagnosis.authEnabled || gaps.length === 0) return null;
+  return (
+    <p className="mt-3 text-muted-foreground text-xs">
+      No scoped user was offered: these credentials are missing{" "}
+      {gaps.map((gap, index) => (
+        <span key={gap.key}>
+          {index > 0 ? ", " : null}
+          <code>{gap.key}</code>
+        </span>
+      ))}{" "}
+      on <code>admin</code>. Connecting as-is stores the string you pasted (encrypted) and dials the
+      cluster with it on every collect. Grant {gaps.length === 1 ? "that action" : "those actions"}{" "}
+      and check again, and Indexterity will offer to create an <code>idx_…</code> user with only the
+      privileges above instead — or create one yourself and connect with its string.{" "}
+      <a href={CLUSTER_USER_DOCS_HREF} className="underline">
+        The exact role is here
+      </a>
+      .
+    </p>
+  );
+}
+
 // The plan the clusters are counted against, or null while the org read has not
 // arrived — in which case the quota simply is not drawn. It is a warning, not a
 // gate: the api is the one that refuses, and it refuses on the same numbers.
@@ -310,13 +344,21 @@ export function ConnectClusterForm({ plan }: { plan: PlanInfo | null }) {
                 </div>
               </div>
             ) : diagnosis.ready ? (
-              <Button
-                className="mt-3"
-                disabled={busy}
-                onClick={() => connectAsIs.mutate(credentials())}
-              >
-                Connect
-              </Button>
+              <>
+                <Button
+                  className="mt-3"
+                  disabled={busy}
+                  onClick={() => connectAsIs.mutate(credentials())}
+                >
+                  Connect
+                </Button>
+                {/* The branch that used to render a bare Connect button and
+                    nothing else. "These credentials cannot create users" and "we
+                    could not tell what they can do" were the same pixels, and
+                    the safer path was never mentioned to the one reader who
+                    could still take it (#86). */}
+                <ProvisioningUnavailable diagnosis={diagnosis} />
+              </>
             ) : (
               <p className="mt-2 text-muted-foreground text-xs">
                 Grant the missing privileges to this user, or paste credentials that can create

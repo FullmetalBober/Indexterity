@@ -2,6 +2,7 @@ import type { Admin } from "mongodb";
 import { z } from "zod";
 import type { ConnectionDiagnosis, PrivilegeCheck, PrivilegeTier } from "../engine/ports";
 import { mongoClient, type TlsOverrides } from "./client";
+import { ENGINE_ROLE } from "./provision";
 import {
   hasQueryStatsPlanMetrics,
   parseServerVersion,
@@ -127,8 +128,45 @@ export const REQUIRED_PRIVILEGES: readonly RequiredPrivilege[] = [
   },
 ];
 
-// Actions that let these credentials create the scoped user for us.
-const PROVISION_ACTIONS = ["createRole", "createUser", "grantRole"];
+// What it takes to create the scoped user for the reader, expressed in the same
+// shape as everything above so it lands in the same list on screen.
+//
+// These used to be three bare action names collapsed into one boolean, and the
+// boolean was all the dashboard had: when it came back false the connect form
+// said nothing at all, so a user that genuinely cannot create users and a
+// diagnosis that could not tell were the same blank space (#86). Named checks
+// mean the form can say which action is missing, and the reader can see for
+// themselves that we asked.
+//
+// `admin` because that is where the role and the user are created
+// (provision.ts); a wildcard `{db:"",collection:""}` grant — what
+// userAdminAnyDatabase and root carry — matches it via grantsNamespace.
+export const PROVISION_PRIVILEGES: readonly RequiredPrivilege[] = [
+  {
+    key: "createRole",
+    label: "Create a role (createRole)",
+    enables: `defining the ${ENGINE_ROLE} role that scopes the user`,
+    tier: "PROVISION",
+    actions: ["createRole"],
+    scope: { kind: "exact", db: "admin", collection: "" },
+  },
+  {
+    key: "createUser",
+    label: "Create a user (createUser)",
+    enables: "creating the idx_… user Indexterity would run as",
+    tier: "PROVISION",
+    actions: ["createUser"],
+    scope: { kind: "exact", db: "admin", collection: "" },
+  },
+  {
+    key: "grantRole",
+    label: "Grant a role (grantRole)",
+    enables: "attaching that role to that user",
+    tier: "PROVISION",
+    actions: ["grantRole"],
+    scope: { kind: "exact", db: "admin", collection: "" },
+  },
+];
 
 const rateLimitDoc = z.object({ internalQueryStatsRateLimit: z.coerce.number() });
 
@@ -220,47 +258,73 @@ function grantsNamespace(
   });
 }
 
+// One requirement against one privilege set. An "anyDb" requirement passes on a
+// wildcard grant, or when every discovered user database is individually covered
+// (a per-database role still works).
+function grants(
+  required: RequiredPrivilege,
+  privileges: readonly MongoPrivilege[],
+  userDatabases: readonly string[],
+): boolean {
+  return required.actions.every((action) => {
+    if (required.scope.kind === "cluster") return grantsCluster(privileges, action);
+    if (required.scope.kind === "exact") {
+      return grantsNamespace(privileges, action, required.scope.db, required.scope.collection);
+    }
+    const collection = required.scope.collection ?? "";
+    // "" as the probe db only matches a wildcard grant.
+    if (grantsNamespace(privileges, action, "", collection)) return true;
+    return (
+      userDatabases.length > 0 &&
+      userDatabases.every((db) => grantsNamespace(privileges, action, db, collection))
+    );
+  });
+}
+
+function toCheck(required: RequiredPrivilege, granted: boolean): PrivilegeCheck {
+  return {
+    key: required.key,
+    label: required.label,
+    enables: required.enables,
+    tier: required.tier,
+    granted,
+  };
+}
+
 // Pure evaluation — the live probe just feeds it. Exported for unit tests.
-// An "anyDb" requirement passes on a wildcard grant, or when every discovered
-// user database is individually covered (a per-database role still works).
 export function evaluatePrivileges(
   privileges: readonly MongoPrivilege[],
   userDatabases: readonly string[],
 ): PrivilegeCheck[] {
-  return REQUIRED_PRIVILEGES.map((required) => {
-    const granted = required.actions.every((action) => {
-      if (required.scope.kind === "cluster") return grantsCluster(privileges, action);
-      if (required.scope.kind === "exact") {
-        return grantsNamespace(privileges, action, required.scope.db, required.scope.collection);
-      }
-      const collection = required.scope.collection ?? "";
-      // "" as the probe db only matches a wildcard grant.
-      if (grantsNamespace(privileges, action, "", collection)) return true;
-      return (
-        userDatabases.length > 0 &&
-        userDatabases.every((db) => grantsNamespace(privileges, action, db, collection))
-      );
-    });
-    return {
-      key: required.key,
-      label: required.label,
-      enables: required.enables,
-      tier: required.tier,
-      granted,
-    };
-  });
+  return REQUIRED_PRIVILEGES.map((required) =>
+    toCheck(required, grants(required, privileges, userDatabases)),
+  );
 }
 
+// The provisioning half, evaluated the same way. No user databases are relevant:
+// all three actions are asked for on `admin` exactly.
+export function evaluateProvisioning(privileges: readonly MongoPrivilege[]): PrivilegeCheck[] {
+  return PROVISION_PRIVILEGES.map((required) =>
+    toCheck(required, grants(required, privileges, [])),
+  );
+}
+
+// Derived from the checks rather than computed a second way, so the offer the
+// form makes and the reasons it shows can never disagree.
 export function canProvisionWith(privileges: readonly MongoPrivilege[]): boolean {
-  return PROVISION_ACTIONS.every((action) => grantsNamespace(privileges, action, "admin", ""));
+  return evaluateProvisioning(privileges).every((check) => check.granted);
 }
 
 function summarize(
   privileges: PrivilegeCheck[],
   base: Omit<ConnectionDiagnosis, "privileges" | "ready" | "canApply" | "missing">,
 ): ConnectionDiagnosis {
+  // CORE and APPLY only. WORKLOAD is an optional signal source, and PROVISION is
+  // not a requirement at all — listing a missing `createUser` here would tell
+  // someone connecting a perfectly good read-only user that something is wrong
+  // with it, and would put it in createCluster's refusal message too.
   const missing = privileges
-    .filter((check) => !check.granted && check.tier !== "WORKLOAD")
+    .filter((check) => !check.granted && (check.tier === "CORE" || check.tier === "APPLY"))
     .map((check) => check.label);
   return {
     ...base,
@@ -271,14 +335,15 @@ function summarize(
   };
 }
 
+// Every check at once, for the two cases where nothing was measured per-action:
+// an unreachable cluster (all false) and a deployment with authentication
+// disabled (all true — everything genuinely is permitted, including creating
+// users; `canProvision` is still false there, because a dedicated user cannot be
+// enforced against a server that asks for no credentials).
 function allGranted(granted: boolean): PrivilegeCheck[] {
-  return REQUIRED_PRIVILEGES.map((required) => ({
-    key: required.key,
-    label: required.label,
-    enables: required.enables,
-    tier: required.tier,
-    granted,
-  }));
+  return [...REQUIRED_PRIVILEGES, ...PROVISION_PRIVILEGES].map((required) =>
+    toCheck(required, granted),
+  );
 }
 
 function failure(message: string): ConnectionDiagnosis {
@@ -355,18 +420,21 @@ export async function diagnoseConnection(
     }
 
     const checks = evaluatePrivileges(privileges, userDatabases);
+    // Reported alongside the engine's own, so whichever answer the form gives
+    // about provisioning, the reader can see what it was read from.
+    const provisioning = evaluateProvisioning(privileges);
     // Only worth saying when the credentials could read the store at all —
     // without the grant the profiler is the source regardless.
     const grantedQueryStats = checks.some((check) => check.key === "queryStats" && check.granted);
     const advisory = grantedQueryStats
       ? queryStatsAdvisory(await readQueryStatsSampling(admin.admin()), version)
       : null;
-    return summarize(checks, {
+    return summarize([...checks, ...provisioning], {
       reachable: true,
       message: advisory,
       username: user.user,
       authEnabled: true,
-      canProvision: canProvisionWith(privileges),
+      canProvision: provisioning.every((check) => check.granted),
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
