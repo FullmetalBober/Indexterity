@@ -216,7 +216,7 @@ apps/web                dashboard
                         cluster, or to connecting one
   src/routes/app.clusters.$clusterId       one cluster: the heading and its tabs
     …$clusterId.index      overview — ROI, recommendations, latency, collections
-    …$clusterId.settings   policy, mode, credentials, disconnect
+    …$clusterId.settings   name, policy, mode, credentials, disconnect
   src/routes/app.clusters.new   connecting a cluster, which is onboarding
   src/routes/app.settings       organization · organizations · account
   src/lib/api.ts        one oRPC client, isomorphic: same-origin in the browser,

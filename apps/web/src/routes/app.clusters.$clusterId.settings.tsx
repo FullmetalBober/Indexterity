@@ -7,6 +7,7 @@
 // lets them be explained at more than badge length.
 import { createFileRoute } from "@tanstack/react-router";
 import { ClusterConnection } from "~/components/app/cluster-connection";
+import { ClusterName } from "~/components/app/cluster-name";
 import { PolicySection, PolicySectionSkeleton } from "~/components/app/policy-section";
 import { policyQuery, usePolicy } from "~/lib/queries/policy";
 import { useCluster } from "~/lib/queries/shell";
@@ -32,6 +33,11 @@ function ClusterSettings() {
     // "days" box a thousand pixels wide tells a reader it wants a thousand
     // pixels of answer.
     <div className="max-w-3xl">
+      {/* First, because it is the cheapest thing on the page to understand and
+          the one that was impossible until #96. Keyed by the cluster: the field
+          holds a name being edited, and switching clusters must not carry the
+          previous one's into it. */}
+      {cluster === null ? null : <ClusterName key={cluster.id} cluster={cluster} />}
       {/* Null means three different things — no cluster, a failed read, and not
           yet — and only the last one gets the outline. The first two draw
           nothing, which is the answer the rest of the app gives for a dead

@@ -99,6 +99,37 @@ test.describe("cluster lifecycle", () => {
     await expect(page.getByText("read-only", { exact: true })).toBeVisible();
   });
 
+  // The name is drawn in three places off one cache entry — the rail, the
+  // heading, and (server-side) every alert subject — so a rename that only moves
+  // one of them is the failure to look for. Before #96 there was no rename at
+  // all: correcting a typo meant disconnecting, which deletes the history.
+  test("renames a cluster, and the rail and heading follow", async ({ page }) => {
+    await signUpAndLandOnDashboard(page, uniqueEmail("rename"));
+    await connectCluster(page, "E2E Typo");
+    await openClusterSettings(page);
+
+    const field = page.getByLabel("Cluster name");
+    await expect(field).toHaveValue("E2E Typo");
+    // Nothing to save yet, and a button that fires anyway would toast a change
+    // that never happened.
+    await expect(page.getByRole("button", { name: "Rename" })).toBeDisabled();
+
+    await field.fill("E2E Production");
+    await page.getByRole("button", { name: "Rename" }).click();
+    await expect(page.getByText(/Renamed to "E2E Production"/)).toBeVisible();
+
+    await expect(page.getByRole("heading", { name: "E2E Production" })).toBeVisible();
+    await expect(
+      page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "E2E Production" }),
+    ).toBeVisible();
+    await expect(page.getByText("E2E Typo")).toHaveCount(0);
+
+    // And it is stored, not held in the form: the reload re-reads it from the api.
+    await page.reload();
+    await expect(page.getByRole("heading", { name: "E2E Production" })).toBeVisible();
+    await expect(page.getByLabel("Cluster name")).toHaveValue("E2E Production");
+  });
+
   // Policy is stored by the api and re-read by the loader; a round trip through
   // a reload is the only way to know it was persisted rather than kept in state.
   test("saves policy and reads it back after a reload", async ({ page }) => {
