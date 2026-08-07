@@ -534,9 +534,23 @@ already carries an `engine` field.
 ```bash
 cp .env.example .env      # then fill secrets
 npm install
-podman-compose up         # postgres + mongo + api + web + worker, hot reload
+podman-compose up         # postgres + api + web + worker, hot reload
 # or npm run up           # the same, and recovers from stale container state
 ```
+
+**No mongod in the stack.** Connect whichever cluster you are actually working
+against — the collector's job is to dial one, and a demo target that nobody
+points at is a container starting on every `up` for nothing. The integration and
+e2e suites do need one, and they take `MONGO_URL` (defaulting to
+`mongodb://localhost:27017`), so a throwaway is enough:
+
+```bash
+podman run -d --rm --name mongo-test -p 27017:27017 docker.io/library/mongo:8
+```
+
+A replica set — which is what reproduces anything topology-shaped, since
+`$indexStats` and `$collStats latencyStats` are both per-member — takes several
+mongods, most easily as several processes in one host-network container.
 
 `podman-compose up` (or `docker compose up`) works directly — `npm run up` is a
 convenience, not a requirement. It adds one thing worth having: when a logout or
@@ -661,7 +675,7 @@ Both defaults exist because the control plane dials hosts that users name.
   a VPC-peered or PrivateLink Atlas cluster is a private address that must still
   be forced to TLS, so coupling a transport rule to an addressing rule would
   quietly weaken real deployments. The compose stack and both test suites set
-  it, because the local mongo serves no certificate.
+  it, because the local mongod they dial serves no certificate.
 
 ### What lands in the control-plane database
 
