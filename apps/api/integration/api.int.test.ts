@@ -2250,6 +2250,58 @@ describe("rate limiting", () => {
       await stopApi(server);
     }
   });
+
+  // The half of #54 that arithmetic alone does not cover: the counters used to
+  // live in each process's memory, so `api.replicas: 2` meant twice the
+  // configured limit and which pod a request landed on decided which bucket it
+  // spent. Two api processes here ARE two replicas — same database, nothing
+  // shared but that — and the second must refuse on a budget the first spent.
+  //
+  // NODE_ENV=production because better-auth enables its own limiter for
+  // production only (the api image sets it), and ALLOW_INSECURE_AUTH_URL because
+  // this one answers over http. AUTH_RATE_LIMIT_MAX is deliberately above 1 so
+  // the first request to the SECOND process passes that process's own Fastify
+  // budget: a 429 from it can then only have come from the shared count.
+  it("spends one budget across two replicas, not one each", async () => {
+    const shared = {
+      NODE_ENV: "production",
+      ALLOW_INSECURE_AUTH_URL: "true",
+      AUTH_RATE_LIMIT_MAX: "3",
+    };
+    const [portA, portB] = [API_PORT + 3, API_PORT + 4];
+    const replicaA = await startApi(shared, portA);
+    const replicaB = await startApi(shared, portB);
+    const attempt = (port: number) =>
+      fetch(`http://localhost:${port}/api/auth/sign-in/email`, {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: WEB_ORIGIN },
+        body: JSON.stringify({ email: "replicas@int.test", password: "wrongwrong123" }),
+      });
+    try {
+      // Spend the budget on A. Bounded rather than while(true): a run that never
+      // throttles has to fail the assertion below, not hang.
+      let spentOnA = false;
+      for (let i = 0; i < 10 && !spentOnA; i += 1) {
+        spentOnA = (await attempt(portA)).status === 429;
+      }
+      expect(spentOnA).toBe(true);
+
+      // B has served nothing and its own memory holds no count for this address.
+      const onB = await attempt(portB);
+      expect(onB.status).toBe(429);
+
+      // And the count is where it can be shared from, keyed by path.
+      const rows = await db.execute<{ key: string; count: number }>(
+        sql`select key, count from rate_limit where key like '%|/sign-in/email'`,
+      );
+      expect(rows.rows.length).toBeGreaterThan(0);
+    } finally {
+      await stopApi(replicaA);
+      await stopApi(replicaB);
+      // Otherwise the next scenario that signs in inherits a spent budget.
+      await db.execute(sql`delete from rate_limit`);
+    }
+  });
 });
 
 // A job that burns its last attempt keeps its row forever — the one table with

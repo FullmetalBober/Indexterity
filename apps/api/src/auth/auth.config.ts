@@ -9,6 +9,7 @@ import { authEventFor, recordSecurityEvent } from "../audit/security-events";
 import { createDatabase, eq, schema, user as userTable } from "../db";
 import { sendMail } from "../mail/mailer";
 import { organizationPlugin } from "./organization";
+import { authRateLimit } from "./rate-limit";
 import { evaluateSignup } from "./signup-gate";
 
 export interface AuthConfig {
@@ -27,6 +28,15 @@ export interface AuthConfig {
   readonly requireEmailVerification: boolean;
   // A trusted proxy sits in front, so forwarded client addresses are real.
   readonly trustProxy: boolean;
+  // Which forwarded hops to distrust, as IPs or CIDR ranges. Empty means a
+  // forwarded header is only believed when it carries exactly one address —
+  // better-auth's rule, and the reason a multi-hop ingress collapses every client
+  // into one rate-limit bucket (see env.ts, and auth/rate-limit.ts).
+  readonly trustedProxies: readonly string[];
+  // Attempts a minute allowed on the credential endpoints, per client address.
+  // The same AUTH_RATE_LIMIT_MAX the Fastify limiter reads, so tuning it moves the
+  // limit that actually applies rather than only the one that does not (#54).
+  readonly authRateLimitMax: number;
   // The dashboard's origin, for the link in an invitation email.
   readonly webOrigin: string;
 }
@@ -145,8 +155,27 @@ export function createAuth(config: AuthConfig) {
       // Only when the deployment says a proxy is in front. Reading a forwarded
       // header otherwise lets a client pick its own address and never reach a
       // rate limit.
-      ...(config.trustProxy ? { ipAddress: { ipAddressHeaders: ["x-forwarded-for"] } } : {}),
+      //
+      // `trustedProxies` is what makes the header usable behind a real ingress:
+      // without it better-auth believes X-Forwarded-For only when it holds a
+      // single address, and an ingress adds itself as a second hop — so every
+      // client resolved to "no trusted ip" and shared one bucket. With the list it
+      // walks the chain from the right and stops at the first hop we did not name.
+      ...(config.trustProxy
+        ? {
+            ipAddress: {
+              ipAddressHeaders: ["x-forwarded-for"],
+              ...(config.trustedProxies.length > 0
+                ? { trustedProxies: [...config.trustedProxies] }
+                : {}),
+            },
+          }
+        : {}),
     },
+    // Counted in Postgres, so the limit is the deployment's rather than each
+    // pod's, and the configured number is the one that applies to a sign-in.
+    // See auth/rate-limit.ts for what is left at better-auth's defaults and why.
+    rateLimit: authRateLimit(config.authRateLimitMax),
     plugins: [
       organizationPlugin(db, {
         webOrigin: config.webOrigin,

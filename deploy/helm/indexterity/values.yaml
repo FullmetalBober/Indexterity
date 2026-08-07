@@ -197,6 +197,13 @@ config:
   # Empty = decide from ingress.enabled. "true", a hop count ("1"), or a CIDR
   # list are all accepted. Leave it off when the api is directly exposed:
   # trusting a forwarded header then lets any client forge an address.
+  #
+  # Prefer the CIDR list. better-auth counts the auth limits per client address
+  # too — in Postgres, so across replicas — and it accepts only ranges: with
+  # "true" it believes X-Forwarded-For only when the header holds a single
+  # address, which it does not once an ingress has added itself. The auth limits
+  # then apply to everybody together rather than per client. The pod network's
+  # range is the usual answer here (10.0.0.0/8 on most clusters).
   trustProxy: ""
   # The plan a newly created organization lands on.
   #

@@ -215,10 +215,13 @@ spec:
           annotations:
             summary: "auth requests are being rate limited"
             description: >-
-              Either a brute-force attempt, or real users behind one NAT address
-              sharing the per-IP budget. Check TRUST_PROXY is set correctly before
-              raising AUTH_RATE_LIMIT_MAX — untrusted forwarding collapses every
-              client into one bucket.
+              Either a brute-force attempt, or real users sharing one budget.
+              Check TRUST_PROXY before raising AUTH_RATE_LIMIT_MAX: set it to the
+              CIDR ranges of the proxies in front, not "true". Untrusted or
+              unresolvable forwarding collapses every client into one bucket, and
+              the auth counters are shared across replicas in Postgres, so that
+              bucket is the whole deployment's. Users behind one NAT address share
+              a budget by design, which is the other reading of this alert.
 
     # What the dashboard's readers are seeing.
     - name: indexterity.dashboard

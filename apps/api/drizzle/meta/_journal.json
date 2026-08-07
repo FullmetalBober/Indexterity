@@ -292,8 +292,15 @@
     {
       "idx": 41,
       "version": "7",
-      "when": 1786128854667,
-      "tag": "0041_security_events",
+      "when": 1786128608610,
+      "tag": "0041_better_auth_rate_limit",
+      "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "7",
+      "when": 1786129064537,
+      "tag": "0042_security_events",
       "breakpoints": true
     }
   ]
