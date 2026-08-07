@@ -55,6 +55,9 @@ services:
       API_PORT: "3001"
       # Dev targets live on the compose network; sign-up is open for convenience.
       ALLOW_PRIVATE_CLUSTER_TARGETS: "true"
+      # The demo mongo below has no certificate. Never set this in a deployment
+      # that dials real customer databases.
+      ALLOW_INSECURE_CLUSTER_TLS: "true"
       SIGNUP_MODE: open
       # The DASHBOARD's origin, not this container's port: better-auth appends
       # /api/auth itself, and the browser reaches all of it on 3000. It is also
@@ -130,6 +133,9 @@ services:
       DATABASE_URL: postgres://mongo_optimizer:mongo_optimizer@postgres:5432/mongo_optimizer
       MASTER_KEY: ${MASTER_KEY}
       ALLOW_PRIVATE_CLUSTER_TARGETS: "true"
+      # The demo mongo below has no certificate. Never set this in a deployment
+      # that dials real customer databases.
+      ALLOW_INSECURE_CLUSTER_TLS: "true"
       WORKER_CONCURRENCY: "2"
       # The alerts a collect or an apply raises are sent from HERE, not from the
       # api — the jobs run in this container. Without these the worker's mailer

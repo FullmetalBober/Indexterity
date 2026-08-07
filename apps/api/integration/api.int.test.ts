@@ -715,6 +715,31 @@ describe("SSRF guard and sign-up gate (second api with production defaults)", ()
     expect(body).toContain("ALLOW_PRIVATE_CLUSTER_TARGETS");
   });
 
+  // Ordering, not just presence: the address guard runs first, so a private
+  // target is refused for being private however its transport is spelled. A
+  // PUBLIC plaintext address is where the TLS rule is the one that applies —
+  // 8.8.8.8 is an IP literal, so nothing is resolved and nothing is dialled.
+  it("refuses a public plaintext address, naming the TLS switch", async () => {
+    const res = await post("/api/clusters/check-connection", guardedOwner, {
+      connectionString: "mongodb://8.8.8.8:27017",
+    });
+    expect(res.status).toBe(400);
+    const body = JSON.stringify(await res.json());
+    expect(body).toContain("validated TLS");
+    expect(body).toContain("ALLOW_INSECURE_CLUSTER_TLS");
+  });
+
+  // The same address with TLS asked for gets past the string checks and fails
+  // for a reason about the cluster instead — proof the rule is about transport
+  // and not a blanket refusal.
+  it("lets a TLS string through the guards", async () => {
+    const res = await post("/api/clusters/check-connection", guardedOwner, {
+      connectionString: "mongodb://8.8.8.8:27017/?tls=true&connectTimeoutMS=1500",
+    });
+    const body = JSON.stringify(await res.json());
+    expect(body).not.toContain("ALLOW_INSECURE_CLUSTER_TLS");
+  });
+
   it("refuses loopback, so the control plane cannot probe itself", async () => {
     const res = await post("/api/clusters/check-connection", guardedOwner, {
       connectionString: "mongodb://127.0.0.1:27017",

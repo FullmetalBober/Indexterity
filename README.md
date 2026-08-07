@@ -539,7 +539,7 @@ yet. Migration creates schemas, so migration creates both.
 in CI. Releasing is `git tag v0.2.0 && git push --tags`, and the release
 workflow refuses a tag whose version the tree does not carry.
 
-**Four test layers**, currently 414 api unit, 229 web unit, 79 integration and
+**Four test layers**, currently 425 api unit, 229 web unit, 81 integration and
 24 end-to-end. The e2e suite deliberately runs with **no proxy in front**, so the
 passthrough is the path under test — the proxy shape is covered by compose and
 the chart, and a fallback nothing exercises is a fallback that is broken when
@@ -590,6 +590,27 @@ Both defaults exist because the control plane dials hosts that users name.
 - **Private targets are refused** unless `ALLOW_PRIVATE_CLUSTER_TARGETS=true`.
   Cloud metadata ranges stay blocked either way, DNS and SRV are resolved before
   dialing, and every host in a multi-host string is checked.
+- **Plaintext connections are refused** unless `ALLOW_INSECURE_CLUSTER_TLS=true`.
+  Every client the control plane builds goes through one constructor
+  (`mongo/client.ts`) that requires validated TLS — so it holds for the worker's
+  stored strings, not only for onboarding, which is the difference between
+  enforcing it and checking it once. `tlsInsecure`,
+  `tlsAllowInvalidCertificates` and `tlsAllowInvalidHostnames` count as
+  plaintext: TLS whose certificate nobody checks is a connection anyone in the
+  path can be. It refuses rather than silently adding `tls=true`, because a
+  server with no TLS would then fail its handshake instead and a string that
+  says `tls=false` is a statement worth contradicting out loud.
+
+  A cluster already stored with a plaintext string skips its passes and mails
+  its owners, the same way an unsupported server version does — no retry fixes
+  either, and it is deliberately **not** reported as unreachable, which would
+  send someone hunting a firewall that is not the problem.
+
+  Its own switch rather than part of `ALLOW_PRIVATE_CLUSTER_TARGETS` on purpose:
+  a VPC-peered or PrivateLink Atlas cluster is a private address that must still
+  be forced to TLS, so coupling a transport rule to an addressing rule would
+  quietly weaken real deployments. The compose stack and both test suites set
+  it, because the local mongo serves no certificate.
 
 ### What lands in the control-plane database
 

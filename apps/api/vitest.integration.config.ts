@@ -7,6 +7,10 @@ export default defineConfig({
   test: {
     include: ["integration/**/*.int.test.ts"],
     environment: "node",
+    // The suite's own in-process MongoConnection (seeding, assertions) dials the
+    // compose mongo, which serves no TLS. `startApi` sets this for the children
+    // it spawns; this is the same opt-out for the runner itself.
+    env: { ALLOW_INSECURE_CLUSTER_TLS: "true" },
     fileParallelism: false,
     testTimeout: 30_000,
     hookTimeout: 120_000,

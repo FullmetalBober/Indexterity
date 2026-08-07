@@ -3,6 +3,7 @@ import { isUnreachableError } from "../errors/unreachable";
 import { emitPassFinished } from "../events/emit";
 import { ALERT_COOLDOWN_MS, alertAllowed, notifyClusterOwners } from "../mail/notify";
 import { recordClusterTask } from "../metrics";
+import { InsecureConnectionError } from "../mongo/client";
 import { UnsupportedServerError } from "../mongo/executor";
 import { applyCluster } from "./apply";
 import { refreshInferredWindow } from "./change-window";
@@ -64,6 +65,27 @@ export async function runClusterTask(
       deps.logger.warn(`${task}: cluster ${clusterId} — ${error.message}`);
       if (!alertAllowed(`${clusterId}:unsupported`, ALERT_COOLDOWN_MS)) return;
       await deps.alertOwners(clusterId, "cluster version not supported", error.message);
+      return;
+    }
+    // The stored string would not connect over validated TLS. Same shape as an
+    // unsupported version and for the same reason: no retry fixes it, only the
+    // owner reconnecting with a TLS string can. Emphatically NOT folded into
+    // "unreachable" — the cluster may be perfectly healthy and we are declining
+    // to dial it, and saying "we could not reach you" would send the owner
+    // hunting a firewall that is not the problem.
+    if (error instanceof InsecureConnectionError) {
+      recordClusterTask(task, clusterId, "insecure");
+      deps.logger.warn(`${task}: cluster ${clusterId} — ${error.message}`);
+      if (!alertAllowed(`${clusterId}:insecure`, ALERT_COOLDOWN_MS)) return;
+      await deps.alertOwners(
+        clusterId,
+        `${task} skipped — this cluster's connection string is not using TLS`,
+        `Indexterity now requires TLS on every connection it makes to a customer database, ` +
+          `and this cluster's stored string would connect in plaintext. The ${task} step did ` +
+          `nothing.\n\n${error.message}\n\nReconnect the cluster with a string that enables ` +
+          `TLS and the pipeline resumes on the next tick. Nothing was executed and nothing ` +
+          `was lost.`,
+      );
       return;
     }
     // Undecryptable credentials need an operator, not a retry and not a

@@ -50,6 +50,8 @@ export async function startApi(
       // The suite's mongo is on localhost, and it signs up freely — both are
       // non-defaults, which is exactly why the guards need their own tests.
       ALLOW_PRIVATE_CLUSTER_TARGETS: "true",
+      // The compose mongo serves no TLS; the suite dials it on purpose.
+      ALLOW_INSECURE_CLUSTER_TLS: "true",
       SIGNUP_MODE: "open",
       // The suite signs up an account per scenario from one address, which the
       // brute-force budget is right to distrust in production and wrong to

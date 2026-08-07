@@ -1,4 +1,5 @@
-import { type Db, MongoClient } from "mongodb";
+import type { Db, MongoClient } from "mongodb";
+import { mongoClient } from "./client";
 import { parseServerVersion, type ServerVersion } from "./version";
 
 // Owns a driver client. Created with an index-only role (the wiki's
@@ -8,9 +9,10 @@ export class MongoConnection {
   private version: ServerVersion | null | undefined;
 
   constructor(connectionString: string) {
-    // Fail fast on unreachable clusters: 5s server selection instead of the
-    // driver's 30s default, so requests surface a 502 quickly.
-    this.client = new MongoClient(connectionString, { serverSelectionTimeoutMS: 5000 });
+    // Throws InsecureConnectionError on a string that would not connect over
+    // validated TLS — see mongo/client.ts, which is the only place a driver
+    // client is built.
+    this.client = mongoClient(connectionString);
   }
 
   async connect(): Promise<void> {

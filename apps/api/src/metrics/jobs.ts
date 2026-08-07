@@ -16,6 +16,11 @@ export type ClusterTaskOutcome =
   | "unreachable"
   | "unsupported"
   | "credentials"
+  // Stored string would not connect over validated TLS. Its own label rather
+  // than "error": no retry fixes it, and it must not hide inside "unreachable",
+  // where a cluster we are refusing to dial insecurely would read as a cluster
+  // that is down.
+  | "insecure"
   | "gone"
   | "error";
 
@@ -32,8 +37,15 @@ export function recordClusterTask(
 ): void {
   clusterTaskRuns.add(1, { task, outcome });
   // Reached and answered — including "your version is too old", which is an
-  // answer. An offboarded cluster leaves the set because it no longer exists.
-  if (outcome === "ok" || outcome === "unsupported" || outcome === "gone") {
+  // answer, and "we refused to dial it", which is a verdict about the string
+  // rather than about the cluster. An offboarded cluster leaves the set because
+  // it no longer exists.
+  if (
+    outcome === "ok" ||
+    outcome === "unsupported" ||
+    outcome === "insecure" ||
+    outcome === "gone"
+  ) {
     unreachable.delete(clusterId);
   } else if (outcome === "unreachable") {
     unreachable.add(clusterId);
