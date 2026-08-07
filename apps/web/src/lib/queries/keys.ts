@@ -20,6 +20,14 @@
 // The four org-level keys take no cluster: they are the same reads whichever
 // cluster is selected, so selecting another is a URL change and not a refetch.
 export const queryKeys = {
+  // The signed-in user, whatever org is active. "me" is better-auth's session
+  // (who am I), the other two are the account page's lists. None take an org:
+  // switching orgs changes none of these answers, only signing in or out does —
+  // and invalidateSession sweeps the whole cache on those already.
+  me: () => ["me"] as const,
+  mySessions: () => ["my-sessions"] as const,
+  myAccounts: () => ["my-accounts"] as const,
+
   // Org level.
   clusters: () => ["clusters"] as const,
   org: () => ["org"] as const,

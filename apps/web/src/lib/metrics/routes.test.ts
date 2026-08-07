@@ -10,7 +10,13 @@ describe("route patterns from the generated tree", () => {
   const patterns = routePatterns(routeTree);
 
   it("finds every page the app declares", () => {
-    expect([...patterns].sort()).toEqual(["/", "/app", "/app/org", "/reset-password"]);
+    expect([...patterns].sort()).toEqual([
+      "/",
+      "/app",
+      "/app/account",
+      "/app/org",
+      "/reset-password",
+    ]);
   });
 
   // An index route's path is "/", which belongs to its parent rather than adding

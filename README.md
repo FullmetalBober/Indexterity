@@ -401,6 +401,7 @@ apps/web                dashboard
   src/routes/app.tsx    the /app shell — auth gate, cluster bar, org switcher
   src/routes/app.index  the cluster dashboard
   src/routes/app.org    members, roles, invites, plan
+  src/routes/app.account  the signed-in user: name, password, open sessions
   src/lib/api.ts        one oRPC client, isomorphic: same-origin in the browser,
                         API_URL with the caller's cookie during SSR
   src/lib/auth-client   better-auth's own browser client

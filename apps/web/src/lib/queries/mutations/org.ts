@@ -23,24 +23,8 @@ import { useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
 import { authClient } from "../../auth-client";
 import { invalidateSession } from "../client";
-import { AuthApiError, apiMessage } from "../errors";
+import { AuthApiError, apiMessage, unwrap } from "../errors";
 import { queryKeys } from "../keys";
-
-// better-auth's client resolves to `{ data, error }` rather than rejecting, and
-// a useMutation with no rejection has no onError. This is the adapter, and it is
-// the only place that shape is unwrapped.
-async function unwrap<T>(
-  call: PromiseLike<{
-    data: T | null;
-    error: { message?: string | undefined; status: number; code?: string | undefined } | null;
-  }>,
-): Promise<T> {
-  const { data, error } = await call;
-  if (error !== null && error !== undefined) {
-    throw new AuthApiError(error.message ?? "request failed", error.status, error.code);
-  }
-  return data as T;
-}
 
 // A slug is required and unique and nothing routes by it — it exists because the
 // plugin resolves organizations by one. Derived from the name so the common case
