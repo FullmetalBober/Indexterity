@@ -239,10 +239,20 @@ export const latencySeriesPoint = z.object({
 });
 export type LatencySeriesPoint = z.infer<typeof latencySeriesPoint>;
 
+// Why a metric has no drawable point, when it has none — null when it has one.
+// Shipped so the panel can say WHICH kind of nothing this is: waiting on a
+// second collect, a counter that never moved, or a mongod restart that made the
+// window unmeasurable. Without it every one of them renders as the same
+// "not enough samples", which is how #85 came in twice.
+export const latencyGap = z.enum(["AWAITING_SECOND_COLLECT", "NO_OPS_RECORDED", "COUNTERS_RESET"]);
+export type LatencyGap = z.infer<typeof latencyGap>;
+
 export const collectionLatencySeries = z.object({
   database: z.string(),
   collection: z.string(),
   points: z.array(latencySeriesPoint),
+  readGap: latencyGap.nullable(),
+  writeGap: latencyGap.nullable(),
 });
 export type CollectionLatencySeries = z.infer<typeof collectionLatencySeries>;
 

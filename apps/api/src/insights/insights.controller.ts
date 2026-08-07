@@ -5,6 +5,7 @@ import { contract } from "@repo/contracts";
 import type { FastifyRequest } from "fastify";
 import {
   type LatencyReading,
+  latencyGaps,
   latencyPoints,
   monthlySavingsUsd,
   summarizeLatency,
@@ -175,11 +176,16 @@ export class InsightsController {
         return { clusterId: input.clusterId, collections: [] };
       }
       const groups = await this.loadLatencyReadings(input.clusterId);
-      const collections = [...groups.values()].map((group) => ({
-        database: group.database,
-        collection: group.collection,
-        points: latencyPoints(group.readings),
-      }));
+      const collections = [...groups.values()].map((group) => {
+        const gaps = latencyGaps(group.readings);
+        return {
+          database: group.database,
+          collection: group.collection,
+          points: latencyPoints(group.readings),
+          readGap: gaps.read,
+          writeGap: gaps.write,
+        };
+      });
       return { clusterId: input.clusterId, collections };
     });
   }

@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { dateRangeCutoff, equalityConstants, lookupJoins, pipelineShape } from "./collector";
+import {
+  dateRangeCutoff,
+  equalityConstants,
+  lookupJoins,
+  pipelineShape,
+  sumLatencyStats,
+} from "./collector";
 
 describe("pipelineShape", () => {
   it("extracts equality/range/directed sort from leading $match + $sort", () => {
@@ -102,5 +108,56 @@ describe("lookupJoins", () => {
 
   it("ignores pipeline-form lookups without a foreignField", () => {
     expect(lookupJoins([{ $lookup: { from: "users", pipeline: [], as: "u" } }])).toEqual([]);
+  });
+});
+
+// $collStats latencyStats is node-local, so collectionLatency asks the primary
+// AND every member — and MemberConnections opens a direct connection to every
+// host including the one the base connection is already using. Summing the raw
+// list would count the primary twice, and the primary is the only node that has
+// any writes at all (#85).
+describe("sumLatencyStats", () => {
+  const doc = (host: string, reads: [number, number], writes: [number, number]) => ({
+    host,
+    latencyStats: {
+      reads: { ops: reads[0], latency: reads[1] },
+      writes: { ops: writes[0], latency: writes[1] },
+    },
+  });
+
+  it("sums the cluster: primary writes, reads from wherever they were served", () => {
+    expect(
+      sumLatencyStats([
+        doc("a:27017", [302, 308_868], [2500, 611_776]),
+        doc("b:27017", [410, 489_973], [0, 0]),
+        doc("c:27017", [12, 2_135], [0, 0]),
+      ]),
+    ).toEqual({
+      reads: { ops: 724, latencyMicros: 800_976 },
+      writes: { ops: 2500, latencyMicros: 611_776 },
+    });
+  });
+
+  it("counts a host once however many connections reached it", () => {
+    const primary = doc("a:27017", [302, 308_868], [2500, 611_776]);
+    expect(sumLatencyStats([primary, primary, doc("b:27017", [410, 489_973], [0, 0])])).toEqual({
+      reads: { ops: 712, latencyMicros: 798_841 },
+      writes: { ops: 2500, latencyMicros: 611_776 },
+    });
+  });
+
+  // Two readings of one counter seconds apart. The later is no less true, and
+  // taking it keeps the totals monotonic, which is what the delta layer needs.
+  it("keeps the newest reading of a host it saw twice", () => {
+    expect(
+      sumLatencyStats([doc("a:27017", [1, 10], [1, 10]), doc("a:27017", [5, 50], [5, 50])]),
+    ).toEqual({ reads: { ops: 5, latencyMicros: 50 }, writes: { ops: 5, latencyMicros: 50 } });
+  });
+
+  it("is zero rather than undefined when nothing answered", () => {
+    expect(sumLatencyStats([])).toEqual({
+      reads: { ops: 0, latencyMicros: 0 },
+      writes: { ops: 0, latencyMicros: 0 },
+    });
   });
 });

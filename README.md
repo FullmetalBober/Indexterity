@@ -70,6 +70,13 @@ usable trend where 6h gave four points a day; going shorter is a question for
 first, not a question of load. A collect takes under a second against a hundred
 collections, and about a round trip per collection against a remote cluster.
 
+**A latency chart with no line says which nothing it is.** A rate needs two
+readings, so a null point can mean the second collect has not run, that the
+counter never moved, or that a mongod restart made the window unmeasurable —
+and rendering the same "not enough samples" for all three reported the
+collector's blind spot as a fact about the cluster. Each is now named under the
+chart, per metric, so an empty panel and an unmeasurable one stop looking alike.
+
 **Never dropped**, whatever the usage: `_id_`, unique (including unique partial
 and sparse — a constraint is not a performance hint), TTL, and shard-key
 indexes. They surface as advisories instead. Partial and sparse indexes without
@@ -319,13 +326,42 @@ and a major release is where command behaviour moves. Set
 See [Connecting a cluster](https://github.com/FullmetalBober/Indexterity/wiki/Connecting-a-cluster) for the exact `createRole`
 snippets. Indexterity never gets document read or write privileges.
 
-**Replica sets** — `$indexStats` is per member; usage sums all of them, so an
-index used only on a secondary counts as used.
+**Replica sets** — `$indexStats` *and* `$collStats latencyStats` are per member;
+both sum all of them, so an index used only on a secondary counts as used, and a
+cluster's write latency is read from the node that actually takes writes. Both
+are aggregations, so the driver routes them by read preference — a connection
+string carrying `readPreference=secondaryPreferred` had every latency reading
+landing on a secondary, whose write counters are permanently zero because oplog
+application is not a client write op.
+
+**Which** members, exactly: every one `hello` names, and that is two arrays, not
+one. Electable members are listed under `hosts`, but a `priority: 0` member is
+listed under `passives` — and priority 0 is the normal setting for a secondary in
+another region, so that it cannot win an election across a WAN. Priority governs
+elections and nothing else, so those members serve `secondaryPreferred` reads
+like any other secondary and both arrays are collected from.
+
+**Hidden members are not**, and this is a deliberate limit rather than an
+oversight. They appear in neither array, so reaching them needs `replSetGetStatus`
+or `replSetGetConfig` — cluster privileges the engine role does not ask for.
+Drivers never route reads to a hidden member either, so what is missed is
+direct-connected traffic: BI tools, backups, delayed members. If an index exists
+solely for a hidden analytics node, hint it or keep it out of the pipeline.
 
 **Sharded clusters** — point at the `mongos`. Stats aggregate across shards, and
 each collection's shard key is read from `config.collections` so any index it
 prefixes is protected. Without config read, the collection is treated as
 unsharded.
+
+**`mongodb+srv://` strings** (what Atlas hands you) carry two settings outside
+their own text: the scheme defaults `tls` to true, and `authSource` arrives in a
+DNS TXT record the driver reads at connect. Per-member connections have to
+rewrite the string as plain `mongodb://` — an SRV seed cannot be pointed at one
+host, since its targets live in DNS and the scheme forbids a port — so both are
+carried across explicitly from the live client rather than re-parsed from the
+original text. Without that the member connections are plaintext, authenticate
+against the database in the path, and fail; a plain multi-host string was never
+affected, because its options are in the string.
 
 ## Auth & tenancy
 
@@ -539,7 +575,7 @@ yet. Migration creates schemas, so migration creates both.
 in CI. Releasing is `git tag v0.2.0 && git push --tags`, and the release
 workflow refuses a tag whose version the tree does not carry.
 
-**Four test layers**, currently 436 api unit, 233 web unit, 81 integration and
+**Four test layers**, currently 457 api unit, 239 web unit, 81 integration and
 24 end-to-end. The e2e suite deliberately runs with **no proxy in front**, so the
 passthrough is the path under test — the proxy shape is covered by compose and
 the chart, and a fallback nothing exercises is a fallback that is broken when

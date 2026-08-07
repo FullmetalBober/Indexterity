@@ -667,7 +667,16 @@ describe("SSRF guard and sign-up gate (second api with production defaults)", ()
 
   beforeAll(async () => {
     guarded = await startApi(
-      { ALLOW_PRIVATE_CLUSTER_TARGETS: "false", SIGNUP_MODE: "invite" },
+      {
+        ALLOW_PRIVATE_CLUSTER_TARGETS: "false",
+        // startApi turns this ON for every instance, because the rest of the
+        // suite dials a localhost mongo with no certificate. This instance is
+        // the one running hosted defaults, so it has to turn it back off — with
+        // it on, the transport guard stands down and a plaintext string reaches
+        // the dial instead of being refused.
+        ALLOW_INSECURE_CLUSTER_TLS: "false",
+        SIGNUP_MODE: "invite",
+      },
       PORT,
     );
     // Users already exist (the suite signed some up), so this instance is past
