@@ -539,8 +539,8 @@ yet. Migration creates schemas, so migration creates both.
 in CI. Releasing is `git tag v0.2.0 && git push --tags`, and the release
 workflow refuses a tag whose version the tree does not carry.
 
-**Four test layers**, currently 392 api unit, 184 web unit, 75 integration and
-23 end-to-end. The e2e suite deliberately runs with **no proxy in front**, so the
+**Four test layers**, currently 414 api unit, 229 web unit, 79 integration and
+24 end-to-end. The e2e suite deliberately runs with **no proxy in front**, so the
 passthrough is the path under test — the proxy shape is covered by compose and
 the chart, and a fallback nothing exercises is a fallback that is broken when
 someone needs it. `npm run test` runs the first two without any infra: the api's

@@ -91,6 +91,13 @@ function SelectLabel({ className, ...props }: React.ComponentProps<typeof Select
   );
 }
 
+// `select-none` stays here, unlike on Label, and not out of deference to the
+// registry: Radix commits the item on mouse `pointerup`, so a drag across an
+// option ends by picking it and unmounting the listbox. Allowing the highlight
+// would paint a selection for the length of the drag and then throw it away —
+// having, in the org switcher, changed which org you are looking at on the way.
+// Nothing here is copy-only text anyway; the org name is selectable in the card
+// title and the rename box on the org page.
 function SelectItem({
   className,
   children,

@@ -128,7 +128,14 @@ function CheckboxField({ label, description }: Chrome) {
         onCheckedChange={(checked) => field.handleChange(checked === true)}
       />
       <FieldContent>
-        <FieldLabel htmlFor={field.name}>{label}</FieldLabel>
+        {/* The one label in this app that is a click target and nothing else.
+            Nobody copies "Instant create"; they do double-click it to toggle,
+            and a highlighted word flashing under the cursor on the way looks
+            like a misfire. Labels are selectable by default (ui/label.tsx) —
+            this is the exception, not the rule. */}
+        <FieldLabel className="select-none" htmlFor={field.name}>
+          {label}
+        </FieldLabel>
         {description ? <FieldDescription>{description}</FieldDescription> : null}
       </FieldContent>
     </Field>
