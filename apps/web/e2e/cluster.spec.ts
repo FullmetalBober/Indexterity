@@ -200,13 +200,16 @@ test.describe("cluster lifecycle", () => {
     expect(html).toContain("Policy");
   });
 
-  // The free plan allows one, and the limit must be visible before it is hit.
+  // The free plan allows one, and the limit must be visible before it is hit —
+  // on the page with the form, with no navigating to go and find it. A test that
+  // clicks through to the org page to read the number is a test agreeing with
+  // wherever the number happens to live (#30).
   test("refuses a second cluster on the free plan and says why", async ({ page }) => {
     await signUpAndLandOnDashboard(page, uniqueEmail("quota"));
     await connectCluster(page, "E2E Quota One");
-    await page.getByRole("link", { name: "Organization" }).click();
-    await expect(page.getByText(/1 \/ 1 clusters/)).toBeVisible();
-    await page.getByRole("link", { name: "Dashboard" }).click();
+
+    await expect(page.getByText(/1 \/ 1 clusters on the FREE plan/)).toBeVisible();
+    await expect(page.getByText("No room for another cluster")).toBeVisible();
 
     await page.getByLabel("Name").fill("E2E Quota Two");
     await page.getByLabel("Connection string").fill(MONGO_URL);

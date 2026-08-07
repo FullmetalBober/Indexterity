@@ -23,7 +23,7 @@ import {
   useRoi,
 } from "~/lib/queries/pipeline";
 import { policyQuery, usePolicy } from "~/lib/queries/policy";
-import { clustersQuery, NO_CLUSTERS, selectCluster, useShell } from "~/lib/queries/shell";
+import { clustersQuery, NO_CLUSTERS, selectCluster, useOrg, useShell } from "~/lib/queries/shell";
 import {
   collectionsQuery,
   latencyQuery,
@@ -86,6 +86,12 @@ export const Route = createFileRoute("/app/")({
 function Dashboard() {
   const shell = useShell();
   const { clusterId: id } = Route.useLoaderData();
+
+  // Not a cluster read, and so not in this route's loader: the layout above
+  // already warmed the org, and the connect form at the bottom of this page
+  // needs its cluster quota. Null until it arrives, or if the reader is in no
+  // organization.
+  const org = useOrg();
 
   // The live half of everything below: the worker's events for THIS cluster,
   // answered by invalidating the same keys the loader warmed. A worker pass
@@ -202,7 +208,7 @@ function Dashboard() {
         <ActivityTable activity={activity} />
       </section>
       {policy !== null ? <PolicySection key={policy.clusterId} policy={policy} /> : null}
-      <ConnectClusterForm />
+      <ConnectClusterForm plan={org?.plan ?? null} />
     </>
   );
 }

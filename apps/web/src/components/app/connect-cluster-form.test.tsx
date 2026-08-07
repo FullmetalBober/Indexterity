@@ -1,4 +1,4 @@
-import type { ConnectionDiagnosis, PrivilegeCheck } from "@repo/contracts";
+import type { ConnectionDiagnosis, PlanInfo, PrivilegeCheck } from "@repo/contracts";
 import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -20,6 +20,21 @@ vi.mock("@tanstack/react-router", () => ({ useNavigate: () => navigate }));
 
 function privilege(key: string, granted: boolean): PrivilegeCheck {
   return { key, label: key, enables: `${key} does things`, tier: "CORE", granted };
+}
+
+// Room for another cluster unless a test says otherwise — every render draws
+// the quota, and only the three tests below are about what it says.
+function plan(over: Partial<PlanInfo> = {}): PlanInfo {
+  return {
+    plan: "PRO",
+    maxClusters: 5,
+    maxMembers: 5,
+    workloadAnalysis: true,
+    autoApply: true,
+    clustersUsed: 1,
+    membersUsed: 1,
+    ...over,
+  };
 }
 
 function diagnosis(over: Partial<ConnectionDiagnosis> = {}): ConnectionDiagnosis {
@@ -49,12 +64,43 @@ beforeEach(() => {
 });
 
 describe("ConnectClusterForm", () => {
+  // The whole point of the quota being here rather than on the org page: it is
+  // read before anything is typed, not after a 402.
+  it("shows what the plan has left before a string is pasted", () => {
+    renderInApp(<ConnectClusterForm plan={plan({ clustersUsed: 2 })} />);
+
+    expect(screen.getByText(/2 \/ 5 clusters on the PRO plan/)).toBeInTheDocument();
+    expect(screen.queryByText("No room for another cluster")).not.toBeInTheDocument();
+  });
+
+  // Full, and still not disabled: checking a string stores nothing, and the api
+  // owns the refusal.
+  it("warns when the plan is already full, without disabling the form", () => {
+    renderInApp(<ConnectClusterForm plan={plan({ plan: "FREE", maxClusters: 1 })} />);
+
+    expect(screen.getByText("No room for another cluster")).toBeInTheDocument();
+    expect(screen.getByText(/The FREE plan allows 1 cluster\./)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Check access" })).toBeEnabled();
+  });
+
+  // A null cap is unlimited, which can never be full and has no "/ n" to show.
+  it("counts without a limit on a plan that has none", () => {
+    renderInApp(
+      <ConnectClusterForm
+        plan={plan({ plan: "ENTERPRISE", maxClusters: null, clustersUsed: 9 })}
+      />,
+    );
+
+    expect(screen.getByText(/9 clusters on the ENTERPRISE plan/)).toBeInTheDocument();
+    expect(screen.queryByText("No room for another cluster")).not.toBeInTheDocument();
+  });
+
   // Both fields are required, and the form says which one is missing rather than
   // greying the button out and leaving the reader to work it out. Nothing is
   // asked of the api until they are both there.
   it("names the empty fields rather than checking with them", async () => {
     const user = userEvent.setup();
-    renderInApp(<ConnectClusterForm />);
+    renderInApp(<ConnectClusterForm plan={plan()} />);
 
     await user.click(screen.getByRole("button", { name: "Check access" }));
 
@@ -70,7 +116,7 @@ describe("ConnectClusterForm", () => {
   it("checks before it connects, and never stores anything on the check", async () => {
     checkConnection.mockResolvedValue(diagnosis());
     const user = userEvent.setup();
-    renderInApp(<ConnectClusterForm />);
+    renderInApp(<ConnectClusterForm plan={plan()} />);
 
     await check(user);
 
@@ -84,7 +130,7 @@ describe("ConnectClusterForm", () => {
     checkConnection.mockResolvedValue(diagnosis());
     createCluster.mockResolvedValue({ id: "c9", name: "Production" });
     const user = userEvent.setup();
-    renderInApp(<ConnectClusterForm />);
+    renderInApp(<ConnectClusterForm plan={plan()} />);
 
     await check(user);
     await user.click(screen.getByRole("button", { name: "Connect" }));
@@ -101,7 +147,7 @@ describe("ConnectClusterForm", () => {
   it("offers to provision a scoped user when the credentials can create one", async () => {
     checkConnection.mockResolvedValue(diagnosis({ canProvision: true }));
     const user = userEvent.setup();
-    renderInApp(<ConnectClusterForm />);
+    renderInApp(<ConnectClusterForm plan={plan()} />);
 
     await check(user);
 
@@ -121,7 +167,7 @@ describe("ConnectClusterForm", () => {
       connectionString: "mongodb://idx_abc:secret@host:27017",
     });
     const user = userEvent.setup();
-    renderInApp(<ConnectClusterForm />);
+    renderInApp(<ConnectClusterForm plan={plan()} />);
 
     await check(user);
     await user.click(screen.getByRole("button", { name: "Create a scoped user and connect" }));
@@ -135,7 +181,7 @@ describe("ConnectClusterForm", () => {
       diagnosis({ ready: false, canApply: false, missing: ["Index usage stats"] }),
     );
     const user = userEvent.setup();
-    renderInApp(<ConnectClusterForm />);
+    renderInApp(<ConnectClusterForm plan={plan()} />);
 
     await check(user);
 
@@ -148,7 +194,7 @@ describe("ConnectClusterForm", () => {
   it("still allows connecting when only the write privileges are missing", async () => {
     checkConnection.mockResolvedValue(diagnosis({ canApply: false, missing: ["Drop indexes"] }));
     const user = userEvent.setup();
-    renderInApp(<ConnectClusterForm />);
+    renderInApp(<ConnectClusterForm plan={plan()} />);
 
     await check(user);
 
@@ -161,7 +207,7 @@ describe("ConnectClusterForm", () => {
       diagnosis({ reachable: false, message: "cluster unreachable — check the host" }),
     );
     const user = userEvent.setup();
-    renderInApp(<ConnectClusterForm />);
+    renderInApp(<ConnectClusterForm plan={plan()} />);
 
     await check(user);
 
@@ -172,7 +218,7 @@ describe("ConnectClusterForm", () => {
   it("surfaces a failed check rather than swallowing it", async () => {
     checkConnection.mockRejectedValue(new Error("boom"));
     const user = userEvent.setup();
-    renderInApp(<ConnectClusterForm />);
+    renderInApp(<ConnectClusterForm plan={plan()} />);
 
     await check(user);
 
@@ -184,7 +230,7 @@ describe("ConnectClusterForm", () => {
   it("discards the diagnosis when the connection string is edited", async () => {
     checkConnection.mockResolvedValue(diagnosis());
     const user = userEvent.setup();
-    renderInApp(<ConnectClusterForm />);
+    renderInApp(<ConnectClusterForm plan={plan()} />);
 
     await check(user);
     expect(screen.getByRole("button", { name: "Connect" })).toBeInTheDocument();

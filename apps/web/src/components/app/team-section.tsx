@@ -1,6 +1,7 @@
 import { createInviteInput, type MyInvite, renameOrgInput } from "@repo/contracts";
 import { useState } from "react";
 import { CreateOrgForm } from "~/components/app/create-org-form";
+import { usage } from "~/components/app/format";
 import { Invitations } from "~/components/app/invitations";
 import { ConfirmButton } from "~/components/confirm-button";
 import { useAppForm } from "~/components/form";
@@ -53,11 +54,6 @@ interface TeamOrg {
   }[];
 }
 
-// "2 / 3" while there is a cap, the bare count when there is not.
-function usage(used: number, limit: number | null): string {
-  return limit === null ? String(used) : `${used} / ${limit}`;
-}
-
 export function TeamSection({ org, invites }: { org: TeamOrg; invites: readonly MyInvite[] }) {
   const [sentTo, setSentTo] = useState<string | null>(null);
   const [renaming, setRenaming] = useState(false);
@@ -98,8 +94,10 @@ export function TeamSection({ org, invites }: { org: TeamOrg; invites: readonly 
       <CardHeader>
         <div className="flex flex-wrap items-center gap-2">
           <CardTitle className="text-base">Team — {org.name}</CardTitle>
-          {/* The limit is worth showing BEFORE it is hit: the alternative is a
-              402 at the moment someone is trying to get work done. */}
+          {/* What the plan is and what has been spent of it. The seats half of
+              it warns here, next to the invite form that spends them; the
+              clusters half warns on the dashboard, next to the connect form.
+              This line is the summary of both, not the warning for either. */}
           <Badge variant="outline">{org.plan.plan}</Badge>
           <span className="text-muted-foreground text-xs">
             {usage(org.plan.clustersUsed, org.plan.maxClusters)} clusters ·{" "}

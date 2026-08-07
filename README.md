@@ -240,7 +240,10 @@ history, and an explicit setting always wins.
 with a free side project and a paid production team holds two orgs on two plans
 and is billed for one of them. How many organizations you make is therefore
 **not** metered — capping it would cap how much you can buy — and the free tier
-is held by the cluster limit, applied inside each org one at a time.
+is held by the cluster limit, applied inside each org one at a time. What has
+been spent of that limit is drawn beside the connect form on the dashboard,
+before anything is typed into it: a quota nobody sees until it refuses them is a
+402 in the middle of someone's work.
 
 **Free gives away the analysis and sells the automation.** Every plan sees every
 recommendation, with the reasoning, and can approve any of them by hand. What a

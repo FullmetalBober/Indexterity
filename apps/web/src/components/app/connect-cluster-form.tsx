@@ -1,5 +1,6 @@
-import { type ConnectionDiagnosis, createClusterInput } from "@repo/contracts";
+import { type ConnectionDiagnosis, createClusterInput, type PlanInfo } from "@repo/contracts";
 import { useState } from "react";
+import { usage } from "~/components/app/format";
 import { PrivilegeList } from "~/components/app/privilege-list";
 import { useAppForm } from "~/components/form";
 import { Alert, AlertDescription, AlertTitle } from "~/components/ui/alert";
@@ -17,7 +18,10 @@ import { CLUSTER_USER_DOCS_HREF } from "~/lib/site";
 const NAME = createClusterInput.shape.name;
 const CONNECTION_STRING = createClusterInput.shape.connectionString;
 
-export function ConnectClusterForm() {
+// The plan the clusters are counted against, or null while the org read has not
+// arrived — in which case the quota simply is not drawn. It is a warning, not a
+// gate: the api is the one that refuses, and it refuses on the same numbers.
+export function ConnectClusterForm({ plan }: { plan: PlanInfo | null }) {
   const [error, setError] = useState<string | null>(null);
   const [diagnosis, setDiagnosis] = useState<ConnectionDiagnosis | null>(null);
   const [provisioned, setProvisioned] = useState<{
@@ -73,16 +77,45 @@ export function ConnectClusterForm() {
   // this component when a field changes.
   const credentials = () => form.state.values;
 
+  // The meter this form spends, read before a word is typed. Unlimited plans
+  // have a null cap and can never be full.
+  const full = plan !== null && plan.maxClusters !== null && plan.clustersUsed >= plan.maxClusters;
+
   return (
     <Card className="mt-8">
       <CardHeader>
-        <CardTitle className="text-base">Connect a cluster</CardTitle>
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <CardTitle className="text-base">Connect a cluster</CardTitle>
+          {/* The count belongs beside the form that spends it, not on the org
+              page: a limit nobody sees until it refuses them is a 402 in the
+              middle of someone's work. */}
+          {plan !== null ? (
+            <span className={full ? "text-destructive text-xs" : "text-muted-foreground text-xs"}>
+              {usage(plan.clustersUsed, plan.maxClusters)} clusters on the {plan.plan} plan
+            </span>
+          ) : null}
+        </div>
         <CardDescription>
           Paste any connection string — Indexterity checks what it can do before storing anything.
           Clusters start in read-only mode.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
+        {plan !== null && full ? (
+          <Alert variant="destructive">
+            <AlertTitle>No room for another cluster</AlertTitle>
+            {/* Nothing is disabled below. Checking a string stores nothing and
+                is still worth doing, and the api owns the refusal — a button
+                greyed out by a stale count would be a lie either way. */}
+            <AlertDescription>
+              The {plan.plan} plan allows {plan.maxClusters}{" "}
+              {plan.maxClusters === 1 ? "cluster" : "clusters"}. Checking a connection string still
+              works, but connecting one will be refused until you disconnect a cluster or move to a
+              plan with room for more.
+            </AlertDescription>
+          </Alert>
+        ) : null}
+
         <form
           className="flex flex-wrap items-end gap-3"
           onSubmit={(event) => {
