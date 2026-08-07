@@ -70,6 +70,13 @@ usable trend where 6h gave four points a day; going shorter is a question for
 first, not a question of load. A collect takes under a second against a hundred
 collections, and about a round trip per collection against a remote cluster.
 
+**A latency chart with no line says which nothing it is.** A rate needs two
+readings, so a null point can mean the second collect has not run, that the
+counter never moved, or that a mongod restart made the window unmeasurable —
+and rendering the same "not enough samples" for all three reported the
+collector's blind spot as a fact about the cluster. Each is now named under the
+chart, per metric, so an empty panel and an unmeasurable one stop looking alike.
+
 **Never dropped**, whatever the usage: `_id_`, unique (including unique partial
 and sparse — a constraint is not a performance hint), TTL, and shard-key
 indexes. They surface as advisories instead. Partial and sparse indexes without
@@ -319,8 +326,13 @@ and a major release is where command behaviour moves. Set
 See [Connecting a cluster](https://github.com/FullmetalBober/Indexterity/wiki/Connecting-a-cluster) for the exact `createRole`
 snippets. Indexterity never gets document read or write privileges.
 
-**Replica sets** — `$indexStats` is per member; usage sums all of them, so an
-index used only on a secondary counts as used.
+**Replica sets** — `$indexStats` *and* `$collStats latencyStats` are per member;
+both sum all of them, so an index used only on a secondary counts as used, and a
+cluster's write latency is read from the node that actually takes writes. Both
+are aggregations, so the driver routes them by read preference — a connection
+string carrying `readPreference=secondaryPreferred` had every latency reading
+landing on a secondary, whose write counters are permanently zero because oplog
+application is not a client write op.
 
 **Which** members, exactly: every one `hello` names, and that is two arrays, not
 one. Electable members are listed under `hosts`, but a `priority: 0` member is
@@ -553,7 +565,7 @@ yet. Migration creates schemas, so migration creates both.
 in CI. Releasing is `git tag v0.2.0 && git push --tags`, and the release
 workflow refuses a tag whose version the tree does not carry.
 
-**Four test layers**, currently 420 api unit, 229 web unit, 79 integration and
+**Four test layers**, currently 430 api unit, 235 web unit, 79 integration and
 24 end-to-end. The e2e suite deliberately runs with **no proxy in front**, so the
 passthrough is the path under test — the proxy shape is covered by compose and
 the chart, and a fallback nothing exercises is a fallback that is broken when

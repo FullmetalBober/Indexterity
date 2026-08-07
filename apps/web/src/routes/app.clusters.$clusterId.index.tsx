@@ -86,7 +86,7 @@ function ClusterOverview() {
 
   // Ranked per metric, not once for both charts — see latency-series.ts for the bug
   // that made this its own module rather than four lines here.
-  const { readSeries, writeSeries, foldedCount } = latencyCharts(
+  const { readSeries, writeSeries, foldedCount, readNote, writeNote } = latencyCharts(
     latencySeries.data,
     SERIES_PALETTE,
   );
@@ -187,22 +187,28 @@ function ClusterOverview() {
       />
 
       {/* Drawn while the series read is out, because two charts appearing under
-          the recommendations table is the single biggest jump on this page. Once
-          it has answered, a cluster with nothing to plot goes back to drawing
-          nothing at all rather than to two empty boxes. */}
-      {latencySeries.pending || chartedCount > 0 ? (
+          the recommendations table is the single biggest jump on this page.
+
+          A cluster with no latency history at all still draws nothing rather than
+          two empty boxes. One that HAS history and nothing plottable now keeps the
+          boxes and says why: a panel that renders nothing and a panel that cannot
+          be measured looked identical from outside, and that is what got #85 filed
+          against a chart that was working. */}
+      {latencySeries.pending || chartedCount > 0 || latencySeries.data.length > 0 ? (
         <section className="mt-8 grid gap-6 md:grid-cols-2">
           <LineChart
             title="Read latency"
             unit="µs/op"
             series={readSeries}
             pending={latencySeries.pending}
+            emptyNote={readNote}
           />
           <LineChart
             title="Write latency"
             unit="µs/op"
             series={writeSeries}
             pending={latencySeries.pending}
+            emptyNote={writeNote}
           />
           {foldedCount > 0 ? (
             <p className="text-muted-foreground text-xs md:col-span-2">
