@@ -60,6 +60,7 @@ describe("RecommendationsTable", () => {
           rec({ id: "high", indexName: "idx_high", score: 90 }),
           rec({ id: "mid", indexName: "idx_mid", score: 55 }),
         ]}
+        loading={false}
       />,
     );
 
@@ -77,6 +78,7 @@ describe("RecommendationsTable", () => {
           rec({ id: "1", collection: "shard10", indexName: "idx_ten" }),
           rec({ id: "2", collection: "shard2", indexName: "idx_two" }),
         ]}
+        loading={false}
       />,
     );
 
@@ -94,6 +96,7 @@ describe("RecommendationsTable", () => {
           rec({ id: "1", collection: "orders", indexName: "idx_orders" }),
           rec({ id: "2", collection: "users", indexName: "idx_users", rationale: "redundant" }),
         ]}
+        loading={false}
       />,
     );
 
@@ -104,7 +107,9 @@ describe("RecommendationsTable", () => {
 
   it("offers approve on a proposal, and sends the id when confirmed", async () => {
     const user = userEvent.setup();
-    renderInApp(<RecommendationsTable clusterId="c1" recommendations={[rec({ id: "r9" })]} />);
+    renderInApp(
+      <RecommendationsTable clusterId="c1" recommendations={[rec({ id: "r9" })]} loading={false} />,
+    );
 
     await user.click(screen.getByRole("button", { name: "Approve" }));
     // Scoped to the dialog: the trigger says "Approve" too, and confirming from
@@ -123,14 +128,22 @@ describe("RecommendationsTable", () => {
     ["DROPPED", "Undo"],
   ] as const)("offers %s the %s action", (state, label) => {
     renderInApp(
-      <RecommendationsTable clusterId="c1" recommendations={[rec({ state, hiddenAt: null })]} />,
+      <RecommendationsTable
+        clusterId="c1"
+        recommendations={[rec({ state, hiddenAt: null })]}
+        loading={false}
+      />,
     );
     expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
   });
 
   it("offers nothing on an advisory", () => {
     renderInApp(
-      <RecommendationsTable clusterId="c1" recommendations={[rec({ type: "ADVISORY_REVIEW" })]} />,
+      <RecommendationsTable
+        clusterId="c1"
+        recommendations={[rec({ type: "ADVISORY_REVIEW" })]}
+        loading={false}
+      />,
     );
 
     expect(screen.getByText("review manually")).toBeInTheDocument();
@@ -143,6 +156,7 @@ describe("RecommendationsTable", () => {
       <RecommendationsTable
         clusterId="c1"
         recommendations={[rec({ state: "HIDDEN", hiddenAt: soon, observeDays: 1 })]}
+        loading={false}
       />,
     );
 
@@ -150,9 +164,20 @@ describe("RecommendationsTable", () => {
   });
 
   it("explains an empty table rather than drawing headers over nothing", () => {
-    renderInApp(<RecommendationsTable clusterId="c1" recommendations={[]} />);
+    renderInApp(<RecommendationsTable clusterId="c1" recommendations={[]} loading={false} />);
 
     expect(screen.getByText("No recommendations yet")).toBeInTheDocument();
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
+  });
+
+  // The worst of the three empty states, because the last sentence of it —
+  // "nothing to review means nothing is obviously wrong" — is a safety claim,
+  // and it was being made about clusters with forty proposals in flight (#72).
+  it("withholds the safety claim until the read has answered", () => {
+    renderInApp(<RecommendationsTable clusterId="c1" recommendations={[]} loading={true} />);
+
+    expect(screen.queryByText("No recommendations yet")).not.toBeInTheDocument();
+    expect(screen.getByRole("table")).toBeInTheDocument();
+    expect(screen.getByLabelText("Filter recommendations")).toBeDisabled();
   });
 });

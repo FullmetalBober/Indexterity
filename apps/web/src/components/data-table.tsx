@@ -34,6 +34,7 @@ import { type ReactNode, useRef, useState } from "react";
 import { Button } from "~/components/ui/button";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "~/components/ui/empty";
 import { Input } from "~/components/ui/input";
+import { Skeleton } from "~/components/ui/skeleton";
 import {
   Table,
   TableBody,
@@ -98,6 +99,15 @@ interface DataTableProps<TData extends RowData> {
   // to hunt through, which is all three of these on a real cluster.
   readonly filterLabel?: string;
   readonly empty: { readonly title: string; readonly description: ReactNode };
+  // The first fetch, with nothing cached — NOT a refetch. Without this the table
+  // draws `empty` the moment `data` is the empty fallback, which is a claim
+  // ("nothing has been applied here") made before the answer arrived (#72).
+  //
+  // Skeleton rows rather than a spinner, and inside the same header and
+  // `<colgroup>` the real rows will land in, so the columns are already where
+  // they are going to be. That is most of what makes a skeleton better than a
+  // spinner: the page does not move underneath the reader when the data lands.
+  readonly loading?: boolean;
   // The table's accessible name. Each one sits under a heading that already says
   // what it is, so the caption is screen-reader-only rather than a second title.
   readonly caption: string;
@@ -161,6 +171,7 @@ export function DataTable<TData extends RowData>({
   initialSorting,
   filterLabel,
   empty,
+  loading = false,
   caption,
   className,
   virtualize,
@@ -240,7 +251,11 @@ export function DataTable<TData extends RowData>({
   // Empty because there is nothing, versus empty because the filter excluded
   // everything, are different facts and get different answers — the second one
   // is the reader's own query and they need to know that.
-  if (data.length === 0) {
+  //
+  // And empty because we have not asked yet is a third: `loading` holds the
+  // empty state back until it is true, rather than saying it early and taking
+  // it back.
+  if (!loading && data.length === 0) {
     return (
       <Empty className={className}>
         <EmptyHeader>
@@ -259,10 +274,14 @@ export function DataTable<TData extends RowData>({
             aria-hidden="true"
             className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground"
           />
+          {/* Drawn while loading, so the table does not shift down when it
+              appears — but disabled, because a filter over rows that do not
+              exist yet is a control that silently does nothing. */}
           <Input
             aria-label={filterLabel}
             placeholder={filterLabel}
             className="pl-8"
+            disabled={loading}
             value={globalFilter}
             onChange={(event) => setGlobalFilter(event.target.value)}
           />
@@ -366,7 +385,9 @@ export function DataTable<TData extends RowData>({
             ))}
           </TableHeader>
           <TableBody>
-            {rows.length === 0 ? (
+            {loading ? (
+              <SkeletonRows columnCount={columnCount} />
+            ) : rows.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={columnCount} className="h-20 text-center text-muted-foreground">
                   Nothing matches “{globalFilter}”.
@@ -411,6 +432,43 @@ export function DataTable<TData extends RowData>({
         </Table>
       </div>
     </div>
+  );
+}
+
+// How many rows to draw while the first fetch is out. A guess either way — the
+// row count is exactly the thing not known yet — so it is small enough to read
+// as "a table is coming" rather than as a count, and the same for every table so
+// no reader learns to read it as one.
+const SKELETON_ROWS = 6;
+
+// The body while `loading`. Real rows and real cells, so the `<colgroup>` and
+// the header above still decide the geometry, and the bars land where the values
+// will. `aria-hidden` because they stand for content rather than being any — a
+// screen reader is told nothing rather than told six blank rows exist.
+function SkeletonRows({ columnCount }: { columnCount: number }) {
+  return (
+    <>
+      {Array.from({ length: SKELETON_ROWS }, (_, row) => (
+        <TableRow
+          // Positional is the honest key here: these rows stand for nothing, so
+          // there is no identity to key them by, and the list never reorders.
+          // biome-ignore lint/suspicious/noArrayIndexKey: placeholder rows have no identity
+          key={row}
+          aria-hidden="true"
+          className="hover:bg-transparent"
+        >
+          {Array.from({ length: columnCount }, (_, cell) => (
+            // biome-ignore lint/suspicious/noArrayIndexKey: placeholder cells have no identity
+            <TableCell key={cell}>
+              {/* min-w so a column with no stated width still has something to
+                  size itself from: without one, `w-full` inside an auto-layout
+                  table measures a zero-width child and the column collapses. */}
+              <Skeleton className="h-4 w-full min-w-16" />
+            </TableCell>
+          ))}
+        </TableRow>
+      ))}
+    </>
   );
 }
 

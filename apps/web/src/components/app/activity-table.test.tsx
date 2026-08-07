@@ -37,6 +37,7 @@ describe("ActivityTable", () => {
           entry({ id: "new", kind: "drop", createdAt: "2026-08-05T10:00:00.000Z" }),
           entry({ id: "mid", kind: "hide", createdAt: "2026-08-01T10:00:00.000Z" }),
         ]}
+        loading={false}
       />,
     );
 
@@ -51,6 +52,7 @@ describe("ActivityTable", () => {
           entry({ id: "old", kind: "build", createdAt: "2026-07-01T10:00:00.000Z" }),
           entry({ id: "new", kind: "drop", createdAt: "2026-08-05T10:00:00.000Z" }),
         ]}
+        loading={false}
       />,
     );
 
@@ -69,6 +71,7 @@ describe("ActivityTable", () => {
           entry({ id: "1", kind: "hide", indexName: "idx_wanted" }),
           entry({ id: "2", kind: "drop", indexName: "idx_other" }),
         ]}
+        loading={false}
       />,
     );
 
@@ -85,6 +88,7 @@ describe("ActivityTable", () => {
           entry({ id: "1", kind: "hide", result: "ok" }),
           entry({ id: "2", kind: "drop", result: "failed" }),
         ]}
+        loading={false}
       />,
     );
 
@@ -94,9 +98,24 @@ describe("ActivityTable", () => {
   });
 
   it("says the engine has changed nothing rather than drawing an empty grid", () => {
-    renderInApp(<ActivityTable activity={[]} />);
+    renderInApp(<ActivityTable activity={[]} loading={false} />);
 
     expect(screen.getByText("Nothing has been applied yet")).toBeInTheDocument();
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
+  });
+
+  // "The engine has not changed anything on this cluster" is a claim, and it
+  // used to be made from an empty array that only meant the read was still out
+  // (#72). An empty trail and an unanswered one are not the same sentence.
+  it("does not claim the engine changed nothing while the read is still out", () => {
+    renderInApp(<ActivityTable activity={[]} loading={true} />);
+
+    expect(screen.queryByText("Nothing has been applied yet")).not.toBeInTheDocument();
+    // The header is drawn, so the columns are already where the rows will land.
+    expect(screen.getByRole("table")).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: /When/ })).toBeInTheDocument();
+    // And the filter is there but inert — a box that silently matches nothing
+    // is worse than one that says it cannot be used yet.
+    expect(screen.getByLabelText("Filter activity")).toBeDisabled();
   });
 });

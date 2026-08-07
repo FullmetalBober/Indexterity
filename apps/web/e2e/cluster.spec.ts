@@ -176,6 +176,11 @@ test.describe("cluster lifecycle", () => {
     // The shell, and a per-cluster read that only the loader could have made.
     await expect(page.getByText("E2E Hydrated", { exact: true })).toBeVisible();
     await expect(page.getByLabel("Observe window (days)")).toHaveValue("14");
+    // And not one skeleton, with every api call blocked. The skeletons added in
+    // #72 are for a cold cache and a client-side cluster switch; a skeleton here
+    // would mean the panels stopped reading the SSR payload and started asking
+    // again, which is a flash where there was none.
+    await expect(page.locator('[data-slot="skeleton"]')).toHaveCount(0);
   });
 
   // The test above runs with JavaScript on, so it cannot tell server output from
@@ -198,6 +203,12 @@ test.describe("cluster lifecycle", () => {
     expect(html).toContain("Sign out");
     expect(html).toContain("Collections");
     expect(html).toContain("Policy");
+    // Three markers are not enough on their own any more: a skeleton draws the
+    // Policy card's heading too, so "Policy" is in the HTML either way. The
+    // loader awaits every read before this renders, so nothing on the server is
+    // ever pending — one skeleton in the response means a panel stopped being
+    // server-rendered and nobody would have noticed.
+    expect(html).not.toContain('data-slot="skeleton"');
   });
 
   // The free plan allows one, and the limit must be visible before it is hit —

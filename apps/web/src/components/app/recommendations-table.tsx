@@ -164,9 +164,11 @@ function buildColumns(actions: Actions): DashboardColumns<Recommendation> {
 export function RecommendationsTable({
   clusterId,
   recommendations,
+  loading,
 }: {
   clusterId: string | null;
   recommendations: Recommendation[];
+  loading: boolean;
 }) {
   const approve = useApproveRecommendation(clusterId);
   const unhide = useUnhideRecommendation(clusterId);
@@ -183,6 +185,7 @@ export function RecommendationsTable({
       caption="Index recommendations for this cluster"
       columns={columns}
       data={recommendations}
+      loading={loading}
       getRowId={(rec) => rec.id}
       // Highest confidence first — the ordering a reader would apply by hand.
       initialSorting={[{ id: "score", desc: true }]}

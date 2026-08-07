@@ -11,6 +11,7 @@ import type { CollectionLatencySeries, CollectionStat, LatencySummary } from "@r
 import { queryOptions, useQuery } from "@tanstack/react-query";
 import { api } from "../api";
 import { queryKeys } from "./keys";
+import type { Read } from "./read";
 
 // Module-level so the identity is stable: these are what a component renders on
 // an absent or failed read, and a fresh [] each render would re-run every memo
@@ -53,17 +54,19 @@ export function collectionsQuery(clusterId: string | null) {
   });
 }
 
-export function useLatency(clusterId: string | null): LatencySummary[] {
-  const { data = NO_LATENCY } = useQuery(latencyQuery(clusterId));
-  return data;
+// Each returns the payload AND whether this is the first fetch — see read.ts for
+// why the bare payload was not enough.
+export function useLatency(clusterId: string | null): Read<LatencySummary[]> {
+  const { data = NO_LATENCY, isPending } = useQuery(latencyQuery(clusterId));
+  return { data, pending: isPending };
 }
 
-export function useLatencySeries(clusterId: string | null): CollectionLatencySeries[] {
-  const { data = NO_SERIES } = useQuery(latencySeriesQuery(clusterId));
-  return data;
+export function useLatencySeries(clusterId: string | null): Read<CollectionLatencySeries[]> {
+  const { data = NO_SERIES, isPending } = useQuery(latencySeriesQuery(clusterId));
+  return { data, pending: isPending };
 }
 
-export function useCollections(clusterId: string | null): CollectionStat[] {
-  const { data = NO_COLLECTIONS } = useQuery(collectionsQuery(clusterId));
-  return data;
+export function useCollections(clusterId: string | null): Read<CollectionStat[]> {
+  const { data = NO_COLLECTIONS, isPending } = useQuery(collectionsQuery(clusterId));
+  return { data, pending: isPending };
 }

@@ -3,6 +3,7 @@ import { tooltip } from "@tanstack/charts/tooltip";
 import { Chart } from "@tanstack/react-charts/tooltip";
 import { scaleLinear, scaleUtc } from "d3-scale";
 import { useEffect, useState } from "react";
+import { Skeleton } from "~/components/ui/skeleton";
 
 // The chart's own height, in px. Named because the placeholder below has to
 // reserve exactly it — a box of a different size would move the page when the
@@ -62,10 +63,16 @@ export function LineChart({
   title,
   unit,
   series,
+  pending = false,
 }: {
   title: string;
   unit: string;
   series: readonly ChartSeries[];
+  // The first fetch is still out. Distinct from an empty `series`, which means
+  // the collector has answered and there is not enough to plot — "Not enough
+  // samples yet" is a statement about the cluster, and it used to be made before
+  // anybody had asked it anything (#72).
+  pending?: boolean;
 }) {
   // The chart is drawn only in the browser, and this is not a preference.
   //
@@ -84,6 +91,19 @@ export function LineChart({
   // and the SVG was never the readable part anyway.
   const [measured, setMeasured] = useState(false);
   useEffect(() => setMeasured(true), []);
+
+  // Nothing has answered yet, so nothing is claimed about the cluster. The box
+  // is the chart's own height, which is the same box the un-measured branch at
+  // the bottom of this file reserves — so the arrival of real data moves
+  // nothing.
+  if (pending) {
+    return (
+      <div>
+        <h3 className="font-medium text-sm">{title}</h3>
+        <Skeleton className="mt-1 w-full" style={{ height: CHART_HEIGHT }} />
+      </div>
+    );
+  }
 
   const samples = toSamples(series);
   const withValues = samples.filter((sample) => sample.value !== null);

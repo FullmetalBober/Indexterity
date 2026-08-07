@@ -88,6 +88,7 @@ describe("CollectionsTable", () => {
           ],
           [],
         )}
+        loading={false}
       />,
     );
 
@@ -104,6 +105,7 @@ describe("CollectionsTable", () => {
           [stat({ collection: "measured" }), stat({ collection: "unmeasured" })],
           [lat({ collection: "measured", currentReadMicros: 5 })],
         )}
+        loading={false}
       />,
     );
 
@@ -119,6 +121,7 @@ describe("CollectionsTable", () => {
     renderInApp(
       <CollectionsTable
         rows={toCollectionRows([stat({ collection: "orders" }), stat({ collection: "users" })], [])}
+        loading={false}
       />,
     );
 
@@ -128,9 +131,20 @@ describe("CollectionsTable", () => {
   });
 
   it("says what is coming instead of showing an empty grid", () => {
-    renderInApp(<CollectionsTable rows={[]} />);
+    renderInApp(<CollectionsTable rows={[]} loading={false} />);
 
     expect(screen.getByText("Nothing collected yet")).toBeInTheDocument();
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
+  });
+
+  // "Nothing collected yet. The footprint appears after the first collect" tells
+  // a reader their cluster has never been collected — which the page did not
+  // know yet (#72).
+  it("does not say a cluster was never collected while the read is still out", () => {
+    renderInApp(<CollectionsTable rows={[]} loading={true} />);
+
+    expect(screen.queryByText("Nothing collected yet")).not.toBeInTheDocument();
+    expect(screen.getByRole("table")).toBeInTheDocument();
+    expect(screen.getByLabelText("Filter collections")).toBeDisabled();
   });
 });
