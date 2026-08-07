@@ -66,7 +66,26 @@ export function metricsPort(): number {
   return Number.isFinite(value) && value > 0 ? value : 9464;
 }
 
+// One provider per process — which is not the same thing as one per module
+// evaluation, and only a dev server tells them apart. Vite re-evaluates the
+// whole SSR module graph on a program reload without restarting node, so this
+// factory runs again while everything the last run did is still in place: the
+// registration below, and the bound port. OpenTelemetry refuses the second
+// registration, so the app would carry on with instruments bound to a provider
+// whose exporter never got the port, while /metrics answers from the first one
+// — numbers that silently stopped moving at the first file save.
+//
+// The instance therefore hangs off globalThis, where the registry it fights
+// with already lives, and Symbol.for is what makes the key survive the module
+// being re-evaluated too.
+const INSTANCE: unique symbol = Symbol.for("indexterity.metrics.instance");
+type InstanceStore = { [INSTANCE]?: Metrics };
+
 export function createMetrics(options: MetricsOptions): Metrics {
+  const store = globalThis as InstanceStore;
+  const existing = store[INSTANCE];
+  if (existing !== undefined) return existing;
+
   const resource = resourceFromAttributes({
     [ATTR_SERVICE_NAME]: options.serviceName ?? "indexterity",
     [ATTR_SERVICE_VERSION]: options.version,
@@ -86,7 +105,7 @@ export function createMetrics(options: MetricsOptions): Metrics {
   const provider = new MeterProvider({ resource, readers: [exporter] });
   metrics.setGlobalMeterProvider(provider);
 
-  return {
+  const instance: Metrics = {
     meter: provider.getMeter("indexterity"),
     startMetricsServer: async (log) => {
       if (!metricsEnabled()) return null;
@@ -115,4 +134,7 @@ export function createMetrics(options: MetricsOptions): Metrics {
       };
     },
   };
+
+  store[INSTANCE] = instance;
+  return instance;
 }
