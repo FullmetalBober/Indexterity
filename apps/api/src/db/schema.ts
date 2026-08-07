@@ -701,3 +701,77 @@ export const latencySamples = pgTable(
     ),
   ],
 );
+
+// --- the security trail --------------------------------------------------
+//
+// `actions` is the other half of this: an immutable record of every index
+// operation, per cluster. It answers "what removed this index, and who approved
+// it" — and stops there. How that person came to be an owner, whether their
+// session was still theirs at the time, who else was in the org that week: none
+// of it left a row anywhere (#53). `session` and `account` are current state, not
+// events; a revoked session is a deleted row.
+//
+// So this table records the OWNER-LEVEL ACTS: signing in and failing to, signing
+// out, revoking a session, promoting and demoting, removing a member, inviting
+// one, an invitation being accepted, an org being made or destroyed, and the four
+// things that can be done to a cluster's access (connected, disconnected,
+// credentials rotated, mode flipped). One row per act, never updated.
+//
+// Separate from `actions` rather than a nullable column on it, deliberately.
+// `actions` hangs off a recommendation, cascades from a cluster, and ages out with
+// the plan's history window; these are per ORG, some have no cluster at all, and
+// they must not age out on a billing clock — the incident that needs them is
+// usually older than the day it is noticed.
+//
+// Nothing cascades INTO this table for the same reason: every foreign key here is
+// `set null`, so deleting an org, a cluster or a user cannot erase the trail of
+// what was done to it. The names are kept alongside the ids (`actor_email`,
+// `target`) so a row still reads after the row it pointed at is gone.
+export const securityEvents = pgTable(
+  "security_events",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    // A SecurityEventName (src/audit/security-events.ts). Text, not an enum, for
+    // the reason `actions.kind` is: recording a new kind of act should be a
+    // constant, not a migration.
+    event: text("event").notNull(),
+    orgId: uuid("org_id").references(() => organizations.id, { onDelete: "set null" }),
+    // Set on the four cluster events; null on everything else, including a
+    // sign-in, which belongs to no cluster.
+    clusterId: uuid("cluster_id").references(() => clusters.id, { onDelete: "set null" }),
+    // Who did it. Null for a failed sign-in, where the address typed is all there
+    // is — and, deliberately, is recorded as the target rather than as the actor:
+    // whoever it was did not prove they were that person.
+    actorUserId: text("actor_user_id").references(() => user.id, { onDelete: "set null" }),
+    actorEmail: text("actor_email"),
+    // What it was done to, in whatever form the reader recognises: the member's
+    // address, the cluster's name, the invited address, the session's id.
+    target: text("target"),
+    // The specifics of that act and nothing else — the roles either side of a
+    // promotion, the mode a cluster was flipped to. Never credentials.
+    metadata: jsonb("metadata").$type<Record<string, unknown>>(),
+    // Personal data, kept on purpose and no more of it than `session` already
+    // holds: an incident asks which address and which client, and an answer of
+    // "an owner, from somewhere, on something" is not one.
+    //
+    // Null rather than wrong when the address cannot be established. The api sees
+    // a forwarded header, and reads it only when TRUST_PROXY says a proxy is in
+    // front (env.ts) — recording the proxy's own address for every request would
+    // be a column full of one number that looks like an answer.
+    ipAddress: text("ip_address"),
+    userAgent: text("user_agent"),
+    createdAt,
+  },
+  (table) => [
+    // Every read is one org's trail, newest first.
+    index("security_events_org_time").on(table.orgId, table.createdAt.desc()),
+    // "Everything this account did", which is the other question an incident
+    // asks, and it crosses orgs.
+    index("security_events_actor_time").on(table.actorUserId, table.createdAt.desc()),
+    // Not for a reader — no page asks for one cluster's security events. It backs
+    // the `set null` on cluster deletion, which would otherwise scan this table
+    // every time a cluster is disconnected, and it is what the suite's
+    // "no foreign key without an index" check asks for.
+    index("security_events_cluster").on(table.clusterId),
+  ],
+);

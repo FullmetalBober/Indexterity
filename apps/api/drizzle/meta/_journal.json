@@ -281,6 +281,13 @@
       "when": 1786111262951,
       "tag": "0039_cluster_tls_overrides",
       "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1786124545586,
+      "tag": "0040_security_events",
+      "breakpoints": true
     }
   ]
 }

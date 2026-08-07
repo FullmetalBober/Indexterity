@@ -3,6 +3,8 @@ import { implement } from "@orpc/nest";
 import { ORPCError } from "@orpc/server";
 import { contract } from "@repo/contracts";
 import type { FastifyRequest } from "fastify";
+import { actorFromRequest } from "../audit/http-actor";
+import { recordSecurityEvent, type SecurityEventInput } from "../audit/security-events";
 import { requireUserId } from "../auth/session";
 import { and, clusters, desc, envKeyProvider, eq, inArray, indexSnapshots, seal, sql } from "../db";
 import { DatabaseService } from "../db/database.service";
@@ -92,6 +94,24 @@ export class ClustersController {
       );
     }
     return row;
+  }
+
+  // One row in the security trail for something done to a cluster's access
+  // (#53). Connecting, disconnecting, rotating credentials and flipping the mode
+  // are all owner-level acts on somebody's production database, and until now
+  // only the index pipeline left any record — `actions` covers what the engine
+  // did and nothing about who let it.
+  //
+  // After the act, never in front of it, and it cannot fail the request:
+  // recordSecurityEvent logs a lost row instead of throwing (see its comment).
+  private async record(
+    req: FastifyRequest,
+    entry: Omit<SecurityEventInput, "actorUserId" | "actorEmail" | "ipAddress" | "userAgent">,
+  ): Promise<void> {
+    const actor = await actorFromRequest(this.database.db, req);
+    await recordSecurityEvent(this.database.db, { ...entry, ...actor }, (message) =>
+      this.log.warn(message),
+    );
   }
 
   // Everything that must be true before the control plane dials a customer
@@ -237,7 +257,17 @@ export class ClustersController {
             "Indexterity provision a scoped one.",
         });
       }
-      return toCluster(await this.storeCluster(orgId, input.name, engine, value, null, overrides));
+      const row = await this.storeCluster(orgId, input.name, engine, value, null, overrides);
+      await this.record(req, {
+        event: "CLUSTER_CONNECTED",
+        orgId,
+        clusterId: row.id,
+        target: row.name,
+        // Which concessions were made and whether we are holding somebody's own
+        // credentials — the two facts an incident asks about a connection.
+        metadata: { engine, provisioned: false, tlsOverrides: overrides },
+      });
+      return toCluster(row);
     });
   }
 
@@ -275,6 +305,20 @@ export class ClustersController {
         provisioned.username,
         overrides,
       );
+      await this.record(req, {
+        event: "CLUSTER_CONNECTED",
+        orgId,
+        clusterId: row.id,
+        target: row.name,
+        // The username, never the string: this row is read by people who are not
+        // meant to be able to dial the cluster from it.
+        metadata: {
+          engine: "MONGODB",
+          provisioned: true,
+          provisionedUsername: provisioned.username,
+          tlsOverrides: overrides,
+        },
+      });
       return {
         cluster: toCluster(row),
         username: provisioned.username,
@@ -338,6 +382,19 @@ export class ClustersController {
         .returning();
       if (updated === undefined) throw errors.NOT_FOUND({ message: "cluster not found" });
       await evictCluster(input.clusterId);
+      await this.record(req, {
+        event: "CLUSTER_CREDENTIALS_ROTATED",
+        orgId,
+        clusterId: updated.id,
+        target: updated.name,
+        // Whether the cluster is still running as a user we created, which is what
+        // decides who can revoke that access afterwards.
+        metadata: {
+          provisionedUsername,
+          keptScopedUser: provisionedUsername !== null,
+          tlsOverrides: overrides,
+        },
+      });
       return toCluster(updated);
     });
   }
@@ -359,6 +416,19 @@ export class ClustersController {
       if (row === undefined) throw errors.NOT_FOUND({ message: "cluster not found" });
       const unhidden = await restoreHiddenIndexes(this.database.db, input.clusterId);
       await this.database.db.delete(clusters).where(eq(clusters.id, input.clusterId));
+      // `clusterId` stays null here and the id goes in the metadata: the row it
+      // would point at has just been deleted, and this event is the one that has
+      // to outlive it — everything else about that cluster is gone.
+      await this.record(req, {
+        event: "CLUSTER_DISCONNECTED",
+        orgId,
+        target: row.name,
+        metadata: {
+          clusterId: row.id,
+          unhidden,
+          provisionedUsername: row.provisionedUsername,
+        },
+      });
       return { unhidden, revokeCommand: revokeCommandFor(row.provisionedUsername) };
     });
   }
@@ -374,6 +444,13 @@ export class ClustersController {
         .where(and(eq(clusters.id, input.clusterId), eq(clusters.orgId, orgId)))
         .returning();
       if (row === undefined) throw errors.NOT_FOUND({ message: "cluster not found" });
+      await this.record(req, {
+        event: "CLUSTER_MODE_CHANGED",
+        orgId,
+        clusterId: row.id,
+        target: row.name,
+        metadata: { readOnly: input.readOnly },
+      });
       return toCluster(row);
     });
   }
