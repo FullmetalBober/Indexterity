@@ -112,9 +112,12 @@ export function useDeleteOrg() {
       unwrap(authClient.organization.delete({ organizationId })),
     onSuccess: async () => {
       toast.success("Organization deleted");
+      // Same order as the switch below, for the same reason: the loader behind
+      // the navigation reads whatever is cached, and what is cached is the org
+      // that no longer exists.
+      await invalidateSessionCache();
       // Whatever cluster was selected belonged to it.
       await navigate({ to: "/app", search: {} });
-      await invalidateSessionCache();
     },
     onError: (error) => toast.error(apiMessage(error, "Delete failed (owner only)")),
   });
@@ -227,9 +230,14 @@ export function useSwitchOrg() {
       unwrap(authClient.organization.setActive({ organizationId })),
     onSuccess: async (switched) => {
       toast.success(`Switched to ${switched?.name ?? "the org"}`);
+      // The invalidation FIRST, then the navigation. Navigating runs the
+      // dashboard's loader, and its ensureQueryData calls resolve from the cache
+      // whether the entries are stale or not — so with the old order the loader
+      // read the previous org's cluster list, picked a cluster this org does not
+      // own, and spent seven requests warming keys for it (#82).
+      await invalidateSessionCache();
       // The selected cluster belongs to the previous org — reset the selection.
       await navigate({ to: "/app", search: {} });
-      await invalidateSessionCache();
     },
     // Nothing moved, so nothing is refetched and the selection stays.
     onError: () => toast.error("Org switch failed"),

@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, type Page, test } from "@playwright/test";
 import {
   connectCluster,
   createOrgAndLandOnDashboard,
@@ -7,6 +7,16 @@ import {
   signUpAndLandOnDashboard,
   uniqueEmail,
 } from "./fixtures";
+
+// Stamp the selected cluster with a value nothing else on the page has. The
+// policy is per cluster and read by the dashboard's own keys, so reading it back
+// says which cluster the panels are about — which the cluster name in the bar
+// does not, because the bar and the panels resolve that separately.
+async function setObserveWindow(page: Page, days: string): Promise<void> {
+  await page.getByLabel("Observe window (days)").fill(days);
+  await page.getByRole("button", { name: "Save policy" }).click();
+  await expect(page.getByText("Policy saved").first()).toBeVisible();
+}
 
 // A leak here is one customer seeing another's clusters, so it is worth
 // checking through the browser and not only in the api's own tests: the web
@@ -102,10 +112,18 @@ test.describe("tenancy", () => {
   // panels — the layout derives the selected cluster from the live list while
   // the dashboard reads the one its loader resolved, and those are two different
   // sources that have to agree.
+  //
+  // Which is also how it passed through the bug in #82. It used to finish on
+  // `getByText("Collections")`, and that is a static heading the dashboard draws
+  // whether or not a single read answered — so the only thing the test really
+  // checked was the bar, which was never the broken half. The panels have to be
+  // identified by something ONLY the expected cluster answers, so each cluster
+  // gets an observe window nothing else has.
   test("switching org re-points the dashboard, not just the bar", async ({ page }) => {
-    await signUpAndLandOnDashboard(page, uniqueEmail("switch"));
+    const firstOrg = await signUpAndLandOnDashboard(page, uniqueEmail("switch"));
     await connectCluster(page, "Switch Cluster A");
     await expect(page.getByText("Switch Cluster A", { exact: true })).toBeVisible();
+    await setObserveWindow(page, "14");
 
     // A second org, made from the org page. The plugin makes it active.
     await page.getByRole("link", { name: "Organization" }).click();
@@ -118,15 +136,21 @@ test.describe("tenancy", () => {
     await expect(page.getByText("No cluster connected")).toBeVisible();
     await connectCluster(page, "Switch Cluster B");
     await expect(page.getByText("Switch Cluster B", { exact: true })).toBeVisible();
+    await setObserveWindow(page, "21");
 
-    // Back to the first org. Everything below the bar has to follow.
+    // Back to the first org, picked by name rather than by position: both
+    // options read "(owner)", and a test that takes whichever came first is
+    // agreeing with the api's ordering rather than choosing an org.
     await page.getByLabel("Switch organization").click();
-    await page.getByRole("option", { name: /owner/ }).first().click();
+    await page.getByRole("option", { name: `${firstOrg} (owner)`, exact: true }).click();
 
     await expect(page.getByText("Switch Cluster A", { exact: true })).toBeVisible();
     await expect(page.getByText("Switch Cluster B", { exact: true })).toBeHidden();
-    // The panels under the bar are about that cluster, not blank.
-    await expect(page.getByText("Collections")).toBeVisible();
+    // The panels under the bar are about cluster A. Not "not blank" — about A:
+    // the failure being defended against is a dashboard still keyed on the
+    // previous org's cluster, which draws the same empty shapes as a dashboard
+    // keyed on nothing.
+    await expect(page.getByLabel("Observe window (days)")).toHaveValue("14");
   });
 
   // Deleting an org takes its clusters and drops the owner back to the create
