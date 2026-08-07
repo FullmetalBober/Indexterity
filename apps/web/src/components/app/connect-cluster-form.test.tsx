@@ -5,6 +5,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderInApp } from "~/test-utils";
 import { ConnectClusterForm } from "./connect-cluster-form";
 
+// Every check box cleared — what the form sends when nobody touches them, and
+// what the api reads a missing field as.
+const NONE = {
+  allowInvalidCertificates: false,
+  allowInvalidHostnames: false,
+  insecure: false,
+};
+
 const checkConnection = vi.hoisted(() => vi.fn());
 const createCluster = vi.hoisted(() => vi.fn());
 const provisionCluster = vi.hoisted(() => vi.fn());
@@ -120,7 +128,10 @@ describe("ConnectClusterForm", () => {
 
     await check(user);
 
-    expect(checkConnection).toHaveBeenCalledWith({ connectionString: "mongodb://host:27017" });
+    expect(checkConnection).toHaveBeenCalledWith({
+      connectionString: "mongodb://host:27017",
+      tlsOverrides: NONE,
+    });
     expect(createCluster).not.toHaveBeenCalled();
     expect(provisionCluster).not.toHaveBeenCalled();
     expect(screen.getByText("appuser")).toBeInTheDocument();
@@ -138,6 +149,7 @@ describe("ConnectClusterForm", () => {
     expect(createCluster).toHaveBeenCalledWith({
       name: "Production",
       connectionString: "mongodb://host:27017",
+      tlsOverrides: NONE,
     });
     // Onto the new cluster's own page. It used to be a search param on /app,
     // which meant a connected cluster had no address of its own (#81).
@@ -242,5 +254,85 @@ describe("ConnectClusterForm", () => {
 
     await user.type(screen.getByLabelText("Connection string"), "9");
     expect(screen.queryByRole("button", { name: "Connect" })).not.toBeInTheDocument();
+  });
+});
+
+// Each box gives up one check that TLS is otherwise there to perform, and the
+// api refuses the matching connection-string option unless the box was ticked.
+// So the box is the only way to connect a cluster whose certificate does not
+// verify — and it has to reach the api, or it is decoration.
+describe("ConnectClusterForm certificate checks", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("sends the ticked box with the check", async () => {
+    checkConnection.mockResolvedValue(diagnosis());
+    const user = userEvent.setup();
+    renderInApp(<ConnectClusterForm plan={plan()} />);
+
+    await user.type(screen.getByLabelText("Name"), "Production");
+    await user.type(screen.getByLabelText("Connection string"), "mongodb://host:27017");
+    await user.click(screen.getByLabelText("Allow an unverified certificate"));
+    await user.click(screen.getByRole("button", { name: "Check access" }));
+
+    expect(checkConnection).toHaveBeenCalledWith({
+      connectionString: "mongodb://host:27017",
+      tlsOverrides: { ...NONE, allowInvalidCertificates: true },
+    });
+  });
+
+  // Three separate concessions, not one. A private CA fails certificate
+  // validation with a perfectly correct hostname; ticking that box must not also
+  // give up the hostname check.
+  it("keeps the three boxes independent", async () => {
+    checkConnection.mockResolvedValue(diagnosis());
+    const user = userEvent.setup();
+    renderInApp(<ConnectClusterForm plan={plan()} />);
+
+    await user.type(screen.getByLabelText("Name"), "Production");
+    await user.type(screen.getByLabelText("Connection string"), "mongodb://host:27017");
+    await user.click(screen.getByLabelText("Allow a mismatched hostname"));
+    await user.click(screen.getByRole("button", { name: "Check access" }));
+
+    expect(checkConnection).toHaveBeenCalledWith({
+      connectionString: "mongodb://host:27017",
+      tlsOverrides: { ...NONE, allowInvalidHostnames: true },
+    });
+  });
+
+  // A diagnosis describes one exact connection, and the boxes are part of it —
+  // so moving one has to clear the answer above, exactly as editing the string
+  // does. Otherwise the reader connects on the strength of a check that was run
+  // against different settings.
+  it("drops a diagnosis when a box moves", async () => {
+    checkConnection.mockResolvedValue(diagnosis());
+    const user = userEvent.setup();
+    renderInApp(<ConnectClusterForm plan={plan()} />);
+
+    await check(user);
+    expect(screen.getByText("appuser")).toBeInTheDocument();
+
+    await user.click(screen.getByLabelText("Skip every certificate check"));
+    expect(screen.queryByText("appuser")).not.toBeInTheDocument();
+  });
+
+  it("carries the boxes into the connect, not only the check", async () => {
+    checkConnection.mockResolvedValue(diagnosis());
+    createCluster.mockResolvedValue({ id: "c9", name: "Production" });
+    const user = userEvent.setup();
+    renderInApp(<ConnectClusterForm plan={plan()} />);
+
+    await user.type(screen.getByLabelText("Name"), "Production");
+    await user.type(screen.getByLabelText("Connection string"), "mongodb://host:27017");
+    await user.click(screen.getByLabelText("Allow an unverified certificate"));
+    await user.click(screen.getByRole("button", { name: "Check access" }));
+    await user.click(await screen.findByRole("button", { name: "Connect" }));
+
+    expect(createCluster).toHaveBeenCalledWith({
+      name: "Production",
+      connectionString: "mongodb://host:27017",
+      tlsOverrides: { ...NONE, allowInvalidCertificates: true },
+    });
   });
 });

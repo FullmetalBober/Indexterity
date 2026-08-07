@@ -13,7 +13,7 @@
 // — zod's defaults ("Too small: expected string to have >=1 characters") are
 // wrong for a label even when they are right about the value.
 import { z } from "zod";
-import { clusterEngine, clusterPolicy } from "./schemas.js";
+import { clusterEngine, clusterPolicy, tlsOverrides } from "./schemas.js";
 
 // Fields, shared by whichever inputs use them.
 export const clusterName = z.string().min(1, "Give the cluster a name");
@@ -39,19 +39,31 @@ export const createClusterInput = z.object({
   connectionString,
   // Defaults to MONGODB — the only engine with an adapter today.
   engine: clusterEngine.optional(),
+  // Absent means all three off, which is what an older client and a plain
+  // scripted connect both mean.
+  tlsOverrides: tlsOverrides.optional(),
 });
 
 export const checkConnectionInput = z.object({
   connectionString,
   engine: clusterEngine.optional(),
+  // Checked with the same concessions the connect would store, or the preflight
+  // would answer for a connection nobody is going to make.
+  tlsOverrides: tlsOverrides.optional(),
 });
 
 export const provisionClusterInput = z.object({
   name: clusterName,
   adminConnectionString: connectionString,
+  // The admin string dials the same cluster as the scoped one it creates, so the
+  // concession has to be made once and applies to both.
+  tlsOverrides: tlsOverrides.optional(),
 });
 
-export const rotateConnectionInput = z.object({ connectionString });
+export const rotateConnectionInput = z.object({
+  connectionString,
+  tlsOverrides: tlsOverrides.optional(),
+});
 
 // The engine knobs minus the cluster they belong to, which the route carries as
 // a path param. Derived from the output schema so a knob cannot be settable and

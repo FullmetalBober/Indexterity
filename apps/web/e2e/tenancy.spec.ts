@@ -108,7 +108,7 @@ test.describe("tenancy", () => {
   }) => {
     await page.goto("/app");
     await page.getByRole("button", { name: "Need an account? Sign up" }).click();
-    await page.getByLabel("Name").fill("E2E User");
+    await page.getByLabel("Name", { exact: true }).fill("E2E User");
     await page.getByLabel("Email").fill(uniqueEmail("no-org"));
     await page.getByLabel("Password").fill(PASSWORD);
     await page.getByRole("button", { name: "Sign up" }).click();
@@ -139,7 +139,7 @@ test.describe("tenancy", () => {
     // lands on the connect page.
     await openOrganizations(page);
     const second = `${E2E_ORG_PREFIX}second-${Date.now()}`;
-    await page.getByLabel("Name").fill(second);
+    await page.getByLabel("Name", { exact: true }).fill(second);
     await page.getByRole("button", { name: "Create organization" }).click();
     await expect(page.getByRole("heading", { name: "Connect a cluster" })).toBeVisible();
 

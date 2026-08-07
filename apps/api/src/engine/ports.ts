@@ -12,6 +12,23 @@ import type { IndexSpec, QueryShape, ServerHealth } from "../analysis";
 
 export type ClusterEngine = "MONGODB" | "POSTGRESQL" | "MSSQL";
 
+// Which certificate checks a cluster's owner chose to turn off, as checkboxes on
+// the connect form. Carried to every dial so the transport guard verifies
+// against a recorded decision rather than against whatever the string says.
+export interface TlsOverrides {
+  readonly allowInvalidCertificates: boolean;
+  readonly allowInvalidHostnames: boolean;
+  readonly insecure: boolean;
+}
+
+// The strict default, and the value an older client or a scripted connect means
+// by saying nothing.
+export const NO_TLS_OVERRIDES: TlsOverrides = {
+  allowInvalidCertificates: false,
+  allowInvalidHostnames: false,
+  insecure: false,
+};
+
 // One index's usage on one replica-set member ($indexStats is per-member; on a
 // sharded cluster mongos merges every shard's members, tagged by host).
 // Relational engines report one "member" per server.
@@ -163,13 +180,17 @@ export interface EngineAdapter {
   isConnString(value: string): boolean;
   // Every host the string would dial, for the network guard to vet.
   hostsOf(value: string): { hosts: string[]; isSrv: boolean };
-  // Throws when the string would not connect over validated TLS. Engine-specific
-  // because how transport is expressed is: mongo puts it in the scheme and the
-  // `tls`/`ssl` params, postgres in `sslmode`. The adapter also OWNS the
-  // enforcement — this exists so onboarding can refuse with the reason rather
-  // than discovering it as a failed dial.
-  assertSecureTransport(value: string): void;
-  open(connectionString: string): Promise<EngineSession>;
+  // Throws when the string would not connect over TLS, or when it turns off a
+  // certificate check the owner did not consent to. Engine-specific because how
+  // transport is expressed is: mongo puts it in the scheme and the `tls`/`ssl`
+  // params, postgres in `sslmode`. The adapter also OWNS the enforcement — this
+  // exists so onboarding can refuse with the reason rather than discovering it
+  // as a failed dial.
+  assertSecureTransport(value: string, overrides?: TlsOverrides): void;
+  // The owner's checkbox choices written into the string, so what is stored and
+  // what was consented to cannot disagree.
+  applySecureTransport(value: string, overrides: TlsOverrides): string;
+  open(connectionString: string, overrides?: TlsOverrides): Promise<EngineSession>;
   // Report what these credentials may do, without writing anything.
-  diagnose(connectionString: string): Promise<ConnectionDiagnosis>;
+  diagnose(connectionString: string, overrides?: TlsOverrides): Promise<ConnectionDiagnosis>;
 }

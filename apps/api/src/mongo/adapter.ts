@@ -1,5 +1,11 @@
-import type { EngineAdapter, EngineSession, IndexCollector, IndexExecutor } from "../engine/ports";
-import { assertTlsEnforced } from "./client";
+import type {
+  EngineAdapter,
+  EngineSession,
+  IndexCollector,
+  IndexExecutor,
+  TlsOverrides,
+} from "../engine/ports";
+import { applyTlsOverrides, assertTlsEnforced } from "./client";
 import { MongoIndexCollector } from "./collector";
 import { isMongoConnString, mongoHosts } from "./conn-string";
 import { MongoConnection } from "./connection";
@@ -16,10 +22,14 @@ class MongoEngineSession implements EngineSession {
   constructor(
     private readonly conn: MongoConnection,
     connString: string,
+    overrides?: TlsOverrides,
   ) {
     // Opened lazily on the first usage collection and held for the session's
     // life, so a 3-member set costs 3 connections rather than 3 per collect.
-    this.members = new MemberConnections(conn, connString);
+    // The members inherit the cluster's own consent: they are the same cluster,
+    // reached one node at a time, and a certificate the owner accepted for it is
+    // accepted for its members too.
+    this.members = new MemberConnections(conn, connString, overrides);
     this.collector = new MongoIndexCollector(conn, this.members);
   }
 
@@ -49,10 +59,11 @@ export const mongoAdapter: EngineAdapter = {
   isConnString: isMongoConnString,
   hostsOf: mongoHosts,
   assertSecureTransport: assertTlsEnforced,
-  open: async (connectionString: string): Promise<EngineSession> => {
-    const conn = new MongoConnection(connectionString);
+  applySecureTransport: applyTlsOverrides,
+  open: async (connectionString: string, overrides?: TlsOverrides): Promise<EngineSession> => {
+    const conn = new MongoConnection(connectionString, overrides);
     await conn.connect();
-    return new MongoEngineSession(conn, connectionString);
+    return new MongoEngineSession(conn, connectionString, overrides);
   },
   diagnose: diagnoseConnection,
 };

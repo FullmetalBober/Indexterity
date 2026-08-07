@@ -35,7 +35,10 @@ export const PASSWORD = "e2e-Passw0rd!";
 export async function signUpAndLandOnDashboard(page: Page, email: string): Promise<string> {
   await page.goto("/app");
   await page.getByRole("button", { name: "Need an account? Sign up" }).click();
-  await page.getByLabel("Name").fill("E2E User");
+  // exact, because getByLabel does a case-insensitive SUBSTRING match and the
+  // connect form now carries an "Allow a mismatched hostname" checkbox — which
+  // contains "name" and made every "Name" locator ambiguous.
+  await page.getByLabel("Name", { exact: true }).fill("E2E User");
   await page.getByLabel("Email").fill(email);
   await page.getByLabel("Password").fill(PASSWORD);
   await page.getByRole("button", { name: "Sign up" }).click();
@@ -83,7 +86,7 @@ export async function openConnectForm(page: Page): Promise<void> {
 // new cluster's own overview.
 export async function connectCluster(page: Page, name: string): Promise<void> {
   await openConnectForm(page);
-  await page.getByLabel("Name").fill(name);
+  await page.getByLabel("Name", { exact: true }).fill(name);
   await page.getByLabel("Connection string").fill(MONGO_URL);
   await page.getByRole("button", { name: "Check access" }).click();
   // The preflight has answered when a connect action appears.

@@ -1,7 +1,7 @@
 import type { Admin } from "mongodb";
 import { z } from "zod";
 import type { ConnectionDiagnosis, PrivilegeCheck, PrivilegeTier } from "../engine/ports";
-import { mongoClient } from "./client";
+import { mongoClient, type TlsOverrides } from "./client";
 import {
   hasQueryStatsPlanMetrics,
   parseServerVersion,
@@ -295,8 +295,11 @@ function failure(message: string): ConnectionDiagnosis {
 // "what works, what breaks, and what is missing". Uses connectionStatus
 // (available to any authenticated user) rather than probing commands, so
 // nothing is written just to find out.
-export async function diagnoseConnection(uri: string): Promise<ConnectionDiagnosis> {
-  const client = mongoClient(uri);
+export async function diagnoseConnection(
+  uri: string,
+  overrides?: TlsOverrides,
+): Promise<ConnectionDiagnosis> {
+  const client = mongoClient(uri, overrides);
   try {
     const admin = client.db("admin");
     // Version first: below the floor nothing else matters, and saying so at

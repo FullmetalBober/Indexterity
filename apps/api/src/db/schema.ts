@@ -277,6 +277,23 @@ export const clusters = pgTable(
     // The least-privilege user Indexterity created on the cluster during
     // admin-string onboarding; null when the customer pasted a ready-made string.
     provisionedUsername: text("provisioned_username"),
+    // Which TLS checks the owner turned off when connecting, as checkboxes on the
+    // connect form. Held HERE and not inferred from the sealed string, for two
+    // reasons: every dial is then verified against a recorded decision rather
+    // than against whatever the string happens to say, and the dashboard can
+    // show a concession that would otherwise be invisible once made.
+    //
+    // jsonb with a default, so the column is additive and every existing row
+    // reads as "nothing turned off" — which is what they all are, since until
+    // now the options were refused outright.
+    tlsOverrides: jsonb("tls_overrides")
+      .$type<{
+        allowInvalidCertificates: boolean;
+        allowInvalidHostnames: boolean;
+        insecure: boolean;
+      }>()
+      .notNull()
+      .default({ allowInvalidCertificates: false, allowInvalidHostnames: false, insecure: false }),
     createdAt,
   },
   // Every cluster list is scoped to an org, and deleting an org cascades here.

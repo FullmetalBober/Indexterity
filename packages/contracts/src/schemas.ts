@@ -38,6 +38,36 @@ export type ConnectionMode = z.infer<typeof connectionMode>;
 export const clusterEngine = z.enum(["MONGODB", "POSTGRESQL", "MSSQL"]);
 export type ClusterEngine = z.infer<typeof clusterEngine>;
 
+// The three MongoDB options that keep TLS switched on while turning off the part
+// that makes it worth having. Each is a checkbox on the connect form, because a
+// connection nobody validates the certificate of is a connection anyone in the
+// path can be — that is a decision an owner should make on purpose, not one that
+// rides in on a pasted string nobody read to the end of.
+//
+// Named one per driver option rather than collapsed into a single "insecure"
+// toggle: they are not the same concession. A private CA fails certificate
+// validation while the hostname is perfectly correct, and an SSH tunnel or a
+// rewritten DNS name fails the hostname check with a certificate that is
+// genuinely valid. Offering one switch would make everyone give up both.
+export const tlsOverrides = z.object({
+  // Connect even if the server's certificate does not verify — self-signed, or
+  // signed by a CA we do not carry.
+  allowInvalidCertificates: z.boolean(),
+  // Connect even if the certificate is for a different name than the one dialed.
+  allowInvalidHostnames: z.boolean(),
+  // The driver's tlsInsecure: the broadest of the three. Disables certificate
+  // AND hostname checking, and on top of that accepts expired certificates and
+  // skips revocation.
+  insecure: z.boolean(),
+});
+export type TlsOverrides = z.infer<typeof tlsOverrides>;
+
+export const NO_TLS_OVERRIDES: TlsOverrides = {
+  allowInvalidCertificates: false,
+  allowInvalidHostnames: false,
+  insecure: false,
+};
+
 export const cluster = z.object({
   id: z.uuid(),
   name: z.string(),
@@ -50,6 +80,10 @@ export const cluster = z.object({
   // Newest index snapshot, or null before the first collect. The dashboard
   // flags stale data so numbers from before an outage cannot read as current.
   lastCollectedAt: z.string().nullable(),
+  // Which TLS checks this cluster was connected with turned off. Read back, not
+  // just written: a security concession the owner cannot see afterwards is one
+  // nobody reviews.
+  tlsOverrides,
   createdAt: z.string(),
 });
 export type Cluster = z.infer<typeof cluster>;

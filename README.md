@@ -575,7 +575,7 @@ yet. Migration creates schemas, so migration creates both.
 in CI. Releasing is `git tag v0.2.0 && git push --tags`, and the release
 workflow refuses a tag whose version the tree does not carry.
 
-**Four test layers**, currently 446 api unit, 235 web unit, 81 integration and
+**Four test layers**, currently 457 api unit, 239 web unit, 81 integration and
 24 end-to-end. The e2e suite deliberately runs with **no proxy in front**, so the
 passthrough is the path under test — the proxy shape is covered by compose and
 the chart, and a fallback nothing exercises is a fallback that is broken when
@@ -630,12 +630,25 @@ Both defaults exist because the control plane dials hosts that users name.
   Every client the control plane builds goes through one constructor
   (`mongo/client.ts`) that requires validated TLS — so it holds for the worker's
   stored strings, not only for onboarding, which is the difference between
-  enforcing it and checking it once. `tlsInsecure`,
-  `tlsAllowInvalidCertificates` and `tlsAllowInvalidHostnames` count as
-  plaintext: TLS whose certificate nobody checks is a connection anyone in the
-  path can be. It refuses rather than silently adding `tls=true`, because a
-  server with no TLS would then fail its handshake instead and a string that
-  says `tls=false` is a statement worth contradicting out loud.
+  enforcing it and checking it once. It refuses rather than silently adding
+  `tls=true`, because a server with no TLS would then fail its handshake instead
+  and a string that says `tls=false` is a statement worth contradicting out loud.
+
+  **Certificate checking is separate, and is the owner's call per cluster.**
+  `tlsInsecure`, `tlsAllowInvalidCertificates` and `tlsAllowInvalidHostnames`
+  keep TLS switched on while turning off the part that makes it worth having, so
+  each is refused unless the matching checkbox was ticked on the connect form.
+  Three boxes rather than one toggle: a private CA fails certificate validation
+  with a perfectly correct hostname, and an SSH tunnel or a rewritten DNS name
+  fails the hostname check with a genuinely valid certificate — one switch would
+  make everyone give up both. Ticking a box writes the option into the string, so
+  nobody hand-edits one to match; clearing it removes the option even if it was
+  pasted in, so the form cannot show three empty boxes above a string that
+  disables all three. The choice is stored on the cluster and read back on it, so
+  the concession stays visible rather than being made once and forgotten, and
+  every dial is verified against that recorded decision rather than against
+  whatever the string happens to say. There is no box that turns TLS itself off —
+  that is what the deployment switch is for.
 
   A cluster already stored with a plaintext string skips its passes and mails
   its owners, the same way an unsupported server version does — no retry fixes

@@ -10,7 +10,7 @@
 // The api's refusals arrive as thrown ORPCErrors now that nothing wraps them in
 // an { ok, message } envelope on the way here, so the reasons are read off the
 // error in onError (see ../errors.ts) rather than off a result.
-import type { ConnectionDiagnosis } from "@repo/contracts";
+import type { ConnectionDiagnosis, TlsOverrides } from "@repo/contracts";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
@@ -120,7 +120,8 @@ export function useCheckConnection(handlers: {
   onError: (message: string) => void;
 }) {
   return useMutation({
-    mutationFn: (connectionString: string) => api().checkConnection({ connectionString }),
+    mutationFn: (input: { connectionString: string; tlsOverrides: TlsOverrides }) =>
+      api().checkConnection(input),
     onMutate: handlers.onStart,
     onSuccess: handlers.onDiagnosis,
     onError: (error) =>
@@ -152,8 +153,11 @@ function useLandOnNewCluster() {
 export function useConnectCluster(handlers: ConnectHandlers) {
   const land = useLandOnNewCluster();
   return useMutation({
-    mutationFn: (credentials: { name: string; connectionString: string }) =>
-      api().createCluster(credentials),
+    mutationFn: (credentials: {
+      name: string;
+      connectionString: string;
+      tlsOverrides: TlsOverrides;
+    }) => api().createCluster(credentials),
     onMutate: handlers.onStart,
     onSuccess: async (created) => {
       handlers.onConnected();
@@ -173,8 +177,11 @@ export function useProvisionCluster(
 ) {
   const land = useLandOnNewCluster();
   return useMutation({
-    mutationFn: (credentials: { name: string; adminConnectionString: string }) =>
-      api().provisionCluster(credentials),
+    mutationFn: (credentials: {
+      name: string;
+      adminConnectionString: string;
+      tlsOverrides: TlsOverrides;
+    }) => api().provisionCluster(credentials),
     onMutate: handlers.onStart,
     onSuccess: async (created) => {
       handlers.onProvisioned({
