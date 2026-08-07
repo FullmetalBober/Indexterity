@@ -13,8 +13,12 @@ describe("route patterns from the generated tree", () => {
     expect([...patterns].sort()).toEqual([
       "/",
       "/app",
-      "/app/account",
-      "/app/org",
+      "/app/clusters/$clusterId",
+      "/app/clusters/$clusterId/settings",
+      "/app/clusters/new",
+      "/app/settings",
+      "/app/settings/account",
+      "/app/settings/organizations",
       "/reset-password",
     ]);
   });
@@ -31,8 +35,27 @@ describe("labelling a request path", () => {
 
   it("labels a declared route with its own pattern", () => {
     expect(label("/app")).toBe("/app");
-    expect(label("/app/org")).toBe("/app/org");
+    expect(label("/app/settings")).toBe("/app/settings");
     expect(label("/")).toBe("/");
+  });
+
+  // The point of a pattern label, and the reason a cluster becoming a route did
+  // not have to cost this metric: a thousand clusters are one series.
+  it("labels every cluster as the same route", () => {
+    expect(label("/app/clusters/018f2b1e-0000-7000-8000-000000000001")).toBe(
+      "/app/clusters/$clusterId",
+    );
+    expect(label("/app/clusters/018f2b1e-0000-7000-8000-000000000002")).toBe(
+      "/app/clusters/$clusterId",
+    );
+    expect(label("/app/clusters/anything/settings")).toBe("/app/clusters/$clusterId/settings");
+  });
+
+  // Both patterns match this path and only one of them answered it. A static
+  // segment wins, or connecting a cluster would be counted as visiting one
+  // called "new".
+  it("prefers a static route over a dynamic one that also matches", () => {
+    expect(label("/app/clusters/new")).toBe("/app/clusters/new");
   });
 
   it("treats a trailing slash as the same route", () => {
@@ -42,7 +65,13 @@ describe("labelling a request path", () => {
 
   // The whole point: a scanner must not be able to grow the scrape.
   it("buckets anything the router does not declare", () => {
-    for (const path of ["/wp-login.php", "/.env", "/app/nope", "/app/org/extra"]) {
+    for (const path of [
+      "/wp-login.php",
+      "/.env",
+      "/app/nope",
+      "/app/settings/extra",
+      "/app/clusters/one/two/three",
+    ]) {
       expect(label(path)).toBe("unmatched");
     }
   });

@@ -120,13 +120,18 @@ export async function refetchShell(client: QueryClient): Promise<void> {
   ]);
 }
 
-// Which cluster a page is about. The cluster list says what exists, the URL says
-// which one is selected, and "none selected" means the first. Defined once so the
-// cluster bar and the dashboard's cache keys cannot disagree — they did, and one
-// entry then held two different clusters' answers.
-export function selectCluster<T extends { readonly id: string }>(
-  clusters: readonly T[],
-  selected: string | null | undefined,
-): T | null {
-  return clusters.find((entry) => entry.id === selected) ?? clusters[0] ?? null;
+// The cluster a page is about, out of the live list.
+//
+// There used to be a `selectCluster(clusters, selected)` here whose whole job
+// was resolving "none selected" to the first cluster, because the selection was
+// a search param that could be absent. It could also name a cluster the reader
+// no longer owns, which is how one cache entry ended up holding two clusters'
+// answers (#82). A cluster is a route now: /app resolves "none selected" once,
+// by redirecting, and everything below it is handed a concrete id.
+//
+// Null means the list has not arrived, failed, or no longer contains this id.
+// The last of those is a frame long — the route's loader redirects on it.
+export function useCluster(clusterId: string): Cluster | null {
+  const clusters = useClusters();
+  return clusters.find((entry) => entry.id === clusterId) ?? null;
 }

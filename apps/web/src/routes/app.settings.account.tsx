@@ -5,7 +5,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { AccountSection } from "~/components/app/account-section";
 import { useMe, useMyAccounts, useMySessions } from "~/lib/queries/account";
 
-export const Route = createFileRoute("/app/account")({
+export const Route = createFileRoute("/app/settings/account")({
   head: () => ({ meta: [{ title: "Account — Indexterity" }] }),
   component: AccountPage,
 });

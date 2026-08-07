@@ -139,7 +139,12 @@ describe("ConnectClusterForm", () => {
       name: "Production",
       connectionString: "mongodb://host:27017",
     });
-    expect(navigate).toHaveBeenCalledWith({ to: "/app", search: { cluster: "c9" } });
+    // Onto the new cluster's own page. It used to be a search param on /app,
+    // which meant a connected cluster had no address of its own (#81).
+    expect(navigate).toHaveBeenCalledWith({
+      to: "/app/clusters/$clusterId",
+      params: { clusterId: "c9" },
+    });
   });
 
   // Provisioning is the recommended path when it is available, and using the

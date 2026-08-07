@@ -1,289 +1,63 @@
-// The cluster dashboard: reclaimable space, recommendations, latency and the
-// per-collection footprint.
+// /app is an address people type, bookmark and get mailed. It is not a page any
+// more — every page under it is about one cluster or about settings — so this
+// route's whole job is deciding which of those the reader meant.
 //
-// Everything here is about ONE cluster. The shell around it — which cluster,
-// which org, sign out — belongs to the /app layout, and the org page is its
-// own route, so this loader fetches only what this page draws.
-import { createFileRoute } from "@tanstack/react-router";
-import { ActivityTable } from "~/components/app/activity-table";
-import { CollectionsTable, toCollectionRows } from "~/components/app/collections-table";
-import { ConnectClusterForm } from "~/components/app/connect-cluster-form";
-import { fmtBytes } from "~/components/app/format";
-import { latencyCharts } from "~/components/app/latency-series";
-import { PolicySection, PolicySectionSkeleton } from "~/components/app/policy-section";
-import { RecommendationsTable } from "~/components/app/recommendations-table";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
-import { Skeleton } from "~/components/ui/skeleton";
-import { useLiveClusterEvents } from "~/lib/queries/live";
-import {
-  activityQuery,
-  recommendationsQuery,
-  roiQuery,
-  useActivity,
-  useRecommendations,
-  useRoi,
-} from "~/lib/queries/pipeline";
-import { policyQuery, usePolicy } from "~/lib/queries/policy";
-import { clustersQuery, NO_CLUSTERS, selectCluster, useOrg, useShell } from "~/lib/queries/shell";
-import {
-  collectionsQuery,
-  latencyQuery,
-  latencySeriesQuery,
-  useCollections,
-  useLatency,
-  useLatencySeries,
-} from "~/lib/queries/telemetry";
-import { LineChart, SERIES_PALETTE } from "../components/latency-chart";
+// A redirect rather than "the dashboard for the first cluster", because those
+// two are not the same thing: the second leaves the URL saying nothing about
+// what is on screen, which is the search-param selection this redesign removed.
+import { createFileRoute, Navigate, redirect } from "@tanstack/react-router";
+import { clustersQuery, orgsQuery, useShell } from "~/lib/queries/shell";
 
 export const Route = createFileRoute("/app/")({
-  loaderDeps: ({ search }: { search: { cluster?: string } }) => ({
-    cluster: search.cluster ?? null,
-  }),
-  // The loader writes through the router's query client, and the SSR payload
-  // carries that cache into the browser, so the server render and the browser
-  // read one entry. First paint does not wait for the browser to boot and ask
-  // again.
-  //
-  // Selecting another cluster changes these keys, so it is the key change that
-  // fetches — not this loader re-running. ensureQueryData resolves with cached
-  // data whenever there is any, stale or not; what refreshes an already-cached
-  // key is a mutation invalidating it, or staleTime lapsing on mount.
-  //
-  // Which is why the keys are resolved here against the cluster list rather than
-  // keyed on the raw search param. "None selected" means the first cluster,
-  // and a key of null therefore MEANT one thing before a cluster existed and
-  // another after — same entry, two answers, and whichever was cached won.
-  // That is a key that lies, and only a zero staleTime constantly refetching
-  // was hiding it. A concrete id means the same cluster forever.
-  //
-  // Same rule as the layout's bar, so the two cannot disagree about which
-  // cluster the page is about — and the component below applies it again rather
-  // than reading the answer out of loader data. An id resolved here is an id
-  // frozen at the moment the loader ran, and a session change refetches the
-  // cluster list WITHOUT re-running any loader (see invalidateSession). That is
-  // what #82 was: switching org left this page keyed on the org just left, while
-  // the bar above it moved on. So this resolves which keys to warm and returns
-  // nothing.
-  //
-  // Every warm is allowed to fail. The reads no longer fold an error into an
-  // empty payload, so a rejection here would take out the whole route instead of
-  // the one panel it belongs to; allSettled leaves the error on its own query,
-  // where the component reading that query draws an empty panel and the six
-  // beside it are unaffected.
-  loader: async ({ deps, context }) => {
-    const clusters = await context.queryClient
-      .ensureQueryData(clustersQuery())
-      .catch(() => NO_CLUSTERS);
-    const id = selectCluster(clusters, deps.cluster)?.id ?? null;
-    await Promise.allSettled([
-      context.queryClient.ensureQueryData(recommendationsQuery(id)),
-      context.queryClient.ensureQueryData(roiQuery(id)),
-      context.queryClient.ensureQueryData(activityQuery(id)),
-      context.queryClient.ensureQueryData(latencyQuery(id)),
-      context.queryClient.ensureQueryData(latencySeriesQuery(id)),
-      context.queryClient.ensureQueryData(collectionsQuery(id)),
-      context.queryClient.ensureQueryData(policyQuery(id)),
+  loader: async ({ context }) => {
+    // Both allowed to fail, and a failure is NOT a redirect. A 401 or an
+    // unreachable api means the layout above is about to draw the sign-in form
+    // or the retry card — sending a signed-out visitor to /app/clusters/new
+    // would leave them looking at a sign-in form under a URL about connecting a
+    // cluster, and their address bar would have lost where they were going.
+    const [orgs, clusters] = await Promise.all([
+      context.queryClient.ensureQueryData(orgsQuery()).catch(() => null),
+      context.queryClient.ensureQueryData(clustersQuery()).catch(() => null),
     ]);
+    if (orgs === null || clusters === null) return;
+    // Same reasoning for belonging to no org: the layout draws the create
+    // screen, and there is nothing under any of these addresses until it is
+    // answered.
+    if (orgs.length === 0) return;
+
+    const first = clusters[0];
+    throw redirect(
+      first === undefined
+        ? // Nothing connected. Connecting one is not a fallback here, it is the
+          // only thing there is to do — see the note on that route.
+          { to: "/app/clusters/new" }
+        : { to: "/app/clusters/$clusterId", params: { clusterId: first.id } },
+    );
   },
-  head: () => ({ meta: [{ title: "Dashboard — Indexterity" }] }),
-  component: Dashboard,
+  component: AppIndex,
 });
 
-function Dashboard() {
+// The same decision again, off the live cluster list.
+//
+// Not belt and braces — the loader alone cannot answer this. Making an
+// organization does not navigate: it invalidates the session cache, the layout
+// above stops drawing the create screen and starts drawing this outlet, and no
+// loader re-runs (see invalidateSession). Somebody who had just made their first
+// org therefore landed on the blank page this route renders when it does not
+// redirect. Deriving it from the query means a cache change is enough, which is
+// the same lesson as #82.
+//
+// The loader is still the one that matters for a cold navigation: it redirects
+// before anything renders, so there is no flash of this page on the way through.
+function AppIndex() {
   const shell = useShell();
-  const { cluster: selected } = Route.useSearch();
-
-  // The same list and the same rule as the bar in the layout above, so the two
-  // cannot disagree about which cluster this page is about — they did, and the
-  // half that could not follow a refetch was this one. Derived on every render
-  // from the live query rather than read out of loader data: a session change
-  // refetches the cluster list without re-running a loader, and that has to be
-  // enough to re-point the whole page.
-  const clusters = shell.authed ? shell.clusters : NO_CLUSTERS;
-  const id = selectCluster(clusters, selected)?.id ?? null;
-
-  // Not a cluster read, and so not in this route's loader: the layout above
-  // already warmed the org, and the connect form at the bottom of this page
-  // needs its cluster quota. Null until it arrives, or if the reader is in no
-  // organization.
-  const org = useOrg();
-
-  // The live half of everything below: the worker's events for THIS cluster,
-  // answered by invalidating the same keys the loader warmed. A worker pass
-  // shows up without a reload; switching clusters swaps the subscription with
-  // the id.
-  useLiveClusterEvents(id);
-
-  // The loader already put each of these in the cache, so they read rather than
-  // fetch. useQuery, not useSuspenseQuery: there is nothing to wait for, and
-  // suspending here would let React hold the previous tree during a navigation
-  // that is unmounting this page. Each hook defaults to empty, so one dead read
-  // costs its own panel and nothing else on the page.
-  const recommendations = useRecommendations(id);
-  const roi = useRoi(id);
-  const activity = useActivity(id);
-  const latency = useLatency(id);
-  const latencySeries = useLatencySeries(id);
-  const collectionStats = useCollections(id);
-  const policy = usePolicy(id);
-
+  // Both of the states this could be are drawn by the layout instead of the
+  // outlet, so reaching here at all means signed in and in an organization.
   if (!shell.authed) return null;
-
-  const proposed = recommendations.data.filter((rec) => rec.state === "PROPOSED");
-  const totalSaved = proposed.reduce((sum, rec) => sum + rec.estimatedBytesSaved, 0);
-
-  // Ranked per metric, not once for both charts — see latency-series.ts for the bug
-  // that made this its own module rather than four lines here.
-  const { readSeries, writeSeries, foldedCount } = latencyCharts(
-    latencySeries.data,
-    SERIES_PALETTE,
-  );
-  const chartedCount = Math.max(readSeries.length, writeSeries.length);
-
-  // Merged by namespace into one row per collection — see collections-table.tsx,
-  // which owns the row shape. Two reads behind one table, so it is waiting until
-  // both have answered — a table drawn from half its inputs is a table that
-  // rewrites itself a moment later.
-  const collectionRows = toCollectionRows(collectionStats.data, latency.data);
-  const collectionsPending = collectionStats.pending || latency.pending;
-
-  return (
-    <>
-      <div className="mt-6 grid gap-4 sm:grid-cols-2">
-        <Card>
-          <CardHeader>
-            <CardDescription>Proposed reclaimable</CardDescription>
-            {/* A measured zero and an unknown look identical as a figure — "0 KB"
-                reads as "we looked, there is nothing", which is the same lie the
-                empty states were telling (#72). The number waits. */}
-            {recommendations.pending ? (
-              <Skeleton className="h-9 w-32" />
-            ) : (
-              <CardTitle className="text-3xl tabular-nums">{fmtBytes(totalSaved)}</CardTitle>
-            )}
-          </CardHeader>
-          <CardContent className="text-muted-foreground text-sm">
-            {recommendations.pending ? (
-              <Skeleton className="h-4 w-52" />
-            ) : (
-              <>
-                {proposed.length} recommendation{proposed.length === 1 ? "" : "s"} awaiting review
-              </>
-            )}
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader>
-            <CardDescription>Reclaimed</CardDescription>
-            {roi.pending ? (
-              <Skeleton className="h-9 w-32" />
-            ) : (
-              <CardTitle className="text-3xl tabular-nums">
-                {fmtBytes(roi.data.freedBytes)}
-              </CardTitle>
-            )}
-          </CardHeader>
-          <CardContent className="text-muted-foreground text-sm">
-            {roi.pending ? (
-              <Skeleton className="h-4 w-52" />
-            ) : (
-              <>
-                {roi.data.indexesDropped} index{roi.data.indexesDropped === 1 ? "" : "es"} dropped ·
-                ${roi.data.estimatedMonthlyUsd.toFixed(2)}/mo
-              </>
-            )}
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* No skeleton: a cluster with nothing dropped yet has no such card at
-          all, so drawing an outline for it would promise a panel that may never
-          arrive — which is the same content-shift, only in the other direction. */}
-      {roi.data.attribution.length > 0 ? (
-        <Card className="mt-4">
-          <CardHeader>
-            <CardTitle className="text-base">Reclaimed by index</CardTitle>
-            <CardDescription>Undone drops are netted out.</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <ul className="space-y-1 text-sm">
-              {roi.data.attribution.map((entry) => (
-                <li
-                  key={entry.recommendationId}
-                  className="flex items-baseline justify-between gap-4"
-                >
-                  <span className="font-mono text-xs">
-                    {entry.database}.{entry.collection} · {entry.indexName}
-                  </span>
-                  <span className="whitespace-nowrap tabular-nums">
-                    {fmtBytes(entry.freedBytes)}{" "}
-                    <span className="text-muted-foreground text-xs">
-                      ~${entry.estimatedMonthlyUsd.toFixed(2)}/mo
-                    </span>
-                  </span>
-                </li>
-              ))}
-            </ul>
-          </CardContent>
-        </Card>
-      ) : null}
-
-      <RecommendationsTable
-        clusterId={id}
-        recommendations={recommendations.data}
-        loading={recommendations.pending}
-      />
-
-      {/* Drawn while the series read is out, because two charts appearing under
-          the recommendations table is the single biggest jump on this page. Once
-          it has answered, a cluster with nothing to plot goes back to drawing
-          nothing at all rather than to two empty boxes. */}
-      {latencySeries.pending || chartedCount > 0 ? (
-        <section className="mt-8 grid gap-6 md:grid-cols-2">
-          <LineChart
-            title="Read latency"
-            unit="µs/op"
-            series={readSeries}
-            pending={latencySeries.pending}
-          />
-          <LineChart
-            title="Write latency"
-            unit="µs/op"
-            series={writeSeries}
-            pending={latencySeries.pending}
-          />
-          {foldedCount > 0 ? (
-            <p className="text-muted-foreground text-xs md:col-span-2">
-              +{foldedCount} more collections — see the table below.
-            </p>
-          ) : null}
-        </section>
-      ) : null}
-
-      <h2 className="mt-8 font-semibold text-lg">Collections</h2>
-      <p className="text-muted-foreground text-sm">
-        Index footprint from the latest collect; latency is the current windowed average vs the
-        first sample (negative Δ = faster).
-      </p>
-      <CollectionsTable rows={collectionRows} loading={collectionsPending} />
-
-      <section className="mt-8">
-        <h2 className="font-semibold text-lg">Activity</h2>
-        <p className="text-muted-foreground text-sm">
-          Every executed operation, with its outcome — the immutable audit trail.
-        </p>
-        <ActivityTable activity={activity.data} loading={activity.pending} />
-      </section>
-      {/* Null means three different things — no cluster, a failed read, and not
-          yet — and only the last one gets the outline. The first two still draw
-          nothing, which is the answer the rest of the page gives for a dead
-          read. */}
-      {policy.data !== null ? (
-        <PolicySection key={policy.data.clusterId} policy={policy.data} />
-      ) : policy.pending ? (
-        <PolicySectionSkeleton />
-      ) : null}
-      <ConnectClusterForm plan={org?.plan ?? null} />
-    </>
+  const first = shell.clusters[0];
+  return first === undefined ? (
+    <Navigate to="/app/clusters/new" replace />
+  ) : (
+    <Navigate to="/app/clusters/$clusterId" params={{ clusterId: first.id }} replace />
   );
 }

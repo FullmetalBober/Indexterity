@@ -11,6 +11,10 @@ test.describe("account page", () => {
     const email = uniqueEmail("account");
     await signUpAndLandOnDashboard(page, email);
 
+    await page
+      .getByRole("navigation", { name: "Main" })
+      .getByRole("link", { name: "Settings" })
+      .click();
     await page.getByRole("link", { name: "Account" }).click();
 
     // The profile card knows who this is.
@@ -47,6 +51,10 @@ test.describe("account page", () => {
     await expect(page.getByRole("button", { name: "Sign out" })).toBeVisible();
 
     // The rename survived the round trip to postgres, not just the cache.
+    await page
+      .getByRole("navigation", { name: "Main" })
+      .getByRole("link", { name: "Settings" })
+      .click();
     await page.getByRole("link", { name: "Account" }).click();
     await expect(page.getByLabel("Name")).toHaveValue("E2E Renamed");
   });
