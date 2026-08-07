@@ -1,5 +1,5 @@
 import type { Db, MongoClient } from "mongodb";
-import { mongoClient } from "./client";
+import { mongoClient, type TlsOverrides } from "./client";
 import { parseServerVersion, type ServerVersion } from "./version";
 
 // Owns a driver client. Created with an index-only role (the wiki's
@@ -8,11 +8,14 @@ export class MongoConnection {
   private readonly client: MongoClient;
   private version: ServerVersion | null | undefined;
 
-  constructor(connectionString: string) {
+  // `overrides` is the cluster owner's recorded consent to skip specific
+  // certificate checks. Omitted means none of them, which is the strict rule —
+  // the direction a forgotten argument has to fail in.
+  constructor(connectionString: string, overrides?: TlsOverrides) {
     // Throws InsecureConnectionError on a string that would not connect over
-    // validated TLS — see mongo/client.ts, which is the only place a driver
-    // client is built.
-    this.client = mongoClient(connectionString);
+    // TLS, or one that disables a check nobody consented to — see
+    // mongo/client.ts, the only place a driver client is built.
+    this.client = mongoClient(connectionString, overrides);
   }
 
   async connect(): Promise<void> {

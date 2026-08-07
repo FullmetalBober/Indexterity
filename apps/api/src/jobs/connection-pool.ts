@@ -1,4 +1,4 @@
-import type { ClusterEngine, EngineSession } from "../engine/ports";
+import type { ClusterEngine, EngineSession, TlsOverrides } from "../engine/ports";
 import { adapterFor } from "../engine/registry";
 
 // One engine session per cluster, shared across jobs and requests — drivers
@@ -46,8 +46,12 @@ async function sweepIdle(): Promise<void> {
   }
 }
 
-async function createEntry(engine: ClusterEngine, connString: string): Promise<PoolEntry> {
-  const session = await adapterFor(engine).open(connString);
+async function createEntry(
+  engine: ClusterEngine,
+  connString: string,
+  overrides?: TlsOverrides,
+): Promise<PoolEntry> {
+  const session = await adapterFor(engine).open(connString, overrides);
   return { connString, session, refs: 0, lastUsed: Date.now(), doomed: false };
 }
 
@@ -55,6 +59,10 @@ export async function acquireClusterSession(
   clusterId: string,
   engine: ClusterEngine,
   connString: string,
+  // The cluster row's recorded consent. Not cached as part of the entry key:
+  // it only ever changes alongside the string it was chosen for, which already
+  // dooms the entry below.
+  overrides?: TlsOverrides,
 ): Promise<PooledSession> {
   ensureSweeper();
   let pending = entries.get(clusterId);
@@ -75,7 +83,7 @@ export async function acquireClusterSession(
     }
   }
   if (pending === undefined) {
-    pending = createEntry(engine, connString);
+    pending = createEntry(engine, connString, overrides);
     entries.set(clusterId, pending);
     pending.catch(() => entries.delete(clusterId));
   }

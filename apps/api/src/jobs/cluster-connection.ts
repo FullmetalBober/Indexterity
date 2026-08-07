@@ -55,6 +55,11 @@ export async function openClusterSession(db: Database, clusterId: string): Promi
   } catch (error) {
     throw new ClusterCredentialsError(clusterId, cluster.keyVersion, error);
   }
-  const { session, release } = await acquireClusterSession(clusterId, cluster.engine, connString);
+  const { session, release } = await acquireClusterSession(
+    clusterId,
+    cluster.engine,
+    connString,
+    cluster.tlsOverrides,
+  );
   return { session, engine: cluster.engine, readOnly: cluster.readOnly, release };
 }

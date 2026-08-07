@@ -1,4 +1,5 @@
 import { allowPrivateTargets, assertTargetsAllowed } from "../engine/net-guard";
+import type { TlsOverrides } from "../engine/ports";
 import { directConnectionTo } from "./conn-string";
 import { MongoConnection } from "./connection";
 
@@ -20,6 +21,7 @@ export class MemberConnections {
   constructor(
     private readonly primary: MongoConnection,
     private readonly connString: string,
+    private readonly overrides?: TlsOverrides,
   ) {}
 
   // Connections to every member except the one the primary client is already
@@ -46,7 +48,7 @@ export class MemberConnections {
 
     for (const host of allowed) {
       try {
-        const conn = new MongoConnection(directConnectionTo(this.connString, host));
+        const conn = new MongoConnection(directConnectionTo(this.connString, host), this.overrides);
         await conn.connect();
         this.opened.push(conn);
       } catch {

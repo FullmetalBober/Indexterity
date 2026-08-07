@@ -48,6 +48,7 @@ export function toCluster(
     readOnly: row.readOnly,
     provisionedUsername: row.provisionedUsername,
     lastCollectedAt: lastCollectedAt?.toISOString() ?? null,
+    tlsOverrides: row.tlsOverrides,
     createdAt: row.createdAt.toISOString(),
   };
 }

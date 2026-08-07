@@ -7,6 +7,7 @@ import { requireUserId } from "../auth/session";
 import { and, clusters, desc, envKeyProvider, eq, inArray, indexSnapshots, seal, sql } from "../db";
 import { DatabaseService } from "../db/database.service";
 import { allowPrivateTargets, assertTargetsAllowed, BlockedTargetError } from "../engine/net-guard";
+import { NO_TLS_OVERRIDES, type TlsOverrides } from "../engine/ports";
 import { adapterFor, engineSupported } from "../engine/registry";
 import { currentKeyVersion, masterKeyBytesFor } from "../env";
 import { consumeDialBudget } from "../errors/dial-budget";
@@ -39,6 +40,7 @@ export class ClustersController {
     engine: typeof clusters.$inferSelect.engine,
     connectionString: string,
     provisionedUsername: string | null,
+    tlsOverrides: TlsOverrides = NO_TLS_OVERRIDES,
   ): Promise<typeof clusters.$inferSelect> {
     const keyVersion = currentKeyVersion();
     const sealed = await seal(
@@ -57,6 +59,7 @@ export class ClustersController {
         sealedData: Buffer.from(sealed.data),
         keyVersion,
         provisionedUsername,
+        tlsOverrides,
       })
       .returning();
     if (row === undefined) throw new Error("failed to create cluster");
@@ -100,6 +103,7 @@ export class ClustersController {
     engine: typeof clusters.$inferSelect.engine,
     value: string,
     errors: { BAD_REQUEST: (options: { message: string }) => Error },
+    overrides: TlsOverrides = NO_TLS_OVERRIDES,
   ): Promise<void> {
     if (!engineSupported(engine)) {
       throw errors.BAD_REQUEST({
@@ -132,7 +136,7 @@ export class ClustersController {
     // is only so onboarding refuses with the reason instead of surfacing the same
     // refusal as a 502 out of diagnose.
     try {
-      adapter.assertSecureTransport(value);
+      adapter.assertSecureTransport(value, overrides);
     } catch (error) {
       if (error instanceof InsecureConnectionError) {
         throw errors.BAD_REQUEST({ message: error.message });
@@ -193,8 +197,14 @@ export class ClustersController {
     return implement(contract.checkConnection).handler(async ({ input, errors }) => {
       await this.tenancy.requireOwner(req);
       const engine = input.engine ?? "MONGODB";
-      await this.guardDial(req, engine, input.connectionString, errors);
-      return toDiagnosis(await adapterFor(engine).diagnose(input.connectionString));
+      const adapter = adapterFor(engine);
+      // The checkboxes are applied to the string BEFORE anything looks at it, so
+      // the preflight answers for the connection that would actually be stored
+      // rather than for the one that was typed.
+      const overrides = input.tlsOverrides ?? NO_TLS_OVERRIDES;
+      const value = adapter.applySecureTransport(input.connectionString, overrides);
+      await this.guardDial(req, engine, value, errors, overrides);
+      return toDiagnosis(await adapter.diagnose(value, overrides));
     });
   }
 
@@ -206,10 +216,13 @@ export class ClustersController {
       // several seconds connecting to a cluster we are not going to keep.
       await this.tenancy.requireRoomFor(orgId, "clusters");
       const engine = input.engine ?? "MONGODB";
-      await this.guardDial(req, engine, input.connectionString, errors);
+      const adapter = adapterFor(engine);
+      const overrides = input.tlsOverrides ?? NO_TLS_OVERRIDES;
+      const value = adapter.applySecureTransport(input.connectionString, overrides);
+      await this.guardDial(req, engine, value, errors, overrides);
       // Verify before storing: an unusable string must fail at connect time
       // with the reason, not silently collect nothing for a day.
-      const diagnosis = await adapterFor(engine).diagnose(input.connectionString);
+      const diagnosis = await adapter.diagnose(value, overrides);
       if (!diagnosis.reachable) {
         throw new ORPCError("CLUSTER_UNREACHABLE", {
           status: 502,
@@ -224,9 +237,7 @@ export class ClustersController {
             "Indexterity provision a scoped one.",
         });
       }
-      return toCluster(
-        await this.storeCluster(orgId, input.name, engine, input.connectionString, null),
-      );
+      return toCluster(await this.storeCluster(orgId, input.name, engine, value, null, overrides));
     });
   }
 
@@ -241,10 +252,15 @@ export class ClustersController {
       await this.tenancy.requireRoomFor(orgId, "clusters");
       // Provisioning is engine-specific; MONGODB is the only adapter with the
       // capability today (see EngineCapabilities.provisionScopedUsers).
-      await this.guardDial(req, "MONGODB", input.adminConnectionString, errors);
+      const overrides = input.tlsOverrides ?? NO_TLS_OVERRIDES;
+      const adminValue = adapterFor("MONGODB").applySecureTransport(
+        input.adminConnectionString,
+        overrides,
+      );
+      await this.guardDial(req, "MONGODB", adminValue, errors, overrides);
       let provisioned: Awaited<ReturnType<typeof provisionScopedUser>>;
       try {
-        provisioned = await provisionScopedUser(input.adminConnectionString);
+        provisioned = await provisionScopedUser(adminValue, overrides);
       } catch (error) {
         if (error instanceof ProvisionDeniedError) {
           throw new ORPCError("PROVISION_DENIED", { status: 422, message: error.message });
@@ -257,6 +273,7 @@ export class ClustersController {
         "MONGODB",
         provisioned.connectionString,
         provisioned.username,
+        overrides,
       );
       return {
         cluster: toCluster(row),
@@ -282,9 +299,13 @@ export class ClustersController {
         .limit(1);
       if (row === undefined) throw errors.NOT_FOUND({ message: "cluster not found" });
       const adapter = adapterFor(row.engine);
-      await this.guardDial(req, row.engine, input.connectionString, errors);
+      // Unstated on a rotation means "as before": rotating a password should not
+      // silently withdraw a concession the cluster still needs to connect at all.
+      const overrides = input.tlsOverrides ?? row.tlsOverrides;
+      const value = adapter.applySecureTransport(input.connectionString, overrides);
+      await this.guardDial(req, row.engine, value, errors, overrides);
       try {
-        const probe = await adapter.open(input.connectionString);
+        const probe = await adapter.open(value, overrides);
         try {
           await probe.ping();
         } finally {
