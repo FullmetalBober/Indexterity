@@ -193,6 +193,12 @@ un-hidden first — and the confirmation dialog makes you type the org's name an
 names every least-privilege user Indexterity created on your clusters, with the
 command to drop it.
 
+**The three acts that reach your database ask for a fresh sign-in.** Going
+live, rotating credentials and disconnecting refuse an owner session signed in
+more than an hour ago — the dashboard asks for the password again and then
+runs the action you chose. Flipping a cluster back to read-only never does:
+the emergency stop works from however old a session.
+
 **Owner-level acts leave a trail.** `actions` records what the engine did to an
 index; `security_events` records the rest — signing in and failing to, signing out,
 revoking a session, promoting and demoting, removing a member, inviting one, an

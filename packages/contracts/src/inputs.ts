@@ -34,6 +34,19 @@ export const emailAddress = z.email("That does not look like an email address");
 // has to refuse exactly what the api would, and "8" written twice is how the
 // two stop agreeing.
 export const PASSWORD_MIN_LENGTH = 8;
+
+// How recently a session must have been SIGNED IN for the acts that change what
+// the engine may do to a customer's database: going live, rotating credentials,
+// disconnecting. Holding an owner session is not the same claim as being the
+// owner at the keyboard right now — a week-old tab on a borrowed laptop holds
+// one and is not the other (#52).
+//
+// Shared because both sides act on it: the api refuses (SESSION_NOT_FRESH, see
+// TenancyService.requireFreshOwner) and the dashboard explains the refusal and
+// asks for the password again. An hour, not better-auth's day: long enough that
+// connect-then-configure never trips it, short enough that "signed in recently"
+// still means something.
+export const SESSION_FRESH_AGE_SECONDS = 60 * 60;
 export const password = z
   .string()
   .min(PASSWORD_MIN_LENGTH, `At least ${PASSWORD_MIN_LENGTH} characters`);
