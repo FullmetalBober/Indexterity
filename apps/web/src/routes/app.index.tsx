@@ -63,6 +63,15 @@ export const Route = createFileRoute("/app/")({
   // the one panel it belongs to; allSettled leaves the error on its own query,
   // where the component reading that query draws an empty panel and the six
   // beside it are unaffected.
+  // Warming only. It deliberately returns nothing: an id resolved here is an id
+  // frozen at the moment the loader ran, and a session change refetches the
+  // cluster list WITHOUT re-running any loader (see invalidateSession). That is
+  // what #82 was — switching org left this page keyed on the previous org's
+  // cluster while the bar above it, which re-derives from the live list, moved
+  // on. Two sources for one question, and only one of them could follow.
+  //
+  // The component derives the same id from the same list, so this resolves the
+  // keys to warm and nothing else.
   loader: async ({ deps, context }) => {
     const clusters = await context.queryClient
       .ensureQueryData(clustersQuery())
@@ -77,7 +86,6 @@ export const Route = createFileRoute("/app/")({
       context.queryClient.ensureQueryData(collectionsQuery(id)),
       context.queryClient.ensureQueryData(policyQuery(id)),
     ]);
-    return { clusterId: id };
   },
   head: () => ({ meta: [{ title: "Dashboard — Indexterity" }] }),
   component: Dashboard,
@@ -85,7 +93,16 @@ export const Route = createFileRoute("/app/")({
 
 function Dashboard() {
   const shell = useShell();
-  const { clusterId: id } = Route.useLoaderData();
+  const { cluster: selected } = Route.useSearch();
+
+  // The same list and the same rule as the bar in the layout above, so the two
+  // cannot disagree about which cluster this page is about — they did, and the
+  // half that could not follow a refetch was this one. Derived on every render
+  // from the live query rather than read out of loader data: a session change
+  // refetches the cluster list without re-running a loader, and that has to be
+  // enough to re-point the whole page.
+  const clusters = shell.authed ? shell.clusters : NO_CLUSTERS;
+  const id = selectCluster(clusters, selected)?.id ?? null;
 
   // Not a cluster read, and so not in this route's loader: the layout above
   // already warmed the org, and the connect form at the bottom of this page
