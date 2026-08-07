@@ -1,4 +1,4 @@
-import type { CollectionLatencySeries } from "@repo/contracts";
+import type { CollectionLatencySeries, LatencyGap } from "@repo/contracts";
 import { describe, expect, it } from "vitest";
 import { latencyCharts } from "./latency-series";
 
@@ -7,6 +7,7 @@ const PALETTE = ["#a", "#b", "#c", "#d"];
 function series(
   collection: string,
   points: { read: number | null; write: number | null }[],
+  gaps: { read?: LatencyGap | null; write?: LatencyGap | null } = {},
 ): CollectionLatencySeries {
   return {
     database: "msb-app",
@@ -16,6 +17,8 @@ function series(
       readMicros: point.read,
       writeMicros: point.write,
     })),
+    readGap: gaps.read ?? null,
+    writeGap: gaps.write ?? null,
   };
 }
 
@@ -114,5 +117,59 @@ describe("latencyCharts", () => {
     for (const entry of [...readSeries, ...writeSeries]) {
       expect(entry.color).toMatch(/^#/);
     }
+  });
+});
+
+// A chart that draws nothing has to say which nothing it is. Reads plotting fine
+// beside a write panel that renders identically whether the cluster took no
+// writes, restarted, or was only ever read from one node is what had #85 filed
+// twice against a chart that was doing its job.
+describe("latencyCharts empty-chart notes", () => {
+  it("explains the empty chart and stays quiet about the drawn one", () => {
+    const { readNote, writeNote } = latencyCharts(
+      [
+        series(
+          "orders",
+          [
+            { read: 100, write: null },
+            { read: 110, write: null },
+          ],
+          { write: "NO_OPS_RECORDED" },
+        ),
+      ],
+      PALETTE,
+    );
+    expect(readNote).toBeNull();
+    expect(writeNote).toBe("No write operations recorded over this history.");
+  });
+
+  it("names the metric it is talking about", () => {
+    const { readNote } = latencyCharts(
+      [series("orders", [{ read: null, write: 5 }], { read: "NO_OPS_RECORDED" })],
+      PALETTE,
+    );
+    expect(readNote).toBe("No read operations recorded over this history.");
+  });
+
+  // A restart outranks a quiet counter: it is the one a customer cannot infer
+  // from the chart, and the one that explains a hole rather than an absence.
+  it("leads with the reset when collections disagree", () => {
+    const { writeNote } = latencyCharts(
+      [
+        series("quiet", [{ read: 1, write: null }], { write: "NO_OPS_RECORDED" }),
+        series("restarted", [{ read: 2, write: null }], { write: "COUNTERS_RESET" }),
+        series("new", [{ read: 3, write: null }], { write: "AWAITING_SECOND_COLLECT" }),
+      ],
+      PALETTE,
+    );
+    expect(writeNote).toBe(
+      "The server restarted and its counters reset, so this window cannot be measured.",
+    );
+  });
+
+  it("falls back to no note when nothing reported a gap", () => {
+    const { readNote, writeNote } = latencyCharts([], PALETTE);
+    expect(readNote).toBeNull();
+    expect(writeNote).toBeNull();
   });
 });
