@@ -334,6 +334,20 @@ string carrying `readPreference=secondaryPreferred` had every latency reading
 landing on a secondary, whose write counters are permanently zero because oplog
 application is not a client write op.
 
+**Which** members, exactly: every one `hello` names, and that is two arrays, not
+one. Electable members are listed under `hosts`, but a `priority: 0` member is
+listed under `passives` — and priority 0 is the normal setting for a secondary in
+another region, so that it cannot win an election across a WAN. Priority governs
+elections and nothing else, so those members serve `secondaryPreferred` reads
+like any other secondary and both arrays are collected from.
+
+**Hidden members are not**, and this is a deliberate limit rather than an
+oversight. They appear in neither array, so reaching them needs `replSetGetStatus`
+or `replSetGetConfig` — cluster privileges the engine role does not ask for.
+Drivers never route reads to a hidden member either, so what is missed is
+direct-connected traffic: BI tools, backups, delayed members. If an index exists
+solely for a hidden analytics node, hint it or keep it out of the pipeline.
+
 **Sharded clusters** — point at the `mongos`. Stats aggregate across shards, and
 each collection's shard key is read from `config.collections` so any index it
 prefixes is protected. Without config read, the collection is treated as
@@ -561,7 +575,7 @@ yet. Migration creates schemas, so migration creates both.
 in CI. Releasing is `git tag v0.2.0 && git push --tags`, and the release
 workflow refuses a tag whose version the tree does not carry.
 
-**Four test layers**, currently 429 api unit, 235 web unit, 79 integration and
+**Four test layers**, currently 435 api unit, 235 web unit, 79 integration and
 24 end-to-end. The e2e suite deliberately runs with **no proxy in front**, so the
 passthrough is the path under test — the proxy shape is covered by compose and
 the chart, and a fallback nothing exercises is a fallback that is broken when
