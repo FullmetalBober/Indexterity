@@ -17,6 +17,23 @@ export const SECURITY_EVENTS = [
   "SIGN_IN_FAILED",
   "SIGN_OUT",
   "SESSION_REVOKED",
+  // The second factor (#55). VERIFIED/FAILED cover both moments a code is
+  // asked for — completing a sign-in and proving an enrolment — because the
+  // path cannot tell them apart and both are worth a row: a run of FAILED is
+  // someone guessing at a code, whichever door they are guessing at.
+  "TWO_FACTOR_ENABLED",
+  "TWO_FACTOR_DISABLED",
+  "TWO_FACTOR_VERIFIED",
+  "TWO_FACTOR_FAILED",
+  "TWO_FACTOR_CODES_REGENERATED",
+  // A sign-in code was mailed. Recorded because it is the one second factor
+  // whose delivery leaves the building: a burst of these to one account is
+  // somebody working a password they already have.
+  "TWO_FACTOR_OTP_SENT",
+  // The request, not the flip (#83): the flip happens on a GET /verify-email
+  // link indistinguishable by path from ordinary signup verification, and the
+  // request is the act with the actor behind it.
+  "EMAIL_CHANGE_REQUESTED",
   // Membership. The acts that decide who can do everything else.
   "MEMBER_ROLE_CHANGED",
   "MEMBER_REMOVED",
@@ -78,7 +95,22 @@ export function clientFromHeaders(
 // rate-limit rules match on.
 export function authEventFor(path: string, ok: boolean): SecurityEventName | null {
   if (path.startsWith("/sign-in")) return ok ? "SIGN_IN" : "SIGN_IN_FAILED";
+  // Before the ok-gate: a wrong code is the interesting half, same as a wrong
+  // password. TOTP and backup code land on the same pair — which kind is in
+  // the path, and the path is stored on the row.
+  if (
+    path === "/two-factor/verify-totp" ||
+    path === "/two-factor/verify-backup-code" ||
+    path === "/two-factor/verify-otp"
+  ) {
+    return ok ? "TWO_FACTOR_VERIFIED" : "TWO_FACTOR_FAILED";
+  }
   if (!ok) return null;
+  if (path === "/two-factor/enable") return "TWO_FACTOR_ENABLED";
+  if (path === "/two-factor/disable") return "TWO_FACTOR_DISABLED";
+  if (path === "/two-factor/generate-backup-codes") return "TWO_FACTOR_CODES_REGENERATED";
+  if (path === "/two-factor/send-otp") return "TWO_FACTOR_OTP_SENT";
+  if (path === "/change-email") return "EMAIL_CHANGE_REQUESTED";
   // Not in the issue's list, and it belongs there: a sign-up creates a session
   // without a sign-in, so without this the first session an account ever holds
   // would be the one with no row explaining where it came from. The refusal side

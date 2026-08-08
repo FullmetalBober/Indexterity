@@ -12,12 +12,20 @@ function request(): FastifyRequest {
   return { headers: { cookie: "better-auth.session_token=tok" } } as unknown as FastifyRequest;
 }
 
-function authed(activeOrganizationId: string | null = null, cookies: string[] = []) {
+const SIGNED_IN_AT = new Date("2026-08-01T10:00:00Z");
+
+function authed(
+  activeOrganizationId: string | null = null,
+  cookies: string[] = [],
+  // A Date when postgres answered, an ISO string when the cookie cache did —
+  // resolveSession has to take both (#52 measures freshness off this).
+  createdAt: Date | string = SIGNED_IN_AT,
+) {
   const headers = new Headers();
   for (const cookie of cookies) headers.append("set-cookie", cookie);
   return {
     headers,
-    response: { user: { id: "user-1" }, session: { activeOrganizationId } },
+    response: { user: { id: "user-1" }, session: { activeOrganizationId, createdAt } },
   };
 }
 
@@ -31,7 +39,12 @@ describe("requireSession", () => {
     const req = request();
     const first = await requireSession(req);
     const second = await requireUserId(req);
-    expect(first).toEqual({ userId: "user-1", activeOrgId: "org-1" });
+    expect(first).toEqual({
+      userId: "user-1",
+      activeOrgId: "org-1",
+      signedInAt: SIGNED_IN_AT,
+      twoFactorEnabled: false,
+    });
     expect(second).toBe("user-1");
     expect(getSession).toHaveBeenCalledTimes(1);
   });
@@ -72,6 +85,11 @@ describe("requireSession", () => {
   it("maps a session that never switched org to a null activeOrgId", async () => {
     getSession.mockResolvedValue(authed(null));
     expect((await requireSession(request())).activeOrgId).toBeNull();
+  });
+
+  it("reads signedInAt off a cookie-cache answer, where the date is a string", async () => {
+    getSession.mockResolvedValue(authed(null, [], SIGNED_IN_AT.toISOString()));
+    expect((await requireSession(request())).signedInAt).toEqual(SIGNED_IN_AT);
   });
 });
 

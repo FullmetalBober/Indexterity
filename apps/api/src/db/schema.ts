@@ -87,9 +87,36 @@ export const user = pgTable("user", {
   email: text("email").notNull().unique(),
   emailVerified: boolean("email_verified").notNull().default(false),
   image: text("image"),
+  // The twoFactor plugin's flag, and the only 2FA fact most requests need:
+  // true only after the first TOTP code verifies, not on enrolment (#55).
+  twoFactorEnabled: boolean("two_factor_enabled").notNull().default(false),
   createdAt,
   updatedAt,
 });
+
+// better-auth's twoFactor plugin, one row per enrolled user: the TOTP secret
+// and the backup codes, both encrypted with BETTER_AUTH_SECRET before they get
+// here (`returned: false` in the plugin's schema — they never leave the api).
+// The lockout columns are the plugin's own brute-force brake on top of the
+// rate limit it registers for /two-factor/*.
+export const twoFactor = pgTable(
+  "two_factor",
+  {
+    id: text("id").primaryKey(),
+    secret: text("secret").notNull(),
+    backupCodes: text("backup_codes").notNull(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    verified: boolean("verified").notNull().default(true),
+    failedVerificationCount: integer("failed_verification_count").notNull().default(0),
+    lockedUntil: timestamp("locked_until", { withTimezone: true }),
+  },
+  (table) => [
+    index("two_factor_user").on(table.userId),
+    index("two_factor_secret").on(table.secret),
+  ],
+);
 
 export const session = pgTable(
   "session",

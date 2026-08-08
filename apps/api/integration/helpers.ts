@@ -331,8 +331,9 @@ export async function api(
   path: string,
   session: Session | null,
   init?: RequestInit,
+  base: string = API_ROOT,
 ): Promise<Response> {
-  const res = await fetch(`${API_ROOT}${path}`, {
+  const res = await fetch(`${base}${path}`, {
     ...init,
     headers: {
       // Only claim a JSON body when one is sent — fastify 400s on an empty

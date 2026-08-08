@@ -1,8 +1,10 @@
 import { Injectable } from "@nestjs/common";
 import { ORPCError } from "@orpc/server";
+import { SESSION_FRESH_AGE_SECONDS } from "@repo/contracts";
 import type { FastifyRequest } from "fastify";
 import { requireSession } from "../auth/session";
 import { type Membership, resolveMembership } from "../auth/tenancy";
+import { hasCredentialAccount } from "../auth/two-factor-gate";
 import {
   allowsAutoApply,
   allowsWorkloadAnalysis,
@@ -13,6 +15,7 @@ import {
 import { seatsUsed } from "../billing/usage";
 import { and, clusters, eq, organizations } from "../db";
 import { DatabaseService } from "../db/database.service";
+import { requireOwnerTwoFactor } from "../env";
 
 // Authn + tenancy, shared by every controller. Was four private methods copied
 // into one 950-line controller; the rules are identical everywhere, so they
@@ -60,7 +63,58 @@ export class TenancyService {
     if (member.role !== "owner") {
       throw new ORPCError("FORBIDDEN", { message: "owner role required" });
     }
+    await this.requireSecondFactor(req);
     return member.orgId;
+  }
+
+  // The other half of "2FA is required for owners" (#55) — the org-membership
+  // routes get the same rule from the hooks.before in auth.config.ts. Only
+  // when the deployment says so (REQUIRE_OWNER_2FA, a posture flag like
+  // SIGNUP_MODE), and only for accounts a password can open: an account that
+  // arrived through GitHub has no TOTP to enrol here (better-auth refuses)
+  // and brings its provider's second factor instead.
+  //
+  // Its own code, like SESSION_NOT_FRESH: this refusal is fixable by the
+  // caller, and the dashboard sends them to the account page rather than
+  // telling them they lack a role they hold.
+  private async requireSecondFactor(req: FastifyRequest): Promise<void> {
+    if (!requireOwnerTwoFactor()) return;
+    const session = await requireSession(req);
+    if (session.twoFactorEnabled) return;
+    if (!(await hasCredentialAccount(this.database.db, session.userId))) return;
+    throw new ORPCError("TWO_FACTOR_REQUIRED", {
+      status: 403,
+      message: "owners must add a second factor before changing anything — Account → Two-factor",
+    });
+  }
+
+  // Owner, AND signed in within the last hour. The tier above requireOwner for
+  // the three acts whose blast radius is the customer's database rather than
+  // this product: going live, rotating credentials, disconnecting (#52). "Are
+  // you an owner" and "are you here right now" are different questions — a
+  // session stolen with the laptop it lives on answers the first for a week.
+  //
+  // Measured from when the session was CREATED, not last used: the rolling
+  // refresh keeps a session alive precisely without the caller proving
+  // anything, so "recently refreshed" is not evidence of presence. Signing in
+  // again mints a new session row, which is how the dashboard clears this —
+  // its own code, so the re-auth dialog knows this refusal from a plain 403.
+  //
+  // De-escalation must never wait on a password: flipping a cluster BACK to
+  // read-only takes requireOwner only, so the emergency stop works from any
+  // owner session however old (clusters.controller.ts setClusterMode).
+  async requireFreshOwner(req: FastifyRequest): Promise<string> {
+    const orgId = await this.requireOwner(req);
+    // Resolved once per request (auth/session.ts), so this re-ask is free.
+    const session = await requireSession(req);
+    const ageMs = Date.now() - session.signedInAt.getTime();
+    if (ageMs >= SESSION_FRESH_AGE_SECONDS * 1000) {
+      throw new ORPCError("SESSION_NOT_FRESH", {
+        status: 403,
+        message: "you signed in a while ago — confirm your password to do this",
+      });
+    }
+    return orgId;
   }
 
   async plan(orgId: string): Promise<Plan> {

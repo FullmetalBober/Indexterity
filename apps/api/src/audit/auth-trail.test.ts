@@ -68,6 +68,37 @@ describe("authEventFor", () => {
     expect(authEventFor("/revoke-other-sessions", true)).toBe("SESSION_REVOKED");
   });
 
+  // The second factor (#55). A wrong code is a credential attempt, so the
+  // verify pair records its failures like sign-in does — and unlike everything
+  // else here.
+  it("records the second factor's lifecycle, and its failures", () => {
+    expect(authEventFor("/two-factor/enable", true)).toBe("TWO_FACTOR_ENABLED");
+    expect(authEventFor("/two-factor/enable", false)).toBeNull();
+    expect(authEventFor("/two-factor/disable", true)).toBe("TWO_FACTOR_DISABLED");
+    expect(authEventFor("/two-factor/generate-backup-codes", true)).toBe(
+      "TWO_FACTOR_CODES_REGENERATED",
+    );
+    for (const path of [
+      "/two-factor/verify-totp",
+      "/two-factor/verify-backup-code",
+      "/two-factor/verify-otp",
+    ]) {
+      expect(authEventFor(path, true)).toBe("TWO_FACTOR_VERIFIED");
+      expect(authEventFor(path, false)).toBe("TWO_FACTOR_FAILED");
+    }
+    // The one second factor whose delivery leaves the building, so the sending
+    // is an act of its own: a burst of these is somebody working a password.
+    expect(authEventFor("/two-factor/send-otp", true)).toBe("TWO_FACTOR_OTP_SENT");
+    expect(authEventFor("/two-factor/send-otp", false)).toBeNull();
+  });
+
+  // The request is the act with the actor behind it; the flip happens on a
+  // verify-email link whose path cannot be told from signup verification.
+  it("records an email change being requested", () => {
+    expect(authEventFor("/change-email", true)).toBe("EMAIL_CHANGE_REQUESTED");
+    expect(authEventFor("/change-email", false)).toBeNull();
+  });
+
   // Reading a session, listing invitations, switching org: traffic, not acts.
   it("ignores the routes that are reads", () => {
     for (const path of ["/get-session", "/organization/list", "/organization/set-active"]) {

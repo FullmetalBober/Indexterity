@@ -197,6 +197,32 @@ un-hidden first — and the confirmation dialog makes you type the org's name an
 names every least-privilege user Indexterity created on your clusters, with the
 command to drop it.
 
+**The three acts that reach your database ask for a fresh sign-in.** Going
+live, rotating credentials and disconnecting refuse an owner session signed in
+more than an hour ago — the dashboard asks for the password again and then
+runs the action you chose. Flipping a cluster back to read-only never does:
+the emergency stop works from however old a session.
+
+**Owner accounts can carry a second factor, and a deployment can demand one.**
+TOTP plus backup codes, enrolled from the account page; with
+`REQUIRE_OWNER_2FA=true` every owner-only mutation — and the org acts that
+decide who has access — refuses until a code has verified. Where SMTP is
+configured, the sign-in page can also mail a six-digit code instead; without
+it that button answers with why rather than sending nothing. Read
+[D44](./docs/decisions.md) before relying on the emailed code: it is a second
+factor against someone who has your password, and none against someone who has
+your inbox — which is also where a password reset lands. GitHub sign-ins are
+exempt (no password to pair a code with; GitHub enforces its own). Lost device,
+lost codes and no email means whoever runs the install resets it after
+verifying it's you — there is deliberately no self-serve way around a second
+factor.
+
+**The sign-in address can change, carefully.** A verified account's current
+address approves the change and the new one verifies itself; an unverified
+account changes at once and the new address gets the verification mail. The
+signup gate applies to the change — `SIGNUP_MODE` cannot be walked around by
+renaming an account — and the old inbox is told either way.
+
 **Owner-level acts leave a trail.** `actions` records what the engine did to an
 index; `security_events` records the rest — signing in and failing to, signing out,
 revoking a session, promoting and demoting, removing a member, inviting one, an

@@ -5,21 +5,30 @@ import { Alert, AlertDescription } from "~/components/ui/alert";
 import { Button } from "~/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
 import { FieldGroup } from "~/components/ui/field";
-import { useRequestPasswordReset, useSignIn, useSignUp } from "~/lib/queries/mutations/auth";
+import {
+  type SecondFactorKind,
+  useRequestPasswordReset,
+  useSendEmailCode,
+  useSignIn,
+  useSignUp,
+  useVerifySecondFactor,
+} from "~/lib/queries/mutations/auth";
 import { REQUEST_ACCESS_HREF } from "~/lib/site";
 
-type Mode = "in" | "up" | "forgot";
+type Mode = "in" | "up" | "forgot" | "code";
 
 const TITLES: Record<Mode, string> = {
   in: "Sign in to your account",
   up: "Create an account",
   forgot: "Reset your password",
+  code: "Enter your verification code",
 };
 
 const SUBMIT_LABELS: Record<Mode, string> = {
   in: "Sign in",
   up: "Sign up",
   forgot: "Send reset link",
+  code: "Verify",
 };
 
 // The rules the api enforces, taken off the api's own input schemas rather than
@@ -30,6 +39,23 @@ const SUBMIT_LABELS: Record<Mode, string> = {
 const EMAIL = signInInput.shape.email;
 const PASSWORD = signInInput.shape.password;
 const NAME = signUpInput.shape.name;
+// Deliberately loose: a TOTP is six digits but a backup code is ten
+// characters, and the same field takes both — the api is the judge of a code,
+// this only refuses an empty submit.
+const TOTP_CODE = ({ value }: { value: string }) =>
+  value.trim() === "" ? "Enter the code" : undefined;
+
+const CODE_LABELS: Record<SecondFactorKind, string> = {
+  totp: "Authenticator code",
+  email: "Emailed code",
+  backup: "Backup code",
+};
+
+const CODE_HINTS: Record<SecondFactorKind, string> = {
+  totp: "The six digits your authenticator app shows right now.",
+  email: "The six digits we just sent to your email address.",
+  backup: "One of the codes you saved when setting this up. Each works once.",
+};
 
 export function AuthForm({ onSignedIn }: { onSignedIn: () => void }) {
   // Not a form value: it decides which fields exist, and the reader picks it
@@ -40,16 +66,39 @@ export function AuthForm({ onSignedIn }: { onSignedIn: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
+  // Which kind of second-factor code the reader is about to type. Not a form
+  // value — it picks the endpoint, and switching must not clear the field.
+  const [factorKind, setFactorKind] = useState<SecondFactorKind>("totp");
+
   // Shared by all three: clear whatever the last attempt said before making
   // another one.
   const onStart = () => {
     setError(null);
     setNotice(null);
   };
-  const credentials = { onStart, onSignedIn, onError: setError };
+  const credentials = {
+    onStart,
+    onSignedIn,
+    onError: setError,
+    // The password was right and the account has a second factor: no session
+    // yet, the code is the rest of the sign-in (#55).
+    onTwoFactor: () => setMode("code"),
+  };
 
   const signIn = useSignIn(credentials);
   const signUp = useSignUp(credentials);
+  const verify = useVerifySecondFactor(credentials);
+  // Sending mail is a step the reader waits on, so it says so and then says it
+  // is done — silence between the click and the inbox is what makes people
+  // click twice.
+  const sendCode = useSendEmailCode({
+    onSent: () => {
+      setFactorKind("email");
+      setError(null);
+      setNotice("Code sent — check your email. It works once, and expires in 5 minutes.");
+    },
+    onError: setError,
+  });
   const forgot = useRequestPasswordReset({
     onStart,
     onSent: () => setNotice("If that email has an account, a reset link is on its way."),
@@ -57,17 +106,19 @@ export function AuthForm({ onSignedIn }: { onSignedIn: () => void }) {
   });
 
   const form = useAppForm({
-    defaultValues: { email: "", password: "", name: "" },
+    defaultValues: { email: "", password: "", name: "", code: "", trustDevice: false },
     onSubmit: ({ value }) => {
       if (mode === "forgot") forgot.mutate(value.email);
       else if (mode === "in") signIn.mutate({ email: value.email, password: value.password });
-      else signUp.mutate(value);
+      else if (mode === "code")
+        verify.mutate({ code: value.code, kind: factorKind, trustDevice: value.trustDevice });
+      else signUp.mutate({ email: value.email, password: value.password, name: value.name });
     },
   });
 
   // Replaces a busy useState that had to be cleared on all four exits from the
   // old submit(), including the ones that returned early.
-  const busy = signIn.isPending || signUp.isPending || forgot.isPending;
+  const busy = signIn.isPending || signUp.isPending || forgot.isPending || verify.isPending;
 
   // Switching mode retires the rules the old one applied, so the errors they
   // left have to go too — along with anything the api said about a request that
@@ -100,10 +151,12 @@ export function AuthForm({ onSignedIn }: { onSignedIn: () => void }) {
                   {(field) => <field.TextField label="Name" autoComplete="name" />}
                 </form.AppField>
               ) : null}
-              <form.AppField name="email" validators={{ onChange: EMAIL }}>
-                {(field) => <field.TextField label="Email" type="email" autoComplete="email" />}
-              </form.AppField>
-              {mode !== "forgot" ? (
+              {mode !== "code" ? (
+                <form.AppField name="email" validators={{ onChange: EMAIL }}>
+                  {(field) => <field.TextField label="Email" type="email" autoComplete="email" />}
+                </form.AppField>
+              ) : null}
+              {mode === "in" || mode === "up" ? (
                 <form.AppField name="password" validators={{ onChange: PASSWORD }}>
                   {(field) => (
                     <field.TextField
@@ -113,6 +166,34 @@ export function AuthForm({ onSignedIn }: { onSignedIn: () => void }) {
                     />
                   )}
                 </form.AppField>
+              ) : null}
+              {mode === "code" ? (
+                <>
+                  <form.AppField
+                    name="code"
+                    validators={{ onChange: TOTP_CODE }}
+                    // Remount when the kind changes: a backup code is longer
+                    // than the other two, and half-typed input from one kind is
+                    // noise to the next.
+                    key={factorKind}
+                  >
+                    {(field) => (
+                      <field.TextField
+                        label={CODE_LABELS[factorKind]}
+                        autoComplete="one-time-code"
+                        description={CODE_HINTS[factorKind]}
+                      />
+                    )}
+                  </form.AppField>
+                  <form.AppField name="trustDevice">
+                    {(field) => (
+                      <field.CheckboxField
+                        label="Trust this browser for 30 days"
+                        description="You will only be asked for a code on new devices."
+                      />
+                    )}
+                  </form.AppField>
+                </>
               ) : null}
             </FieldGroup>
             {error !== null ? (
@@ -143,24 +224,88 @@ export function AuthForm({ onSignedIn }: { onSignedIn: () => void }) {
             </form.AppForm>
           </form>
           <div className="mt-4 flex flex-col items-start gap-1">
-            <Button
-              variant="link"
-              size="sm"
-              className="h-auto p-0"
-              onClick={() => switchTo(mode === "in" ? "up" : "in")}
-            >
-              {mode === "in" ? "Need an account? Sign up" : "Have an account? Sign in"}
-            </Button>
-            {mode === "in" ? (
-              <Button
-                variant="link"
-                size="sm"
-                className="h-auto p-0"
-                onClick={() => switchTo("forgot")}
-              >
-                Forgot password?
-              </Button>
-            ) : null}
+            {mode === "code" ? (
+              <>
+                {factorKind === "totp" ? null : (
+                  <Button
+                    variant="link"
+                    size="sm"
+                    className="h-auto p-0"
+                    onClick={() => {
+                      setFactorKind("totp");
+                      setError(null);
+                      setNotice(null);
+                    }}
+                  >
+                    Use your authenticator app instead
+                  </Button>
+                )}
+                {/* Offered to anyone who has reached this step, since nothing
+                    here knows which factor the account enrolled — a deployment
+                    with no SMTP answers with its own reason, which is more use
+                    than a button that is not there. */}
+                {factorKind === "email" ? null : (
+                  <Button
+                    variant="link"
+                    size="sm"
+                    className="h-auto p-0"
+                    disabled={sendCode.isPending}
+                    onClick={() => {
+                      setError(null);
+                      sendCode.mutate();
+                    }}
+                  >
+                    {sendCode.isPending ? "Sending…" : "Email me a code instead"}
+                  </Button>
+                )}
+                {factorKind === "backup" ? null : (
+                  <Button
+                    variant="link"
+                    size="sm"
+                    className="h-auto p-0"
+                    onClick={() => {
+                      setFactorKind("backup");
+                      setError(null);
+                      setNotice(null);
+                    }}
+                  >
+                    Lost the device? Use a backup code
+                  </Button>
+                )}
+                <Button
+                  variant="link"
+                  size="sm"
+                  className="h-auto p-0"
+                  onClick={() => {
+                    setFactorKind("totp");
+                    switchTo("in");
+                  }}
+                >
+                  Start over
+                </Button>
+              </>
+            ) : (
+              <>
+                <Button
+                  variant="link"
+                  size="sm"
+                  className="h-auto p-0"
+                  onClick={() => switchTo(mode === "in" ? "up" : "in")}
+                >
+                  {mode === "in" ? "Need an account? Sign up" : "Have an account? Sign in"}
+                </Button>
+                {mode === "in" ? (
+                  <Button
+                    variant="link"
+                    size="sm"
+                    className="h-auto p-0"
+                    onClick={() => switchTo("forgot")}
+                  >
+                    Forgot password?
+                  </Button>
+                ) : null}
+              </>
+            )}
           </div>
         </CardContent>
       </Card>

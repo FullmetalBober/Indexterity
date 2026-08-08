@@ -1,5 +1,5 @@
 {
-  "id": "7d7323cb-0c53-4188-a8d9-95f2e0a595a7",
+  "id": "f4d26dc3-2590-49f8-96a4-ef3d6e4f6649",
   "prevId": "1ed18fbc-fa3a-48ba-8264-fc3dbc68d968",
   "version": "7",
   "dialect": "postgresql",
@@ -333,51 +333,6 @@
         "cluster_indexes_cluster_id_clusters_id_fk": {
           "name": "cluster_indexes_cluster_id_clusters_id_fk",
           "tableFrom": "cluster_indexes",
-          "tableTo": "clusters",
-          "columnsFrom": [
-            "cluster_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.cluster_rosters": {
-      "name": "cluster_rosters",
-      "schema": "",
-      "columns": {
-        "cluster_id": {
-          "name": "cluster_id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "nodes": {
-          "name": "nodes",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "collected_at": {
-          "name": "collected_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "cluster_rosters_cluster_id_clusters_id_fk": {
-          "name": "cluster_rosters_cluster_id_clusters_id_fk",
-          "tableFrom": "cluster_rosters",
           "tableTo": "clusters",
           "columnsFrom": [
             "cluster_id"
@@ -2131,6 +2086,108 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.two_factor": {
+      "name": "two_factor",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "secret": {
+          "name": "secret",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "backup_codes": {
+          "name": "backup_codes",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "verified": {
+          "name": "verified",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
+        },
+        "failed_verification_count": {
+          "name": "failed_verification_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "locked_until": {
+          "name": "locked_until",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "two_factor_user": {
+          "name": "two_factor_user",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "two_factor_secret": {
+          "name": "two_factor_secret",
+          "columns": [
+            {
+              "expression": "secret",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "two_factor_user_id_user_id_fk": {
+          "name": "two_factor_user_id_user_id_fk",
+          "tableFrom": "two_factor",
+          "tableTo": "user",
+          "columnsFrom": [
+            "user_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.user": {
       "name": "user",
       "schema": "",
@@ -2165,6 +2222,13 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
+        },
+        "two_factor_enabled": {
+          "name": "two_factor_enabled",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
         },
         "created_at": {
           "name": "created_at",
