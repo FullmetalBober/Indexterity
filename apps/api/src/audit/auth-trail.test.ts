@@ -78,10 +78,18 @@ describe("authEventFor", () => {
     expect(authEventFor("/two-factor/generate-backup-codes", true)).toBe(
       "TWO_FACTOR_CODES_REGENERATED",
     );
-    for (const path of ["/two-factor/verify-totp", "/two-factor/verify-backup-code"]) {
+    for (const path of [
+      "/two-factor/verify-totp",
+      "/two-factor/verify-backup-code",
+      "/two-factor/verify-otp",
+    ]) {
       expect(authEventFor(path, true)).toBe("TWO_FACTOR_VERIFIED");
       expect(authEventFor(path, false)).toBe("TWO_FACTOR_FAILED");
     }
+    // The one second factor whose delivery leaves the building, so the sending
+    // is an act of its own: a burst of these is somebody working a password.
+    expect(authEventFor("/two-factor/send-otp", true)).toBe("TWO_FACTOR_OTP_SENT");
+    expect(authEventFor("/two-factor/send-otp", false)).toBeNull();
   });
 
   // The request is the act with the actor behind it; the flip happens on a

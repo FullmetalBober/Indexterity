@@ -6,7 +6,9 @@ import { Button } from "~/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
 import { FieldGroup } from "~/components/ui/field";
 import {
+  type SecondFactorKind,
   useRequestPasswordReset,
+  useSendEmailCode,
   useSignIn,
   useSignUp,
   useVerifySecondFactor,
@@ -43,6 +45,18 @@ const NAME = signUpInput.shape.name;
 const TOTP_CODE = ({ value }: { value: string }) =>
   value.trim() === "" ? "Enter the code" : undefined;
 
+const CODE_LABELS: Record<SecondFactorKind, string> = {
+  totp: "Authenticator code",
+  email: "Emailed code",
+  backup: "Backup code",
+};
+
+const CODE_HINTS: Record<SecondFactorKind, string> = {
+  totp: "The six digits your authenticator app shows right now.",
+  email: "The six digits we just sent to your email address.",
+  backup: "One of the codes you saved when setting this up. Each works once.",
+};
+
 export function AuthForm({ onSignedIn }: { onSignedIn: () => void }) {
   // Not a form value: it decides which fields exist, and the reader picks it
   // from a link rather than typing it.
@@ -53,8 +67,8 @@ export function AuthForm({ onSignedIn }: { onSignedIn: () => void }) {
   const [notice, setNotice] = useState<string | null>(null);
 
   // Which kind of second-factor code the reader is about to type. Not a form
-  // value — it picks the endpoint, and flipping it must not clear the field.
-  const [backupCode, setBackupCode] = useState(false);
+  // value — it picks the endpoint, and switching must not clear the field.
+  const [factorKind, setFactorKind] = useState<SecondFactorKind>("totp");
 
   // Shared by all three: clear whatever the last attempt said before making
   // another one.
@@ -74,6 +88,17 @@ export function AuthForm({ onSignedIn }: { onSignedIn: () => void }) {
   const signIn = useSignIn(credentials);
   const signUp = useSignUp(credentials);
   const verify = useVerifySecondFactor(credentials);
+  // Sending mail is a step the reader waits on, so it says so and then says it
+  // is done — silence between the click and the inbox is what makes people
+  // click twice.
+  const sendCode = useSendEmailCode({
+    onSent: () => {
+      setFactorKind("email");
+      setError(null);
+      setNotice("Code sent — check your email. It works once, and expires in 5 minutes.");
+    },
+    onError: setError,
+  });
   const forgot = useRequestPasswordReset({
     onStart,
     onSent: () => setNotice("If that email has an account, a reset link is on its way."),
@@ -86,7 +111,7 @@ export function AuthForm({ onSignedIn }: { onSignedIn: () => void }) {
       if (mode === "forgot") forgot.mutate(value.email);
       else if (mode === "in") signIn.mutate({ email: value.email, password: value.password });
       else if (mode === "code")
-        verify.mutate({ code: value.code, backup: backupCode, trustDevice: value.trustDevice });
+        verify.mutate({ code: value.code, kind: factorKind, trustDevice: value.trustDevice });
       else signUp.mutate({ email: value.email, password: value.password, name: value.name });
     },
   });
@@ -147,20 +172,16 @@ export function AuthForm({ onSignedIn }: { onSignedIn: () => void }) {
                   <form.AppField
                     name="code"
                     validators={{ onChange: TOTP_CODE }}
-                    // Remount when the kind flips: a backup code is longer than
-                    // a TOTP and half-typed input from one kind is noise to the
-                    // other.
-                    key={backupCode ? "backup" : "totp"}
+                    // Remount when the kind changes: a backup code is longer
+                    // than the other two, and half-typed input from one kind is
+                    // noise to the next.
+                    key={factorKind}
                   >
                     {(field) => (
                       <field.TextField
-                        label={backupCode ? "Backup code" : "Authenticator code"}
+                        label={CODE_LABELS[factorKind]}
                         autoComplete="one-time-code"
-                        description={
-                          backupCode
-                            ? "One of the codes you saved when setting this up. Each works once."
-                            : "The six digits your authenticator app shows right now."
-                        }
+                        description={CODE_HINTS[factorKind]}
                       />
                     )}
                   </form.AppField>
@@ -205,25 +226,58 @@ export function AuthForm({ onSignedIn }: { onSignedIn: () => void }) {
           <div className="mt-4 flex flex-col items-start gap-1">
             {mode === "code" ? (
               <>
+                {factorKind === "totp" ? null : (
+                  <Button
+                    variant="link"
+                    size="sm"
+                    className="h-auto p-0"
+                    onClick={() => {
+                      setFactorKind("totp");
+                      setError(null);
+                      setNotice(null);
+                    }}
+                  >
+                    Use your authenticator app instead
+                  </Button>
+                )}
+                {/* Offered to anyone who has reached this step, since nothing
+                    here knows which factor the account enrolled — a deployment
+                    with no SMTP answers with its own reason, which is more use
+                    than a button that is not there. */}
+                {factorKind === "email" ? null : (
+                  <Button
+                    variant="link"
+                    size="sm"
+                    className="h-auto p-0"
+                    disabled={sendCode.isPending}
+                    onClick={() => {
+                      setError(null);
+                      sendCode.mutate();
+                    }}
+                  >
+                    {sendCode.isPending ? "Sending…" : "Email me a code instead"}
+                  </Button>
+                )}
+                {factorKind === "backup" ? null : (
+                  <Button
+                    variant="link"
+                    size="sm"
+                    className="h-auto p-0"
+                    onClick={() => {
+                      setFactorKind("backup");
+                      setError(null);
+                      setNotice(null);
+                    }}
+                  >
+                    Lost the device? Use a backup code
+                  </Button>
+                )}
                 <Button
                   variant="link"
                   size="sm"
                   className="h-auto p-0"
                   onClick={() => {
-                    setBackupCode(!backupCode);
-                    setError(null);
-                  }}
-                >
-                  {backupCode
-                    ? "Use your authenticator app instead"
-                    : "Lost the device? Use a backup code"}
-                </Button>
-                <Button
-                  variant="link"
-                  size="sm"
-                  className="h-auto p-0"
-                  onClick={() => {
-                    setBackupCode(false);
+                    setFactorKind("totp");
                     switchTo("in");
                   }}
                 >

@@ -8,7 +8,7 @@ import { twoFactor } from "better-auth/plugins/two-factor";
 import { authTrailEntry, sessionEndedEntry, type TrailActor } from "../audit/auth-trail";
 import { authEventFor, recordSecurityEvent } from "../audit/security-events";
 import { and, createDatabase, eq, members, schema, user as userTable } from "../db";
-import { sendMail } from "../mail/mailer";
+import { mailEnabled, sendMail } from "../mail/mailer";
 import { organizationPlugin } from "./organization";
 import { authRateLimit } from "./rate-limit";
 import { evaluateSignup } from "./signup-gate";
@@ -50,6 +50,11 @@ export interface AuthConfig {
 // The org mutations the second-factor rule gates: the ones through which an
 // owner reshapes who may act. Rename, leave and the reads stay open — the rule
 // exists for the acts with someone else's access in them.
+// How long an emailed sign-in code lives. Short, because the mail is already
+// sent and a code sitting in an inbox is a credential: long enough to switch
+// to a mail client and back, not long enough to matter tomorrow.
+const OTP_PERIOD_MINUTES = 5;
+
 const OWNER_2FA_PATHS = new Set([
   "/organization/invite-member",
   "/organization/remove-member",
@@ -242,7 +247,42 @@ export function createAuth(config: AuthConfig) {
       // factor wearing a costume, not a second one. `skipVerificationOnEnable`
       // stays false: `twoFactorEnabled` means a code has actually worked once,
       // not that a QR was displayed.
-      twoFactor({ issuer: "Indexterity" }),
+      twoFactor({
+        issuer: "Indexterity",
+        // A code mailed to the address on the account, for the reader who has
+        // no authenticator app. Available only where the deployment can
+        // actually send mail — `hooks.before` refuses the endpoint when SMTP
+        // is unconfigured, because a factor that silently delivers nothing is
+        // worse than one that is absent (mail/mailer.ts no-ops without it).
+        //
+        // Read the trade in D44 before widening this: the mailbox is also
+        // where a password reset lands, so an emailed code is a second factor
+        // only against an attacker who has the password and NOT the inbox. It
+        // is offered as an alternative delivery for everyone with 2FA on, so
+        // it is also the ceiling on what 2FA is worth here.
+        otpOptions: {
+          sendOTP: async ({ user, otp }) => {
+            await sendMail(
+              user.email,
+              "Your Indexterity sign-in code",
+              `Your sign-in code is ${otp}\n\n` +
+                `It expires in ${OTP_PERIOD_MINUTES} minutes and works once.\n\n` +
+                `If you did not just try to sign in, someone has your password — ` +
+                `change it now.`,
+            );
+          },
+          period: OTP_PERIOD_MINUTES,
+          digits: 6,
+          // Per code, on top of the plugin's own 3-per-10s rate limit for
+          // /two-factor/*: six digits is a million guesses, and five is what
+          // makes that number mean something.
+          allowedAttempts: 5,
+          // Never recoverable from the database, unlike the TOTP secret, which
+          // has to be. A one-time code has no reason to be readable after it
+          // is written — better-auth compares hashes.
+          storeOTP: "hashed",
+        },
+      }),
       organizationPlugin(db, {
         webOrigin: config.webOrigin,
         requireEmailVerification: config.requireEmailVerification,
@@ -280,6 +320,18 @@ export function createAuth(config: AuthConfig) {
       // is left to the plugin, whose "not an owner" is the accurate refusal.
       before: createAuthMiddleware(async (ctx) => {
         if (ctx.method !== "POST") return;
+        // An emailed code needs a deployment that can send mail. `sendMail`
+        // no-ops and logs when SMTP is unconfigured, so without this the
+        // endpoint answers 200 and the reader waits for a code that was never
+        // sent — the one outcome worse than not offering it. Said plainly,
+        // because the fix is the operator's and the reader cannot guess it.
+        if (ctx.path === "/two-factor/send-otp" && !mailEnabled()) {
+          throw new APIError("BAD_REQUEST", {
+            message:
+              "this deployment cannot send email — use your authenticator app or a backup code",
+            code: "EMAIL_NOT_CONFIGURED",
+          });
+        }
         // The signup gate applies to a CHANGE of address too (#83):
         // SIGNUP_MODE decides which addresses may hold an account at all, and
         // changing yours must not be the way around it. Refused here, before

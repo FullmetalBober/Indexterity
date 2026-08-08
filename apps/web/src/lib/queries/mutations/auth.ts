@@ -64,19 +64,38 @@ function credentialCallbacks(handlers: CredentialHandlers) {
 // one of the backup codes. `trustDevice` asks better-auth to remember this
 // browser for 30 days, so the code is for new places rather than every
 // morning.
+// Which kind of code the reader is about to type. Three, because they come
+// from three different places and are verified by three different endpoints:
+// the authenticator app, the inbox, and the sheet saved at enrolment.
+export type SecondFactorKind = "totp" | "email" | "backup";
+
 export function useVerifySecondFactor(h: CredentialHandlers) {
   return useMutation({
-    mutationFn: (attempt: { code: string; backup: boolean; trustDevice: boolean }) =>
-      attempt.backup
-        ? authClient.twoFactor.verifyBackupCode({
-            code: attempt.code,
-            trustDevice: attempt.trustDevice,
-          })
-        : authClient.twoFactor.verifyTotp({
-            code: attempt.code,
-            trustDevice: attempt.trustDevice,
-          }),
+    mutationFn: (attempt: { code: string; kind: SecondFactorKind; trustDevice: boolean }) => {
+      const body = { code: attempt.code, trustDevice: attempt.trustDevice };
+      if (attempt.kind === "backup") return authClient.twoFactor.verifyBackupCode(body);
+      if (attempt.kind === "email") return authClient.twoFactor.verifyOtp(body);
+      return authClient.twoFactor.verifyTotp(body);
+    },
     ...credentialCallbacks(h),
+  });
+}
+
+// Ask the api to mail a code. Its own mutation rather than a step inside the
+// verify, because the reader waits between the two and the button has to say
+// so — and because this is the one that fails on a deployment with no SMTP,
+// with a message worth showing verbatim (EMAIL_NOT_CONFIGURED).
+export function useSendEmailCode(handlers: {
+  onSent: () => void;
+  onError: (message: string) => void;
+}) {
+  return useMutation({
+    mutationFn: () => authClient.twoFactor.sendOtp(),
+    onSuccess: (result: Answer) => {
+      if (result.error === null) handlers.onSent();
+      else handlers.onError(result.error.message ?? "could not send the code");
+    },
+    onError: () => handlers.onError("could not send the code"),
   });
 }
 

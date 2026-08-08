@@ -3449,7 +3449,15 @@ describe("owner two-factor requirement (second api with REQUIRE_OWNER_2FA)", () 
   }
 
   beforeAll(async () => {
-    gated = await startApi({ REQUIRE_OWNER_2FA: "true" }, PORT);
+    // SMTP is cleared deliberately, and it is load-bearing twice over. It puts
+    // this instance in the state a fresh self-hosted install is in, which is
+    // what the emailed-code refusal below is about — and it stops the suite
+    // handing real messages to whatever SMTP account the developer's .env
+    // happens to name, which is what a send-otp test does otherwise.
+    gated = await startApi(
+      { REQUIRE_OWNER_2FA: "true", SMTP_HOST: "", SMTP_USER: "", SMTP_PASS: "" },
+      PORT,
+    );
     gatedOwner = await gatedSignUp("twofactor-owner");
     createdOrgIds.push(await createOrg(gatedOwner, "Gated Org", BASE));
   });
@@ -3525,6 +3533,19 @@ describe("owner two-factor requirement (second api with REQUIRE_OWNER_2FA)", () 
       BASE,
     );
     expect(inviteAfter.status).toBe(200);
+  });
+
+  // The emailed code is offered only where mail can actually be sent. This
+  // suite runs without SMTP — the same state a fresh self-hosted install is in
+  // — so the refusal is the behaviour under test, and it has to be a refusal
+  // rather than a 200 with nothing delivered.
+  it("refuses to mail a sign-in code when the deployment has no SMTP", async () => {
+    const res = await authPost("/two-factor/send-otp", gatedOwner, {}, BASE);
+    expect(res.status).toBe(400);
+    const body = JSON.stringify(await res.json());
+    expect(body).toContain("EMAIL_NOT_CONFIGURED");
+    // And it says what to reach for instead, since the fix is the operator's.
+    expect(body).toContain("authenticator app");
   });
 
   it("exempts an account with no password to pair a code with", async () => {

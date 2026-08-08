@@ -420,10 +420,12 @@ function TwoFactorCard({ me, accounts }: { me: Me; accounts: readonly ProviderAc
         ) : enabled ? (
           <div className="space-y-4">
             <p className="text-muted-foreground text-sm">
-              Signing in asks for a code from your authenticator app. Backup codes cover a lost
-              device — regenerate them if they are running low or the sheet is gone. Lost both?
-              Whoever runs this install can reset two-factor after verifying it is you; there is no
-              self-serve way around it, on purpose.
+              Signing in asks for a code from your authenticator app. If you cannot reach it, the
+              sign-in page can email a code to this address instead, or take one of your backup
+              codes — regenerate those if they are running low or the sheet is gone. Lost the app
+              and the codes, on a deployment that sends no email? Whoever runs this install can
+              reset two-factor after verifying it is you; there is no self-serve way around it, on
+              purpose.
             </p>
             <PasswordGate
               label="Regenerate backup codes"
