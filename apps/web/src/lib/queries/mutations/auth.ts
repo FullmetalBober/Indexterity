@@ -10,6 +10,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { authClient } from "../../auth-client";
 import { invalidateSession } from "../client";
+import { queryKeys } from "../keys";
 
 // better-auth answers with { data, error } rather than throwing, so a refusal
 // arrives as a resolved promise and is branched on here. onError underneath is
@@ -54,6 +55,56 @@ export function useSignUp(h: CredentialHandlers) {
     mutationFn: (credentials: { email: string; password: string; name: string }) =>
       authClient.signUp.email(credentials),
     ...credentialCallbacks(h),
+  });
+}
+
+// Signing in again while already signed in — the answer to SESSION_NOT_FRESH,
+// the api's refusal to go live, rotate credentials or disconnect on a session
+// older than an hour (#52). Better-auth mints a new session row, which is what
+// the api measures freshness from.
+//
+// The same person, so nothing sweeps the cache — but the new session knows
+// nothing of the org switcher, so the active org is carried across by hand:
+// left null, a multi-org owner would come back from the password prompt
+// silently moved to their oldest org, and the retried action would answer
+// NOT_FOUND for a cluster they were just looking at.
+export function useReauthenticate(handlers: {
+  onFresh: () => void;
+  onError: (message: string) => void;
+}) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (password: string) => {
+      const current = await authClient.getSession();
+      const me = current.data;
+      if (me === null || me === undefined) {
+        return { error: { message: "your session has ended — sign in again" } };
+      }
+      const activeOrgId = me.session.activeOrganizationId ?? null;
+      const signedIn = await authClient.signIn.email({ email: me.user.email, password });
+      if (signedIn.error !== null) return signedIn;
+      if (activeOrgId !== null) {
+        const restored = await authClient.organization.setActive({
+          organizationId: activeOrgId,
+        });
+        if (restored.error !== null) return restored;
+      }
+      return signedIn;
+    },
+    onSuccess: async (result: Answer) => {
+      if (result.error !== null) {
+        handlers.onError(result.error.message ?? "authentication failed");
+        return;
+      }
+      // A new session row: the sessions list gained one and "this device"
+      // moved. Same identity, so the org- and cluster-level answers stand.
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.me() }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.mySessions() }),
+      ]);
+      handlers.onFresh();
+    },
+    onError: () => handlers.onError("authentication failed"),
   });
 }
 

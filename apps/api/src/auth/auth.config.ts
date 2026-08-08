@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { PASSWORD_MIN_LENGTH } from "@repo/contracts";
+import { PASSWORD_MIN_LENGTH, SESSION_FRESH_AGE_SECONDS } from "@repo/contracts";
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { APIError, createAuthMiddleware, getSessionFromCtx } from "better-auth/api";
@@ -113,6 +113,21 @@ export function createAuth(config: AuthConfig) {
     baseURL: config.baseURL,
     trustedOrigins: [...config.trustedOrigins],
     session: {
+      // The lifetime is DECIDED now, not inherited (#52): these are
+      // better-auth's defaults, kept on purpose. Seven days rolling is long
+      // for a tool that can write to a customer's database — but the three
+      // acts with that reach (go live, rotate credentials, disconnect) no
+      // longer ride session age at all: they demand a sign-in within
+      // SESSION_FRESH_AGE_SECONDS regardless (TenancyService.requireFreshOwner).
+      // With those gated, what a week-old session grants is reading the
+      // dashboard and the benign mutations, and shortening it would tax every
+      // daily user to shrink a window the fresh tier already closed.
+      expiresIn: 60 * 60 * 24 * 7,
+      updateAge: 60 * 60 * 24,
+      // better-auth's own freshness checks (delete-user without a password)
+      // measure against the same hour the api's fresh tier uses, so "fresh"
+      // means one thing across the product.
+      freshAge: SESSION_FRESH_AGE_SECONDS,
       // The session rides a second, short-lived HMAC-signed cookie, so the
       // common request decides who is asking without touching postgres.
       // Freshness is not lost where it matters: membership and role are read

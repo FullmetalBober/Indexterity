@@ -1,7 +1,8 @@
+import { ORPCError } from "@orpc/client";
 import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { apiError, renderInApp } from "~/test-utils";
+import { apiError, authOk, renderInApp } from "~/test-utils";
 import { ClusterConnection } from "./cluster-connection";
 
 const setClusterMode = vi.hoisted(() => vi.fn());
@@ -10,6 +11,9 @@ const deleteCluster = vi.hoisted(() => vi.fn());
 const navigate = vi.hoisted(() => vi.fn());
 const toastSuccess = vi.hoisted(() => vi.fn());
 const toastError = vi.hoisted(() => vi.fn());
+const getSession = vi.hoisted(() => vi.fn());
+const signInEmail = vi.hoisted(() => vi.fn());
+const setActiveOrg = vi.hoisted(() => vi.fn());
 
 // The api client, called straight from the mutation hooks. A refusal is a throw
 // with a status on it, not an { ok: false } a server function handed back.
@@ -18,6 +22,15 @@ vi.mock("~/lib/api", () => ({
 }));
 vi.mock("@tanstack/react-router", () => ({ useNavigate: () => navigate }));
 vi.mock("sonner", () => ({ toast: { success: toastSuccess, error: toastError } }));
+// The re-auth dialog's half of the fresh-session flow (#52) goes through
+// better-auth's client, not the api.
+vi.mock("~/lib/auth-client", () => ({
+  authClient: {
+    getSession,
+    signIn: { email: signInEmail },
+    organization: { setActive: setActiveOrg },
+  },
+}));
 
 const cluster = {
   id: "c1",
@@ -26,11 +39,22 @@ const cluster = {
   provisionedUsername: null,
 };
 
+// The api's refusal to act on a session older than the fresh window — the one
+// failure the hooks turn into a password prompt instead of a toast.
+function staleSession(): Error {
+  return new ORPCError("SESSION_NOT_FRESH", { status: 403, message: "sign in again" });
+}
+
 beforeEach(() => {
   navigate.mockResolvedValue(undefined);
   setClusterMode.mockResolvedValue(cluster);
   rotateConnection.mockResolvedValue(cluster);
   deleteCluster.mockResolvedValue({ unhidden: 0, revokeCommand: null });
+  getSession.mockResolvedValue(
+    authOk({ user: { email: "owner@example.com" }, session: { activeOrganizationId: null } }),
+  );
+  signInEmail.mockResolvedValue(authOk({}));
+  setActiveOrg.mockResolvedValue(authOk({}));
 });
 
 // Open a ConfirmButton dialog and press its confirm action.
@@ -190,5 +214,78 @@ describe("ClusterConnection", () => {
     await user.click(screen.getByRole("button", { name: "Save" }));
 
     expect(toastError).toHaveBeenCalledWith("cluster unreachable");
+  });
+
+  // The fresh-session tier (#52): SESSION_NOT_FRESH is the one refusal the
+  // reader can fix in place, so it opens a password prompt instead of a toast —
+  // and the action re-fires on its own once the sign-in lands.
+  it("asks for the password on a stale session, then re-fires the action", async () => {
+    setClusterMode.mockRejectedValueOnce(staleSession()).mockResolvedValueOnce(cluster);
+    const user = userEvent.setup();
+    renderInApp(<ClusterConnection cluster={cluster} />);
+
+    await confirm(user, "Go live", "Go live");
+
+    expect(await screen.findByText(/Confirm it's you/)).toBeInTheDocument();
+    expect(toastError).not.toHaveBeenCalled();
+
+    await user.type(screen.getByLabelText("Password"), "hunter2hunter2");
+    await user.click(screen.getByRole("button", { name: "Confirm" }));
+
+    expect(signInEmail).toHaveBeenCalledWith({
+      email: "owner@example.com",
+      password: "hunter2hunter2",
+    });
+    expect(setClusterMode).toHaveBeenCalledTimes(2);
+    expect(setClusterMode).toHaveBeenLastCalledWith({ clusterId: "c1", readOnly: false });
+    expect(toastSuccess).toHaveBeenCalledWith(expect.stringContaining("Live mode enabled"));
+  });
+
+  it("carries the active org onto the re-authenticated session", async () => {
+    getSession.mockResolvedValue(
+      authOk({ user: { email: "owner@example.com" }, session: { activeOrganizationId: "org-2" } }),
+    );
+    deleteCluster
+      .mockRejectedValueOnce(staleSession())
+      .mockResolvedValueOnce({ unhidden: 0, revokeCommand: null });
+    const user = userEvent.setup();
+    renderInApp(<ClusterConnection cluster={cluster} />);
+
+    await confirm(user, "Disconnect", "Disconnect");
+    await user.type(await screen.findByLabelText("Password"), "hunter2hunter2");
+    await user.click(screen.getByRole("button", { name: "Confirm" }));
+
+    // Without this, the new session would fall back to the oldest membership
+    // and the retried disconnect would 404 on a cluster the reader was looking
+    // at moments ago.
+    expect(setActiveOrg).toHaveBeenCalledWith({ organizationId: "org-2" });
+    expect(deleteCluster).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows the refusal and keeps the prompt open on a wrong password", async () => {
+    setClusterMode.mockRejectedValue(staleSession());
+    signInEmail.mockResolvedValue({ data: null, error: { message: "invalid password" } });
+    const user = userEvent.setup();
+    renderInApp(<ClusterConnection cluster={cluster} />);
+
+    await confirm(user, "Go live", "Go live");
+    await user.type(await screen.findByLabelText("Password"), "wrong");
+    await user.click(screen.getByRole("button", { name: "Confirm" }));
+
+    expect(await screen.findByText("invalid password")).toBeInTheDocument();
+    expect(setClusterMode).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancelling the password prompt retries nothing", async () => {
+    setClusterMode.mockRejectedValue(staleSession());
+    const user = userEvent.setup();
+    renderInApp(<ClusterConnection cluster={cluster} />);
+
+    await confirm(user, "Go live", "Go live");
+    await screen.findByText(/Confirm it's you/);
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+
+    expect(signInEmail).not.toHaveBeenCalled();
+    expect(setClusterMode).toHaveBeenCalledTimes(1);
   });
 });

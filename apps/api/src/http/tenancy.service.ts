@@ -1,5 +1,6 @@
 import { Injectable } from "@nestjs/common";
 import { ORPCError } from "@orpc/server";
+import { SESSION_FRESH_AGE_SECONDS } from "@repo/contracts";
 import type { FastifyRequest } from "fastify";
 import { requireSession } from "../auth/session";
 import { type Membership, resolveMembership } from "../auth/tenancy";
@@ -61,6 +62,35 @@ export class TenancyService {
       throw new ORPCError("FORBIDDEN", { message: "owner role required" });
     }
     return member.orgId;
+  }
+
+  // Owner, AND signed in within the last hour. The tier above requireOwner for
+  // the three acts whose blast radius is the customer's database rather than
+  // this product: going live, rotating credentials, disconnecting (#52). "Are
+  // you an owner" and "are you here right now" are different questions — a
+  // session stolen with the laptop it lives on answers the first for a week.
+  //
+  // Measured from when the session was CREATED, not last used: the rolling
+  // refresh keeps a session alive precisely without the caller proving
+  // anything, so "recently refreshed" is not evidence of presence. Signing in
+  // again mints a new session row, which is how the dashboard clears this —
+  // its own code, so the re-auth dialog knows this refusal from a plain 403.
+  //
+  // De-escalation must never wait on a password: flipping a cluster BACK to
+  // read-only takes requireOwner only, so the emergency stop works from any
+  // owner session however old (clusters.controller.ts setClusterMode).
+  async requireFreshOwner(req: FastifyRequest): Promise<string> {
+    const orgId = await this.requireOwner(req);
+    // Resolved once per request (auth/session.ts), so this re-ask is free.
+    const session = await requireSession(req);
+    const ageMs = Date.now() - session.signedInAt.getTime();
+    if (ageMs >= SESSION_FRESH_AGE_SECONDS * 1000) {
+      throw new ORPCError("SESSION_NOT_FRESH", {
+        status: 403,
+        message: "you signed in a while ago — confirm your password to do this",
+      });
+    }
+    return orgId;
   }
 
   async plan(orgId: string): Promise<Plan> {

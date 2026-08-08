@@ -776,6 +776,83 @@ describe("session cookie cache", () => {
   });
 });
 
+describe("fresh session tier", () => {
+  // The three acts that change what the engine may do to a customer's database
+  // — going live, rotating credentials, disconnecting — refuse an owner session
+  // signed in more than SESSION_FRESH_AGE_SECONDS ago (#52). The session is
+  // aged here behind the browser's back, the way time does it, and the cache
+  // cookie is shed because it still carries the young createdAt it was signed
+  // with — a browser at that point re-arms from the aged row on the next reply.
+  it("refuses the three sensitive acts on an old session, until a new sign-in", async () => {
+    const stale = await signUp("stale-owner");
+    createdEmails.push(stale.email);
+    const orgId = asString(asRecord(await (await api("/org", stale)).json()).id);
+    createdOrgIds.push(orgId);
+
+    const connected = await api("/clusters", stale, {
+      method: "POST",
+      body: JSON.stringify({ name: "Stale Cluster", connectionString: MONGO_URL }),
+    });
+    expect(connected.status).toBe(200);
+    const staleClusterId = asString(asRecord(await connected.json()).id);
+    createdClusterIds.push(staleClusterId);
+
+    const [account] = await db
+      .select({ id: user.id })
+      .from(user)
+      .where(eq(user.email, stale.email));
+    await db
+      .update(session)
+      .set({ createdAt: sql`now() - interval '2 hours'` })
+      .where(eq(session.userId, asString(account?.id)));
+    stale.cookie = stale.cookie
+      .split("; ")
+      .filter((pair) => !pair.includes("session_data"))
+      .join("; ");
+
+    // The refusal is its own code, not a bare 403: the dashboard tells an
+    // owner who can fix it (sign in again) apart from a member who cannot.
+    const live = await api(`/clusters/${staleClusterId}/mode`, stale, {
+      method: "PATCH",
+      body: JSON.stringify({ readOnly: false }),
+    });
+    const rotated = await api(`/clusters/${staleClusterId}/connection`, stale, {
+      method: "PATCH",
+      body: JSON.stringify({ connectionString: MONGO_URL }),
+    });
+    const deleted = await api(`/clusters/${staleClusterId}`, stale, { method: "DELETE" });
+    expect([live.status, rotated.status, deleted.status]).toEqual([403, 403, 403]);
+    expect(asRecord(await live.json()).code).toBe("SESSION_NOT_FRESH");
+
+    // De-escalation and the benign mutations ride the ordinary owner check —
+    // an emergency stop that waits on a password is not an emergency stop.
+    const readOnly = await api(`/clusters/${staleClusterId}/mode`, stale, {
+      method: "PATCH",
+      body: JSON.stringify({ readOnly: true }),
+    });
+    const renamed = await api(`/clusters/${staleClusterId}`, stale, {
+      method: "PATCH",
+      body: JSON.stringify({ name: "Still Reachable" }),
+    });
+    expect([readOnly.status, renamed.status]).toEqual([200, 200]);
+
+    // Signing in again mints a fresh session row — the api form of the
+    // dashboard's re-auth dialog — and the same act goes through.
+    const again = await fetch(`${API_BASE}/api/auth/sign-in/email`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: WEB_ORIGIN },
+      body: JSON.stringify({ email: stale.email, password: "password12345" }),
+    });
+    expect(again.status).toBe(200);
+    const fresh = sessionFrom(stale.email, again);
+    const liveNow = await api(`/clusters/${staleClusterId}/mode`, fresh, {
+      method: "PATCH",
+      body: JSON.stringify({ readOnly: false }),
+    });
+    expect(liveNow.status).toBe(200);
+  });
+});
+
 describe("SSRF guard and sign-up gate (second api with production defaults)", () => {
   // The main instance runs with ALLOW_PRIVATE_CLUSTER_TARGETS=true and
   // SIGNUP_MODE=open so the rest of the suite can use a localhost mongo. This

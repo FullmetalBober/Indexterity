@@ -9,6 +9,11 @@ export interface CallerSession {
   // session that has never switched, or whose org was deleted underneath it —
   // both fall back to the caller's oldest membership (auth/tenancy.ts).
   readonly activeOrgId: string | null;
+  // When the caller last SIGNED IN — the session row's createdAt, which the
+  // rolling refresh (updateAge) never touches. Re-authenticating mints a new
+  // row, so this is what "a fresh session" is measured from
+  // (TenancyService.requireFreshOwner, #52).
+  readonly signedInAt: Date;
 }
 
 // One `auth.api.getSession` per request. Several endpoints used to ask more
@@ -36,6 +41,9 @@ function resolveSession(req: FastifyRequest): Promise<CallerSession | null> {
         : {
             userId: response.user.id,
             activeOrgId: response.session.activeOrganizationId ?? null,
+            // A Date from postgres, an ISO string when the cookie cache
+            // answered — the constructor takes both.
+            signedInAt: new Date(response.session.createdAt),
           };
     });
   resolvedByRequest.set(req, fresh);

@@ -424,7 +424,9 @@ export class ClustersController {
   @Implement(contract.rotateConnection)
   rotateConnection(@Req() req: FastifyRequest) {
     return implement(contract.rotateConnection).handler(async ({ input, errors }) => {
-      const orgId = await this.tenancy.requireOwner(req);
+      // Fresh, not merely owner: this replaces the credentials the engine
+      // dials the customer's cluster with (#52).
+      const orgId = await this.tenancy.requireFreshOwner(req);
       const [row] = await this.database.db
         .select()
         .from(clusters)
@@ -496,7 +498,9 @@ export class ClustersController {
   @Implement(contract.deleteCluster)
   deleteCluster(@Req() req: FastifyRequest) {
     return implement(contract.deleteCluster).handler(async ({ input, errors }) => {
-      const orgId = await this.tenancy.requireOwner(req);
+      // Fresh, not merely owner: everything collected is deleted and cannot
+      // be re-collected as it was (#52).
+      const orgId = await this.tenancy.requireFreshOwner(req);
       const [row] = await this.database.db
         .select()
         .from(clusters)
@@ -559,7 +563,13 @@ export class ClustersController {
   @Implement(contract.setClusterMode)
   setClusterMode(@Req() req: FastifyRequest) {
     return implement(contract.setClusterMode).handler(async ({ input, errors }) => {
-      const orgId = await this.tenancy.requireOwner(req);
+      // Going live is the moment the engine gains permission to write, so it
+      // takes a fresh sign-in. The way BACK to read-only deliberately does
+      // not: an emergency stop that waits on a password re-prompt is not an
+      // emergency stop (#52).
+      const orgId = input.readOnly
+        ? await this.tenancy.requireOwner(req)
+        : await this.tenancy.requireFreshOwner(req);
       const [row] = await this.database.db
         .update(clusters)
         .set({ readOnly: input.readOnly })
