@@ -195,6 +195,27 @@ export const clusterCollections = z.object({
 });
 export type ClusterCollections = z.infer<typeof clusterCollections>;
 
+// One node of the cluster as the last collect saw it (#100). `refused` is this
+// deployment's net guard declining to dial the address the cluster named — a
+// policy fact, not member health — and a role stays "unknown" exactly when the
+// node never answered the handshake that would have named one.
+export const clusterNode = z.object({
+  host: z.string(),
+  role: z.enum(["primary", "secondary", "mongos", "standalone", "unknown"]),
+  state: z.enum(["answered", "unreachable", "refused"]),
+});
+export type ClusterNodeView = z.infer<typeof clusterNode>;
+
+// collectedAt is null only when no collect has ever landed a roster — the
+// panel's "nothing collected yet" state. A stale roster keeps its own stamp,
+// which is what makes "as of six hours ago" sayable.
+export const clusterNodes = z.object({
+  clusterId: z.uuid(),
+  collectedAt: z.string().nullable(),
+  nodes: z.array(clusterNode),
+});
+export type ClusterNodes = z.infer<typeof clusterNodes>;
+
 // The result of disconnecting a cluster: how many in-flight hidden indexes were
 // restored, and the command to revoke the provisioned user (null when the
 // cluster was connected with a pasted string).

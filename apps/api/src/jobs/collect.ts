@@ -1,6 +1,7 @@
 import {
   and,
   clusterIndexes,
+  clusterRosters,
   type Database,
   desc,
   eq,
@@ -9,7 +10,7 @@ import {
   latencySamples,
   sql,
 } from "../db";
-import { workloadKey } from "../engine/ports";
+import { type ClusterNode, workloadKey } from "../engine/ports";
 import { type CollectedLatency, type CollectedSnapshot, collectSnapshots } from "../mongo";
 import { openClusterSession } from "./cluster-connection";
 import { jobDb } from "./db";
@@ -311,21 +312,47 @@ async function recordLatency(
   if (insert.length > 0) await db.insert(latencySamples).values(insert);
 }
 
+// The roster is replaced whole, never merged: the members are one fact about
+// one moment. Null means the collect could not even establish that much — the
+// previous roster stays, still carrying its own collectedAt, which is the
+// honest answer ("as of then") rather than an empty panel.
+async function recordRoster(
+  db: Database,
+  clusterId: string,
+  nodes: readonly ClusterNode[] | null,
+  now: Date,
+): Promise<void> {
+  if (nodes === null) return;
+  await db
+    .insert(clusterRosters)
+    .values({ clusterId, nodes: [...nodes], collectedAt: now })
+    .onConflictDoUpdate({
+      target: clusterRosters.clusterId,
+      set: { nodes: [...nodes], collectedAt: now },
+    });
+}
+
 export async function collectCluster(clusterId: string): Promise<number> {
   const db = jobDb();
   const { session, release } = await openClusterSession(db, clusterId);
   try {
-    const { snapshots, latency } = await collectSnapshots(session);
+    // The roster costs one hello per member on connections the usage pass
+    // opens anyway, so it rides the same session rather than its own dial.
+    const [{ snapshots, latency }, nodes] = await Promise.all([
+      collectSnapshots(session),
+      session.collector.collectNodes(),
+    ]);
     // One stamp for the whole collect. Every row it touches then agrees about
     // when we looked, which is what lets a reader recover the set of indexes
     // present at the last collect as `last_seen_at = max(last_seen_at)`.
     const now = new Date();
-    // Two independent tables, so they go together rather than one after the
+    // Independent tables, so they go together rather than one after the
     // other — the point of this change is to make collecting more often cheap,
     // and a serialised round trip is the kind of cost that scales with cadence.
     await Promise.all([
       recordSnapshots(db, clusterId, snapshots, now),
       recordLatency(db, clusterId, latency, now),
+      recordRoster(db, clusterId, nodes, now),
     ]);
     return snapshots.length;
   } finally {

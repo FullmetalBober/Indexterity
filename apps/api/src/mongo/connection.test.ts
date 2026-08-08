@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { membersFromHello } from "./connection";
+import { membersFromHello, nodeFromHello } from "./connection";
 
 // The shape a real 5-member 8.0 set answered with — primary, two priority-1
 // secondaries, one priority-0 secondary, one hidden. Reading `hosts` alone found
@@ -51,5 +51,41 @@ describe("membersFromHello", () => {
   // host must not cost a second direct connection every collect.
   it("names a host once even if both arrays claim it", () => {
     expect(membersFromHello({ hosts: ["a:27017"], passives: ["a:27017"] })).toEqual(["a:27017"]);
+  });
+});
+
+// The roster's per-node row (#100): what one node's own hello admits to. The
+// same replies membersFromHello reads, asked a different question.
+describe("nodeFromHello", () => {
+  it("names a replica-set primary and secondary by their own answers", () => {
+    expect(nodeFromHello({ ...FIVE_MEMBER_SET, isWritablePrimary: true, me: "a:27017" })).toEqual({
+      me: "a:27017",
+      role: "primary",
+    });
+    expect(nodeFromHello({ ...FIVE_MEMBER_SET, secondary: true, me: "d:27017" })).toEqual({
+      me: "d:27017",
+      role: "secondary",
+    });
+  });
+
+  // A hidden member answers `secondary` on a direct connection — hidden
+  // governs routing, not identity — so a roster row for one is still honest.
+  it("does not need a member to be electable to name it", () => {
+    expect(nodeFromHello({ setName: "rs0", secondary: true, passive: true }).role).toBe(
+      "secondary",
+    );
+  });
+
+  it("tells a mongos and a standalone apart from set members", () => {
+    expect(nodeFromHello({ msg: "isdbgrid", isWritablePrimary: true }).role).toBe("mongos");
+    expect(nodeFromHello({ isWritablePrimary: true }).role).toBe("standalone");
+  });
+
+  // A member mid-election answers neither primary nor secondary; a malformed
+  // reply answers nothing. Both are "unknown", never a guess.
+  it("says unknown rather than guessing", () => {
+    expect(nodeFromHello({ setName: "rs0" }).role).toBe("unknown");
+    expect(nodeFromHello(null)).toEqual({ me: null, role: "unknown" });
+    expect(nodeFromHello("not a document")).toEqual({ me: null, role: "unknown" });
   });
 });

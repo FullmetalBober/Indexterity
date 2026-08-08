@@ -12,6 +12,7 @@ import {
   type SortKey,
 } from "../analysis";
 import {
+  type ClusterNode,
   type CollectionLatency,
   type CollectionStorage,
   type DeletePattern,
@@ -532,6 +533,34 @@ export class MongoIndexCollector implements IndexCollector {
         spec.keys.map((key) => key.field),
       ),
     }));
+  }
+
+  // The roster (#100): every member the set admitted to and how its dial went,
+  // with each answering node's role read from its own handshake. A standalone
+  // or a mongos names no members, so the base connection speaks for itself —
+  // and when even that much cannot be established, null, never a guess.
+  async collectNodes(): Promise<readonly ClusterNode[] | null> {
+    const dials = this.members === undefined ? [] : await this.members.dials();
+    if (dials.length === 0) {
+      const self = await this.conn.helloNode();
+      if (self === null) return null;
+      const host = self.me ?? this.conn.address();
+      return host === null ? null : [{ host, role: self.role, state: "answered" }];
+    }
+    return Promise.all(
+      dials.map(async (dial): Promise<ClusterNode> => {
+        if (dial.connection === null) {
+          return { host: dial.host, role: "unknown", state: dial.state };
+        }
+        // Each node's own hello, not the primary's view of it: `hello` names
+        // only which host is primary, while the node itself also admits to
+        // being a secondary — and a member that connected but cannot even
+        // answer hello is not "answered" in any sense the panel should claim.
+        const self = await dial.connection.helloNode();
+        if (self === null) return { host: dial.host, role: "unknown", state: "unreachable" };
+        return { host: dial.host, role: self.role, state: "answered" };
+      }),
+    );
   }
 
   async collectUsage(database: string, collection: string): Promise<IndexUsageStat[]> {

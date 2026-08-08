@@ -11,6 +11,7 @@ import { ActivityTable } from "~/components/app/activity-table";
 import { CollectionsTable, toCollectionRows } from "~/components/app/collections-table";
 import { fmtBytes } from "~/components/app/format";
 import { latencyCharts } from "~/components/app/latency-series";
+import { NodesPanel } from "~/components/app/nodes-panel";
 import { RecommendationsTable } from "~/components/app/recommendations-table";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
 import { Skeleton } from "~/components/ui/skeleton";
@@ -26,9 +27,11 @@ import {
   collectionsQuery,
   latencyQuery,
   latencySeriesQuery,
+  nodesQuery,
   useCollections,
   useLatency,
   useLatencySeries,
+  useNodes,
 } from "~/lib/queries/telemetry";
 import { LineChart, SERIES_PALETTE } from "../components/latency-chart";
 
@@ -60,6 +63,7 @@ export const Route = createFileRoute("/app/clusters/$clusterId/")({
       context.queryClient.ensureQueryData(latencyQuery(id)),
       context.queryClient.ensureQueryData(latencySeriesQuery(id)),
       context.queryClient.ensureQueryData(collectionsQuery(id)),
+      context.queryClient.ensureQueryData(nodesQuery(id)),
     ]);
   },
   head: () => ({ meta: [{ title: "Overview — Indexterity" }] }),
@@ -80,6 +84,7 @@ function ClusterOverview() {
   const latency = useLatency(id);
   const latencySeries = useLatencySeries(id);
   const collectionStats = useCollections(id);
+  const nodes = useNodes(id);
 
   const proposed = recommendations.data.filter((rec) => rec.state === "PROPOSED");
   const totalSaved = proposed.reduce((sum, rec) => sum + rec.estimatedBytesSaved, 0);
@@ -217,6 +222,17 @@ function ClusterOverview() {
           ) : null}
         </section>
       ) : null}
+
+      <section className="mt-8">
+        <h2 className="font-semibold text-lg">Nodes</h2>
+        <p className="text-muted-foreground text-sm">
+          Every member the last collect saw. Usage and latency are summed across the ones that
+          answered — a member that did not answer is a blind spot, not a zero.
+        </p>
+        <div className="mt-3">
+          <NodesPanel roster={nodes.data} loading={nodes.pending} />
+        </div>
+      </section>
 
       <h2 className="mt-8 font-semibold text-lg">Collections</h2>
       <p className="text-muted-foreground text-sm">

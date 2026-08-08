@@ -1,8 +1,9 @@
 import { Controller, Req } from "@nestjs/common";
 import { implement } from "@orpc/nest";
 import type { RoiContribution } from "@repo/contracts";
-import { contract } from "@repo/contracts";
+import { clusterNode, contract } from "@repo/contracts";
 import type { FastifyRequest } from "fastify";
+import { z } from "zod";
 import {
   type LatencyReading,
   latencyGaps,
@@ -15,6 +16,7 @@ import {
   actions,
   and,
   clusterIndexes,
+  clusterRosters,
   desc,
   eq,
   gte,
@@ -261,6 +263,32 @@ export class InsightsController {
         }))
         .sort((a, b) => b.totalIndexBytes - a.totalIndexBytes);
       return { clusterId: input.clusterId, collections };
+    });
+  }
+
+  @Implement(contract.getNodes)
+  getNodes(@Req() req: FastifyRequest) {
+    return implement(contract.getNodes).handler(async ({ input }) => {
+      const orgId = await this.tenancy.org(req);
+      if (!(await this.tenancy.ownsCluster(input.clusterId, orgId))) {
+        return { clusterId: input.clusterId, collectedAt: null, nodes: [] };
+      }
+      const [roster] = await this.database.db
+        .select()
+        .from(clusterRosters)
+        .where(eq(clusterRosters.clusterId, input.clusterId))
+        .limit(1);
+      if (roster === undefined) {
+        return { clusterId: input.clusterId, collectedAt: null, nodes: [] };
+      }
+      // The stored strings are ClusterNode's vocabulary (engine/ports.ts), but
+      // jsonb proves nothing — parse rather than assert, and let an alien
+      // value fail loudly instead of drawing a badge for it.
+      return {
+        clusterId: input.clusterId,
+        collectedAt: roster.collectedAt.toISOString(),
+        nodes: z.array(clusterNode).parse(roster.nodes),
+      };
     });
   }
 

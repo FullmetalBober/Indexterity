@@ -721,6 +721,22 @@ export const indexCooldowns = pgTable(
 // reports the same four cumulative counters every time. There is no dimension
 // half to split out here, because every column IS a measurement — the namespace
 // stays on the row.
+// The node roster (#100): every member the LAST collect saw and how each
+// answered, one row per cluster, replaced whole on every collect. Deliberately
+// not a history table — "which nodes, right now, and did we reach them" is the
+// question the panel answers, and a per-collect log of it would grow with the
+// cadence like latency_samples does (D39) for a fact nobody asks about the
+// past of. jsonb because the members ARE one fact: a roster read half-replaced
+// would be a topology that never existed.
+export const clusterRosters = pgTable("cluster_rosters", {
+  clusterId: uuid("cluster_id")
+    .primaryKey()
+    .references(() => clusters.id, { onDelete: "cascade" }),
+  // ClusterNode[] from engine/ports.ts: { host, role, state }.
+  nodes: jsonb("nodes").$type<{ host: string; role: string; state: string }[]>().notNull(),
+  collectedAt: timestamp("collected_at", { withTimezone: true }).notNull(),
+});
+
 export const latencySamples = pgTable(
   "latency_samples",
   {
