@@ -207,6 +207,12 @@ exempt (no password to pair a code with; GitHub enforces its own). Lost device
 and lost codes means whoever runs the install resets it after verifying it's
 you — there is deliberately no self-serve way around a second factor.
 
+**The sign-in address can change, carefully.** A verified account's current
+address approves the change and the new one verifies itself; an unverified
+account changes at once and the new address gets the verification mail. The
+signup gate applies to the change — `SIGNUP_MODE` cannot be walked around by
+renaming an account — and the old inbox is told either way.
+
 **Owner-level acts leave a trail.** `actions` records what the engine did to an
 index; `security_events` records the rest — signing in and failing to, signing out,
 revoking a session, promoting and demoting, removing a member, inviting one, an

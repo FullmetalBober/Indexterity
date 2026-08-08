@@ -855,6 +855,48 @@ describe("fresh session tier", () => {
   });
 });
 
+describe("change email", () => {
+  // The immediate flow (#83): this instance does not require verification and
+  // the account is unverified, so the address flips in the request itself —
+  // and the old address stops signing in at the same moment the new one
+  // starts. The two-step verified chain is better-auth's own and needs a
+  // mailbox; what is proven here is the half the product decided.
+  it("moves sign-in to the new address, and the old one stops working", async () => {
+    const mover = await signUpWithoutOrg("email-mover");
+    createdEmails.push(mover.email);
+    const oldEmail = mover.email;
+    const newEmail = `moved-${Date.now()}-${Math.floor(Math.random() * 1e6)}@int.test`;
+    createdEmails.push(newEmail);
+
+    const changed = await authPost("/change-email", mover, { newEmail });
+    expect(changed.status).toBe(200);
+
+    const [row] = await db.select({ email: user.email }).from(user).where(eq(user.email, newEmail));
+    expect(row?.email).toBe(newEmail);
+
+    const oldSignIn = await fetch(`${API_BASE}/api/auth/sign-in/email`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: WEB_ORIGIN },
+      body: JSON.stringify({ email: oldEmail, password: "password12345" }),
+    });
+    expect(oldSignIn.status).toBe(401);
+
+    const newSignIn = await fetch(`${API_BASE}/api/auth/sign-in/email`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: WEB_ORIGIN },
+      body: JSON.stringify({ email: newEmail, password: "password12345" }),
+    });
+    expect(newSignIn.status).toBe(200);
+  });
+
+  it("refuses the address the account already has", async () => {
+    const same = await signUpWithoutOrg("email-same");
+    createdEmails.push(same.email);
+    const refused = await authPost("/change-email", same, { newEmail: same.email });
+    expect(refused.status).toBe(400);
+  });
+});
+
 describe("SSRF guard and sign-up gate (second api with production defaults)", () => {
   // The main instance runs with ALLOW_PRIVATE_CLUSTER_TARGETS=true and
   // SIGNUP_MODE=open so the rest of the suite can use a localhost mongo. This
@@ -925,6 +967,20 @@ describe("SSRF guard and sign-up gate (second api with production defaults)", ()
 
   afterAll(async () => {
     await stopApi(guarded);
+  });
+
+  // Changing an address must not be the way around SIGNUP_MODE (#83): the
+  // same gate that would refuse the sign-up refuses the change, with the same
+  // reason, before any verification token exists.
+  it("refuses an email change to an address the signup gate would refuse", async () => {
+    const refused = await authPost(
+      "/change-email",
+      guardedOwner,
+      { newEmail: `uninvited-${Date.now()}@int.test` },
+      BASE,
+    );
+    expect(refused.status).toBe(403);
+    expect(JSON.stringify(await refused.json())).toContain("invite-only");
   });
 
   it("refuses to dial private addresses, naming the escape hatch", async () => {

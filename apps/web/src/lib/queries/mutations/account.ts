@@ -26,6 +26,30 @@ export function useUpdateName() {
   });
 }
 
+// A change of address is a chain, not a write (#83): a verified account's
+// current address approves it, then the new one proves itself; an unverified
+// account changes at once and the new address gets the verification mail. The
+// response cannot say which happened — better-auth answers { status } either
+// way, on purpose (a taken address answers the same, so the form is not an
+// existence oracle) — so the toast promises only what is true in every case,
+// and the refetched "me" shows the flip when it was immediate.
+export function useChangeEmail({ onRequested }: { onRequested: () => void }) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (newEmail: string) =>
+      unwrap(authClient.changeEmail({ newEmail, callbackURL: "/app/account" })),
+    onSuccess: async () => {
+      toast.success("Change requested — the emails say what happens next");
+      onRequested();
+      await queryClient.invalidateQueries({ queryKey: queryKeys.me() });
+    },
+    // 400s carry better-auth's own reasons ("Email is the same", a stale
+    // session's demand to sign in again); 403 is the signup gate's refusal,
+    // which names the rule.
+    onError: (error) => toast.error(apiMessage(error, "Could not change the email")),
+  });
+}
+
 // onDone exists so the form can clear itself: a password that succeeded has no
 // business still sitting in three text fields.
 export function useChangePassword({ onDone }: { onDone: () => void }) {

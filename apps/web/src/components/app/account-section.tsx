@@ -1,4 +1,4 @@
-import { changePasswordInput, updateNameInput } from "@repo/contracts";
+import { changeEmailInput, changePasswordInput, updateNameInput } from "@repo/contracts";
 import { useState } from "react";
 import QRCode from "react-qr-code";
 import { useAppForm } from "~/components/form";
@@ -11,6 +11,7 @@ import { Label } from "~/components/ui/label";
 import { Separator } from "~/components/ui/separator";
 import type { Me, ProviderAccount, SessionEntry } from "~/lib/queries/account";
 import {
+  useChangeEmail,
   useChangePassword,
   useRevokeOtherSessions,
   useRevokeSession,
@@ -76,6 +77,17 @@ function ProfileCard({ me }: { me: Me }) {
     defaultValues: { name: me.user.name },
     onSubmit: ({ value }) => rename.mutate(value.name),
   });
+  const [changingEmail, setChangingEmail] = useState(false);
+  const emailForm = useAppForm({
+    defaultValues: { newEmail: "" },
+    onSubmit: ({ value }) => changeEmail.mutate(value.newEmail),
+  });
+  const changeEmail = useChangeEmail({
+    onRequested: () => {
+      setChangingEmail(false);
+      emailForm.reset();
+    },
+  });
 
   return (
     <Card>
@@ -107,13 +119,47 @@ function ProfileCard({ me }: { me: Me }) {
         <Separator />
         <div className="flex flex-wrap items-center gap-2 text-sm">
           <span>{me.user.email}</span>
-          {/* Sign-in and every notice go to this address, so whether it is
-              verified is worth a word — but there is no change-email flow, and
-              a control that is not here should not be implied. */}
           <Badge variant={me.user.emailVerified ? "outline" : "secondary"}>
             {me.user.emailVerified ? "verified" : "unverified"}
           </Badge>
+          <Button variant="outline" size="sm" onClick={() => setChangingEmail(!changingEmail)}>
+            Change email
+          </Button>
         </div>
+        {changingEmail ? (
+          <form
+            className="flex flex-wrap items-end gap-3"
+            onSubmit={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              void emailForm.handleSubmit();
+            }}
+          >
+            <emailForm.AppField
+              name="newEmail"
+              validators={{ onChange: changeEmailInput.shape.newEmail }}
+            >
+              {(field) => (
+                <field.TextField
+                  label="New email"
+                  type="email"
+                  autoComplete="email"
+                  className="w-64"
+                  description={
+                    me.user.emailVerified
+                      ? "Your current address approves the change, then the new one verifies itself. Sign-in moves with it; invitations sent to the old address stop being yours."
+                      : "The address changes at once and the new one gets the verification mail. Sign-in moves with it; invitations sent to the old address stop being yours."
+                  }
+                />
+              )}
+            </emailForm.AppField>
+            <emailForm.AppForm>
+              <emailForm.SubmitButton pending={changeEmail.isPending}>
+                Request change
+              </emailForm.SubmitButton>
+            </emailForm.AppForm>
+          </form>
+        ) : null}
       </CardContent>
     </Card>
   );

@@ -207,6 +207,35 @@ export function createAuth(config: AuthConfig) {
     // pod's, and the configured number is the one that applies to a sign-in.
     // See auth/rate-limit.ts for what is left at better-auth's defaults and why.
     rateLimit: authRateLimit(config.authRateLimitMax),
+    user: {
+      // The address you sign in with, and every notice goes to (#83). The full
+      // chain for a VERIFIED account is deliberately two-step: the current
+      // address approves the change (sendChangeEmailConfirmation below), then
+      // the new address proves itself (emailVerification.sendVerificationEmail,
+      // the same sender sign-up uses) — a stolen session alone cannot move the
+      // account, and a typo cannot receive it. better-auth also demands a
+      // FRESH session on this route (sensitiveSessionMiddleware), which is the
+      // same hour requireFreshOwner uses (#52).
+      changeEmail: {
+        enabled: true,
+        // An UNVERIFIED address never proved anything, so making it approve
+        // its own replacement is theatre: change at once and let the new
+        // address get the verification mail. This is also what keeps the flow
+        // usable on installs without SMTP, where the approval link could never
+        // arrive.
+        updateEmailWithoutVerification: true,
+        sendChangeEmailConfirmation: async ({ user, newEmail, url }) => {
+          await sendMail(
+            user.email,
+            "Approve changing your Indexterity email",
+            `Someone signed in to your account asked to change its email from ` +
+              `${user.email} to ${newEmail}.\n\nApprove it here:\n${url}\n\n` +
+              `After you approve, ${newEmail} receives its own verification link. ` +
+              `If this wasn't you, do NOT click the link — change your password instead.`,
+          );
+        },
+      },
+    },
     plugins: [
       // TOTP and backup codes only — no OTP-over-email. The mailbox is what a
       // password reset already trusts, so a code sent there is the first
@@ -250,8 +279,39 @@ export function createAuth(config: AuthConfig) {
       // own permission check still applies after they do. A member everywhere
       // is left to the plugin, whose "not an owner" is the accurate refusal.
       before: createAuthMiddleware(async (ctx) => {
+        if (ctx.method !== "POST") return;
+        // The signup gate applies to a CHANGE of address too (#83):
+        // SIGNUP_MODE decides which addresses may hold an account at all, and
+        // changing yours must not be the way around it. Refused here, before
+        // any token is minted, so the reader gets the gate's own reason
+        // instead of a dead verification link.
+        if (ctx.path === "/change-email") {
+          const resolved = await getSessionFromCtx(ctx);
+          const newEmail = (ctx.body as { newEmail?: unknown } | undefined)?.newEmail;
+          if (resolved === null || typeof newEmail !== "string") return; // its own checks answer
+          const decision = await evaluateSignup(db, newEmail);
+          if (!decision.allowed) {
+            throw new APIError("FORBIDDEN", { message: decision.reason });
+          }
+          // The immediate flow (unverified account) flips the address in this
+          // very request, so the only notice the old inbox will ever get is
+          // this one. Verified accounts skip it — their confirmation mail IS
+          // the notice, and it arrives with an approve link rather than a
+          // fait accompli. Worded as a request: the flip can still fail.
+          if (resolved.user.emailVerified !== true) {
+            await sendMail(
+              resolved.user.email,
+              "Your Indexterity email is being changed",
+              `A change of your account email from ${resolved.user.email} to ` +
+                `${newEmail} was just requested from a signed-in session.\n\n` +
+                `If this was you, nothing else to do. If it wasn't, someone has ` +
+                `your session or password — reset it now.`,
+            );
+          }
+          return;
+        }
         if (!config.requireOwnerTwoFactor) return;
-        if (ctx.method !== "POST" || !OWNER_2FA_PATHS.has(ctx.path)) return;
+        if (!OWNER_2FA_PATHS.has(ctx.path)) return;
         const resolved = await getSessionFromCtx(ctx);
         if (resolved === null) return; // the endpoint's own authn answers this
         const enabled = (resolved.user as { twoFactorEnabled?: unknown }).twoFactorEnabled;

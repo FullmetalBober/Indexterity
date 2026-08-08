@@ -84,6 +84,13 @@ describe("authEventFor", () => {
     }
   });
 
+  // The request is the act with the actor behind it; the flip happens on a
+  // verify-email link whose path cannot be told from signup verification.
+  it("records an email change being requested", () => {
+    expect(authEventFor("/change-email", true)).toBe("EMAIL_CHANGE_REQUESTED");
+    expect(authEventFor("/change-email", false)).toBeNull();
+  });
+
   // Reading a session, listing invitations, switching org: traffic, not acts.
   it("ignores the routes that are reads", () => {
     for (const path of ["/get-session", "/organization/list", "/organization/set-active"]) {

@@ -5,6 +5,7 @@ import { authOk, renderInApp } from "~/test-utils";
 import { AccountSection, describeAgent } from "./account-section";
 
 const updateUser = vi.hoisted(() => vi.fn());
+const changeEmail = vi.hoisted(() => vi.fn());
 const changePassword = vi.hoisted(() => vi.fn());
 const revokeSession = vi.hoisted(() => vi.fn());
 const revokeOtherSessions = vi.hoisted(() => vi.fn());
@@ -20,6 +21,7 @@ const toastError = vi.hoisted(() => vi.fn());
 vi.mock("~/lib/auth-client", () => ({
   authClient: {
     updateUser,
+    changeEmail,
     changePassword,
     revokeSession,
     revokeOtherSessions,
@@ -97,6 +99,7 @@ const BACKUP_CODES = ["aaaaa11111", "bbbbb22222", "ccccc33333"];
 beforeEach(() => {
   vi.clearAllMocks();
   updateUser.mockResolvedValue(authOk({ status: true }));
+  changeEmail.mockResolvedValue(authOk({ status: true }));
   changePassword.mockResolvedValue(authOk({ token: null, user: me.user }));
   revokeSession.mockResolvedValue(authOk({ status: true }));
   revokeOtherSessions.mockResolvedValue(authOk({ status: true }));
@@ -131,6 +134,63 @@ describe("profile", () => {
     await user.click(screen.getByRole("button", { name: "Save" }));
     expect(await screen.findByText("What should we call you?")).toBeInTheDocument();
     expect(updateUser).not.toHaveBeenCalled();
+  });
+
+  // The address is the identity: the form exists now (#83), lands back on the
+  // account page, and says what the chain does before anything is sent.
+  it("requests an email change and says what happens next", async () => {
+    const user = userEvent.setup();
+    renderSection();
+
+    await user.click(screen.getByRole("button", { name: "Change email" }));
+    // A verified account's chain starts at the current address.
+    expect(screen.getByText(/current address approves the change/)).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText("New email"), "next@acme.test");
+    await user.click(screen.getByRole("button", { name: "Request change" }));
+
+    expect(changeEmail).toHaveBeenCalledWith({
+      newEmail: "next@acme.test",
+      callbackURL: "/app/account",
+    });
+    expect(toastSuccess).toHaveBeenCalledWith(expect.stringContaining("Change requested"));
+  });
+
+  it("tells an unverified account the change is immediate", async () => {
+    const user = userEvent.setup();
+    renderSection({ me: { ...me, user: { ...me.user, emailVerified: false } } });
+
+    await user.click(screen.getByRole("button", { name: "Change email" }));
+    expect(screen.getByText(/changes at once/)).toBeInTheDocument();
+  });
+
+  it("refuses a non-address before submitting one", async () => {
+    const user = userEvent.setup();
+    renderSection();
+
+    await user.click(screen.getByRole("button", { name: "Change email" }));
+    await user.type(screen.getByLabelText("New email"), "not-an-email");
+    await user.click(screen.getByRole("button", { name: "Request change" }));
+
+    expect(await screen.findByText("That does not look like an email address")).toBeInTheDocument();
+    expect(changeEmail).not.toHaveBeenCalled();
+  });
+
+  // The gate's 403 names the rule; "failed" would send the reader hunting a
+  // typo they did not make.
+  it("shows the signup gate's own refusal", async () => {
+    changeEmail.mockResolvedValue({
+      data: null,
+      error: { status: 403, message: "sign-up is invite-only — ask an owner", code: "FORBIDDEN" },
+    });
+    const user = userEvent.setup();
+    renderSection();
+
+    await user.click(screen.getByRole("button", { name: "Change email" }));
+    await user.type(screen.getByLabelText("New email"), "next@gated.test");
+    await user.click(screen.getByRole("button", { name: "Request change" }));
+
+    expect(toastError).toHaveBeenCalledWith(expect.stringContaining("invite-only"));
   });
 });
 
