@@ -46,6 +46,9 @@ services:
       # customer databases.
       ALLOW_INSECURE_CLUSTER_TLS: "true"
       SIGNUP_MODE: open
+      # Off in dev so nothing demands an authenticator app of a test account;
+      # a hosted install sets it (see .env.example, REQUIRE_OWNER_2FA).
+      REQUIRE_OWNER_2FA: "false"
       # The DASHBOARD's origin, not this container's port: better-auth appends
       # /api/auth itself, and the browser reaches all of it on 3000. It is also
       # what the reset links in emails are built from.

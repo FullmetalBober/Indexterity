@@ -16,24 +16,68 @@ import { queryKeys } from "../keys";
 // arrives as a resolved promise and is branched on here. onError underneath is
 // what catches the request that got no answer at all.
 interface Answer {
+  // Unknown on purpose: better-auth types each endpoint's data individually
+  // and the twoFactorClient's `twoFactorRedirect` marker is not on any of
+  // them — it is a runtime answer, so it is read by a guard rather than a type.
+  readonly data?: unknown;
   readonly error: { readonly message?: string } | null;
+}
+
+// A sign-in that answered "now the code" instead of a session (#55).
+function wantsSecondFactor(data: unknown): boolean {
+  return (
+    typeof data === "object" &&
+    data !== null &&
+    (data as { twoFactorRedirect?: unknown }).twoFactorRedirect === true
+  );
 }
 
 interface CredentialHandlers {
   readonly onStart: () => void;
   readonly onSignedIn: () => void;
   readonly onError: (message: string) => void;
+  // A sign-in that answered "now the code": the password was right, no session
+  // exists yet, and the caller owes a TOTP or backup code (#55). Only sign-in
+  // can answer this way, so sign-up does not pass it.
+  readonly onTwoFactor?: () => void;
 }
 
 function credentialCallbacks(handlers: CredentialHandlers) {
   return {
     onMutate: handlers.onStart,
     onSuccess: (result: Answer) => {
-      if (result.error === null) handlers.onSignedIn();
-      else handlers.onError(result.error.message ?? "authentication failed");
+      if (result.error !== null) {
+        handlers.onError(result.error.message ?? "authentication failed");
+      } else if (wantsSecondFactor(result.data)) {
+        // Without a handler this would be reported as signed in — and every
+        // query would answer 401 behind that lie.
+        (handlers.onTwoFactor ?? (() => handlers.onError("two-factor code required")))();
+      } else {
+        handlers.onSignedIn();
+      }
     },
     onError: () => handlers.onError("authentication failed"),
   };
+}
+
+// The second half of a 2FA sign-in: the code from the authenticator app, or
+// one of the backup codes. `trustDevice` asks better-auth to remember this
+// browser for 30 days, so the code is for new places rather than every
+// morning.
+export function useVerifySecondFactor(h: CredentialHandlers) {
+  return useMutation({
+    mutationFn: (attempt: { code: string; backup: boolean; trustDevice: boolean }) =>
+      attempt.backup
+        ? authClient.twoFactor.verifyBackupCode({
+            code: attempt.code,
+            trustDevice: attempt.trustDevice,
+          })
+        : authClient.twoFactor.verifyTotp({
+            code: attempt.code,
+            trustDevice: attempt.trustDevice,
+          }),
+    ...credentialCallbacks(h),
+  });
 }
 
 // The credentials arrive with mutate(), not with the hook call. They used to
@@ -68,32 +112,31 @@ export function useSignUp(h: CredentialHandlers) {
 // left null, a multi-org owner would come back from the password prompt
 // silently moved to their oldest org, and the retried action would answer
 // NOT_FOUND for a cluster they were just looking at.
-export function useReauthenticate(handlers: {
-  onFresh: () => void;
-  onError: (message: string) => void;
-}) {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: async (password: string) => {
-      const current = await authClient.getSession();
-      const me = current.data;
-      if (me === null || me === undefined) {
-        return { error: { message: "your session has ended — sign in again" } };
-      }
-      const activeOrgId = me.session.activeOrganizationId ?? null;
-      const signedIn = await authClient.signIn.email({ email: me.user.email, password });
-      if (signedIn.error !== null) return signedIn;
-      if (activeOrgId !== null) {
-        const restored = await authClient.organization.setActive({
-          organizationId: activeOrgId,
-        });
-        if (restored.error !== null) return restored;
-      }
-      return signedIn;
-    },
+//
+// With a second factor on the account the password alone mints nothing:
+// better-auth answers twoFactorRedirect and the dialog owes a code, which is
+// the whole point of having one (#55). The org restore and the invalidations
+// then belong to the code's mutation instead — shared below.
+interface ReauthHandlers {
+  readonly onFresh: () => void;
+  readonly onError: (message: string) => void;
+  readonly onTwoFactor?: () => void;
+}
+
+async function restoreActiveOrg(activeOrgId: string | null): Promise<Answer> {
+  if (activeOrgId === null) return { error: null };
+  return authClient.organization.setActive({ organizationId: activeOrgId });
+}
+
+function reauthCallbacks(handlers: ReauthHandlers, queryClient: ReturnType<typeof useQueryClient>) {
+  return {
     onSuccess: async (result: Answer) => {
       if (result.error !== null) {
         handlers.onError(result.error.message ?? "authentication failed");
+        return;
+      }
+      if (wantsSecondFactor(result.data)) {
+        (handlers.onTwoFactor ?? (() => handlers.onError("two-factor code required")))();
         return;
       }
       // A new session row: the sessions list gained one and "this device"
@@ -105,6 +148,48 @@ export function useReauthenticate(handlers: {
       handlers.onFresh();
     },
     onError: () => handlers.onError("authentication failed"),
+  };
+}
+
+export function useReauthenticate(handlers: ReauthHandlers) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (attempt: {
+      email: string;
+      password: string;
+      activeOrgId: string | null;
+    }): Promise<Answer> => {
+      const signedIn = await authClient.signIn.email({
+        email: attempt.email,
+        password: attempt.password,
+      });
+      if (signedIn.error !== null) return signedIn;
+      if (wantsSecondFactor(signedIn.data)) return signedIn;
+      return restoreActiveOrg(attempt.activeOrgId);
+    },
+    ...reauthCallbacks(handlers, queryClient),
+  });
+}
+
+// The code step of a re-authentication, when the password answered
+// twoFactorRedirect. No trustDevice: the fresh-session tier exists to prove
+// presence NOW, and a trusted device would let the next re-auth skip the one
+// thing it exists to ask.
+export function useReauthenticateSecondFactor(handlers: ReauthHandlers) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (attempt: {
+      code: string;
+      backup: boolean;
+      activeOrgId: string | null;
+    }): Promise<Answer> => {
+      const verified = attempt.backup
+        ? await authClient.twoFactor.verifyBackupCode({ code: attempt.code })
+        : await authClient.twoFactor.verifyTotp({ code: attempt.code });
+      if (verified.error !== null) return verified;
+      return restoreActiveOrg(attempt.activeOrgId);
+    },
+    ...reauthCallbacks(handlers, queryClient),
   });
 }
 

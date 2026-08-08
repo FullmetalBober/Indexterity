@@ -3,6 +3,7 @@ import { makeWorkerUtils } from "graphile-worker";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { entitledAutomation } from "../src/billing/plans";
 import {
+  account,
   actions,
   and,
   clusterIndexes,
@@ -58,6 +59,7 @@ import {
   stopApi,
   WEB_ORIGIN,
 } from "./helpers";
+import { secretFromTotpUri, totpCode } from "./totp";
 
 // fetch().json() is unknown — narrow at the boundary, no `as`.
 function asRecord(value: unknown): Record<string, unknown> {
@@ -3365,5 +3367,187 @@ describe("the control plane's own indexes", () => {
     `);
     const unindexed = rows.rows.map((row) => `${String(row.child)}.${String(row.column)}`);
     expect(unindexed).toEqual([]);
+  });
+});
+
+// The owner second-factor posture (#55) is an env flag, so it gets its own api
+// instance — the main one stays open so every other scenario works without
+// enrolling an authenticator. The suite plays the authenticator app itself
+// (integration/totp.ts): the code paths exercised are the ones a phone drives.
+describe("owner two-factor requirement (second api with REQUIRE_OWNER_2FA)", () => {
+  const PORT = 3097;
+  const BASE = `http://localhost:${PORT}`;
+  let gated: ChildProcess;
+  let gatedOwner: Session;
+
+  async function gatedSignUp(prefix: string): Promise<Session> {
+    const email = `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1e6)}@int.test`;
+    const res = await fetch(`${BASE}/api/auth/sign-up/email`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: WEB_ORIGIN },
+      body: JSON.stringify({ email, password: "password12345", name: prefix }),
+    });
+    expect(res.status).toBe(200);
+    createdEmails.push(email);
+    return sessionFrom(email, res);
+  }
+
+  beforeAll(async () => {
+    gated = await startApi({ REQUIRE_OWNER_2FA: "true" }, PORT);
+    gatedOwner = await gatedSignUp("twofactor-owner");
+    createdOrgIds.push(await createOrg(gatedOwner, "Gated Org", BASE));
+  });
+
+  afterAll(async () => {
+    await stopApi(gated);
+  });
+
+  it("refuses owner acts until a code verifies, then stands aside", async () => {
+    // The api's own mutations answer with the code the dashboard keys off.
+    const before = await api(
+      "/clusters",
+      gatedOwner,
+      { method: "POST", body: JSON.stringify({ name: "Gated", connectionString: MONGO_URL }) },
+      `${BASE}/api`,
+    );
+    expect(before.status).toBe(403);
+    expect(asRecord(await before.json()).code).toBe("TWO_FACTOR_REQUIRED");
+
+    // The org-membership half rides better-auth's routes, not the api's, and
+    // gets the same refusal from the hooks.before gate.
+    const inviteBefore = await authPost(
+      "/organization/invite-member",
+      gatedOwner,
+      { email: `nobody-${Date.now()}@int.test`, role: "member" },
+      BASE,
+    );
+    expect(inviteBefore.status).toBe(403);
+    expect(asRecord(await inviteBefore.json()).code).toBe("TWO_FACTOR_REQUIRED");
+
+    // Enrolment is never gated — it is the way out. Nothing is on until the
+    // first code verifies.
+    const enable = await authPost(
+      "/two-factor/enable",
+      gatedOwner,
+      { password: "password12345" },
+      BASE,
+    );
+    expect(enable.status).toBe(200);
+    const secret = secretFromTotpUri(asString(asRecord(await enable.json()).totpURI));
+    const stillGated = await api(
+      "/clusters",
+      gatedOwner,
+      { method: "POST", body: JSON.stringify({ name: "Gated", connectionString: MONGO_URL }) },
+      `${BASE}/api`,
+    );
+    expect(stillGated.status).toBe(403);
+
+    const verify = await authPost(
+      "/two-factor/verify-totp",
+      gatedOwner,
+      { code: totpCode(secret) },
+      BASE,
+    );
+    expect(verify.status).toBe(200);
+
+    // The verify response expired the cookie cache (auth.config.ts hooks.after),
+    // so this read comes from the row that now says enabled — without that, the
+    // cached false would keep refusing for the cache's maxAge.
+    const after = await api(
+      "/clusters",
+      gatedOwner,
+      { method: "POST", body: JSON.stringify({ name: "Gated", connectionString: MONGO_URL }) },
+      `${BASE}/api`,
+    );
+    expect(after.status).toBe(200);
+    createdClusterIds.push(asString(asRecord(await after.json()).id));
+
+    const inviteAfter = await authPost(
+      "/organization/invite-member",
+      gatedOwner,
+      { email: `nobody-${Date.now()}@int.test`, role: "member" },
+      BASE,
+    );
+    expect(inviteAfter.status).toBe(200);
+  });
+
+  it("exempts an account with no password to pair a code with", async () => {
+    const oauthish = await gatedSignUp("twofactor-github");
+    createdOrgIds.push(await createOrg(oauthish, "OAuth Org", BASE));
+
+    // Turn the credential account into what a GitHub sign-in leaves behind.
+    // The session survives — provider is a fact about the account row, and the
+    // gate reads that row live rather than trusting the cookie.
+    const [row] = await db.select({ id: user.id }).from(user).where(eq(user.email, oauthish.email));
+    await db
+      .update(account)
+      .set({ providerId: "github" })
+      .where(eq(account.userId, asString(row?.id)));
+
+    const res = await api(
+      "/clusters",
+      oauthish,
+      {
+        method: "POST",
+        body: JSON.stringify({ name: "OAuth Gated", connectionString: MONGO_URL }),
+      },
+      `${BASE}/api`,
+    );
+    expect(res.status).toBe(200);
+    createdClusterIds.push(asString(asRecord(await res.json()).id));
+  });
+
+  it("asks for the code at sign-in once it is on, and a backup code works once", async () => {
+    const enrolled = await gatedSignUp("twofactor-signin");
+    const enable = await authPost(
+      "/two-factor/enable",
+      enrolled,
+      { password: "password12345" },
+      BASE,
+    );
+    const enabled = asRecord(await enable.json());
+    const secret = secretFromTotpUri(asString(enabled.totpURI));
+    const codes = enabled.backupCodes as string[];
+    await authPost("/two-factor/verify-totp", enrolled, { code: totpCode(secret) }, BASE);
+
+    // The password alone no longer signs in: better-auth answers a redirect
+    // marker and a short-lived 2FA cookie instead of a session.
+    const half = await fetch(`${BASE}/api/auth/sign-in/email`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: WEB_ORIGIN },
+      body: JSON.stringify({ email: enrolled.email, password: "password12345" }),
+    });
+    expect(half.status).toBe(200);
+    expect(asRecord(await half.json()).twoFactorRedirect).toBe(true);
+    const pending = sessionFrom(enrolled.email, half);
+
+    // No session yet: the data routes refuse the half-signed-in cookie.
+    const refused = await api("/orgs", pending, undefined, `${BASE}/api`);
+    expect(refused.status).toBe(401);
+
+    const backup = await authPost(
+      "/two-factor/verify-backup-code",
+      pending,
+      { code: codes[0] },
+      BASE,
+    );
+    expect(backup.status).toBe(200);
+    const readable = await api("/orgs", pending, undefined, `${BASE}/api`);
+    expect(readable.status).toBe(200);
+
+    // Once. A backup code that keeps working is a second password.
+    const again = await fetch(`${BASE}/api/auth/sign-in/email`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: WEB_ORIGIN },
+      body: JSON.stringify({ email: enrolled.email, password: "password12345" }),
+    });
+    const pendingAgain = sessionFrom(enrolled.email, again);
+    const reused = await authPost(
+      "/two-factor/verify-backup-code",
+      pendingAgain,
+      { code: codes[0] },
+      BASE,
+    );
+    expect(reused.status).not.toBe(200);
   });
 });

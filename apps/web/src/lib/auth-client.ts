@@ -1,4 +1,4 @@
-import { organizationClient } from "better-auth/client/plugins";
+import { organizationClient, twoFactorClient } from "better-auth/client/plugins";
 import { createAuthClient } from "better-auth/react";
 
 // better-auth's own client, talking to better-auth.
@@ -24,4 +24,10 @@ import { createAuthClient } from "better-auth/react";
 // eight oRPC routes the api used to carry. What the api still answers is the
 // plan and how much of it is spent, which is not a plugin concept (queries/
 // shell.ts).
-export const authClient = createAuthClient({ plugins: [organizationClient()] });
+// twoFactorClient deliberately gets no onTwoFactorRedirect: the two places a
+// sign-in happens (the auth form, the re-auth dialog) both handle the
+// twoFactorRedirect answer inline as their own next step, and a global
+// navigation would yank the reader out of whichever one they were in.
+export const authClient = createAuthClient({
+  plugins: [organizationClient(), twoFactorClient()],
+});

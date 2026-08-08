@@ -68,6 +68,22 @@ describe("authEventFor", () => {
     expect(authEventFor("/revoke-other-sessions", true)).toBe("SESSION_REVOKED");
   });
 
+  // The second factor (#55). A wrong code is a credential attempt, so the
+  // verify pair records its failures like sign-in does — and unlike everything
+  // else here.
+  it("records the second factor's lifecycle, and its failures", () => {
+    expect(authEventFor("/two-factor/enable", true)).toBe("TWO_FACTOR_ENABLED");
+    expect(authEventFor("/two-factor/enable", false)).toBeNull();
+    expect(authEventFor("/two-factor/disable", true)).toBe("TWO_FACTOR_DISABLED");
+    expect(authEventFor("/two-factor/generate-backup-codes", true)).toBe(
+      "TWO_FACTOR_CODES_REGENERATED",
+    );
+    for (const path of ["/two-factor/verify-totp", "/two-factor/verify-backup-code"]) {
+      expect(authEventFor(path, true)).toBe("TWO_FACTOR_VERIFIED");
+      expect(authEventFor(path, false)).toBe("TWO_FACTOR_FAILED");
+    }
+  });
+
   // Reading a session, listing invitations, switching org: traffic, not acts.
   it("ignores the routes that are reads", () => {
     for (const path of ["/get-session", "/organization/list", "/organization/set-active"]) {

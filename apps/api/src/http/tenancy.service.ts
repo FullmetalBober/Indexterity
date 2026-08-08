@@ -4,6 +4,7 @@ import { SESSION_FRESH_AGE_SECONDS } from "@repo/contracts";
 import type { FastifyRequest } from "fastify";
 import { requireSession } from "../auth/session";
 import { type Membership, resolveMembership } from "../auth/tenancy";
+import { hasCredentialAccount } from "../auth/two-factor-gate";
 import {
   allowsAutoApply,
   allowsWorkloadAnalysis,
@@ -14,6 +15,7 @@ import {
 import { seatsUsed } from "../billing/usage";
 import { and, clusters, eq, organizations } from "../db";
 import { DatabaseService } from "../db/database.service";
+import { requireOwnerTwoFactor } from "../env";
 
 // Authn + tenancy, shared by every controller. Was four private methods copied
 // into one 950-line controller; the rules are identical everywhere, so they
@@ -61,7 +63,29 @@ export class TenancyService {
     if (member.role !== "owner") {
       throw new ORPCError("FORBIDDEN", { message: "owner role required" });
     }
+    await this.requireSecondFactor(req);
     return member.orgId;
+  }
+
+  // The other half of "2FA is required for owners" (#55) — the org-membership
+  // routes get the same rule from the hooks.before in auth.config.ts. Only
+  // when the deployment says so (REQUIRE_OWNER_2FA, a posture flag like
+  // SIGNUP_MODE), and only for accounts a password can open: an account that
+  // arrived through GitHub has no TOTP to enrol here (better-auth refuses)
+  // and brings its provider's second factor instead.
+  //
+  // Its own code, like SESSION_NOT_FRESH: this refusal is fixable by the
+  // caller, and the dashboard sends them to the account page rather than
+  // telling them they lack a role they hold.
+  private async requireSecondFactor(req: FastifyRequest): Promise<void> {
+    if (!requireOwnerTwoFactor()) return;
+    const session = await requireSession(req);
+    if (session.twoFactorEnabled) return;
+    if (!(await hasCredentialAccount(this.database.db, session.userId))) return;
+    throw new ORPCError("TWO_FACTOR_REQUIRED", {
+      status: 403,
+      message: "owners must add a second factor before changing anything — Account → Two-factor",
+    });
   }
 
   // Owner, AND signed in within the last hour. The tier above requireOwner for

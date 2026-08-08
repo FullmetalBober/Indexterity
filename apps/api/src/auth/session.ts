@@ -14,6 +14,11 @@ export interface CallerSession {
   // row, so this is what "a fresh session" is measured from
   // (TenancyService.requireFreshOwner, #52).
   readonly signedInAt: Date;
+  // The twoFactor plugin's flag on the user: a code has verified at least
+  // once. What requireOwner checks when the deployment demands a second
+  // factor of owners (#55). False for a cookie signed before the plugin
+  // existed; those age out with the cache.
+  readonly twoFactorEnabled: boolean;
 }
 
 // One `auth.api.getSession` per request. Several endpoints used to ask more
@@ -44,6 +49,8 @@ function resolveSession(req: FastifyRequest): Promise<CallerSession | null> {
             // A Date from postgres, an ISO string when the cookie cache
             // answered — the constructor takes both.
             signedInAt: new Date(response.session.createdAt),
+            twoFactorEnabled:
+              (response.user as { twoFactorEnabled?: unknown }).twoFactorEnabled === true,
           };
     });
   resolvedByRequest.set(req, fresh);
