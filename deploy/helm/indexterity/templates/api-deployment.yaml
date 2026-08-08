@@ -75,6 +75,8 @@ spec:
               value: {{ .Values.config.requireEmailVerification | quote }}
             - name: SIGNUP_MODE
               value: {{ .Values.config.signupMode | quote }}
+            - name: REQUIRE_OWNER_2FA
+              value: {{ .Values.config.requireOwnerTwoFactor | quote }}
             {{- if .Values.secrets.github.clientId }}
             - name: GITHUB_CLIENT_ID
               value: {{ .Values.secrets.github.clientId | quote }}

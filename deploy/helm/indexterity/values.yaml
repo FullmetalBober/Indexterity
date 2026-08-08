@@ -166,6 +166,11 @@ config:
   logLevel: info
   # Reject sign-ins from unverified addresses (needs working SMTP).
   requireEmailVerification: false
+  # Demand a second factor of owners before any owner-only mutation. False by
+  # default so a fresh install can bootstrap its first account, but a hosted
+  # deployment should turn it on: owner accounts can flip customers' clusters
+  # live. GitHub sign-ins are exempt (their provider enforces its own).
+  requireOwnerTwoFactor: false
   # Who may create an account:
   #   invite — default. The first account bootstraps the install; after that an
   #            address needs a pending invite from an owner.

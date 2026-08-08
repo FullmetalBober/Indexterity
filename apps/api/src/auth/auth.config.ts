@@ -1,16 +1,18 @@
 import { randomUUID } from "node:crypto";
-import { PASSWORD_MIN_LENGTH } from "@repo/contracts";
+import { PASSWORD_MIN_LENGTH, SESSION_FRESH_AGE_SECONDS } from "@repo/contracts";
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { APIError, createAuthMiddleware, getSessionFromCtx } from "better-auth/api";
 import { expireCookie } from "better-auth/cookies";
+import { twoFactor } from "better-auth/plugins/two-factor";
 import { authTrailEntry, sessionEndedEntry, type TrailActor } from "../audit/auth-trail";
 import { authEventFor, recordSecurityEvent } from "../audit/security-events";
-import { createDatabase, eq, schema, user as userTable } from "../db";
-import { sendMail } from "../mail/mailer";
+import { and, createDatabase, eq, members, schema, user as userTable } from "../db";
+import { mailEnabled, sendMail } from "../mail/mailer";
 import { organizationPlugin } from "./organization";
 import { authRateLimit } from "./rate-limit";
 import { evaluateSignup } from "./signup-gate";
+import { hasCredentialAccount } from "./two-factor-gate";
 
 export interface AuthConfig {
   readonly databaseUrl: string;
@@ -39,7 +41,26 @@ export interface AuthConfig {
   readonly authRateLimitMax: number;
   // The dashboard's origin, for the link in an invitation email.
   readonly webOrigin: string;
+  // Owners must hold a second factor before the org mutations that decide who
+  // can do everything else (#55). Deployment posture, like SIGNUP_MODE — the
+  // api-side half of the same rule lives in TenancyService.requireOwner.
+  readonly requireOwnerTwoFactor: boolean;
 }
+
+// The org mutations the second-factor rule gates: the ones through which an
+// owner reshapes who may act. Rename, leave and the reads stay open — the rule
+// exists for the acts with someone else's access in them.
+// How long an emailed sign-in code lives. Short, because the mail is already
+// sent and a code sitting in an inbox is a credential: long enough to switch
+// to a mail client and back, not long enough to matter tomorrow.
+const OTP_PERIOD_MINUTES = 5;
+
+const OWNER_2FA_PATHS = new Set([
+  "/organization/invite-member",
+  "/organization/remove-member",
+  "/organization/update-member-role",
+  "/organization/delete",
+]);
 
 // Who is making this request, for the security trail. Two sources, because the
 // acts arrive in two shapes and neither covers the other — both measured against
@@ -113,6 +134,21 @@ export function createAuth(config: AuthConfig) {
     baseURL: config.baseURL,
     trustedOrigins: [...config.trustedOrigins],
     session: {
+      // The lifetime is DECIDED now, not inherited (#52): these are
+      // better-auth's defaults, kept on purpose. Seven days rolling is long
+      // for a tool that can write to a customer's database — but the three
+      // acts with that reach (go live, rotate credentials, disconnect) no
+      // longer ride session age at all: they demand a sign-in within
+      // SESSION_FRESH_AGE_SECONDS regardless (TenancyService.requireFreshOwner).
+      // With those gated, what a week-old session grants is reading the
+      // dashboard and the benign mutations, and shortening it would tax every
+      // daily user to shrink a window the fresh tier already closed.
+      expiresIn: 60 * 60 * 24 * 7,
+      updateAge: 60 * 60 * 24,
+      // better-auth's own freshness checks (delete-user without a password)
+      // measure against the same hour the api's fresh tier uses, so "fresh"
+      // means one thing across the product.
+      freshAge: SESSION_FRESH_AGE_SECONDS,
       // The session rides a second, short-lived HMAC-signed cookie, so the
       // common request decides who is asking without touching postgres.
       // Freshness is not lost where it matters: membership and role are read
@@ -176,7 +212,77 @@ export function createAuth(config: AuthConfig) {
     // pod's, and the configured number is the one that applies to a sign-in.
     // See auth/rate-limit.ts for what is left at better-auth's defaults and why.
     rateLimit: authRateLimit(config.authRateLimitMax),
+    user: {
+      // The address you sign in with, and every notice goes to (#83). The full
+      // chain for a VERIFIED account is deliberately two-step: the current
+      // address approves the change (sendChangeEmailConfirmation below), then
+      // the new address proves itself (emailVerification.sendVerificationEmail,
+      // the same sender sign-up uses) — a stolen session alone cannot move the
+      // account, and a typo cannot receive it. better-auth also demands a
+      // FRESH session on this route (sensitiveSessionMiddleware), which is the
+      // same hour requireFreshOwner uses (#52).
+      changeEmail: {
+        enabled: true,
+        // An UNVERIFIED address never proved anything, so making it approve
+        // its own replacement is theatre: change at once and let the new
+        // address get the verification mail. This is also what keeps the flow
+        // usable on installs without SMTP, where the approval link could never
+        // arrive.
+        updateEmailWithoutVerification: true,
+        sendChangeEmailConfirmation: async ({ user, newEmail, url }) => {
+          await sendMail(
+            user.email,
+            "Approve changing your Indexterity email",
+            `Someone signed in to your account asked to change its email from ` +
+              `${user.email} to ${newEmail}.\n\nApprove it here:\n${url}\n\n` +
+              `After you approve, ${newEmail} receives its own verification link. ` +
+              `If this wasn't you, do NOT click the link — change your password instead.`,
+          );
+        },
+      },
+    },
     plugins: [
+      // TOTP and backup codes only — no OTP-over-email. The mailbox is what a
+      // password reset already trusts, so a code sent there is the first
+      // factor wearing a costume, not a second one. `skipVerificationOnEnable`
+      // stays false: `twoFactorEnabled` means a code has actually worked once,
+      // not that a QR was displayed.
+      twoFactor({
+        issuer: "Indexterity",
+        // A code mailed to the address on the account, for the reader who has
+        // no authenticator app. Available only where the deployment can
+        // actually send mail — `hooks.before` refuses the endpoint when SMTP
+        // is unconfigured, because a factor that silently delivers nothing is
+        // worse than one that is absent (mail/mailer.ts no-ops without it).
+        //
+        // Read the trade in D44 before widening this: the mailbox is also
+        // where a password reset lands, so an emailed code is a second factor
+        // only against an attacker who has the password and NOT the inbox. It
+        // is offered as an alternative delivery for everyone with 2FA on, so
+        // it is also the ceiling on what 2FA is worth here.
+        otpOptions: {
+          sendOTP: async ({ user, otp }) => {
+            await sendMail(
+              user.email,
+              "Your Indexterity sign-in code",
+              `Your sign-in code is ${otp}\n\n` +
+                `It expires in ${OTP_PERIOD_MINUTES} minutes and works once.\n\n` +
+                `If you did not just try to sign in, someone has your password — ` +
+                `change it now.`,
+            );
+          },
+          period: OTP_PERIOD_MINUTES,
+          digits: 6,
+          // Per code, on top of the plugin's own 3-per-10s rate limit for
+          // /two-factor/*: six digits is a million guesses, and five is what
+          // makes that number mean something.
+          allowedAttempts: 5,
+          // Never recoverable from the database, unlike the TOTP secret, which
+          // has to be. A one-time code has no reason to be readable after it
+          // is written — better-auth compares hashes.
+          storeOTP: "hashed",
+        },
+      }),
       organizationPlugin(db, {
         webOrigin: config.webOrigin,
         requireEmailVerification: config.requireEmailVerification,
@@ -201,6 +307,80 @@ export function createAuth(config: AuthConfig) {
     // session this costs that caller one extra read; on set-active, the fresh
     // cookie is already in the response and is kept.
     hooks: {
+      // The org-route half of the owner second-factor rule (#55); the api's
+      // mutations get the same answer from TenancyService.requireOwner. Here
+      // rather than in organizationHooks because those are handed the member
+      // and the org and never the CALLER — the same reason the trail below
+      // resolves its actor here (#53).
+      //
+      // Owner of ANY org, not just the active one: the posture is per account.
+      // Someone who owns org A and is a member of org B must enrol before
+      // acting anywhere — the message tells them how to fix it, and org B's
+      // own permission check still applies after they do. A member everywhere
+      // is left to the plugin, whose "not an owner" is the accurate refusal.
+      before: createAuthMiddleware(async (ctx) => {
+        if (ctx.method !== "POST") return;
+        // An emailed code needs a deployment that can send mail. `sendMail`
+        // no-ops and logs when SMTP is unconfigured, so without this the
+        // endpoint answers 200 and the reader waits for a code that was never
+        // sent — the one outcome worse than not offering it. Said plainly,
+        // because the fix is the operator's and the reader cannot guess it.
+        if (ctx.path === "/two-factor/send-otp" && !mailEnabled()) {
+          throw new APIError("BAD_REQUEST", {
+            message:
+              "this deployment cannot send email — use your authenticator app or a backup code",
+            code: "EMAIL_NOT_CONFIGURED",
+          });
+        }
+        // The signup gate applies to a CHANGE of address too (#83):
+        // SIGNUP_MODE decides which addresses may hold an account at all, and
+        // changing yours must not be the way around it. Refused here, before
+        // any token is minted, so the reader gets the gate's own reason
+        // instead of a dead verification link.
+        if (ctx.path === "/change-email") {
+          const resolved = await getSessionFromCtx(ctx);
+          const newEmail = (ctx.body as { newEmail?: unknown } | undefined)?.newEmail;
+          if (resolved === null || typeof newEmail !== "string") return; // its own checks answer
+          const decision = await evaluateSignup(db, newEmail);
+          if (!decision.allowed) {
+            throw new APIError("FORBIDDEN", { message: decision.reason });
+          }
+          // The immediate flow (unverified account) flips the address in this
+          // very request, so the only notice the old inbox will ever get is
+          // this one. Verified accounts skip it — their confirmation mail IS
+          // the notice, and it arrives with an approve link rather than a
+          // fait accompli. Worded as a request: the flip can still fail.
+          if (resolved.user.emailVerified !== true) {
+            await sendMail(
+              resolved.user.email,
+              "Your Indexterity email is being changed",
+              `A change of your account email from ${resolved.user.email} to ` +
+                `${newEmail} was just requested from a signed-in session.\n\n` +
+                `If this was you, nothing else to do. If it wasn't, someone has ` +
+                `your session or password — reset it now.`,
+            );
+          }
+          return;
+        }
+        if (!config.requireOwnerTwoFactor) return;
+        if (!OWNER_2FA_PATHS.has(ctx.path)) return;
+        const resolved = await getSessionFromCtx(ctx);
+        if (resolved === null) return; // the endpoint's own authn answers this
+        const enabled = (resolved.user as { twoFactorEnabled?: unknown }).twoFactorEnabled;
+        if (enabled === true) return;
+        const [owns] = await db
+          .select({ orgId: members.orgId })
+          .from(members)
+          .where(and(eq(members.userId, resolved.user.id), eq(members.role, "owner")))
+          .limit(1);
+        if (owns === undefined) return;
+        if (!(await hasCredentialAccount(db, resolved.user.id))) return;
+        throw new APIError("FORBIDDEN", {
+          message:
+            "owners must add a second factor before changing who has access — Account → Two-factor",
+          code: "TWO_FACTOR_REQUIRED",
+        });
+      }),
       after: createAuthMiddleware(async (ctx) => {
         // The security trail (audit/auth-trail.ts). First, and never allowed to
         // throw: whether the act is recorded must not decide whether it happened,
@@ -222,7 +402,17 @@ export function createAuth(config: AuthConfig) {
             await recordSecurityEvent(db, entry, (message) => ctx.context.logger.warn(message));
           }
         }
-        if (ctx.method !== "POST" || !ctx.path.startsWith("/organization/")) return;
+        // /two-factor/ is in the same boat for the same reason: verify-totp
+        // (the first one) and disable flip `user.twoFactorEnabled`, which the
+        // cached cookie carries a copy of — and requireOwner now reads it, so
+        // a stale false would keep refusing an owner who just enrolled for up
+        // to the cache's maxAge (#55).
+        if (
+          ctx.method !== "POST" ||
+          !(ctx.path.startsWith("/organization/") || ctx.path.startsWith("/two-factor/"))
+        ) {
+          return;
+        }
         const sessionData = ctx.context.authCookies.sessionData;
         const pending = ctx.context.responseHeaders?.getSetCookie() ?? [];
         const reSigned = pending.some((cookie) => cookie.startsWith(`${sessionData.name}=`));

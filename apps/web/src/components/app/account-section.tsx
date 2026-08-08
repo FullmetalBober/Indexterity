@@ -1,17 +1,29 @@
-import { changePasswordInput, updateNameInput } from "@repo/contracts";
+import { changeEmailInput, changePasswordInput, updateNameInput } from "@repo/contracts";
+import { useState } from "react";
+import QRCode from "react-qr-code";
 import { useAppForm } from "~/components/form";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "~/components/ui/card";
 import { FieldGroup } from "~/components/ui/field";
+import { Input } from "~/components/ui/input";
+import { Label } from "~/components/ui/label";
 import { Separator } from "~/components/ui/separator";
 import type { Me, ProviderAccount, SessionEntry } from "~/lib/queries/account";
 import {
+  useChangeEmail,
   useChangePassword,
   useRevokeOtherSessions,
   useRevokeSession,
   useUpdateName,
 } from "~/lib/queries/mutations/account";
+import {
+  type IssuedTwoFactor,
+  useDisableTwoFactor,
+  useEnableTwoFactor,
+  useRegenerateBackupCodes,
+  useVerifyTwoFactorEnrolment,
+} from "~/lib/queries/mutations/two-factor";
 
 // A user-agent string is written for machines; the row is read by a person
 // deciding whether a session is theirs. Browser and platform are the two words
@@ -65,6 +77,17 @@ function ProfileCard({ me }: { me: Me }) {
     defaultValues: { name: me.user.name },
     onSubmit: ({ value }) => rename.mutate(value.name),
   });
+  const [changingEmail, setChangingEmail] = useState(false);
+  const emailForm = useAppForm({
+    defaultValues: { newEmail: "" },
+    onSubmit: ({ value }) => changeEmail.mutate(value.newEmail),
+  });
+  const changeEmail = useChangeEmail({
+    onRequested: () => {
+      setChangingEmail(false);
+      emailForm.reset();
+    },
+  });
 
   return (
     <Card>
@@ -96,13 +119,47 @@ function ProfileCard({ me }: { me: Me }) {
         <Separator />
         <div className="flex flex-wrap items-center gap-2 text-sm">
           <span>{me.user.email}</span>
-          {/* Sign-in and every notice go to this address, so whether it is
-              verified is worth a word — but there is no change-email flow, and
-              a control that is not here should not be implied. */}
           <Badge variant={me.user.emailVerified ? "outline" : "secondary"}>
             {me.user.emailVerified ? "verified" : "unverified"}
           </Badge>
+          <Button variant="outline" size="sm" onClick={() => setChangingEmail(!changingEmail)}>
+            Change email
+          </Button>
         </div>
+        {changingEmail ? (
+          <form
+            className="flex flex-wrap items-end gap-3"
+            onSubmit={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              void emailForm.handleSubmit();
+            }}
+          >
+            <emailForm.AppField
+              name="newEmail"
+              validators={{ onChange: changeEmailInput.shape.newEmail }}
+            >
+              {(field) => (
+                <field.TextField
+                  label="New email"
+                  type="email"
+                  autoComplete="email"
+                  className="w-64"
+                  description={
+                    me.user.emailVerified
+                      ? "Your current address approves the change, then the new one verifies itself. Sign-in moves with it; invitations sent to the old address stop being yours."
+                      : "The address changes at once and the new one gets the verification mail. Sign-in moves with it; invitations sent to the old address stop being yours."
+                  }
+                />
+              )}
+            </emailForm.AppField>
+            <emailForm.AppForm>
+              <emailForm.SubmitButton pending={changeEmail.isPending}>
+                Request change
+              </emailForm.SubmitButton>
+            </emailForm.AppForm>
+          </form>
+        ) : null}
       </CardContent>
     </Card>
   );
@@ -204,6 +261,204 @@ function PasswordCard({ accounts }: { accounts: readonly ProviderAccount[] }) {
   );
 }
 
+// One password field, three verbs — enable, disable, regenerate — all guarded
+// server-side by the same password, so the form is the same shape each time.
+function PasswordGate({
+  label,
+  pending,
+  destructive = false,
+  onSubmit,
+}: {
+  label: string;
+  pending: boolean;
+  destructive?: boolean;
+  onSubmit: (password: string) => void;
+}) {
+  const [password, setPassword] = useState("");
+  return (
+    <form
+      className="flex flex-wrap items-end gap-2"
+      onSubmit={(event) => {
+        event.preventDefault();
+        onSubmit(password);
+        setPassword("");
+      }}
+    >
+      <div className="flex flex-col gap-2">
+        <Label htmlFor={`gate-${label}`}>Your password</Label>
+        <Input
+          id={`gate-${label}`}
+          type="password"
+          autoComplete="current-password"
+          className="w-56"
+          value={password}
+          onChange={(event) => setPassword(event.target.value)}
+        />
+      </div>
+      <Button
+        type="submit"
+        variant={destructive ? "ghost" : "outline"}
+        className={destructive ? "text-destructive" : undefined}
+        disabled={password.length === 0 || pending}
+      >
+        {label}
+      </Button>
+    </form>
+  );
+}
+
+// The backup codes, shown exactly once — the same "this is the only copy"
+// treatment the provisioned connection string gets, because it is the same
+// fact: the server stores them encrypted and cannot show them again.
+function BackupCodesOnce({ codes, onSaved }: { codes: readonly string[]; onSaved: () => void }) {
+  return (
+    <div className="space-y-3 rounded-md border p-4">
+      <p className="text-sm">
+        <strong>Backup codes</strong> — each signs you in once if the authenticator is gone. This is
+        the only time they are shown; the server keeps them encrypted and cannot display them again.
+      </p>
+      <div className="grid max-w-xs grid-cols-2 gap-1 font-mono text-sm">
+        {codes.map((code) => (
+          <code key={code}>{code}</code>
+        ))}
+      </div>
+      <div className="flex gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => navigator.clipboard.writeText(codes.join("\n"))}
+        >
+          Copy all
+        </Button>
+        <Button size="sm" onClick={onSaved}>
+          I saved them
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function TwoFactorCard({ me, accounts }: { me: Me; accounts: readonly ProviderAccount[] }) {
+  // The one-time material lives here and only here: a QR to scan while
+  // enrolling, and codes to save. Neither touches the query cache.
+  const [issued, setIssued] = useState<IssuedTwoFactor | null>(null);
+  const [savedCodes, setSavedCodes] = useState<readonly string[] | null>(null);
+  const [verifyCode, setVerifyCode] = useState("");
+
+  const enable = useEnableTwoFactor({ onIssued: setIssued });
+  const verify = useVerifyTwoFactorEnrolment({
+    onVerified: () => {
+      setSavedCodes(issued?.backupCodes ?? null);
+      setIssued(null);
+      setVerifyCode("");
+    },
+  });
+  const disable = useDisableTwoFactor({ onDone: () => setSavedCodes(null) });
+  const regenerate = useRegenerateBackupCodes({ onIssued: setSavedCodes });
+
+  const hasPassword = accounts.some((account) => account.providerId === "credential");
+  const enabled = me.user.twoFactorEnabled === true;
+  // The manual half of the QR, for the reader whose phone cannot scan it.
+  const secret = issued === null ? null : new URL(issued.totpURI).searchParams.get("secret");
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">
+          Two-factor authentication{" "}
+          {enabled ? <Badge variant="outline">on</Badge> : <Badge variant="secondary">off</Badge>}
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {!hasPassword ? (
+          <p className="text-muted-foreground text-sm">
+            You sign in with GitHub, which enforces its own second factor — there is no password
+            here to pair a code with.
+          </p>
+        ) : savedCodes !== null ? (
+          <BackupCodesOnce codes={savedCodes} onSaved={() => setSavedCodes(null)} />
+        ) : issued !== null ? (
+          <div className="space-y-4">
+            <p className="text-sm">
+              Scan this with your authenticator app, then enter the six digits it shows to turn
+              two-factor on. Nothing is on until a code verifies.
+            </p>
+            <div className="w-fit rounded-md bg-white p-3">
+              <QRCode value={issued.totpURI} size={168} aria-label="TOTP enrolment QR code" />
+            </div>
+            {secret !== null ? (
+              <p className="text-muted-foreground text-sm">
+                Can't scan it? Enter this key by hand:{" "}
+                <code className="break-all font-mono text-xs">{secret}</code>
+              </p>
+            ) : null}
+            <form
+              className="flex flex-wrap items-end gap-2"
+              onSubmit={(event) => {
+                event.preventDefault();
+                verify.mutate(verifyCode);
+              }}
+            >
+              <div className="flex flex-col gap-2">
+                <Label htmlFor="totp-verify">Authenticator code</Label>
+                <Input
+                  id="totp-verify"
+                  autoComplete="one-time-code"
+                  className="w-40"
+                  value={verifyCode}
+                  onChange={(event) => setVerifyCode(event.target.value)}
+                />
+              </div>
+              <Button type="submit" disabled={verifyCode.length === 0 || verify.isPending}>
+                Verify
+              </Button>
+              <Button type="button" variant="ghost" onClick={() => setIssued(null)}>
+                Cancel
+              </Button>
+            </form>
+          </div>
+        ) : enabled ? (
+          <div className="space-y-4">
+            <p className="text-muted-foreground text-sm">
+              Signing in asks for a code from your authenticator app. If you cannot reach it, the
+              sign-in page can email a code to this address instead, or take one of your backup
+              codes — regenerate those if they are running low or the sheet is gone. Lost the app
+              and the codes, on a deployment that sends no email? Whoever runs this install can
+              reset two-factor after verifying it is you; there is no self-serve way around it, on
+              purpose.
+            </p>
+            <PasswordGate
+              label="Regenerate backup codes"
+              pending={regenerate.isPending}
+              onSubmit={(password) => regenerate.mutate(password)}
+            />
+            <Separator />
+            <PasswordGate
+              label="Turn off two-factor"
+              destructive
+              pending={disable.isPending}
+              onSubmit={(password) => disable.mutate(password)}
+            />
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <p className="text-muted-foreground text-sm">
+              A code from your phone alongside the password. Owner accounts decide what the engine
+              may do to production databases — some installs require this before an owner can change
+              anything.
+            </p>
+            <PasswordGate
+              label="Enable two-factor"
+              pending={enable.isPending}
+              onSubmit={(password) => enable.mutate(password)}
+            />
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function SessionsCard({
   sessions,
   currentToken,
@@ -284,6 +539,7 @@ export function AccountSection({
     <div className="mt-8 space-y-4">
       <ProfileCard me={me} />
       <PasswordCard accounts={accounts} />
+      <TwoFactorCard me={me} accounts={accounts} />
       <SessionsCard sessions={sessions} currentToken={me.session.token} />
     </div>
   );

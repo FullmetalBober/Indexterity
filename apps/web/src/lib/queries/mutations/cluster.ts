@@ -15,7 +15,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
 import { api } from "../../api";
-import { apiMessage } from "../errors";
+import { apiMessage, isSessionStale, isTwoFactorRequired } from "../errors";
 import { queryKeys } from "../keys";
 
 // Said the same way whether the api refused or never answered, because from the
@@ -54,9 +54,16 @@ function useInvalidateClusterCount(): () => Promise<void> {
   };
 }
 
-export function useSetClusterMode(clusterId: string) {
+// `onStale` is how the fresh-session refusal (#52) reaches the reader as a
+// password prompt instead of a failure toast: the hook hands back a retry that
+// re-fires this exact mutation, and the dialog invokes it once the sign-in
+// lands. Only the three acts the api gates this way take it.
+export function useSetClusterMode(
+  clusterId: string,
+  { onStale }: { onStale: (retry: () => void) => void },
+) {
   const invalidateClusters = useInvalidateClusters();
-  return useMutation({
+  const mutation = useMutation({
     mutationFn: (readOnly: boolean) => api().setClusterMode({ clusterId, readOnly }),
     onSuccess: (_cluster, readOnly) => {
       toast.success(
@@ -65,8 +72,13 @@ export function useSetClusterMode(clusterId: string) {
       return invalidateClusters();
     },
     // A refused change moved nothing, so there is nothing to refetch.
-    onError: () => toast.error(MODE_FAILED),
+    onError: (error, readOnly) => {
+      if (isSessionStale(error)) onStale(() => mutation.mutate(readOnly));
+      else if (isTwoFactorRequired(error)) toast.error(apiMessage(error, MODE_FAILED));
+      else toast.error(MODE_FAILED);
+    },
   });
+  return mutation;
 }
 
 // The name is what the rail, the cluster heading and every alert subject line
@@ -89,9 +101,12 @@ export function useRenameCluster(clusterId: string, { onRenamed }: { onRenamed: 
 
 // Credential rotation: verified server-side before storing, so a typo can't
 // brick the cluster; history survives (unlike disconnect + reconnect).
-export function useRotateConnection(clusterId: string, { onRotated }: { onRotated: () => void }) {
+export function useRotateConnection(
+  clusterId: string,
+  { onRotated, onStale }: { onRotated: () => void; onStale: (retry: () => void) => void },
+) {
   const invalidateClusters = useInvalidateClusters();
-  return useMutation({
+  const mutation = useMutation({
     mutationFn: (connectionString: string) =>
       api().rotateConnection({ clusterId, connectionString }),
     onSuccess: () => {
@@ -101,16 +116,24 @@ export function useRotateConnection(clusterId: string, { onRotated }: { onRotate
     },
     // 400 names the problem with the string, 404 the cluster, 502 says the
     // cluster could not be dialled with it — all three are worth reading.
-    onError: (error) => toast.error(apiMessage(error, ROTATION_FAILED, [400, 404, 502])),
+    onError: (error, connectionString) => {
+      if (isSessionStale(error)) onStale(() => mutation.mutate(connectionString));
+      else if (isTwoFactorRequired(error)) toast.error(apiMessage(error, ROTATION_FAILED));
+      else toast.error(apiMessage(error, ROTATION_FAILED, [400, 404, 502]));
+    },
   });
+  return mutation;
 }
 
 // Offboard a cluster: the api restores in-flight hidden indexes, deletes all
 // collected data, and reports how to revoke the provisioned user.
-export function useDisconnectCluster(clusterId: string) {
+export function useDisconnectCluster(
+  clusterId: string,
+  { onStale }: { onStale: (retry: () => void) => void },
+) {
   const invalidateClusterCount = useInvalidateClusterCount();
   const navigate = useNavigate();
-  return useMutation({
+  const mutation = useMutation({
     mutationFn: () => api().deleteCluster({ clusterId }),
     onSuccess: async (result) => {
       toast.success(
@@ -126,8 +149,13 @@ export function useDisconnectCluster(clusterId: string) {
       await navigate({ to: "/app" });
     },
     // The cluster is still there, so leaving its page would be a lie.
-    onError: () => toast.error(DISCONNECT_FAILED),
+    onError: (error) => {
+      if (isSessionStale(error)) onStale(() => mutation.mutate());
+      else if (isTwoFactorRequired(error)) toast.error(apiMessage(error, DISCONNECT_FAILED));
+      else toast.error(DISCONNECT_FAILED);
+    },
   });
+  return mutation;
 }
 
 // Preflight: ask the api what these credentials may do before storing them.

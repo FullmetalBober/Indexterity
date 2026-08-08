@@ -1,6 +1,6 @@
 {
-  "id": "f4d26dc3-2590-49f8-96a4-ef3d6e4f6649",
-  "prevId": "1ed18fbc-fa3a-48ba-8264-fc3dbc68d968",
+  "id": "80f6f874-c4ab-491f-a575-61f8056fb112",
+  "prevId": "f4d26dc3-2590-49f8-96a4-ef3d6e4f6649",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -333,6 +333,51 @@
         "cluster_indexes_cluster_id_clusters_id_fk": {
           "name": "cluster_indexes_cluster_id_clusters_id_fk",
           "tableFrom": "cluster_indexes",
+          "tableTo": "clusters",
+          "columnsFrom": [
+            "cluster_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.cluster_rosters": {
+      "name": "cluster_rosters",
+      "schema": "",
+      "columns": {
+        "cluster_id": {
+          "name": "cluster_id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "nodes": {
+          "name": "nodes",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "collected_at": {
+          "name": "collected_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "cluster_rosters_cluster_id_clusters_id_fk": {
+          "name": "cluster_rosters_cluster_id_clusters_id_fk",
+          "tableFrom": "cluster_rosters",
           "tableTo": "clusters",
           "columnsFrom": [
             "cluster_id"
