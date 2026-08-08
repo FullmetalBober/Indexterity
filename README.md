@@ -202,10 +202,16 @@ the emergency stop works from however old a session.
 **Owner accounts can carry a second factor, and a deployment can demand one.**
 TOTP plus backup codes, enrolled from the account page; with
 `REQUIRE_OWNER_2FA=true` every owner-only mutation — and the org acts that
-decide who has access — refuses until a code has verified. GitHub sign-ins are
-exempt (no password to pair a code with; GitHub enforces its own). Lost device
-and lost codes means whoever runs the install resets it after verifying it's
-you — there is deliberately no self-serve way around a second factor.
+decide who has access — refuses until a code has verified. Where SMTP is
+configured, the sign-in page can also mail a six-digit code instead; without
+it that button answers with why rather than sending nothing. Read
+[D44](./docs/decisions.md) before relying on the emailed code: it is a second
+factor against someone who has your password, and none against someone who has
+your inbox — which is also where a password reset lands. GitHub sign-ins are
+exempt (no password to pair a code with; GitHub enforces its own). Lost device,
+lost codes and no email means whoever runs the install resets it after
+verifying it's you — there is deliberately no self-serve way around a second
+factor.
 
 **The sign-in address can change, carefully.** A verified account's current
 address approves the change and the new one verifies itself; an unverified

@@ -26,6 +26,10 @@ export const SECURITY_EVENTS = [
   "TWO_FACTOR_VERIFIED",
   "TWO_FACTOR_FAILED",
   "TWO_FACTOR_CODES_REGENERATED",
+  // A sign-in code was mailed. Recorded because it is the one second factor
+  // whose delivery leaves the building: a burst of these to one account is
+  // somebody working a password they already have.
+  "TWO_FACTOR_OTP_SENT",
   // The request, not the flip (#83): the flip happens on a GET /verify-email
   // link indistinguishable by path from ordinary signup verification, and the
   // request is the act with the actor behind it.
@@ -94,13 +98,18 @@ export function authEventFor(path: string, ok: boolean): SecurityEventName | nul
   // Before the ok-gate: a wrong code is the interesting half, same as a wrong
   // password. TOTP and backup code land on the same pair — which kind is in
   // the path, and the path is stored on the row.
-  if (path === "/two-factor/verify-totp" || path === "/two-factor/verify-backup-code") {
+  if (
+    path === "/two-factor/verify-totp" ||
+    path === "/two-factor/verify-backup-code" ||
+    path === "/two-factor/verify-otp"
+  ) {
     return ok ? "TWO_FACTOR_VERIFIED" : "TWO_FACTOR_FAILED";
   }
   if (!ok) return null;
   if (path === "/two-factor/enable") return "TWO_FACTOR_ENABLED";
   if (path === "/two-factor/disable") return "TWO_FACTOR_DISABLED";
   if (path === "/two-factor/generate-backup-codes") return "TWO_FACTOR_CODES_REGENERATED";
+  if (path === "/two-factor/send-otp") return "TWO_FACTOR_OTP_SENT";
   if (path === "/change-email") return "EMAIL_CHANGE_REQUESTED";
   // Not in the issue's list, and it belongs there: a sign-up creates a session
   // without a sign-in, so without this the first session an account ever holds

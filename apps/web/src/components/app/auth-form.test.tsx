@@ -9,6 +9,8 @@ const signUp = vi.hoisted(() => vi.fn());
 const requestPasswordReset = vi.hoisted(() => vi.fn());
 const verifyTotp = vi.hoisted(() => vi.fn());
 const verifyBackupCode = vi.hoisted(() => vi.fn());
+const verifyOtp = vi.hoisted(() => vi.fn());
+const sendOtp = vi.hoisted(() => vi.fn());
 
 // better-auth's own client, which is what the form now talks to — no relay in
 // between. It answers with { data, error } rather than throwing, so a refusal
@@ -18,7 +20,7 @@ vi.mock("~/lib/auth-client", () => ({
     signIn: { email: signIn },
     signUp: { email: signUp },
     requestPasswordReset,
-    twoFactor: { verifyTotp, verifyBackupCode },
+    twoFactor: { verifyTotp, verifyBackupCode, verifyOtp, sendOtp },
   },
 }));
 
@@ -30,6 +32,8 @@ beforeEach(() => {
   requestPasswordReset.mockResolvedValue(OK);
   verifyTotp.mockResolvedValue(OK);
   verifyBackupCode.mockResolvedValue(OK);
+  verifyOtp.mockResolvedValue(OK);
+  sendOtp.mockResolvedValue(OK);
 });
 
 describe("AuthForm", () => {
@@ -260,5 +264,51 @@ describe("AuthForm", () => {
     expect(await screen.findByText("invalid two factor code")).toBeInTheDocument();
     expect(screen.getByLabelText("Authenticator code")).toBeInTheDocument();
     expect(onSignedIn).not.toHaveBeenCalled();
+  });
+
+  // The emailed code is a request and then an entry, so the step between them
+  // has to be visible — silence between the click and the inbox is what makes
+  // somebody click twice and burn the first code.
+  it("emails a code on request, says so, and verifies it against the OTP endpoint", async () => {
+    signIn.mockResolvedValue({ data: { twoFactorRedirect: true }, error: null });
+    const user = userEvent.setup();
+    const onSignedIn = vi.fn();
+    renderInApp(<AuthForm onSignedIn={onSignedIn} />);
+
+    await user.type(screen.getByLabelText("Email"), "a@b.test");
+    await user.type(screen.getByLabelText("Password"), "hunter2-ok");
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+
+    await user.click(await screen.findByRole("button", { name: "Email me a code instead" }));
+    expect(sendOtp).toHaveBeenCalled();
+    expect(await screen.findByText(/Code sent/)).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText("Emailed code"), "654321");
+    await user.click(screen.getByRole("button", { name: "Verify" }));
+
+    expect(verifyOtp).toHaveBeenCalledWith({ code: "654321", trustDevice: false });
+    expect(verifyTotp).not.toHaveBeenCalled();
+    expect(onSignedIn).toHaveBeenCalled();
+  });
+
+  // A deployment with no SMTP refuses, and its reason is the only thing that
+  // tells the reader to stop waiting for mail that is not coming.
+  it("shows the api's reason when the deployment cannot send email", async () => {
+    signIn.mockResolvedValue({ data: { twoFactorRedirect: true }, error: null });
+    sendOtp.mockResolvedValue({
+      data: null,
+      error: { message: "this deployment cannot send email — use your authenticator app" },
+    });
+    const user = userEvent.setup();
+    renderInApp(<AuthForm onSignedIn={vi.fn()} />);
+
+    await user.type(screen.getByLabelText("Email"), "a@b.test");
+    await user.type(screen.getByLabelText("Password"), "hunter2-ok");
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+    await user.click(await screen.findByRole("button", { name: "Email me a code instead" }));
+
+    expect(await screen.findByText(/cannot send email/)).toBeInTheDocument();
+    // Still on the authenticator field: nothing was sent, so nothing changed.
+    expect(screen.getByLabelText("Authenticator code")).toBeInTheDocument();
   });
 });
