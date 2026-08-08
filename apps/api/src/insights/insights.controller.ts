@@ -1,7 +1,12 @@
 import { Controller, Req } from "@nestjs/common";
 import { implement } from "@orpc/nest";
 import type { RoiContribution } from "@repo/contracts";
-import { clusterNode, contract } from "@repo/contracts";
+import {
+  clusterNode,
+  contract,
+  LATENCY_SERIES_MAX_COLLECTIONS,
+  LATENCY_SERIES_WINDOW_DAYS,
+} from "@repo/contracts";
 import type { FastifyRequest } from "fastify";
 import { z } from "zod";
 import {
@@ -43,10 +48,14 @@ export class InsightsController {
 
   private async loadLatencyReadings(
     clusterId: string,
+    // A floor tighter than the plan's window, when the caller only draws a
+    // recent slice (#64). Never looser: the plan window is the entitlement.
+    notBefore?: Date,
   ): Promise<Map<string, { database: string; collection: string; readings: LatencyReading[] }>> {
     // The plan's window. Rows outlive it — deletion runs one cutoff for the whole
     // deployment now — so this is what actually enforces the entitlement.
-    const since = await historyWindow(this.database.db, clusterId);
+    const planSince = await historyWindow(this.database.db, clusterId);
+    const since = notBefore !== undefined && notBefore > planSince ? notBefore : planSince;
     const rows = await this.database.db
       .select()
       .from(latencySamples)
@@ -170,29 +179,49 @@ export class InsightsController {
     });
   }
 
+  // Bounded on both axes (#64), because this was the read that grew with
+  // *every collect, forever*: measured at 200 collections × 90 days of hourly
+  // readings, the full payload was 30.9 MB per dashboard load — of which the
+  // chart drew four collections. A 30-day window bounds time (the trend chart
+  // is about recently, the before/after table covers the long term), the
+  // top-N by evidence bounds collections the same way the chart already
+  // ranked them, and totalCollections keeps the cut honest on screen.
   @Implement(contract.getLatencySeries)
   getLatencySeries(@Req() req: FastifyRequest) {
     return implement(contract.getLatencySeries).handler(async ({ input }) => {
       const orgId = await this.tenancy.org(req);
       if (!(await this.tenancy.ownsCluster(input.clusterId, orgId))) {
-        return { clusterId: input.clusterId, collections: [] };
+        return { clusterId: input.clusterId, totalCollections: 0, collections: [] };
       }
-      const groups = await this.loadLatencyReadings(input.clusterId);
-      const collections = [...groups.values()].map((group) => {
-        const gaps = latencyGaps(group.readings);
-        return {
-          database: group.database,
-          collection: group.collection,
-          points: latencyPoints(group.readings),
-          readGap: gaps.read,
-          writeGap: gaps.write,
-        };
-      });
-      return { clusterId: input.clusterId, collections };
+      const window = new Date(Date.now() - LATENCY_SERIES_WINDOW_DAYS * 86_400_000);
+      const groups = await this.loadLatencyReadings(input.clusterId, window);
+      const collections = [...groups.values()]
+        .map((group) => {
+          const gaps = latencyGaps(group.readings);
+          return {
+            database: group.database,
+            collection: group.collection,
+            points: latencyPoints(group.readings),
+            readGap: gaps.read,
+            writeGap: gaps.write,
+          };
+        })
+        .sort((a, b) => b.points.length - a.points.length);
+      return {
+        clusterId: input.clusterId,
+        totalCollections: collections.length,
+        collections: collections.slice(0, LATENCY_SERIES_MAX_COLLECTIONS),
+      };
     });
   }
 
   // Per-collection index footprint as of the latest collect.
+  //
+  // Deliberately NOT capped (#64's definition of done asks this be recorded):
+  // one row per collection, and the 500-collection worst case measured 55 KB
+  // and 28 ms — a cluster would need ~5,000 collections to reach half a
+  // megabyte, and a reader with that cluster has bigger conversations to have
+  // with this product than payload size.
   //
   // By `last_seen_at`, not `captured_at`, and the difference is the whole of what
   // run-length storage changes here. This used to select the newest BATCH of

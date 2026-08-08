@@ -281,11 +281,36 @@ export const collectionLatencySeries = z.object({
 });
 export type CollectionLatencySeries = z.infer<typeof collectionLatencySeries>;
 
+// The bounds #64 measured its way to. A 200-collection cluster with 90 days of
+// hourly readings shipped 30.9 MB of series JSON per dashboard load, of which
+// the chart drew four collections — so the api sends the top few by evidence
+// and says how many it did not. Shared constants because the panel explains
+// the cap in the same numbers the api applies.
+export const LATENCY_SERIES_WINDOW_DAYS = 30;
+export const LATENCY_SERIES_MAX_COLLECTIONS = 8;
+
 export const clusterLatencySeries = z.object({
   clusterId: z.uuid(),
+  // How many collections had readings in the window — the honest denominator
+  // when `collections` is the capped top slice of them.
+  totalCollections: z.int().nonnegative(),
   collections: z.array(collectionLatencySeries),
 });
 export type ClusterLatencySeries = z.infer<typeof clusterLatencySeries>;
+
+// Same treatment for the proposals: 4,000 of them (the one-per-index worst
+// case) measured 1.86 MB. The cap keeps the client-side sort and filter D33
+// decided (they work over what arrives), and `total` keeps the truncation
+// honest — "showing 500 of 4,000" instead of a table that silently claims to
+// be everything.
+export const RECOMMENDATIONS_CAP = 500;
+
+export const clusterRecommendations = z.object({
+  clusterId: z.uuid(),
+  total: z.int().nonnegative(),
+  recommendations: z.array(recommendation),
+});
+export type ClusterRecommendations = z.infer<typeof clusterRecommendations>;
 
 // One executed operation from the immutable audit trail.
 export const auditAction = z.object({

@@ -164,10 +164,17 @@ function buildColumns(actions: Actions): DashboardColumns<Recommendation> {
 export function RecommendationsTable({
   clusterId,
   recommendations,
+  total,
   loading,
 }: {
   clusterId: string | null;
   recommendations: Recommendation[];
+  // How many exist server-side; the api sends the RECOMMENDATIONS_CAP
+  // highest-scoring of them (#64). Sorting and filtering below work over what
+  // arrived — D33's client-side behaviour, deliberately kept — so when the
+  // two numbers differ the table has to say so, or "no rows match" quietly
+  // becomes a claim about rows that were never sent.
+  total: number;
   loading: boolean;
 }) {
   const approve = useApproveRecommendation(clusterId);
@@ -179,34 +186,44 @@ export function RecommendationsTable({
     [approve.mutate, unhide.mutate, undo.mutate],
   );
 
+  const truncated = total > recommendations.length;
+
   return (
-    <DataTable
-      className="mt-6"
-      caption="Index recommendations for this cluster"
-      columns={columns}
-      data={recommendations}
-      loading={loading}
-      getRowId={(rec) => rec.id}
-      // Highest confidence first — the ordering a reader would apply by hand.
-      initialSorting={[{ id: "score", desc: true }]}
-      filterLabel="Filter recommendations"
-      // Unbounded by nature: one row per index worth touching, across every
-      // collection. Sixty-odd is a normal cluster and thousands is a big one.
-      virtualize={{ maxHeight: 640, estimateRowHeight: 64 }}
-      // Type, Collection, Index, Score, Usage, Rationale, Action. Rationale takes
-      // the most because it is prose and wraps; the two names after it are the other
-      // unpredictable ones. Fixing these is what stops the table re-laying itself out
-      // as virtualized rows swap — see DataTable's columnWidths.
-      columnWidths={[132, 200, 200, 104, 120, 280, 132]}
-      // The rationale: prose, and the only cell here that reads better on one line than
-      // on three. Capped at a comfortable measure rather than the whole page — a line
-      // much past ninety characters is hard to track back from.
-      flexColumn={{ index: 5, max: 620 }}
-      empty={{
-        title: "No recommendations yet",
-        description:
-          "The engine proposes changes once it has a week of index usage to reason about. Nothing to review means nothing is obviously wrong.",
-      }}
-    />
+    <>
+      {truncated ? (
+        <p className="mt-6 text-muted-foreground text-sm">
+          Showing the {recommendations.length} highest-scoring of {total.toLocaleString()}{" "}
+          recommendations. The filter searches these; the rest surface as they are resolved.
+        </p>
+      ) : null}
+      <DataTable
+        className="mt-6"
+        caption="Index recommendations for this cluster"
+        columns={columns}
+        data={recommendations}
+        loading={loading}
+        getRowId={(rec) => rec.id}
+        // Highest confidence first — the ordering a reader would apply by hand.
+        initialSorting={[{ id: "score", desc: true }]}
+        filterLabel="Filter recommendations"
+        // Unbounded by nature: one row per index worth touching, across every
+        // collection. Sixty-odd is a normal cluster and thousands is a big one.
+        virtualize={{ maxHeight: 640, estimateRowHeight: 64 }}
+        // Type, Collection, Index, Score, Usage, Rationale, Action. Rationale takes
+        // the most because it is prose and wraps; the two names after it are the other
+        // unpredictable ones. Fixing these is what stops the table re-laying itself out
+        // as virtualized rows swap — see DataTable's columnWidths.
+        columnWidths={[132, 200, 200, 104, 120, 280, 132]}
+        // The rationale: prose, and the only cell here that reads better on one line than
+        // on three. Capped at a comfortable measure rather than the whole page — a line
+        // much past ninety characters is hard to track back from.
+        flexColumn={{ index: 5, max: 620 }}
+        empty={{
+          title: "No recommendations yet",
+          description:
+            "The engine proposes changes once it has a week of index usage to reason about. Nothing to review means nothing is obviously wrong.",
+        }}
+      />
+    </>
   );
 }

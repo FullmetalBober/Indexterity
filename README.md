@@ -265,7 +265,8 @@ apps/web                dashboard
                         keys.ts, and mutations/ grouped by what they change
   src/components/form   TanStack Form bound once to shadcn's Field primitives
   src/components/data-table  TanStack Table bound once to shadcn's table
-                        primitives; the two unbounded tables virtualize their rows
+                        primitives; the long tables virtualize their rows, and
+                        the api caps what it sends them (D47)
   src/components/latency-chart  TanStack Charts behind a props-stable wrapper —
                         pre-1.0, so churn is contained to this one file
 packages/contracts      oRPC + zod contracts shared by api and web
