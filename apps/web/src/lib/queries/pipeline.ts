@@ -6,14 +6,20 @@
 // a fact about invalidation, and it is expressible as three invalidations. What
 // the shared entry cost was on the read side: the ROI card could not be drawn
 // without also fetching fifty recommendations and the whole trail.
-import type { AuditAction, ClusterRoi, Recommendation } from "@repo/contracts";
+import type { AuditAction, ClusterRecommendations, ClusterRoi } from "@repo/contracts";
 import { queryOptions, useQuery } from "@tanstack/react-query";
 import { api } from "../api";
 import { queryKeys } from "./keys";
 import type { Read } from "./read";
 
 // Stable fallbacks for an absent or failed read — see the note in telemetry.ts.
-export const NO_RECOMMENDATIONS: Recommendation[] = [];
+// The whole payload, not just the rows: `total` is what keeps the api's cap
+// honest on screen (#64), so dropping it here would re-hide the truncation.
+export const NO_RECOMMENDATIONS: ClusterRecommendations = {
+  clusterId: "",
+  total: 0,
+  recommendations: [],
+};
 export const NO_ACTIVITY: AuditAction[] = [];
 // A cluster with nothing dropped yet and a cluster whose ROI read failed both
 // show zeroes, which is the honest answer either way: nothing has been proven.
@@ -49,7 +55,7 @@ export function activityQuery(clusterId: string | null) {
 
 // Each returns the payload AND whether this is the first fetch — see read.ts for
 // why the bare payload was not enough.
-export function useRecommendations(clusterId: string | null): Read<Recommendation[]> {
+export function useRecommendations(clusterId: string | null): Read<ClusterRecommendations> {
   const { data = NO_RECOMMENDATIONS, isPending } = useQuery(recommendationsQuery(clusterId));
   return { data, pending: isPending };
 }

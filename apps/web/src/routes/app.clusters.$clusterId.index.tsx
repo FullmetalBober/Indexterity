@@ -86,16 +86,20 @@ function ClusterOverview() {
   const collectionStats = useCollections(id);
   const nodes = useNodes(id);
 
-  const proposed = recommendations.data.filter((rec) => rec.state === "PROPOSED");
+  const proposed = recommendations.data.recommendations.filter((rec) => rec.state === "PROPOSED");
   const totalSaved = proposed.reduce((sum, rec) => sum + rec.estimatedBytesSaved, 0);
 
   // Ranked per metric, not once for both charts — see latency-series.ts for the bug
   // that made this its own module rather than four lines here.
-  const { readSeries, writeSeries, foldedCount, readNote, writeNote } = latencyCharts(
-    latencySeries.data,
+  const { readSeries, writeSeries, readNote, writeNote } = latencyCharts(
+    latencySeries.data.collections,
     SERIES_PALETTE,
   );
   const chartedCount = Math.max(readSeries.length, writeSeries.length);
+  // Against the server's denominator, not the payload's length: the api sends
+  // the top few by evidence and says how many had readings (#64), so this one
+  // number covers both its cut and the chart's own fold to the palette.
+  const unchartedCount = Math.max(0, latencySeries.data.totalCollections - chartedCount);
 
   // Merged by namespace into one row per collection — see collections-table.tsx,
   // which owns the row shape. Two reads behind one table, so it is waiting until
@@ -187,7 +191,8 @@ function ClusterOverview() {
 
       <RecommendationsTable
         clusterId={id}
-        recommendations={recommendations.data}
+        recommendations={recommendations.data.recommendations}
+        total={recommendations.data.total}
         loading={recommendations.pending}
       />
 
@@ -199,7 +204,7 @@ function ClusterOverview() {
           boxes and says why: a panel that renders nothing and a panel that cannot
           be measured looked identical from outside, and that is what got #85 filed
           against a chart that was working. */}
-      {latencySeries.pending || chartedCount > 0 || latencySeries.data.length > 0 ? (
+      {latencySeries.pending || chartedCount > 0 || latencySeries.data.collections.length > 0 ? (
         <section className="mt-8 grid gap-6 md:grid-cols-2">
           <LineChart
             title="Read latency"
@@ -215,9 +220,9 @@ function ClusterOverview() {
             pending={latencySeries.pending}
             emptyNote={writeNote}
           />
-          {foldedCount > 0 ? (
+          {unchartedCount > 0 ? (
             <p className="text-muted-foreground text-xs md:col-span-2">
-              +{foldedCount} more collections — see the table below.
+              +{unchartedCount} more collections had readings — see the table below.
             </p>
           ) : null}
         </section>

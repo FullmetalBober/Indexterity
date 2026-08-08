@@ -17,6 +17,7 @@ import {
   clusterLatencySeries,
   clusterNodes,
   clusterPolicyView,
+  clusterRecommendations,
   clusterRoi,
   connectionDiagnosis,
   myInvite,
@@ -38,14 +39,18 @@ export const contract = {
     .route({ method: "GET", path: "/clusters", summary: "List connected clusters" })
     .output(z.array(cluster)),
 
+  // Capped at the RECOMMENDATIONS_CAP highest-scoring, with the true total
+  // beside them (#64). Nobody has asked to page through 20k proposals — they
+  // want the top ones, which is what the default sort already gives — so the
+  // cap carries an honest count rather than a cursor.
   listRecommendations: oc
     .route({
       method: "GET",
       path: "/clusters/{clusterId}/recommendations",
-      summary: "List recommendations for a cluster",
+      summary: "The cluster's recommendations: the highest-scoring, and how many exist",
     })
     .input(clusterId)
-    .output(z.array(recommendation)),
+    .output(clusterRecommendations),
 
   getRoi: oc
     .route({

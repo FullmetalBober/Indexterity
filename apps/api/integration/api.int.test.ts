@@ -1,4 +1,9 @@
 import type { ChildProcess } from "node:child_process";
+import {
+  LATENCY_SERIES_MAX_COLLECTIONS,
+  LATENCY_SERIES_WINDOW_DAYS,
+  RECOMMENDATIONS_CAP,
+} from "@repo/contracts";
 import { makeWorkerUtils } from "graphile-worker";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { entitledAutomation } from "../src/billing/plans";
@@ -3311,5 +3316,99 @@ describe("the control plane's own indexes", () => {
     `);
     const unindexed = rows.rows.map((row) => `${String(row.child)}.${String(row.column)}`);
     expect(unindexed).toEqual([]);
+  });
+});
+
+// The bounds #64 measured its way to. Both caps are asserted against real
+// rows through the real handler, because the whole point of the issue was that
+// nobody had measured what the reads actually ship.
+describe("bounded per-cluster reads", () => {
+  it("sends the highest-scoring recommendations and the true total", async () => {
+    const boundedId = await bareCluster("Bounded Recs");
+    const OVERSHOOT = 20;
+    const rows = [];
+    for (let i = 0; i < RECOMMENDATIONS_CAP + OVERSHOOT; i++) {
+      rows.push({
+        clusterId: boundedId,
+        type: "DROP_UNUSED" as const,
+        state: "PROPOSED" as const,
+        database: "app",
+        collection: `coll_${i % 10}`,
+        indexName: `idx_${i}_1`,
+        rationale: "unused across the trust window",
+        // The overshoot scores zero, so "kept the top" is checkable rather
+        // than merely "kept some".
+        score: i < OVERSHOOT ? 0 : 50,
+        estimatedBytesSaved: 1_000,
+      });
+    }
+    for (let i = 0; i < rows.length; i += 500) {
+      await db.insert(recommendations).values(rows.slice(i, i + 500));
+    }
+
+    const body = asRecord(
+      await (await api(`/clusters/${boundedId}/recommendations`, owner)).json(),
+    );
+    const sent = body.recommendations as { score: number }[];
+    expect(body.total).toBe(RECOMMENDATIONS_CAP + OVERSHOOT);
+    expect(sent).toHaveLength(RECOMMENDATIONS_CAP);
+    // The cut is by score, not by whatever order postgres felt like.
+    expect(sent.every((rec) => rec.score === 50)).toBe(true);
+  });
+
+  it("windows the latency series in time and caps the collections it charts", async () => {
+    const seriesId = await bareCluster("Bounded Series");
+    const now = Date.now();
+    const fixtures = [];
+    // Enough collections to exceed the cap, with the first ones carrying more
+    // readings so the top-N is decided by evidence rather than by luck.
+    for (let c = 0; c < LATENCY_SERIES_MAX_COLLECTIONS + 3; c++) {
+      const looks = c < LATENCY_SERIES_MAX_COLLECTIONS ? 5 : 3;
+      for (let t = 0; t < looks; t++) {
+        const at = new Date(now - (looks - t) * 3_600_000);
+        fixtures.push({
+          clusterId: seriesId,
+          database: "app",
+          collection: `in_window_${c}`,
+          readOps: 100 * (t + 1),
+          readLatencyMicros: 1_000 * (t + 1),
+          writeOps: 50 * (t + 1),
+          writeLatencyMicros: 500 * (t + 1),
+          capturedAt: at,
+          lastSeenAt: at,
+        });
+      }
+    }
+    // Inside the plan's 90-day history, outside the series' 30-day window —
+    // the case the new floor exists for.
+    for (let t = 0; t < 5; t++) {
+      const at = new Date(now - (LATENCY_SERIES_WINDOW_DAYS + 30) * 86_400_000 + t * 3_600_000);
+      fixtures.push({
+        clusterId: seriesId,
+        database: "app",
+        collection: "ancient",
+        readOps: 100 * (t + 1),
+        readLatencyMicros: 1_000 * (t + 1),
+        writeOps: 50 * (t + 1),
+        writeLatencyMicros: 500 * (t + 1),
+        capturedAt: at,
+        lastSeenAt: at,
+      });
+    }
+    await insertLatency(db, fixtures);
+
+    const body = asRecord(await (await api(`/clusters/${seriesId}/latency-series`, owner)).json());
+    const collections = body.collections as { collection: string }[];
+    // The denominator counts what had readings IN the window, so the panel can
+    // say how many it is not drawing.
+    expect(body.totalCollections).toBe(LATENCY_SERIES_MAX_COLLECTIONS + 3);
+    expect(collections).toHaveLength(LATENCY_SERIES_MAX_COLLECTIONS);
+    expect(collections.map((entry) => entry.collection)).not.toContain("ancient");
+
+    // The long-term view is still whole: the before/after table reads the same
+    // rows without the series' tighter window.
+    const summary = asRecord(await (await api(`/clusters/${seriesId}/latency`, owner)).json());
+    const summarized = summary.collections as { collection: string }[];
+    expect(summarized.map((entry) => entry.collection)).toContain("ancient");
   });
 });
