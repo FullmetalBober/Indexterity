@@ -20,6 +20,7 @@
     "@repo/errors": "^0.1.0",
     "@repo/metrics": "*",
     "@sentry/tanstackstart-react": "^10.69.0",
+    "@t3-oss/env-core": "^0.13.11",
     "@tanstack/charts": "^0.6.5",
     "@tanstack/react-charts": "^0.6.5",
     "@tanstack/react-form": "^1.33.3",
@@ -39,7 +40,8 @@
     "react-dom": "^19.2.8",
     "react-qr-code": "^2.2.0",
     "sonner": "^2.0.7",
-    "tailwind-merge": "^3.3.1"
+    "tailwind-merge": "^3.3.1",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@playwright/test": "^1.62.1",

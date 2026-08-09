@@ -1,32 +1,29 @@
-import { afterEach, describe, expect, it } from "vitest";
-import { jsonLd, NOINDEX_META, seoTags, siteOrigin } from "./seo";
-
-const previous = process.env.SITE_URL;
-
-afterEach(() => {
-  if (previous === undefined) delete process.env.SITE_URL;
-  else process.env.SITE_URL = previous;
-});
+import { describe, expect, it } from "vitest";
+import { jsonLd, NOINDEX_META, originFrom, seoTags, siteOrigin } from "./seo";
 
 function content(tags: ReturnType<typeof seoTags>, key: string): string | undefined {
   return tags.meta.find((tag) => tag.name === key || tag.property === key)?.content;
 }
 
+// SITE_URL is a server variable now (lib/env.ts), read once at boot rather than
+// on every call — so the override is exercised through the pure half, and
+// siteOrigin() is pinned for the side these tests actually run on.
 describe("siteOrigin", () => {
-  it("is the canonical origin by default", () => {
-    delete process.env.SITE_URL;
+  it("is the canonical origin in the browser, whatever the server was told", () => {
     expect(siteOrigin()).toBe("https://indexterity.alivlad.com");
   });
 
+  it("is the canonical origin when nothing overrides it", () => {
+    expect(originFrom(undefined)).toBe("https://indexterity.alivlad.com");
+  });
+
   it("lets a staging copy override it", () => {
-    process.env.SITE_URL = "https://staging.example.com";
-    expect(siteOrigin()).toBe("https://staging.example.com");
+    expect(originFrom("https://staging.example.com")).toBe("https://staging.example.com");
   });
 
   // A trailing slash would produce "https://x.com//pricing" in every canonical.
   it("strips trailing slashes so joined paths stay well-formed", () => {
-    process.env.SITE_URL = "https://staging.example.com///";
-    expect(siteOrigin()).toBe("https://staging.example.com");
+    expect(originFrom("https://staging.example.com///")).toBe("https://staging.example.com");
   });
 });
 
@@ -36,7 +33,6 @@ describe("seoTags", () => {
   // Duplicate content is the failure this guards: the canonical must point at
   // the one indexable copy no matter which host served the response.
   it("points canonical and og:url at the same absolute URL", () => {
-    delete process.env.SITE_URL;
     const tags = seoTags(page);
     const expected = "https://indexterity.alivlad.com/pricing";
     expect(tags.links).toContainEqual({ rel: "canonical", href: expected });
@@ -60,7 +56,6 @@ describe("seoTags", () => {
   });
 
   it("makes the social image absolute, with a default", () => {
-    delete process.env.SITE_URL;
     expect(content(seoTags(page), "og:image")).toBe("https://indexterity.alivlad.com/og-card.png");
     expect(content(seoTags({ ...page, image: "/custom.png" }), "og:image")).toBe(
       "https://indexterity.alivlad.com/custom.png",

@@ -12,6 +12,7 @@
 // origin in and out, so Set-Cookie passes through byte for byte and there is
 // nothing to re-encode.
 import { apiOrigin } from "./api-origin";
+import { trustsProxy } from "./env";
 
 // Connection-level headers describe THIS hop and must not be forwarded to the
 // next one. content-length goes too: the body is re-framed by fetch, and a
@@ -38,10 +39,6 @@ const HOP_BY_HOP = new Set([
 // about. So they are stripped unless this server is itself behind a proxy that
 // sets them, which is a thing the deployment has to say out loud.
 const CLIENT_SPOOFABLE = ["x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "x-real-ip"];
-
-function trustsProxy(): boolean {
-  return process.env.TRUST_PROXY === "true";
-}
 
 export function isApiRequest(pathname: string): boolean {
   return pathname === "/api" || pathname.startsWith("/api/");

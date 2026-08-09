@@ -13,9 +13,9 @@ import {
   withinLimit,
 } from "../billing/plans";
 import { seatsUsed } from "../billing/usage";
+import { requireOwnerTwoFactor } from "../config/env";
 import { and, clusters, eq, organizations } from "../db";
 import { DatabaseService } from "../db/database.service";
-import { requireOwnerTwoFactor } from "../env";
 
 // Authn + tenancy, shared by every controller. Was four private methods copied
 // into one 950-line controller; the rules are identical everywhere, so they

@@ -1,5 +1,5 @@
 import { type Runner, run } from "graphile-worker";
-import { requiredEnv } from "../env";
+import { apiEnv, workerEnv } from "../config/env";
 import { captureError } from "../errors/reporting";
 import { ALERT_COOLDOWN_MS, alertAllowed, notifyClusterOwners } from "../mail/notify";
 import { instrumentRunner } from "../metrics";
@@ -59,9 +59,10 @@ const CRONTAB = [
 // Start the job runner. Used by the standalone worker process, and by the api
 // itself when RUN_WORKER=true collapses both into one container.
 export async function startWorker(): Promise<Runner> {
+  const values = workerEnv();
   const runner = await run({
-    connectionString: requiredEnv("DATABASE_URL"),
-    concurrency: Number(process.env.WORKER_CONCURRENCY ?? 2),
+    connectionString: values.DATABASE_URL,
+    concurrency: values.WORKER_CONCURRENCY,
     taskList,
     crontab: CRONTAB,
   });
@@ -119,5 +120,5 @@ export async function startWorker(): Promise<Runner> {
 // in-memory alert cooldown keeps its single-replica assumption. Small and
 // self-hosted installs trade that for one container.
 export function embeddedWorkerEnabled(): boolean {
-  return process.env.RUN_WORKER === "true";
+  return apiEnv().RUN_WORKER;
 }

@@ -1,11 +1,6 @@
 import { makeWorkerUtils } from "graphile-worker";
-import {
-  effectiveRetentionDays,
-  maxRetentionDays,
-  operatorCeilingDays,
-  type Plan,
-  planFrom,
-} from "../billing/plans";
+import { effectiveRetentionDays, maxRetentionDays, type Plan, planFrom } from "../billing/plans";
+import { coreEnv, operatorCeilingDays } from "../config/env";
 import {
   and,
   clusterIndexes,
@@ -19,7 +14,6 @@ import {
   recommendations,
   sql,
 } from "../db";
-import { requiredEnv } from "../env";
 import { jobDb } from "./db";
 
 const DAY_MS = 86_400_000;
@@ -57,7 +51,7 @@ export async function pruneDeadLetterJobs(): Promise<number> {
   `);
   const ids = rows.rows.flatMap((row) => (typeof row.id === "string" ? [row.id] : []));
   if (ids.length === 0) return 0;
-  const utils = await makeWorkerUtils({ connectionString: requiredEnv("DATABASE_URL") });
+  const utils = await makeWorkerUtils({ connectionString: coreEnv().DATABASE_URL });
   try {
     await utils.completeJobs(ids);
   } finally {
@@ -106,7 +100,7 @@ export async function pruneOldSamples(): Promise<number> {
   const clusterIds = owned.map((row) => row.clusterId);
 
   let pruned = 0;
-  const keepDays = maxRetentionDays();
+  const keepDays = maxRetentionDays(operatorCeilingDays());
   if (Number.isFinite(keepDays)) {
     const cutoff = new Date(Date.now() - keepDays * DAY_MS);
     // By when a run ENDED, not when it started. A row covers
@@ -174,7 +168,7 @@ export async function pruneOldSamples(): Promise<number> {
     byPlan.set(plan, ids);
   }
   for (const [plan, ids] of byPlan) {
-    const days = effectiveRetentionDays(plan);
+    const days = effectiveRetentionDays(plan, operatorCeilingDays());
     if (!Number.isFinite(days)) continue;
     const cutoff = new Date(Date.now() - days * DAY_MS);
     const decisions = await db

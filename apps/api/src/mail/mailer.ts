@@ -1,19 +1,21 @@
 import { createTransport, type Transporter } from "nodemailer";
+import { workerEnv } from "../config/env";
 
-// Outbound mail (invites, alerts). Configured entirely from SMTP_* env; when
-// unset, sending is a logged no-op so dev environments work without SMTP.
+// Outbound mail (invites, alerts). Configured entirely from SMTP_* env; with no
+// SMTP_HOST, sending is a logged no-op so dev environments work without SMTP.
+//
+// A host with only half its credentials no longer lands here: it used to read as
+// "mail is off" while every invitation and reset reported success, and the
+// schema refuses to boot on it instead (config/schema.ts → checkMailGroup).
 let transporter: Transporter | null | undefined;
 
 function getTransporter(): Transporter | null {
   if (transporter !== undefined) return transporter;
-  const host = process.env.SMTP_HOST;
-  const user = process.env.SMTP_USER;
-  const pass = process.env.SMTP_PASS;
-  if (host === undefined || host === "" || user === undefined || pass === undefined) {
+  const { SMTP_HOST: host, SMTP_USER: user, SMTP_PASS: pass, SMTP_PORT: port } = workerEnv();
+  if (host === undefined || user === undefined || pass === undefined) {
     transporter = null;
     return transporter;
   }
-  const port = Number(process.env.SMTP_PORT ?? 465);
   transporter = createTransport({
     host,
     port,
@@ -34,7 +36,8 @@ export async function sendMail(to: string, subject: string, text: string): Promi
     console.warn(`mail disabled (no SMTP config); skipped "${subject}" to ${to}`);
     return false;
   }
-  const from = process.env.MAIL_FROM ?? process.env.SMTP_USER ?? "";
+  const { MAIL_FROM, SMTP_USER } = workerEnv();
+  const from = MAIL_FROM ?? SMTP_USER ?? "";
   try {
     await transport.sendMail({ from: `Indexterity <${from}>`, to, subject, text });
     return true;

@@ -16,6 +16,8 @@
 // produced and approved, and then every apply tick fails with a message about
 // a field nobody mentioned. Nothing drops and nothing explains why.
 
+import { workerEnv } from "../config/env";
+
 export interface ServerVersion {
   readonly major: number;
   readonly minor: number;
@@ -55,7 +57,7 @@ export function hasQueryStatsPlanMetrics(version: ServerVersion | null): boolean
 // self-hosted escape hatches. The floor is not overridable: below it the
 // pipeline is either impossible (pre-4.4) or unsupported on purpose.
 export function allowUntestedVersions(): boolean {
-  return process.env.ALLOW_UNTESTED_MONGO_VERSION === "true";
+  return workerEnv().ALLOW_UNTESTED_MONGO_VERSION;
 }
 
 export function isTestedVersion(version: ServerVersion | null): boolean {

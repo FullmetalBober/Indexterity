@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { loadEnv } from "../config/env";
 import {
   applyTlsOverrides,
   assertTlsEnforced,
@@ -10,9 +11,11 @@ import {
 const NONE = { allowInvalidCertificates: false, allowInvalidHostnames: false, insecure: false };
 const CERTS = { ...NONE, allowInvalidCertificates: true };
 
+// The flag is read from the validated environment, which is parsed once at boot
+// — so a test that wants a different one says when the process read it.
 afterEach(() => {
-  process.env.ALLOW_INSECURE_CLUSTER_TLS = undefined;
   delete process.env.ALLOW_INSECURE_CLUSTER_TLS;
+  loadEnv("api");
 });
 
 describe("usesTls", () => {
@@ -65,14 +68,16 @@ describe("assertTlsEnforced", () => {
   // The dev stack and both test suites dial a local mongod with no certificate.
   it("stands down when the deployment has opted out", () => {
     process.env.ALLOW_INSECURE_CLUSTER_TLS = "true";
+    loadEnv("api");
     expect(() => assertTlsEnforced("mongodb://h:27017/app")).not.toThrow();
   });
 
-  // Only the exact string. A truthy-looking value is a misconfiguration, and the
-  // safe reading of one is "no".
+  // Only the exact string. A truthy-looking value used to read as "no", which
+  // was the safe answer to the wrong question — the deployment meant yes. It is
+  // a boot failure now (config/schema.test.ts), so nothing here can see one.
   it("takes only a literal true", () => {
     process.env.ALLOW_INSECURE_CLUSTER_TLS = "1";
-    expect(() => assertTlsEnforced("mongodb://h:27017/app")).toThrow(InsecureConnectionError);
+    expect(() => loadEnv("api")).toThrow(/ALLOW_INSECURE_CLUSTER_TLS/);
   });
 });
 

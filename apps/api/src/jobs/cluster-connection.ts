@@ -1,6 +1,6 @@
+import { masterKeyBytesFor } from "../config/env";
 import { clusters, type Database, envKeyProvider, eq, open } from "../db";
 import type { ClusterEngine, EngineSession } from "../engine/ports";
-import { masterKeyBytesFor } from "../env";
 import { acquireClusterSession } from "./connection-pool";
 
 // The stored credentials would not decrypt. Always a control-plane problem —

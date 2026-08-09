@@ -22,14 +22,18 @@ export function useSecureCookies(baseURL: string, nodeEnv: string | undefined): 
 // misconfigure. Same shape as the other "unsafe, and sometimes what you meant"
 // switches (ALLOW_PRIVATE_CLUSTER_TARGETS, ALLOW_UNTESTED_MONGO_VERSION):
 // opt-in, named for what it gives up, and never the default.
-export function allowInsecureAuthUrl(): boolean {
-  return process.env.ALLOW_INSECURE_AUTH_URL === "true";
-}
-
-export function assertProductionUrl(baseURL: string, nodeEnv: string | undefined): void {
+//
+// Taken as an argument rather than read here: config/schema.ts owns what the
+// variable means, and a check whose inputs are all arguments is one a test can
+// state in a line.
+export function assertProductionUrl(
+  baseURL: string,
+  nodeEnv: string | undefined,
+  allowInsecure: boolean,
+): void {
   if (nodeEnv !== "production") return;
   if (baseURL.startsWith("https://")) return;
-  if (allowInsecureAuthUrl()) return;
+  if (allowInsecure) return;
   throw new Error(
     `BETTER_AUTH_URL must be https in production (got "${baseURL}"). ` +
       `Set it to the api's public https origin; the session cookie's Secure flag depends on it. ` +
