@@ -11,6 +11,7 @@ export default defineConfig({
     // compose mongo, which serves no TLS. `startApi` sets this for the children
     // it spawns; this is the same opt-out for the runner itself.
     env: { ALLOW_INSECURE_CLUSTER_TLS: "true" },
+    setupFiles: ["./vitest.integration.setup.ts"],
     fileParallelism: false,
     testTimeout: 30_000,
     hookTimeout: 120_000,

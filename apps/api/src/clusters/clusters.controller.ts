@@ -6,6 +6,7 @@ import type { FastifyRequest } from "fastify";
 import { actorFromRequest } from "../audit/http-actor";
 import { recordSecurityEvent, type SecurityEventInput } from "../audit/security-events";
 import { requireUserId } from "../auth/session";
+import { currentKeyVersion, masterKeyBytesFor } from "../config/env";
 import {
   and,
   clusters,
@@ -22,7 +23,6 @@ import { DatabaseService } from "../db/database.service";
 import { allowPrivateTargets, assertTargetsAllowed, BlockedTargetError } from "../engine/net-guard";
 import { NO_TLS_OVERRIDES, type TlsOverrides } from "../engine/ports";
 import { adapterFor, engineSupported } from "../engine/registry";
-import { currentKeyVersion, masterKeyBytesFor } from "../env";
 import { consumeDialBudget } from "../errors/dial-budget";
 import { mapClusterError, toCluster, toDiagnosis } from "../http/mappers";
 import { TenancyService } from "../http/tenancy.service";

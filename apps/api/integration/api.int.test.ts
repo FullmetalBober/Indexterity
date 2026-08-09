@@ -7,6 +7,7 @@ import {
 import { makeWorkerUtils } from "graphile-worker";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { entitledAutomation } from "../src/billing/plans";
+import { loadEnv } from "../src/config/env";
 import {
   account,
   actions,
@@ -2845,13 +2846,19 @@ describe("retention follows the plan", () => {
       },
     ]);
 
+    // The ceiling is read from the validated environment, which this process
+    // parsed at startup (vitest.integration.setup.ts) — so setting it means
+    // saying when the process read it, and putting it back means saying so
+    // again.
     const previous = process.env.RETENTION_DAYS;
     process.env.RETENTION_DAYS = "7";
+    loadEnv("api");
     try {
       await pruneOldSamples();
     } finally {
       if (previous === undefined) delete process.env.RETENTION_DAYS;
       else process.env.RETENTION_DAYS = previous;
+      loadEnv("api");
     }
     // SCALE would have kept it for a year; the operator's ceiling wins.
     expect(

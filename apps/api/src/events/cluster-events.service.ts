@@ -2,7 +2,7 @@ import { EventEmitter, on } from "node:events";
 import { Injectable, type OnApplicationBootstrap, type OnModuleDestroy } from "@nestjs/common";
 import type { ClusterEvent } from "@repo/contracts";
 import { Client } from "pg";
-import { requiredEnv } from "../env";
+import { coreEnv } from "../config/env";
 import { CLUSTER_EVENTS_CHANNEL, parseClusterEventNotification, toClusterEvent } from "./channel";
 
 const RECONNECT_MIN_MS = 1_000;
@@ -66,7 +66,7 @@ export class ClusterEventsService implements OnApplicationBootstrap, OnModuleDes
 
   private async connect(): Promise<void> {
     if (this.closing.signal.aborted) return;
-    const client = new Client({ connectionString: requiredEnv("DATABASE_URL") });
+    const client = new Client({ connectionString: coreEnv().DATABASE_URL });
     // A dropped connection surfaces here after connect succeeds. Without a
     // handler it would be an uncaught exception; with one, it is a reconnect.
     client.on("error", () => this.scheduleReconnect());

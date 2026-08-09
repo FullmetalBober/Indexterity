@@ -428,6 +428,39 @@ docker build -f apps/api/Dockerfile -t indexterity-api .
 docker build -f apps/web/Dockerfile -t indexterity-web .
 ```
 
+### Configuration
+
+**Every process validates its environment before it serves anything**, against
+one schema per process rather than reads scattered through the code. `absent is
+fine, malformed is fatal`: an unset optional knob takes its default, and a
+malformed one is a boot failure naming the variable and what it expected. So
+`AUTH_RATE_LIMIT_MAX=2O` (letter O) refuses to start instead of quietly reading
+as 20, and a garbled `TRUST_PROXY` refuses instead of quietly meaning "no proxy
+in front" — which used to collapse every per-client rate limit into one shared
+bucket.
+
+Three schemas, because the three processes are given different things
+(`apps/api/src/config/schema.ts`):
+
+| Process | Demands | Because |
+|---|---|---|
+| `migrate` | `DATABASE_URL` | The pre-install Job talks to Postgres and exits |
+| `worker` | `+ MASTER_KEY` | It unseals stored credentials to dial a cluster — without it, it used to start cleanly and fail at the first job |
+| `api` | `+ BETTER_AUTH_SECRET` | Only the api serves auth |
+
+The dashboard server has its own, built on `@t3-oss/env-core`
+(`apps/web/src/lib/env.ts`), where the interesting part is the split: every
+variable is a **server** one, so reading one in the browser throws rather than
+returning undefined, and a value the browser genuinely needs has to be declared
+with the `VITE_` prefix that makes it public by construction. There are none.
+
+The schema is also the source of truth for the four places a variable has to be
+registered — `.env.example`, `docker-compose.yml`, the test suites, and the Helm
+chart. `config/homes.test.ts` walks it and holds all four to it, in both
+directions: a required variable the chart never sets fails the test rather than
+the deploy, and a variable the chart sets that no schema knows is a typo nothing
+else would have caught.
+
 One web image serves every environment — `API_URL` and `WEB_ORIGIN` are read at
 runtime, and nothing about the api's address is baked into the browser bundle.
 The worker deploys from the api image with `CMD ["node",

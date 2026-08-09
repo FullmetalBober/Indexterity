@@ -2,6 +2,11 @@
 // in this file before the first statement of the body, so an init written as a
 // call here would run after everything it is supposed to precede (#31).
 import "~/lib/errors/provider";
+// Second, and for the same reason: createEnv validates on import, so this is
+// where an invalid environment becomes a boot failure that names the variable
+// instead of a default that quietly took effect (#126). After the reporter, so
+// the refusal is itself reportable.
+import "~/lib/env";
 import { wrapFetchWithSentry } from "@sentry/tanstackstart-react";
 import { createStartHandler, defaultStreamHandler } from "@tanstack/react-start/server";
 import { createServerEntry } from "@tanstack/react-start/server-entry";

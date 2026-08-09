@@ -1,9 +1,8 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   allowsAutoApply,
   allowsWorkloadAnalysis,
   DEFAULT_PLAN,
-  defaultOrgPlan,
   effectiveRetentionDays,
   entitledAutomation,
   entitlementsFor,
@@ -153,42 +152,16 @@ describe("entitlements", () => {
   });
 });
 
-// A self-hosted install owns its database, so a quota there is decoration. The
-// code default stays strict — a process that has not been told where it runs
-// should assume the answer that cannot leak entitlements.
-describe("defaultOrgPlan", () => {
-  const previous = process.env.DEFAULT_ORG_PLAN;
-  afterEach(() => {
-    if (previous === undefined) delete process.env.DEFAULT_ORG_PLAN;
-    else process.env.DEFAULT_ORG_PLAN = previous;
-  });
-
-  it("is FREE when nothing says otherwise", () => {
-    delete process.env.DEFAULT_ORG_PLAN;
-    expect(defaultOrgPlan()).toBe("FREE");
-  });
-
-  it("takes the deployment's answer when there is one", () => {
-    process.env.DEFAULT_ORG_PLAN = "SCALE";
-    expect(defaultOrgPlan()).toBe("SCALE");
-  });
-
-  it("refuses to guess from a typo", () => {
-    process.env.DEFAULT_ORG_PLAN = "scale";
-    expect(defaultOrgPlan()).toBe("FREE");
-  });
-});
-
 // Half a year on PRO: long enough for a quarterly job to show up twice, which
 // is what makes "this index is only used at quarter end" provable rather than
 // a guess.
-describe("retention", () => {
-  const previous = process.env.RETENTION_DAYS;
-  afterEach(() => {
-    if (previous === undefined) delete process.env.RETENTION_DAYS;
-    else process.env.RETENTION_DAYS = previous;
-  });
+//
+// The operator's ceiling is an argument now, not a read of RETENTION_DAYS —
+// this file promises to be pure, and config/schema.test.ts is where the variable
+// itself is pinned. NO_CEILING is what an unset one means.
+const NO_CEILING = Number.POSITIVE_INFINITY;
 
+describe("retention", () => {
   it("gives PRO half a year", () => {
     expect(entitlementsFor("PRO").retentionDays).toBe(183);
   });
@@ -198,13 +171,14 @@ describe("retention", () => {
   // deployment so it can sweep a contiguous range; the plan's own window is
   // applied on every read instead (jobs/plan.ts).
   it("keeps rows for the longest window any plan could claim", () => {
-    delete process.env.RETENTION_DAYS;
     const longest = Math.max(...PLANS.map((plan) => entitlementsFor(plan).retentionDays));
-    expect(maxRetentionDays()).toBe(longest);
+    expect(maxRetentionDays(NO_CEILING)).toBe(longest);
     // And nobody can be entitled to a row that has been deleted — the whole
     // safety property of splitting the two.
     for (const plan of PLANS) {
-      expect(effectiveRetentionDays(plan)).toBeLessThanOrEqual(maxRetentionDays());
+      expect(effectiveRetentionDays(plan, NO_CEILING)).toBeLessThanOrEqual(
+        maxRetentionDays(NO_CEILING),
+      );
     }
   });
 
@@ -212,15 +186,13 @@ describe("retention", () => {
     // Storage is the operator's bill, so RETENTION_DAYS caps what is kept AND
     // what any plan may see. A ceiling that capped only visibility would keep
     // paying for rows nobody may read.
-    process.env.RETENTION_DAYS = "30";
-    expect(maxRetentionDays()).toBe(30);
-    expect(effectiveRetentionDays("SCALE")).toBe(30);
-    expect(effectiveRetentionDays("FREE")).toBe(30);
+    expect(maxRetentionDays(30)).toBe(30);
+    expect(effectiveRetentionDays("SCALE", 30)).toBe(30);
+    expect(effectiveRetentionDays("FREE", 30)).toBe(30);
   });
 
   it("ignores a ceiling above the plans, rather than extending them", () => {
-    process.env.RETENTION_DAYS = "10000";
-    expect(maxRetentionDays()).toBe(365);
-    expect(effectiveRetentionDays("FREE")).toBe(90);
+    expect(maxRetentionDays(10_000)).toBe(365);
+    expect(effectiveRetentionDays("FREE", 10_000)).toBe(90);
   });
 });

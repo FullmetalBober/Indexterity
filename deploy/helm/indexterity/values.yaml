@@ -43,6 +43,11 @@ api:
   tolerations: []
   affinity: {}
   podAnnotations: {}
+  # Run the job runner inside the api process instead of a separate worker
+  # container, for a small single-replica install that sets worker.enabled=false.
+  # Keep it false otherwise: with the worker Deployment on, or with more than one
+  # api replica, the cron schedule would be installed more than once.
+  runWorker: false
   # Extra environment variables (name/value pairs).
   extraEnv: []
 
@@ -229,6 +234,23 @@ config:
   # MongoDB you manage genuinely serves no certificate and the network between
   # is trusted.
   allowInsecureClusterTls: false
+  # Allow connecting clusters running a MongoDB major series newer than the one
+  # this release was tested against. The floor is not overridable; this is the
+  # ceiling. Refusing rather than guessing is the default because the engine
+  # hides, drops and builds indexes on a live database, and a major release is
+  # where command behaviour moves.
+  allowUntestedMongoVersion: false
+  # The operator's retention ceiling, in days. Storage is your bill, so this caps
+  # what any plan keeps AND what any plan may see. Empty means no ceiling — each
+  # plan's own window decides.
+  retentionDays: ""
+  # Per-IP request budgets, per minute. Raise them for a shared egress IP or a
+  # test suite. Read rateLimitMax as PER REPLICA (see the api Deployment);
+  # authRateLimitMax is read twice — Fastify applies it per replica to
+  # /api/auth/*, and better-auth applies it to the credential endpoints counting
+  # in Postgres, so that half is the whole deployment's budget.
+  rateLimitMax: 300
+  authRateLimitMax: 20
   # Whether a trusted proxy sits in front of the api. Behind an ingress or a
   # Service, every request arrives from the proxy, so the per-IP rate limits
   # collapse into one shared bucket unless the forwarded address is trusted.

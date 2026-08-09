@@ -91,7 +91,6 @@ services:
     working_dir: /app
     command: sh -c "npm install && exec npx turbo run dev --filter=@repo/web"
     environment:
-      WEB_PORT: "3000"
       # Two things read this. The web server's own SSR reads, which happen in
       # this container — so the address has to be one this container can reach,
       # not the one the browser uses — and the /api passthrough, which forwards

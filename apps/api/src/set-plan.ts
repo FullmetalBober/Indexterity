@@ -1,6 +1,6 @@
 import { entitlementsFor, isPlan, PLANS, planFrom } from "./billing/plans";
+import { coreEnv, loadEnvOrExit } from "./config/env";
 import { createDatabase, eq, organizations } from "./db";
-import { requiredEnv } from "./env";
 
 // Move an organization onto a plan.
 //
@@ -25,7 +25,8 @@ function describeLimit(value: number): string {
 }
 
 async function main(): Promise<void> {
-  const db = createDatabase(requiredEnv("DATABASE_URL"));
+  loadEnvOrExit("migrate");
+  const db = createDatabase(coreEnv().DATABASE_URL);
   const [target, plan, ...noteParts] = process.argv.slice(2);
 
   if (target === undefined) {

@@ -1,5 +1,5 @@
+import { currentKeyVersion, loadEnvOrExit, masterKeyBytesFor, workerEnv } from "./config/env";
 import { clusters, createDatabase, envKeyProvider, eq, ne, open, seal } from "./db";
-import { currentKeyVersion, masterKeyBytesFor, requiredEnv } from "./env";
 
 // Re-seal every stored connection string under the current master key.
 //
@@ -12,7 +12,10 @@ import { currentKeyVersion, masterKeyBytesFor, requiredEnv } from "./env";
 // interrupted run leaves a mix of versions that still opens — as long as BOTH
 // keys stay in the environment until the run reports zero remaining.
 async function main(): Promise<void> {
-  const db = createDatabase(requiredEnv("DATABASE_URL"));
+  // The worker schema: this rewraps stored credentials, so it needs MASTER_KEY
+  // and every MASTER_KEY_V<n> the rotation names.
+  loadEnvOrExit("worker");
+  const db = createDatabase(workerEnv().DATABASE_URL);
   const target = currentKeyVersion();
   const targetKey = envKeyProvider(masterKeyBytesFor(target));
 
