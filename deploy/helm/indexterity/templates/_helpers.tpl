@@ -101,6 +101,14 @@ app.kubernetes.io/component: {{ .component }}
   value: {{ .Values.config.allowPrivateClusterTargets | quote }}
 - name: ALLOW_INSECURE_CLUSTER_TLS
   value: {{ .Values.config.allowInsecureClusterTls | quote }}
+{{- if .Values.config.allowUntestedMongoVersion }}
+- name: ALLOW_UNTESTED_MONGO_VERSION
+  value: "true"
+{{- end }}
+{{- if .Values.config.retentionDays }}
+- name: RETENTION_DAYS
+  value: {{ .Values.config.retentionDays | quote }}
+{{- end }}
 {{- end -}}
 
 {{/* The metrics endpoint — shared by the api and the worker, which export different halves of it. */}}

@@ -17,6 +17,7 @@ import {
   summarizeLatency,
 } from "../analysis";
 import { runFrom } from "../analysis/types";
+import { workerEnv } from "../config/env";
 import {
   actions,
   and,
@@ -112,8 +113,7 @@ export class InsightsController {
         0,
         rows.reduce((sum, row) => sum + row.indexCountDelta, 0),
       );
-      const envRate = Number(process.env.STORAGE_USD_PER_GB_MONTH);
-      const rate = Number.isFinite(envRate) && envRate > 0 ? envRate : undefined;
+      const rate = workerEnv().STORAGE_USD_PER_GB_MONTH;
       // Attribution: net freed bytes per recommendation (drop rows minus undo
       // rows), positive contributors only, biggest first.
       const net = new Map<string, number>();

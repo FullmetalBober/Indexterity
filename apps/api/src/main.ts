@@ -1,6 +1,9 @@
 // FIRST, before reflect-metadata and before Nest: the SDK instruments modules as
 // they are required, so anything imported above it is invisible to it (#31).
 import "./instrument.api";
+// Before Nest, before better-auth, before anything that reads a value: an
+// invalid environment is a boot failure that names the variable (#126).
+import "./env.api";
 import "reflect-metadata";
 import rateLimit from "@fastify/rate-limit";
 import { NestFactory } from "@nestjs/core";
@@ -8,7 +11,7 @@ import { FastifyAdapter, type NestFastifyApplication } from "@nestjs/platform-fa
 import { AppModule } from "./app.module";
 import { auth } from "./auth";
 import { sessionCookiesFor } from "./auth/session";
-import { positiveEnv, trustProxySetting } from "./env";
+import { apiEnv, trustProxySetting } from "./config/env";
 import { AppExceptionFilter } from "./errors/exception.filter";
 import { captureAuthFailure } from "./errors/reporting";
 import { jobDb } from "./jobs/db";
@@ -23,7 +26,7 @@ async function bootstrap(): Promise<void> {
     // and the per-IP rate limits become one shared bucket (see env.ts).
     trustProxy: trustProxySetting(),
     logger: {
-      level: process.env.LOG_LEVEL ?? "info",
+      level: apiEnv().LOG_LEVEL,
       redact: ["req.headers.authorization", "req.headers.cookie", 'res.headers["set-cookie"]'],
     },
   });
@@ -52,7 +55,7 @@ async function bootstrap(): Promise<void> {
   // minute, both look like an attack at the default. Raising it is a decision
   // an operator makes on purpose; the defaults stay where they are.
   await fastify.register(rateLimit, {
-    max: positiveEnv("RATE_LIMIT_MAX", 300),
+    max: apiEnv().RATE_LIMIT_MAX,
     timeWindow: "1 minute",
   });
 
@@ -77,7 +80,7 @@ async function bootstrap(): Promise<void> {
     "/api/auth/*",
     {
       config: {
-        rateLimit: { max: positiveEnv("AUTH_RATE_LIMIT_MAX", 20), timeWindow: "1 minute" },
+        rateLimit: { max: apiEnv().AUTH_RATE_LIMIT_MAX, timeWindow: "1 minute" },
       },
     },
     async (request, reply) => {
@@ -142,7 +145,7 @@ async function bootstrap(): Promise<void> {
     process.once("SIGINT", () => void runner.stop());
   }
 
-  const port = Number(process.env.API_PORT ?? 3001);
+  const port = apiEnv().API_PORT;
   await app.listen(port, "0.0.0.0");
 }
 

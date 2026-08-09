@@ -15,12 +15,14 @@ describe("useSecureCookies", () => {
 
 describe("assertProductionUrl", () => {
   it("refuses to boot production on a plaintext origin", () => {
-    expect(() => assertProductionUrl("http://api:3001", "production")).toThrow(/must be https/);
+    expect(() => assertProductionUrl("http://api:3001", "production", false)).toThrow(
+      /must be https/,
+    );
   });
 
   it("allows https in production and anything outside it", () => {
-    expect(() => assertProductionUrl("https://api.example.com", "production")).not.toThrow();
-    expect(() => assertProductionUrl("http://localhost:3001", "development")).not.toThrow();
+    expect(() => assertProductionUrl("https://api.example.com", "production", false)).not.toThrow();
+    expect(() => assertProductionUrl("http://localhost:3001", "development", false)).not.toThrow();
   });
 });
 
@@ -28,16 +30,13 @@ describe("assertProductionUrl", () => {
 // say NODE_ENV=production, and there is no ingress there to misconfigure.
 describe("ALLOW_INSECURE_AUTH_URL", () => {
   it("lets an http baseURL boot when explicitly opted in", () => {
-    process.env.ALLOW_INSECURE_AUTH_URL = "true";
-    try {
-      expect(() => assertProductionUrl("http://indexterity-api:3001", "production")).not.toThrow();
-    } finally {
-      delete process.env.ALLOW_INSECURE_AUTH_URL;
-    }
+    expect(() =>
+      assertProductionUrl("http://indexterity-api:3001", "production", true),
+    ).not.toThrow();
   });
 
   it("still refuses without it, and names the switch", () => {
-    expect(() => assertProductionUrl("http://indexterity-api:3001", "production")).toThrow(
+    expect(() => assertProductionUrl("http://indexterity-api:3001", "production", false)).toThrow(
       /ALLOW_INSECURE_AUTH_URL/,
     );
   });
@@ -45,11 +44,6 @@ describe("ALLOW_INSECURE_AUTH_URL", () => {
   // The cookie is still marked Secure in production — the switch only silences
   // the boot check, it does not downgrade the cookie.
   it("does not change the Secure flag", () => {
-    process.env.ALLOW_INSECURE_AUTH_URL = "true";
-    try {
-      expect(useSecureCookies("http://indexterity-api:3001", "production")).toBe(true);
-    } finally {
-      delete process.env.ALLOW_INSECURE_AUTH_URL;
-    }
+    expect(useSecureCookies("http://indexterity-api:3001", "production")).toBe(true);
   });
 });

@@ -10,6 +10,12 @@
 // callers here (the SSR branch of lib/api.ts, and the passthrough) are deleted
 // from the client build, so this is tree-shaken out with them; the build check
 // in CI is what keeps that honest.
+//
+// Read through lib/env.ts, which declares it as a `server` variable — so if one
+// of those callers ever stopped being server-only, this would throw in the
+// browser rather than silently resolving to the default.
+import { env } from "./env";
+
 export function apiOrigin(): string {
-  return process.env.API_URL ?? "http://localhost:3001";
+  return env.API_URL;
 }

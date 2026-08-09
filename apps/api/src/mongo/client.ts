@@ -1,5 +1,6 @@
 import { MongoClient } from "mongodb";
 import ConnectionString from "mongodb-connection-string-url";
+import { workerEnv } from "../config/env";
 
 // Fail fast on unreachable clusters: 5s server selection instead of the driver's
 // 30s default, so requests surface a 502 quickly.
@@ -44,7 +45,7 @@ export const NO_TLS_OVERRIDES: TlsOverrides = {
 // private address that must still be forced to TLS, so coupling a transport rule
 // to an addressing rule would quietly weaken real deployments.
 export function allowInsecureTls(): boolean {
-  return process.env.ALLOW_INSECURE_CLUSTER_TLS === "true";
+  return workerEnv().ALLOW_INSECURE_CLUSTER_TLS;
 }
 
 // Whether the transport is encrypted at all.

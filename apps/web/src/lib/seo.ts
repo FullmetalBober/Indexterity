@@ -1,11 +1,22 @@
+import { env } from "./env";
 import { CANONICAL_ORIGIN } from "./site";
 
 // Canonical and og:url must point at the one indexable copy no matter which
 // host served the response (preview deploy, raw service URL, apex vs www), or
 // search engines see duplicates — hence a constant rather than WEB_ORIGIN.
 // Self-hosters and staging override it with SITE_URL.
+//
+// SITE_URL is a `server` variable, so the guard is not decoration: these tags
+// are rendered during SSR and the head is re-evaluated in the browser, where
+// reading one throws. The constant is what the client sees, which is why an
+// override changes what is SERVED rather than what the app believes about
+// itself.
 export function siteOrigin(): string {
-  const override = typeof process === "undefined" ? undefined : process.env.SITE_URL;
+  return originFrom(typeof window === "undefined" ? env.SITE_URL : undefined);
+}
+
+// The normalising half, pure so it can be stated in a test without a server.
+export function originFrom(override: string | undefined): string {
   return (override ?? CANONICAL_ORIGIN).replace(/\/+$/, "");
 }
 

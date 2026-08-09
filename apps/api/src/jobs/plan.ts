@@ -1,4 +1,5 @@
 import { effectiveRetentionDays, type Plan, planFrom } from "../billing/plans";
+import { operatorCeilingDays } from "../config/env";
 import { clusters, type Database, eq, organizations } from "../db";
 
 const DAY_MS = 86_400_000;
@@ -38,7 +39,7 @@ export async function planForCluster(db: Database, clusterId: string): Promise<P
 // the newest row is inside every window by definition, and a plan cannot be
 // entitled to less than "what is true now".
 export async function historyWindow(db: Database, clusterId: string): Promise<Date> {
-  const days = effectiveRetentionDays(await planForCluster(db, clusterId));
+  const days = effectiveRetentionDays(await planForCluster(db, clusterId), operatorCeilingDays());
   if (!Number.isFinite(days)) return new Date(0);
   return new Date(Date.now() - days * DAY_MS);
 }

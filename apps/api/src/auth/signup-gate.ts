@@ -1,3 +1,4 @@
+import { apiEnv } from "../config/env";
 import { and, type Database, eq, gt, invites, sql, user } from "../db";
 
 // Who may create an account.
@@ -11,9 +12,7 @@ import { and, type Database, eq, gt, invites, sql, user } from "../db";
 export type SignupMode = "invite" | "open" | "closed";
 
 export function signupMode(): SignupMode {
-  const raw = process.env.SIGNUP_MODE;
-  if (raw === "open" || raw === "closed") return raw;
-  return "invite";
+  return apiEnv().SIGNUP_MODE;
 }
 
 export interface SignupDecision {
