@@ -67,6 +67,11 @@ services:
       # the picture, so each gets its own host port: api 9464, worker 9465,
       # web 9466.
       METRICS_ENABLED: "true"
+      # Error reporting, off unless SENTRY_DSN_API is in .env. Reads plain
+      # SENTRY_DSN here; which project that is belongs to the deployment, and
+      # for this one it is indexterity-api.
+      SENTRY_DSN: ${SENTRY_DSN_API:-}
+      SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-}
     ports:
       # Published for curl and the OpenAPI document, not for the browser. The
       # dashboard reaches the api at /api on its OWN origin (localhost:3000),
@@ -99,6 +104,11 @@ services:
       API_URL: http://api:3001
       WEB_ORIGIN: http://localhost:3000
       METRICS_ENABLED: "true"
+      # Error reporting, off unless SENTRY_DSN_WEB is in .env. Reads plain
+      # SENTRY_DSN here; which project that is belongs to the deployment, and
+      # for this one it is indexterity-web.
+      SENTRY_DSN: ${SENTRY_DSN_WEB:-}
+      SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-}
     ports:
       # The one origin a browser uses, /api included. There was an nginx service
       # in front of this doing the ingress's /api split; the dashboard server
@@ -140,6 +150,11 @@ services:
       SMTP_PASS: ${SMTP_PASS}
       MAIL_FROM: ${MAIL_FROM}
       METRICS_ENABLED: "true"
+      # Error reporting, off unless SENTRY_DSN_API is in .env. Reads plain
+      # SENTRY_DSN here; which project that is belongs to the deployment, and
+      # for this one it is indexterity-api.
+      SENTRY_DSN: ${SENTRY_DSN_API:-}
+      SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-}
     ports:
       - "9465:9464"
     volumes:

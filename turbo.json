@@ -28,6 +28,10 @@
     "WORKER_CONCURRENCY",
     "METRICS_ENABLED",
     "METRICS_PORT",
+    "SENTRY_DSN",
+    "SENTRY_DSN_API",
+    "SENTRY_DSN_WEB",
+    "SENTRY_ENVIRONMENT",
     "INT_API_PORT"
   ],
   "tasks": {

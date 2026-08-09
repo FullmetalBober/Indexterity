@@ -1,9 +1,10 @@
 import { type Runner, run } from "graphile-worker";
 import { requiredEnv } from "../env";
+import { captureError } from "../errors/reporting";
 import { ALERT_COOLDOWN_MS, alertAllowed, notifyClusterOwners } from "../mail/notify";
 import { instrumentRunner } from "../metrics";
 import { jobDb } from "./db";
-import { finalClusterFailure } from "./failure";
+import { clusterIdOf, finalClusterFailure } from "./failure";
 import { taskList } from "./tasks";
 
 // Recurring schedule (per cluster via the dispatcher tasks):
@@ -67,6 +68,28 @@ export async function startWorker(): Promise<Runner> {
   // Job counters come off the same events, so they are registered here and
   // cover the embedded mode below as well as the standalone worker.
   instrumentRunner(runner);
+  // The dead-letter transition, reported once (#31). Deliberately the LAST
+  // attempt rather than every failure: graphile-worker retries, so reporting
+  // each one turns a single fault into five events that say the same thing, and
+  // how often a job retries is already a counter (instrumentRunner above). D28's
+  // division holds — metrics say how often, errors say what.
+  //
+  // Every task, not only the per-cluster ones that notifyClusterOwners covers
+  // below. `retention`, `digest` and the schedule dispatchers have no owner to
+  // mail, so before this they were the failures with no audience at all.
+  //
+  // Nothing that the pipeline classifies reaches here: an unreachable cluster is
+  // a handled condition the queue records as a SUCCESS (§7.4.1), so job:failed
+  // is already only the unexpected ones.
+  runner.events.on("job:failed", ({ job, error }) => {
+    if (job.attempts >= job.max_attempts) {
+      captureError(error, {
+        task: job.task_identifier,
+        attempt: job.attempts,
+        clusterId: clusterIdOf(job.payload),
+      });
+    }
+  });
   // A cluster task that burns its last retry alerts the owners — a dead
   // connection string or revoked user otherwise fails silently forever.
   runner.events.on("job:failed", ({ job, error }) => {

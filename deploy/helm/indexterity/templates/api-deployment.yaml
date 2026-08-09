@@ -49,6 +49,7 @@ spec:
             {{- include "indexterity.coreEnv" . | nindent 12 }}
             {{- include "indexterity.mailEnv" . | nindent 12 }}
             {{- include "indexterity.metricsEnv" . | nindent 12 }}
+            {{- include "indexterity.errorsEnv" (dict "root" . "dsn" .Values.errorReporting.dsn) | nindent 12 }}
             - name: API_PORT
               value: {{ .Values.api.port | quote }}
             # Browser auth requests arrive through the dashboard's server

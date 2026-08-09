@@ -1,3 +1,8 @@
+// First, and a side-effect import rather than a call: ESM evaluates every import
+// in this file before the first statement of the body, so an init written as a
+// call here would run after everything it is supposed to precede (#31).
+import "~/lib/errors/provider";
+import { wrapFetchWithSentry } from "@sentry/tanstackstart-react";
 import { createStartHandler, defaultStreamHandler } from "@tanstack/react-start/server";
 import { createServerEntry } from "@tanstack/react-start/server-entry";
 import { isApiRequest, passThroughToApi } from "~/lib/api-passthrough";
@@ -57,11 +62,24 @@ if (bootState[BOOTED] !== true) {
 // it to the router is a 404. Still inside measureRequest, which is how a
 // passthrough that is running when a proxy should have answered first becomes
 // visible rather than silent.
-export default createServerEntry({
-  fetch: (request, ...rest) =>
-    measureRequest(request, () =>
-      isApiRequest(new URL(request.url).pathname)
-        ? passThroughToApi(request)
-        : fetch(request, ...rest),
-    ),
-});
+//
+// wrapFetchWithSentry is the outermost layer, so a throw from measureRequest
+// itself is still reported. It is the whole of the dashboard's error reporting:
+// the docs' other seam, sentryGlobalFunctionMiddleware in a src/start.ts, is
+// deliberately not here — D29 built that seam for per-function metrics, measured
+// it as restating what the api already reports, and removed it. Reinstating it
+// for errors would buy the same little: a server function here is one to three
+// api calls, and those already report from the api's own side.
+//
+// The options argument is typed `unknown` on the way in and cast back on the way
+// out, because wrapFetchWithSentry is generic over every framework it supports
+// and cannot name TanStack Start's RequestOptions. The value is handed back
+// exactly as it arrived — the cast restores a type, it does not assert one.
+const handleRequest = (request: Request, opts?: unknown): Response | Promise<Response> =>
+  measureRequest(request, () =>
+    isApiRequest(new URL(request.url).pathname)
+      ? passThroughToApi(request)
+      : fetch(request, opts as Parameters<typeof fetch>[1]),
+  );
+
+export default createServerEntry(wrapFetchWithSentry({ fetch: handleRequest }));

@@ -1,3 +1,6 @@
+// FIRST, before reflect-metadata and before Nest: the SDK instruments modules as
+// they are required, so anything imported above it is invisible to it (#31).
+import "./instrument.api";
 import "reflect-metadata";
 import rateLimit from "@fastify/rate-limit";
 import { NestFactory } from "@nestjs/core";
@@ -7,6 +10,7 @@ import { auth } from "./auth";
 import { sessionCookiesFor } from "./auth/session";
 import { positiveEnv, trustProxySetting } from "./env";
 import { AppExceptionFilter } from "./errors/exception.filter";
+import { captureAuthFailure } from "./errors/reporting";
 import { jobDb } from "./jobs/db";
 import { embeddedWorkerEnabled, startWorker } from "./jobs/runner";
 import { instrumentHttp, registerControlPlaneGauges, startMetricsServer } from "./metrics";
@@ -92,6 +96,11 @@ async function bootstrap(): Promise<void> {
           body: hasBody ? JSON.stringify(request.body) : undefined,
         }),
       );
+      // better-auth turns its own failures into a 500 rather than throwing, so
+      // this is the only place an auth-route fault is visible to us (#31).
+      if (response.status >= 500) {
+        captureAuthFailure(request.method, url.pathname, response.status, String(request.id));
+      }
       reply.status(response.status);
       response.headers.forEach((value, key) => {
         if (key.toLowerCase() !== "set-cookie") reply.header(key, value);

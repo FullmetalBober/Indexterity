@@ -493,6 +493,59 @@ the label-selector gotcha; what the dashboard server reports that the api cannot
 and the two alert traps worth knowing, are in
 [Architecture §15](https://github.com/FullmetalBober/Indexterity/wiki/Architecture).
 
+### Errors
+
+The metrics above say how *often* something failed. `SENTRY_DSN` says *what*.
+Every process reads that one variable; leave it empty — the default here, in
+compose and in the chart — and nothing is initialised at all.
+
+**The DSN is yours.** A self-hosted install reports to your own Sentry
+organisation or your own self-hosted Sentry, never to us.
+
+**Two projects, not three.** The api and the worker share one: they are one
+image, one release and one body of code — `jobs/`, `analysis/` and the drizzle
+layer are reachable from both, so a fault there is one issue a per-workload split
+would file twice, and `RUN_WORKER=true` makes them a single process anyway. A
+`service` tag says which answered. The dashboard is a separate app and gets its
+own. In compose that is `SENTRY_DSN_API` and `SENTRY_DSN_WEB`; in the chart,
+`errorReporting.dsn` and `errorReporting.webDsn`.
+
+| workload | what is reported |
+|---|---|
+| api | unhandled 500s from `AppExceptionFilter`, tagged with the request id already in the log line and the response body |
+| worker | a job that burned its last retry — the dead-letter transition — tagged with task, attempt and cluster |
+| web | server-side render failures, and anything the passthrough throws |
+
+Plus the unhandled-rejection and uncaught-exception sinks the SDK installs in
+every process, which is the half that had no home before.
+
+Reported once each, and only for things that are actually faults. A retry is not
+an event (the counters above already say how often jobs retry), and neither is a
+429, a 413, a 404, or a cluster whose owner's firewall is doing its job — an
+unreachable cluster is a handled condition, so paging about it would be paging
+about somebody else's network.
+
+**Nothing leaves with a connection string in it.** `packages/errors` strips
+MongoDB and Postgres URIs whole — hosts included, because a replica set's member
+list is the customer's infrastructure and `+srv` resolves to it — plus the
+credentials of any other URI, any field named like a secret (a superset of the
+Fastify logger's redact list), and the same secrets encoded inside a JSON string,
+where key matching cannot see them. It walks the entire event rather than a list
+of known fields, because the way a field list fails is silently, on the day the
+SDK adds a field. Unit-tested against a seeded event carrying the string in every
+place one could hide.
+
+**The request body is dropped entirely**, not scrubbed: `POST /clusters` carries
+a customer's connection string as a field. `sendDefaultPii: false` does *not*
+cover this — in SDK 10.69 bodies, stack locals and database payloads are governed
+by `dataCollection`, and its defaults collect all three. All are off, and the body
+is removed in `beforeSend` as well, because setting `httpBodies: []` did not stop
+it arriving. That was measured against the running stack, not read off the docs.
+
+Tracing, profiling, session replay and Sentry's own metrics are all off: the
+scrape endpoint above is the only source of timings, and a second one would
+answer the same questions where the chart's alerts cannot see them.
+
 ## Licence
 
 [BUSL-1.1](./LICENSE.md) — the Business Source License, converting to

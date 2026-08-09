@@ -152,6 +152,39 @@ metrics:
       # and starts looking like the engine proposing bad drops.
       regressionsPerDay: 3
 
+# Error reporting to Sentry, from all three workloads. The other half of the
+# picture above: the metrics say how OFTEN something failed, an error says WHAT
+# failed and where. The worker is the reason this exists — a job that throws
+# there is invisible unless somebody happens to be reading container logs at the
+# time.
+#
+# Off unless you set a DSN, and the DSN is YOURS. This install reports to your
+# Sentry organisation (or to a self-hosted Sentry), never to ours.
+#
+# What is sent is scrubbed before it leaves the pod: MongoDB and Postgres URIs
+# are removed whole — hosts included, since a replica set's member list is your
+# infrastructure — along with the credentials of any other URI and any field
+# named like a secret. That runs on every event, breadcrumb and request body, and
+# is unit-tested in packages/errors. Nothing here sends metrics or traces: the
+# scrape endpoint above stays the only source of those.
+errorReporting:
+  # The api AND the worker report here. One project for the two of them on
+  # purpose: they are one image, one release and one body of code — a fault in
+  # the job or analysis layer is reachable from both, so a project per workload
+  # would file it twice — and RUN_WORKER=true makes them one process anyway.
+  # A `service` tag says which one answered.
+  #
+  # https://<key>@<org>.ingest.<region>.sentry.io/<project>
+  dsn: ""
+  # The dashboard server, which is a separate app with a separate release and
+  # nothing shared with the api but the contract. Leave empty to send it to the
+  # same project as the api.
+  webDsn: ""
+  # Which deployment an event came from. Staging and production must not share
+  # an issue stream, and NODE_ENV calls both of them "production". Defaults to
+  # the release namespace.
+  environment: ""
+
 # Runs `node dist/migrate.js` as a pre-install/pre-upgrade hook, before any new
 # pod starts. Disable only if you apply migrations out of band.
 migrations:
