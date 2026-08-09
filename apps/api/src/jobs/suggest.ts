@@ -3,10 +3,13 @@ import {
   executionsPerWeek,
   type IndexSpec,
   isRecurring,
+  isReorderable,
   MIN_WEEKLY_DOCS_EXAMINED,
   narrowScore,
   recommendCreates,
   recommendNarrowing,
+  recommendReorder,
+  reorderScore,
   type ScanSeverity,
   type SortKey,
   scanCost,
@@ -224,11 +227,80 @@ export async function suggestForCluster(clusterId: string): Promise<number> {
           : "ROUTINE";
       const worst = costs.find((cost) => cost.severity === severity);
 
+      // A protected compound index whose directions cannot serve a sort the
+      // workload performs. Rebuilt with the same keys in the same order and
+      // different directions, which preserves a unique constraint exactly
+      // (analysis/reorder.ts) — but only where nothing pins it with hint().
+      //
+      // The hint is a HARD VETO here, not a scoring penalty, and it is the one
+      // veto that needs live state. `.hint("a_1_b_1")` against an index that is
+      // now `a_1_b_-1` is an ERROR, not a slower query, and the default name
+      // encodes the directions — so a hinted index breaks by name as well as by
+      // key pattern. Nothing downstream would catch it either: the post-build
+      // watch measures WRITE latency, and the queries in question would already
+      // have stopped running.
+      const hinted = existing.some((idx) => isReorderable(idx))
+        ? new Set(await collector.collectHintedIndexes(database, collection))
+        : new Set<string>();
+      const reordering = new Set<string>();
+      for (const candidate of recommendReorder(shapes, existing, WORKLOAD_OPTIONS, hinted)) {
+        const indexName = proposedName(candidate.keys);
+        if (cooled.has(cooldownKey(database, collection, indexName))) continue;
+        if (existing.some((idx) => idx.name === indexName)) continue;
+        if (toInsert.some((row) => row.collection === collection && row.indexName === indexName)) {
+          continue;
+        }
+        toInsert.push({
+          clusterId,
+          type: "REORDER",
+          // Never APPROVED here, whatever the score: this class is
+          // approval-only (jobs/apply.ts).
+          state: "PROPOSED",
+          source: "WORKLOAD",
+          database,
+          collection,
+          indexName,
+          rationale: `${candidate.rationale}${cost}`,
+          score: reorderScore({
+            count: candidate.count,
+            sizeBytes: sizes[candidate.indexName] ?? 0,
+            pastRegressions: regressionCounts.get(`${database} ${collection} ${indexName}`) ?? 0,
+          }),
+          // Claimed at retirement, not now: the original is still there and
+          // still costing until it is actually dropped. A re-order reclaims
+          // nothing anyway — the replacement is the same size.
+          estimatedBytesSaved: 0,
+          targetSpec: {
+            keys: encodeKeys(candidate.keys),
+            retire: [candidate.indexName],
+            // Carried VERBATIM. A dropped option here is a silently weakened
+            // constraint, which is the one outcome this feature must never
+            // produce — so they travel with the row rather than being re-derived
+            // from a live read at build time, when the original may already have
+            // been changed by somebody else.
+            options: {
+              unique: candidate.spec.unique,
+              sparse: candidate.spec.sparse,
+              collation: candidate.spec.collation,
+              ...(candidate.spec.partialFilter === null
+                ? {}
+                : { partialFilter: candidate.spec.partialFilter }),
+            },
+          },
+        });
+        reordering.add(candidate.indexName);
+      }
+
       // An index already covers the fields but in an order that cannot serve
       // the sort. No create is proposed for it — the fix is a second index
       // differing only in direction, which doubles this collection's write cost
       // and is a judgement call. Say so rather than drop it silently.
+      //
+      // Skipped where the re-order pass above has already proposed doing it
+      // properly, which is the only case where there IS something better than
+      // an advisory: rebuilding the one index rather than keeping two.
       for (const advisory of sortOrderAdvisories(shapes, existing, WORKLOAD_OPTIONS)) {
+        if (reordering.has(advisory.existingIndex)) continue;
         const indexName = `${advisory.existingIndex}_sortorder`;
         if (cooled.has(cooldownKey(database, collection, indexName))) continue;
         const keys = advisory.wantedKeys.map((key) => `${key.field}: ${key.direction}`).join(", ");

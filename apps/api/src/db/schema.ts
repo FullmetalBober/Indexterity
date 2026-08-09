@@ -44,6 +44,7 @@ export const recommendationType = pgEnum("recommendation_type", [
   "MERGE",
   "CREATE",
   "UPDATE",
+  "REORDER",
   "ADVISORY_REVIEW",
 ]);
 export const recommendationState = pgEnum("recommendation_state", [
@@ -587,6 +588,23 @@ export const recommendations = pgTable(
       keys: string[];
       retire: string[];
       partial?: Record<string, string | number | boolean>;
+      // REORDER only: the ORIGINAL index's options, carried verbatim so the
+      // replacement enforces exactly what it replaced. Recorded at proposal
+      // time rather than re-read at build time — by then the original may have
+      // been changed by somebody else, and inheriting that silently is how an
+      // option gets dropped. A missing `options` is an older row or another
+      // type, and the build refuses a REORDER without one.
+      options?: {
+        unique: boolean;
+        sparse: boolean;
+        collation: string | null;
+        partialFilter?: Record<string, unknown>;
+      };
+      // On the DROP_REDUNDANT row that retires a re-ordered index: the index
+      // that replaced it. The only thing that lets a protected index be dropped
+      // at all, and it is a claim rather than a permission — preflightDrop
+      // re-checks it against live state at the moment of the drop.
+      supersededBy?: string;
     }>(),
     createdAt,
     updatedAt,

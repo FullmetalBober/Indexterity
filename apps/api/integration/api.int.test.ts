@@ -1416,6 +1416,111 @@ describe("change window gates elective builds", () => {
     expect(specs.some((spec) => spec.name === "winidx_1")).toBe(true);
     await mongo.db("inttest").collection("orders").dropIndex("winidx_1");
   });
+
+  // The claim the whole re-order feature rests on, made against a real mongod
+  // rather than argued: a unique index's guarantee is a property of its key SET,
+  // not of its key directions, so swapping the directions preserves it — and
+  // building the replacement BEFORE retiring the original means there is no
+  // instant when nothing is enforcing it.
+  //
+  // Asserted at all three moments, because only the last one is the interesting
+  // claim and only the first two make it safe: before the swap, while both
+  // exist, and after the original is gone.
+  it("re-orders a unique index's keys without ever losing the constraint", async () => {
+    process.env.MASTER_KEY =
+      process.env.MASTER_KEY ?? Buffer.from("0123456789abcdef0123456789abcdef").toString("base64");
+    await setWindow(null, null);
+    const coll = mongo.db("inttest").collection("reorder");
+    await coll.deleteMany({});
+    await coll.insertMany([
+      { a: 1, b: 1 },
+      { a: 1, b: 2 },
+    ]);
+    await coll.createIndex({ a: 1, b: 1 }, { name: "a_1_b_1", unique: true });
+
+    const duplicateRefused = async (): Promise<boolean> => {
+      try {
+        await coll.insertOne({ a: 1, b: 1 });
+        await coll.deleteOne({ a: 1, b: 1, _id: { $exists: true } });
+        return false;
+      } catch {
+        return true;
+      }
+    };
+    expect(await duplicateRefused()).toBe(true);
+
+    const [rec] = await db
+      .insert(recommendations)
+      .values({
+        clusterId,
+        type: "REORDER",
+        state: "APPROVED",
+        database: "inttest",
+        collection: "reorder",
+        indexName: "a_1_b_-1",
+        rationale: "reorder integration test",
+        estimatedBytesSaved: 0,
+        targetSpec: {
+          keys: ["a", "b:-1"],
+          retire: ["a_1_b_1"],
+          options: { unique: true, sparse: false, collation: null },
+        },
+      })
+      .returning();
+    if (rec === undefined) throw new Error("failed to insert recommendation");
+
+    // Build first. The options travel with the row, so the replacement arrives
+    // unique — an index rebuilt without it would be the constraint removed.
+    expect(await applyCreatesForCluster(clusterId)).toBe(1);
+    const built = await coll.indexes();
+    const replacement = built.find((spec) => spec.name === "a_1_b_-1");
+    expect(replacement?.unique).toBe(true);
+    expect(replacement?.key).toEqual({ a: 1, b: -1 });
+    // Both present, and the rule still holds.
+    expect(await duplicateRefused()).toBe(true);
+
+    // Graduate the build: the watch has elapsed and writes are stable, so
+    // finalize proposes retiring the original — naming what replaced it, which
+    // is the only thing that lets a protected index be dropped at all.
+    await db
+      .update(recommendations)
+      .set({ builtAt: new Date(Date.now() - 60 * 86_400_000) })
+      .where(eq(recommendations.id, rec.id));
+    await finalizeCluster(clusterId);
+    const [retirement] = await db
+      .select()
+      .from(recommendations)
+      .where(
+        and(
+          eq(recommendations.clusterId, clusterId),
+          eq(recommendations.indexName, "a_1_b_1"),
+          eq(recommendations.state, "PROPOSED"),
+        ),
+      );
+    expect(retirement?.type).toBe("DROP_REDUNDANT");
+    expect(retirement?.targetSpec?.supersededBy).toBe("a_1_b_-1");
+    expect(retirement?.rationale).toContain("unique constraint");
+
+    // And the drop itself, through the ordinary gates. Hidden first, observed,
+    // then dropped — a protected index gets no shortcut for being replaceable.
+    await db
+      .update(recommendations)
+      .set({ state: "HIDDEN", hiddenAt: new Date(Date.now() - 60 * 86_400_000), observeDays: 1 })
+      .where(eq(recommendations.id, retirement?.id ?? ""));
+    await mongo
+      .db("inttest")
+      .command({ collMod: "reorder", index: { name: "a_1_b_1", hidden: true } });
+    await finalizeCluster(clusterId);
+
+    const after = await coll.indexes();
+    expect(after.some((spec) => spec.name === "a_1_b_1")).toBe(false);
+    expect(after.some((spec) => spec.name === "a_1_b_-1")).toBe(true);
+    // The point of all of it: with the original gone, the survivor still
+    // refuses the duplicate.
+    expect(await duplicateRefused()).toBe(true);
+
+    await coll.drop();
+  });
 });
 
 describe("dynamic observe window", () => {

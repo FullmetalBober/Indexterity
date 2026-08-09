@@ -121,7 +121,13 @@ export interface IndexCollector {
 export interface CreateIndexOptions {
   readonly name?: string;
   readonly unique?: boolean;
-  readonly partialFilterExpression?: Readonly<Record<string, string | number | boolean>>;
+  // Index only the documents that HAVE the field. Carried when a REORDER
+  // rebuilds an index that had it, and when an undo restores one — a sparse
+  // index that comes back dense indexes documents the original never did, and a
+  // unique+sparse pair is the "unique among documents that have it" pattern,
+  // which a dense rebuild would refuse to build at all.
+  readonly sparse?: boolean;
+  readonly partialFilterExpression?: Readonly<Record<string, unknown>>;
   readonly collation?: { readonly locale: string };
 }
 

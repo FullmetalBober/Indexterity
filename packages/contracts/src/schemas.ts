@@ -6,6 +6,11 @@ export const recommendationType = z.enum([
   "MERGE",
   "CREATE",
   "UPDATE",
+  // Rebuild a PROTECTED index with the same keys in the same order and
+  // different DIRECTIONS. Its own type rather than an UPDATE because UPDATE
+  // means "extend to a wider key set", and a reader approving a change to a
+  // unique index is owed wording that says the constraint is preserved.
+  "REORDER",
   "ADVISORY_REVIEW",
 ]);
 export type RecommendationType = z.infer<typeof recommendationType>;
