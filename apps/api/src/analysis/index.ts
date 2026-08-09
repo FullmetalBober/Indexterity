@@ -9,6 +9,7 @@ export * from "./pressure";
 export * from "./recommend";
 export * from "./redundancy";
 export * from "./regression";
+export * from "./reorder";
 export * from "./rollback";
 export * from "./safety";
 export * from "./score";

@@ -1,0 +1,1 @@
+ALTER TYPE "public"."recommendation_type" ADD VALUE 'REORDER' BEFORE 'ADVISORY_REVIEW';

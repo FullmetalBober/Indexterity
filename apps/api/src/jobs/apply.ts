@@ -9,7 +9,7 @@ import {
   eq,
   gte,
   indexSnapshots,
-  ne,
+  notInArray,
   policies,
   recommendations,
   sql,
@@ -33,6 +33,13 @@ const DEFAULT_OBSERVE_DAYS = 30;
 // is the entire content of an advisory, and promoting one also strands it —
 // classify only deletes and re-inserts PROPOSED rows, so an approved advisory
 // leaves the refresh pool and is never re-evaluated again.
+//
+// REORDER is excluded for a different reason, and deliberately rather than by
+// scoring it low. It rebuilds a UNIQUE index with different key directions —
+// provably the same constraint, built before the original is retired, so
+// nothing is ever unenforced — but a change to a constraint-bearing index is a
+// different felt risk from adding one, and this is where that decision is
+// enforced rather than left to a threshold somebody may set to 0.
 export async function promoteByScore(
   db: Database,
   clusterId: string,
@@ -47,7 +54,7 @@ export async function promoteByScore(
         eq(recommendations.clusterId, clusterId),
         eq(recommendations.state, "PROPOSED"),
         gte(recommendations.score, threshold),
-        ne(recommendations.type, "ADVISORY_REVIEW"),
+        notInArray(recommendations.type, ["ADVISORY_REVIEW", "REORDER"]),
       ),
     );
 }

@@ -3,6 +3,10 @@
 export function badgeVariant(type: string): "secondary" | "destructive" | "default" | "outline" {
   if (type === "DROP_REDUNDANT" || type === "ADVISORY_REVIEW") return "secondary";
   if (type === "DROP_UNUSED") return "destructive";
+  // REORDER is additive too — it builds before it retires — but it is the only
+  // one that touches a constraint-bearing index, so it does not sit in the same
+  // quiet outline as an ordinary create.
+  if (type === "REORDER") return "default";
   return "outline"; // CREATE / UPDATE / MERGE (additive)
 }
 

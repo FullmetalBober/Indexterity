@@ -41,9 +41,14 @@ function action(rec: Recommendation, actions: Actions) {
         description={
           <>
             <p>
-              {rec.type.startsWith("DROP") || rec.type === "MERGE"
-                ? "The index is hidden first and observed before anything is dropped — hiding is instant and reversible."
-                : "The index is built and then watched: if writes regress, the build rolls back automatically."}
+              {rec.type === "REORDER"
+                ? // The one approval that touches a constraint-bearing index, so
+                  // it says what is preserved and in what order — a reader
+                  // deciding this is owed more than "the index is built".
+                  "The replacement is built FIRST, with the same keys and the same options — including the unique constraint, which both indexes then enforce. Only once it has survived its post-build watch is retiring the original proposed, through the usual hide, observe and regression gates. There is no moment when the constraint is not being enforced."
+                : rec.type.startsWith("DROP") || rec.type === "MERGE"
+                  ? "The index is hidden first and observed before anything is dropped — hiding is instant and reversible."
+                  : "The index is built and then watched: if writes regress, the build rolls back automatically."}
             </p>
             <p className="font-mono text-xs">
               {rec.database}.{rec.collection} · {rec.indexName}

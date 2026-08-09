@@ -3,9 +3,10 @@ import { implement } from "@orpc/nest";
 import { contract, RECOMMENDATIONS_CAP } from "@repo/contracts";
 import type { FastifyRequest } from "fastify";
 import { z } from "zod";
-import { parseStoredSpec, rebuildKeys } from "../analysis";
+import { parseStoredSpec, rebuildKeys, rebuildOptions } from "../analysis";
 import { actions, and, clusters, desc, eq, recommendations, roiMetrics, sql } from "../db";
 import { DatabaseService } from "../db/database.service";
+import type { CreateIndexOptions } from "../engine/ports";
 import { mapClusterError, toRecommendation } from "../http/mappers";
 import { TenancyService } from "../http/tenancy.service";
 import { openClusterSession } from "../jobs/cluster-connection";
@@ -113,13 +114,14 @@ export class RecommendationsController {
         throw errors.CONFLICT({ message: "no rollback token recorded for this drop" });
       }
       let keys: Record<string, 1 | -1> | null = null;
-      let indexName = rec.indexName;
-      let collation: string | null = null;
+      // Everything the index WAS, not just its keys. An undo that restored a
+      // unique index without its uniqueness would remove the constraint by
+      // putting it back — see analysis/rollback.ts.
+      let options: CreateIndexOptions = { name: rec.indexName };
       try {
         const spec = parseStoredSpec(rollbackTokenSchema.parse(withToken.rollbackToken).spec);
         keys = rebuildKeys(spec);
-        indexName = spec.name;
-        collation = spec.collation;
+        options = rebuildOptions(spec);
       } catch {
         keys = null;
       }
@@ -136,10 +138,7 @@ export class RecommendationsController {
             throw errors.CONFLICT({ message: "cluster is read-only" });
           }
           const executor = session.executor(readOnly);
-          await executor.create(rec.database, rec.collection, keys, {
-            name: indexName,
-            ...(collation === null ? {} : { collation: { locale: collation } }),
-          });
+          await executor.create(rec.database, rec.collection, keys, options);
         } finally {
           release();
         }

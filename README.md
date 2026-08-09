@@ -66,6 +66,20 @@ indexes. They surface as advisories instead. Partial and sparse indexes without
 a constraint *are* droppable: the pipeline hides and measures rather than
 trusting the counter.
 
+**Re-ordering** is the one thing the engine will do to a protected index, and it
+removes nothing. A unique index's guarantee is a property of its key *set*, not
+of its key *directions*, so `{a: 1, b: 1}` unique and `{a: 1, b: -1}` unique
+enforce exactly the same rule — which makes a direction change a swap rather
+than a drop. When a compound unique index covers a sort's fields in an order
+that cannot serve it, the replacement is **built first**, with every option
+carried over verbatim, and the original is only retired once the new one has
+survived its post-build watch: there is no instant when nothing is enforcing the
+constraint. It is **approval-only** whatever the auto-apply threshold says, and
+an index anything pins with `hint()` is vetoed outright — a hint at a renamed
+index is an error, not a slower query. Single-field, TTL and shard-key indexes
+are out of scope by construction, which makes the addressable set small
+([D50](./docs/decisions.md)).
+
 **Adding** (opt-in via `workloadAnalysis`). Query shapes come from `$queryStats`
 on **mongo 8.0+**, and from the profiler below it — until 8.0 the store reports
 execution counts only, which is the difference between knowing a query ran and
