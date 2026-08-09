@@ -36,7 +36,8 @@
   },
   "allowScripts": {
     "esbuild": true,
-    "@swc/core": true
+    "@swc/core": true,
+    "@sentry/cli": true
   },
   "license": "BUSL-1.1"
 }
