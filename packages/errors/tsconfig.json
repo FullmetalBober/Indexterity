@@ -1,0 +1,17 @@
+{
+  "extends": "../config/tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    // Declared rather than inherited by accident. This package reads process.env
+    // and nothing it depends on drags the node types in behind it — @repo/metrics
+    // only compiles without this because an OpenTelemetry .d.ts happens to
+    // reference them.
+    "types": ["node"]
+  },
+  "include": ["src"],
+  // The scrubber's tests are the point of the package, but they are not part of
+  // what the api and the dashboard import — emitting them puts a second copy of
+  // every case in dist/ for vitest to find and run twice.
+  "exclude": ["src/**/*.test.ts"]
+}

@@ -113,6 +113,24 @@ app.kubernetes.io/component: {{ .component }}
 {{- end }}
 {{- end -}}
 
+{{/* Error reporting. Takes the workload's own DSN as `dsn` because the api and the
+     worker report to one Sentry project and the dashboard to another — every process
+     reads a plain SENTRY_DSN, and which project that is belongs to the deployment.
+     Off unless a DSN is given, and it is the OPERATOR's: this chart never defaults
+     to reporting anywhere.
+
+     A plain value rather than a Secret key: a DSN is an ingest identifier, not a
+     credential — it can only write events, which is why Sentry's own browser SDKs
+     ship it publicly. */}}
+{{- define "indexterity.errorsEnv" -}}
+{{- if .dsn }}
+- name: SENTRY_DSN
+  value: {{ .dsn | quote }}
+- name: SENTRY_ENVIRONMENT
+  value: {{ default .root.Release.Namespace .root.Values.errorReporting.environment | quote }}
+{{- end }}
+{{- end -}}
+
 {{/* SMTP + storage pricing — shared by the api (mail, ROI) and worker (alerts, digest). */}}
 {{- define "indexterity.mailEnv" -}}
 {{- if .Values.smtp.host }}
