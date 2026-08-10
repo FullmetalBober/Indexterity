@@ -1,4 +1,4 @@
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Page } from "@playwright/test";
 import {
   connectCluster,
   MONGO_ADMIN_URL,
@@ -6,6 +6,7 @@ import {
   openClusterSettings,
   openConnectForm,
   signUpAndLandOnDashboard,
+  test,
   uniqueEmail,
 } from "./fixtures";
 

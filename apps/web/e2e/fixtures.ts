@@ -1,5 +1,32 @@
 import { createHmac } from "node:crypto";
-import { expect, type Page } from "@playwright/test";
+import { test as base, expect, type Page } from "@playwright/test";
+
+// `test` for this suite, not @playwright/test's — every spec imports it from
+// here so that one fixture applies to all of them.
+//
+// The fixture is the Content-Security-Policy's only honest test. The header is
+// a nonce the SSR scripts have to carry (src/lib/security-headers.ts), and the
+// way it fails is not an exception anyone can catch: the browser refuses the
+// hydration script and the page renders, sits there, and never becomes
+// interactive. Most of what these specs do would then fail anyway — but on a
+// button that "does nothing", which reads as a slow app rather than a broken
+// header. Chromium logs every refusal to the console, so the refusal itself is
+// the assertion, and it is made on EVERY test rather than a page or two.
+export const test = base.extend<{ cspRefusals: string[] }>({
+  cspRefusals: [
+    async ({ page }, use) => {
+      const refusals: string[] = [];
+      page.on("console", (message) => {
+        if (message.type() === "error" && /content security policy/i.test(message.text())) {
+          refusals.push(message.text());
+        }
+      });
+      await use(refusals);
+      expect(refusals, "the browser refused something the policy should have allowed").toEqual([]);
+    },
+    { auto: true },
+  ],
+});
 
 // Every account this suite creates carries this prefix, so the teardown can
 // find its own rows and nothing else's — the dev postgres is shared with the
