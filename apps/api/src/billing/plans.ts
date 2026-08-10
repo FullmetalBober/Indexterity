@@ -189,18 +189,21 @@ export function allowsWorkloadAnalysis(plan: Plan): LimitVerdict {
   };
 }
 
-// The plan a newly created org lands on.
+// The plan a newly created org lands on is DEFAULT_ORG_PLAN, validated as one of
+// PLANS at boot (config/schema.ts), read through config/env.ts → defaultOrgPlan,
+// and stamped onto the row by auth/organization.ts → beforeCreateOrganization.
+// It is deliberately not read here: this file stays pure, and the moment an org
+// is created is the plugin's, not billing's.
 //
-// Nothing here is a security control: anyone who owns the database can lift a
-// quota with one UPDATE, and the source is public. The licence is what binds —
+// Nothing about it is a security control: anyone who owns the database can lift
+// a quota with one UPDATE, and the source is public. The licence is what binds —
 // BUSL permits production use with one connected cluster — and this is what
 // keeps the software honest about it, so a self-hosted install does not quietly
 // invite you past what you were granted.
 //
 // FREE by default because a process that has not been told where it runs should
 // offer the least. The chart says SELF_HOSTED, which is what the licence grants
-// someone running it on their own hardware. DEFAULT_ORG_PLAN is validated as one
-// of PLANS at boot and read from config/env.ts → defaultOrgPlan.
+// someone running it on their own hardware.
 
 // What a cluster's policy actually means once the plan is applied.
 //

@@ -1,8 +1,10 @@
 import { APIError } from "better-auth/api";
 import { organization } from "better-auth/plugins";
+import type { Plan } from "../billing/plans";
 import { planFrom, withinLimit } from "../billing/plans";
 import { seatsUsed } from "../billing/usage";
 import { restoreHiddenIndexes } from "../clusters/offboard";
+import { defaultOrgPlan } from "../config/env";
 import { clusters, type Database, eq, organizations } from "../db";
 import { sendMail } from "../mail/mailer";
 
@@ -55,6 +57,48 @@ function assertRole(role: string): void {
   if (!(ORG_ROLES as readonly string[]).includes(role)) {
     throw new APIError("BAD_REQUEST", { message: `role must be one of: ${ORG_ROLES.join(", ")}` });
   }
+}
+
+// Everything decided about an organization at the moment it is created: the
+// slug is checked, and the plan the deployment asked for is stamped on.
+//
+// Exported and free of the database on purpose. It is the only place
+// DEFAULT_ORG_PLAN is read, and a hook reachable only through better-auth is a
+// hook nothing can pin — organization.test.ts calls this directly, which is the
+// test #132 says was missing: `defaultOrgPlan()` had unit tests that passed
+// while the function reached nothing.
+export async function beforeCreateOrganization({
+  organization: incoming,
+}: {
+  organization: Record<string, unknown>;
+}): Promise<{ data: Record<string, unknown> & { plan: Plan } }> {
+  const slug = typeof incoming.slug === "string" ? incoming.slug : "";
+  if (!SLUG.test(slug)) {
+    throw new APIError("BAD_REQUEST", {
+      message: "slug must be lowercase letters, digits and hyphens",
+    });
+  }
+  // No cap on how many. A plan is bought per organization, so a limit here
+  // would be a limit on how much a customer may buy — and the thing it would
+  // protect, the free tier, is protected by the cluster cap that applies inside
+  // every org one at a time.
+
+  // The plan, and the whole of #132: `plan` is an `additionalFields` entry with
+  // `input: false`, so it is not in the body the endpoint builds, and until this
+  // line nothing put it there either. The column's DDL default — FREE — decided
+  // instead, which meant every self-hosted install ran on the hosted free tier
+  // (3 members, no unattended apply, 90 days) while the chart shipped
+  // `DEFAULT_ORG_PLAN=SELF_HOSTED` and the variable reached the container and
+  // stopped.
+  //
+  // Returned as data rather than written by an UPDATE afterwards, so the row is
+  // never momentarily on a plan the deployment did not ask for — a worker
+  // reading it in between would enforce the wrong limits.
+  //
+  // The spread is the plugin's own contract: it merges `data` over the request
+  // body, and keys the organization model does not declare are dropped by the
+  // adapter before the insert.
+  return { data: { ...incoming, plan: defaultOrgPlan() } };
 }
 
 export interface OrganizationPluginConfig {
@@ -123,18 +167,7 @@ export function organizationPlugin(db: Database, config: OrganizationPluginConfi
       },
     },
     organizationHooks: {
-      beforeCreateOrganization: async ({ organization: incoming }) => {
-        const slug = incoming.slug ?? "";
-        if (!SLUG.test(slug)) {
-          throw new APIError("BAD_REQUEST", {
-            message: "slug must be lowercase letters, digits and hyphens",
-          });
-        }
-        // No cap on how many. A plan is bought per organization, so a limit
-        // here would be a limit on how much a customer may buy — and the thing
-        // it would protect, the free tier, is protected by the cluster cap that
-        // applies inside every org one at a time.
-      },
+      beforeCreateOrganization,
 
       beforeCreateInvitation: async ({ invitation }) => {
         assertRole(invitation.role);

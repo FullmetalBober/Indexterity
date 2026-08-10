@@ -1,11 +1,13 @@
-import { entitlementsFor, isPlan, PLANS, planFrom } from "./billing/plans";
+import { entitlementsFor, isPlan, PLANS, type Plan, planFrom } from "./billing/plans";
 import { coreEnv, loadEnvOrExit } from "./config/env";
-import { createDatabase, eq, organizations } from "./db";
+import { and, createDatabase, type Database, eq, isNull, ne, organizations } from "./db";
 
 // Move an organization onto a plan.
 //
 //   node apps/api/dist/set-plan.js <org-id|org-slug|org-name> <PLAN> [note]
 //   node apps/api/dist/set-plan.js                          # list every org
+//   node apps/api/dist/set-plan.js --backfill <PLAN>        # what --apply would move
+//   node apps/api/dist/set-plan.js --backfill <PLAN> --apply
 //
 // This is the whole billing integration today, and it is enough to charge
 // people: send an invoice, run this when it clears. No provider is wired, and
@@ -24,10 +26,84 @@ function describeLimit(value: number): string {
   return Number.isFinite(value) ? String(value) : "unlimited";
 }
 
+// Organizations whose plan nobody ever chose (#132).
+//
+// Until DEFAULT_ORG_PLAN was read, the column's DDL default decided, so an
+// install that has been running a while has orgs sitting on `FREE` that were
+// meant to be `SELF_HOSTED` — the fix above only reaches orgs created after it.
+// This is the rest of them, and the whole design of it is about being safe on a
+// HOSTED deployment as well as a self-hosted one:
+//
+//   * two guards, not one. `planUpdatedAt IS NULL` means neither this script nor
+//     a webhook has ever written the row, and `billingSubscriptionId IS NULL`
+//     means no provider owns it. A paying customer fails both, so no argument to
+//     this command can move one.
+//   * the plan is an argument, never DEFAULT_ORG_PLAN. Reading the deployment's
+//     variable would make "which orgs move where" depend on a value the operator
+//     may not have in front of them, and the failure would be silent and
+//     wholesale — exactly the shape of the bug this fixes.
+//   * it prints and changes nothing unless told twice. `--apply` is the second
+//     time.
+const NEVER_CHOSEN = "no plan was ever chosen for it";
+
+async function backfill(db: Database, plan: Plan, apply: boolean): Promise<void> {
+  const rows = await db
+    .select({
+      id: organizations.id,
+      name: organizations.name,
+      slug: organizations.slug,
+      plan: organizations.plan,
+    })
+    .from(organizations)
+    .where(
+      and(
+        isNull(organizations.planUpdatedAt),
+        isNull(organizations.billingSubscriptionId),
+        ne(organizations.plan, plan),
+      ),
+    );
+
+  if (rows.length === 0) {
+    console.log(`nothing to move: every organization is already on ${plan}, or has a chosen plan`);
+    return;
+  }
+
+  for (const row of rows)
+    console.log(`  ${row.id}  ${row.plan} -> ${plan}  ${row.name} (${row.slug})`);
+  if (!apply) {
+    console.log(
+      `\n${rows.length} organization(s) would move to ${plan}. Nothing was changed — ` +
+        `re-run with --apply.`,
+    );
+    return;
+  }
+
+  await db
+    .update(organizations)
+    .set({ plan, planUpdatedAt: new Date(), planNote: NEVER_CHOSEN })
+    .where(
+      and(
+        isNull(organizations.planUpdatedAt),
+        isNull(organizations.billingSubscriptionId),
+        ne(organizations.plan, plan),
+      ),
+    );
+  console.log(`\n${rows.length} organization(s) moved to ${plan}.`);
+}
+
 async function main(): Promise<void> {
   loadEnvOrExit("migrate");
   const db = createDatabase(coreEnv().DATABASE_URL);
-  const [target, plan, ...noteParts] = process.argv.slice(2);
+  const argv = process.argv.slice(2);
+
+  if (argv[0] === "--backfill") {
+    const plan = argv[1];
+    if (plan === undefined || !isPlan(plan)) fail(`--backfill needs a plan: ${PLANS.join(", ")}`);
+    await backfill(db, plan, argv.includes("--apply"));
+    return;
+  }
+
+  const [target, plan, ...noteParts] = argv;
 
   if (target === undefined) {
     const rows = await db
