@@ -4,6 +4,7 @@ import { nitroV2Plugin } from "@tanstack/nitro-v2-vite-plugin";
 import { tanstackStart } from "@tanstack/react-start/plugin/vite";
 import viteReact from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
+import { ASSET_CACHE_CONTROL, EDGE_HEADERS } from "./src/lib/security-headers";
 
 export default defineConfig({
   // No `server.proxy` for /api. There was one, and the passthrough in
@@ -23,25 +24,21 @@ export default defineConfig({
     // letting it fall back to 2024-04-03 and warn on every build.
     //
     // routeRules is the only seam in front of nitro's static handler, which
-    // answers /assets/** before src/server.ts runs — so the headers that module
-    // adds never reach a built asset. Measured on the built output: a hashed
-    // asset came back with an ETag and nothing else, no nosniff and no
-    // cache-control at all, which means the browser revalidates the whole bundle
-    // on every navigation.
+    // answers the built assets and everything in public/ before src/server.ts
+    // runs — so the headers that module adds never reach either. Measured on the
+    // built output: a hashed asset came back with an ETag and nothing else, and
+    // the first ZAP run reported `nosniff` missing on /favicon.svg and
+    // /robots.txt for the same reason.
     //
-    // A year and `immutable` is safe here and only here: vite puts a content
-    // hash in every one of these filenames, so a changed file is a changed URL
-    // and a cached one can never be stale. Everything else on this origin is
-    // no-store (src/lib/security-headers.ts).
+    // `/**` rather than a list of paths, so a file added to public/ next year is
+    // covered by having been added. The header values are imported rather than
+    // written again here — two copies of a security header is one copy and one
+    // stale copy.
     nitroV2Plugin({
       compatibilityDate: "2026-07-31",
       routeRules: {
-        "/assets/**": {
-          headers: {
-            "cache-control": "public, max-age=31536000, immutable",
-            "x-content-type-options": "nosniff",
-          },
-        },
+        "/**": { headers: { ...EDGE_HEADERS } },
+        "/assets/**": { headers: { "cache-control": ASSET_CACHE_CONTROL } },
       },
     }),
     // react's vite plugin must come after start's plugin

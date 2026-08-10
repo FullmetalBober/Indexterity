@@ -40,6 +40,7 @@ describe("securityHeaders", () => {
     ["x-content-type-options", "nosniff"],
     ["x-frame-options", "DENY"],
     ["referrer-policy", "no-referrer"],
+    ["cross-origin-resource-policy", "same-origin"],
   ])("sets %s", (name, value) => {
     expect(send().get(name)).toBe(value);
   });

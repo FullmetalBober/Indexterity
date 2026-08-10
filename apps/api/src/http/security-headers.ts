@@ -33,9 +33,9 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 //   anyway — sending one would be a header that looks like a policy and is not.
 //   The chart's ingress is where it belongs (see deploy/helm).
 //
-//   Cross-Origin-Resource-Policy: same-origin would break nothing today and say
-//   nothing either: every reader of this api is same-origin already, by the
-//   design that lets the browser hold the session cookie at all.
+//   Cross-Origin-Opener-Policy governs window handles between documents, and
+//   nothing here is a document. On a JSON response it is a header the next
+//   reader has to work out the irrelevance of.
 const HEADERS: Readonly<Record<string, string>> = {
   // No subresources, no framing, no plugins, no <base> tricks. Everything this
   // api can legitimately do is already permitted by returning bytes.
@@ -53,6 +53,10 @@ const HEADERS: Readonly<Record<string, string>> = {
   // None of these features exist in a JSON response; saying so is what stops an
   // embedded context from inheriting the permission.
   "permissions-policy": "camera=(), microphone=(), geolocation=(), payment=()",
+  // No other origin may read these bytes by embedding them. CORS already refuses
+  // to hand a cross-origin script the body, but a <script> or <img> load is a
+  // no-cors read that CORS never sees — this is the header that refuses those.
+  "cross-origin-resource-policy": "same-origin",
 };
 
 // A browser must not reuse an authenticated answer for the next caller, and a
