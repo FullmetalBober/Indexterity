@@ -1,4 +1,4 @@
-import { entitlementsFor, isPlan, PLANS, type Plan, planFrom } from "./billing/plans";
+import { DEFAULT_PLAN, entitlementsFor, isPlan, PLANS, type Plan, planFrom } from "./billing/plans";
 import { coreEnv, loadEnvOrExit } from "./config/env";
 import { and, createDatabase, type Database, eq, isNull, ne, organizations } from "./db";
 
@@ -34,17 +34,38 @@ function describeLimit(value: number): string {
 // This is the rest of them, and the whole design of it is about being safe on a
 // HOSTED deployment as well as a self-hosted one:
 //
-//   * two guards, not one. `planUpdatedAt IS NULL` means neither this script nor
-//     a webhook has ever written the row, and `billingSubscriptionId IS NULL`
-//     means no provider owns it. A paying customer fails both, so no argument to
-//     this command can move one.
+//   * three guards, not one. `plan = FREE` is the one that says which orgs this
+//     is FOR — the ones the DDL default decided for, since that default was
+//     FREE. `planUpdatedAt IS NULL` means neither this script nor a webhook has
+//     ever written the row, and `billingSubscriptionId IS NULL` means no provider
+//     owns it. A paying customer fails at least two of the three, so no argument
+//     to this command can move one.
 //   * the plan is an argument, never DEFAULT_ORG_PLAN. Reading the deployment's
 //     variable would make "which orgs move where" depend on a value the operator
 //     may not have in front of them, and the failure would be silent and
 //     wholesale — exactly the shape of the bug this fixes.
 //   * it prints and changes nothing unless told twice. `--apply` is the second
 //     time.
+//
+// The `plan = FREE` guard was added after running the dry run against a database
+// with history in it: `planUpdatedAt IS NULL` alone matched organizations sitting
+// on SCALE, because anything that writes the column without also writing the
+// timestamp — an integration test, a hand-run UPDATE — looks exactly like an org
+// nobody ever chose for. Every one of those would have been silently DOWNGRADED,
+// which is the opposite of what a command called backfill should be able to do.
 const NEVER_CHOSEN = "no plan was ever chosen for it";
+
+// The plan the DDL default used to impose, and so the only plan this moves FROM.
+const WAS_THE_DEFAULT = DEFAULT_PLAN;
+
+function neverChosen(plan: Plan) {
+  return and(
+    eq(organizations.plan, WAS_THE_DEFAULT),
+    isNull(organizations.planUpdatedAt),
+    isNull(organizations.billingSubscriptionId),
+    ne(organizations.plan, plan),
+  );
+}
 
 async function backfill(db: Database, plan: Plan, apply: boolean): Promise<void> {
   const rows = await db
@@ -55,16 +76,12 @@ async function backfill(db: Database, plan: Plan, apply: boolean): Promise<void>
       plan: organizations.plan,
     })
     .from(organizations)
-    .where(
-      and(
-        isNull(organizations.planUpdatedAt),
-        isNull(organizations.billingSubscriptionId),
-        ne(organizations.plan, plan),
-      ),
-    );
+    .where(neverChosen(plan));
 
   if (rows.length === 0) {
-    console.log(`nothing to move: every organization is already on ${plan}, or has a chosen plan`);
+    console.log(
+      `nothing to move: no organization is on ${WAS_THE_DEFAULT} with a plan nobody chose`,
+    );
     return;
   }
 
@@ -78,16 +95,14 @@ async function backfill(db: Database, plan: Plan, apply: boolean): Promise<void>
     return;
   }
 
+  // The same predicate, not a list of the ids just selected: the UPDATE has to
+  // be re-evaluated against the rows as they are now, so an org that acquired a
+  // chosen plan between the SELECT and here is left alone rather than overwritten
+  // from a stale read.
   await db
     .update(organizations)
     .set({ plan, planUpdatedAt: new Date(), planNote: NEVER_CHOSEN })
-    .where(
-      and(
-        isNull(organizations.planUpdatedAt),
-        isNull(organizations.billingSubscriptionId),
-        ne(organizations.plan, plan),
-      ),
-    );
+    .where(neverChosen(plan));
   console.log(`\n${rows.length} organization(s) moved to ${plan}.`);
 }
 
