@@ -15,6 +15,7 @@
     "dev": "turbo run dev",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
+    "audit:gate": "node scripts/audit-gate.mjs",
     "lint": "biome check . && node scripts/lint-tailwind.mjs",
     "lint:fix": "biome check --write . && node scripts/lint-tailwind.mjs",
     "lint:tailwind": "node scripts/lint-tailwind.mjs",

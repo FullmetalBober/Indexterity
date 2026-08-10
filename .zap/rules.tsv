@@ -1,0 +1,13 @@
+# ZAP baseline alerts we have decided about. Everything else fails the build.
+#
+# Tab-separated: <rule id>	<IGNORE|WARN|FAIL>	<reason>
+#
+# IGNORE is a decision, not a mute button. Every line here has to say why the
+# alert is not worth acting on, or which issue is acting on it — an entry that
+# says neither is how a scan turns into a formality. The rule ids are ZAP's:
+# https://www.zaproxy.org/docs/alerts/
+#
+# Also read: apps/api/src/http/security-headers.ts and
+# apps/web/src/lib/security-headers.ts, which are why this file is as short as it
+# is. The alternative to fixing an alert is not always ignoring it.
+10038	IGNORE	CSP on the document surface needs a nonce for the SSR hydration script — #134. The api sends default-src 'none'; the dashboard sends none yet, and a wrong script-src breaks hydration silently.

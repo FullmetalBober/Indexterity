@@ -73,6 +73,16 @@ jobs:
       - run: npm run build
       - run: npm run typecheck
       - run: npm run test
+      # Advisories against the half of the tree that ships. Deliberately not a
+      # bare `npm audit`: that counts the dev-server hole in drizzle-kit's
+      # bundled esbuild the same as one in the HTTP router, and a gate that
+      # fires on everything is a gate people learn to ignore. See the header of
+      # scripts/audit-gate.mjs for what is carried on purpose and why.
+      #
+      # In `check` rather than a job of its own because it needs the installed
+      # tree and nothing else — a second job would re-run `npm ci` to read a
+      # lockfile that is already sitting here.
+      - run: npm run audit:gate
 
   # Every supported major, because version behaviour is load-bearing: the floor,
   # the $queryStats plan-metrics gate, and the profiler fallback below 8.0 are
@@ -224,6 +234,124 @@ jobs:
           name: playwright-report
           path: apps/web/playwright-report/
           retention-days: 7
+
+  # OWASP ZAP, passive, against the origin a browser actually gets.
+  #
+  # Passive only — the baseline scan spiders and reads, it does not attack. That
+  # is not timidity: an active scan against this app would submit forms as an
+  # authenticated owner, and the things it would find its way to are `connect a
+  # cluster` and `apply a recommendation`. Deciding to run one is deciding what it
+  # is allowed to touch, which is a separate piece of work (#21).
+  #
+  # The target is the DASHBOARD's port, not the api's, because that is the whole
+  # surface: the web server answers /api itself (src/lib/api-passthrough.ts), so
+  # one origin covers documents, assets and the api alike — the same shape a
+  # browser sees in production, minus the proxy.
+  #
+  # No mongo service. The scan signs in to nothing and connects no cluster, so
+  # the only backing store either process opens is postgres.
+  zap:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: mongo_optimizer
+          POSTGRES_PASSWORD: mongo_optimizer
+          POSTGRES_DB: mongo_optimizer
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd "pg_isready -U mongo_optimizer"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://mongo_optimizer:mongo_optimizer@localhost:5432/mongo_optimizer
+      BETTER_AUTH_SECRET: zap-secret
+      MASTER_KEY: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+      # One origin, the dashboard's. Both servers have to agree on it: the api
+      # builds better-auth's URLs from it and checks Origin against it, and the
+      # dashboard forwards /api to the api's own port server-side.
+      WEB_ORIGIN: http://127.0.0.1:3000
+      BETTER_AUTH_URL: http://127.0.0.1:3000
+      API_PORT: "3001"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "26"
+          cache: npm
+      - uses: actions/cache@v6
+        id: modules
+        with:
+          path: |
+            node_modules
+            apps/*/node_modules
+            packages/*/node_modules
+          key: modules-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+      - run: npm ci
+        if: steps.modules.outputs.cache-hit != 'true'
+      - uses: actions/cache@v6
+        with:
+          path: .turbo
+          key: turbo-zap-${{ github.sha }}
+          restore-keys: |
+            turbo-zap-
+            turbo-
+      - run: npm run build
+      - run: npm run db:migrate
+
+      # Started by hand rather than through playwright's webServer, because the
+      # scanner is not a test run: the servers have to outlive the step that
+      # starts them. Logs go to files so a scan that fails on a 500 can be told
+      # apart from one that fails on a header.
+      - name: boot the api and the dashboard
+        run: |
+          node apps/api/dist/main.js > /tmp/api.log 2>&1 &
+          echo $! > /tmp/api.pid
+          PORT=3000 API_URL=http://127.0.0.1:3001 \
+            node apps/web/.output/server/index.mjs > /tmp/web.log 2>&1 &
+          echo $! > /tmp/web.pid
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:3001/api/health > /dev/null \
+               && curl -fsS http://127.0.0.1:3000/ > /dev/null; then
+              echo "both up after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::the stack did not come up in 60s"
+          echo "--- api ---"; cat /tmp/api.log
+          echo "--- web ---"; cat /tmp/web.log
+          exit 1
+
+      # `--network=host` is the action's own default, so 127.0.0.1 inside the ZAP
+      # container is the runner's loopback and the servers above are reachable.
+      #
+      # allow_issue_writing is off deliberately. On, this opens and rewrites a
+      # GitHub issue on every run, which turns the repo's issue list into a scan
+      # log; the report is uploaded as an artefact instead, and a real finding is
+      # worth someone filing by hand.
+      #
+      # fail_action is ON. A scan that cannot fail is a report nobody is obliged
+      # to read — and .zap/rules.tsv is where an alert we have decided about goes,
+      # with the reason next to it, so silence is always something someone wrote.
+      - name: ZAP baseline scan
+        uses: zaproxy/action-baseline@v0.15.0
+        with:
+          target: http://127.0.0.1:3000
+          rules_file_name: .zap/rules.tsv
+          allow_issue_writing: false
+          fail_action: true
+          artifact_name: zap-baseline
+
+      - name: server logs
+        if: always()
+        run: |
+          echo "--- api ---"; cat /tmp/api.log || true
+          echo "--- web ---"; cat /tmp/web.log || true
+          kill "$(cat /tmp/api.pid)" "$(cat /tmp/web.pid)" 2>/dev/null || true
 
   # Does this change touch what the chart job tests?
   #

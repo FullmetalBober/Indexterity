@@ -10,6 +10,7 @@ observe window, a pre-flight check, and a read-latency regression test.
 | | |
 |---|---|
 | **How it is built** | [Architecture](https://github.com/FullmetalBober/Indexterity/wiki/Architecture) |
+| **What holds it shut** | [Security](https://github.com/FullmetalBober/Indexterity/wiki/Security) |
 | **Knobs, scoring and plans** | [Plans and policy](https://github.com/FullmetalBober/Indexterity/wiki/Plans-and-policy) |
 | **The MongoDB user it needs** | [Connecting a cluster](https://github.com/FullmetalBober/Indexterity/wiki/Connecting-a-cluster) |
 | **Every load-bearing choice** | [`docs/decisions.md`](./docs/decisions.md) |
@@ -432,6 +433,19 @@ instead of 1,460. A hole in the series means "we stopped watching, so absence of
 usage proves nothing", so a run is the positive form of the claim: *we looked at
 `lastSeenAt`, and it was still this*. Details in
 [Architecture §10 and §11](https://github.com/FullmetalBober/Indexterity/wiki/Architecture).
+
+**Two of those defaults are checked on every pull request.** An OWASP ZAP baseline
+scan runs against the origin a browser actually gets — the dashboard's, since it
+answers `/api` itself — and `npm run audit:gate` fails on high or critical
+advisories reachable from the half of the dependency tree that ships, ignoring the
+build tools that never leave the runner. Neither can be silenced without writing
+down why: exceptions live in `scripts/audit-gate.mjs` and `.zap/rules.tsv`, keyed
+so that a *new* advisory against an already-excepted package still fails and an
+exception whose advisory was fixed fails too.
+
+The full review, chapter by chapter against OWASP ASVS 5.0 Level 2, including what
+is deliberately not done:
+[Security](https://github.com/FullmetalBober/Indexterity/wiki/Security).
 
 ## Deploy
 

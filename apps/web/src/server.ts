@@ -13,6 +13,7 @@ import { createServerEntry } from "@tanstack/react-start/server-entry";
 import { isApiRequest, passThroughToApi } from "~/lib/api-passthrough";
 import { startMetricsServer } from "~/lib/metrics/provider";
 import { measureRequest } from "~/lib/metrics/requests";
+import { withSecurityHeaders } from "~/lib/security-headers";
 
 // The dashboard's server entry. It replaces the framework's default (which is
 // exactly the two lines below) for two reasons, both of which need a module that
@@ -80,11 +81,15 @@ if (bootState[BOOTED] !== true) {
 // out, because wrapFetchWithSentry is generic over every framework it supports
 // and cannot name TanStack Start's RequestOptions. The value is handed back
 // exactly as it arrived — the cast restores a type, it does not assert one.
+// withSecurityHeaders wraps the ROUTER branch alone. The api answers /api with
+// its own, stricter set (apps/api/src/http/security-headers.ts) and a response
+// that arrived through `fetch` has an immutable header list, so adding to it here
+// would throw for no gain.
 const handleRequest = (request: Request, opts?: unknown): Response | Promise<Response> =>
-  measureRequest(request, () =>
+  measureRequest(request, async () =>
     isApiRequest(new URL(request.url).pathname)
       ? passThroughToApi(request)
-      : fetch(request, opts as Parameters<typeof fetch>[1]),
+      : withSecurityHeaders(await fetch(request, opts as Parameters<typeof fetch>[1])),
   );
 
 export default createServerEntry(wrapFetchWithSentry({ fetch: handleRequest }));

@@ -21,7 +21,29 @@ export default defineConfig({
     tanstackStart(),
     // Pin nitro's defaults to the date this app was built against, instead of
     // letting it fall back to 2024-04-03 and warn on every build.
-    nitroV2Plugin({ compatibilityDate: "2026-07-31" }),
+    //
+    // routeRules is the only seam in front of nitro's static handler, which
+    // answers /assets/** before src/server.ts runs — so the headers that module
+    // adds never reach a built asset. Measured on the built output: a hashed
+    // asset came back with an ETag and nothing else, no nosniff and no
+    // cache-control at all, which means the browser revalidates the whole bundle
+    // on every navigation.
+    //
+    // A year and `immutable` is safe here and only here: vite puts a content
+    // hash in every one of these filenames, so a changed file is a changed URL
+    // and a cached one can never be stale. Everything else on this origin is
+    // no-store (src/lib/security-headers.ts).
+    nitroV2Plugin({
+      compatibilityDate: "2026-07-31",
+      routeRules: {
+        "/assets/**": {
+          headers: {
+            "cache-control": "public, max-age=31536000, immutable",
+            "x-content-type-options": "nosniff",
+          },
+        },
+      },
+    }),
     // react's vite plugin must come after start's plugin
     viteReact(),
     tailwindcss(),

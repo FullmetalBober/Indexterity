@@ -14,6 +14,7 @@ import { sessionCookiesFor } from "./auth/session";
 import { apiEnv, trustProxySetting } from "./config/env";
 import { AppExceptionFilter } from "./errors/exception.filter";
 import { captureAuthFailure } from "./errors/reporting";
+import { securityHeaders } from "./http/security-headers";
 import { jobDb } from "./jobs/db";
 import { embeddedWorkerEnabled, startWorker } from "./jobs/runner";
 import { instrumentHttp, registerControlPlaneGauges, startMetricsServer } from "./metrics";
@@ -43,9 +44,12 @@ async function bootstrap(): Promise<void> {
   app.setGlobalPrefix("api");
   app.useGlobalFilters(new AppExceptionFilter());
   const fastify = app.getHttpAdapter().getInstance();
-  // Before the routes exist, so the hook sees oRPC, better-auth and the health
-  // check alike.
+  // Before the routes exist, so the hooks see oRPC, better-auth and the health
+  // check alike. That breadth is the whole point for the headers: better-auth
+  // registers straight on Fastify, outside Nest, so anything scoped to a
+  // controller would miss every endpoint that handles a credential.
   instrumentHttp(fastify);
+  securityHeaders(fastify);
 
   // Global ceiling per IP, with a tight budget on the auth endpoints — they are
   // the brute-force target (sign-in/sign-up).
