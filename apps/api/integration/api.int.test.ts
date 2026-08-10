@@ -1270,6 +1270,16 @@ describe("org management", () => {
     const orgId = asString(asRecord(await (await api("/org", upgrader)).json()).id);
     createdOrgIds.push(orgId);
 
+    // Whatever the deployment's DEFAULT_ORG_PLAN put here, rather than a
+    // literal. Pinning FREE would pass for the wrong reason on an api booted
+    // without the variable — which is the whole of #132 — and fail on one
+    // booted with it.
+    const [before] = await db
+      .select({ plan: organizations.plan })
+      .from(organizations)
+      .where(eq(organizations.id, orgId));
+    expect(before?.plan).not.toBeUndefined();
+
     const res = await authPost("/organization/update", upgrader, {
       data: { name: "Still Free", plan: "SCALE" },
     });
@@ -1280,7 +1290,7 @@ describe("org management", () => {
       .from(organizations)
       .where(eq(organizations.id, orgId));
     expect(org?.name).toBe("Still Free");
-    expect(org?.plan).toBe("FREE");
+    expect(org?.plan).toBe(before?.plan);
   });
 
   it("guards the last owner and round-trips a role change", async () => {

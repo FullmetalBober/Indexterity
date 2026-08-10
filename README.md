@@ -169,6 +169,15 @@ paid plan adds is not having to. A plan is per organization, history is enforced
 on read rather than by deletion (so an upgrade returns yours at once), and no
 payment provider is wired on purpose.
 
+A new organization lands on `DEFAULT_ORG_PLAN`, which the chart sets to
+`SELF_HOSTED`. **Upgrading an install that has been running a while?** Its
+organizations were created before anything read that variable and are sitting on
+`FREE` — three seats, no unattended apply, 90 days. `set-plan.js --backfill
+SELF_HOSTED` lists them and changes nothing; add `--apply` to move them. It moves
+only organizations that are **on `FREE`** and whose plan was never chosen
+deliberately — no `set-plan.js` run, no billing subscription — so it can raise a
+plan and never lower one.
+
 Each knob, how the observe window scales to the index, and the entitlement
 reasoning: [Plans and policy](https://github.com/FullmetalBober/Indexterity/wiki/Plans-and-policy).
 

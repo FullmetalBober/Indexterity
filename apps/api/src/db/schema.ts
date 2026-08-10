@@ -232,7 +232,15 @@ export const organizations = pgTable("organizations", {
   // What this org is entitled to — the rules live in billing/plans.ts, this is
   // only which set applies. Text rather than an enum so adding a plan is a
   // constant, not a migration; unrecognised values fall back to FREE.
-  plan: text("plan").notNull().default("FREE"),
+  //
+  // No DDL default, deliberately (#132). It had one, `FREE`, and a default on a
+  // column nobody wrote is not a fallback — it is the decision. The organization
+  // plugin inserts without a plan, so `FREE` is what every self-hosted install
+  // got while the chart asked for `SELF_HOSTED` and no code read the variable.
+  // auth/organization.ts stamps it now, and a column that cannot fall back is
+  // what makes a future path that forgets fail at the insert instead of quietly
+  // choosing the most restrictive plan.
+  plan: text("plan").notNull(),
   planUpdatedAt: timestamp("plan_updated_at", { withTimezone: true }),
   // Why it is on that plan: an invoice number, a trial end, "founding
   // customer". Written by whoever changed it, shown to nobody but operators.
