@@ -1,3 +1,7 @@
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { documentCsp, EDGE_HEADERS, newNonce, withSecurityHeaders } from "./security-headers";
 
@@ -98,16 +102,61 @@ describe("documentCsp", () => {
     },
   );
 
-  // The one relaxation, and it is a decision rather than an oversight: `sonner`
-  // injects its CSS through a style element at import time with no nonce
-  // option, and `react-remove-scroll-bar` writes the measured scrollbar width
-  // into a rule, so its content differs between machines and cannot be hashed.
-  // Asserted so that narrowing it later is a change to this line rather than a
-  // silent one — and so that the same token appearing in script-src, which the
-  // case above forbids, stays a separate question.
-  it("permits inline styles, and says so only for styles", () => {
-    expect(directive("style-src")).toBe("'self' 'unsafe-inline'");
+  // Style ELEMENTS are allowed by name — the nonce for what asks `get-nonce` for
+  // one, the hashes for sonner, which does not. 'unsafe-inline' would be the
+  // easy answer and is the one thing this must not say, since it is also what
+  // ZAP reports as 10055.
+  it("allows style elements by name, never by 'unsafe-inline'", () => {
+    expect(directive("style-src")).not.toContain("'unsafe-inline'");
+    expect(directive("style-src")).toContain("'nonce-NONCE'");
+    expect(directive("style-src")).toContain("'sha256-");
+  });
+
+  // The attribute is a separate directive and the one place 'unsafe-inline' is
+  // unavoidable: React server-renders `style={{…}}` as `style="…"`. Stated
+  // separately so that widening it never widens style-src by accident.
+  it("permits style attributes, and only attributes", () => {
+    expect(directive("style-src-attr")).toBe("'unsafe-inline'");
     expect(directive("script-src")).not.toContain("'unsafe-inline'");
+  });
+
+  // The hashes in the policy are constants of the INSTALLED dependencies, and
+  // this recomputes them from node_modules. An upgrade that changes one byte of
+  // either stylesheet is then a red unit test naming the constant to update —
+  // not a toast that quietly loses its styling in production.
+  //
+  // `resolve` rather than a path, because npm may hoist these to the repo root
+  // or keep them here.
+  const require_ = createRequire(join(process.cwd(), "package.json"));
+  const hashOf = (css: string): string =>
+    `'sha256-${createHash("sha256").update(css).digest("base64")}'`;
+
+  it("carries the hash of the sonner stylesheet actually installed", () => {
+    // Either of sonner's builds serves: vite bundles the ESM one, `resolve`
+    // finds the CJS one, and the CSS literal is byte-identical in both.
+    const source = readFileSync(require_.resolve("sonner"), "utf8");
+    const literal = /__insertCSS\("(.*?)"\);?\n/s.exec(source)?.[1];
+    expect(literal, "sonner no longer injects its CSS from one __insertCSS call").toBeTruthy();
+    expect(
+      directive("style-src"),
+      "sonner's stylesheet changed — update INJECTED_STYLE_HASHES",
+    ).toContain(hashOf(JSON.parse(`"${literal}"`) as string));
+  });
+
+  it("carries the hash of the radix select viewport rule actually installed", () => {
+    const source = readFileSync(require_.resolve("@radix-ui/react-select"), "utf8");
+    const literal = /__html: `(\[data-radix-select-viewport\][^`]*)`/.exec(source)?.[1];
+    expect(literal, "radix select no longer renders one viewport style").toBeTruthy();
+    expect(
+      directive("style-src"),
+      "the radix select viewport rule changed — update INJECTED_STYLE_HASHES",
+    ).toContain(hashOf(literal ?? ""));
+  });
+
+  // Not a third dependency: a browser checks a style element when it is appended
+  // and again when its text lands, and the first check sees an empty one.
+  it("allows the empty style element every injection is checked as first", () => {
+    expect(directive("style-src")).toContain(hashOf(""));
   });
 
   // Same-origin is the whole of it because the web server answers /api itself,

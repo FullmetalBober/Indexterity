@@ -37,6 +37,10 @@ test.describe("content security policy", () => {
     const scriptSrc = /script-src ([^;]*)/.exec(policy)?.[1] ?? "";
     expect(scriptSrc).not.toContain("unsafe-inline");
     expect(scriptSrc).not.toContain("unsafe-eval");
+    // Nor style-src, which is ZAP's 10055. 'unsafe-inline' is confined to the
+    // ATTRIBUTE directive, which React's server-rendered `style={{…}}` needs.
+    const styleSrc = /(?:^|; )style-src ([^;]*)/.exec(policy)?.[1] ?? "";
+    expect(styleSrc).not.toContain("unsafe-inline");
     expect(policy).toContain("default-src 'none'");
     expect(policy).toContain("object-src 'none'");
     expect(policy).toContain("base-uri 'none'");

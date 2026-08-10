@@ -10,19 +10,35 @@ import { test as base, expect, type Page } from "@playwright/test";
 // hydration script and the page renders, sits there, and never becomes
 // interactive. Most of what these specs do would then fail anyway — but on a
 // button that "does nothing", which reads as a slow app rather than a broken
-// header. Chromium logs every refusal to the console, so the refusal itself is
-// the assertion, and it is made on EVERY test rather than a page or two.
+// header. So the refusal itself is the assertion, and it is made on EVERY test
+// rather than on a page or two.
 export const test = base.extend<{ cspRefusals: string[] }>({
   cspRefusals: [
     async ({ page }, use) => {
-      const refusals: string[] = [];
-      page.on("console", (message) => {
-        if (message.type() === "error" && /content security policy/i.test(message.text())) {
-          refusals.push(message.text());
-        }
+      const refusals = new Set<string>();
+      // The `securitypolicyviolation` event rather than the console message,
+      // because it names WHERE. The console only says a policy was violated, and
+      // the answer to that is always "which of the dozen things on this page?" —
+      // the event carries the directive and the source position that did it,
+      // which is what a fix starts from. Both times this fired for real, that
+      // position is what identified the library.
+      //
+      // Playwright injects this through CDP, before any page script and outside
+      // the policy's reach, so the listener cannot itself be refused.
+      await page.exposeFunction("__cspRefusal", (detail: string) => void refusals.add(detail));
+      await page.addInitScript(() => {
+        document.addEventListener("securitypolicyviolation", (event) => {
+          const where = event.sourceFile
+            ? `${event.sourceFile}:${event.lineNumber}:${event.columnNumber}`
+            : event.documentURI;
+          const report = (window as unknown as { __cspRefusal: (d: string) => void }).__cspRefusal;
+          report(`${event.effectiveDirective} refused ${event.blockedURI} at ${where}`);
+        });
       });
-      await use(refusals);
-      expect(refusals, "the browser refused something the policy should have allowed").toEqual([]);
+      await use([...refusals]);
+      expect([...refusals], "the browser refused something the policy should have allowed").toEqual(
+        [],
+      );
     },
     { auto: true },
   ],

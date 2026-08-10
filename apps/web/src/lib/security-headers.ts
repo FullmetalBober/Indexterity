@@ -96,6 +96,43 @@ export function newNonce(): string {
   return randomBytes(16).toString("base64");
 }
 
+// The style elements this origin writes from JavaScript that cannot be given a
+// nonce, allowed by their CONTENT instead.
+//
+// Two dependencies, and the whole list — measured against the built bundle, not
+// assumed:
+//
+//   sonner              its stylesheet, injected at import time through a
+//                       `document.createElement("style")`. Takes no nonce.
+//   @radix-ui/react-select  the viewport's scrollbar-hiding rule, rendered as a
+//                       React element. It DOES take a `nonce` prop, but the only
+//                       way to pass one is through the vendored
+//                       components/ui/select.tsx — and forking a registry file
+//                       is what the next `shadcn add` undoes.
+//
+// Everything else that writes a style element asks `get-nonce` for a nonce and
+// gets this response's (see ./style-nonce.ts), which is how
+// `react-remove-scroll-bar` — whose rule carries the MEASURED scrollbar width and
+// so could never be hashed — is covered under every Radix dialog.
+//
+// The empty-string hash is not a third dependency: a browser checks a style
+// element when it is appended and again when its text lands, and the first of
+// those checks sees an empty one. It permits nothing but an empty stylesheet.
+//
+// A hash rather than 'unsafe-inline' because both strings are constants of the
+// installed versions — which also makes them checkable. security-headers.test.ts
+// recomputes both from node_modules and fails if either has moved, so an upgrade
+// is a red unit test naming this constant rather than a toast that quietly loses
+// its styling. Regenerate them the way that test does.
+const INJECTED_STYLE_HASHES = [
+  // sha256 of ""
+  "'sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU='",
+  // sonner 2.0.7
+  "'sha256-CIxDM5jnsGiKqXs2v7NKCY5MzdR9gu6TtiMJrDw29AY='",
+  // @radix-ui/react-select's viewport rule
+  "'sha256-441zG27rExd4/il+NvIqyL8zFx5XmyNQtE381kSkUJk='",
+];
+
 // The policy for a rendered document, given the nonce its scripts carry.
 //
 // `default-src 'none'` and then the exceptions, rather than a permissive default
@@ -112,23 +149,19 @@ export function documentCsp(nonce: string): string {
     // response (above), 'self' cannot be turned into a script by getting the api
     // to echo JSON back at a <script src> — the type has to be right too.
     `script-src 'self' 'nonce-${nonce}'`,
-    // The one relaxation, and it is deliberate rather than the default anyone
-    // reaches for. Our own CSS is a linked stylesheet — Tailwind through Vite
-    // emits one — but two dependencies write style ELEMENTS from JavaScript at
-    // runtime and neither can be reached: `sonner` injects its CSS at import
-    // time through a `document.createElement("style")` with no nonce option,
-    // and `react-remove-scroll-bar` (under every Radix dialog) writes a rule
-    // containing the measured scrollbar width, so its content is not the same
-    // twice and cannot be hashed either. React's server-rendered `style={{…}}`
-    // needs it too — that is how the virtualized tables position their rows.
-    //
-    // What makes it acceptable HERE rather than in general is the rest of this
-    // policy. Injected CSS attacks work by fetching: an attribute selector that
-    // asks for a background image per character, or a font per glyph. With
-    // `default-src 'none'` and `img-src`, `font-src` and `connect-src` all
-    // 'self', injected CSS has nowhere to send what it reads. `script-src`,
-    // which is the directive this header exists for, keeps its nonce.
-    "style-src 'self' 'unsafe-inline'",
+    // No 'unsafe-inline'. Our own CSS is a linked stylesheet — Tailwind through
+    // Vite emits one — and every style ELEMENT written from JavaScript is
+    // allowed by name instead: by this response's nonce where the library asks
+    // for one, and by content hash where it cannot (see above). An injected
+    // `<style>` matches neither.
+    `style-src 'self' 'nonce-${nonce}' ${INJECTED_STYLE_HASHES.join(" ")}`,
+    // The ATTRIBUTE is a separate directive, and the one place 'unsafe-inline'
+    // is unavoidable: React server-renders `style={{…}}` as `style="…"`, which
+    // is how the virtualized tables position their rows and the charts size
+    // their marks. Naming it separately is what keeps `style-src` above strict —
+    // and a style attribute cannot carry a selector, so it cannot do the
+    // reading that makes injected CSS worth having.
+    "style-src-attr 'unsafe-inline'",
     // `data:` for the QR code the two-factor setup draws.
     "img-src 'self' data:",
     "font-src 'self'",
