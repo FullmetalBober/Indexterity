@@ -1,5 +1,5 @@
-import { expect, test } from "@playwright/test";
-import { PASSWORD, signUpAndLandOnDashboard, uniqueEmail } from "./fixtures";
+import { expect } from "@playwright/test";
+import { PASSWORD, signUpAndLandOnDashboard, test, uniqueEmail } from "./fixtures";
 
 // The account page's chain is better-auth's own endpoints end to end: the
 // component tests stop at a mocked auth client, so this is the only place a

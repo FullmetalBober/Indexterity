@@ -22,6 +22,12 @@
 // `routeRules` in vite.config.ts is the only seam in front of that handler, so
 // the headers that must reach EVERY response are declared here and imported
 // there, rather than written twice and drifting.
+//
+// `Content-Security-Policy` is the one header deliberately NOT declared there:
+// it is per-response (see below), and a second copy arriving from routeRules
+// would be INTERSECTED with the real one by every browser — two policies is not
+// the stricter of the two, it is neither.
+import { randomBytes } from "node:crypto";
 
 // Sent by both paths: the static handler (through routeRules) and this one.
 //
@@ -67,16 +73,115 @@ const DOCUMENT_HEADERS: Readonly<Record<string, string>> = {
   "referrer-policy": "strict-origin-when-cross-origin",
 };
 
-// `Content-Security-Policy` is deliberately NOT in either list yet.
+// ── Content-Security-Policy ─────────────────────────────────────────────────
 //
-// The document surface needs a real `script-src`, and getting one right against
-// the SSR output is its own change: TanStack Start streams an inline hydration
-// script per response, so a policy without either a per-response nonce or
-// 'unsafe-inline' blocks hydration — and a dashboard that renders and then never
-// becomes interactive is a worse failure than the one the header prevents,
-// because it looks like a slow page. Tracked as #134; the ZAP rule for it is
-// IGNOREd in .zap/rules.tsv with the same pointer, so the gate stays honest about
-// what it is not yet checking rather than passing quietly.
+// Not in either list above, because it is the one header here whose value
+// changes per response: TanStack Start streams inline scripts — the router's
+// dehydrated payload, and the buffered `$tsr` block that carries what resolved
+// after the shell — and the only way to allow exactly those without allowing
+// every inline script is a nonce minted for the response they belong to. So
+// src/server.ts mints one, hands it to the router (`ssr.nonce`, which is what
+// puts it on every script the framework emits) and sets the header from the same
+// value.
+//
+// A nonce rather than 'unsafe-inline', which would have been one line: an
+// injected `<script>` is the whole class of attack this header exists to stop,
+// and 'unsafe-inline' permits precisely that. A nonce rather than hashes,
+// because the payload is a tenant's data and is different on every response.
+
+// The nonce's length is the security property: a value an attacker can guess is
+// a value they can put on their own script tag. 128 bits, base64, per response
+// and never reused — the CSP specification's own floor.
+export function newNonce(): string {
+  return randomBytes(16).toString("base64");
+}
+
+// The style elements this origin writes from JavaScript that cannot be given a
+// nonce, allowed by their CONTENT instead.
+//
+// Two dependencies, and the whole list — measured against the built bundle, not
+// assumed:
+//
+//   sonner              its stylesheet, injected at import time through a
+//                       `document.createElement("style")`. Takes no nonce.
+//   @radix-ui/react-select  the viewport's scrollbar-hiding rule, rendered as a
+//                       React element. It DOES take a `nonce` prop, but the only
+//                       way to pass one is through the vendored
+//                       components/ui/select.tsx — and forking a registry file
+//                       is what the next `shadcn add` undoes.
+//
+// Everything else that writes a style element asks `get-nonce` for a nonce and
+// gets this response's (see ./style-nonce.ts), which is how
+// `react-remove-scroll-bar` — whose rule carries the MEASURED scrollbar width and
+// so could never be hashed — is covered under every Radix dialog.
+//
+// The empty-string hash is not a third dependency: a browser checks a style
+// element when it is appended and again when its text lands, and the first of
+// those checks sees an empty one. It permits nothing but an empty stylesheet.
+//
+// A hash rather than 'unsafe-inline' because both strings are constants of the
+// installed versions — which also makes them checkable. security-headers.test.ts
+// recomputes both from node_modules and fails if either has moved, so an upgrade
+// is a red unit test naming this constant rather than a toast that quietly loses
+// its styling. Regenerate them the way that test does.
+const INJECTED_STYLE_HASHES = [
+  // sha256 of ""
+  "'sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU='",
+  // sonner 2.0.7
+  "'sha256-CIxDM5jnsGiKqXs2v7NKCY5MzdR9gu6TtiMJrDw29AY='",
+  // @radix-ui/react-select's viewport rule
+  "'sha256-441zG27rExd4/il+NvIqyL8zFx5XmyNQtE381kSkUJk='",
+];
+
+// The policy for a rendered document, given the nonce its scripts carry.
+//
+// `default-src 'none'` and then the exceptions, rather than a permissive default
+// narrowed by exclusions: a directive nobody thought about should refuse rather
+// than allow, so the next thing this app fetches from somewhere new fails
+// visibly in review instead of quietly widening the policy.
+export function documentCsp(nonce: string): string {
+  return [
+    "default-src 'none'",
+    // 'self' covers the built bundle and every `<link rel=modulepreload>` beside
+    // it; the nonce covers the inline ones. NOT 'strict-dynamic': it would make
+    // browsers ignore 'self', and the modulepreloads carry no nonce of their own
+    // because they are links rather than scripts. With `nosniff` sent on every
+    // response (above), 'self' cannot be turned into a script by getting the api
+    // to echo JSON back at a <script src> — the type has to be right too.
+    `script-src 'self' 'nonce-${nonce}'`,
+    // No 'unsafe-inline'. Our own CSS is a linked stylesheet — Tailwind through
+    // Vite emits one — and every style ELEMENT written from JavaScript is
+    // allowed by name instead: by this response's nonce where the library asks
+    // for one, and by content hash where it cannot (see above). An injected
+    // `<style>` matches neither.
+    `style-src 'self' 'nonce-${nonce}' ${INJECTED_STYLE_HASHES.join(" ")}`,
+    // The ATTRIBUTE is a separate directive, and the one place 'unsafe-inline'
+    // is unavoidable: React server-renders `style={{…}}` as `style="…"`, which
+    // is how the virtualized tables position their rows and the charts size
+    // their marks. Naming it separately is what keeps `style-src` above strict —
+    // and a style attribute cannot carry a selector, so it cannot do the
+    // reading that makes injected CSS worth having.
+    "style-src-attr 'unsafe-inline'",
+    // `data:` for the QR code the two-factor setup draws.
+    "img-src 'self' data:",
+    "font-src 'self'",
+    // The api and the SSE stream are both same-origin: the web server answers
+    // /api itself (lib/api-passthrough.ts), which is the whole reason 'self' is
+    // enough here. Error reporting is server-side only — @sentry/tanstackstart-react
+    // is initialised from lib/errors/provider.ts, which vite builds for the SSR
+    // environment alone, so no browser SDK dials an ingest host. Verified in the
+    // built client bundle: it contains no Sentry at all.
+    "connect-src 'self'",
+    "form-action 'self'",
+    // The same refusal as `x-frame-options: DENY`, stated in the header that
+    // superseded it. Both are sent: the older one is what an old browser reads.
+    "frame-ancestors 'none'",
+    // Nothing may re-point relative URLs, which is how an injected <base> turns
+    // every asset path on the page into someone else's origin.
+    "base-uri 'none'",
+    "object-src 'none'",
+  ].join("; ");
+}
 
 // Nothing this handler answers may be stored. Every one of them is a document
 // rendered from a tenant's data or a server function returning it, and the

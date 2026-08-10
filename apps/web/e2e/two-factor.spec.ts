@@ -1,5 +1,5 @@
-import { expect, test } from "@playwright/test";
-import { PASSWORD, signUpAndLandOnDashboard, totpCode, uniqueEmail } from "./fixtures";
+import { expect } from "@playwright/test";
+import { PASSWORD, signUpAndLandOnDashboard, test, totpCode, uniqueEmail } from "./fixtures";
 
 // The whole second factor, end to end and through the UI only (#55): enrol by
 // reading the manual key off the screen, prove the first code, save a backup

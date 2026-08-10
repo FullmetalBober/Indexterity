@@ -452,6 +452,18 @@ down why: exceptions live in `scripts/audit-gate.ts` and `.zap/rules.tsv`, keyed
 so that a *new* advisory against an already-excepted package still fails and an
 exception whose advisory was fixed fails too.
 
+**The dashboard's documents carry a `Content-Security-Policy` with a nonce minted
+per response** — `default-src 'none'`, and a `script-src` of `'self'` plus that
+nonce, so an injected `<script>` is refused whatever else goes wrong. The nonce
+reaches the framework's own inline scripts through `router.options.ssr.nonce` and
+the header is built from the same variable, which is what stops the two drifting
+into a page that renders and never hydrates. **No `'unsafe-inline'` anywhere
+except the `style` attribute**: the dependencies that write style elements from
+JavaScript are covered by name — the same nonce where the library asks for one,
+a content hash where it cannot, and a unit test recomputes those hashes from
+`node_modules` so an upgrade is a red test rather than a silent change. Every
+end-to-end test fails if the browser refused anything at all.
+
 The full review, chapter by chapter against OWASP ASVS 5.0 Level 2, including what
 is deliberately not done:
 [Security](https://github.com/FullmetalBober/Indexterity/wiki/Security).

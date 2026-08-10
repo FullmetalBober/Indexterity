@@ -1,5 +1,5 @@
-import { expect, test } from "@playwright/test";
-import { PASSWORD, signIn, signUpAndLandOnDashboard, uniqueEmail } from "./fixtures";
+import { expect } from "@playwright/test";
+import { PASSWORD, signIn, signUpAndLandOnDashboard, test, uniqueEmail } from "./fixtures";
 
 // Browser → web server → api → postgres. The component tests mock the server
 // function; this proves the session cookie the api sets actually comes back

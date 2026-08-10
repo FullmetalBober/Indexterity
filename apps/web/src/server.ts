@@ -13,7 +13,7 @@ import { createServerEntry } from "@tanstack/react-start/server-entry";
 import { isApiRequest, passThroughToApi } from "~/lib/api-passthrough";
 import { startMetricsServer } from "~/lib/metrics/provider";
 import { measureRequest } from "~/lib/metrics/requests";
-import { withSecurityHeaders } from "~/lib/security-headers";
+import { documentCsp, newNonce, withSecurityHeaders } from "~/lib/security-headers";
 
 // The dashboard's server entry. It replaces the framework's default (which is
 // exactly the two lines below) for two reasons, both of which need a module that
@@ -29,7 +29,24 @@ import { withSecurityHeaders } from "~/lib/security-headers";
 //
 // Nothing here reaches the browser: vite resolves this file for the server
 // environment alone.
-const fetch = createStartHandler(defaultStreamHandler);
+//
+// The stream handler is wrapped rather than passed through, for the one header
+// that cannot be a constant. A nonce is minted per response, given to the router
+// — `ssr.nonce` is what puts it on every script the framework emits, the
+// dehydration payload and the buffered `$tsr` block alike — and named in the
+// Content-Security-Policy built from the same value. Both halves come from one
+// variable on purpose: a header naming a nonce the scripts do not carry is a
+// page that renders and never hydrates.
+//
+// Set HERE rather than in withSecurityHeaders, because this is the only point
+// that holds both the router and the response's headers, and it has to happen
+// BEFORE the render: the scripts read `ssr.nonce` as they are emitted.
+const fetch = createStartHandler((ctx) => {
+  const nonce = newNonce();
+  ctx.router.update({ ssr: { ...ctx.router.options.ssr, nonce } });
+  ctx.responseHeaders.set("content-security-policy", documentCsp(nonce));
+  return defaultStreamHandler(ctx);
+});
 
 // Off unless METRICS_ENABLED=true. Not awaited, because the entry has to export
 // a handler synchronously; a scrape arriving in the millisecond before the port
