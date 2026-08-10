@@ -4,6 +4,7 @@ import { nitroV2Plugin } from "@tanstack/nitro-v2-vite-plugin";
 import { tanstackStart } from "@tanstack/react-start/plugin/vite";
 import viteReact from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
+import { ASSET_CACHE_CONTROL, EDGE_HEADERS } from "./src/lib/security-headers";
 
 export default defineConfig({
   // No `server.proxy` for /api. There was one, and the passthrough in
@@ -21,7 +22,25 @@ export default defineConfig({
     tanstackStart(),
     // Pin nitro's defaults to the date this app was built against, instead of
     // letting it fall back to 2024-04-03 and warn on every build.
-    nitroV2Plugin({ compatibilityDate: "2026-07-31" }),
+    //
+    // routeRules is the only seam in front of nitro's static handler, which
+    // answers the built assets and everything in public/ before src/server.ts
+    // runs — so the headers that module adds never reach either. Measured on the
+    // built output: a hashed asset came back with an ETag and nothing else, and
+    // the first ZAP run reported `nosniff` missing on /favicon.svg and
+    // /robots.txt for the same reason.
+    //
+    // `/**` rather than a list of paths, so a file added to public/ next year is
+    // covered by having been added. The header values are imported rather than
+    // written again here — two copies of a security header is one copy and one
+    // stale copy.
+    nitroV2Plugin({
+      compatibilityDate: "2026-07-31",
+      routeRules: {
+        "/**": { headers: { ...EDGE_HEADERS } },
+        "/assets/**": { headers: { "cache-control": ASSET_CACHE_CONTROL } },
+      },
+    }),
     // react's vite plugin must come after start's plugin
     viteReact(),
     tailwindcss(),
