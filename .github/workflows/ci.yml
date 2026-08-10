@@ -77,7 +77,7 @@ jobs:
       # bare `npm audit`: that counts the dev-server hole in drizzle-kit's
       # bundled esbuild the same as one in the HTTP router, and a gate that
       # fires on everything is a gate people learn to ignore. See the header of
-      # scripts/audit-gate.mjs for what is carried on purpose and why.
+      # scripts/audit-gate.ts for what is carried on purpose and why.
       #
       # In `check` rather than a job of its own because it needs the installed
       # tree and nothing else — a second job would re-run `npm ci` to read a

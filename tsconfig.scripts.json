@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  // The repo's own scripts, which belong to no workspace. Without this file
+  // `npm run typecheck` fans out to apps/* and packages/* and reads none of
+  // them — so `scripts/` was the only source in the tree that nothing checked.
+  //
+  // They are run by `node scripts/x.ts` directly, with no build step: Node
+  // strips types on the way in. Everything here exists to keep that true.
+  "extends": "./packages/config/tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    // Node erases types, it does not compile them. `enum`, parameter
+    // properties and `namespace` all need code generated for them, so they
+    // parse here and then fail at runtime — this turns that into a type error
+    // instead of a stack trace in CI.
+    "erasableSyntaxOnly": true,
+    // Nothing emitted, so nothing to declare or map.
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false,
+    "types": ["node"]
+  },
+  "include": ["scripts/**/*.ts"]
+}

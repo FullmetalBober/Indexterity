@@ -125,13 +125,17 @@ const OPAQUE = /[(),=&>*'"\s|~^$]/;
 const ARBITRARY = /^-?([a-z][a-z0-9-]*)-\[([^\]]+)\]$/;
 
 // The suggestion for one class token, or null when there is nothing to say.
-export function canonicalFor(token) {
+export function canonicalFor(token: string): string | null {
   // Variants stack in front of the utility, separated by colons. Only the last
   // segment is a utility; `data-[state=open]:` and `[&>svg]:` are conditions.
   const utilityPart = token.slice(token.lastIndexOf(":") + 1);
   const match = ARBITRARY.exec(utilityPart);
   if (match === null) return null;
+  // Both groups are non-optional in ARBITRARY, so a match has them — but the
+  // type says otherwise under noUncheckedIndexedAccess and narrowing beats
+  // asserting.
   const [, utility, value] = match;
+  if (utility === undefined || value === undefined) return null;
   if (OPAQUE.test(value)) return null;
   const negative = utilityPart.startsWith("-") ? "-" : "";
 
@@ -166,8 +170,10 @@ export function canonicalFor(token) {
 // having to understand the syntax around it.
 const STRINGS = /"([^"\\\n]*)"|'([^'\\\n]*)'|`([^`\\]*)`/g;
 
-export function findings(source) {
-  const found = [];
+type Finding = { line: number; token: string; suggestion: string };
+
+export function findings(source: string): Finding[] {
+  const found: Finding[] = [];
   for (const match of source.matchAll(STRINGS)) {
     const literal = match[1] ?? match[2] ?? match[3] ?? "";
     if (!literal.includes("[")) continue;
@@ -188,7 +194,7 @@ export function findings(source) {
 // A lint script's real failure mode is matching nothing and passing forever, so
 // the cases it must and must not flag are checked on every run. Cheap, and it
 // means a broken checker fails the build instead of blessing everything.
-const EXPECTATIONS = [
+const EXPECTATIONS: Array<[token: string, canonical: string | null]> = [
   // Flagged: the v4 spacing scale, in every spelling of it.
   ["w-[220px]", "w-55"],
   ["h-[16px]", "h-4"],
@@ -219,7 +225,7 @@ const EXPECTATIONS = [
   ["text-[13px]", null],
 ];
 
-function selfCheck() {
+function selfCheck(): void {
   const wrong = EXPECTATIONS.filter(([token, want]) => canonicalFor(token) !== want);
   if (wrong.length === 0) return;
   console.error("lint-tailwind is broken — its own cases do not hold:");
@@ -231,7 +237,7 @@ function selfCheck() {
   process.exit(2);
 }
 
-function* sourceFiles(dir) {
+function* sourceFiles(dir: string): Generator<string> {
   for (const entry of readdirSync(dir)) {
     const full = join(dir, entry);
     if (statSync(full).isDirectory()) {
@@ -245,7 +251,7 @@ function* sourceFiles(dir) {
   }
 }
 
-function main() {
+function main(): void {
   selfCheck();
   let total = 0;
   for (const dir of ROOTS) {

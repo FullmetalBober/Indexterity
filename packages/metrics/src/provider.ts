@@ -17,7 +17,7 @@ import { ATTR_SERVICE_NAME, ATTR_SERVICE_VERSION } from "@opentelemetry/semantic
 
 export interface MetricsOptions {
   // Reported as service.version on target_info. Every package in this repo
-  // carries the same version (scripts/set-version.mjs), so any of them will do —
+  // carries the same version (scripts/set-version.ts), so any of them will do —
   // the app reads its own because that is the one it can reach at runtime.
   readonly version: string;
   // Reported as service.name. One name for the whole product by default: which
