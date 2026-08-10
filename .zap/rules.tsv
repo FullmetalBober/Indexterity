@@ -14,7 +14,13 @@
 # assets, CORP and COOP everywhere, and a year of caching on the hashed bundles
 # that were being revalidated on every navigation. The alternative to fixing an
 # alert is not always ignoring it.
+#
+# Note that zap-baseline counts an INFORMATIONAL alert as a WARN unless it is
+# listed here, so two of the lines below are about noise rather than risk. That
+# is worth knowing before reading the length of this file as a measure of debt.
 10038	IGNORE	CSP on the document surface needs a nonce for the SSR hydration script — #134. The api sends default-src 'none'; the dashboard sends none yet, and a wrong script-src breaks hydration silently.
 90004	IGNORE	One rule id for three headers. CORP and COOP ARE sent, on every response, and are asserted by unit tests in both apps — this covers only Cross-Origin-Embedder-Policy, which is deliberately absent: require-corp buys cross-origin isolation (SharedArrayBuffer, precise timers) that this app does not want, and costs every cross-origin subresource having to opt in, so the first external avatar or font anyone adds would break silently.
 10024	IGNORE	/reset-password?token. A reset token in a URL is how an emailed reset link works — every implementation of one. It is single-use, expires, and Referrer-Policy keeps the path off cross-origin requests. Removing it means moving to a code the user retypes, which is a product decision and not a header.
 2	IGNORE	Private IP Disclosure on /assets/index-*.js. The match is the literal "10.0.0.0/8" inside the TRUST_PROXY validation message in apps/web/src/lib/env.ts, which is documentation of the expected format, not an address of any deployment. Verified in the built bundle.
+10049	IGNORE	Storable/Non-Storable Content. This one fires BECAUSE the headers are right: it reports every no-store response as "non-storable" and every hashed asset as "cacheable", which is the split apps/web/src/lib/security-headers.ts and the routeRules in vite.config.ts exist to produce. It is an observation, not a finding — zap-baseline counts informational alerts as WARN unless they are listed here. Both halves are asserted by unit tests and were verified against the running built server.
+10109	IGNORE	Modern Web Application. Informational, and about the SCANNER rather than the app: it notes that links are rendered by JavaScript, so a passive spider will not reach every route. True of any SSR React app, and the reason the baseline scan is a check on what the origin RETURNS rather than a claim to have visited all of it.
