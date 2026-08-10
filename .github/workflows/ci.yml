@@ -326,6 +326,77 @@ jobs:
           echo "--- web ---"; cat /tmp/web.log
           exit 1
 
+      # Sign in, so the scan sees the product rather than its front door.
+      #
+      # Without this the spider reached thirteen URLs — `/`, `/app` rendering the
+      # sign-in screen, `/reset-password`, robots, sitemap and the assets — and
+      # every authenticated page, which is where a tenant's data is, went
+      # unscanned. The alerts that matter most are only reachable here: whether an
+      # authenticated document says no-store, whether the session cookie carries
+      # the flags it should, whether a cluster name or an org id leaks into a URL.
+      #
+      # `SIGNUP_MODE` is deliberately NOT set. The default is invite-only and the
+      # FIRST account always bootstraps an install, so a fresh service-container
+      # database lets this through on the same posture a real deployment runs —
+      # switching to `open` would scan a configuration nobody deploys.
+      #
+      # The organization matters as much as the account: without one the dashboard
+      # draws a create-org screen and nothing below it, so the pages worth scanning
+      # would still not exist. No cluster is connected — that needs a mongod and
+      # would have the scanner dialling a database, which is a bigger decision than
+      # this job should make on its own.
+      - name: sign in, so the scan reaches the dashboard
+        run: |
+          set -euo pipefail
+          cookies() { grep -i '^set-cookie:' "$1" | sed -E 's/^[Ss]et-[Cc]ookie: *//' | cut -d';' -f1 | paste -sd'; ' -; }
+
+          curl -fsS -D /tmp/signup.h -o /tmp/signup.json \
+            -X POST http://127.0.0.1:3001/api/auth/sign-up/email \
+            -H 'content-type: application/json' -H "origin: $WEB_ORIGIN" \
+            -d '{"email":"zap@scan.invalid","password":"scanner-password-12345","name":"ZAP"}'
+          COOKIE="$(cookies /tmp/signup.h)"
+          if [ -z "$COOKIE" ]; then
+            echo "::error::sign-up returned no session cookie"; cat /tmp/signup.json; exit 1
+          fi
+          # Never let the session reach a log, even though the whole stack dies
+          # with the job.
+          echo "::add-mask::$COOKIE"
+
+          curl -fsS -o /tmp/org.json \
+            -X POST http://127.0.0.1:3001/api/auth/organization/create \
+            -H 'content-type: application/json' -H "origin: $WEB_ORIGIN" -H "cookie: $COOKIE" \
+            -d '{"name":"ZAP Scan Org","slug":"zap-scan-org"}'
+
+          # The action forwards these three into the container with a bare `-e`,
+          # so they have to be in the job environment by the time it runs. ZAP
+          # then sets the header on every request to the named site — the default
+          # header is Authorization, and this app authenticates by cookie.
+          {
+            echo "ZAP_AUTH_HEADER=Cookie"
+            echo "ZAP_AUTH_HEADER_VALUE=$COOKIE"
+            echo "ZAP_AUTH_HEADER_SITE=127.0.0.1"
+          } >> "$GITHUB_ENV"
+
+          # Proof the session works before handing it to the scanner. A cookie that
+          # has silently stopped authenticating would produce a clean scan of the
+          # sign-in page — passing, and meaning nothing.
+          #
+          # Asked of the api rather than the dashboard, deliberately. `/api/org`
+          # answers 200 with the org for a resolved session and 401 "sign in
+          # required" without one, which is exactly the question being asked. The
+          # obvious alternative — following /app and checking where it lands — also
+          # works but couples the check to routing: /app redirects to a real route
+          # only once the session resolves an organization, so it would answer "not
+          # authenticated" for a state that is authenticated. Both were measured
+          # against the built servers before choosing.
+          STATUS="$(curl -sS -o /tmp/org.json -w '%{http_code}' -H "cookie: $COOKIE" http://127.0.0.1:3001/api/org)"
+          if [ "$STATUS" != "200" ]; then
+            echo "::error::the session cookie does not authenticate — /api/org answered $STATUS"
+            cat /tmp/org.json
+            exit 1
+          fi
+          echo "signed in, organization created, /api/org answers 200"
+
       # `--network=host` is the action's own default, so 127.0.0.1 inside the ZAP
       # container is the runner's loopback and the servers above are reachable.
       #
@@ -337,11 +408,28 @@ jobs:
       # fail_action is ON. A scan that cannot fail is a report nobody is obliged
       # to read — and .zap/rules.tsv is where an alert we have decided about goes,
       # with the reason next to it, so silence is always something someone wrote.
+      #
+      # `-j` is the browser-driven spider, and it is not optional here. **The
+      # dashboard's pages contain no `href` at all** — measured on the built
+      # output, signed in and signed out, zero in both — because TanStack Router
+      # navigates on the client. So the traditional spider, which reads HTML and
+      # follows links, cannot discover a single route beyond the entry page: it is
+      # what left the first runs scanning thirteen URLs, none of them the product.
+      # A browser that runs the bundle finds what a user would.
+      #
+      # It is still a PASSIVE scan. The spider drives the app as a signed-in owner
+      # and ZAP reads the responses; nothing injects a payload, which is the line
+      # #21 drew and this stays on the right side of. What the browser can reach is
+      # bounded on purpose: no cluster is connected, so there is nothing to
+      # disconnect or drop, and deleting the organization needs its name typed into
+      # a confirm dialog. The database is a service container that dies with the
+      # job either way.
       - name: ZAP baseline scan
         uses: zaproxy/action-baseline@v0.15.0
         with:
           target: http://127.0.0.1:3000
           rules_file_name: .zap/rules.tsv
+          cmd_options: -j
           allow_issue_writing: false
           fail_action: true
           artifact_name: zap-baseline
