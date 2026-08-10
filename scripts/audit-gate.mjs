@@ -35,22 +35,33 @@ const BLOCKING = new Set(["high", "critical"]);
 
 // Advisories we have looked at and are carrying on purpose.
 //
+// Empty, and that is the intended resting state rather than a sign nobody has
+// filled it in. An entry here is a high or critical advisory that a container
+// runs and that we are shipping anyway, which should be rare enough to argue
+// about each time.
+//
+// The shape, when one is needed:
+//
+//   {
+//     id: "GHSA-xxxx-xxxx-xxxx",   // the advisory, NOT the package
+//     package: "find-my-way",      // for the message only
+//     why: "one line, the reason it cannot be reached from this deployment",
+//     until: "the condition that ends it, in words",
+//   }
+//
 // `id` is the GHSA identifier rather than the package name, so a NEW advisory
-// against the same package fails the build. `until` is the condition that ends
-// the exception, in words — a date would only be a reminder to move the date.
-const ACCEPTED = [
-  {
-    id: "GHSA-c96f-x56v-gq3h",
-    package: "find-my-way",
-    // Reachable in the dependency graph, unreachable in this deployment: the
-    // advisory is a denial of service through HTTP/2 CONTINUATION frames, and
-    // the api's FastifyAdapter (apps/api/src/main.ts) never sets `http2`, so
-    // every listener it opens speaks HTTP/1.1. The ingress terminates HTTP/2
-    // and speaks 1.1 to the pod; nothing in the chart or compose changes that.
-    why: "the DDoS needs HTTP/2 and the FastifyAdapter is HTTP/1.1 — `http2` is never set",
-    until: "@nestjs/platform-fastify ships a find-my-way >9.6.0, or this api serves HTTP/2",
-  },
-];
+// against an already-excepted package still fails the build. `until` is a
+// condition rather than a date, because a date is only ever a reminder to move
+// the date — and the check below fails when an accepted advisory stops being
+// reported, so a condition that comes true removes the entry rather than
+// leaving it to be believed.
+//
+// That is not theoretical. This list held GHSA-c96f-x56v-gq3h (find-my-way's
+// HTTP/2 DDoS, unreachable because the FastifyAdapter never enables HTTP/2)
+// until @nestjs/platform-fastify@11.1.29 shipped find-my-way 9.7.0 — exactly the
+// `until` that was written down — and the gate failed on the stale entry rather
+// than carrying a note about a risk that no longer existed.
+const ACCEPTED = [];
 
 // ── The runtime half of the tree ────────────────────────────────────────────
 
