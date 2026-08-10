@@ -38,7 +38,7 @@ export interface SentryDefaultsOptions {
   // project split could correctly pick.
   readonly service: string;
   // Ties an issue to the build that produced it. Same version across every
-  // package in the repo (scripts/set-version.mjs).
+  // package in the repo (scripts/set-version.ts).
   readonly release: string;
 }
 

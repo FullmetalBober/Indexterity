@@ -20,7 +20,7 @@
 # is worth knowing before reading the length of this file as a measure of debt.
 #
 # An entry that has stopped firing is deleted, not left to be believed — the same
-# rule scripts/audit-gate.mjs enforces for advisories. `10109` (Modern Web
+# rule scripts/audit-gate.ts enforces for advisories. `10109` (Modern Web
 # Application) was here until the scan gained a session and a browser spider:
 # ZAP stopped observing that it could not crawl a JavaScript app, because it
 # now can. `10038` (CSP header not set) was here until #134 sent one: the

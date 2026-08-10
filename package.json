@@ -2,9 +2,10 @@
   "name": "indexterity",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "packageManager": "npm@11.6.2",
   "engines": {
-    "node": ">=22"
+    "node": ">=24"
   },
   "workspaces": [
     "apps/*",
@@ -13,12 +14,13 @@
   "scripts": {
     "build": "turbo run build",
     "dev": "turbo run dev",
-    "typecheck": "turbo run typecheck",
+    "typecheck": "turbo run typecheck //#typecheck:scripts",
+    "typecheck:scripts": "tsc -p tsconfig.scripts.json",
     "test": "turbo run test",
-    "audit:gate": "node scripts/audit-gate.mjs",
-    "lint": "biome check . && node scripts/lint-tailwind.mjs",
-    "lint:fix": "biome check --write . && node scripts/lint-tailwind.mjs",
-    "lint:tailwind": "node scripts/lint-tailwind.mjs",
+    "audit:gate": "node scripts/audit-gate.ts",
+    "lint": "biome check . && node scripts/lint-tailwind.ts",
+    "lint:fix": "biome check --write . && node scripts/lint-tailwind.ts",
+    "lint:tailwind": "node scripts/lint-tailwind.ts",
     "format": "biome format --write .",
     "db:generate": "npm run db:generate -w @repo/api",
     "db:migrate": "npm run db:migrate -w @repo/api",
@@ -26,8 +28,8 @@
     "up": "bash scripts/compose.sh up",
     "down": "bash scripts/compose.sh down",
     "compose": "bash scripts/compose.sh",
-    "version:set": "node scripts/set-version.mjs set",
-    "version:check": "node scripts/set-version.mjs check"
+    "version:set": "node scripts/set-version.ts set",
+    "version:check": "node scripts/set-version.ts check"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.5",

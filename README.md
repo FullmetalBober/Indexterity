@@ -366,7 +366,7 @@ from PATH, which matters only when compose is reached *through* npm —
 `@vercel/nft` installs an `nft` binary there and podman's network backend shells
 out to `nft` meaning nftables.
 
-`npm run lint` is Biome plus `scripts/lint-tailwind.mjs`, which fails the build
+`npm run lint` is Biome plus `scripts/lint-tailwind.ts`, which fails the build
 on a Tailwind arbitrary value that has a canonical utility (`w-[220px]` is
 `w-55`). Vendored `components/ui` is exempt. Migration installs **two** schemas
 — `public` for Drizzle and `graphile_worker` for the queue — because the api and
@@ -448,7 +448,7 @@ scan runs against the origin a browser actually gets — the dashboard's, since 
 answers `/api` itself — and `npm run audit:gate` fails on high or critical
 advisories reachable from the half of the dependency tree that ships, ignoring the
 build tools that never leave the runner. Neither can be silenced without writing
-down why: exceptions live in `scripts/audit-gate.mjs` and `.zap/rules.tsv`, keyed
+down why: exceptions live in `scripts/audit-gate.ts` and `.zap/rules.tsv`, keyed
 so that a *new* advisory against an already-excepted package still fails and an
 exception whose advisory was fixed fails too.
 
