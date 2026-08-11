@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { apiEnv, EnvironmentError, loadEnv } from "./env";
+import { apiEnv, EnvironmentError, loadEnv, masterKeyBytesFor } from "./env";
 import { cidrEntries, requiredVars, trustProxyFrom, withoutBlanks } from "./schema";
 
 const MASTER_KEY = Buffer.from("0123456789abcdef0123456789abcdef").toString("base64");
@@ -154,6 +154,46 @@ describe("MASTER_KEY", () => {
     expect(
       refusal("worker", { ...WORKER, MASTER_KEY_VERSION: "2", MASTER_KEY_V2: "short" }),
     ).toContain("MASTER_KEY_V2");
+  });
+
+  // A rotation key is a KEK, and the report used a literal set of secret NAMES —
+  // which dynamic ones can never be in. So the refusal above printed the value
+  // it rejected, putting key material in the boot log of the process that
+  // refused to start.
+  it("never prints a rotation key it is rejecting", () => {
+    const message = refusal("worker", {
+      ...WORKER,
+      MASTER_KEY_VERSION: "2",
+      MASTER_KEY_V2: "kek-material-that-must-not-be-logged",
+    });
+    expect(message).toContain("MASTER_KEY_V2");
+    expect(message).not.toContain("kek-material-that-must-not-be-logged");
+  });
+
+  // v1 can be named too, which is what lets a retired key be supplied as
+  // MASTER_KEY_V1 instead of having to sit in MASTER_KEY while MASTER_KEY_V2
+  // holds the live one.
+  it("checks MASTER_KEY_V1 when it is named, and does not require it", () => {
+    expect(parse("worker", { ...WORKER, MASTER_KEY_V1: MASTER_KEY }).MASTER_KEY_VERSION).toBe(1);
+    expect(refusal("worker", { ...WORKER, MASTER_KEY_V1: "short" })).toContain("MASTER_KEY_V1");
+    expect(refusal("worker", { ...WORKER, MASTER_KEY_V1: "short" })).not.toContain("short");
+  });
+
+  // Which key version 1 actually resolves to. MASTER_KEY alone still answers it,
+  // which is every deployment that exists; a named MASTER_KEY_V1 takes
+  // precedence, which is what makes a retired first key supplyable by name.
+  it("resolves version 1 to MASTER_KEY_V1 when named, else MASTER_KEY", () => {
+    const other = Buffer.from("fedcba9876543210fedcba9876543210").toString("base64");
+
+    parse("worker", WORKER);
+    expect(Buffer.from(masterKeyBytesFor(1)).toString("base64")).toBe(MASTER_KEY);
+
+    parse("worker", { ...WORKER, MASTER_KEY_V1: other });
+    expect(Buffer.from(masterKeyBytesFor(1)).toString("base64")).toBe(other);
+
+    // And a version with nothing behind it is still the same refusal, named.
+    parse("worker", WORKER);
+    expect(() => masterKeyBytesFor(3)).toThrow(/MASTER_KEY_V3/);
   });
 });
 

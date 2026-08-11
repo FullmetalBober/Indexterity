@@ -237,6 +237,16 @@ export const SECRET_VARS = new Set([
   "SENTRY_DSN",
 ]);
 
+// Every rotation key is a KEK, and they are the one group of secrets here whose
+// NAMES are dynamic — so a literal set could never hold them, and it did not: a
+// malformed MASTER_KEY_V2 was reported as `expected 32 bytes of base64 (got
+// "…")`, printing the key material into the boot log of the process that
+// refused to start. The set below is the answer to "is this variable's value
+// safe to quote", so it has to be asked as a question and not as a lookup.
+export function isSecretVar(name: string): boolean {
+  return SECRET_VARS.has(name) || /^MASTER_KEY_V\d+$/.test(name);
+}
+
 // A rotation whose MASTER_KEY_VERSION names a key that is not in the
 // environment. Every cluster row sealed at the new version becomes unreadable —
 // the one mistake in this file with no recovery — and today it is discovered by
@@ -245,6 +255,19 @@ export const SECRET_VARS = new Set([
 function checkRotationKeys(value: Record<string, unknown>, ctx: z.RefinementCtx): void {
   const version = value.MASTER_KEY_VERSION;
   if (typeof version !== "number") return;
+  // v1 is the one version that need not be named — MASTER_KEY is its fallback —
+  // so it is checked only when it IS named. Unchecked, a retired key supplied as
+  // 32 characters instead of 32 bytes would boot fine and fail later, per row,
+  // as a decrypt error: the shape of failure this whole function exists to move
+  // forward to boot.
+  const v1 = value.MASTER_KEY_V1;
+  if (typeof v1 === "string" && decodeKey(v1).length !== 32) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["MASTER_KEY_V1"],
+      message: "expected 32 bytes of base64 — generate one with `openssl rand -base64 32`",
+    });
+  }
   for (let n = 2; n <= version; n++) {
     const name = `MASTER_KEY_V${n}`;
     const raw = value[name];

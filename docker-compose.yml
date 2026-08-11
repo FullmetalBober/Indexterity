@@ -56,6 +56,13 @@ services:
       WEB_ORIGIN: http://localhost:3000
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET}
       MASTER_KEY: ${MASTER_KEY}
+      # A KEK rotation, and a retired key. Passed through empty when unset, which
+      # the schema reads as absent (withoutBlanks) — so these cost nothing until
+      # a rotation names them. MASTER_KEY_V1 is how an OLD first key is supplied
+      # by name while MASTER_KEY_V2 holds the live one.
+      MASTER_KEY_VERSION: ${MASTER_KEY_VERSION}
+      MASTER_KEY_V1: ${MASTER_KEY_V1}
+      MASTER_KEY_V2: ${MASTER_KEY_V2}
       GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID}
       GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET}
       SMTP_HOST: ${SMTP_HOST}
@@ -131,6 +138,13 @@ services:
     environment:
       DATABASE_URL: postgres://mongo_optimizer:mongo_optimizer@postgres:5432/mongo_optimizer
       MASTER_KEY: ${MASTER_KEY}
+      # A KEK rotation, and a retired key. Passed through empty when unset, which
+      # the schema reads as absent (withoutBlanks) — so these cost nothing until
+      # a rotation names them. MASTER_KEY_V1 is how an OLD first key is supplied
+      # by name while MASTER_KEY_V2 holds the live one.
+      MASTER_KEY_VERSION: ${MASTER_KEY_VERSION}
+      MASTER_KEY_V1: ${MASTER_KEY_V1}
+      MASTER_KEY_V2: ${MASTER_KEY_V2}
       ALLOW_PRIVATE_CLUSTER_TARGETS: "true"
       # A local mongod has no certificate, and the integration and e2e suites
       # dial one on purpose. Never set this in a deployment that dials real

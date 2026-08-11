@@ -3,8 +3,13 @@ import { clusters, createDatabase, envKeyProvider, eq, ne, open, seal } from "./
 
 // Re-seal every stored connection string under the current master key.
 //
-//   MASTER_KEY_VERSION=2 MASTER_KEY_V2=<new> MASTER_KEY=<old> \
+//   MASTER_KEY_VERSION=2 MASTER_KEY_V2=<new> MASTER_KEY_V1=<old> \
 //     node apps/api/dist/rotate-key.js
+//
+// `MASTER_KEY=<old>` still works — v1 falls back to it — but naming the retired
+// key MASTER_KEY_V1 is the spelling that does not read backwards, since with the
+// fallback the variable called MASTER_KEY is the one holding the key you are
+// getting rid of.
 //
 // Envelope encryption means only the wrapped DEK changes; the connection string
 // is decrypted and re-encrypted in the api process and never leaves it. Rows are
