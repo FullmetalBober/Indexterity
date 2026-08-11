@@ -14,6 +14,22 @@ import { type Database, sql } from "../db";
 const WINDOW_SECONDS = 60;
 const MAX_DIALS = 10;
 
+// Its own code rather than the bare 429 it rides on (#162), the way
+// `PLAN_LIMIT` is its own code rather than a bare 402.
+//
+// Every other 429 this product answers is better-auth's per-address rate limit,
+// which means "you are going too fast" and comes back on a clock the reader can
+// guess. This one is per ACCOUNT and exists because the control plane dials
+// hosts the caller names — a security control, not a throttle — so someone who
+// typos a connection string a few times and someone sweeping a network hit the
+// same refusal. It has to say which limit it was.
+//
+// The dashboard reads the code, not the status: `apiMessage` shows the api's own
+// words for this refusal whatever readable-status list the call site passed,
+// because all four routes that dial narrow that list to their own failures
+// (web/src/lib/queries/errors.ts).
+export const DIAL_BUDGET_CODE = "DIAL_BUDGET";
+
 // Atomic in a single statement: the window either rolls over or increments, so
 // concurrent requests across replicas cannot both read a stale count.
 export async function consumeDialBudget(db: Database, userId: string): Promise<void> {
@@ -32,9 +48,14 @@ export async function consumeDialBudget(db: Database, userId: string): Promise<v
   if (row === undefined) return;
   if (Number(row.count) > MAX_DIALS) {
     const seconds = Math.max(1, Number(row.seconds_left));
-    throw new ORPCError("TOO_MANY_REQUESTS", {
+    // Names the budget, its clock and when it comes back, all three read off the
+    // constants above so the sentence cannot drift from the rule it describes.
+    // "Try again later" was what a reader got before, from a window that is
+    // actually a minute long — so the refusal read as permanent and arrived as a
+    // support question.
+    throw new ORPCError(DIAL_BUDGET_CODE, {
       status: 429,
-      message: `too many connection attempts — try again in ${seconds}s`,
+      message: `connection attempts are limited to ${MAX_DIALS} every ${WINDOW_SECONDS}s per account — try again in ${seconds}s`,
     });
   }
 }
