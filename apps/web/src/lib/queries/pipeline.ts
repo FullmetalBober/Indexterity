@@ -6,7 +6,12 @@
 // a fact about invalidation, and it is expressible as three invalidations. What
 // the shared entry cost was on the read side: the ROI card could not be drawn
 // without also fetching fifty recommendations and the whole trail.
-import type { AuditAction, ClusterRecommendations, ClusterRoi } from "@repo/contracts";
+import type {
+  AuditAction,
+  ClusterCooldowns,
+  ClusterRecommendations,
+  ClusterRoi,
+} from "@repo/contracts";
 import { queryOptions, useQuery } from "@tanstack/react-query";
 import { api } from "../api";
 import { queryKeys } from "./keys";
@@ -32,6 +37,16 @@ export const NO_ROI: ClusterRoi = {
   attribution: [],
 };
 
+// A cluster nobody has parked anything on and one whose cooldown read failed
+// both draw the same empty panel, which is honest either way: neither is
+// evidence that the engine has backed out of a decision.
+export const NO_COOLDOWNS: ClusterCooldowns = {
+  clusterId: "",
+  activeCount: 0,
+  nextEligibleAt: null,
+  parked: [],
+};
+
 export function recommendationsQuery(clusterId: string | null) {
   return queryOptions({
     queryKey: queryKeys.recommendations(clusterId),
@@ -54,6 +69,15 @@ export function activityQuery(clusterId: string | null) {
   });
 }
 
+// The whole payload: `activeCount` is the panel's headline and the list holds
+// expired rows too, so the two numbers must not be conflated here (#159).
+export function cooldownsQuery(clusterId: string | null) {
+  return queryOptions({
+    queryKey: queryKeys.cooldowns(clusterId),
+    queryFn: () => (clusterId === null ? NO_COOLDOWNS : api().listCooldowns({ clusterId })),
+  });
+}
+
 // Each returns the payload AND whether this is the first fetch — see read.ts for
 // why the bare payload was not enough.
 export function useRecommendations(clusterId: string | null): Read<ClusterRecommendations> {
@@ -68,5 +92,10 @@ export function useRoi(clusterId: string | null): Read<ClusterRoi> {
 
 export function useActivity(clusterId: string | null): Read<AuditAction[]> {
   const { data = NO_ACTIVITY, isPending } = useQuery(activityQuery(clusterId));
+  return { data, pending: isPending };
+}
+
+export function useCooldowns(clusterId: string | null): Read<ClusterCooldowns> {
+  const { data = NO_COOLDOWNS, isPending } = useQuery(cooldownsQuery(clusterId));
   return { data, pending: isPending };
 }

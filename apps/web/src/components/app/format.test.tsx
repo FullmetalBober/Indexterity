@@ -1,6 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import { badgeVariant, DeltaCell, dropsOn, fmtBytes, fmtMicros } from "./format";
+import { badgeVariant, DeltaCell, dropsOn, fmtBytes, fmtBytesDelta, fmtMicros } from "./format";
 
 describe("badgeVariant", () => {
   // The badge is the only thing distinguishing a drop from a build at a glance,
@@ -31,6 +31,30 @@ describe("fmtBytes", () => {
   it("rounds kilobytes to whole numbers", () => {
     expect(fmtBytes(4096)).toBe("4 KB");
     expect(fmtBytes(0)).toBe("0 KB");
+  });
+
+  // #160: an index footprint reaches gigabytes, and `6144.0 MB` is a number
+  // nobody converts in their head.
+  it("switches to GB at a gigabyte", () => {
+    expect(fmtBytes(1024 * 1024 * 1024)).toBe("1.0 GB");
+    expect(fmtBytes(6 * 1024 * 1024 * 1024)).toBe("6.0 GB");
+    expect(fmtBytes(1024 * 1024 * 1024 - 1)).toBe("1024.0 MB");
+  });
+
+  // The footprint delta is negative when the cluster carries less index than it
+  // did, which is the answer the panel exists to give.
+  it("keeps the sign of a shrinking footprint at every tier", () => {
+    expect(fmtBytes(-2 * 1024 * 1024 * 1024)).toBe("-2.0 GB");
+    expect(fmtBytes(-2 * 1024 * 1024)).toBe("-2.0 MB");
+    expect(fmtBytes(-4096)).toBe("-4 KB");
+  });
+});
+
+describe("fmtBytesDelta", () => {
+  it("writes the sign both ways, because growth is the finding", () => {
+    expect(fmtBytesDelta(6 * 1024 * 1024 * 1024)).toBe("+6.0 GB");
+    expect(fmtBytesDelta(-4 * 1024 * 1024 * 1024)).toBe("-4.0 GB");
+    expect(fmtBytesDelta(0)).toBe("0 KB");
   });
 });
 

@@ -42,7 +42,12 @@ observe window, a pre-flight check, and a read-latency regression test.
 4. **Apply** safely: `hide → observe → drop` for removals, `build` for
    additions. Clusters start read-only; an owner flips them live.
 5. **Prove ROI**: freed bytes and the $/month they cost, index-count delta, and
-   a before/after latency trend per collection.
+   a before/after latency trend per collection. Beside it, the number ROI cannot
+   report: total index bytes per day over the trend window. Both ROI figures are
+   cumulative and only ever climb, because they count what the engine removed —
+   a cluster where it freed 4 GB while the application added 6 GB has a
+   triumphant ROI card and a bigger bill, and the footprint series is what says
+   so. A day nobody collected renders as a gap, never as a zero.
 
 The dashboard follows the engine live: a pass landing, a drop going hidden, a
 build graduating or a regression firing arrives over SSE and refetches exactly
@@ -144,6 +149,13 @@ the index is still hidden: it becomes visible again immediately and is parked
 for 90 days. **Undo** rebuilds a dropped index from the spec captured at drop
 time and corrects the ROI headline back down. Neither counts as a regression.
 
+Everything parked, from either source, is listed on the cluster page under
+**Parked**: what the engine has agreed not to propose again, in whose words,
+until when, and how many times each index has regressed. An index that has
+regressed three times says something about the collection that one rejection
+does not, and that count is recorded nowhere else — so an expired cooldown stays
+on the list, marked back in scope, rather than disappearing with its date.
+
 Undo is available for as long as the plan keeps history — the spec it rebuilds
 from lives in the audit trail, and a settled recommendation ages out with it.
 Live ones never do, however old: an index hidden through a long outage is still
@@ -226,6 +238,16 @@ un-hidden first — and the confirmation dialog makes you type the org's name an
 names every least-privilege user Indexterity created on your clusters, with the
 command to drop it.
 
+**Everything owner-level leaves a row, and owners can read them.** Sign-ins and
+failed sign-ins, every two-factor event, role changes, invitations, and the four
+things that can be done to a cluster's access — 23 kinds of act, at **Settings →
+Security**, filterable by kind and by actor and paged back to the day the trail
+shipped. It never ages out on a billing clock: the incident that needs a row is
+usually older than the day it is noticed. Owner-only, because every row carries
+the address and client a colleague acted from. A failed sign-in is shown with no
+actor and the typed address worded as an attempt — nobody proved they were that
+person, and the account holder is who it was done to.
+
 **The three acts that reach your database ask for a fresh sign-in.** Going
 live, rotating credentials and disconnecting refuse an owner session signed in
 more than an hour ago — the dashboard asks for the password again and then
@@ -277,17 +299,19 @@ apps/api                control plane
   src/engine            engine-neutral ports (collector, executor, session)
   src/mongo             the MongoDB adapter; zod-parses driver output at the boundary
   src/jobs              graphile-worker tasks (collect/classify/suggest/apply/finalize)
-  src/audit             the security trail — who signed in, who changed a role
+  src/audit             the security trail — who signed in, who changed a role,
+                        read at Settings → Security by owners only
   src/db                Drizzle schema, client, secret sealing
 apps/web                dashboard
   src/routes/app.tsx    the /app shell — auth gate, org switcher, the nav rail
   src/routes/app.index  resolves "no cluster named" — redirects to the first
                         cluster, or to connecting one
   src/routes/app.clusters.$clusterId       one cluster: the heading and its tabs
-    …$clusterId.index      overview — ROI, recommendations, latency, collections
+    …$clusterId.index      overview — ROI, index footprint over time,
+                           recommendations, latency, nodes, collections
     …$clusterId.settings   name, policy, mode, credentials, disconnect
   src/routes/app.clusters.new   connecting a cluster, which is onboarding
-  src/routes/app.settings       organization · organizations · account
+  src/routes/app.settings       organization · organizations · account · security
   src/lib/api.ts        one oRPC client, isomorphic: same-origin in the browser,
                         API_URL with the caller's cookie during SSR
   src/lib/queries       the query layer: the client, one key per api call in

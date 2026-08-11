@@ -13,6 +13,7 @@ import {
   latencyGaps,
   latencyPoints,
   monthlySavingsUsd,
+  summarizeFootprint,
   summarizeLatency,
 } from "../analysis";
 import { runFrom } from "../analysis/types";
@@ -26,6 +27,7 @@ import {
   eq,
   gte,
   inArray,
+  indexCooldowns,
   indexSnapshots,
   latencySamples,
   recommendations,
@@ -220,6 +222,94 @@ export class InsightsController {
     );
   }
 
+  // Total index bytes per day (#160) — the question the ROI panel cannot answer.
+  //
+  // Both of ROI's numbers are cumulative and only ever go up, because they count
+  // what the engine removed. Neither says whether the cluster's footprint is
+  // smaller than it was, which is what an owner actually asks after a month: a
+  // cluster where we freed 4 GB while the application added 6 GB has a
+  // triumphant ROI panel and a larger bill.
+  //
+  // Bucketed in SQL, one point per day, rather than shipped one point per
+  // snapshot run. Runs are run-length encoded (#67), so the row count is a
+  // function of how much the cluster CHANGES — a busy 200-index cluster writes
+  // roughly four runs per index per day, which is 24,000 rows for a 30-day
+  // window and a chart that draws 31 points.
+  //
+  // A day counts an index once, at the newest run that overlapped it, and a day
+  // no run overlaps comes back null rather than zero — the difference between
+  // "this cluster had no indexes" and "nobody looked". Overlap is the right test
+  // and an instant is not: a busy index's runs end and restart around each
+  // collect, so "the run covering midnight" would drop exactly the indexes whose
+  // counters move.
+  @Implement(contract.getIndexSizeSeries)
+  getIndexSizeSeries(@Req() req: FastifyRequest) {
+    return route(this.tenancy, contract.getIndexSizeSeries, req, "member").handler(
+      async ({ input, context }) => {
+        const empty = {
+          clusterId: input.clusterId,
+          firstBytes: null,
+          latestBytes: null,
+          changeBytes: null,
+          points: [],
+        };
+        if (!(await this.tenancy.ownsCluster(input.clusterId, context.member.orgId))) return empty;
+        // The plan's window is the entitlement and the trend window is the
+        // chart's; whichever is tighter wins, exactly as loadLatencyReadings
+        // does it.
+        const planSince = await historyWindow(this.database.db, input.clusterId);
+        const trendSince = new Date(Date.now() - LATENCY_SERIES_WINDOW_DAYS * 86_400_000);
+        const since = trendSince > planSince ? trendSince : planSince;
+        const rows = await this.database.db.execute<{
+          day: Date;
+          total_bytes: string | null;
+          index_count: number;
+        }>(sql`
+          with days as (
+            select generate_series(
+              date_trunc('day', ${since}::timestamptz),
+              date_trunc('day', now()),
+              interval '1 day'
+            ) as day
+          ),
+          -- One row per (day, index): the newest run that overlapped that day.
+          -- distinct on rather than a window function because the ordering IS
+          -- the choice, and because at most one run per index can be picked --
+          -- the exclusion constraint on the span column guarantees a cluster's
+          -- runs for one index never overlap each other.
+          picked as (
+            select distinct on (d.day, s.index_id) d.day as day, s.size_bytes
+            from days d
+            join ${indexSnapshots} s
+              on s.cluster_id = ${input.clusterId}
+             and s.last_seen_at >= ${since}
+             and s.captured_at < d.day + interval '1 day'
+             and s.last_seen_at >= d.day
+            order by d.day, s.index_id, s.captured_at desc
+          )
+          select
+            d.day,
+            -- sum over no rows is null, which is the gap marker, so this is
+            -- deliberately NOT coalesced to zero.
+            sum(p.size_bytes)::bigint as total_bytes,
+            count(p.size_bytes)::int as index_count
+          from days d
+          left join picked p on p.day = d.day
+          group by d.day
+          order by d.day
+        `);
+        // bigint arrives as a string from node-postgres — Number is exact to 9
+        // petabytes, which is well past any index footprint.
+        const points = rows.rows.map((row) => ({
+          day: new Date(row.day).toISOString(),
+          totalBytes: row.total_bytes === null ? null : Number(row.total_bytes),
+          indexCount: Number(row.index_count),
+        }));
+        return { clusterId: input.clusterId, ...summarizeFootprint(points), points };
+      },
+    );
+  }
+
   // Per-collection index footprint as of the latest collect.
   //
   // Deliberately NOT capped (#64's definition of done asks this be recorded):
@@ -298,6 +388,65 @@ export class InsightsController {
           }))
           .sort((a, b) => b.totalIndexBytes - a.totalIndexBytes);
         return { clusterId: input.clusterId, collections };
+      },
+    );
+  }
+
+  // What the engine has agreed not to touch, and until when (#159).
+  //
+  // Read from `index_cooldowns` alone, never joined to `recommendations`. A
+  // cooldown outlives its cause: `recordManualVeto` parks an index for 90 days
+  // when an owner cancels or undoes a drop, and the recommendation that was
+  // cancelled is a row the next classify pass rewrites. Joining would drop
+  // exactly the longest-standing entries, which are the interesting ones.
+  //
+  // Every row, not only the ones still in force. An expired cooldown is the only
+  // record that this index has been parked before and how often it regressed,
+  // and `regression_count` has no other home in the product — but `active` is
+  // computed here rather than left to the browser, because a clock an hour
+  // behind would draw a parked index as eligible.
+  @Implement(contract.listCooldowns)
+  listCooldowns(@Req() req: FastifyRequest) {
+    return route(this.tenancy, contract.listCooldowns, req, "member").handler(
+      async ({ input, context }) => {
+        const orgId = context.member.orgId;
+        if (!(await this.tenancy.ownsCluster(input.clusterId, orgId))) {
+          return {
+            clusterId: input.clusterId,
+            activeCount: 0,
+            nextEligibleAt: null,
+            parked: [],
+          };
+        }
+        const rows = await this.database.db
+          .select()
+          .from(indexCooldowns)
+          .where(eq(indexCooldowns.clusterId, input.clusterId))
+          .orderBy(desc(indexCooldowns.until));
+        // One `now` for the whole answer. Read per row, a cooldown expiring
+        // mid-loop could be counted active and then reported with a past date.
+        const now = Date.now();
+        const parked = rows.map((row) => ({
+          database: row.database,
+          collection: row.collection,
+          indexName: row.indexName,
+          reason: row.reason,
+          regressionCount: row.regressionCount,
+          until: row.until.toISOString(),
+          active: row.until.getTime() > now,
+          createdAt: row.createdAt.toISOString(),
+          updatedAt: row.updatedAt.toISOString(),
+        }));
+        const active = parked.filter((entry) => entry.active);
+        return {
+          clusterId: input.clusterId,
+          activeCount: active.length,
+          // The SOONEST one still in force, which is the opposite end of the
+          // `until desc` order the list is drawn in — "next eligible" is the
+          // first thing that comes back, not the last.
+          nextEligibleAt: active[active.length - 1]?.until ?? null,
+          parked,
+        };
       },
     );
   }

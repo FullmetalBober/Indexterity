@@ -17,9 +17,30 @@ export function usage(used: number, limit: number | null): string {
   return limit === null ? String(used) : `${used} / ${limit}`;
 }
 
+const KB = 1024;
+const MB = 1024 * KB;
+const GB = 1024 * MB;
+
+// A gigabyte tier, because index footprints reach one (#160). Without it the
+// footprint chart's axis reads `6144.0 MB` and the ROI headline on a cluster
+// that has had a few large drops reads the same way — a number nobody converts
+// in their head, on the one panel whose whole job is to be read at a glance.
+//
+// Sign-preserving: the footprint delta is negative when the cluster is carrying
+// less index than it was, which is the answer everybody wants and the one this
+// helper must not lose to an abs().
 export function fmtBytes(bytes: number): string {
-  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  return `${(bytes / 1024).toFixed(0)} KB`;
+  const size = Math.abs(bytes);
+  if (size >= GB) return `${(bytes / GB).toFixed(1)} GB`;
+  if (size >= MB) return `${(bytes / MB).toFixed(1)} MB`;
+  return `${(bytes / KB).toFixed(0)} KB`;
+}
+
+// The same, with the sign always written. `+6.0 GB` is a cluster that grew, and
+// growth is the finding — a bare `6.0 GB` beside the word "change" reads as a
+// footprint, not as a delta.
+export function fmtBytesDelta(bytes: number): string {
+  return bytes > 0 ? `+${fmtBytes(bytes)}` : fmtBytes(bytes);
 }
 
 export function fmtMicros(value: number | null): string {
