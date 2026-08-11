@@ -352,6 +352,35 @@ export const clusterLatencySeries = z.object({
 });
 export type ClusterLatencySeries = z.infer<typeof clusterLatencySeries>;
 
+// One replica-set member's share of an index's operations (#161).
+//
+// The whole point of collecting per member. An index with 40,000 ops that are
+// ALL on one secondary is a different object from one with 40,000 spread evenly:
+// the first is serving a reporting replica or an analytics client with a read
+// preference, and dropping it breaks something nobody was watching; the second
+// is serving the application. Summed, they were the same row on this dashboard.
+export const memberOps = z.object({
+  member: z.string(),
+  ops: z.int().nonnegative(),
+});
+export type MemberOps = z.infer<typeof memberOps>;
+
+// What the last collect saw of one index's usage, per member.
+export const indexUsage = z.object({
+  recommendationId: z.uuid(),
+  // The number that was already on screen, kept: it is still the right headline,
+  // and the split is what it was missing.
+  totalOps: z.int().nonnegative(),
+  // Only the members that ANSWERED and reported this index. A member the collect
+  // could not reach is not in here and must not be drawn as a zero — the roster
+  // (getNodes) is what names it, and the two are read together.
+  perMember: z.array(memberOps),
+  // When this reading was last confirmed. A per-node split from a collect that
+  // failed three days ago is a claim about three days ago.
+  observedAt: z.string(),
+});
+export type IndexUsage = z.infer<typeof indexUsage>;
+
 // One day's total index footprint for a cluster (#160).
 //
 // `totalBytes` is null for a day nothing was collected, and that distinction is
@@ -402,6 +431,15 @@ export const clusterRecommendations = z.object({
   clusterId: z.uuid(),
   total: z.int().nonnegative(),
   recommendations: z.array(recommendation),
+  // Beside the rows rather than on them (#161), and that is not a style choice:
+  // `recommendation` is also what approve, undo and un-hide return, and those
+  // answer about a ROW. A usage field on that shape would come back null from
+  // every mutation and read as "this index has no recorded usage", which is a
+  // measurement none of them took.
+  //
+  // Absent for an index the last collect did not see — dropped since, or a
+  // collect that never reached the member holding it.
+  usage: z.array(indexUsage),
 });
 export type ClusterRecommendations = z.infer<typeof clusterRecommendations>;
 

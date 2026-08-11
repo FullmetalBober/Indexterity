@@ -24,6 +24,7 @@ export const NO_RECOMMENDATIONS: ClusterRecommendations = {
   clusterId: "",
   total: 0,
   recommendations: [],
+  usage: [],
 };
 export const NO_ACTIVITY: AuditAction[] = [];
 // A cluster with nothing dropped yet and a cluster whose ROI read failed both

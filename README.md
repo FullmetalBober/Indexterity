@@ -31,7 +31,12 @@ observe window, a pre-flight check, and a read-latency regression test.
    shape is written once, and an unchanged counter extends the row it already
    has instead of adding another. The dashboard's node roster shows which
    members the last collect saw and which answered — a member that did not is a
-   named blind spot, not a silent zero.
+   named blind spot, not a silent zero. The same rule applies to the numbers
+   beside it: the recommendations table's Usage column carries the per-member
+   split, because 40,000 reads all on one secondary is a reporting replica and
+   the same 40,000 spread evenly is your application, and dropping the first
+   breaks something nobody was watching. A member the collect could not reach is
+   named there too, never counted as a zero.
 3. **Decide** with a pure analysis engine (`apps/api/src/analysis` — no I/O, so
    it is unit-tested without a database or a cluster).
 4. **Apply** safely: `hide → observe → drop` for removals, `build` for

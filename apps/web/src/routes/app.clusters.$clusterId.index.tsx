@@ -47,9 +47,8 @@ export const Route = createFileRoute("/app/clusters/$clusterId/")({
   // read one entry. First paint does not wait for the browser to boot and ask
   // again.
   //
-  // Eight reads, and only the eight this page draws. The policy is not among
-  // them any more: it belongs to the settings tab, which warms it in its own
-  // loader.
+  // Nine reads, and only the nine this page draws. The policy is not among them
+  // any more: it belongs to the settings tab, which warms it in its own loader.
   //
   // No resolving of "which cluster" left to do — the param is the answer, which
   // is what a cluster being a route buys. What it used to cost: the id was
@@ -216,9 +215,15 @@ function ClusterOverview() {
         </div>
       </section>
 
+      {/* The roster comes from the read the Nodes panel below already makes, not
+          from a second copy in the recommendations payload: the members are a
+          fact about the cluster's last collect, identical for every row, and
+          repeating them 500 times would be the same fact 500 times (#161). */}
       <RecommendationsTable
         clusterId={id}
         recommendations={recommendations.data.recommendations}
+        usage={recommendations.data.usage}
+        roster={nodes.data}
         total={recommendations.data.total}
         loading={recommendations.pending}
       />
