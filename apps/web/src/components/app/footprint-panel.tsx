@@ -1,6 +1,6 @@
 import type { ClusterIndexSizeSeries } from "@repo/contracts";
 import { fmtBytes, fmtBytesDelta } from "~/components/app/format";
-import { type ChartSeries, LineChart, SERIES_PALETTE } from "~/components/latency-chart";
+import { type ChartSeries, dayLabel, LineChart, SERIES_PALETTE } from "~/components/latency-chart";
 
 // Total index bytes over the trend window (#160).
 //
@@ -79,6 +79,17 @@ export function FootprintPanel({
         series={toSeries(series)}
         pending={loading}
         format={fmtBytes}
+        // Days, in UTC. Every point here IS a day — `date_trunc('day', …)` — so
+        // the default's `8/9 03:00` was precise to the minute about a whole
+        // day's total, and read in the local zone it named the day before for
+        // anybody west of UTC.
+        timeFormat={dayLabel}
+        // fmtBytes already writes the unit, so the tooltip must not append the
+        // axis label as well: that read "4.0 GB bytes".
+        tooltipUnit=""
+        // Not "per collection" — this series is the cluster's total, and the
+        // Collections table below is where a per-namespace figure lives.
+        ariaLabel="Total index bytes across the cluster, one point per day"
         emptyNote="Not enough history yet — this needs two days of collects to draw a line."
       />
       {loading ? null : (
