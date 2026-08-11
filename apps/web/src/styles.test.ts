@@ -35,4 +35,15 @@ describe("styles.css", () => {
     expect(block).toContain("*::before");
     expect(block).toContain("*::after");
   });
+
+  // Tailwind v4's Preflight leaves buttons on the browser default, which is the
+  // arrow. Asserted here as text because what it does is only observable in a
+  // browser — e2e/cursor.spec.ts measures the computed value on real buttons.
+  it("gives an enabled button the pointer", () => {
+    const base = /@layer base \{([\s\S]*?)\n\}/.exec(css)?.[1] ?? "";
+    expect(base).toContain("cursor: pointer");
+    expect(base).toContain("button:not(:disabled)");
+    // The guard, not a formality: a button nobody can press keeps the arrow.
+    expect(base).toContain(":not(:disabled)");
+  });
 });
