@@ -1,7 +1,13 @@
 import { render, screen } from "@testing-library/react";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { type ChartSeries, LineChart, SERIES_PALETTE } from "./latency-chart";
+import {
+  type ChartSeries,
+  LineChart,
+  SERIES_PALETTE,
+  tooltipTime,
+  tooltipValue,
+} from "./latency-chart";
 
 // Two collections over three collects, with a hole in the second — the shape the
 // telemetry query actually produces.
@@ -142,5 +148,52 @@ describe("LineChart empty note", () => {
   it("keeps the generic sentence when it does not", () => {
     render(<LineChart title="Write latency" unit="µs/op" series={[]} emptyNote={null} />);
     expect(screen.getByText("Not enough samples yet.")).toBeInTheDocument();
+  });
+});
+
+// The tooltip reads a point, and a point carries the datum next to the pixel it
+// was painted at: `xValue`/`yValue` against `x`/`y`. Both pairs are numbers, so
+// reading the wrong one is silent — and both were being read wrong. The heading
+// formatted `x`, so every tooltip said `1/1 03:00` on a Kyiv-time screen (a point
+// 40px in is 40ms after 1970-01-01T00:00Z); the value line printed `y`, reporting
+// a pixel offset as µs/op, which looks plausible and is therefore worse.
+//
+// Every point below carries a DIFFERENT number in each pair. That is what makes
+// these assertions about which field is read rather than about the format — the
+// format itself is asserted against a local copy of it, which would not catch a
+// change of format and is not what broke.
+const label = (at: Date): string =>
+  `${at.getMonth() + 1}/${at.getDate()} ${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}`;
+
+describe("the tooltip reads the datum, not the pixel", () => {
+  const at = new Date("2026-08-11T03:00:00.000Z");
+
+  it("names the group from xValue", () => {
+    expect(tooltipTime({ xValue: at, yValue: 58_000, x: 40, y: 137 })).toBe(label(at));
+  });
+
+  // The bug, on record as a test: a small number read as a timestamp lands near
+  // the epoch whatever the data says.
+  it("does not agree with what the pixel would have said", () => {
+    expect(tooltipTime({ xValue: 40 })).toBe(label(new Date(40)));
+    expect(label(new Date(40))).not.toBe(label(at));
+  });
+
+  it("prints the µs/op from yValue", () => {
+    expect(tooltipValue({ xValue: at, yValue: 58_000, x: 40, y: 137 }, "µs")).toBe("58000 µs");
+    expect(tooltipValue({ xValue: at, yValue: 58_499.6 }, "µs")).toBe("58500 µs");
+  });
+
+  // The null points that draw the gaps. Rounding one to `0 µs` would report an
+  // idle collection as an instant one.
+  it("draws a gap as a dash rather than as zero", () => {
+    expect(tooltipValue({ xValue: at, yValue: null }, "µs")).toBe("—");
+    expect(tooltipValue(undefined, "µs")).toBe("—");
+  });
+
+  it("says nothing rather than 1970 for a time it cannot read", () => {
+    expect(tooltipTime(undefined)).toBe("");
+    expect(tooltipTime({ xValue: null })).toBe("");
+    expect(tooltipTime({ xValue: "not a date" })).toBe("");
   });
 });
