@@ -138,9 +138,10 @@ export function CollectionsTable({ rows, loading }: { rows: CollectionRow[]; loa
       // that is wider than the value it labels.
       columnWidths={[340, 92, 116, 100, 92, 104, 92, 104]}
       // The namespace takes whatever the page has spare — a column holding "3" or "—"
-      // gains nothing from being twice as wide — but only so far: past about 640px the
-      // name is far enough from its own numbers that the row stops reading as one row.
-      flexColumn={{ index: 0, max: 640 }}
+      // gains nothing from being twice as wide. No ceiling on it any more: the 640px
+      // cap kept the name near its numbers, and paid for that by leaving the table
+      // short of the page it sits on, which is the more noticeable of the two.
+      flexColumn={{ index: 0 }}
       empty={{
         title: "Nothing collected yet",
         description:
