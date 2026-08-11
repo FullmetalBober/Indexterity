@@ -4,7 +4,7 @@ import { ORPCError } from "@orpc/server";
 import { contract } from "@repo/contracts";
 import type { FastifyRequest } from "fastify";
 import { actorFromRequest } from "../audit/http-actor";
-import { recordSecurityEvent, type SecurityEventInput } from "../audit/security-events";
+import { recordSecurityEvent, type SecurityEventDetails } from "../audit/security-events";
 import { requireUserId } from "../auth/session";
 import { currentKeyVersion, masterKeyBytesFor } from "../config/env";
 import {
@@ -190,10 +190,7 @@ export class ClustersController {
   //
   // After the act, never in front of it, and it cannot fail the request:
   // recordSecurityEvent logs a lost row instead of throwing (see its comment).
-  private async record(
-    req: FastifyRequest,
-    entry: Omit<SecurityEventInput, "actorUserId" | "actorEmail" | "ipAddress" | "userAgent">,
-  ): Promise<void> {
+  private async record(req: FastifyRequest, entry: SecurityEventDetails): Promise<void> {
     const actor = await actorFromRequest(this.database.db, req);
     await recordSecurityEvent(this.database.db, { ...entry, ...actor }, (message) =>
       this.log.warn(message),
