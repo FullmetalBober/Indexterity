@@ -50,8 +50,16 @@ function expandIncludes(template: string): string {
 
 function envNamesIn(text: string): Set<string> {
   const names = new Set<string>();
-  for (const match of text.matchAll(/^[\t ]*-[\t ]*name:[\t ]*([A-Z][A-Z0-9_]*)/gm)) {
-    names.add(match[1] as string);
+  // A name may end in a templated segment: the rotation's keys are emitted by a
+  // `range` over secrets.masterKeys as `MASTER_KEY_V{{ $version }}`. That value
+  // stands for a version number, so a `1` is substituted and the family is then
+  // held to the same shape rule as everything else — rather than widening that
+  // rule to accept a bare `MASTER_KEY_V`, which is what the raw template text
+  // reads as, and which would accept a misspelling of it too.
+  for (const match of text.matchAll(
+    /^[\t ]*-[\t ]*name:[\t ]*([A-Z][A-Z0-9_]*)(\{\{[^}]*\}\})?/gm,
+  )) {
+    names.add(match[2] === undefined ? (match[1] as string) : `${match[1]}1`);
   }
   return names;
 }
