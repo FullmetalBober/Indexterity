@@ -39,8 +39,22 @@
       "dependsOn": ["^build"],
       "outputs": ["dist/**", ".output/**", ".nitro/**", "src/routeTree.gen.ts"]
     },
+    // No `^build`, and no wait. Every internal package now declares
+    // `exports["."].types` as `./src/index.ts`, so a consumer type-checks
+    // against the source it was going to be built from rather than against a
+    // `.d.ts` that has to exist first — which means the five typechecks all
+    // start at once instead of queueing behind three builds.
+    //
+    // `transit` is what keeps the caching honest without the wait: it matches no
+    // package script, so it completes instantly, and depending on it is what
+    // tells turbo that a change in @repo/contracts must re-run the api's
+    // typecheck. Without it this task would be the mistake #142 fixed for
+    // `test` — cached against nothing.
+    "transit": {
+      "dependsOn": ["^transit"]
+    },
     "typecheck": {
-      "dependsOn": ["^build"]
+      "dependsOn": ["transit"]
     },
     // scripts/ belongs to no workspace, so the fan-out above never reaches it.
     // A root task is how turbo runs something in the repo root itself, and
