@@ -44,7 +44,13 @@ import { documentCsp, newNonce, withSecurityHeaders } from "~/lib/security-heade
 const fetch = createStartHandler((ctx) => {
   const nonce = newNonce();
   ctx.router.update({ ssr: { ...ctx.router.options.ssr, nonce } });
-  ctx.responseHeaders.set("content-security-policy", documentCsp(nonce));
+  // `import.meta.env.DEV` rather than NODE_ENV: what needs the allowance is the
+  // vite dev server injecting the stylesheet, not a mode anyone can set. Vite
+  // replaces it with a literal, so the built output carries no branch at all.
+  ctx.responseHeaders.set(
+    "content-security-policy",
+    documentCsp(nonce, { dev: import.meta.env.DEV }),
+  );
   return defaultStreamHandler(ctx);
 });
 

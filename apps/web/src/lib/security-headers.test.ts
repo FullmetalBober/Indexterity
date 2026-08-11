@@ -112,6 +112,34 @@ describe("documentCsp", () => {
     expect(directive("style-src")).toContain("'sha256-");
   });
 
+  // The one environment difference, and it belongs to the dev SERVER rather than
+  // to this app: `@vite/client` applies the stylesheet by creating a style
+  // element, and the meta tag it looks for a nonce in is written by TanStack
+  // Start with the value in `content` rather than in `nonce`. Without this the
+  // whole dashboard renders unstyled under `npm run dev`.
+  describe("under the vite dev server", () => {
+    const devPolicy = documentCsp("NONCE", { dev: true });
+    const devDirective = (name: string): string =>
+      new RegExp(`(?:^|; )${name} ([^;]*)`).exec(devPolicy)?.[1] ?? "";
+
+    // Dropping the nonce and the hashes is the point, not an oversight: a
+    // browser IGNORES 'unsafe-inline' in a directive that carries either, so
+    // appending it would have changed nothing — which it duly did, until this
+    // was measured against a running dev server.
+    it("permits the dev server's injected stylesheet", () => {
+      expect(devDirective("style-src")).toBe("'self' 'unsafe-inline'");
+    });
+
+    // The allowance is for style elements and for nothing else. A build is what
+    // the e2e suite and the ZAP job read, so this is the only place a difference
+    // could hide.
+    it("changes nothing else", () => {
+      const rest = (from: string): string[] =>
+        from.split("; ").filter((part) => !part.startsWith("style-src "));
+      expect(rest(devPolicy)).toEqual(rest(policy));
+    });
+  });
+
   // The attribute is a separate directive and the one place 'unsafe-inline' is
   // unavoidable: React server-renders `style={{…}}` as `style="…"`. Stated
   // separately so that widening it never widens style-src by accident.

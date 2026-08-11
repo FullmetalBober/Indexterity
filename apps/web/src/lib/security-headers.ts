@@ -139,7 +139,26 @@ const INJECTED_STYLE_HASHES = [
 // narrowed by exclusions: a directive nobody thought about should refuse rather
 // than allow, so the next thing this app fetches from somewhere new fails
 // visibly in review instead of quietly widening the policy.
-export function documentCsp(nonce: string): string {
+//
+// `dev` is the ONE thing that differs between environments here, and it is the
+// dev server's stylesheet rather than the app's. Under `vite dev` there is no
+// built CSS file: `@vite/client` fetches the stylesheet and applies it by
+// creating a `<style>` element, which `style-src` refuses — the whole dashboard
+// renders unstyled, which is what a strict `style-src` cost before this argument
+// was noticed.
+//
+// It is not for want of a nonce on either side. Vite looks one up, at
+// `document.querySelector("meta[property=csp-nonce]")?.nonce`, and TanStack Start
+// emits exactly that meta tag — but writes the value to `content` while stamping
+// `nonce` on every OTHER head element it renders, so the one attribute Vite reads
+// is the one that is not set. Passing our own tag ahead of it would depend on the
+// framework's internal head ordering, which is a worse thing to rely on than this
+// flag.
+//
+// Production is unaffected and is what the checks read: the built output serves a
+// `<link rel="stylesheet">`, which `'self'` covers, and both the e2e suite and the
+// ZAP job run against the built output.
+export function documentCsp(nonce: string, { dev = false }: { dev?: boolean } = {}): string {
   return [
     "default-src 'none'",
     // 'self' covers the built bundle and every `<link rel=modulepreload>` beside
@@ -149,12 +168,20 @@ export function documentCsp(nonce: string): string {
     // response (above), 'self' cannot be turned into a script by getting the api
     // to echo JSON back at a <script src> — the type has to be right too.
     `script-src 'self' 'nonce-${nonce}'`,
-    // No 'unsafe-inline'. Our own CSS is a linked stylesheet — Tailwind through
-    // Vite emits one — and every style ELEMENT written from JavaScript is
-    // allowed by name instead: by this response's nonce where the library asks
-    // for one, and by content hash where it cannot (see above). An injected
-    // `<style>` matches neither.
-    `style-src 'self' 'nonce-${nonce}' ${INJECTED_STYLE_HASHES.join(" ")}`,
+    // No 'unsafe-inline' in a build. Our own CSS is a linked stylesheet —
+    // Tailwind through Vite emits one — and every style ELEMENT written from
+    // JavaScript is allowed by name instead: by this response's nonce where the
+    // library asks for one, and by content hash where it cannot (see above). An
+    // injected `<style>` matches neither.
+    //
+    // The dev spelling drops the nonce and the hashes rather than adding to
+    // them, because a browser IGNORES 'unsafe-inline' in any directive that
+    // carries a nonce or a hash — which is exactly why it is safe to leave the
+    // two beside each other elsewhere, and why appending it here would have
+    // changed nothing at all.
+    dev
+      ? "style-src 'self' 'unsafe-inline'"
+      : `style-src 'self' 'nonce-${nonce}' ${INJECTED_STYLE_HASHES.join(" ")}`,
     // The ATTRIBUTE is a separate directive, and the one place 'unsafe-inline'
     // is unavoidable: React server-renders `style={{…}}` as `style="…"`, which
     // is how the virtualized tables position their rows and the charts size
