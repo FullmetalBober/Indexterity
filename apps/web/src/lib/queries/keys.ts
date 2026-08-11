@@ -36,6 +36,23 @@ export const queryKeys = {
   // that answers for somebody who is in no org at all, which is exactly who
   // needs it.
   myInvites: () => ["my-invites"] as const,
+  // The org's security trail (#158). The filter and the page cursor are IN the
+  // key: they are what the api was asked, so two filters are two answers, and
+  // one entry holding both would show the previous filter's rows under the new
+  // one's heading while it loaded.
+  securityEvents: (filter: {
+    event?: string | undefined;
+    actorUserId?: string | undefined;
+    beforeCreatedAt?: string | undefined;
+    beforeId?: string | undefined;
+  }) =>
+    [
+      "security-events",
+      filter.event ?? null,
+      filter.actorUserId ?? null,
+      filter.beforeCreatedAt ?? null,
+      filter.beforeId ?? null,
+    ] as const,
 
   // Per cluster.
   recommendations: (clusterId: string | null) => ["recommendations", clusterId] as const,

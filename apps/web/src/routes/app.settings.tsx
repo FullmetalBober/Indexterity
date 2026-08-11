@@ -51,6 +51,18 @@ function SettingsLayout() {
         >
           Account
         </Link>
+        {/* Shown to everyone and answered for owners only (#158) — the api
+            refuses a member with a 403, and the page says so rather than the tab
+            disappearing. A tab that is there for some readers and not others is
+            how somebody concludes the feature does not exist. */}
+        <Link
+          to="/app/settings/security"
+          activeProps={TAB_ACTIVE}
+          inactiveProps={TAB_INACTIVE}
+          className={TAB}
+        >
+          Security
+        </Link>
       </nav>
       <Outlet />
     </div>

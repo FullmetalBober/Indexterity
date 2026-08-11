@@ -480,6 +480,114 @@ export const clusterPolicyView = clusterPolicy.extend({
 });
 export type ClusterPolicyView = z.infer<typeof clusterPolicyView>;
 
+// The 23 acts the security trail records (#53), and the one list of them.
+//
+// It lived in the api (`src/audit/security-events.ts`) while nothing read the
+// table. A screen needs the same list to label rows and to offer the kind
+// filter, and two copies of it would drift the moment an act is added — so the
+// names live here and the writer imports them. The per-act metadata SHAPES stay
+// in the api, where the call sites that fill them in are.
+//
+// Text in the column, not an enum, on purpose: recording a new kind of act
+// should be a constant and not a migration (db/schema.ts). The api validates
+// nothing against this on the way IN — an older row whose act has since been
+// renamed still has to read — so `securityEvent.event` below is a string.
+export const SECURITY_EVENTS = [
+  // Authentication.
+  "ACCOUNT_CREATED",
+  "SIGN_IN",
+  "SIGN_IN_FAILED",
+  "SIGN_OUT",
+  "SESSION_REVOKED",
+  // The second factor (#55).
+  "TWO_FACTOR_ENABLED",
+  "TWO_FACTOR_DISABLED",
+  "TWO_FACTOR_VERIFIED",
+  "TWO_FACTOR_FAILED",
+  "TWO_FACTOR_CODES_REGENERATED",
+  "TWO_FACTOR_OTP_SENT",
+  // The account.
+  "EMAIL_CHANGE_REQUESTED",
+  // Membership — the acts that decide who can do everything else.
+  "MEMBER_ROLE_CHANGED",
+  "MEMBER_REMOVED",
+  "MEMBER_LEFT",
+  "INVITE_CREATED",
+  "INVITE_ACCEPTED",
+  "ORG_CREATED",
+  "ORG_DELETED",
+  // A cluster's access, which is what the control plane holds of a customer's.
+  "CLUSTER_CONNECTED",
+  "CLUSTER_DISCONNECTED",
+  "CLUSTER_CREDENTIALS_ROTATED",
+  "CLUSTER_MODE_CHANGED",
+] as const;
+
+export type SecurityEventName = (typeof SECURITY_EVENTS)[number];
+
+// The acts where the ADDRESS ON THE ROW IS NOT SOMEBODY WHO DID SOMETHING.
+//
+// `SIGN_IN_FAILED` deliberately records the address that was typed as the
+// TARGET and leaves the actor null, because whoever it was did not prove they
+// were that person (db/schema.ts). A screen that draws every row as
+// "<address> did <act>" turns that into an accusation against the account
+// holder — who, in the case worth reading, is the victim. The same applies to a
+// failed second factor.
+//
+// Exported so the screen and its tests read the rule from one place rather than
+// each spelling out a pair of event names.
+export const UNPROVEN_ACTOR_EVENTS: readonly SecurityEventName[] = [
+  "SIGN_IN_FAILED",
+  "TWO_FACTOR_FAILED",
+];
+
+// One row of the trail.
+//
+// `event` is a string rather than the enum above: the column is text so that
+// adding an act is a constant, and a row written under a name this build does
+// not know still has to render. The screen labels what it recognises and shows
+// the raw name for what it does not.
+export const securityEvent = z.object({
+  id: z.uuid(),
+  event: z.string(),
+  // Null once the account is deleted — every foreign key on this table is
+  // `set null` so that deleting an org, a cluster or a user cannot erase the
+  // trail of what was done to it. The email beside it is kept for exactly that
+  // moment, and is what the screen shows.
+  actorUserId: z.string().nullable(),
+  actorEmail: z.string().nullable(),
+  target: z.string().nullable(),
+  clusterId: z.uuid().nullable(),
+  // The specifics of the act — the roles either side of a promotion, the mode a
+  // cluster was flipped to. Never credentials. Loose here for the same reason
+  // the column is: the shape differs per act.
+  metadata: z.record(z.string(), z.unknown()).nullable(),
+  ipAddress: z.string().nullable(),
+  userAgent: z.string().nullable(),
+  createdAt: z.string(),
+});
+export type SecurityEvent = z.infer<typeof securityEvent>;
+
+// One page of it. The trail never ages out — retention skips it deliberately,
+// because the incident that needs a row is usually older than the day it is
+// noticed — so it is the one table that grows forever and the read has to be
+// paged rather than capped.
+export const SECURITY_TRAIL_PAGE = 100;
+
+export const securityTrail = z.object({
+  events: z.array(securityEvent),
+  // How many rows match the filter, so a page can say "100 of 4,312" instead of
+  // implying it is everything.
+  total: z.int().nonnegative(),
+  // The cursor for the page after this one, or null at the end of the trail.
+  // A compound key, not a timestamp: two acts can land in the same microsecond
+  // (an invite accepted is a membership row and a session), and a cursor that
+  // is only a time would skip whichever one sorted second.
+  nextCreatedAt: z.string().nullable(),
+  nextId: z.uuid().nullable(),
+});
+export type SecurityTrail = z.infer<typeof securityTrail>;
+
 export const orgMember = z.object({
   // The membership row's id, which is what the plugin's updateMemberRole and
   // removeMember take — not the user's. One person can be a member of several

@@ -28,6 +28,7 @@ import {
   orgSummary,
   provisionedCluster,
   recommendation,
+  securityTrail,
 } from "./schemas.js";
 
 const clusterId = z.object({ clusterId: z.uuid() });
@@ -323,6 +324,44 @@ export const contract = {
       summary: "Every org the caller belongs to, with the active one flagged",
     })
     .output(z.array(orgSummary)),
+
+  // The org's security trail (#158): sign-ins and failed sign-ins, every 2FA
+  // event, role changes, invitations, and the four things that can be done to a
+  // cluster's access. Written since #53 and read by nothing until now.
+  //
+  // OWNER-ONLY, and that is the load-bearing part of this route: it is
+  // who-did-what, and every row carries a colleague's IP address and user agent.
+  // A member reading everything in their org — the rule everywhere else — is the
+  // wrong rule for this one.
+  //
+  // Scoped to the caller's active org, always. `security_events_actor_time`
+  // exists for the other incident question, "everything this account did", which
+  // crosses orgs — that is an operator's query and not a tenant's, so nothing
+  // here can ask it.
+  //
+  // No plan window. Retention skips this table on purpose, so what a reader may
+  // see is not an entitlement to sell; it is the whole trail back to the day it
+  // shipped.
+  listSecurityEvents: oc
+    .route({
+      method: "GET",
+      path: "/security-events",
+      summary:
+        "The organization's security trail, newest first (owner only) — filterable by kind and by actor",
+    })
+    .input(
+      z.object({
+        // Both optional, and both exact: these are the two questions the table's
+        // indexes were built for.
+        event: z.string().optional(),
+        actorUserId: z.string().optional(),
+        // The cursor from the previous page. Both halves or neither — a time
+        // without its tiebreak would skip a row that shares the microsecond.
+        beforeCreatedAt: z.string().optional(),
+        beforeId: z.uuid().optional(),
+      }),
+    )
+    .output(securityTrail),
 
   // Answered outside any org on purpose: someone in no organization at all is
   // exactly who needs to see they have been invited to one.

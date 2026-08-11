@@ -1,9 +1,22 @@
 import { Controller, Req } from "@nestjs/common";
-import { contract } from "@repo/contracts";
+import { contract, SECURITY_TRAIL_PAGE } from "@repo/contracts";
 import type { FastifyRequest } from "fastify";
 import { entitlementsFor, planFrom } from "../billing/plans";
 import { provisionedUsersIn } from "../clusters/offboard";
-import { and, asc, clusters, eq, gt, invites, members, organizations, user } from "../db";
+import {
+  and,
+  asc,
+  clusters,
+  desc,
+  eq,
+  gt,
+  invites,
+  members,
+  organizations,
+  securityEvents,
+  sql,
+  user,
+} from "../db";
 import { DatabaseService } from "../db/database.service";
 import { TenancyService } from "../http/tenancy.service";
 import { Implement, route } from "../orpc/implement";
@@ -170,6 +183,88 @@ export class OrgController {
           role: row.role,
           expiresAt: row.expiresAt.toISOString(),
         }));
+      },
+    );
+  }
+
+  // The org's security trail (#158). Written since #53, read by nothing until
+  // now — the data was already there, already indexed for exactly this query,
+  // and already exempt from retention.
+  //
+  // `owner`, not `member`. Everywhere else in this product a member reads
+  // everything in their org; here every row carries a colleague's IP address and
+  // user agent, and who-signed-in-from-where is not team-wide reading.
+  //
+  // Scoped to the caller's active org and ordered newest first, which is
+  // `security_events_org_time` exactly: the schema comment says "every read is
+  // one org's trail, newest first", and this is that read. The other index,
+  // `security_events_actor_time`, answers "everything this account did" ACROSS
+  // orgs — an operator's question during an incident, not a tenant's, so no
+  // input here can ask it.
+  //
+  // No retention window and no plan filter, deliberately: this table is the one
+  // that does not age out, because the incident that needs a row is usually
+  // older than the day it is noticed.
+  @Implement(contract.listSecurityEvents)
+  listSecurityEvents(@Req() req: FastifyRequest) {
+    return route(this.tenancy, contract.listSecurityEvents, req, "owner").handler(
+      async ({ input, context }) => {
+        const orgId = context.member.orgId;
+        const filters = [eq(securityEvents.orgId, orgId)];
+        if (input.event !== undefined) filters.push(eq(securityEvents.event, input.event));
+        if (input.actorUserId !== undefined) {
+          filters.push(eq(securityEvents.actorUserId, input.actorUserId));
+        }
+        // The total is of what MATCHES, not of the trail: a filtered page saying
+        // "100 of 4,312" when 4,312 is the unfiltered count would describe rows
+        // the reader did not ask for.
+        const [counted] = await this.database.db
+          .select({ total: sql<number>`count(*)::int` })
+          .from(securityEvents)
+          .where(and(...filters));
+
+        const page = [...filters];
+        // Keyset, not offset. The trail grows at the head — a sign-in lands
+        // between two page loads — and an offset page would then repeat the row
+        // that was pushed across the boundary. The compound comparison is what
+        // makes it exact: `created_at` alone would skip a row that shares the
+        // microsecond with the cursor, and an invitation being accepted writes
+        // two rows in one request.
+        if (input.beforeCreatedAt !== undefined && input.beforeId !== undefined) {
+          page.push(
+            sql`(${securityEvents.createdAt}, ${securityEvents.id}) < (${new Date(input.beforeCreatedAt)}, ${input.beforeId}::uuid)`,
+          );
+        }
+        // One more than the page, to learn whether there IS a next page without
+        // a second count — and the extra row is dropped rather than sent.
+        const rows = await this.database.db
+          .select()
+          .from(securityEvents)
+          .where(and(...page))
+          .orderBy(desc(securityEvents.createdAt), desc(securityEvents.id))
+          .limit(SECURITY_TRAIL_PAGE + 1);
+        const events = rows.slice(0, SECURITY_TRAIL_PAGE);
+        const more = rows.length > SECURITY_TRAIL_PAGE;
+        const last = events[events.length - 1];
+        return {
+          events: events.map((row) => ({
+            id: row.id,
+            event: row.event,
+            actorUserId: row.actorUserId,
+            actorEmail: row.actorEmail,
+            target: row.target,
+            clusterId: row.clusterId,
+            metadata: row.metadata,
+            ipAddress: row.ipAddress,
+            userAgent: row.userAgent,
+            createdAt: row.createdAt.toISOString(),
+          })),
+          total: counted?.total ?? events.length,
+          // Null at the end of the trail, so the page can stop offering "older"
+          // rather than fetching an empty one to find out.
+          nextCreatedAt: more && last !== undefined ? last.createdAt.toISOString() : null,
+          nextId: more && last !== undefined ? last.id : null,
+        };
       },
     );
   }

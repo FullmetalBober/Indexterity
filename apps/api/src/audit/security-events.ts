@@ -1,3 +1,5 @@
+import type { SecurityEventName } from "@repo/contracts";
+import { SECURITY_EVENTS } from "@repo/contracts";
 import type { Database } from "../db";
 import { securityEvents } from "../db";
 import type { ClusterEngine, TlsOverrides } from "../engine/ports";
@@ -9,48 +11,29 @@ import type { ClusterEngine, TlsOverrides } from "../engine/ports";
 // about, which had no trail at all (#53): sign-ins, the org's membership, and the
 // four things that can be done to a cluster's access.
 
-// Written to `security_events.event`. Adding one is a constant here, not a
-// migration — the column is text.
-export const SECURITY_EVENTS = [
-  // Authentication.
-  "ACCOUNT_CREATED",
-  "SIGN_IN",
-  "SIGN_IN_FAILED",
-  "SIGN_OUT",
-  "SESSION_REVOKED",
-  // The second factor (#55). VERIFIED/FAILED cover both moments a code is
-  // asked for — completing a sign-in and proving an enrolment — because the
-  // path cannot tell them apart and both are worth a row: a run of FAILED is
-  // someone guessing at a code, whichever door they are guessing at.
-  "TWO_FACTOR_ENABLED",
-  "TWO_FACTOR_DISABLED",
-  "TWO_FACTOR_VERIFIED",
-  "TWO_FACTOR_FAILED",
-  "TWO_FACTOR_CODES_REGENERATED",
-  // A sign-in code was mailed. Recorded because it is the one second factor
-  // whose delivery leaves the building: a burst of these to one account is
-  // somebody working a password they already have.
-  "TWO_FACTOR_OTP_SENT",
-  // The request, not the flip (#83): the flip happens on a GET /verify-email
-  // link indistinguishable by path from ordinary signup verification, and the
-  // request is the act with the actor behind it.
-  "EMAIL_CHANGE_REQUESTED",
-  // Membership. The acts that decide who can do everything else.
-  "MEMBER_ROLE_CHANGED",
-  "MEMBER_REMOVED",
-  "MEMBER_LEFT",
-  "INVITE_CREATED",
-  "INVITE_ACCEPTED",
-  "ORG_CREATED",
-  "ORG_DELETED",
-  // A cluster's access, which is what the control plane holds of a customer's.
-  "CLUSTER_CONNECTED",
-  "CLUSTER_DISCONNECTED",
-  "CLUSTER_CREDENTIALS_ROTATED",
-  "CLUSTER_MODE_CHANGED",
-] as const;
-
-export type SecurityEventName = (typeof SECURITY_EVENTS)[number];
+export type { SecurityEventName };
+// The names moved to @repo/contracts when the trail got a screen (#158): the
+// page labels rows and offers a kind filter from the same list this writes, and
+// two copies of it would drift the moment an act is added. Re-exported so the
+// call sites in this app keep importing it from here, beside the metadata
+// shapes that only make sense next to it.
+//
+// The notes that used to sit inside the list, kept because they are about
+// WRITING and belong here:
+//
+//   TWO_FACTOR_VERIFIED / _FAILED cover both moments a code is asked for —
+//   completing a sign-in and proving an enrolment — because the path cannot
+//   tell them apart and both are worth a row: a run of FAILED is someone
+//   guessing at a code, whichever door they are guessing at.
+//
+//   TWO_FACTOR_OTP_SENT is the one second factor whose delivery leaves the
+//   building, so a burst of them to one account is somebody working a password
+//   they already have.
+//
+//   EMAIL_CHANGE_REQUESTED is the request and not the flip (#83): the flip
+//   happens on a GET /verify-email link indistinguishable by path from ordinary
+//   signup verification, and the request is the act with an actor behind it.
+export { SECURITY_EVENTS };
 
 // What each act records BESIDE the columns every row has, one entry per act that
 // records anything. An act absent from here carries no specifics.
