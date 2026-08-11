@@ -7,8 +7,21 @@
 // are the Mongo driver's. Other engines add their own names here as they land.
 const UNREACHABLE_NAME =
   /MongoServerSelectionError|MongoNetworkError|MongoNetworkTimeoutError|MongoTimeoutError/;
+// `ETIMED?OUT` covers both spellings, and they are two different errors from two
+// different parts of Node: a socket that gave up is `ETIMEDOUT`, and a DNS query
+// that got no answer is `ETIMEOUT`. Matching only the first missed every
+// `mongodb+srv://` cluster — which is every Atlas cluster — because an SRV string
+// resolves through `dns.resolveSrv` before a socket is ever opened. The failure
+// arrived as `querySrv ETIMEOUT _mongodb._tcp.…`, was classified as a fault in
+// our code, and cost five retries at fifty seconds each, a stack trace per
+// attempt, a 500 where the dashboard expects CLUSTER_UNREACHABLE, and a Sentry
+// report about somebody else's resolver.
+//
+// `querySrv`/`queryTxt` join `getaddrinfo` for the same reason: those three are
+// how a hostname fails to become an address, and which one answers depends only
+// on whether the string was SRV.
 const UNREACHABLE_MESSAGE =
-  /getaddrinfo|ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ENETUNREACH|ETIMEDOUT|Server selection timed out/i;
+  /getaddrinfo|querySrv|queryTxt|ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ENETUNREACH|ETIMED?OUT|Server selection timed out/i;
 
 export function isUnreachableError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
