@@ -64,6 +64,30 @@
     background-color: var(--background);
     color: var(--foreground);
   }
+
+  /* A button looks clickable, so the pointer should say so.
+
+     Tailwind v4's Preflight stopped setting this and leaves the browser default,
+     which for `<button>` is `default` — the arrow. Links were unaffected, so the
+     dashboard ended up with a rail that responded to the pointer and buttons
+     beside it that did not: measured, `a` came back `pointer` while "Sign out",
+     "Check access" and the checkbox all came back `default`.
+
+     In `base` rather than on the components, because `components/ui` is vendored
+     and rewriting it forks a file the next `shadcn add` puts back (D9). That also
+     makes this deliberately outrankable: a utility class sits in a later layer,
+     so `select.tsx`'s `cursor-default` on its menu items — shadcn matching how a
+     native select behaves — still wins, and so does every
+     `disabled:cursor-not-allowed`.
+
+     `:not(:disabled)` so a button nobody can press keeps the arrow. `:disabled`
+     only matches form elements, which is why the `[role="button"]` half is
+     belt-and-braces: a Radix trigger that is disabled carries
+     `pointer-events-none` and never sees a hover at all. */
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
 }
 
 /* Reader has asked their system for less motion, so give them less of it.
