@@ -1941,6 +1941,16 @@ describe("password reset (changes the owner password — keep near the end)", ()
     if (reset === undefined) throw new Error("reset token was not stored");
     const token = reset.identifier.slice("reset-password:".length);
 
+    // The session the account was already holding, captured BEFORE the reset.
+    // Copied rather than aliased: `owner.cookie` moves forward as scenarios
+    // adopt cookies, and this has to be the old value.
+    const sessionBeforeReset: Session = { email: owner.email, cookie: owner.cookie };
+    const tokensBeforeReset = await db
+      .select({ token: session.token })
+      .from(session)
+      .where(eq(session.userId, ownerUser.id));
+    expect(tokensBeforeReset.length).toBeGreaterThan(0);
+
     const apply = await fetch(`${API_BASE}/api/auth/reset-password`, {
       method: "POST",
       headers: { "content-type": "application/json", origin: WEB_ORIGIN },
@@ -1954,6 +1964,41 @@ describe("password reset (changes the owner password — keep near the end)", ()
       body: JSON.stringify({ email: owner.email, password: "rotated-pass-456" }),
     });
     expect(signInRes.status).toBe(200);
+
+    // revokeSessionsOnPasswordReset (auth.config.ts): every session the account
+    // held before the reset is gone from the database.
+    //
+    // Asserted as "none of those tokens is left" rather than as a count of what
+    // is: better-auth mints a session on the reset itself, so the account
+    // legitimately holds more than the one the sign-in above just made, and a
+    // count would be an assertion about that incidental behaviour instead of
+    // about the revocation. Checked on the rows because the cookie cache
+    // answers for up to its maxAge on a client that still holds one, which
+    // makes the request below the weaker half of this.
+    const tokensAfterReset = await db
+      .select({ token: session.token })
+      .from(session)
+      .where(eq(session.userId, ownerUser.id));
+    const survivors = tokensAfterReset
+      .map((row) => row.token)
+      .filter((token) => tokensBeforeReset.some((old) => old.token === token));
+    expect(survivors).toEqual([]);
+
+    // And the old session TOKEN no longer authorises anything. The cached copy
+    // is dropped from the jar first, on purpose: the cache is a signed snapshot
+    // with its own maxAge and would answer this request without consulting the
+    // row, so leaving it in would test the cache rather than the revocation —
+    // and would pass equally well with the option off.
+    const tokenOnly: Session = {
+      email: owner.email,
+      cookie: sessionBeforeReset.cookie
+        .split("; ")
+        .filter((pair) => pair.includes("session_token"))
+        .join("; "),
+    };
+    expect(tokenOnly.cookie).not.toBe("");
+    const afterReset = await api("/clusters", tokenOnly);
+    expect(afterReset.status).toBe(401);
   });
 });
 

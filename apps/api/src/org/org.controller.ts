@@ -1,14 +1,12 @@
 import { Controller, Req } from "@nestjs/common";
-import { implement } from "@orpc/nest";
 import { contract } from "@repo/contracts";
 import type { FastifyRequest } from "fastify";
-import { requireSession } from "../auth/session";
-import { resolveMembership } from "../auth/tenancy";
 import { entitlementsFor, planFrom } from "../billing/plans";
 import { provisionedUsersIn } from "../clusters/offboard";
 import { and, asc, clusters, eq, gt, invites, members, organizations, user } from "../db";
 import { DatabaseService } from "../db/database.service";
-import { Implement } from "../orpc/implement";
+import { TenancyService } from "../http/tenancy.service";
+import { Implement, route } from "../orpc/implement";
 
 // The org reads better-auth's organization plugin cannot answer.
 //
@@ -24,7 +22,10 @@ import { Implement } from "../orpc/implement";
 // orgs are made on purpose rather than conjured by the first GET.
 @Controller()
 export class OrgController {
-  constructor(private readonly database: DatabaseService) {}
+  constructor(
+    private readonly database: DatabaseService,
+    private readonly tenancy: TenancyService,
+  ) {}
 
   // Infinity does not survive JSON, so an absent limit is null.
   private static cap(value: number): number | null {
@@ -33,15 +34,10 @@ export class OrgController {
 
   @Implement(contract.getOrg)
   getOrg(@Req() req: FastifyRequest) {
-    return implement(contract.getOrg).handler(async () => {
-      const session = await requireSession(req);
-      const membership = await resolveMembership(
-        this.database.db,
-        session.userId,
-        session.activeOrgId,
-      );
+    return route(this.tenancy, contract.getOrg, req, "session").handler(async ({ context }) => {
       // Not an error: the dashboard draws a create-org screen for it, and a 404
       // would make the shell's three reads look like a broken api.
+      const membership = context.member;
       if (membership === null) return null;
       const orgId = membership.orgId;
 
@@ -113,9 +109,8 @@ export class OrgController {
 
   @Implement(contract.listOrgs)
   listOrgs(@Req() req: FastifyRequest) {
-    return implement(contract.listOrgs).handler(async () => {
-      const session = await requireSession(req);
-      const active = await resolveMembership(this.database.db, session.userId, session.activeOrgId);
+    return route(this.tenancy, contract.listOrgs, req, "session").handler(async ({ context }) => {
+      const active = context.member;
       const rows = await this.database.db
         .select({
           orgId: members.orgId,
@@ -125,7 +120,7 @@ export class OrgController {
         })
         .from(members)
         .innerJoin(organizations, eq(members.orgId, organizations.id))
-        .where(eq(members.userId, session.userId))
+        .where(eq(members.userId, context.userId))
         .orderBy(asc(members.createdAt));
       return rows.map((row) => ({
         orgId: row.orgId,
@@ -138,43 +133,44 @@ export class OrgController {
 
   @Implement(contract.listMyInvites)
   listMyInvites(@Req() req: FastifyRequest) {
-    return implement(contract.listMyInvites).handler(async () => {
-      const session = await requireSession(req);
-      const [me] = await this.database.db
-        .select({ email: user.email })
-        .from(user)
-        .where(eq(user.id, session.userId))
-        .limit(1);
-      if (me === undefined) return [];
-      const rows = await this.database.db
-        .select({
-          id: invites.id,
-          role: invites.role,
-          expiresAt: invites.expiresAt,
-          orgName: organizations.name,
-        })
-        .from(invites)
-        .innerJoin(organizations, eq(invites.orgId, organizations.id))
-        .where(
-          and(
-            // The plugin lowercases the address it stores; user.email is stored
-            // as typed, so this is compared the same way the accept endpoint
-            // compares it rather than a way that happens to work today.
-            eq(invites.email, me.email.toLowerCase()),
-            eq(invites.status, "pending"),
-            // The plugin's own list-user-invitations filters on status alone, so
-            // it shows expired invitations as joinable and the 400 arrives on the
-            // click. An invitation nobody can accept is not pending.
-            gt(invites.expiresAt, new Date()),
-          ),
-        )
-        .orderBy(asc(invites.createdAt));
-      return rows.map((row) => ({
-        id: row.id,
-        orgName: row.orgName,
-        role: row.role,
-        expiresAt: row.expiresAt.toISOString(),
-      }));
-    });
+    return route(this.tenancy, contract.listMyInvites, req, "session").handler(
+      async ({ context }) => {
+        const [me] = await this.database.db
+          .select({ email: user.email })
+          .from(user)
+          .where(eq(user.id, context.userId))
+          .limit(1);
+        if (me === undefined) return [];
+        const rows = await this.database.db
+          .select({
+            id: invites.id,
+            role: invites.role,
+            expiresAt: invites.expiresAt,
+            orgName: organizations.name,
+          })
+          .from(invites)
+          .innerJoin(organizations, eq(invites.orgId, organizations.id))
+          .where(
+            and(
+              // The plugin lowercases the address it stores; user.email is stored
+              // as typed, so this is compared the same way the accept endpoint
+              // compares it rather than a way that happens to work today.
+              eq(invites.email, me.email.toLowerCase()),
+              eq(invites.status, "pending"),
+              // The plugin's own list-user-invitations filters on status alone, so
+              // it shows expired invitations as joinable and the 400 arrives on the
+              // click. An invitation nobody can accept is not pending.
+              gt(invites.expiresAt, new Date()),
+            ),
+          )
+          .orderBy(asc(invites.createdAt));
+        return rows.map((row) => ({
+          id: row.id,
+          orgName: row.orgName,
+          role: row.role,
+          expiresAt: row.expiresAt.toISOString(),
+        }));
+      },
+    );
   }
 }

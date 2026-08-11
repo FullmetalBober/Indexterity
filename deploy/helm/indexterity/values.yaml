@@ -302,8 +302,22 @@ secrets:
   # KEK for envelope-encrypted cluster credentials: openssl rand -base64 32
   # LOSING THIS MAKES EVERY STORED CONNECTION STRING UNREADABLE — back it up.
   masterKey: ""
-  # Bump alongside adding MASTER_KEY_V<n> to rotate the KEK.
+  # Which key version NEW rows are sealed with. Bump it alongside adding the key
+  # to masterKeys below, then run rotate-key to re-seal the older rows.
   masterKeyVersion: ""
+  # The KEKs, by version, rendered into the Secret as MASTER_KEY_V<n>. Every
+  # version that any surviving cluster row was sealed with has to be here, or
+  # that row cannot be decrypted — which is why rotate-key reports how many are
+  # left and you keep the old key until it reports none.
+  #
+  #   masterKeyVersion: "2"
+  #   masterKeys:
+  #     1: "<the retired key>"     # only until rotate-key reports zero remaining
+  #     2: "<the live key>"
+  #
+  # Version 1 may also be left in `masterKey` above, which is where it lived
+  # before these existed; naming it here is the clearer half of a rotation.
+  masterKeys: {}
   github:
     clientId: ""
     clientSecret: ""

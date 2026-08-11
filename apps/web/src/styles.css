@@ -64,4 +64,56 @@
     background-color: var(--background);
     color: var(--foreground);
   }
+
+  /* A button looks clickable, so the pointer should say so.
+
+     Tailwind v4's Preflight stopped setting this and leaves the browser default,
+     which for `<button>` is `default` — the arrow. Links were unaffected, so the
+     dashboard ended up with a rail that responded to the pointer and buttons
+     beside it that did not: measured, `a` came back `pointer` while "Sign out",
+     "Check access" and the checkbox all came back `default`.
+
+     In `base` rather than on the components, because `components/ui` is vendored
+     and rewriting it forks a file the next `shadcn add` puts back (D9). That also
+     makes this deliberately outrankable: a utility class sits in a later layer,
+     so `select.tsx`'s `cursor-default` on its menu items — shadcn matching how a
+     native select behaves — still wins, and so does every
+     `disabled:cursor-not-allowed`.
+
+     `:not(:disabled)` so a button nobody can press keeps the arrow. `:disabled`
+     only matches form elements, which is why the `[role="button"]` half is
+     belt-and-braces: a Radix trigger that is disabled carries
+     `pointer-events-none` and never sees a hover at all. */
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+}
+
+/* Reader has asked their system for less motion, so give them less of it.
+   Nothing here honoured that before, and there is motion to honour: every
+   dialog and dropdown enters and leaves on `animate-in`/`animate-out`, the
+   skeletons pulse forever while a read is in flight, and the spinner spins.
+
+   Durations, not `animation: none`. The reason usually given for this is wrong
+   here and worth writing down so nobody re-derives it: Radix does unmount a
+   closed dialog on `animationend`, but its Presence checks the computed name
+   first — `else if (currentAnimationName === "none" || styles?.display ===
+   "none") send("UNMOUNT")` — so cancelling outright is safe too, measured with
+   both spellings and the whole cluster spec passing under either. The short
+   duration is the widely used form and it keeps `animationend` firing for
+   anything that is not Radix, which this file cannot know about.
+   `iteration-count: 1` settles `animate-pulse` rather than freezing it.
+
+   Scroll behaviour goes too, because `scrollRestoration` (router.tsx) jumps the
+   page on every navigation. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

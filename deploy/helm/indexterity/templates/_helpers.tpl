@@ -93,6 +93,20 @@ app.kubernetes.io/component: {{ .component }}
 - name: MASTER_KEY_VERSION
   value: {{ .Values.secrets.masterKeyVersion | quote }}
 {{- end }}
+{{- /* The rotation's keys, from the Secret rather than inline: these are KEKs.
+      Ranged over the same map the Secret renders, so a version present in one is
+      present in the other — a key in the Secret that no container reads is a
+      rotation that looks configured and decrypts nothing. With
+      `existingSecret`, name the versions in secrets.masterKeys anyway (values
+      may be empty): the keys are read from your Secret, this only says which
+      ones to mount. */}}
+{{- range $version, $key := .Values.secrets.masterKeys }}
+- name: MASTER_KEY_V{{ $version }}
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "indexterity.secretName" $ }}
+      key: MASTER_KEY_V{{ $version }}
+{{- end }}
 - name: DEFAULT_ORG_PLAN
   value: {{ .Values.config.defaultOrgPlan | quote }}
 - name: LOG_LEVEL

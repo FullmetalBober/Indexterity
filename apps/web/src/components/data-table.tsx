@@ -156,12 +156,17 @@ interface DataTableProps<TData extends RowData> {
   // use the room — got no better treatment. A `<col>` with no width takes the whole
   // remainder under `fixed`, so naming one column is the whole mechanism.
   //
-  // `max` is the other half, and leaving it out was its own bug: on a wide monitor the
-  // namespace column ran to 1,800px and a collection's name ended up a long way from
-  // its own numbers. A table does not have to be as wide as the page it sits on. Past
-  // this the table stops growing and the leftover stays leftover — which the page
-  // still spends well, on two charts side by side rather than on one stretched row.
-  readonly flexColumn?: { readonly index: number; readonly max: number };
+  // `max` caps how wide the flexible column may grow. Optional, and the two
+  // dashboard tables now leave it out: capping it was the right call while the
+  // content column had a reading measure around it, and the wrong one for a table
+  // whose rightmost columns are what a reader came for. Without it the table fills
+  // its container and the leftover goes to the flexible column, which is the
+  // column that can use it.
+  //
+  // Set it where the flexible column holds something that stops being readable
+  // when stretched — a line much past ninety characters is hard to track back
+  // from, so a column of prose in a narrow page still wants a ceiling.
+  readonly flexColumn?: { readonly index: number; readonly max?: number };
 }
 
 export function DataTable<TData extends RowData>({
@@ -306,12 +311,17 @@ export function DataTable<TData extends RowData>({
         className={
           virtualize === undefined
             ? undefined
-            : // `w-fit max-w-full` so the border hugs the table rather than the page. The
-              // table stops at its own ceiling (see columnWidths/flexColumn) and a box
-              // that kept going left a stretch of empty bordered space beside every
-              // row. Capped at the parent so a narrow viewport still scrolls instead of
-              // overflowing the page.
-              "w-fit max-w-full overflow-auto rounded-md border [&_[data-slot=table-container]]:overflow-visible"
+            : [
+                "overflow-auto rounded-md border [&_[data-slot=table-container]]:overflow-visible",
+                // Which of the two the box is depends on whether the table has a
+                // ceiling. With one, `w-fit max-w-full` makes the border hug the
+                // table — a box that kept going left a stretch of empty bordered
+                // space beside every row. Without one the table already fills the
+                // container, so `w-fit` would measure the same thing twice and
+                // shrink-to-fit a full-width table, which under `table-fixed`
+                // collapses it to the sum of its stated columns.
+                flexColumn?.max === undefined ? "w-full" : "w-fit max-w-full",
+              ].join(" ")
         }
         style={virtualize === undefined ? undefined : { maxHeight: virtualize.maxHeight }}
       >
@@ -321,14 +331,14 @@ export function DataTable<TData extends RowData>({
             columnWidths === undefined
               ? undefined
               : // Below the floor the columns would be squeezed rather than scrolled,
-                // and a namespace is not a thing to squeeze. The ceiling is that floor
-                // with the flexible column grown to its maximum: wider than that, and
-                // the only thing gained is distance between a row's name and its
-                // numbers.
+                // and a namespace is not a thing to squeeze. A ceiling, where one is
+                // asked for, is that floor with the flexible column grown to its
+                // maximum; without one the table takes the container and `w-full`
+                // above stretches the box with it.
                 {
                   minWidth: tableFloor,
                   maxWidth:
-                    flexColumn === undefined
+                    flexColumn?.max === undefined
                       ? undefined
                       : tableFloor - (columnWidths[flexColumn.index] ?? 0) + flexColumn.max,
                 }

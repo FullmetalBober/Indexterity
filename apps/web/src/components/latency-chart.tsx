@@ -48,11 +48,55 @@ function toSamples(series: readonly ChartSeries[]): Sample[] {
   );
 }
 
-// Takes either form because the axis hands over the Date the scale holds while a
-// tooltip point's x is widened to the library's ChartValue union.
-function timeLabel(at: Date | number): string {
-  const date = at instanceof Date ? at : new Date(at);
+// Takes either form because the axis hands over the Date the scale holds, while a
+// tooltip reads it off a point (see tooltipTime).
+//
+// Empty for anything that is not a readable instant. It used to render one
+// regardless, which is how a pixel offset came out as `1/1 03:00`: small numbers
+// are milliseconds after the epoch, and `new Date(null)` is the epoch exactly.
+function timeLabel(at: unknown): string {
+  // `null` first, and not as a formality: `new Date(null)` is the epoch, so
+  // without this an absent value reads as a real instant in 1970 rather than as
+  // nothing — which is the same wrong answer the pixel was giving.
+  if (at === null || at === undefined) return "";
+  const date = at instanceof Date ? at : new Date(at as string | number);
+  if (Number.isNaN(date.getTime())) return "";
   return `${date.getMonth() + 1}/${date.getDate()} ${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
+// A tooltip point carries the datum AND where it was painted: `xValue`/`yValue`
+// are the Date and the µs/op, `x`/`y` are scene coordinates in pixels — the
+// library hit-tests with them (`focus.js`) and offsets them per facet
+// (`facet.js`). Reading the wrong pair is silent, because both are numbers.
+//
+// It was being read wrong in both places. The heading formatted `point.x` as a
+// timestamp, so every tooltip on a Kyiv-time screen said `1/1 03:00` — a point
+// painted 40px in is 40ms after 1970-01-01T00:00Z. The value line printed
+// `point.y`, so a latency of 58,000µs read as however many pixels down the line
+// sat, which is a plausible-looking number and therefore worse.
+//
+// These take the POINT rather than a value so the choice cannot be made again at
+// the call site.
+interface TooltipPoint {
+  readonly xValue?: unknown;
+  readonly yValue?: unknown;
+  // Declared and deliberately never read. They are on the real point, and naming
+  // them here is what lets a test hand over one that carries both pairs — which
+  // is the only way to assert that the datum is what gets read.
+  readonly x?: unknown;
+  readonly y?: unknown;
+}
+
+export function tooltipTime(point: TooltipPoint | undefined): string {
+  return point === undefined ? "" : timeLabel(point.xValue);
+}
+
+// `—` rather than a number for the null points that draw the gaps: no ops went
+// through, so there is no µs/op, and rounding null to `0 µs` would report an
+// idle collection as an instant one.
+export function tooltipValue(point: TooltipPoint | undefined, unit: string): string {
+  const value = point?.yValue;
+  return typeof value === "number" && Number.isFinite(value) ? `${Math.round(value)} ${unit}` : "—";
 }
 
 // One line per series over a shared time axis. Nulls break the line (a gap, not
@@ -163,12 +207,9 @@ export function LineChart({
     },
     tooltip: {
       use: tooltip,
-      format: (point) => `${Math.round(point.y)} ${unit}`,
+      format: (point) => tooltipValue(point, unit),
       // Every point in a group shares the timestamp, so the first one names it.
-      formatGroup: (points) => {
-        const first = points[0];
-        return first === undefined ? "" : timeLabel(first.x);
-      },
+      formatGroup: (points) => tooltipTime(points[0]),
     },
     // The data moves once every six hours. An animation here is decoration on a
     // number nobody is watching change.

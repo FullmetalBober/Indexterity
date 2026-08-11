@@ -322,4 +322,62 @@ describe("DataTable, column widths", () => {
     expect(container.querySelector("table")?.className ?? "").not.toContain("table-fixed");
     expect(container.querySelector("colgroup")).toBeNull();
   });
+
+  // A flexible column with no `max` is the dashboard's two tables: fill the
+  // container, and let the flexible column have the slack.
+  //
+  // Both halves are asserted because either alone breaks it. Without the box
+  // stretching, `w-fit` shrink-to-fits a full-width table and `table-fixed`
+  // collapses it to the sum of the stated columns; without dropping the ceiling
+  // the table stops at that number however wide the page is. Measured in a
+  // browser once — at a 2200px container this is 1508px against 2198px — since
+  // jsdom lays nothing out and can only be asked what was declared.
+  it("takes the whole container when the flexible column has no ceiling", () => {
+    const { container } = renderInApp(
+      <DataTable
+        caption="Test rows"
+        columns={columns}
+        data={MANY}
+        getRowId={(row) => row.id}
+        initialSorting={[{ id: "name", desc: false }]}
+        empty={{ title: "Nothing here", description: "Not collected yet." }}
+        virtualize={{ maxHeight: 600, estimateRowHeight: 40 }}
+        columnWidths={[300, 96]}
+        flexColumn={{ index: 0 }}
+      />,
+    );
+
+    const table = container.querySelector("table");
+    expect(table?.style.maxWidth).toBe("");
+    expect(table?.style.minWidth).toBe("396px");
+    // The flexible column states no width, which is what makes `fixed` hand it
+    // the remainder rather than sharing it out in proportion.
+    const cols = [...container.querySelectorAll("colgroup col")];
+    expect(cols.map((col) => (col as HTMLElement).style.width)).toEqual(["", "96px"]);
+    expect(
+      container.querySelector("[data-slot=table-container]")?.parentElement?.className,
+    ).toContain("w-full");
+  });
+
+  it("still hugs the table when a ceiling is asked for", () => {
+    const { container } = renderInApp(
+      <DataTable
+        caption="Test rows"
+        columns={columns}
+        data={MANY}
+        getRowId={(row) => row.id}
+        initialSorting={[{ id: "name", desc: false }]}
+        empty={{ title: "Nothing here", description: "Not collected yet." }}
+        virtualize={{ maxHeight: 600, estimateRowHeight: 40 }}
+        columnWidths={[300, 96]}
+        flexColumn={{ index: 0, max: 500 }}
+      />,
+    );
+
+    // 396 floor, minus the flexible column's 300, plus its 500.
+    expect(container.querySelector("table")?.style.maxWidth).toBe("596px");
+    expect(
+      container.querySelector("[data-slot=table-container]")?.parentElement?.className,
+    ).toContain("w-fit");
+  });
 });

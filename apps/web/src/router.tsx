@@ -48,6 +48,30 @@ export function getRouter() {
     routeTree,
     context: { queryClient },
     scrollRestoration: true,
+    // Run a link's loader when the pointer settles on it, so the click lands on
+    // data that is already there. The cluster page is the one this is for: its
+    // loader fans out seven reads, and until now every one of them started after
+    // the click.
+    //
+    // The cost is reads for a cluster nobody opened, and what bounds it is the
+    // query cache rather than this setting — the loaders go through
+    // ensureQueryData, so a preload fills the same entries the click would have,
+    // and `defaultPreloadStaleTime` below stops a second hover re-asking. Sweeping
+    // the pointer down a list of eight clusters is therefore eight loaders once,
+    // not once per pass.
+    defaultPreload: "intent",
+    // 50ms is the framework's default and it is too eager for a list: moving the
+    // pointer to the thing you actually want crosses the rows above it, and each
+    // of those is a cluster page's worth of reads. 200ms is past the speed a
+    // pointer travels over something on its way elsewhere and well under the time
+    // it takes to decide to click.
+    defaultPreloadDelay: 200,
+    // Matches the query client's staleTime (queries/client.ts). Left at the
+    // framework's 30s, but stated, because the two numbers have to agree: a
+    // preload window shorter than the cache window re-runs loaders that answer
+    // from cache anyway, and a longer one serves a click from data this router
+    // declined to refresh.
+    defaultPreloadStaleTime: 30_000,
     defaultErrorComponent: AppError,
     defaultNotFoundComponent: NotFound,
   });

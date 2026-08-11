@@ -95,13 +95,16 @@ export function authTrailEntry(
   // sessionEndedEntry.
   if (event === "SIGN_OUT") return null;
 
+  // The columns every act shares. Not `satisfies SecurityEventInput`: `event` is
+  // still the whole union here, and an act that records specifics may only be
+  // paired with ITS specifics — so the three cases below re-state the narrowed
+  // `event` alongside their metadata, and that pairing is what gets checked.
   const base = {
-    event,
     orgId: orgOf(ctx, actor),
     actorUserId: actor?.userId ?? null,
     actorEmail: actor?.email ?? null,
     ...clientFromHeaders(ctx.headers, trustProxy),
-  } satisfies SecurityEventInput;
+  };
 
   switch (event) {
     // Nobody proved who they were, so the address goes in `target` rather than in
@@ -109,6 +112,7 @@ export function authTrailEntry(
     case "SIGN_IN_FAILED":
       return {
         ...base,
+        event,
         orgId: null,
         actorUserId: null,
         actorEmail: null,
@@ -119,10 +123,15 @@ export function authTrailEntry(
     // it should be copied to. Which session it was is recoverable from the
     // sign-in rows and the time; the credential is not worth storing to save that.
     case "SESSION_REVOKED":
-      return { ...base, metadata: { scope: path === "/revoke-session" ? "one" : "others" } };
+      return {
+        ...base,
+        event,
+        metadata: { scope: path === "/revoke-session" ? "one" : "others" },
+      };
     case "MEMBER_ROLE_CHANGED":
       return {
         ...base,
+        event,
         target:
           text(field(ctx.context.returned, "user"), "email") ??
           text(ctx.body, "memberId") ??
@@ -130,12 +139,13 @@ export function authTrailEntry(
         metadata: { role: text(ctx.body, "role") },
       };
     case "MEMBER_REMOVED":
-      return { ...base, target: text(ctx.body, "memberIdOrEmail") };
+      return { ...base, event, target: text(ctx.body, "memberIdOrEmail") };
     case "MEMBER_LEFT":
-      return { ...base, target: actor?.email ?? null };
+      return { ...base, event, target: actor?.email ?? null };
     case "INVITE_CREATED":
       return {
         ...base,
+        event,
         target: text(ctx.body, "email"),
         metadata: { role: text(ctx.body, "role") },
       };
@@ -143,13 +153,13 @@ export function authTrailEntry(
     // said twice on purpose, because the interesting fact is that this account
     // gained a membership, and a reader scanning the target column should see it.
     case "INVITE_ACCEPTED":
-      return { ...base, target: actor?.email ?? null };
+      return { ...base, event, target: actor?.email ?? null };
     case "ORG_CREATED":
-      return { ...base, target: text(ctx.context.returned, "name") };
+      return { ...base, event, target: text(ctx.context.returned, "name") };
     case "ORG_DELETED":
-      return { ...base, target: text(ctx.body, "organizationId") };
+      return { ...base, event, target: text(ctx.body, "organizationId") };
     default:
-      return base;
+      return { ...base, event };
   }
 }
 

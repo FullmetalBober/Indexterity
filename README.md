@@ -366,15 +366,22 @@ from PATH, which matters only when compose is reached *through* npm —
 `@vercel/nft` installs an `nft` binary there and podman's network backend shells
 out to `nft` meaning nftables.
 
-`npm run lint` is Biome plus `scripts/lint-tailwind.ts`, which fails the build
-on a Tailwind arbitrary value that has a canonical utility (`w-[220px]` is
-`w-55`). Vendored `components/ui` is exempt. Migration installs **two** schemas
+`npm run lint` is Biome plus two checks Biome cannot express.
+`scripts/lint-tailwind.ts` fails the build on a Tailwind arbitrary value that has
+a canonical utility (`w-[220px]` is `w-55`); vendored `components/ui` is exempt.
+`scripts/lint-migrations.ts` fails it on a migration that adds an enum value and
+then uses it — Postgres refuses that inside one transaction, and drizzle-kit runs
+one file per transaction, so the `ALTER TYPE` has to commit on its own and the
+backfill goes in the next migration. Both scripts verify their own cases on every
+run, because the way a check like that fails is by matching nothing.
+
+Migration installs **two** schemas
 — `public` for Drizzle and `graphile_worker` for the queue — because the api and
 worker start together and whoever queues a job first would otherwise race a
 schema that is not there yet.
 
-**Four test layers**, currently 457 api unit, 244 web unit, 81 integration and
-24 end-to-end.
+**Four test layers**, currently 600 api unit, 317 web unit, 104 integration and
+31 end-to-end.
 
 | layer | what it needs | what only it catches |
 |---|---|---|

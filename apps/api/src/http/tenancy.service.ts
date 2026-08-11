@@ -2,7 +2,7 @@ import { Injectable } from "@nestjs/common";
 import { ORPCError } from "@orpc/server";
 import { SESSION_FRESH_AGE_SECONDS } from "@repo/contracts";
 import type { FastifyRequest } from "fastify";
-import { requireSession } from "../auth/session";
+import { requireSession, requireUserId } from "../auth/session";
 import { type Membership, resolveMembership } from "../auth/tenancy";
 import { hasCredentialAccount } from "../auth/two-factor-gate";
 import {
@@ -17,6 +17,12 @@ import { requireOwnerTwoFactor } from "../config/env";
 import { and, clusters, eq, organizations } from "../db";
 import { DatabaseService } from "../db/database.service";
 
+// One `resolveMembership` per request, for the same reason `auth/session.ts`
+// resolves the session once (#77): the caller's membership cannot change
+// mid-request, and the gate now resolves it before the handler runs, so an
+// un-memoized lookup would be two queries where there used to be one.
+const membershipByRequest = new WeakMap<FastifyRequest, Promise<Membership | null>>();
+
 // Authn + tenancy, shared by every controller. Was four private methods copied
 // into one 950-line controller; the rules are identical everywhere, so they
 // belong in one place rather than in whichever controller happens to need them.
@@ -24,10 +30,20 @@ import { DatabaseService } from "../db/database.service";
 export class TenancyService {
   constructor(private readonly database: DatabaseService) {}
 
+  // 401 without a valid session, else who is asking.
+  async userId(req: FastifyRequest): Promise<string> {
+    return requireUserId(req);
+  }
+
   // 401 without a valid session; null when the caller is in no organization.
   async memberOrNull(req: FastifyRequest): Promise<Membership | null> {
-    const session = await requireSession(req);
-    return resolveMembership(this.database.db, session.userId, session.activeOrgId);
+    const pending = membershipByRequest.get(req);
+    if (pending !== undefined) return pending;
+    const fresh = requireSession(req).then((session) =>
+      resolveMembership(this.database.db, session.userId, session.activeOrgId),
+    );
+    membershipByRequest.set(req, fresh);
+    return fresh;
   }
 
   // 401 without a valid session, else the caller's membership.
@@ -48,23 +64,15 @@ export class TenancyService {
     return membership;
   }
 
-  async org(req: FastifyRequest): Promise<string> {
-    return (await this.member(req)).orgId;
-  }
-
-  async orgOrNull(req: FastifyRequest): Promise<string | null> {
-    return (await this.memberOrNull(req))?.orgId ?? null;
-  }
-
   // Mutations (connect cluster, mode, approve, undo, collect) are owner-only;
   // members read everything.
-  async requireOwner(req: FastifyRequest): Promise<string> {
+  async requireOwner(req: FastifyRequest): Promise<Membership> {
     const member = await this.member(req);
     if (member.role !== "owner") {
       throw new ORPCError("FORBIDDEN", { message: "owner role required" });
     }
     await this.requireSecondFactor(req);
-    return member.orgId;
+    return member;
   }
 
   // The other half of "2FA is required for owners" (#55) — the org-membership
@@ -103,8 +111,8 @@ export class TenancyService {
   // De-escalation must never wait on a password: flipping a cluster BACK to
   // read-only takes requireOwner only, so the emergency stop works from any
   // owner session however old (clusters.controller.ts setClusterMode).
-  async requireFreshOwner(req: FastifyRequest): Promise<string> {
-    const orgId = await this.requireOwner(req);
+  async requireFreshOwner(req: FastifyRequest): Promise<Membership> {
+    const member = await this.requireOwner(req);
     // Resolved once per request (auth/session.ts), so this re-ask is free.
     const session = await requireSession(req);
     const ageMs = Date.now() - session.signedInAt.getTime();
@@ -114,7 +122,7 @@ export class TenancyService {
         message: "you signed in a while ago — confirm your password to do this",
       });
     }
-    return orgId;
+    return member;
   }
 
   async plan(orgId: string): Promise<Plan> {
@@ -173,5 +181,28 @@ export class TenancyService {
       .where(and(eq(clusters.id, clusterId), eq(clusters.orgId, orgId)))
       .limit(1);
     return row !== undefined;
+  }
+
+  // Not found rather than forbidden: whether a cluster id exists is not this
+  // caller's business, so another tenant's cluster answers the same way a
+  // typo does.
+  //
+  // The eight routes that refuse this way say so in one line here instead of
+  // four each. The three that answer with an empty shape rather than a refusal
+  // keep `ownsCluster` above — an empty ROI panel is a read of a cluster you
+  // cannot see, and a stream that ends is not the same as one that never
+  // started (see each call site).
+  // Takes the handler's own `errors` map rather than throwing a bare ORPCError,
+  // the way assertNameFree and guardDial do next door: NOT_FOUND is declared on
+  // these contracts, and a refusal raised through the map is the one the client
+  // can discriminate.
+  async assertOwnsCluster(
+    clusterId: string,
+    orgId: string,
+    errors: { NOT_FOUND: (options: { message: string }) => Error },
+  ): Promise<void> {
+    if (!(await this.ownsCluster(clusterId, orgId))) {
+      throw errors.NOT_FOUND({ message: "cluster not found" });
+    }
   }
 }

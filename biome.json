@@ -49,7 +49,18 @@
       "style": {
         "noNonNullAssertion": "error",
         "useImportType": "error",
-        "useConst": "error"
+        "useConst": "error",
+        "noRestrictedImports": {
+          "level": "error",
+          "options": {
+            "paths": {
+              "@orpc/nest": {
+                "importNames": ["implement", "Implement"],
+                "message": "import { Implement, route } from src/orpc/implement instead — @orpc/nest's implement builds a handler with no authorization level, and its Implement forgets the @Res() that stops Fastify sending twice (#143, D20)"
+              }
+            }
+          }
+        }
       }
     }
   },
@@ -68,6 +79,16 @@
         "rules": {
           "style": {
             "useImportType": "off"
+          }
+        }
+      }
+    },
+    {
+      "includes": ["apps/api/src/orpc/implement.ts"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": "off"
           }
         }
       }

@@ -631,7 +631,17 @@ export const actions = pgTable(
     kind: text("kind").notNull(),
     actor: text("actor").notNull(),
     result: text("result").notNull(),
-    rollbackToken: jsonb("rollback_token").$type<Record<string, unknown>>(),
+    // How to undo this action, and it is a different thing per kind — which was
+    // invisible while the column was `Record<string, unknown>`. A DROP or HIDE
+    // stores the serialized spec of the index it took away, because putting it
+    // back means rebuilding everything it was (jobs/apply.ts, jobs/finalize.ts);
+    // a CREATE stores only the name it added, because undoing that is a drop
+    // (jobs/create.ts). Spelled as the union so a reader has to say which one it
+    // is holding — `rollbackRecommendation` reads DROP rows and nothing reads
+    // the CREATE variant yet.
+    rollbackToken: jsonb("rollback_token").$type<
+      { spec: Record<string, unknown> } | { indexName: string }
+    >(),
     createdAt,
   },
   (table) => [index("actions_recommendation").on(table.recommendationId)],
@@ -854,6 +864,13 @@ export const securityEvents = pgTable(
     target: text("target"),
     // The specifics of that act and nothing else — the roles either side of a
     // promotion, the mode a cluster was flipped to. Never credentials.
+    //
+    // Loose here and checked at the writer: the shape differs per act, so the
+    // column holds a union that `SecurityEventMetadata` (src/audit/security-
+    // events.ts) declares one entry at a time, and `recordSecurityEvent` is the
+    // only thing that writes this table. Typing it from there would point this
+    // file up at a layer above it; nothing reads the column back, so the
+    // per-act shape has to be enforced where it is spelled or nowhere.
     metadata: jsonb("metadata").$type<Record<string, unknown>>(),
     // Personal data, kept on purpose and no more of it than `session` already
     // holds: an incident asks which address and which client, and an answer of

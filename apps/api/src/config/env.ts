@@ -4,10 +4,10 @@ import {
   type ApiEnv,
   cidrEntries,
   decodeKey,
+  isSecretVar,
   type MigrateEnv,
   PROCESS_SCHEMAS,
   type ProcessName,
-  SECRET_VARS,
   type TrustProxy,
   type WorkerEnv,
   withoutBlanks,
@@ -59,7 +59,7 @@ function report(process: ProcessName, raw: Record<string, string>, error: z.ZodE
       const hint = MISSING_HINTS[name];
       return `  ${name}: required${hint === undefined ? "" : ` — ${hint}`}`;
     }
-    const got = SECRET_VARS.has(name) ? "" : ` (got ${JSON.stringify(value)})`;
+    const got = isSecretVar(name) ? "" : ` (got ${JSON.stringify(value)})`;
     return `  ${name}: ${issue.message}${got}`;
   });
   return [
@@ -146,13 +146,29 @@ export function masterKeyBytes(): Uint8Array {
   return decodeKey(workerEnv().MASTER_KEY);
 }
 
-// KEK rotation: v1 = MASTER_KEY, v2+ = MASTER_KEY_V<n>. Each cluster row records
-// the version that sealed it, so old rows stay readable during a rotation. The
-// schema has already checked that every version up to MASTER_KEY_VERSION has a
-// well-formed key behind it.
+// KEK rotation: MASTER_KEY_V<n> for every n, with MASTER_KEY as v1's fallback.
+// Each cluster row records the version that sealed it, so old rows stay readable
+// during a rotation. The schema has already checked that every version up to
+// MASTER_KEY_VERSION has a well-formed key behind it.
 export function masterKeyBytesFor(version: number): Uint8Array {
   const values: Record<string, unknown> = workerEnv();
-  const raw = version <= 1 ? values.MASTER_KEY : values[`MASTER_KEY_V${version}`];
+  // Every version can be named `MASTER_KEY_V<n>`, version 1 included, and
+  // MASTER_KEY is what v1 falls back to.
+  //
+  // v1 used to be MASTER_KEY and nothing else, which made the first key the one
+  // key that could never be retired by name: after rotating to v2, the variable
+  // called MASTER_KEY had to go on holding the OLD value for as long as any v1
+  // row survived — so the live key was MASTER_KEY_V2 and the retired one was
+  // MASTER_KEY, which reads backwards and is a thing to get wrong under pressure.
+  // Naming it makes the rotation symmetric: MASTER_KEY_V1 is the retired key,
+  // MASTER_KEY_V2 is the current one, and rotate-key.js re-seals across them.
+  //
+  // Fallback rather than replacement, so every existing deployment keeps working
+  // untouched. Note the consequence when MASTER_KEY_VERSION is still 1 and
+  // MASTER_KEY_V1 is set: NEW rows seal with MASTER_KEY_V1 too, because that is
+  // what version 1's key now is. Setting it without bumping the version is how
+  // you would write new rows with a key you meant to retire.
+  const raw = values[`MASTER_KEY_V${version}`] ?? (version <= 1 ? values.MASTER_KEY : undefined);
   if (typeof raw !== "string") {
     // A row sealed with a version this deployment was never given. Not a config
     // error the schema could have caught — MASTER_KEY_VERSION says which key
