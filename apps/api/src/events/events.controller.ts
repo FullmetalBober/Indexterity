@@ -1,9 +1,8 @@
 import { Controller, Req } from "@nestjs/common";
-import { implement } from "@orpc/nest";
 import { contract } from "@repo/contracts";
 import type { FastifyRequest } from "fastify";
 import { TenancyService } from "../http/tenancy.service";
-import { Implement } from "../orpc/implement";
+import { Implement, route } from "../orpc/implement";
 import { ClusterEventsService } from "./cluster-events.service";
 
 // How long one stream may live before the client has to reconnect. Ownership
@@ -27,16 +26,15 @@ export class EventsController {
     // An arrow returning the subscription's generator, not an `async function*`
     // itself: the tenancy checks run — and refuse — before any stream exists,
     // and `this` survives into the handler.
-    return implement(contract.listClusterEvents).handler(async ({ input, errors, signal }) => {
-      const orgId = await this.tenancy.org(req);
-      // NOT_FOUND rather than the read idiom's empty answer: an empty stream
-      // does not end, it hangs — see the contract's note.
-      if (!(await this.tenancy.ownsCluster(input.clusterId, orgId))) {
-        throw errors.NOT_FOUND({ message: "cluster not found" });
-      }
-      const deadline = AbortSignal.timeout(STREAM_TTL_MS);
-      const stop = signal === undefined ? deadline : AbortSignal.any([signal, deadline]);
-      return this.events.subscribe(input.clusterId, stop);
-    });
+    return route(this.tenancy, contract.listClusterEvents, req, "member").handler(
+      async ({ input, errors, signal, context }) => {
+        // NOT_FOUND rather than the read idiom's empty answer: an empty stream
+        // does not end, it hangs — see the contract's note.
+        await this.tenancy.assertOwnsCluster(input.clusterId, context.member.orgId, errors);
+        const deadline = AbortSignal.timeout(STREAM_TTL_MS);
+        const stop = signal === undefined ? deadline : AbortSignal.any([signal, deadline]);
+        return this.events.subscribe(input.clusterId, stop);
+      },
+    );
   }
 }
