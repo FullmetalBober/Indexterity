@@ -12,14 +12,17 @@ import { CollectionsTable, toCollectionRows } from "~/components/app/collections
 import { fmtBytes } from "~/components/app/format";
 import { latencyCharts } from "~/components/app/latency-series";
 import { NodesPanel } from "~/components/app/nodes-panel";
+import { ParkedPanel } from "~/components/app/parked-panel";
 import { RecommendationsTable } from "~/components/app/recommendations-table";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
 import { Skeleton } from "~/components/ui/skeleton";
 import {
   activityQuery,
+  cooldownsQuery,
   recommendationsQuery,
   roiQuery,
   useActivity,
+  useCooldowns,
   useRecommendations,
   useRoi,
 } from "~/lib/queries/pipeline";
@@ -41,8 +44,9 @@ export const Route = createFileRoute("/app/clusters/$clusterId/")({
   // read one entry. First paint does not wait for the browser to boot and ask
   // again.
   //
-  // Six reads, and only the six this page draws. The policy is not among them
-  // any more: it belongs to the settings tab, which warms it in its own loader.
+  // Eight reads, and only the eight this page draws. The policy is not among
+  // them any more: it belongs to the settings tab, which warms it in its own
+  // loader.
   //
   // No resolving of "which cluster" left to do — the param is the answer, which
   // is what a cluster being a route buys. What it used to cost: the id was
@@ -64,6 +68,7 @@ export const Route = createFileRoute("/app/clusters/$clusterId/")({
       context.queryClient.ensureQueryData(latencySeriesQuery(id)),
       context.queryClient.ensureQueryData(collectionsQuery(id)),
       context.queryClient.ensureQueryData(nodesQuery(id)),
+      context.queryClient.ensureQueryData(cooldownsQuery(id)),
     ]);
   },
   head: () => ({ meta: [{ title: "Overview — Indexterity" }] }),
@@ -85,6 +90,7 @@ function ClusterOverview() {
   const latencySeries = useLatencySeries(id);
   const collectionStats = useCollections(id);
   const nodes = useNodes(id);
+  const cooldowns = useCooldowns(id);
 
   const proposed = recommendations.data.recommendations.filter((rec) => rec.state === "PROPOSED");
   const totalSaved = proposed.reduce((sum, rec) => sum + rec.estimatedBytesSaved, 0);
@@ -195,6 +201,21 @@ function ClusterOverview() {
         total={recommendations.data.total}
         loading={recommendations.pending}
       />
+
+      {/* Directly under the proposals, because it is the other half of the same
+          answer: what the engine is proposing, and what it has decided not to.
+          A cluster with six parked indexes used to look exactly like a clean one
+          from here (#159). */}
+      <section className="mt-8">
+        <h2 className="font-semibold text-lg">Parked</h2>
+        <p className="text-muted-foreground text-sm">
+          Indexes the engine has agreed not to propose again, and until when — because a drop
+          regressed, or because an owner said no.
+        </p>
+        <div className="mt-3">
+          <ParkedPanel cooldowns={cooldowns.data} loading={cooldowns.pending} />
+        </div>
+      </section>
 
       {/* Drawn while the series read is out, because two charts appearing under
           the recommendations table is the single biggest jump on this page.

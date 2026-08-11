@@ -221,6 +221,55 @@ export const clusterNodes = z.object({
 });
 export type ClusterNodes = z.infer<typeof clusterNodes>;
 
+// One index the engine has agreed not to touch, and until when (#159).
+//
+// Written from three places — the regression gate when reads got worse after a
+// drop was hidden, the post-build watch when writes got worse, and an owner
+// cancelling or undoing a drop. `reason` is the writer's own sentence, so the
+// panel does not have to keep a translation table of engine decisions in sync
+// with the engine.
+//
+// `regressionCount` is the field with no other home anywhere in the product: an
+// index that has regressed three times is saying something about the collection
+// that a single rejection does not. Zero on the two owner paths, deliberately —
+// nothing regressed there, somebody simply knows something the engine does not,
+// and counting it would feed the escalating backoff a fact that never happened.
+export const parkedIndex = z.object({
+  database: z.string(),
+  collection: z.string(),
+  indexName: z.string(),
+  reason: z.string(),
+  regressionCount: z.int().nonnegative(),
+  until: z.string(),
+  // Whether `until` is still in the future. Computed by the api against ITS
+  // clock, not left to the browser's: a laptop an hour behind would draw a
+  // parked index as eligible, and this is the field the panel's headline counts.
+  active: z.boolean(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type ParkedIndex = z.infer<typeof parkedIndex>;
+
+// Every index this cluster has ever parked, active ones first.
+//
+// Uncapped, like getCollections and unlike the two reads #64 bounded. The bound
+// is structural rather than measured: the table is unique on (cluster, database,
+// collection, index), so it holds at most one row per index — and only per index
+// that a regression or an owner has actually parked, which is a rare event by
+// construction rather than something a collect writes on a schedule.
+export const clusterCooldowns = z.object({
+  clusterId: z.uuid(),
+  // Of the rows below, how many are still parked. The panel leads with this and
+  // the list carries the expired ones underneath, so `parked.length` is never
+  // the headline number.
+  activeCount: z.int().nonnegative(),
+  // The soonest `until` still in the future — "next eligible" — or null when
+  // nothing is parked.
+  nextEligibleAt: z.string().nullable(),
+  parked: z.array(parkedIndex),
+});
+export type ClusterCooldowns = z.infer<typeof clusterCooldowns>;
+
 // The result of disconnecting a cluster: how many in-flight hidden indexes were
 // restored, and the command to revoke the provisioned user (null when the
 // cluster was connected with a pasted string).

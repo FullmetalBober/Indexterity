@@ -26,6 +26,7 @@ import {
   eq,
   gte,
   inArray,
+  indexCooldowns,
   indexSnapshots,
   latencySamples,
   recommendations,
@@ -298,6 +299,65 @@ export class InsightsController {
           }))
           .sort((a, b) => b.totalIndexBytes - a.totalIndexBytes);
         return { clusterId: input.clusterId, collections };
+      },
+    );
+  }
+
+  // What the engine has agreed not to touch, and until when (#159).
+  //
+  // Read from `index_cooldowns` alone, never joined to `recommendations`. A
+  // cooldown outlives its cause: `recordManualVeto` parks an index for 90 days
+  // when an owner cancels or undoes a drop, and the recommendation that was
+  // cancelled is a row the next classify pass rewrites. Joining would drop
+  // exactly the longest-standing entries, which are the interesting ones.
+  //
+  // Every row, not only the ones still in force. An expired cooldown is the only
+  // record that this index has been parked before and how often it regressed,
+  // and `regression_count` has no other home in the product — but `active` is
+  // computed here rather than left to the browser, because a clock an hour
+  // behind would draw a parked index as eligible.
+  @Implement(contract.listCooldowns)
+  listCooldowns(@Req() req: FastifyRequest) {
+    return route(this.tenancy, contract.listCooldowns, req, "member").handler(
+      async ({ input, context }) => {
+        const orgId = context.member.orgId;
+        if (!(await this.tenancy.ownsCluster(input.clusterId, orgId))) {
+          return {
+            clusterId: input.clusterId,
+            activeCount: 0,
+            nextEligibleAt: null,
+            parked: [],
+          };
+        }
+        const rows = await this.database.db
+          .select()
+          .from(indexCooldowns)
+          .where(eq(indexCooldowns.clusterId, input.clusterId))
+          .orderBy(desc(indexCooldowns.until));
+        // One `now` for the whole answer. Read per row, a cooldown expiring
+        // mid-loop could be counted active and then reported with a past date.
+        const now = Date.now();
+        const parked = rows.map((row) => ({
+          database: row.database,
+          collection: row.collection,
+          indexName: row.indexName,
+          reason: row.reason,
+          regressionCount: row.regressionCount,
+          until: row.until.toISOString(),
+          active: row.until.getTime() > now,
+          createdAt: row.createdAt.toISOString(),
+          updatedAt: row.updatedAt.toISOString(),
+        }));
+        const active = parked.filter((entry) => entry.active);
+        return {
+          clusterId: input.clusterId,
+          activeCount: active.length,
+          // The SOONEST one still in force, which is the opposite end of the
+          // `until desc` order the list is drawn in — "next eligible" is the
+          // first thing that comes back, not the last.
+          nextEligibleAt: active[active.length - 1]?.until ?? null,
+          parked,
+        };
       },
     );
   }

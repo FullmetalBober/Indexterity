@@ -45,5 +45,9 @@ export const queryKeys = {
   latencySeries: (clusterId: string | null) => ["latency-series", clusterId] as const,
   collections: (clusterId: string | null) => ["collections", clusterId] as const,
   nodes: (clusterId: string | null) => ["nodes", clusterId] as const,
+  // Its own key rather than a field on `recommendations`: a cooldown outlives
+  // the recommendation that caused it, and the two are moved by different
+  // writes — a regression parks an index without touching the proposal list.
+  cooldowns: (clusterId: string | null) => ["cooldowns", clusterId] as const,
   policy: (clusterId: string | null) => ["policy", clusterId] as const,
 };

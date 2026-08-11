@@ -70,12 +70,15 @@ describe("invalidationKeys", () => {
     }
   });
 
-  it("execution passes move the pipeline: rows, trail, ROI", () => {
+  // The cooldown key rides with these two because finalize is where both
+  // regression gates run, and each parks the index it rejected (#159).
+  it("execution passes move the pipeline: rows, trail, ROI, parked", () => {
     for (const task of ["apply", "finalize"] as const) {
       expect(invalidationKeys(CLUSTER, { kind: "PASS_FINISHED", task })).toEqual([
         queryKeys.recommendations(CLUSTER),
         queryKeys.activity(CLUSTER),
         queryKeys.roi(CLUSTER),
+        queryKeys.cooldowns(CLUSTER),
       ]);
     }
   });
@@ -86,13 +89,25 @@ describe("invalidationKeys", () => {
   });
 
   it("every transition event moves the pipeline", () => {
-    for (const kind of ["DROP_HIDDEN", "BUILD_GRADUATED", "REGRESSION_FIRED"] as const) {
+    for (const kind of ["DROP_HIDDEN", "BUILD_GRADUATED"] as const) {
       expect(invalidationKeys(CLUSTER, { kind, task: null })).toEqual([
         queryKeys.recommendations(CLUSTER),
         queryKeys.activity(CLUSTER),
         queryKeys.roi(CLUSTER),
       ]);
     }
+  });
+
+  // A regression is the one transition that always writes a cooldown — both
+  // places that emit it call recordRegression first — and the parked panel is
+  // the only screen that shows what the regression cost.
+  it("a regression also moves the parked panel", () => {
+    expect(invalidationKeys(CLUSTER, { kind: "REGRESSION_FIRED", task: null })).toEqual([
+      queryKeys.recommendations(CLUSTER),
+      queryKeys.activity(CLUSTER),
+      queryKeys.roi(CLUSTER),
+      queryKeys.cooldowns(CLUSTER),
+    ]);
   });
 });
 
