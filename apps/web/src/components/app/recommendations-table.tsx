@@ -110,8 +110,12 @@ function buildColumns(actions: Actions): DashboardColumns<Recommendation> {
       id: "namespace",
       header: "Collection",
       sortFn: "alphanumeric",
-      // See collections-table: a fixed column will not grow for a long namespace, so
-      // it truncates and keeps the whole value in the title.
+      // Still `title` rather than a tooltip, and that asymmetry with the column
+      // beside it is a choice rather than an oversight: a namespace is scanned by
+      // its tail as often as its head, so a clipped one usually still says which
+      // collection it is. Worth revisiting together with collections-table, which
+      // draws the same value the same way — moving one and not the other is how
+      // two tables start disagreeing about what a hover does.
       cell: (info) => (
         <span className="block truncate font-mono text-xs" title={info.getValue()}>
           {info.getValue()}
@@ -121,11 +125,10 @@ function buildColumns(actions: Actions): DashboardColumns<Recommendation> {
     column.accessor("indexName", {
       header: "Index",
       sortFn: "alphanumeric",
-      cell: (info) => (
-        <span className="block truncate font-mono text-xs" title={info.getValue()}>
-          {info.getValue()}
-        </span>
-      ),
+      // A clipped index name is worse than a clipped sentence: half of
+      // `orders_customerId_1_createdAt_-1` names nothing, and it is the string a
+      // reader carries to mongosh. Same treatment as the rationale.
+      cell: (info) => <Truncated className="font-mono text-xs">{info.getValue()}</Truncated>,
     }),
     column.accessor("score", {
       header: "Score",
