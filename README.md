@@ -7,8 +7,14 @@ create the missing — and proves the result in freed bytes and latency.
 Read-only by default. The one irreversible step, a drop, is gated behind an
 observe window, a pre-flight check, and a read-latency regression test.
 
-Full design: the [Architecture](https://github.com/FullmetalBober/Indexterity/wiki/Architecture) page in the wiki. Every
-load-bearing choice and whether it is still open: [`docs/decisions.md`](./docs/decisions.md).
+| | |
+|---|---|
+| **How it is built** | [Architecture](https://github.com/FullmetalBober/Indexterity/wiki/Architecture) |
+| **What holds it shut** | [Security](https://github.com/FullmetalBober/Indexterity/wiki/Security) |
+| **Knobs, scoring and plans** | [Plans and policy](https://github.com/FullmetalBober/Indexterity/wiki/Plans-and-policy) |
+| **The MongoDB user it needs** | [Connecting a cluster](https://github.com/FullmetalBober/Indexterity/wiki/Connecting-a-cluster) |
+| **Every load-bearing choice** | [`docs/decisions.md`](./docs/decisions.md) |
+| **What is planned** | [project board](https://github.com/users/FullmetalBober/projects/6) |
 
 ## How it works
 
@@ -19,9 +25,13 @@ load-bearing choice and whether it is still open: [`docs/decisions.md`](./docs/d
    The admin string is used once and never persisted; only the scoped one is
    stored, sealed with envelope encryption.
 2. **Collect** hourly via `$indexStats` / `$collStats` — usage, sizes,
-   per-collection read/write latency. Never your documents. What gets *stored* is
-   only what changed: an index's shape is written once, and an unchanged counter
-   extends the row it already has instead of adding another.
+   per-collection read/write latency, from **every replica-set member** the
+   cluster admits to (secondary-only traffic is invisible from the primary).
+   Never your documents. What gets *stored* is only what changed: an index's
+   shape is written once, and an unchanged counter extends the row it already
+   has instead of adding another. The dashboard's node roster shows which
+   members the last collect saw and which answered — a member that did not is a
+   named blind spot, not a silent zero.
 3. **Decide** with a pure analysis engine (`apps/api/src/analysis` — no I/O, so
    it is unit-tested without a database or a cluster).
 4. **Apply** safely: `hide → observe → drop` for removals, `build` for
@@ -31,8 +41,7 @@ load-bearing choice and whether it is still open: [`docs/decisions.md`](./docs/d
 
 The dashboard follows the engine live: a pass landing, a drop going hidden, a
 build graduating or a regression firing arrives over SSE and refetches exactly
-the panels it moved — no reload, no polling (the wiki's Architecture page,
-Live updates).
+the panels it moved — no reload, no polling.
 
 ## What it decides
 
@@ -45,37 +54,12 @@ least three days in which the collection was actually queried**, with no hole
 over 48h, a recent newest snapshot and no counter restart. The week is the
 warm-up; the activity requirement is what makes it mean something. An index
 reads zero either because nobody needs it or because nobody touched the
-collection — elapsed time cannot tell those apart, so an always-on but idle dev
-cluster would otherwise accumulate a month of "proof" without doing any work.
-Hours in which the collection served no reads simply do not count.
-Redundancy is structural and unaffected.
+collection — elapsed time cannot tell those apart. Hours in which the collection
+served no reads simply do not count. Redundancy is structural and unaffected.
 
 Every one of those thresholds is expressed in **hours**, not in collect
-intervals. Two of them used to be interval counts, which meant they only said
-what they appeared to say while the cadence stayed at 6h: shorten it and the
-engine would have started calling indexes dead on three hours of evidence
-instead of three days, with no code change and nothing failing. That is what
-made the cadence safe to move. A newly connected cluster is also collected
-immediately rather than at the next scheduled pass — the cold start was always a
-separate problem from the cadence, and it has a separate fix.
-
-**The cadence is hourly, and the ceiling on it is one table.** Storing only what
-changed made index history nearly free — measured on real data, 76% of looks
-collapse into an extended run — but `latency_samples` collapses *none* of them.
-`$collStats` totals move on any operation, so a live collection differs at every
-look and there is nothing to run-length: that table grows in step with the
-cadence while index history grows at about a quarter of the rate. Hourly is a
-usable trend where 6h gave four points a day; going shorter is a question for
-`getLatencySeries` becoming bounded and old latency history being rolled up
-first, not a question of load. A collect takes under a second against a hundred
-collections, and about a round trip per collection against a remote cluster.
-
-**A latency chart with no line says which nothing it is.** A rate needs two
-readings, so a null point can mean the second collect has not run, that the
-counter never moved, or that a mongod restart made the window unmeasurable —
-and rendering the same "not enough samples" for all three reported the
-collector's blind spot as a fact about the cluster. Each is now named under the
-chart, per metric, so an empty panel and an unmeasurable one stop looking alike.
+intervals, which is what made the cadence safe to move
+([D36](./docs/decisions.md)).
 
 **Never dropped**, whatever the usage: `_id_`, unique (including unique partial
 and sparse — a constraint is not a performance hint), TTL, and shard-key
@@ -83,37 +67,39 @@ indexes. They surface as advisories instead. Partial and sparse indexes without
 a constraint *are* droppable: the pipeline hides and measures rather than
 trusting the counter.
 
+**Re-ordering** is the one thing the engine will do to a protected index, and it
+removes nothing. A unique index's guarantee is a property of its key *set*, not
+of its key *directions*, so `{a: 1, b: 1}` unique and `{a: 1, b: -1}` unique
+enforce exactly the same rule — which makes a direction change a swap rather
+than a drop. When a compound unique index covers a sort's fields in an order
+that cannot serve it, the replacement is **built first**, with every option
+carried over verbatim, and the original is only retired once the new one has
+survived its post-build watch: there is no instant when nothing is enforcing the
+constraint. It is **approval-only** whatever the auto-apply threshold says, and
+an index anything pins with `hint()` is vetoed outright — a hint at a renamed
+index is an error, not a slower query. Single-field, TTL and shard-key indexes
+are out of scope by construction, which makes the addressable set small
+([D50](./docs/decisions.md)).
+
 **Adding** (opt-in via `workloadAnalysis`). Query shapes come from `$queryStats`
-on **mongo 8.0+**, and from the profiler below it. `$queryStats` exists from 6.0,
-but until 8.0 it reports execution counts only — no `docsExamined`, no
-`keysExamined`, no `hasSortStage` (verified against live 6.0, 7.0 and 8.2
-servers). That is the difference between knowing a query ran and knowing it
-scanned, so on 6.0 and 7.0 the profiler is the only source that can suggest an
-index and the engine falls back to it. Either way `$queryStats` records nothing
-until `internalQueryStatsRateLimit` is set — it is `0` by default, and connecting
-a cluster says so if it is.
+on **mongo 8.0+**, and from the profiler below it — until 8.0 the store reports
+execution counts only, which is the difference between knowing a query ran and
+knowing it scanned. Either way `$queryStats` records nothing until
+`internalQueryStatsRateLimit` is set; connecting a cluster says so if it is not.
 
 Two shapes earn an index. One is a **collection scan**. The other is a query
 that finds its documents through an index and then **sorts them in memory** —
 invisible to every scan test, because keys were examined, and the failure mode
 that ends in an error rather than slowness, since a blocking sort dies at 100 MB.
-The fix is usually extending the index that already found the documents so it
-can order them too.
 
 Which collections get looked at is a question of **cost, not size**: a
 collection earns create-side analysis once its scanning passes a million
-documents a week, whatever it holds. A 900-document collection scanned five
-hundred times a second qualifies; a 50,000-row lookup table scanned twice a day
-does not. Only a trivial floor — 100 documents — is decided on size.
+documents a week, whatever it holds. A shape must recur — **3+ sightings** — and
+must come from something other than a person at a prompt, so the same query from
+`mongosh` and from your app arrive as separate entries. Keys are ordered
+Equality → Sort → Range.
 
-A shape must recur — **3+ sightings** — and must come from something other than a
-person at a prompt. `$queryStats` groups by client and the profiler records
-`appName`, so the same query from `mongosh` and from your app arrive as separate
-entries; one seen only from shells and GUIs earns nothing, because the index
-would be maintained on every write for years for queries nobody runs again. Keys
-are ordered Equality → Sort → Range. An equality field compared against the same
-literal every time moves into a `partialFilterExpression` instead of the keys:
-smaller index, same query.
+Full reasoning for all of it: [Architecture §6](https://github.com/FullmetalBober/Indexterity/wiki/Architecture).
 
 ## The safety pipeline
 
@@ -139,108 +125,37 @@ window. Before the drop, `finalize` gates it three ways:
   UNOBSERVABLE, never as "no regression" — the index is un-hidden and
   re-proposed rather than dropped on evidence that no longer exists.
 - **Regression.** Read latency above `baseline × 1.5` un-hides the index and
-  parks it in a cooldown that escalates on repeats, so it is not re-proposed
-  and re-cycled.
+  parks it in a cooldown that escalates on repeats.
 - **Pre-flight.** Index now protected, covering index gone, or fresh ops on it
   → un-hide and re-propose.
 
 Additions get the mirror treatment: write latency is baselined at build time,
 and an index that slows writes during its watch is dropped and cooled down. One
-that survives graduates.
-
-Every executed operation writes an immutable `actions` row.
+that survives graduates. Every executed operation writes an immutable `actions`
+row.
 
 Two escape hatches on the dashboard. **Keep it** cancels a pending drop while
 the index is still hidden: it becomes visible again immediately and is parked
-for 90 days so the engine does not re-propose it. **Undo** rebuilds a dropped
-index from the spec captured at drop time and corrects the ROI headline back
-down. Neither counts as a regression — that number feeds the score, and nothing
-regressed.
+for 90 days. **Undo** rebuilds a dropped index from the spec captured at drop
+time and corrects the ROI headline back down. Neither counts as a regression.
 
-Undo is available for as long as the plan keeps history: the spec it rebuilds
-from lives in the audit trail, and the audit trail ages out with everything
-else. A settled recommendation — dropped, rejected, rolled back — is removed
-once it passes the window, along with its actions. Live ones never are, however
-old: an index hidden through a long outage is still waiting on its own observe
-window. The ROI it earned stays either way, unattributed rather than deleted.
+Undo is available for as long as the plan keeps history — the spec it rebuilds
+from lives in the audit trail, and a settled recommendation ages out with it.
+Live ones never do, however old: an index hidden through a long outage is still
+waiting on its own observe window.
 
-**The score.** Every recommendation carries 0–100, and the scale is calibrated
-so 100 is reachable and means "as sure as this engine gets". Drops: the argument
-is worth 55 (redundant), 50 (never used) or 35 (was periodic, went quiet); a
-month of unbroken history adds up to 25; reclaimable space up to 20. Creates: 40
-for a live collection scan, up to 35 for frequency, up to 25 for collection size.
-Each past regression on the same index subtracts 40, so one is nearly
-disqualifying and two are. The score gates *entry* only — every safety stage runs
-regardless.
+Every recommendation carries a **score**, 0–100, calibrated so 100 is reachable.
+It gates *entry* only; every safety stage runs regardless. The
+[weights](https://github.com/FullmetalBober/Indexterity/wiki/Plans-and-policy#the-score)
+are on the wiki.
 
-## Policy knobs (per cluster)
+## Policy and plans
 
-| knob | effect | default |
-|------|--------|---------|
-| `readOnly` | compute everything, never write | on |
-| `workloadAnalysis` | enable the create/merge/update engine | off |
-| `instantCreate` | build critical missing indexes without approval | off |
-| `observeWindowDays` | baseline bake time for a hidden index; scaled per index (below) | 30 |
-| `maxCollectionSizeBytes` | size ceiling for building new indexes | — |
-| `autoApplyScore` | the one auto-approval control: empty = you approve everything, `0` = everything auto-approves, `1`–`100` = a confidence floor. **70 is the suggested setting.** Advisories never auto-approve | empty |
-| `changeWindowStartHour` / `EndHour` | elective changes run only in this UTC window; safety rollbacks never wait | engine-chosen |
-
-**The observe window scales to the index.** `observeWindowDays` is the baseline;
-each pending drop gets its own, decided once at hide time and recorded with its
-reason. The window is set by whichever question is still open, and the two run
-on different clocks — *will anything want this again* at the cadence of the
-workload, *did hiding it hurt* at the rate the index is queried:
-
-| the index | window | |
-|-----------|--------|---|
-| periodic usage (monthly report, weekly batch) | 2× the largest activity gap, ≤ 90d | might be wanted next cycle |
-| queried about daily, and still when hidden | 7d | a regression arrives in days, not weeks |
-| in place ≥ 2× the policy and used in that time | 1.5× the policy, ≤ 90d | may have a cadence longer than we have watched |
-| zero usage across ≥ 2× the policy | half the policy, ≥ 7d | the history already was the observation |
-| appeared on our watch, never used since | about as long as it has existed, ≥ 7d | its whole life is on record |
-| anything else | the policy | |
-
-Order matters in the first two rows. A quarterly job that runs densely for a
-week is periodic, not busy, so the cadence rule is checked first. And "still"
-is narrow: an index that *was* busy and went quiet a week ago gets no fast
-verdict from being hidden, because nothing is querying it to notice — that one
-is back to a cadence question, and waiting is the only answer.
-
-The last two handle a hand-made ad-hoc index: created, used once, forgotten. Its
-whole life is on record, so it leaves in about a week instead of a month. Age
-only counts when the index appeared *after* we started watching — snapshots
-begin at onboarding, so an index in the first one may be five years old.
-
-**Every five minutes, a health probe.** Two things, in order.
-
-First the server as a whole. CPU is not available — mongod reports none outside
-FTDC — but `serverStatus` reports what the query engine is *doing*: collection
-scans, documents and index keys walked, sorts run with no index to order by, and
-operations queued behind the global lock. The signal is **documents walked per
-index key**, which is volume-independent, so it reads the same on a small
-cluster and a large one. A loaded CPU could be a backup or a noisy neighbour;
-thousands of documents per key is a missing index and nothing else. This catches
-a scan storm spread thinly across many collections that no single collection's
-latency would show.
-
-Then per collection: a missing index shows up as average read latency climbing
-while the collection keeps serving traffic. When reads get sharply slower than
-their own baseline, the workload pass runs immediately instead of waiting for the
-hourly one. Only the busiest 20 collections are probed, and the readings are
-never written to `latency_samples` — that table's hourly cadence is what the
-activity gate and the change-window inference reason over.
-
-`serverStatus` is the one privilege that reads beyond index metadata, so it is
-optional: a cluster without it onboards clean and simply loses the first half of
-the probe. [Connecting a cluster](https://github.com/FullmetalBober/Indexterity/wiki/Connecting-a-cluster) says exactly what it
-exposes.
-
-**The change window picks itself.** Left unset, the engine buckets the cluster's
-own traffic into the four 6h slots of the UTC day and takes the quietest,
-re-deriving after every collect. It declines to guess on a flat day or thin
-history, and an explicit setting always wins.
-
-## Plans
+Seven per-cluster knobs — `readOnly`, `workloadAnalysis`, `instantCreate`,
+`observeWindowDays`, `maxCollectionSizeBytes`, `autoApplyScore` and the change
+window. Clusters start read-only and approve nothing automatically;
+`autoApplyScore` is the one auto-approval control, and **70 is the suggested
+setting**.
 
 | | clusters | seats | index suggestions | unattended changes | history |
 |---|---|---|---|---|---|
@@ -249,119 +164,39 @@ history, and an explicit setting always wins.
 | **SCALE** | unlimited | unlimited | yes | yes | 365 days |
 | **SELF_HOSTED** | 1 | unlimited | yes | yes | 365 days |
 
-**A plan is per organization.** Every number above is that org's, so a customer
-with a free side project and a paid production team holds two orgs on two plans
-and is billed for one of them. How many organizations you make is therefore
-**not** metered — capping it would cap how much you can buy — and the free tier
-is held by the cluster limit, applied inside each org one at a time. What has
-been spent of that limit is drawn beside the connect form, before anything is
-typed into it: a quota nobody sees until it refuses them is a 402 in the middle
-of someone's work.
-
 **Free gives away the analysis and sells the automation.** Every plan sees every
 recommendation, with the reasoning, and can approve any of them by hand. What a
-paid plan adds is not having to: `autoApplyScore` (approve by score) and
-`instantCreate` (build a critical missing index immediately). The safety
-pipeline — hide, observe, regression-gate, roll back — is what makes unattended
-changes safe to run, and it is the part that took the work.
+paid plan adds is not having to. A plan is per organization, history is enforced
+on read rather than by deletion (so an upgrade returns yours at once), and no
+payment provider is wired on purpose.
 
-The rules live in one table in `apps/api/src/billing/plans.ts`; nothing else
-decides them. Limits are enforced by the api, not drawn in the dashboard, and a
-refusal comes back as **402** rather than 403 — the caller is an owner, so
-"forbidden" would send them looking for a permissions problem they do not have.
-Seats count members **plus outstanding invites**, so an org cannot invite past
-its plan and leave the refusal for whoever clicks the link; better-auth's own
-`membershipLimit`, which counts members only, is deliberately left unset so that
-there is one limit with one name. A downgrade never deletes anything: an org
-over its new limit keeps what it has and simply cannot add more, and an
-auto-approve score saved on a paid plan stops being obeyed without being erased
-— it comes back on upgrading.
+A new organization lands on `DEFAULT_ORG_PLAN`, which the chart sets to
+`SELF_HOSTED`. **Upgrading an install that has been running a while?** Its
+organizations were created before anything read that variable and are sitting on
+`FREE` — three seats, no unattended apply, 90 days. `set-plan.js --backfill
+SELF_HOSTED` lists them and changes nothing; add `--apply` to move them. It moves
+only organizations that are **on `FREE`** and whose plan was never chosen
+deliberately — no `set-plan.js` run, no billing subscription — so it can raise a
+plan and never lower one.
 
-History is enforced, not advertised — but **enforced on read, not by deletion**.
-Two questions with different answers: how long rows are *kept*, and how much of
-them a plan may *see*. Deletion runs one cutoff for the whole deployment (the
-longest window any plan could claim), so it sweeps a contiguous range instead of
-hunting rows tenant by tenant. The plan's own window is applied at every read of
-the time-series tables — the engine's reads as much as the dashboard's, since a
-longer series is precisely what lets the engine call an index unused at all.
-
-So **an upgrade returns your history at once.** Before, a free org moving to a
-paid plan got nothing extra until ninety more days had passed, because the rows
-it was newly entitled to had already been deleted. Now they were there all along,
-merely out of view. It costs very little, because run-length storage means an
-idle index is one row whether it is retained for ninety days or a year.
-
-`RETENTION_DAYS` remains the operator's ceiling and caps both halves — storage is
-their bill, so a plan may keep less than the cap but never more. Rows past the
-longest plan's window are deleted outright: nobody could ever be entitled to
-them. Settled recommendations still age out on their own plan's clock, because
-"we kept last year's decisions and merely stopped showing them to you" is a
-different promise from "we deleted them", and that table does not grow per
-collect anyway.
-
-**`SELF_HOSTED` is not a tier anyone buys.** It is the BUSL Additional Use Grant
-expressed as entitlements — one production cluster, everything else on — and it
-is what the chart ships. The licence caps production clusters and says nothing
-about features, seats or history, so neither does this. Shipping self-hosters
-the hosted free tier would restrict them further than the licence they are
-complying with, on hardware they pay for themselves.
-
-**No payment provider is wired, on purpose.** Plans are set with
-`node apps/api/dist/set-plan.js <org> <PLAN> [note]` — enough to charge by
-invoice today, from anywhere, with no processor account. Whoever eventually
-takes the money only decides *which* plan an org is on; a webhook would write
-the same column that CLI does, and the entitlements above would not change.
+Each knob, how the observe window scales to the index, and the entitlement
+reasoning: [Plans and policy](https://github.com/FullmetalBober/Indexterity/wiki/Plans-and-policy).
 
 ## Connecting a cluster
 
 **MongoDB 6.0 to 8.x.** 4.4 and 5.0 are past end-of-life and have no
-`$queryStats`, so they are refused rather than supported half-well. A server
-below the floor is refused at connect time with that explanation, and every
-write re-checks the version immediately before running, so a cluster downgraded
-or repointed later cannot be half-changed. A major series newer than anything
-tested is refused too — this engine drops and builds indexes on a live database,
-and a major release is where command behaviour moves. Set
-`ALLOW_UNTESTED_MONGO_VERSION=true` to run ahead of the tested range.
+`$queryStats`, so they are refused rather than supported half-well. Every write
+re-checks the version immediately before running, so a cluster downgraded or
+repointed later cannot be half-changed.
 
-See [Connecting a cluster](https://github.com/FullmetalBober/Indexterity/wiki/Connecting-a-cluster) for the exact `createRole`
-snippets. Indexterity never gets document read or write privileges.
-
-**Replica sets** — `$indexStats` *and* `$collStats latencyStats` are per member;
-both sum all of them, so an index used only on a secondary counts as used, and a
-cluster's write latency is read from the node that actually takes writes. Both
-are aggregations, so the driver routes them by read preference — a connection
-string carrying `readPreference=secondaryPreferred` had every latency reading
-landing on a secondary, whose write counters are permanently zero because oplog
-application is not a client write op.
-
-**Which** members, exactly: every one `hello` names, and that is two arrays, not
-one. Electable members are listed under `hosts`, but a `priority: 0` member is
-listed under `passives` — and priority 0 is the normal setting for a secondary in
-another region, so that it cannot win an election across a WAN. Priority governs
-elections and nothing else, so those members serve `secondaryPreferred` reads
-like any other secondary and both arrays are collected from.
-
-**Hidden members are not**, and this is a deliberate limit rather than an
-oversight. They appear in neither array, so reaching them needs `replSetGetStatus`
-or `replSetGetConfig` — cluster privileges the engine role does not ask for.
-Drivers never route reads to a hidden member either, so what is missed is
-direct-connected traffic: BI tools, backups, delayed members. If an index exists
-solely for a hidden analytics node, hint it or keep it out of the pipeline.
-
-**Sharded clusters** — point at the `mongos`. Stats aggregate across shards, and
-each collection's shard key is read from `config.collections` so any index it
-prefixes is protected. Without config read, the collection is treated as
-unsharded.
-
-**`mongodb+srv://` strings** (what Atlas hands you) carry two settings outside
-their own text: the scheme defaults `tls` to true, and `authSource` arrives in a
-DNS TXT record the driver reads at connect. Per-member connections have to
-rewrite the string as plain `mongodb://` — an SRV seed cannot be pointed at one
-host, since its targets live in DNS and the scheme forbids a port — so both are
-carried across explicitly from the live client rather than re-parsed from the
-original text. Without that the member connections are plaintext, authenticate
-against the database in the path, and fail; a plain multi-host string was never
-affected, because its options are in the string.
+Indexterity never gets document read or write privileges. The preflight lists
+every privilege it looked for, including the three that decide whether it can
+create its own user (`createRole`, `createUser`, `grantRole` on `admin`) — when
+one is missing it says which, rather than quietly keeping the string you pasted.
+[Connecting a cluster](https://github.com/FullmetalBober/Indexterity/wiki/Connecting-a-cluster)
+has the exact `createRole` snippets, what `serverStatus` exposes, which
+replica-set members get read, and what `mongodb+srv://` carries outside its own
+text.
 
 ## Auth & tenancy
 
@@ -369,71 +204,67 @@ Every endpoint requires a better-auth session and is scoped to the caller's org.
 The browser holds that session itself: the api answers under `/api` on the
 dashboard's own origin, so the cookie is first-party and travels with every call
 without CORS or `SameSite=None`. Set `WEB_ORIGIN` and `BETTER_AUTH_URL` on the
-api to that origin — it is what better-auth trusts for auth requests and
-redirect targets, and what the links in reset emails are built from.
-
-The dashboard used to be a BFF, relaying all 28 calls through the web server
-because the api was on another origin. It is not one any more; see
-[One origin](#deploy) for what that requires of a deployment.
+api to that origin.
 
 Tenancy is **better-auth's `organization` plugin**, mapped onto the tables the
-api already had (`apps/api/src/auth/organization.ts`). Creating, renaming and
-deleting an org, inviting, accepting, changing a role, removing a member,
-leaving and switching are all its endpoints under `/api/auth/organization/*`.
-Two reads stay on the api because the plugin has no opinion about them: `GET
-/api/org`, which carries the plan and how much of it is spent, and `GET
-/api/orgs`, which carries the caller's role in each.
-
-Org creators are **owners**, invited users are **members**, and there is no
-third rung — the plugin's `admin` role is refused, because half the api still
-asks only "are you the owner?". Members read everything; every mutation is
-owner-only.
-
-**You make an organization, and you can delete one.** Neither used to be
-possible: an org appeared as a side effect of the first authenticated request,
-called `My Org`, and an empty one was quietly deleted again when its owner
-accepted an invite. A fresh account now belongs to nothing and lands on a
-create-org screen, which is also where an invitation waiting for it appears.
-Making the *next* one lives on the organization page, and nothing limits how
-many — see **Plans** for why.
-
-**Invitations are addressed, not bearer.** They used to be a one-time token
-mailed out and pasted back, which meant whoever held the string could join. The
-invitation id is not a secret now: accepting requires being signed in as the
-invited address, so the api lists your own invitations to you instead. Seven-day
-expiry, emailed when `SMTP_*` is configured and a logged no-op otherwise.
-
-**The switcher is per session**, not per user (`session.active_organization_id`
-replaced a `members.is_active` flag), so two browsers can sit in two different
+api already had. Org creators are **owners**, invited users are **members**, and
+there is no third rung — members read everything, every mutation is owner-only.
+You make an organization and you can delete one; invitations are addressed
+rather than bearer, so accepting requires being signed in as the invited
+address. The switcher is per session, so two browsers can sit in two different
 orgs.
 
-**Deciding who is asking is cheap.** The session resolves once per request
-(memoized in `auth/session.ts` — some endpoints ask more than once), and usually
-without touching postgres: `session.cookieCache` carries it in a five-minute
-signed cookie. A session change invalidates that cookie in the same response —
-switching orgs re-signs it, and every other org mutation expires it (better-auth
-stops at the session row there, so `auth.config.ts` closes the gap in an after
-hook) — and the api re-arms it on ordinary responses. Membership and role are
-still read fresh on every request, so removals and role changes bite
-immediately. The trade is revocation: a session torn down behind the browser's
-back keeps answering for up to the window — sign-out is not that case, it clears
-both cookies in the same response.
-
 **Deleting an org is the dangerous verb**, because an org is not a row. Cascades
-take the clusters and everything under them; they touch nothing on the
-customer's servers. So the delete runs the same restoration a disconnect does —
-any index parked in an observe window is un-hidden first — and the confirmation
-dialog makes you type the org's name and names every least-privilege user
-Indexterity created on your clusters, with the command to drop it. After the
-org is gone there is nothing left to name them from.
+take the clusters and everything under them, so the delete runs the same
+restoration a disconnect does — any index parked in an observe window is
+un-hidden first — and the confirmation dialog makes you type the org's name and
+names every least-privilege user Indexterity created on your clusters, with the
+command to drop it.
+
+**The three acts that reach your database ask for a fresh sign-in.** Going
+live, rotating credentials and disconnecting refuse an owner session signed in
+more than an hour ago — the dashboard asks for the password again and then
+runs the action you chose. Flipping a cluster back to read-only never does:
+the emergency stop works from however old a session.
+
+**Owner accounts can carry a second factor, and a deployment can demand one.**
+TOTP plus backup codes, enrolled from the account page; with
+`REQUIRE_OWNER_2FA=true` every owner-only mutation — and the org acts that
+decide who has access — refuses until a code has verified. Where SMTP is
+configured, the sign-in page can also mail a six-digit code instead; without
+it that button answers with why rather than sending nothing. Read
+[D44](./docs/decisions.md) before relying on the emailed code: it is a second
+factor against someone who has your password, and none against someone who has
+your inbox — which is also where a password reset lands. GitHub sign-ins are
+exempt (no password to pair a code with; GitHub enforces its own). Lost device,
+lost codes and no email means whoever runs the install resets it after
+verifying it's you — there is deliberately no self-serve way around a second
+factor.
+
+**The sign-in address can change, carefully.** A verified account's current
+address approves the change and the new one verifies itself; an unverified
+account changes at once and the new address gets the verification mail. The
+signup gate applies to the change — `SIGNUP_MODE` cannot be walked around by
+renaming an account — and the old inbox is told either way.
+
+**Owner-level acts leave a trail.** `actions` records what the engine did to an
+index; `security_events` records the rest — signing in and failing to, signing out,
+revoking a session, promoting and demoting, removing a member, inviting one, an
+invitation accepted, an org made or destroyed, and a cluster connected,
+disconnected, rotated or flipped live. Each row names the account that did it, what
+it was done to, and the client it came from. It does not age out with the plan's
+history window, and nothing cascades into it: deleting an org, a cluster or a user
+cannot erase what was done to it.
+
+Session resolution, the cookie-cache trade and the plugin mapping:
+[Architecture §9.3](https://github.com/FullmetalBober/Indexterity/wiki/Architecture).
 
 ## Stack
 
 Turbo monorepo · NestJS + Fastify (api) · TanStack Start + TanStack Query +
 TanStack Form + TanStack Table + TanStack Virtual + TanStack Charts + shadcn (web) ·
-better-auth · Drizzle +
-PostgreSQL · oRPC contracts (zod 4) · graphile-worker · Biome · strict
-TypeScript (no `any`, no `as`, no lint-ignore).
+better-auth · Drizzle + PostgreSQL · oRPC contracts (zod 4) · graphile-worker ·
+Biome · strict TypeScript (no `any`, no `as`, no lint-ignore).
 
 ```
 apps/api                control plane
@@ -441,6 +272,7 @@ apps/api                control plane
   src/engine            engine-neutral ports (collector, executor, session)
   src/mongo             the MongoDB adapter; zod-parses driver output at the boundary
   src/jobs              graphile-worker tasks (collect/classify/suggest/apply/finalize)
+  src/audit             the security trail — who signed in, who changed a role
   src/db                Drizzle schema, client, secret sealing
 apps/web                dashboard
   src/routes/app.tsx    the /app shell — auth gate, org switcher, the nav rail
@@ -448,86 +280,43 @@ apps/web                dashboard
                         cluster, or to connecting one
   src/routes/app.clusters.$clusterId       one cluster: the heading and its tabs
     …$clusterId.index      overview — ROI, recommendations, latency, collections
-    …$clusterId.settings   policy, mode, credentials, disconnect
+    …$clusterId.settings   name, policy, mode, credentials, disconnect
   src/routes/app.clusters.new   connecting a cluster, which is onboarding
   src/routes/app.settings       organization · organizations · account
-    …settings.index          this org: name, plan, members, roles, invites
-    …settings.organizations  the orgs you belong to, and starting another
-    …settings.account        the signed-in user: name, password, open sessions
   src/lib/api.ts        one oRPC client, isomorphic: same-origin in the browser,
                         API_URL with the caller's cookie during SSR
-  src/lib/auth-client   better-auth's own browser client
   src/lib/queries       the query layer: the client, one key per api call in
                         keys.ts, and mutations/ grouped by what they change
-  src/components/form   TanStack Form bound once to shadcn's Field primitives —
-                        every form in the app is built from these
+  src/components/form   TanStack Form bound once to shadcn's Field primitives
   src/components/data-table  TanStack Table bound once to shadcn's table
-                        primitives; the three dashboard tables are column defs.
-                        The two unbounded ones virtualize their rows
+                        primitives; the long tables virtualize their rows, and
+                        the api caps what it sends them (D47)
   src/components/latency-chart  TanStack Charts behind a props-stable wrapper —
                         pre-1.0, so churn is contained to this one file
-  src/router.tsx        the one query client, and the SSR dehydrate/hydrate wiring
 packages/contracts      oRPC + zod contracts shared by api and web
   src/schemas.ts        what the api returns
   src/inputs.ts         what it accepts — and what the dashboard's forms validate
                         against, so a field refuses exactly what a route refuses
 ```
 
-**A cluster is an address, not a selection.** It used to be `?cluster=`, resolved
-against the cluster list separately by the bar and by every panel — two answers
-to one question, which is how switching org left the page drawing the previous
-org's numbers under the new org's name. `/app/clusters/<id>` is concrete before
-anything reads it, so a cluster-scoped cache key can never mean "whichever is
-first", and a cluster can be bookmarked, opened in a second tab and linked to
-from an alert. `/app` itself is now only the redirect that answers "which one did
-you mean" — the first cluster, or connecting one if there are none.
-
-The rest of the shape follows from what each page is FOR. A dashboard answers
-"how is this cluster doing", so no configuration form lives on it: policy,
-credentials, mode and disconnect are the cluster's own settings tab. Connecting a
-cluster is onboarding rather than a card under the ROI numbers, so it is one link
-from everywhere and the thing an org with no clusters lands on. And your name,
-your password, this org's members and starting another organization are all
-settings — three sub-sections of one page, rather than peers of the dashboard
-they configure.
+**A cluster is an address, not a selection.** `/app/clusters/<id>` is concrete
+before anything reads it, so a cluster-scoped cache key can never mean
+"whichever is first", and a cluster can be bookmarked, opened in a second tab
+and linked to from an alert. The rest of the shape follows from what each page is
+FOR: no configuration form lives on a dashboard, connecting a cluster is
+onboarding rather than a card under the ROI numbers, and your name, your
+password and this org's members are all settings.
 
 Route loaders are the SSR entry point and write **through** the query client, so
 the server render and the browser read one cache entry; mutations invalidate a
-key rather than re-running loaders. **One key per api call** — a cache entry
-holding three answers is three questions sharing a cache line, and it showed:
-the org page fetched a cluster list it never draws, and a failing latency read
-blanked the collection table beside it. The wiki's [Architecture](https://github.com/FullmetalBober/Indexterity/wiki/Architecture)
-page, under Web / dashboard, has every key and the things that turned out to be
-load-bearing.
+key rather than re-running loaders, **one key per api call**. Forms validate
+against the api's own input schemas from `packages/contracts`, so a rule lives in
+exactly one place. Everything engine-specific sits behind the ports in
+`src/engine`, so PostgreSQL and SQL Server adapters can slot in without pipeline
+changes.
 
-Forms are TanStack Form, validated against the api's own input schemas from
-`packages/contracts` — so a password the sign-up field accepts is one better-auth
-accepts, and the rule lives in exactly one place. Values reach a mutation with
-`mutate()`, not through the render, which is why nothing in a form needs
-`useState` any more.
-
-Tables are TanStack Table, sortable and filterable, rendered through the same
-shadcn primitives as before — a column is one object saying how to read a value,
-draw it and sort it, rather than a header cell in one place and a body cell in
-another.
-
-The two whose row count is bounded only by how big the customer is —
-recommendations (collections × indexes) and the per-collection footprint —
-virtualize with TanStack Virtual: a screenful of rows in the DOM whatever the
-row count, bracketed by two spacer rows rather than absolutely positioned, so the
-columns stay aligned and a `<table>` stays a table to a screen reader. The height
-is a *maximum*, so a small cluster's table renders at its natural height and looks
-untouched.
-
-The latency charts are TanStack Charts, which is pre-1.0 and therefore kept behind
-`LineChart`'s unchanged `{title, unit, series}` props: a breaking release is one
-file. It replaced recharts, which cut **65 KiB gzipped** off the client bundle
-(361 KB → 294 KB, measured) and made the charts render server-side — recharts 3
-draws client-only, so the panels used to pop in after hydration.
-
-Everything engine-specific sits behind the ports in `src/engine`, so PostgreSQL
-and SQL Server adapters can slot in without pipeline changes — the data model
-already carries an `engine` field.
+Every key, component and the things that turned out to be load-bearing:
+[Architecture §14](https://github.com/FullmetalBober/Indexterity/wiki/Architecture).
 
 ## Develop
 
@@ -538,102 +327,80 @@ podman-compose up         # postgres + api + web + worker, hot reload
 # or npm run up           # the same, and recovers from stale container state
 ```
 
-**No mongod in the stack.** Connect whichever cluster you are actually working
-against — the collector's job is to dial one, and a demo target that nobody
-points at is a container starting on every `up` for nothing. The integration and
-e2e suites do need one, and they take `MONGO_URL` (defaulting to
-`mongodb://localhost:27017`), so a throwaway is enough:
+**No mongod in the stack** — connect whichever cluster you are working against.
+Which throwaway you want depends on who has to reach it:
 
 ```bash
+# the integration and e2e suites, which run on the HOST (they take MONGO_URL)
 podman run -d --rm --name mongo-test -p 27017:27017 docker.io/library/mongo:8
+
+# a cluster you connect IN the stack — then use mongodb://mongo:27017
+podman run -d --rm --name mongo --network mongo_optimizer_default \
+  --network-alias mongo docker.io/library/mongo:8
 ```
 
-A replica set — which is what reproduces anything topology-shaped, since
-`$indexStats` and `$collStats latencyStats` are both per-member — takes several
-mongods, most easily as several processes in one host-network container.
+The second one has to be on the compose network: the api and worker are
+containers, so `localhost` is themselves, and the host is only addressable as
+`host.containers.internal`, which resolves into `169.254.0.0/16` — a range
+`src/engine/net-guard.ts` files as FORBIDDEN and never dials, even with
+`ALLOW_PRIVATE_CLUSTER_TARGETS`, because the cloud metadata endpoint shares it.
+Clusters registered before the demo mongod was dropped from compose already hold
+`mongodb://mongo:27017`, and the worker logs `cluster <id> unreachable —
+skipped` every tick until something answers to that name.
 
-`podman-compose up` (or `docker compose up`) works directly — `npm run up` is a
-convenience, not a requirement. It adds one thing worth having: when a logout or
-reboot clears `XDG_RUNTIME_DIR` while podman still has containers recorded,
-their crun state is gone and `up` fails with `cannot open .../exec.fifo`. They
-can then only be removed, so the wrapper recreates them and says so. Named
-volumes are untouched by that, so the databases survive — by hand it is
-`podman rm -f` the containers and up again.
+Anything topology-shaped needs a replica set, since `$indexStats` and
+`$collStats latencyStats` are both per-member — most easily several mongods as
+several processes in one host-network container.
 
-It also drops `node_modules/.bin` from PATH, which matters only when compose is
-reached *through* npm: npm prepends that directory, `@vercel/nft` installs an
-`nft` binary there, and podman's network backend shells out to `nft` meaning
-nftables. Typing `podman-compose up` yourself never hits it.
+```
+npm run build · npm run typecheck · npm run lint · npm run test
+npm run db:generate · npm run db:migrate
+npm run db:deploy -w @repo/api        # production migrations, compiled migrator
+npm run version:set 0.2.0             # one version for every workspace + the chart
+```
 
-`npm run build` · `npm run typecheck` · `npm run lint` · `npm run test` ·
-`npm run db:generate` · `npm run db:migrate`. Production migrations run the
-compiled migrator: `npm run db:deploy -w @repo/api`.
+`npm run up` is a convenience, not a requirement — `podman-compose up` works
+directly. It recreates containers whose crun state a logout cleared (`cannot
+open .../exec.fifo`; named volumes untouched), and drops `node_modules/.bin`
+from PATH, which matters only when compose is reached *through* npm —
+`@vercel/nft` installs an `nft` binary there and podman's network backend shells
+out to `nft` meaning nftables.
 
-`npm run lint` is Biome plus `scripts/lint-tailwind.mjs`, which fails the build
+`npm run lint` is Biome plus `scripts/lint-tailwind.ts`, which fails the build
 on a Tailwind arbitrary value that has a canonical utility (`w-[220px]` is
-`w-55`). That warning comes from the editor's Tailwind integration and nothing
-else — Biome has no rule for it and Tailwind v4 ships no lint binary — so
-without it the rule was observable while typing and unenforceable in CI. Vendored
-`components/ui` is exempt: rewriting registry code forks it, and the next
-`shadcn add` puts it back.
-
-Both install **two** schemas: `public`, which Drizzle owns, and
-`graphile_worker`, which the job queue owns. The queue would install its own on
-first boot, but the api and the worker start together, and anything that queues
-a job before the worker wins that race fails against a schema that is not there
-yet. Migration creates schemas, so migration creates both.
-
-**Versioning.** One number for the whole product, in the root `package.json`.
-`npm run version:set 0.2.0` writes it to every workspace and to the chart's
-`version` and `appVersion`; `npm run version:check` asserts they agree and runs
-in CI. Releasing is `git tag v0.2.0 && git push --tags`, and the release
-workflow refuses a tag whose version the tree does not carry.
+`w-55`). Vendored `components/ui` is exempt. Migration installs **two** schemas
+— `public` for Drizzle and `graphile_worker` for the queue — because the api and
+worker start together and whoever queues a job first would otherwise race a
+schema that is not there yet.
 
 **Four test layers**, currently 457 api unit, 244 web unit, 81 integration and
-24 end-to-end. The e2e suite deliberately runs with **no proxy in front**, so the
-passthrough is the path under test — the proxy shape is covered by compose and
-the chart, and a fallback nothing exercises is a fallback that is broken when
-someone needs it. `npm run test` runs the first two without any infra: the api's
-pure decision engine, and the web app's components in jsdom with the api client
-mocked at the `~/lib/api` boundary — what the browser does with an answer, not
-whether the answer was fetched. That boundary moved when the relay went: it was
-`~/lib/app-server`, and mocking the api client instead puts the mutation hooks'
-own error handling under test rather than stubbing it out alongside the
-transport. `npm run test:int -w
-@repo/api` needs a migrated postgres and a mongo, and CI runs it against **6.0,
-7.0 and 8.x** because the three take different paths through the workload
-collector. `npm run test:e2e` builds both apps and drives a real browser
-through them with Playwright — nothing mocked, all the way to postgres and
-mongo. And `deploy/kind-test.sh` installs the Helm chart into a throwaway Kind
-cluster, runs `helm test`, signs up and connects a cluster over cluster DNS,
-and fails if any pod logged a warning.
+24 end-to-end.
 
-The layers catch different things, and the top ones are not decoration. The
-end-to-end suite found that the api's session cookie was being percent-encoded
-a second time on its way through the web server, so every request after signing
-in came back 401 — both sides correct on their own, the defect in the hand-off.
-It also found the dashboard drawing itself twice: the server fetched everything,
-the browser hydrated against an empty query cache and fetched it all again. Both
-renders were correct, so only a browser could see it. The Kind run found that the
-chart could not install at all: its migration hook referenced a ServiceAccount
-and a Secret that hooks run before, and the api's auth signing key was written
-into the Secret and never handed to a container. `helm lint` passed throughout.
-Rendering valid YAML and being installable are different questions.
+| layer | what it needs | what only it catches |
+|---|---|---|
+| `npm run test` | nothing | the pure decision engine; components in jsdom with the api client mocked at `~/lib/api` |
+| `npm run test:int -w @repo/api` | migrated postgres + a mongod | CI runs it against **6.0, 7.0 and 8.x** — the three take different paths through the workload collector |
+| `npm run test:e2e` | both apps built | a real browser all the way to postgres and mongo, with **no proxy in front**, so the passthrough is the path under test |
+| `deploy/kind-test.sh` | Kind | the chart actually installing, `helm test`, sign-up over cluster DNS; fails if any pod logged a warning |
 
-**A superseded CI run is cancelled, not finished.** Push again to a pull request
-branch and the previous run stops: it is answering about a commit nobody is
-looking at any more, and holding a runner while it does. Pushes to `main` and
-`dev` are exempt — those runs are the record of whether an integration branch is
-sound, and a cancelled one leaves a commit with no verdict. The release workflow
-has no such rule at all, since a half-published release is worse than a slow one.
+The top ones are not decoration. The e2e suite found the api's session cookie
+being percent-encoded a second time on its way through the web server — both
+sides correct on their own, the defect in the hand-off — and the dashboard
+drawing itself twice, which only a browser could see. The Kind run found that
+the chart could not install at all, while `helm lint` passed throughout.
+
+**A superseded CI run is cancelled, not finished.** Pushes to `main` and `dev`
+are exempt — those runs are the record of whether an integration branch is
+sound. The release workflow has no such rule at all.
 
 **House rule: the api and the web app run clean.** No errors and no warnings in
 server logs, build output, or the browser console. A warning is a defect — fix
-the cause, don't silence it. See architecture §16.
+the cause, don't silence it. See
+[Architecture §16](https://github.com/FullmetalBober/Indexterity/wiki/Architecture).
 
 ## Security posture (defaults)
 
-Both defaults exist because the control plane dials hosts that users name.
+All three defaults exist because the control plane dials hosts that users name.
 
 - **Sign-up is invite-only** (`SIGNUP_MODE`). The first account bootstraps the
   install. `open` hands that outbound reach to strangers.
@@ -643,84 +410,63 @@ Both defaults exist because the control plane dials hosts that users name.
 - **Plaintext connections are refused** unless `ALLOW_INSECURE_CLUSTER_TLS=true`.
   Every client the control plane builds goes through one constructor
   (`mongo/client.ts`) that requires validated TLS — so it holds for the worker's
-  stored strings, not only for onboarding, which is the difference between
-  enforcing it and checking it once. It refuses rather than silently adding
-  `tls=true`, because a server with no TLS would then fail its handshake instead
-  and a string that says `tls=false` is a statement worth contradicting out loud.
+  stored strings, not only for onboarding. It refuses rather than silently
+  adding `tls=true`, because a string that says `tls=false` is a statement worth
+  contradicting out loud. Its own switch rather than part of the private-target
+  one on purpose: a VPC-peered Atlas cluster is a private address that must
+  still be forced to TLS.
 
-  **Certificate checking is separate, and is the owner's call per cluster.**
-  `tlsInsecure`, `tlsAllowInvalidCertificates` and `tlsAllowInvalidHostnames`
-  keep TLS switched on while turning off the part that makes it worth having, so
-  each is refused unless the matching checkbox was ticked on the connect form.
-  Three boxes rather than one toggle: a private CA fails certificate validation
-  with a perfectly correct hostname, and an SSH tunnel or a rewritten DNS name
-  fails the hostname check with a genuinely valid certificate — one switch would
-  make everyone give up both. Ticking a box writes the option into the string, so
-  nobody hand-edits one to match; clearing it removes the option even if it was
-  pasted in, so the form cannot show three empty boxes above a string that
-  disables all three. The choice is stored on the cluster, and every dial is verified
-  against that recorded decision rather than against whatever the string happens
-  to say. It is also drawn on the cluster's own heading, beside the read-only
-  badge — a concession is chosen once, at a moment when the only goal is getting
-  the connection to work, and one nobody can see afterwards is one nobody
-  reviews. There is no box that turns TLS itself off —
-  that is what the deployment switch is for.
+**Certificate checking is separate, and is the owner's call per cluster.**
+`tlsInsecure`, `tlsAllowInvalidCertificates` and `tlsAllowInvalidHostnames` keep
+TLS switched on while turning off the part that makes it worth having, so each
+is refused unless the matching checkbox was ticked on the connect form. Three
+boxes rather than one toggle: a private CA fails certificate validation with a
+perfectly correct hostname, and an SSH tunnel fails the hostname check with a
+genuinely valid certificate. The choice is stored on the cluster, every dial is
+verified against that recorded decision rather than against whatever the string
+happens to say, and it is drawn on the cluster's heading — a concession nobody
+can see afterwards is one nobody reviews. There is no box that turns TLS itself
+off.
 
-  A cluster already stored with a plaintext string skips its passes and mails
-  its owners, the same way an unsupported server version does — no retry fixes
-  either, and it is deliberately **not** reported as unreachable, which would
-  send someone hunting a firewall that is not the problem.
+**What lands in the control-plane database:** index names, field names,
+collection names, and counters. Not documents — the provisioned role cannot read
+them, so there is nothing to store. One deliberate exception: a **partial index**
+needs the literal value in its filter, so equality literals from the profiler can
+reach the database, narrowed to fields whose value was identical in *every*
+sample and short enough to be a discriminator, never one shaped like an ObjectId
+or a UUID. `$queryStats` never carries literals at all.
 
-  Its own switch rather than part of `ALLOW_PRIVATE_CLUSTER_TARGETS` on purpose:
-  a VPC-peered or PrivateLink Atlas cluster is a private address that must still
-  be forced to TLS, so coupling a transport rule to an addressing rule would
-  quietly weaken real deployments. The compose stack and both test suites set
-  it, because the local mongod they dial serves no certificate.
+Storage tracks how much a cluster *changes*, not how often we look at it —
+**86% smaller** over a simulated year, and an index nobody touches costs one row
+instead of 1,460. A hole in the series means "we stopped watching, so absence of
+usage proves nothing", so a run is the positive form of the claim: *we looked at
+`lastSeenAt`, and it was still this*. Details in
+[Architecture §10 and §11](https://github.com/FullmetalBober/Indexterity/wiki/Architecture).
 
-### What lands in the control-plane database
+**Two of those defaults are checked on every pull request.** An OWASP ZAP baseline
+scan runs against the origin a browser actually gets — the dashboard's, since it
+answers `/api` itself — and `npm run audit:gate` fails on high or critical
+advisories reachable from the half of the dependency tree that ships, ignoring the
+build tools that never leave the runner. Neither can be silenced without writing
+down why: exceptions live in `scripts/audit-gate.ts` and `.zap/rules.tsv`, keyed
+so that a *new* advisory against an already-excepted package still fails and an
+exception whose advisory was fixed fails too.
 
-Index names, field names, collection names, and counters — sizes, op counts,
-latency totals. Not documents: the provisioned role cannot read them, so there
-is nothing to store.
+**The dashboard's documents carry a `Content-Security-Policy` with a nonce minted
+per response** — `default-src 'none'`, and a `script-src` of `'self'` plus that
+nonce, so an injected `<script>` is refused whatever else goes wrong. The nonce
+reaches the framework's own inline scripts through `router.options.ssr.nonce` and
+the header is built from the same variable, which is what stops the two drifting
+into a page that renders and never hydrates. **No `'unsafe-inline'` anywhere
+except the `style` attribute**: the dependencies that write style elements from
+JavaScript are covered by name — the same nonce where the library asks for one,
+a content hash where it cannot, and a unit test recomputes those hashes from
+`node_modules` so an upgrade is a red test rather than a silent change. Every
+end-to-end test fails if the browser refused anything at all.
 
-**And it lands once.** Storage tracks how much a cluster *changes*, not how often
-we look at it. An index's shape and its `(database, collection, name)` are
-constants of the index, so they live in one `cluster_indexes` row rather than
-being rewritten on every collect — the spec alone was two thirds of a snapshot
-row and 2.4× the counter it accompanied. The counter itself is stored as a **run**:
-a row covers `[capturedAt, lastSeenAt]`, and a collect that finds it unchanged
-moves the end forward instead of inserting a duplicate. Simulated over a year at
-the then-current 6h cadence, the two together are **86% smaller** (30% from the shape alone),
-and an index nobody touches costs **one row instead of 1,460**.
-
-That is what makes collecting more often a load question rather than a storage
-bill — but the reason it needed care is the other direction. A hole in the series
-means *"we stopped watching, so absence of usage proves nothing"*, so an idle
-index that simply stopped producing rows would be indistinguishable from a
-cluster we lost, and "cannot tell" would get spelled "all clear". A run is the
-positive form of the claim — **we looked at `lastSeenAt`, and it was still this** —
-and the collector refuses to extend one across a hole the classifier would object
-to, so an outage still shows up as an outage.
-
-Two things hold that rather than one. The collector's refusal is the first, but it
-put half of a safety invariant in a different file from the half that depends on
-it, with nothing in the data to check against — so each run also records the widest
-gap inside its own span, and the classifier *asks* rather than assumes. Overlap is
-ruled out by the database itself, with an exclusion constraint over the interval
-each row covers: readers find holes by differencing one run's end against the
-next's start, so an overlap would be a *negative* gap, which reads as no gap at
-all.
-
-One exception, and it is deliberate. A **partial index** needs the literal value
-in its filter — `partialFilterExpression: { status: "active" }` cannot be built
-without knowing `"active"` — so equality literals from the profiler can reach
-the database. What survives to get there is narrow: only fields whose value was
-identical in **every** sample, which drops anything per-user or per-request on
-its own, and then only values short enough to be a discriminator, never one
-shaped like an ObjectId or a UUID. The values that are useful as a partial
-filter and the values that are safe to hold are the same set, which is what
-makes the rule easy to keep. `$queryStats` never carries literals at all — it
-shapifies them to `?string` before we see them.
+The full review, chapter by chapter against OWASP ASVS 5.0 Level 2, including what
+is deliberately not done:
+[Security](https://github.com/FullmetalBober/Indexterity/wiki/Security).
 
 ## Deploy
 
@@ -731,46 +477,69 @@ docker build -f apps/api/Dockerfile -t indexterity-api .
 docker build -f apps/web/Dockerfile -t indexterity-web .
 ```
 
+### Configuration
+
+**Every process validates its environment before it serves anything**, against
+one schema per process rather than reads scattered through the code. `absent is
+fine, malformed is fatal`: an unset optional knob takes its default, and a
+malformed one is a boot failure naming the variable and what it expected. So
+`AUTH_RATE_LIMIT_MAX=2O` (letter O) refuses to start instead of quietly reading
+as 20, and a garbled `TRUST_PROXY` refuses instead of quietly meaning "no proxy
+in front" — which used to collapse every per-client rate limit into one shared
+bucket.
+
+Three schemas, because the three processes are given different things
+(`apps/api/src/config/schema.ts`):
+
+| Process | Demands | Because |
+|---|---|---|
+| `migrate` | `DATABASE_URL` | The pre-install Job talks to Postgres and exits |
+| `worker` | `+ MASTER_KEY` | It unseals stored credentials to dial a cluster — without it, it used to start cleanly and fail at the first job |
+| `api` | `+ BETTER_AUTH_SECRET` | Only the api serves auth |
+
+The dashboard server has its own, built on `@t3-oss/env-core`
+(`apps/web/src/lib/env.ts`), where the interesting part is the split: every
+variable is a **server** one, so reading one in the browser throws rather than
+returning undefined, and a value the browser genuinely needs has to be declared
+with the `VITE_` prefix that makes it public by construction. There are none.
+
+The schema is also the source of truth for the four places a variable has to be
+registered — `.env.example`, `docker-compose.yml`, the test suites, and the Helm
+chart. `config/homes.test.ts` walks it and holds all four to it, in both
+directions: a required variable the chart never sets fails the test rather than
+the deploy, and a variable the chart sets that no schema knows is a typo nothing
+else would have caught.
+
 One web image serves every environment — `API_URL` and `WEB_ORIGIN` are read at
-runtime, and nothing about the api's address is baked into the browser bundle:
-it calls `/api` on whatever origin served the page. `API_URL` is now only the
-web server's own SSR reads. The worker deploys from the api image with
-`CMD ["node", "apps/api/dist/worker.js"]`, or set `RUN_WORKER=true` to embed it
-in the api for a one-container install. Hosted should keep them separate: an api
-rollout would otherwise abort an in-flight index build, and the alert cooldown
-assumes a single worker.
+runtime, and nothing about the api's address is baked into the browser bundle.
+The worker deploys from the api image with `CMD ["node",
+"apps/api/dist/worker.js"]`, or set `RUN_WORKER=true` to embed it in the api for
+a one-container install. Hosted should keep them separate: an api rollout would
+otherwise abort an in-flight index build.
 
 **One origin, guaranteed by the app.** The browser calls the api itself, so the
 session cookie only works if both answer on one origin. That is arranged twice
-over, and the difference is a hop rather than whether it works:
+over, and the difference is a hop rather than whether it works — a proxy in
+front routes `/api` to the api (zero hops, what the ingress does), and with
+nothing in front the dashboard server answers `/api` itself and forwards it
+(`src/lib/api-passthrough.ts`, one transparent hop, no configuration). So
+`helm install` without an ingress works, a port-forward works, `npm run dev`
+works, and compose works; `indexterity_web_requests_total{kind="api"}` is
+non-zero exactly when you have not set the proxy rule, which is how a missing
+ingress rule stops being silent. The cost is that the api is publicly reachable,
+so its rate limiting, origin checks and auth guard are now the only line of
+defence rather than the second.
 
-- **A proxy in front** routes `/api` to the api and `/` to the dashboard, which
-  is what the ingress does. Zero hops — the api answers directly.
-- **Nothing in front?** The dashboard server answers `/api` itself and forwards
-  it (`src/lib/api-passthrough.ts`). One transparent hop, no configuration, and
-  the cookie is still first-party because the origin never changed.
-
-So `helm install` without an ingress works, a port-forward works, `npm run dev`
-works, and compose works — none of them needs a proxy container to put the two
-back on one origin. Set up the proxy rule when you want the hop back; the
-`indexterity_web_requests_total{kind="api"}` counter is non-zero exactly when
-you have not, which is how a missing ingress rule stops being silent.
-
-This is *not* the relay that used to live here. That was 28 typed wrappers
-re-setting cookies onto a different origin, which needed hand-rolled decoding to
-survive being encoded twice. This is one pass-through: same origin in and out,
-`Set-Cookie` forwarded byte for byte, nothing to re-encode.
-
-Two things it does not do. It strips `x-forwarded-*` and `x-real-ip` from the
-client unless `TRUST_PROXY=true`, because forwarding a header a browser could
-have written lets a caller pick its own address and never reach the api's
-per-IP rate limit. And it never rewrites `Origin`, which better-auth checks
-against its trusted origins.
-
-The cost of the browser reaching the api at all is that the api is publicly
-reachable. Its rate limiting, origin checks and auth guard used to be a second
-line of defence behind an unreachable address; they are now the only line.
-Nothing about them changed, but their importance did.
+Those limits are worth reading precisely, because two limiters answer for them.
+`RATE_LIMIT_MAX` (300/min) is counted in each api process's memory, so it is **per
+replica** and a rolling deploy resets it. `AUTH_RATE_LIMIT_MAX` (20/min) is read
+twice: the same per-replica way for `/api/auth/*`, and by better-auth for the
+credential endpoints, which counts in Postgres — so that half is one budget for the
+whole deployment. Set `TRUST_PROXY` to the CIDR ranges of whatever sits in front,
+not to `true`: better-auth resolves a client address only from a forwarded header
+it can attribute, and without ranges every caller shares one bucket.
+[Architecture §10.5](https://github.com/FullmetalBober/Indexterity/wiki/Architecture)
+has the table.
 
 A Helm chart is in [`deploy/helm/indexterity`](./deploy/helm/indexterity) —
 api + dashboard + worker, a pre-upgrade migration hook, ingress, and a
@@ -798,83 +567,66 @@ retried, nothing fails — so the queue counters cannot see it and
 `indexterity_cluster_task_runs_total{outcome=...}` is where the six ways a tick
 can end are told apart.
 
-The dashboard server reports what the api cannot. `indexterity_web_document_duration_seconds`
-is render time per route pattern — the thing the reader waits on.
-`indexterity_web_api_requests_total{procedure,status}` is the api measured from
-the other end of the network, with `status="unreachable"` for the case the api can
-never report itself; it matters because the loaders *swallow* api failures and
-render an empty panel, so one procedure returning 500 is otherwise unrecorded. A
-500 that never reached the api at all shows up as
-`indexterity_web_requests_total{kind="document",status="500"}`.
-
-That api counter is **SSR reads only** since the browser started calling the api
-directly — a reader clicking Approve does not pass through this process at all,
-and the api's own counters are where those land. `kind` on the request counter
-lost its `server_fn` value for the same reason: there are no server functions
-left, and a series that is always zero reads as "no traffic" rather than "no
-such thing".
-
 **The endpoint has no auth**, which is why it is a second port instead of a route
-on the app: an ingress routes the app port, so publishing a host does not publish
-this. Instrumentation is OpenTelemetry (`@opentelemetry/sdk-metrics`) with the
-Prometheus exporter, wired once in `packages/metrics` — pointing it at an OTLP
-collector instead is a change to that one file. Pod CPU and memory come from the
-platform, not from here.
+on the app. `metrics.prometheusRule.enabled=true` installs 18 alerts with the
+metrics, because a scrape endpoint nobody wrote queries against is a scrape
+endpoint nobody reads. `deploy/helm/indexterity/README.md` has the thresholds and
+the label-selector gotcha; what the dashboard server reports that the api cannot,
+and the two alert traps worth knowing, are in
+[Architecture §15](https://github.com/FullmetalBober/Indexterity/wiki/Architecture).
 
-`metrics.prometheusRule.enabled=true` installs 18 alerts with the metrics, because
-a scrape endpoint nobody wrote queries against is a scrape endpoint nobody reads.
-They cover the failures that are otherwise silent — a schedule that stopped
-running logs nothing, since nothing runs. Two are shaped by traps worth knowing:
-`absent_over_time` rather than `increase` for a dead process (a stale series
-matches no `== 0` comparison, so the obvious rule is silent exactly when it
-matters), and the alerts watch the `schedule*` dispatchers rather than the
-per-cluster tasks, which stop legitimately when the last cluster is offboarded.
-`deploy/helm/indexterity/README.md` has the thresholds and the label-selector
-gotcha.
+### Errors
 
-## Open
+The metrics above say how *often* something failed. `SENTRY_DSN` says *what*.
+Every process reads that one variable; leave it empty — the default here, in
+compose and in the chart — and nothing is initialised at all.
 
-Planned work lives on the [project board](https://github.com/users/FullmetalBober/projects/6),
-not here — a roadmap in two places is a roadmap that disagrees with itself. What
-follows is the reasoning behind decisions already taken, which the board does not
-carry.
+**The DSN is yours.** A self-hosted install reports to your own Sentry
+organisation or your own self-hosted Sentry, never to us.
 
-**Atlas Admin API onboarding is dropped, not deferred.** An admin API key is a
-bigger ask than the `createRole` snippet it would replace, and it hands us a
-credential to guard. Atlas clusters get the guided 422 naming the commands to
-run in their own console.
+**Two projects, not three.** The api and the worker share one: they are one
+image, one release and one body of code — `jobs/`, `analysis/` and the drizzle
+layer are reachable from both, so a fault there is one issue a per-workload split
+would file twice, and `RUN_WORKER=true` makes them a single process anyway. A
+`service` tag says which answered. The dashboard is a separate app and gets its
+own. In compose that is `SENTRY_DSN_API` and `SENTRY_DSN_WEB`; in the chart,
+`errorReporting.dsn` and `errorReporting.webDsn`.
 
-**How urgent a missing index is** comes from `docsExamined` — the documents the
-server actually walked — not from table size:
+| workload | what is reported |
+|---|---|
+| api | unhandled 500s from `AppExceptionFilter`, tagged with the request id already in the log line and the response body |
+| worker | a job that burned its last retry — the dead-letter transition — tagged with task, attempt and cluster |
+| web | server-side render failures, and anything the passthrough throws |
 
-| the scan | treatment |
-|----------|-----------|
-| ≥ 10M documents walked, or ≥ 500k per execution | **critical** — auto-approved with `instantCreate`, and the build skips the change window |
-| ≥ 1M walked, or a collection over 100k documents | elevated — auto-approved with `instantCreate`, build waits for the window |
-| anything smaller | routine — proposed for a human |
+Plus the unhandled-rejection and uncaught-exception sinks the SDK installs in
+every process, which is the half that had no home before.
 
-Workload analysis runs **hourly**, on its own half-hour offset from the collect
-pass rather than behind it, because a missing index costs on every execution and
-most of the old delay was waiting to notice. A critical scan now goes from first
-sighting to built index in minutes rather than the better part of a day.
+Reported once each, and only for things that are actually faults. A retry is not
+an event (the counters above already say how often jobs retry), and neither is a
+429, a 413, a 404, or a cluster whose owner's firewall is doing its job — an
+unreachable cluster is a handled condition, so paging about it would be paging
+about somebody else's network.
 
-**A shape must recur, measured two ways.** A count floor of three stops someone's
-ad-hoc query leaving an index behind. A rate floor — once a fortnight — stops the
-quieter mistake: `$queryStats` accumulates for the life of the store, so on a
-server up two months, three executions clears a count floor while describing a
-query that runs roughly never. Both windows are measurable, so both are measured
-(`analysis/workload.ts`).
+**Nothing leaves with a connection string in it.** `packages/errors` strips
+MongoDB and Postgres URIs whole — hosts included, because a replica set's member
+list is the customer's infrastructure and `+srv` resolves to it — plus the
+credentials of any other URI, any field named like a secret (a superset of the
+Fastify logger's redact list), and the same secrets encoded inside a JSON string,
+where key matching cannot see them. It walks the entire event rather than a list
+of known fields, because the way a field list fails is silently, on the day the
+SDK adds a field. Unit-tested against a seeded event carrying the string in every
+place one could hide.
 
-**Which collections are worth analysing is the same question in the collection's
-units.** It used to be a document count — under a thousand documents, excluded
-before the workload was even fetched — which is a proxy for cost evaluated
-before the cost is knowable. A scan costs documents *times* frequency, so the
-proxy was wrong in both directions at once: a 900-document collection scanned
-five hundred times a second was invisible, and a 50,000-row lookup table
-scanned twice a day sailed through. The gate is now a million documents walked
-per week, measured, with a 100-document floor for collections too small for an
-index to pay for the write it adds. A blocking in-memory sort is exempt — it
-walks no extra documents and still dies at 100 MB.
+**The request body is dropped entirely**, not scrubbed: `POST /clusters` carries
+a customer's connection string as a field. `sendDefaultPii: false` does *not*
+cover this — in SDK 10.69 bodies, stack locals and database payloads are governed
+by `dataCollection`, and its defaults collect all three. All are off, and the body
+is removed in `beforeSend` as well, because setting `httpBodies: []` did not stop
+it arriving. That was measured against the running stack, not read off the docs.
+
+Tracing, profiling, session replay and Sentry's own metrics are all off: the
+scrape endpoint above is the only source of timings, and a second one would
+answer the same questions where the chart's alerts cannot see them.
 
 ## Licence
 
@@ -900,9 +652,9 @@ here is withheld permanently.
 The Additional Use Grant is one connected cluster and nothing else, so the chart
 ships `defaultOrgPlan: SELF_HOSTED` — one cluster, every feature on. It would be
 easy to ship the hosted free tier here and cheap to justify; it would also
-restrict you further than the licence you are complying with, which is a nudge
-rather than a limit. The plan is not a security control and does not pretend to
-be: anyone who owns the database can change it. The licence is what binds.
+restrict you further than the licence you are complying with. The plan is not a
+security control and does not pretend to be: anyone who owns the database can
+change it. The licence is what binds.
 
 **Want more than the grant?** [hello@alivlad.com](mailto:hello@alivlad.com?subject=Indexterity%20commercial%20licence).
 The copyright is held by one person, so a commercial licence is a conversation,

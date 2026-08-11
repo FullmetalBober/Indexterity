@@ -54,6 +54,7 @@ describe("RecommendationsTable", () => {
   it("leads with the highest score", () => {
     renderInApp(
       <RecommendationsTable
+        total={3}
         clusterId="c1"
         recommendations={[
           rec({ id: "low", indexName: "idx_low", score: 20 }),
@@ -73,6 +74,7 @@ describe("RecommendationsTable", () => {
     const user = userEvent.setup();
     renderInApp(
       <RecommendationsTable
+        total={2}
         clusterId="c1"
         recommendations={[
           rec({ id: "1", collection: "shard10", indexName: "idx_ten" }),
@@ -91,6 +93,7 @@ describe("RecommendationsTable", () => {
     const user = userEvent.setup();
     renderInApp(
       <RecommendationsTable
+        total={2}
         clusterId="c1"
         recommendations={[
           rec({ id: "1", collection: "orders", indexName: "idx_orders" }),
@@ -108,7 +111,12 @@ describe("RecommendationsTable", () => {
   it("offers approve on a proposal, and sends the id when confirmed", async () => {
     const user = userEvent.setup();
     renderInApp(
-      <RecommendationsTable clusterId="c1" recommendations={[rec({ id: "r9" })]} loading={false} />,
+      <RecommendationsTable
+        clusterId="c1"
+        recommendations={[rec({ id: "r9" })]}
+        total={1}
+        loading={false}
+      />,
     );
 
     await user.click(screen.getByRole("button", { name: "Approve" }));
@@ -129,6 +137,7 @@ describe("RecommendationsTable", () => {
   ] as const)("offers %s the %s action", (state, label) => {
     renderInApp(
       <RecommendationsTable
+        total={1}
         clusterId="c1"
         recommendations={[rec({ state, hiddenAt: null })]}
         loading={false}
@@ -140,6 +149,7 @@ describe("RecommendationsTable", () => {
   it("offers nothing on an advisory", () => {
     renderInApp(
       <RecommendationsTable
+        total={1}
         clusterId="c1"
         recommendations={[rec({ type: "ADVISORY_REVIEW" })]}
         loading={false}
@@ -154,6 +164,7 @@ describe("RecommendationsTable", () => {
     const soon = new Date(Date.now() + 5 * 86_400_000).toISOString();
     renderInApp(
       <RecommendationsTable
+        total={1}
         clusterId="c1"
         recommendations={[rec({ state: "HIDDEN", hiddenAt: soon, observeDays: 1 })]}
         loading={false}
@@ -164,17 +175,50 @@ describe("RecommendationsTable", () => {
   });
 
   it("explains an empty table rather than drawing headers over nothing", () => {
-    renderInApp(<RecommendationsTable clusterId="c1" recommendations={[]} loading={false} />);
+    renderInApp(
+      <RecommendationsTable clusterId="c1" recommendations={[]} total={0} loading={false} />,
+    );
 
     expect(screen.getByText("No recommendations yet")).toBeInTheDocument();
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
+  });
+
+  // The api sends the highest-scoring 500 and says how many exist (#64). A
+  // table that showed 500 of 4,000 rows without saying so would make its
+  // filter lie: "nothing matches" would be a claim about rows never sent.
+  it("says how many rows exist when it is only showing the top of them", () => {
+    renderInApp(
+      <RecommendationsTable
+        clusterId="c1"
+        recommendations={[rec({ id: "1" }), rec({ id: "2" })]}
+        total={4000}
+        loading={false}
+      />,
+    );
+
+    expect(screen.getByText(/Showing the 2 highest-scoring of 4,000/)).toBeInTheDocument();
+  });
+
+  it("says nothing about totals when it is showing all of them", () => {
+    renderInApp(
+      <RecommendationsTable
+        clusterId="c1"
+        recommendations={[rec({ id: "1" }), rec({ id: "2" })]}
+        total={2}
+        loading={false}
+      />,
+    );
+
+    expect(screen.queryByText(/highest-scoring of/)).not.toBeInTheDocument();
   });
 
   // The worst of the three empty states, because the last sentence of it —
   // "nothing to review means nothing is obviously wrong" — is a safety claim,
   // and it was being made about clusters with forty proposals in flight (#72).
   it("withholds the safety claim until the read has answered", () => {
-    renderInApp(<RecommendationsTable clusterId="c1" recommendations={[]} loading={true} />);
+    renderInApp(
+      <RecommendationsTable clusterId="c1" recommendations={[]} total={0} loading={true} />,
+    );
 
     expect(screen.queryByText("No recommendations yet")).not.toBeInTheDocument();
     expect(screen.getByRole("table")).toBeInTheDocument();

@@ -37,6 +37,39 @@ export function membersFromHello(hello: unknown): string[] {
   return [...new Set([...stringsAt(hello, "hosts"), ...stringsAt(hello, "passives")])];
 }
 
+// What one node's own `hello` says about itself — the roster's row (#100).
+// `me` only exists on replica-set members; a standalone or a mongos identifies
+// itself by the address it was dialled on instead.
+export interface HelloNode {
+  readonly me: string | null;
+  readonly role: "primary" | "secondary" | "mongos" | "standalone" | "unknown";
+}
+
+// Pure over the reply so the mapping is a unit test. The role vocabulary is
+// what `hello` can actually admit: a hidden member answers `secondary` on a
+// direct connection (hidden governs routing, not identity), and an arbiter is
+// never dialled because membersFromHello never names one.
+export function nodeFromHello(hello: unknown): HelloNode {
+  if (typeof hello !== "object" || hello === null) return { me: null, role: "unknown" };
+  const me = Reflect.get(hello, "me");
+  const setName = Reflect.get(hello, "setName");
+  const msg = Reflect.get(hello, "msg");
+  const primary = Reflect.get(hello, "isWritablePrimary") === true;
+  const role =
+    msg === "isdbgrid"
+      ? "mongos"
+      : typeof setName !== "string"
+        ? primary
+          ? "standalone"
+          : "unknown"
+        : primary
+          ? "primary"
+          : Reflect.get(hello, "secondary") === true
+            ? "secondary"
+            : "unknown";
+  return { me: typeof me === "string" ? me : null, role };
+}
+
 // Owns a driver client. Created with an index-only role (the wiki's
 // Architecture page, Security) so it cannot read customer documents.
 export class MongoConnection {
@@ -81,6 +114,25 @@ export class MongoConnection {
   async replicaMembers(): Promise<string[]> {
     const hello: unknown = await this.client.db("admin").command({ hello: 1 });
     return membersFromHello(hello);
+  }
+
+  // This node describing itself, or null when even `hello` fails — which is
+  // "unreachable" by the time anyone reads it, never "probably primary". No
+  // privilege involved: hello is the pre-auth handshake command.
+  async helloNode(): Promise<HelloNode | null> {
+    try {
+      const hello: unknown = await this.client.db("admin").command({ hello: 1 });
+      return nodeFromHello(hello);
+    } catch {
+      return null;
+    }
+  }
+
+  // The address this client was pointed at, for the roster row of a node whose
+  // hello carries no `me` (standalones, mongos).
+  address(): string | null {
+    const [first] = this.client.options.hosts ?? [];
+    return first === undefined ? null : first.toString();
   }
 
   // What this client is actually connected with, as opposed to what its string

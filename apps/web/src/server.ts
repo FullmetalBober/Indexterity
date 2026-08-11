@@ -1,8 +1,19 @@
+// First, and a side-effect import rather than a call: ESM evaluates every import
+// in this file before the first statement of the body, so an init written as a
+// call here would run after everything it is supposed to precede (#31).
+import "~/lib/errors/provider";
+// Second, and for the same reason: createEnv validates on import, so this is
+// where an invalid environment becomes a boot failure that names the variable
+// instead of a default that quietly took effect (#126). After the reporter, so
+// the refusal is itself reportable.
+import "~/lib/env";
+import { wrapFetchWithSentry } from "@sentry/tanstackstart-react";
 import { createStartHandler, defaultStreamHandler } from "@tanstack/react-start/server";
 import { createServerEntry } from "@tanstack/react-start/server-entry";
 import { isApiRequest, passThroughToApi } from "~/lib/api-passthrough";
 import { startMetricsServer } from "~/lib/metrics/provider";
 import { measureRequest } from "~/lib/metrics/requests";
+import { documentCsp, newNonce, withSecurityHeaders } from "~/lib/security-headers";
 
 // The dashboard's server entry. It replaces the framework's default (which is
 // exactly the two lines below) for two reasons, both of which need a module that
@@ -18,7 +29,30 @@ import { measureRequest } from "~/lib/metrics/requests";
 //
 // Nothing here reaches the browser: vite resolves this file for the server
 // environment alone.
-const fetch = createStartHandler(defaultStreamHandler);
+//
+// The stream handler is wrapped rather than passed through, for the one header
+// that cannot be a constant. A nonce is minted per response, given to the router
+// — `ssr.nonce` is what puts it on every script the framework emits, the
+// dehydration payload and the buffered `$tsr` block alike — and named in the
+// Content-Security-Policy built from the same value. Both halves come from one
+// variable on purpose: a header naming a nonce the scripts do not carry is a
+// page that renders and never hydrates.
+//
+// Set HERE rather than in withSecurityHeaders, because this is the only point
+// that holds both the router and the response's headers, and it has to happen
+// BEFORE the render: the scripts read `ssr.nonce` as they are emitted.
+const fetch = createStartHandler((ctx) => {
+  const nonce = newNonce();
+  ctx.router.update({ ssr: { ...ctx.router.options.ssr, nonce } });
+  // `import.meta.env.DEV` rather than NODE_ENV: what needs the allowance is the
+  // vite dev server injecting the stylesheet, not a mode anyone can set. Vite
+  // replaces it with a literal, so the built output carries no branch at all.
+  ctx.responseHeaders.set(
+    "content-security-policy",
+    documentCsp(nonce, { dev: import.meta.env.DEV }),
+  );
+  return defaultStreamHandler(ctx);
+});
 
 // Off unless METRICS_ENABLED=true. Not awaited, because the entry has to export
 // a handler synchronously; a scrape arriving in the millisecond before the port
@@ -57,11 +91,28 @@ if (bootState[BOOTED] !== true) {
 // it to the router is a 404. Still inside measureRequest, which is how a
 // passthrough that is running when a proxy should have answered first becomes
 // visible rather than silent.
-export default createServerEntry({
-  fetch: (request, ...rest) =>
-    measureRequest(request, () =>
-      isApiRequest(new URL(request.url).pathname)
-        ? passThroughToApi(request)
-        : fetch(request, ...rest),
-    ),
-});
+//
+// wrapFetchWithSentry is the outermost layer, so a throw from measureRequest
+// itself is still reported. It is the whole of the dashboard's error reporting:
+// the docs' other seam, sentryGlobalFunctionMiddleware in a src/start.ts, is
+// deliberately not here — D29 built that seam for per-function metrics, measured
+// it as restating what the api already reports, and removed it. Reinstating it
+// for errors would buy the same little: a server function here is one to three
+// api calls, and those already report from the api's own side.
+//
+// The options argument is typed `unknown` on the way in and cast back on the way
+// out, because wrapFetchWithSentry is generic over every framework it supports
+// and cannot name TanStack Start's RequestOptions. The value is handed back
+// exactly as it arrived — the cast restores a type, it does not assert one.
+// withSecurityHeaders wraps the ROUTER branch alone. The api answers /api with
+// its own, stricter set (apps/api/src/http/security-headers.ts) and a response
+// that arrived through `fetch` has an immutable header list, so adding to it here
+// would throw for no gain.
+const handleRequest = (request: Request, opts?: unknown): Response | Promise<Response> =>
+  measureRequest(request, async () =>
+    isApiRequest(new URL(request.url).pathname)
+      ? passThroughToApi(request)
+      : withSecurityHeaders(await fetch(request, opts as Parameters<typeof fetch>[1])),
+  );
+
+export default createServerEntry(wrapFetchWithSentry({ fetch: handleRequest }));

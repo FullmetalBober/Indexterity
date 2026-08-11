@@ -1,3 +1,9 @@
+// FIRST, before reflect-metadata and before Nest: the SDK instruments modules as
+// they are required, so anything imported above it is invisible to it (#31).
+import "./instrument.api";
+// Before Nest, before better-auth, before anything that reads a value: an
+// invalid environment is a boot failure that names the variable (#126).
+import "./env.api";
 import "reflect-metadata";
 import rateLimit from "@fastify/rate-limit";
 import { NestFactory } from "@nestjs/core";
@@ -5,8 +11,10 @@ import { FastifyAdapter, type NestFastifyApplication } from "@nestjs/platform-fa
 import { AppModule } from "./app.module";
 import { auth } from "./auth";
 import { sessionCookiesFor } from "./auth/session";
-import { positiveEnv, trustProxySetting } from "./env";
+import { apiEnv, trustProxySetting } from "./config/env";
 import { AppExceptionFilter } from "./errors/exception.filter";
+import { captureAuthFailure } from "./errors/reporting";
+import { securityHeaders } from "./http/security-headers";
 import { jobDb } from "./jobs/db";
 import { embeddedWorkerEnabled, startWorker } from "./jobs/runner";
 import { instrumentHttp, registerControlPlaneGauges, startMetricsServer } from "./metrics";
@@ -19,7 +27,7 @@ async function bootstrap(): Promise<void> {
     // and the per-IP rate limits become one shared bucket (see env.ts).
     trustProxy: trustProxySetting(),
     logger: {
-      level: process.env.LOG_LEVEL ?? "info",
+      level: apiEnv().LOG_LEVEL,
       redact: ["req.headers.authorization", "req.headers.cookie", 'res.headers["set-cookie"]'],
     },
   });
@@ -36,9 +44,12 @@ async function bootstrap(): Promise<void> {
   app.setGlobalPrefix("api");
   app.useGlobalFilters(new AppExceptionFilter());
   const fastify = app.getHttpAdapter().getInstance();
-  // Before the routes exist, so the hook sees oRPC, better-auth and the health
-  // check alike.
+  // Before the routes exist, so the hooks see oRPC, better-auth and the health
+  // check alike. That breadth is the whole point for the headers: better-auth
+  // registers straight on Fastify, outside Nest, so anything scoped to a
+  // controller would miss every endpoint that handles a credential.
   instrumentHttp(fastify);
+  securityHeaders(fastify);
 
   // Global ceiling per IP, with a tight budget on the auth endpoints — they are
   // the brute-force target (sign-in/sign-up).
@@ -48,7 +59,7 @@ async function bootstrap(): Promise<void> {
   // minute, both look like an attack at the default. Raising it is a decision
   // an operator makes on purpose; the defaults stay where they are.
   await fastify.register(rateLimit, {
-    max: positiveEnv("RATE_LIMIT_MAX", 300),
+    max: apiEnv().RATE_LIMIT_MAX,
     timeWindow: "1 minute",
   });
 
@@ -73,7 +84,7 @@ async function bootstrap(): Promise<void> {
     "/api/auth/*",
     {
       config: {
-        rateLimit: { max: positiveEnv("AUTH_RATE_LIMIT_MAX", 20), timeWindow: "1 minute" },
+        rateLimit: { max: apiEnv().AUTH_RATE_LIMIT_MAX, timeWindow: "1 minute" },
       },
     },
     async (request, reply) => {
@@ -92,6 +103,11 @@ async function bootstrap(): Promise<void> {
           body: hasBody ? JSON.stringify(request.body) : undefined,
         }),
       );
+      // better-auth turns its own failures into a 500 rather than throwing, so
+      // this is the only place an auth-route fault is visible to us (#31).
+      if (response.status >= 500) {
+        captureAuthFailure(request.method, url.pathname, response.status, String(request.id));
+      }
       reply.status(response.status);
       response.headers.forEach((value, key) => {
         if (key.toLowerCase() !== "set-cookie") reply.header(key, value);
@@ -133,7 +149,7 @@ async function bootstrap(): Promise<void> {
     process.once("SIGINT", () => void runner.stop());
   }
 
-  const port = Number(process.env.API_PORT ?? 3001);
+  const port = apiEnv().API_PORT;
   await app.listen(port, "0.0.0.0");
 }
 

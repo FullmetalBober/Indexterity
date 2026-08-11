@@ -201,6 +201,15 @@ function servesOrder(index: IndexSpec, wanted: readonly SortKey[]): boolean {
 // two near-identical indexes double the write cost of the collection, and which
 // one to keep is a judgement about the workload. Reported instead of silently
 // dropped, which is what happened before.
+//
+// PROTECTED indexes are included, and they were not. `!isNeverDrop(idx)`
+// excluded them from being a blocker, and recommendCreates suppresses the
+// create whenever an index covers the fields — with no such exclusion — so a
+// unique index with the wrong directions produced NOTHING AT ALL: not a create,
+// not an advisory. The engine had a finding and said nothing about it. Where a
+// re-order can fix one properly, jobs/suggest.ts proposes that instead of this;
+// where it cannot — hinted, or another shape relies on the current directions —
+// this is what a human gets, which is what the silence was costing them.
 export interface SortOrderAdvisory {
   readonly existingIndex: string;
   readonly wantedKeys: readonly SortKey[];
@@ -222,8 +231,7 @@ export function sortOrderAdvisories(
     if (wantedKeys.length === 0) continue;
     const wanted = wantedKeys.map((key) => key.field);
     const blocker = existing.find(
-      (idx) =>
-        !isNeverDrop(idx) && equalFields(fieldsOf(idx), wanted) && !servesOrder(idx, wantedKeys),
+      (idx) => equalFields(fieldsOf(idx), wanted) && !servesOrder(idx, wantedKeys),
     );
     if (blocker === undefined) continue;
     const key = `${blocker.name}\u0000${wantedKeys.map((k) => `${k.field}:${k.direction}`).join(",")}`;

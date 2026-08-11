@@ -101,6 +101,14 @@ app.kubernetes.io/component: {{ .component }}
   value: {{ .Values.config.allowPrivateClusterTargets | quote }}
 - name: ALLOW_INSECURE_CLUSTER_TLS
   value: {{ .Values.config.allowInsecureClusterTls | quote }}
+{{- if .Values.config.allowUntestedMongoVersion }}
+- name: ALLOW_UNTESTED_MONGO_VERSION
+  value: "true"
+{{- end }}
+{{- if .Values.config.retentionDays }}
+- name: RETENTION_DAYS
+  value: {{ .Values.config.retentionDays | quote }}
+{{- end }}
 {{- end -}}
 
 {{/* The metrics endpoint — shared by the api and the worker, which export different halves of it. */}}
@@ -110,6 +118,24 @@ app.kubernetes.io/component: {{ .component }}
   value: "true"
 - name: METRICS_PORT
   value: {{ .Values.metrics.port | quote }}
+{{- end }}
+{{- end -}}
+
+{{/* Error reporting. Takes the workload's own DSN as `dsn` because the api and the
+     worker report to one Sentry project and the dashboard to another — every process
+     reads a plain SENTRY_DSN, and which project that is belongs to the deployment.
+     Off unless a DSN is given, and it is the OPERATOR's: this chart never defaults
+     to reporting anywhere.
+
+     A plain value rather than a Secret key: a DSN is an ingest identifier, not a
+     credential — it can only write events, which is why Sentry's own browser SDKs
+     ship it publicly. */}}
+{{- define "indexterity.errorsEnv" -}}
+{{- if .dsn }}
+- name: SENTRY_DSN
+  value: {{ .dsn | quote }}
+- name: SENTRY_ENVIRONMENT
+  value: {{ default .root.Release.Namespace .root.Values.errorReporting.environment | quote }}
 {{- end }}
 {{- end -}}
 

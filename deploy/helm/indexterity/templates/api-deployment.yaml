@@ -49,6 +49,7 @@ spec:
             {{- include "indexterity.coreEnv" . | nindent 12 }}
             {{- include "indexterity.mailEnv" . | nindent 12 }}
             {{- include "indexterity.metricsEnv" . | nindent 12 }}
+            {{- include "indexterity.errorsEnv" (dict "root" . "dsn" .Values.errorReporting.dsn) | nindent 12 }}
             - name: API_PORT
               value: {{ .Values.api.port | quote }}
             # Browser auth requests arrive through the dashboard's server
@@ -71,10 +72,23 @@ spec:
             {{- end }}
             - name: TRUST_PROXY
               value: {{ include "indexterity.trustProxy" . | quote }}
+            # Per-IP request budgets, per minute and PER REPLICA — the counters
+            # live in each api process's memory, so two replicas allow twice
+            # this and a rolling deploy hands every bucket back at zero.
+            - name: RATE_LIMIT_MAX
+              value: {{ .Values.config.rateLimitMax | quote }}
+            - name: AUTH_RATE_LIMIT_MAX
+              value: {{ .Values.config.authRateLimitMax | quote }}
+            # One-container mode. Off while the worker Deployment is on, or the
+            # schedule would be installed twice.
+            - name: RUN_WORKER
+              value: {{ .Values.api.runWorker | quote }}
             - name: REQUIRE_EMAIL_VERIFICATION
               value: {{ .Values.config.requireEmailVerification | quote }}
             - name: SIGNUP_MODE
               value: {{ .Values.config.signupMode | quote }}
+            - name: REQUIRE_OWNER_2FA
+              value: {{ .Values.config.requireOwnerTwoFactor | quote }}
             {{- if .Values.secrets.github.clientId }}
             - name: GITHUB_CLIENT_ID
               value: {{ .Values.secrets.github.clientId | quote }}

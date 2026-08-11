@@ -18,7 +18,7 @@ export async function applyCreatesForCluster(clusterId: string): Promise<number>
       and(
         eq(recommendations.clusterId, clusterId),
         eq(recommendations.state, "APPROVED"),
-        inArray(recommendations.type, ["CREATE", "UPDATE", "MERGE"]),
+        inArray(recommendations.type, ["CREATE", "UPDATE", "MERGE", "REORDER"]),
       ),
     );
   if (approved.length === 0) return 0;
@@ -57,9 +57,34 @@ export async function applyCreatesForCluster(clusterId: string): Promise<number>
         if (entry.endsWith(":-1")) keys[entry.slice(0, -3)] = -1;
         else keys[entry] = 1;
       }
+      // A REORDER replaces a PROTECTED index, so it has to arrive carrying that
+      // index's options — unique, the partial filter, sparse, the collation.
+      // Refused rather than built without them: an index that was unique and
+      // comes back not unique is a constraint silently removed, and it would be
+      // removed for good the moment the original is retired.
+      if (rec.type === "REORDER" && target.options === undefined) {
+        await db.insert(actions).values({
+          recommendationId: rec.id,
+          kind: "CREATE",
+          actor: "system",
+          result: "refused: no original options recorded, so the replacement could not match it",
+        });
+        continue;
+      }
+      const carried = target.options;
       await executor.create(rec.database, rec.collection, keys, {
         name: rec.indexName,
         ...(target.partial === undefined ? {} : { partialFilterExpression: target.partial }),
+        ...(carried === undefined
+          ? {}
+          : {
+              ...(carried.unique ? { unique: true } : {}),
+              ...(carried.sparse ? { sparse: true } : {}),
+              ...(carried.collation === null ? {} : { collation: { locale: carried.collation } }),
+              ...(carried.partialFilter === undefined
+                ? {}
+                : { partialFilterExpression: carried.partialFilter }),
+            }),
       });
       // Write-latency baseline at build time — the reference for the post-build watch.
       const { writes } = await collector.collectionLatency(rec.database, rec.collection);

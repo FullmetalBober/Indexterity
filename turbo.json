@@ -28,6 +28,10 @@
     "WORKER_CONCURRENCY",
     "METRICS_ENABLED",
     "METRICS_PORT",
+    "SENTRY_DSN",
+    "SENTRY_DSN_API",
+    "SENTRY_DSN_WEB",
+    "SENTRY_ENVIRONMENT",
     "INT_API_PORT"
   ],
   "tasks": {
@@ -37,6 +41,13 @@
     },
     "typecheck": {
       "dependsOn": ["^build"]
+    },
+    // scripts/ belongs to no workspace, so the fan-out above never reaches it.
+    // A root task is how turbo runs something in the repo root itself, and
+    // `npm run typecheck` asks for both — otherwise the only source files CI
+    // never type-checks would stay that way.
+    "//#typecheck:scripts": {
+      "inputs": ["scripts/**/*.ts", "tsconfig.scripts.json", "packages/config/tsconfig.base.json"]
     },
     "test": {},
     "lint": {},

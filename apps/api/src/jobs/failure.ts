@@ -10,10 +10,11 @@ export interface FailedJobInfo {
   readonly payload: unknown;
 }
 
-export function finalClusterFailure(job: FailedJobInfo): string | null {
-  if (job.attempts < job.maxAttempts) return null;
-  if (!CLUSTER_TASKS.has(job.taskIdentifier)) return null;
-  const payload = job.payload;
+// Which cluster a job payload names, if it names one. Split out from the
+// decision below because error reporting wants it for tasks the owner alert
+// deliberately skips: a `retention` run that dies still happened somewhere, and
+// the tag is worth having even when there is nobody to mail about it.
+export function clusterIdOf(payload: unknown): string | undefined {
   if (
     typeof payload === "object" &&
     payload !== null &&
@@ -22,5 +23,11 @@ export function finalClusterFailure(job: FailedJobInfo): string | null {
   ) {
     return payload.clusterId;
   }
-  return null;
+  return undefined;
+}
+
+export function finalClusterFailure(job: FailedJobInfo): string | null {
+  if (job.attempts < job.maxAttempts) return null;
+  if (!CLUSTER_TASKS.has(job.taskIdentifier)) return null;
+  return clusterIdOf(job.payload) ?? null;
 }

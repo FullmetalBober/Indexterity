@@ -1,11 +1,12 @@
 import { Controller, Req } from "@nestjs/common";
 import { implement } from "@orpc/nest";
-import { contract } from "@repo/contracts";
+import { contract, RECOMMENDATIONS_CAP } from "@repo/contracts";
 import type { FastifyRequest } from "fastify";
 import { z } from "zod";
-import { parseStoredSpec, rebuildKeys } from "../analysis";
-import { actions, and, clusters, desc, eq, recommendations, roiMetrics } from "../db";
+import { parseStoredSpec, rebuildKeys, rebuildOptions } from "../analysis";
+import { actions, and, clusters, desc, eq, recommendations, roiMetrics, sql } from "../db";
 import { DatabaseService } from "../db/database.service";
+import type { CreateIndexOptions } from "../engine/ports";
 import { mapClusterError, toRecommendation } from "../http/mappers";
 import { TenancyService } from "../http/tenancy.service";
 import { openClusterSession } from "../jobs/cluster-connection";
@@ -28,16 +29,34 @@ export class RecommendationsController {
     private readonly tenancy: TenancyService,
   ) {}
 
+  // Bounded (#64): the RECOMMENDATIONS_CAP highest-scoring rows plus the true
+  // total. The order is D33's default sort — score descending, size as the
+  // tiebreak — applied here rather than left to the client, because a cap
+  // without an order is a random sample. Measured before deciding: 4,000
+  // proposals (the one-per-index worst case) shipped 1.86 MB; the cap holds
+  // the payload near 250 KB however large the cluster grows.
   @Implement(contract.listRecommendations)
   listRecommendations(@Req() req: FastifyRequest) {
     return implement(contract.listRecommendations).handler(async ({ input }) => {
       const orgId = await this.tenancy.org(req);
-      if (!(await this.tenancy.ownsCluster(input.clusterId, orgId))) return [];
+      if (!(await this.tenancy.ownsCluster(input.clusterId, orgId))) {
+        return { clusterId: input.clusterId, total: 0, recommendations: [] };
+      }
+      const [counted] = await this.database.db
+        .select({ total: sql<number>`count(*)::int` })
+        .from(recommendations)
+        .where(eq(recommendations.clusterId, input.clusterId));
       const rows = await this.database.db
         .select()
         .from(recommendations)
-        .where(eq(recommendations.clusterId, input.clusterId));
-      return rows.map(toRecommendation);
+        .where(eq(recommendations.clusterId, input.clusterId))
+        .orderBy(desc(recommendations.score), desc(recommendations.estimatedBytesSaved))
+        .limit(RECOMMENDATIONS_CAP);
+      return {
+        clusterId: input.clusterId,
+        total: counted?.total ?? rows.length,
+        recommendations: rows.map(toRecommendation),
+      };
     });
   }
 
@@ -95,13 +114,14 @@ export class RecommendationsController {
         throw errors.CONFLICT({ message: "no rollback token recorded for this drop" });
       }
       let keys: Record<string, 1 | -1> | null = null;
-      let indexName = rec.indexName;
-      let collation: string | null = null;
+      // Everything the index WAS, not just its keys. An undo that restored a
+      // unique index without its uniqueness would remove the constraint by
+      // putting it back — see analysis/rollback.ts.
+      let options: CreateIndexOptions = { name: rec.indexName };
       try {
         const spec = parseStoredSpec(rollbackTokenSchema.parse(withToken.rollbackToken).spec);
         keys = rebuildKeys(spec);
-        indexName = spec.name;
-        collation = spec.collation;
+        options = rebuildOptions(spec);
       } catch {
         keys = null;
       }
@@ -118,10 +138,7 @@ export class RecommendationsController {
             throw errors.CONFLICT({ message: "cluster is read-only" });
           }
           const executor = session.executor(readOnly);
-          await executor.create(rec.database, rec.collection, keys, {
-            name: indexName,
-            ...(collation === null ? {} : { collation: { locale: collation } }),
-          });
+          await executor.create(rec.database, rec.collection, keys, options);
         } finally {
           release();
         }

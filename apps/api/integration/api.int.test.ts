@@ -1,13 +1,21 @@
 import type { ChildProcess } from "node:child_process";
+import {
+  LATENCY_SERIES_MAX_COLLECTIONS,
+  LATENCY_SERIES_WINDOW_DAYS,
+  RECOMMENDATIONS_CAP,
+} from "@repo/contracts";
 import { makeWorkerUtils } from "graphile-worker";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { entitledAutomation } from "../src/billing/plans";
+import { loadEnv } from "../src/config/env";
 import {
+  account,
   actions,
   and,
   clusterIndexes,
   clusters,
   createDatabase,
+  desc,
   eq,
   inArray,
   indexCooldowns,
@@ -17,6 +25,7 @@ import {
   policies,
   recommendations,
   roiMetrics,
+  securityEvents,
   session,
   sql,
   user,
@@ -56,6 +65,7 @@ import {
   stopApi,
   WEB_ORIGIN,
 } from "./helpers";
+import { secretFromTotpUri, totpCode } from "./totp";
 
 // fetch().json() is unknown — narrow at the boundary, no `as`.
 function asRecord(value: unknown): Record<string, unknown> {
@@ -122,6 +132,27 @@ afterAll(async () => {
   // The change-window test ran job code in THIS process — release its pools.
   await drainPool();
   await closeJobDb();
+  // Before the orgs and accounts go, not after. Every foreign key on
+  // `security_events` is `set null` on purpose — deleting an org must not erase
+  // the trail of what was done to it — so rows deleted by cascade is exactly what
+  // does NOT happen, and the suite has to remove its own debris while it can
+  // still recognise it.
+  if (createdOrgIds.length > 0) {
+    await db
+      .delete(securityEvents)
+      .where(inArray(securityEvents.orgId, createdOrgIds))
+      .catch(() => {});
+  }
+  if (createdEmails.length > 0) {
+    await db
+      .delete(securityEvents)
+      .where(inArray(securityEvents.actorEmail, createdEmails))
+      .catch(() => {});
+    await db
+      .delete(securityEvents)
+      .where(inArray(securityEvents.target, createdEmails))
+      .catch(() => {});
+  }
   for (const id of createdClusterIds) {
     await db
       .delete(clusters)
@@ -235,6 +266,29 @@ describe("cluster lifecycle", () => {
     expect(asRecord(await queued.json()).queued).toBe(true);
   });
 
+  // The roster (#100): the collect that just ran recorded which nodes it saw.
+  // The suite's mongo is a standalone, so the roster is the one honest row a
+  // standalone gets — the multi-member states are covered at the unit level
+  // (nodeFromHello, MemberConnections), where a replica set can be faked.
+  it("serves the node roster the last collect recorded", async () => {
+    const res = await api(`/clusters/${clusterId}/nodes`, owner);
+    expect(res.status).toBe(200);
+    const body = asRecord(await res.json());
+    expect(body.collectedAt).not.toBeNull();
+    const nodes = body.nodes as { host: string; role: string; state: string }[];
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0]?.role).toBe("standalone");
+    expect(nodes[0]?.state).toBe("answered");
+
+    // Another tenant's cluster answers empty, the same shape as never collected.
+    const stranger = await signUp("nodes-stranger");
+    createdEmails.push(stranger.email);
+    createdOrgIds.push(asString(asRecord(await (await api("/org", stranger)).json()).id));
+    const foreign = asRecord(await (await api(`/clusters/${clusterId}/nodes`, stranger)).json());
+    expect(foreign.collectedAt).toBeNull();
+    expect(foreign.nodes).toEqual([]);
+  });
+
   it("serves policy defaults and round-trips an update", async () => {
     const defaults = asRecord(await (await api(`/clusters/${clusterId}/policy`, owner)).json());
     expect(defaults.observeWindowDays).toBe(30);
@@ -256,6 +310,113 @@ describe("cluster lifecycle", () => {
     const saved = asRecord(await (await api(`/clusters/${clusterId}/policy`, owner)).json());
     expect(saved.observeWindowDays).toBe(7);
     expect(saved.workloadAnalysis).toBe(true);
+  });
+});
+
+// A name used to be set once, at connect time, and the only route to a different
+// one was disconnect + reconnect — which deletes every snapshot, recommendation,
+// ROI figure and audit row the cluster had (#96).
+//
+// Its own account, and not because of tenancy: connecting spends the per-user
+// dial budget (10 a minute), and two more connects on the shared `owner` push the
+// scenarios below it over the line. A separate session is the cheap way to keep
+// this describe from being a 429 somewhere else.
+describe("cluster rename", () => {
+  let renamer: Session;
+  let renameId: string;
+
+  it("connects two clusters, one to rename and one to collide with", async () => {
+    renamer = await signUp("renamer");
+    createdEmails.push(renamer.email);
+    createdOrgIds.push(await giveRoom(renamer));
+    for (const name of ["Int Taken", "Int Rename"]) {
+      const res = await api("/clusters", renamer, {
+        method: "POST",
+        body: JSON.stringify({ name, connectionString: MONGO_URL }),
+      });
+      expect(res.status).toBe(200);
+      const id = asString(asRecord(await res.json()).id);
+      createdClusterIds.push(id);
+      if (name === "Int Rename") renameId = id;
+    }
+  });
+
+  it("renames it, and the list says so", async () => {
+    const res = await api(`/clusters/${renameId}`, renamer, {
+      method: "PATCH",
+      body: JSON.stringify({ name: "Int Renamed" }),
+    });
+    expect(res.status).toBe(200);
+    expect(asRecord(await res.json()).name).toBe("Int Renamed");
+
+    const list: unknown = await (await api("/clusters", renamer)).json();
+    const names = Array.isArray(list) ? list.map((entry) => asRecord(entry).name) : [];
+    expect(names).toContain("Int Renamed");
+    expect(names).not.toContain("Int Rename");
+  });
+
+  // The history is the whole reason this endpoint exists rather than "disconnect
+  // and connect again", so the rename has to leave it where it was.
+  it("keeps everything collected about the cluster", async () => {
+    const collected = await collectCluster(renameId);
+    expect(collected).toBeGreaterThan(0);
+    const before = await db
+      .select({ id: indexSnapshots.id })
+      .from(indexSnapshots)
+      .where(eq(indexSnapshots.clusterId, renameId));
+    const res = await api(`/clusters/${renameId}`, renamer, {
+      method: "PATCH",
+      body: JSON.stringify({ name: "Int Renamed Twice" }),
+    });
+    expect(res.status).toBe(200);
+    const after = await db
+      .select({ id: indexSnapshots.id })
+      .from(indexSnapshots)
+      .where(eq(indexSnapshots.clusterId, renameId));
+    expect(after).toHaveLength(before.length);
+  });
+
+  // Two clusters called "staging" are one indistinguishable pair in the sidebar
+  // and, worse, in an alert subject line.
+  it("refuses a name the org is already using, on rename and on connect", async () => {
+    const collision = await api(`/clusters/${renameId}`, renamer, {
+      method: "PATCH",
+      body: JSON.stringify({ name: "Int Taken" }),
+    });
+    expect(collision.status).toBe(400);
+    expect(asString(asRecord(await collision.json()).message)).toContain("already has a cluster");
+
+    // Same rule at the other door, and refused BEFORE anything is dialed.
+    const connect = await api("/clusters", renamer, {
+      method: "POST",
+      body: JSON.stringify({ name: "Int Taken", connectionString: MONGO_URL }),
+    });
+    expect(connect.status).toBe(400);
+  });
+
+  it("refuses a name that is only whitespace", async () => {
+    const blank = await api(`/clusters/${renameId}`, renamer, {
+      method: "PATCH",
+      body: JSON.stringify({ name: "   " }),
+    });
+    expect(blank.status).toBe(400);
+  });
+
+  // Another tenant's cluster is not found rather than forbidden: whether an id
+  // exists is not this caller's to learn.
+  it("does not exist for another organization", async () => {
+    const outsider = await signUp("outsider");
+    createdEmails.push(outsider.email);
+    createdOrgIds.push(asString(asRecord(await (await api("/org", outsider)).json()).id));
+    const res = await api(`/clusters/${renameId}`, outsider, {
+      method: "PATCH",
+      body: JSON.stringify({ name: "Mine Now" }),
+    });
+    expect(res.status).toBe(404);
+    const list: unknown = await (await api("/clusters", renamer)).json();
+    const names = Array.isArray(list) ? list.map((entry) => asRecord(entry).name) : [];
+    expect(names).toContain("Int Renamed Twice");
+    expect(names).not.toContain("Mine Now");
   });
 });
 
@@ -364,6 +525,10 @@ describe("tenancy, invites and roles", () => {
       method: "PATCH",
       body: JSON.stringify({ readOnly: true }),
     });
+    const rename = await api(`/clusters/${clusterId}`, member, {
+      method: "PATCH",
+      body: JSON.stringify({ name: "Theirs" }),
+    });
     const create = await api("/clusters", member, {
       method: "POST",
       body: JSON.stringify({ name: "nope", connectionString: MONGO_URL }),
@@ -386,8 +551,8 @@ describe("tenancy, invites and roles", () => {
         changeWindowEndHour: null,
       }),
     });
-    expect([mode.status, create.status, invite.status, policy.status]).toEqual([
-      403, 403, 403, 403,
+    expect([mode.status, rename.status, create.status, invite.status, policy.status]).toEqual([
+      403, 403, 403, 403, 403,
     ]);
     const read = await api(`/clusters/${clusterId}/policy`, member);
     expect(read.status).toBe(200);
@@ -642,6 +807,125 @@ describe("session cookie cache", () => {
   });
 });
 
+describe("fresh session tier", () => {
+  // The three acts that change what the engine may do to a customer's database
+  // — going live, rotating credentials, disconnecting — refuse an owner session
+  // signed in more than SESSION_FRESH_AGE_SECONDS ago (#52). The session is
+  // aged here behind the browser's back, the way time does it, and the cache
+  // cookie is shed because it still carries the young createdAt it was signed
+  // with — a browser at that point re-arms from the aged row on the next reply.
+  it("refuses the three sensitive acts on an old session, until a new sign-in", async () => {
+    const stale = await signUp("stale-owner");
+    createdEmails.push(stale.email);
+    const orgId = asString(asRecord(await (await api("/org", stale)).json()).id);
+    createdOrgIds.push(orgId);
+
+    const connected = await api("/clusters", stale, {
+      method: "POST",
+      body: JSON.stringify({ name: "Stale Cluster", connectionString: MONGO_URL }),
+    });
+    expect(connected.status).toBe(200);
+    const staleClusterId = asString(asRecord(await connected.json()).id);
+    createdClusterIds.push(staleClusterId);
+
+    const [account] = await db
+      .select({ id: user.id })
+      .from(user)
+      .where(eq(user.email, stale.email));
+    await db
+      .update(session)
+      .set({ createdAt: sql`now() - interval '2 hours'` })
+      .where(eq(session.userId, asString(account?.id)));
+    stale.cookie = stale.cookie
+      .split("; ")
+      .filter((pair) => !pair.includes("session_data"))
+      .join("; ");
+
+    // The refusal is its own code, not a bare 403: the dashboard tells an
+    // owner who can fix it (sign in again) apart from a member who cannot.
+    const live = await api(`/clusters/${staleClusterId}/mode`, stale, {
+      method: "PATCH",
+      body: JSON.stringify({ readOnly: false }),
+    });
+    const rotated = await api(`/clusters/${staleClusterId}/connection`, stale, {
+      method: "PATCH",
+      body: JSON.stringify({ connectionString: MONGO_URL }),
+    });
+    const deleted = await api(`/clusters/${staleClusterId}`, stale, { method: "DELETE" });
+    expect([live.status, rotated.status, deleted.status]).toEqual([403, 403, 403]);
+    expect(asRecord(await live.json()).code).toBe("SESSION_NOT_FRESH");
+
+    // De-escalation and the benign mutations ride the ordinary owner check —
+    // an emergency stop that waits on a password is not an emergency stop.
+    const readOnly = await api(`/clusters/${staleClusterId}/mode`, stale, {
+      method: "PATCH",
+      body: JSON.stringify({ readOnly: true }),
+    });
+    const renamed = await api(`/clusters/${staleClusterId}`, stale, {
+      method: "PATCH",
+      body: JSON.stringify({ name: "Still Reachable" }),
+    });
+    expect([readOnly.status, renamed.status]).toEqual([200, 200]);
+
+    // Signing in again mints a fresh session row — the api form of the
+    // dashboard's re-auth dialog — and the same act goes through.
+    const again = await fetch(`${API_BASE}/api/auth/sign-in/email`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: WEB_ORIGIN },
+      body: JSON.stringify({ email: stale.email, password: "password12345" }),
+    });
+    expect(again.status).toBe(200);
+    const fresh = sessionFrom(stale.email, again);
+    const liveNow = await api(`/clusters/${staleClusterId}/mode`, fresh, {
+      method: "PATCH",
+      body: JSON.stringify({ readOnly: false }),
+    });
+    expect(liveNow.status).toBe(200);
+  });
+});
+
+describe("change email", () => {
+  // The immediate flow (#83): this instance does not require verification and
+  // the account is unverified, so the address flips in the request itself —
+  // and the old address stops signing in at the same moment the new one
+  // starts. The two-step verified chain is better-auth's own and needs a
+  // mailbox; what is proven here is the half the product decided.
+  it("moves sign-in to the new address, and the old one stops working", async () => {
+    const mover = await signUpWithoutOrg("email-mover");
+    createdEmails.push(mover.email);
+    const oldEmail = mover.email;
+    const newEmail = `moved-${Date.now()}-${Math.floor(Math.random() * 1e6)}@int.test`;
+    createdEmails.push(newEmail);
+
+    const changed = await authPost("/change-email", mover, { newEmail });
+    expect(changed.status).toBe(200);
+
+    const [row] = await db.select({ email: user.email }).from(user).where(eq(user.email, newEmail));
+    expect(row?.email).toBe(newEmail);
+
+    const oldSignIn = await fetch(`${API_BASE}/api/auth/sign-in/email`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: WEB_ORIGIN },
+      body: JSON.stringify({ email: oldEmail, password: "password12345" }),
+    });
+    expect(oldSignIn.status).toBe(401);
+
+    const newSignIn = await fetch(`${API_BASE}/api/auth/sign-in/email`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: WEB_ORIGIN },
+      body: JSON.stringify({ email: newEmail, password: "password12345" }),
+    });
+    expect(newSignIn.status).toBe(200);
+  });
+
+  it("refuses the address the account already has", async () => {
+    const same = await signUpWithoutOrg("email-same");
+    createdEmails.push(same.email);
+    const refused = await authPost("/change-email", same, { newEmail: same.email });
+    expect(refused.status).toBe(400);
+  });
+});
+
 describe("SSRF guard and sign-up gate (second api with production defaults)", () => {
   // The main instance runs with ALLOW_PRIVATE_CLUSTER_TARGETS=true and
   // SIGNUP_MODE=open so the rest of the suite can use a localhost mongo. This
@@ -712,6 +996,20 @@ describe("SSRF guard and sign-up gate (second api with production defaults)", ()
 
   afterAll(async () => {
     await stopApi(guarded);
+  });
+
+  // Changing an address must not be the way around SIGNUP_MODE (#83): the
+  // same gate that would refuse the sign-up refuses the change, with the same
+  // reason, before any verification token exists.
+  it("refuses an email change to an address the signup gate would refuse", async () => {
+    const refused = await authPost(
+      "/change-email",
+      guardedOwner,
+      { newEmail: `uninvited-${Date.now()}@int.test` },
+      BASE,
+    );
+    expect(refused.status).toBe(403);
+    expect(JSON.stringify(await refused.json())).toContain("invite-only");
   });
 
   it("refuses to dial private addresses, naming the escape hatch", async () => {
@@ -972,6 +1270,16 @@ describe("org management", () => {
     const orgId = asString(asRecord(await (await api("/org", upgrader)).json()).id);
     createdOrgIds.push(orgId);
 
+    // Whatever the deployment's DEFAULT_ORG_PLAN put here, rather than a
+    // literal. Pinning FREE would pass for the wrong reason on an api booted
+    // without the variable — which is the whole of #132 — and fail on one
+    // booted with it.
+    const [before] = await db
+      .select({ plan: organizations.plan })
+      .from(organizations)
+      .where(eq(organizations.id, orgId));
+    expect(before?.plan).not.toBeUndefined();
+
     const res = await authPost("/organization/update", upgrader, {
       data: { name: "Still Free", plan: "SCALE" },
     });
@@ -982,7 +1290,7 @@ describe("org management", () => {
       .from(organizations)
       .where(eq(organizations.id, orgId));
     expect(org?.name).toBe("Still Free");
-    expect(org?.plan).toBe("FREE");
+    expect(org?.plan).toBe(before?.plan);
   });
 
   it("guards the last owner and round-trips a role change", async () => {
@@ -1117,6 +1425,111 @@ describe("change window gates elective builds", () => {
     const specs = await mongo.db("inttest").collection("orders").indexes();
     expect(specs.some((spec) => spec.name === "winidx_1")).toBe(true);
     await mongo.db("inttest").collection("orders").dropIndex("winidx_1");
+  });
+
+  // The claim the whole re-order feature rests on, made against a real mongod
+  // rather than argued: a unique index's guarantee is a property of its key SET,
+  // not of its key directions, so swapping the directions preserves it — and
+  // building the replacement BEFORE retiring the original means there is no
+  // instant when nothing is enforcing it.
+  //
+  // Asserted at all three moments, because only the last one is the interesting
+  // claim and only the first two make it safe: before the swap, while both
+  // exist, and after the original is gone.
+  it("re-orders a unique index's keys without ever losing the constraint", async () => {
+    process.env.MASTER_KEY =
+      process.env.MASTER_KEY ?? Buffer.from("0123456789abcdef0123456789abcdef").toString("base64");
+    await setWindow(null, null);
+    const coll = mongo.db("inttest").collection("reorder");
+    await coll.deleteMany({});
+    await coll.insertMany([
+      { a: 1, b: 1 },
+      { a: 1, b: 2 },
+    ]);
+    await coll.createIndex({ a: 1, b: 1 }, { name: "a_1_b_1", unique: true });
+
+    const duplicateRefused = async (): Promise<boolean> => {
+      try {
+        await coll.insertOne({ a: 1, b: 1 });
+        await coll.deleteOne({ a: 1, b: 1, _id: { $exists: true } });
+        return false;
+      } catch {
+        return true;
+      }
+    };
+    expect(await duplicateRefused()).toBe(true);
+
+    const [rec] = await db
+      .insert(recommendations)
+      .values({
+        clusterId,
+        type: "REORDER",
+        state: "APPROVED",
+        database: "inttest",
+        collection: "reorder",
+        indexName: "a_1_b_-1",
+        rationale: "reorder integration test",
+        estimatedBytesSaved: 0,
+        targetSpec: {
+          keys: ["a", "b:-1"],
+          retire: ["a_1_b_1"],
+          options: { unique: true, sparse: false, collation: null },
+        },
+      })
+      .returning();
+    if (rec === undefined) throw new Error("failed to insert recommendation");
+
+    // Build first. The options travel with the row, so the replacement arrives
+    // unique — an index rebuilt without it would be the constraint removed.
+    expect(await applyCreatesForCluster(clusterId)).toBe(1);
+    const built = await coll.indexes();
+    const replacement = built.find((spec) => spec.name === "a_1_b_-1");
+    expect(replacement?.unique).toBe(true);
+    expect(replacement?.key).toEqual({ a: 1, b: -1 });
+    // Both present, and the rule still holds.
+    expect(await duplicateRefused()).toBe(true);
+
+    // Graduate the build: the watch has elapsed and writes are stable, so
+    // finalize proposes retiring the original — naming what replaced it, which
+    // is the only thing that lets a protected index be dropped at all.
+    await db
+      .update(recommendations)
+      .set({ builtAt: new Date(Date.now() - 60 * 86_400_000) })
+      .where(eq(recommendations.id, rec.id));
+    await finalizeCluster(clusterId);
+    const [retirement] = await db
+      .select()
+      .from(recommendations)
+      .where(
+        and(
+          eq(recommendations.clusterId, clusterId),
+          eq(recommendations.indexName, "a_1_b_1"),
+          eq(recommendations.state, "PROPOSED"),
+        ),
+      );
+    expect(retirement?.type).toBe("DROP_REDUNDANT");
+    expect(retirement?.targetSpec?.supersededBy).toBe("a_1_b_-1");
+    expect(retirement?.rationale).toContain("unique constraint");
+
+    // And the drop itself, through the ordinary gates. Hidden first, observed,
+    // then dropped — a protected index gets no shortcut for being replaceable.
+    await db
+      .update(recommendations)
+      .set({ state: "HIDDEN", hiddenAt: new Date(Date.now() - 60 * 86_400_000), observeDays: 1 })
+      .where(eq(recommendations.id, retirement?.id ?? ""));
+    await mongo
+      .db("inttest")
+      .command({ collMod: "reorder", index: { name: "a_1_b_1", hidden: true } });
+    await finalizeCluster(clusterId);
+
+    const after = await coll.indexes();
+    expect(after.some((spec) => spec.name === "a_1_b_1")).toBe(false);
+    expect(after.some((spec) => spec.name === "a_1_b_-1")).toBe(true);
+    // The point of all of it: with the original gone, the survivor still
+    // refuses the duplicate.
+    expect(await duplicateRefused()).toBe(true);
+
+    await coll.drop();
   });
 });
 
@@ -1957,6 +2370,139 @@ describe("engine-chosen change window", () => {
   });
 });
 
+// The other half of the audit story (#53). `actions` records what the engine did
+// to an index; nothing recorded who signed in, who became an owner, or who took a
+// cluster's credentials — and the mapping from a better-auth route to a row is
+// read off its hook context, which only a real request produces. Late in the file
+// on purpose: the scenarios above have already invited, promoted, demoted,
+// removed, connected, rotated and flipped a mode, so this asserts the trail those
+// left rather than performing them a second time.
+describe("security trail", () => {
+  async function eventsFor(orgId: string) {
+    return (
+      await db
+        .select()
+        .from(securityEvents)
+        .where(eq(securityEvents.orgId, orgId))
+        .orderBy(desc(securityEvents.createdAt))
+    ).map((row) => ({ ...row }));
+  }
+
+  it("records signing in, failing to, and signing out", async () => {
+    const email = `trail-${Date.now()}@int.test`;
+    const signUpRes = await fetch(`${API_BASE}/api/auth/sign-up/email`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: WEB_ORIGIN },
+      body: JSON.stringify({ email, password: "password12345", name: "trail" }),
+    });
+    expect(signUpRes.status).toBe(200);
+    createdEmails.push(email);
+
+    const signIn = async (password: string) =>
+      fetch(`${API_BASE}/api/auth/sign-in/email`, {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: WEB_ORIGIN },
+        body: JSON.stringify({ email, password }),
+      });
+    const good = await signIn("password12345");
+    expect(good.status).toBe(200);
+    const bad = await signIn("not-the-password");
+    expect(bad.status).toBe(401);
+    const out = await fetch(`${API_BASE}/api/auth/sign-out`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: WEB_ORIGIN,
+        cookie: sessionFrom(email, good).cookie,
+      },
+      body: "{}",
+    });
+    expect(out.status).toBe(200);
+
+    const rows = (
+      await db.select().from(securityEvents).where(eq(securityEvents.actorEmail, email))
+    ).map((row) => ({ ...row }));
+    const events = rows.map((row) => row.event);
+    expect(events).toContain("ACCOUNT_CREATED");
+    expect(events).toContain("SIGN_IN");
+    expect(events).toContain("SIGN_OUT");
+
+    // The failed one is credited to nobody — whoever it was did not prove they
+    // were this account — so it is found by target instead.
+    const failed = (
+      await db.select().from(securityEvents).where(eq(securityEvents.target, email))
+    ).map((row) => ({ ...row }));
+    expect(failed.map((row) => row.event)).toContain("SIGN_IN_FAILED");
+    const attempt = failed.find((row) => row.event === "SIGN_IN_FAILED");
+    expect(attempt?.actorUserId).toBeNull();
+    expect(attempt?.actorEmail).toBeNull();
+    // Enough to answer "which client, and was it the same one" without a session
+    // being resolvable at all.
+    expect(attempt?.userAgent === null || typeof attempt?.userAgent === "string").toBe(true);
+  });
+
+  it("records who was invited, promoted and removed, and by whom", async () => {
+    const rows = await eventsFor(ownerOrgId);
+    const events = rows.map((row) => row.event);
+    expect(events).toContain("INVITE_CREATED");
+    expect(events).toContain("MEMBER_ROLE_CHANGED");
+    expect(events).toContain("MEMBER_REMOVED");
+
+    // The point of the table: every one of those names the account that did it.
+    for (const row of rows.filter((entry) => entry.event !== "SIGN_IN_FAILED")) {
+      expect(row.actorUserId).not.toBeNull();
+      expect(row.actorEmail).not.toBeNull();
+    }
+    const promotion = rows.find((row) => row.event === "MEMBER_ROLE_CHANGED");
+    expect(promotion?.actorEmail).toBe(owner.email);
+    expect(promotion?.target).not.toBeNull();
+    expect(promotion?.metadata).toMatchObject({ role: expect.any(String) });
+    const invite = rows.find((row) => row.event === "INVITE_CREATED");
+    expect(invite?.metadata).toMatchObject({ role: expect.any(String) });
+  });
+
+  it("records what was done to a cluster's access", async () => {
+    const rows = await eventsFor(ownerOrgId);
+    const events = rows.map((row) => row.event);
+    expect(events).toContain("CLUSTER_CONNECTED");
+    expect(events).toContain("CLUSTER_MODE_CHANGED");
+    expect(events).toContain("CLUSTER_CREDENTIALS_ROTATED");
+
+    const flip = rows.find((row) => row.event === "CLUSTER_MODE_CHANGED");
+    expect(flip?.clusterId).toBe(clusterId);
+    expect(flip?.metadata).toMatchObject({ readOnly: expect.any(Boolean) });
+    expect(flip?.actorEmail).toBe(owner.email);
+    // The api's own handlers read Fastify's resolved address, which exists whether
+    // or not a proxy is trusted; the better-auth half reads a forwarded header and
+    // records nothing without TRUST_PROXY, which this suite does not set. Two
+    // sources, and the difference is deliberate — see audit/http-actor.ts.
+    expect(flip?.ipAddress).not.toBeNull();
+
+    // Disconnecting deletes the cluster, so the row that records it cannot point
+    // at one — it carries the id in its metadata instead, and it is the only thing
+    // left about that cluster afterwards.
+    const gone = rows.find((row) => row.event === "CLUSTER_DISCONNECTED");
+    if (gone !== undefined) {
+      expect(gone.clusterId).toBeNull();
+      expect(gone.metadata).toMatchObject({ clusterId: expect.any(String) });
+    }
+  });
+
+  // An audit table is read by people who are not meant to be able to use what it
+  // records. A connection string or a session token in `metadata` would hand them
+  // exactly what the rest of this api goes to some trouble to seal.
+  it("copies no credential into the trail", async () => {
+    const rows = await db.select().from(securityEvents);
+    const serialised = JSON.stringify(rows);
+    expect(serialised).not.toContain("mongodb://");
+    expect(serialised).not.toContain("mongodb+srv://");
+    expect(serialised).not.toContain("password12345");
+    for (const row of rows) {
+      expect(JSON.stringify(row.metadata ?? {})).not.toMatch(/token|secret|connectionString/i);
+    }
+  });
+});
+
 // Its own api instance at the production default. The shared one raises the
 // budget so the suite can sign up an account per scenario, which would make
 // this pass or fail on the wrong number — the limit under test is the one a
@@ -1981,6 +2527,58 @@ describe("rate limiting", () => {
       expect(limited).toBe(true);
     } finally {
       await stopApi(server);
+    }
+  });
+
+  // The half of #54 that arithmetic alone does not cover: the counters used to
+  // live in each process's memory, so `api.replicas: 2` meant twice the
+  // configured limit and which pod a request landed on decided which bucket it
+  // spent. Two api processes here ARE two replicas — same database, nothing
+  // shared but that — and the second must refuse on a budget the first spent.
+  //
+  // NODE_ENV=production because better-auth enables its own limiter for
+  // production only (the api image sets it), and ALLOW_INSECURE_AUTH_URL because
+  // this one answers over http. AUTH_RATE_LIMIT_MAX is deliberately above 1 so
+  // the first request to the SECOND process passes that process's own Fastify
+  // budget: a 429 from it can then only have come from the shared count.
+  it("spends one budget across two replicas, not one each", async () => {
+    const shared = {
+      NODE_ENV: "production",
+      ALLOW_INSECURE_AUTH_URL: "true",
+      AUTH_RATE_LIMIT_MAX: "3",
+    };
+    const [portA, portB] = [API_PORT + 3, API_PORT + 4];
+    const replicaA = await startApi(shared, portA);
+    const replicaB = await startApi(shared, portB);
+    const attempt = (port: number) =>
+      fetch(`http://localhost:${port}/api/auth/sign-in/email`, {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: WEB_ORIGIN },
+        body: JSON.stringify({ email: "replicas@int.test", password: "wrongwrong123" }),
+      });
+    try {
+      // Spend the budget on A. Bounded rather than while(true): a run that never
+      // throttles has to fail the assertion below, not hang.
+      let spentOnA = false;
+      for (let i = 0; i < 10 && !spentOnA; i += 1) {
+        spentOnA = (await attempt(portA)).status === 429;
+      }
+      expect(spentOnA).toBe(true);
+
+      // B has served nothing and its own memory holds no count for this address.
+      const onB = await attempt(portB);
+      expect(onB.status).toBe(429);
+
+      // And the count is where it can be shared from, keyed by path.
+      const rows = await db.execute<{ key: string; count: number }>(
+        sql`select key, count from rate_limit where key like '%|/sign-in/email'`,
+      );
+      expect(rows.rows.length).toBeGreaterThan(0);
+    } finally {
+      await stopApi(replicaA);
+      await stopApi(replicaB);
+      // Otherwise the next scenario that signs in inherits a spent budget.
+      await db.execute(sql`delete from rate_limit`);
     }
   });
 });
@@ -2363,13 +2961,19 @@ describe("retention follows the plan", () => {
       },
     ]);
 
+    // The ceiling is read from the validated environment, which this process
+    // parsed at startup (vitest.integration.setup.ts) — so setting it means
+    // saying when the process read it, and putting it back means saying so
+    // again.
     const previous = process.env.RETENTION_DAYS;
     process.env.RETENTION_DAYS = "7";
+    loadEnv("api");
     try {
       await pruneOldSamples();
     } finally {
       if (previous === undefined) delete process.env.RETENTION_DAYS;
       else process.env.RETENTION_DAYS = previous;
+      loadEnv("api");
     }
     // SCALE would have kept it for a year; the operator's ceiling wins.
     expect(
@@ -2969,5 +3573,302 @@ describe("the control plane's own indexes", () => {
     `);
     const unindexed = rows.rows.map((row) => `${String(row.child)}.${String(row.column)}`);
     expect(unindexed).toEqual([]);
+  });
+});
+
+// The owner second-factor posture (#55) is an env flag, so it gets its own api
+// instance — the main one stays open so every other scenario works without
+// enrolling an authenticator. The suite plays the authenticator app itself
+// (integration/totp.ts): the code paths exercised are the ones a phone drives.
+describe("owner two-factor requirement (second api with REQUIRE_OWNER_2FA)", () => {
+  const PORT = 3097;
+  const BASE = `http://localhost:${PORT}`;
+  let gated: ChildProcess;
+  let gatedOwner: Session;
+
+  async function gatedSignUp(prefix: string): Promise<Session> {
+    const email = `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1e6)}@int.test`;
+    const res = await fetch(`${BASE}/api/auth/sign-up/email`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: WEB_ORIGIN },
+      body: JSON.stringify({ email, password: "password12345", name: prefix }),
+    });
+    expect(res.status).toBe(200);
+    createdEmails.push(email);
+    return sessionFrom(email, res);
+  }
+
+  beforeAll(async () => {
+    // SMTP is cleared deliberately, and it is load-bearing twice over. It puts
+    // this instance in the state a fresh self-hosted install is in, which is
+    // what the emailed-code refusal below is about — and it stops the suite
+    // handing real messages to whatever SMTP account the developer's .env
+    // happens to name, which is what a send-otp test does otherwise.
+    gated = await startApi(
+      { REQUIRE_OWNER_2FA: "true", SMTP_HOST: "", SMTP_USER: "", SMTP_PASS: "" },
+      PORT,
+    );
+    gatedOwner = await gatedSignUp("twofactor-owner");
+    createdOrgIds.push(await createOrg(gatedOwner, "Gated Org", BASE));
+  });
+
+  afterAll(async () => {
+    await stopApi(gated);
+  });
+
+  it("refuses owner acts until a code verifies, then stands aside", async () => {
+    // The api's own mutations answer with the code the dashboard keys off.
+    const before = await api(
+      "/clusters",
+      gatedOwner,
+      { method: "POST", body: JSON.stringify({ name: "Gated", connectionString: MONGO_URL }) },
+      `${BASE}/api`,
+    );
+    expect(before.status).toBe(403);
+    expect(asRecord(await before.json()).code).toBe("TWO_FACTOR_REQUIRED");
+
+    // The org-membership half rides better-auth's routes, not the api's, and
+    // gets the same refusal from the hooks.before gate.
+    const inviteBefore = await authPost(
+      "/organization/invite-member",
+      gatedOwner,
+      { email: `nobody-${Date.now()}@int.test`, role: "member" },
+      BASE,
+    );
+    expect(inviteBefore.status).toBe(403);
+    expect(asRecord(await inviteBefore.json()).code).toBe("TWO_FACTOR_REQUIRED");
+
+    // Enrolment is never gated — it is the way out. Nothing is on until the
+    // first code verifies.
+    const enable = await authPost(
+      "/two-factor/enable",
+      gatedOwner,
+      { password: "password12345" },
+      BASE,
+    );
+    expect(enable.status).toBe(200);
+    const secret = secretFromTotpUri(asString(asRecord(await enable.json()).totpURI));
+    const stillGated = await api(
+      "/clusters",
+      gatedOwner,
+      { method: "POST", body: JSON.stringify({ name: "Gated", connectionString: MONGO_URL }) },
+      `${BASE}/api`,
+    );
+    expect(stillGated.status).toBe(403);
+
+    const verify = await authPost(
+      "/two-factor/verify-totp",
+      gatedOwner,
+      { code: totpCode(secret) },
+      BASE,
+    );
+    expect(verify.status).toBe(200);
+
+    // The verify response expired the cookie cache (auth.config.ts hooks.after),
+    // so this read comes from the row that now says enabled — without that, the
+    // cached false would keep refusing for the cache's maxAge.
+    const after = await api(
+      "/clusters",
+      gatedOwner,
+      { method: "POST", body: JSON.stringify({ name: "Gated", connectionString: MONGO_URL }) },
+      `${BASE}/api`,
+    );
+    expect(after.status).toBe(200);
+    createdClusterIds.push(asString(asRecord(await after.json()).id));
+
+    const inviteAfter = await authPost(
+      "/organization/invite-member",
+      gatedOwner,
+      { email: `nobody-${Date.now()}@int.test`, role: "member" },
+      BASE,
+    );
+    expect(inviteAfter.status).toBe(200);
+  });
+
+  // The emailed code is offered only where mail can actually be sent. This
+  // suite runs without SMTP — the same state a fresh self-hosted install is in
+  // — so the refusal is the behaviour under test, and it has to be a refusal
+  // rather than a 200 with nothing delivered.
+  it("refuses to mail a sign-in code when the deployment has no SMTP", async () => {
+    const res = await authPost("/two-factor/send-otp", gatedOwner, {}, BASE);
+    expect(res.status).toBe(400);
+    const body = JSON.stringify(await res.json());
+    expect(body).toContain("EMAIL_NOT_CONFIGURED");
+    // And it says what to reach for instead, since the fix is the operator's.
+    expect(body).toContain("authenticator app");
+  });
+
+  it("exempts an account with no password to pair a code with", async () => {
+    const oauthish = await gatedSignUp("twofactor-github");
+    createdOrgIds.push(await createOrg(oauthish, "OAuth Org", BASE));
+
+    // Turn the credential account into what a GitHub sign-in leaves behind.
+    // The session survives — provider is a fact about the account row, and the
+    // gate reads that row live rather than trusting the cookie.
+    const [row] = await db.select({ id: user.id }).from(user).where(eq(user.email, oauthish.email));
+    await db
+      .update(account)
+      .set({ providerId: "github" })
+      .where(eq(account.userId, asString(row?.id)));
+
+    const res = await api(
+      "/clusters",
+      oauthish,
+      {
+        method: "POST",
+        body: JSON.stringify({ name: "OAuth Gated", connectionString: MONGO_URL }),
+      },
+      `${BASE}/api`,
+    );
+    expect(res.status).toBe(200);
+    createdClusterIds.push(asString(asRecord(await res.json()).id));
+  });
+
+  it("asks for the code at sign-in once it is on, and a backup code works once", async () => {
+    const enrolled = await gatedSignUp("twofactor-signin");
+    const enable = await authPost(
+      "/two-factor/enable",
+      enrolled,
+      { password: "password12345" },
+      BASE,
+    );
+    const enabled = asRecord(await enable.json());
+    const secret = secretFromTotpUri(asString(enabled.totpURI));
+    const codes = enabled.backupCodes as string[];
+    await authPost("/two-factor/verify-totp", enrolled, { code: totpCode(secret) }, BASE);
+
+    // The password alone no longer signs in: better-auth answers a redirect
+    // marker and a short-lived 2FA cookie instead of a session.
+    const half = await fetch(`${BASE}/api/auth/sign-in/email`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: WEB_ORIGIN },
+      body: JSON.stringify({ email: enrolled.email, password: "password12345" }),
+    });
+    expect(half.status).toBe(200);
+    expect(asRecord(await half.json()).twoFactorRedirect).toBe(true);
+    const pending = sessionFrom(enrolled.email, half);
+
+    // No session yet: the data routes refuse the half-signed-in cookie.
+    const refused = await api("/orgs", pending, undefined, `${BASE}/api`);
+    expect(refused.status).toBe(401);
+
+    const backup = await authPost(
+      "/two-factor/verify-backup-code",
+      pending,
+      { code: codes[0] },
+      BASE,
+    );
+    expect(backup.status).toBe(200);
+    const readable = await api("/orgs", pending, undefined, `${BASE}/api`);
+    expect(readable.status).toBe(200);
+
+    // Once. A backup code that keeps working is a second password.
+    const again = await fetch(`${BASE}/api/auth/sign-in/email`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: WEB_ORIGIN },
+      body: JSON.stringify({ email: enrolled.email, password: "password12345" }),
+    });
+    const pendingAgain = sessionFrom(enrolled.email, again);
+    const reused = await authPost(
+      "/two-factor/verify-backup-code",
+      pendingAgain,
+      { code: codes[0] },
+      BASE,
+    );
+    expect(reused.status).not.toBe(200);
+  });
+});
+
+// The bounds #64 measured its way to. Both caps are asserted against real
+// rows through the real handler, because the whole point of the issue was that
+// nobody had measured what the reads actually ship.
+describe("bounded per-cluster reads", () => {
+  it("sends the highest-scoring recommendations and the true total", async () => {
+    const boundedId = await bareCluster("Bounded Recs");
+    const OVERSHOOT = 20;
+    const rows = [];
+    for (let i = 0; i < RECOMMENDATIONS_CAP + OVERSHOOT; i++) {
+      rows.push({
+        clusterId: boundedId,
+        type: "DROP_UNUSED" as const,
+        state: "PROPOSED" as const,
+        database: "app",
+        collection: `coll_${i % 10}`,
+        indexName: `idx_${i}_1`,
+        rationale: "unused across the trust window",
+        // The overshoot scores zero, so "kept the top" is checkable rather
+        // than merely "kept some".
+        score: i < OVERSHOOT ? 0 : 50,
+        estimatedBytesSaved: 1_000,
+      });
+    }
+    for (let i = 0; i < rows.length; i += 500) {
+      await db.insert(recommendations).values(rows.slice(i, i + 500));
+    }
+
+    const body = asRecord(
+      await (await api(`/clusters/${boundedId}/recommendations`, owner)).json(),
+    );
+    const sent = body.recommendations as { score: number }[];
+    expect(body.total).toBe(RECOMMENDATIONS_CAP + OVERSHOOT);
+    expect(sent).toHaveLength(RECOMMENDATIONS_CAP);
+    // The cut is by score, not by whatever order postgres felt like.
+    expect(sent.every((rec) => rec.score === 50)).toBe(true);
+  });
+
+  it("windows the latency series in time and caps the collections it charts", async () => {
+    const seriesId = await bareCluster("Bounded Series");
+    const now = Date.now();
+    const fixtures = [];
+    // Enough collections to exceed the cap, with the first ones carrying more
+    // readings so the top-N is decided by evidence rather than by luck.
+    for (let c = 0; c < LATENCY_SERIES_MAX_COLLECTIONS + 3; c++) {
+      const looks = c < LATENCY_SERIES_MAX_COLLECTIONS ? 5 : 3;
+      for (let t = 0; t < looks; t++) {
+        const at = new Date(now - (looks - t) * 3_600_000);
+        fixtures.push({
+          clusterId: seriesId,
+          database: "app",
+          collection: `in_window_${c}`,
+          readOps: 100 * (t + 1),
+          readLatencyMicros: 1_000 * (t + 1),
+          writeOps: 50 * (t + 1),
+          writeLatencyMicros: 500 * (t + 1),
+          capturedAt: at,
+          lastSeenAt: at,
+        });
+      }
+    }
+    // Inside the plan's 90-day history, outside the series' 30-day window —
+    // the case the new floor exists for.
+    for (let t = 0; t < 5; t++) {
+      const at = new Date(now - (LATENCY_SERIES_WINDOW_DAYS + 30) * 86_400_000 + t * 3_600_000);
+      fixtures.push({
+        clusterId: seriesId,
+        database: "app",
+        collection: "ancient",
+        readOps: 100 * (t + 1),
+        readLatencyMicros: 1_000 * (t + 1),
+        writeOps: 50 * (t + 1),
+        writeLatencyMicros: 500 * (t + 1),
+        capturedAt: at,
+        lastSeenAt: at,
+      });
+    }
+    await insertLatency(db, fixtures);
+
+    const body = asRecord(await (await api(`/clusters/${seriesId}/latency-series`, owner)).json());
+    const collections = body.collections as { collection: string }[];
+    // The denominator counts what had readings IN the window, so the panel can
+    // say how many it is not drawing.
+    expect(body.totalCollections).toBe(LATENCY_SERIES_MAX_COLLECTIONS + 3);
+    expect(collections).toHaveLength(LATENCY_SERIES_MAX_COLLECTIONS);
+    expect(collections.map((entry) => entry.collection)).not.toContain("ancient");
+
+    // The long-term view is still whole: the before/after table reads the same
+    // rows without the series' tighter window.
+    const summary = asRecord(await (await api(`/clusters/${seriesId}/latency`, owner)).json());
+    const summarized = summary.collections as { collection: string }[];
+    expect(summarized.map((entry) => entry.collection)).toContain("ancient");
   });
 });

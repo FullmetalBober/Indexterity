@@ -1,4 +1,48 @@
-import { expect, type Page } from "@playwright/test";
+import { createHmac } from "node:crypto";
+import { test as base, expect, type Page } from "@playwright/test";
+
+// `test` for this suite, not @playwright/test's — every spec imports it from
+// here so that one fixture applies to all of them.
+//
+// The fixture is the Content-Security-Policy's only honest test. The header is
+// a nonce the SSR scripts have to carry (src/lib/security-headers.ts), and the
+// way it fails is not an exception anyone can catch: the browser refuses the
+// hydration script and the page renders, sits there, and never becomes
+// interactive. Most of what these specs do would then fail anyway — but on a
+// button that "does nothing", which reads as a slow app rather than a broken
+// header. So the refusal itself is the assertion, and it is made on EVERY test
+// rather than on a page or two.
+export const test = base.extend<{ cspRefusals: string[] }>({
+  cspRefusals: [
+    async ({ page }, use) => {
+      const refusals = new Set<string>();
+      // The `securitypolicyviolation` event rather than the console message,
+      // because it names WHERE. The console only says a policy was violated, and
+      // the answer to that is always "which of the dozen things on this page?" —
+      // the event carries the directive and the source position that did it,
+      // which is what a fix starts from. Both times this fired for real, that
+      // position is what identified the library.
+      //
+      // Playwright injects this through CDP, before any page script and outside
+      // the policy's reach, so the listener cannot itself be refused.
+      await page.exposeFunction("__cspRefusal", (detail: string) => void refusals.add(detail));
+      await page.addInitScript(() => {
+        document.addEventListener("securitypolicyviolation", (event) => {
+          const where = event.sourceFile
+            ? `${event.sourceFile}:${event.lineNumber}:${event.columnNumber}`
+            : event.documentURI;
+          const report = (window as unknown as { __cspRefusal: (d: string) => void }).__cspRefusal;
+          report(`${event.effectiveDirective} refused ${event.blockedURI} at ${where}`);
+        });
+      });
+      await use([...refusals]);
+      expect([...refusals], "the browser refused something the policy should have allowed").toEqual(
+        [],
+      );
+    },
+    { auto: true },
+  ],
+});
 
 // Every account this suite creates carries this prefix, so the teardown can
 // find its own rows and nothing else's — the dev postgres is shared with the
@@ -12,6 +56,24 @@ export const E2E_EMAIL_PREFIX = "e2e-";
 export const E2E_ORG_PREFIX = "e2e-org-";
 
 export const MONGO_URL = process.env.MONGO_URL ?? "mongodb://127.0.0.1:27017";
+
+// An auth-enabled mongod whose user can create users, when the run has one.
+//
+// The MONGO_URL above deliberately has authentication disabled, which is the one
+// state where the scoped-user offer can never appear: every privilege is granted
+// and a dedicated user cannot be enforced, so `canProvision` is false whatever
+// the code does. That is why the provisioning path had no e2e coverage while the
+// fixture's `Connect` / `Use these credentials as-is` branch looked like it did
+// (#86) — the second half never ran.
+//
+// Empty means the tests that need it skip rather than fail. CI runs a second
+// mongo service with a root user for exactly this; locally:
+//
+//   podman run -d --rm --name mongo-auth -p 27018:27017 \
+//     -e MONGO_INITDB_ROOT_USERNAME=root -e MONGO_INITDB_ROOT_PASSWORD=secret \
+//     docker.io/library/mongo:8
+//   export MONGO_ADMIN_URL=mongodb://root:secret@127.0.0.1:27018
+export const MONGO_ADMIN_URL = process.env.MONGO_ADMIN_URL ?? "";
 
 let counter = 0;
 
@@ -106,4 +168,35 @@ export async function openClusterSettings(page: Page): Promise<void> {
     .getByRole("link", { name: "Settings" })
     .click();
   await expect(page.getByLabel("Observe window (days)")).toBeVisible();
+}
+
+// Enough RFC 6238 to play the authenticator app (better-auth's defaults:
+// SHA-1, 6 digits, 30s period). The suite reads the manual-entry key off the
+// enrolment screen exactly as a person typing it into a phone would.
+const BASE32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+
+function base32Decode(encoded: string): Buffer {
+  let bits = 0;
+  let value = 0;
+  const bytes: number[] = [];
+  for (const char of encoded.replace(/=+$/, "").toUpperCase()) {
+    const index = BASE32.indexOf(char);
+    if (index === -1) throw new Error(`not base32: ${char}`);
+    value = (value << 5) | index;
+    bits += 5;
+    if (bits >= 8) {
+      bytes.push((value >>> (bits - 8)) & 0xff);
+      bits -= 8;
+    }
+  }
+  return Buffer.from(bytes);
+}
+
+export function totpCode(secret: string, at: number = Date.now()): string {
+  const counter = Math.floor(at / 1000 / 30);
+  const message = Buffer.alloc(8);
+  message.writeBigUInt64BE(BigInt(counter));
+  const digest = createHmac("sha1", base32Decode(secret)).update(message).digest();
+  const offset = (digest[digest.length - 1] as number) & 0x0f;
+  return ((digest.readUInt32BE(offset) & 0x7fffffff) % 1_000_000).toString().padStart(6, "0");
 }

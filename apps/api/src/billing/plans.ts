@@ -85,20 +85,18 @@ const ENTITLEMENTS: Record<Plan, Entitlements> = {
   },
 };
 
-// RETENTION_DAYS is the operator's ceiling, not the plan's number. Storage is the
-// operator's bill, so they can cap it; a plan may keep less than the cap but never
-// more. Unset means the plan decides on its own.
-export function operatorCeilingDays(): number {
-  const envDays = Number(process.env.RETENTION_DAYS);
-  return Number.isFinite(envDays) && envDays > 0 ? envDays : Number.POSITIVE_INFINITY;
-}
-
 // How much history a plan may SEE. Applied at every read of the time-series
 // tables (jobs/plan.ts → historyWindow), because history depth is the thing a
 // paid plan buys: a longer series is what lets the engine call an index unused at
 // all, so it has to be enforced rather than advertised.
-export function effectiveRetentionDays(plan: Plan): number {
-  return Math.min(entitlementsFor(plan).retentionDays, operatorCeilingDays());
+//
+// `ceilingDays` is the operator's cap (RETENTION_DAYS, via config/env.ts →
+// operatorCeilingDays), passed in rather than read: storage is the operator's
+// bill, so they can cap what any plan keeps, and Infinity means they have not.
+// This file promises to be pure — reading the environment here is what stopped
+// it being.
+export function effectiveRetentionDays(plan: Plan, ceilingDays: number): number {
+  return Math.min(entitlementsFor(plan).retentionDays, ceilingDays);
 }
 
 // How long rows are actually KEPT, for every org on the deployment.
@@ -114,9 +112,9 @@ export function effectiveRetentionDays(plan: Plan): number {
 // than their having to wait out the new window to accumulate it — the rows were
 // there all along, merely out of view. Cheap because of run-length storage: an
 // idle index is one row whether it is kept for ninety days or a year.
-export function maxRetentionDays(): number {
+export function maxRetentionDays(ceilingDays: number): number {
   const longest = Math.max(...PLANS.map((plan) => entitlementsFor(plan).retentionDays));
-  return Math.min(longest, operatorCeilingDays());
+  return Math.min(longest, ceilingDays);
 }
 
 export function entitlementsFor(plan: Plan): Entitlements {
@@ -191,10 +189,14 @@ export function allowsWorkloadAnalysis(plan: Plan): LimitVerdict {
   };
 }
 
-// The plan a newly created org lands on.
+// The plan a newly created org lands on is DEFAULT_ORG_PLAN, validated as one of
+// PLANS at boot (config/schema.ts), read through config/env.ts → defaultOrgPlan,
+// and stamped onto the row by auth/organization.ts → beforeCreateOrganization.
+// It is deliberately not read here: this file stays pure, and the moment an org
+// is created is the plugin's, not billing's.
 //
-// Nothing here is a security control: anyone who owns the database can lift a
-// quota with one UPDATE, and the source is public. The licence is what binds —
+// Nothing about it is a security control: anyone who owns the database can lift
+// a quota with one UPDATE, and the source is public. The licence is what binds —
 // BUSL permits production use with one connected cluster — and this is what
 // keeps the software honest about it, so a self-hosted install does not quietly
 // invite you past what you were granted.
@@ -202,9 +204,6 @@ export function allowsWorkloadAnalysis(plan: Plan): LimitVerdict {
 // FREE by default because a process that has not been told where it runs should
 // offer the least. The chart says SELF_HOSTED, which is what the licence grants
 // someone running it on their own hardware.
-export function defaultOrgPlan(): Plan {
-  return planFrom(process.env.DEFAULT_ORG_PLAN);
-}
 
 // What a cluster's policy actually means once the plan is applied.
 //

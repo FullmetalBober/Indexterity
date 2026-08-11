@@ -1,6 +1,6 @@
 {
   "name": "@repo/api",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "commonjs",
   "scripts": {
@@ -20,7 +20,7 @@
     "@nestjs/common": "^11.1.28",
     "@nestjs/config": "^4.0.4",
     "@nestjs/core": "^11.1.28",
-    "@nestjs/platform-fastify": "^11.1.28",
+    "@nestjs/platform-fastify": "^11.1.29",
     "@noble/ciphers": "^2.2.0",
     "@opentelemetry/api": "^1.9.1",
     "@orpc/client": "^1.14.13",
@@ -28,7 +28,9 @@
     "@orpc/nest": "^1.14.13",
     "@orpc/server": "^1.14.13",
     "@repo/contracts": "*",
+    "@repo/errors": "*",
     "@repo/metrics": "*",
+    "@sentry/nestjs": "^10.69.0",
     "better-auth": "^1.6.24",
     "drizzle-orm": "^0.45.2",
     "graphile-worker": "^0.17.3",

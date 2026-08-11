@@ -39,7 +39,7 @@ export async function watchedIndexKeys(
     .where(
       and(
         eq(recommendations.clusterId, clusterId),
-        inArray(recommendations.type, ["CREATE", "UPDATE", "MERGE"]),
+        inArray(recommendations.type, ["CREATE", "UPDATE", "MERGE", "REORDER"]),
         inArray(recommendations.state, ["APPROVED", "ACTIVE"]),
       ),
     );

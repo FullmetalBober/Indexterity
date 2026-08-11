@@ -155,6 +155,41 @@ export function narrowScore(signals: NarrowSignals): number {
   return Math.min(NARROW_MAX_SCORE, clamp(score));
 }
 
+export interface ReorderSignals {
+  // Executions of the shapes this index's directions cannot serve.
+  readonly count: number;
+  readonly sizeBytes: number;
+  readonly pastRegressions: number;
+}
+
+// Re-ordering a PROTECTED index is APPROVAL-ONLY whatever this returns —
+// jobs/apply.ts excludes the type from auto-approval the way it excludes an
+// advisory — so this score ranks and explains rather than gates.
+//
+// Not because the guarantee is in doubt: it is provably identical either way
+// (analysis/reorder.ts), and the build-first sequence leaves no instant without
+// it. But a change to a constraint-bearing index is a different FELT risk from
+// adding one, and the person who answers for that database is entitled to look
+// at it. That is a product decision rather than a measurement, so it is made in
+// one place and holds however the threshold is set.
+//
+// It is also the only class where the cost scales with the INDEX rather than
+// with the collection: a second copy of a large unique index has to exist for
+// the length of the watch, so size counts against it here where narrowing
+// counts it in favour.
+const REORDER_MAX_SCORE = 65;
+
+export function reorderScore(signals: ReorderSignals): number {
+  let score = 30;
+  score += Math.min(25, Math.floor((25 * signals.count) / SIGHTINGS_FOR_FULL_CREDIT));
+  // A second copy of a big index is real disk and real write amplification for
+  // the length of the watch.
+  if (signals.sizeBytes >= GB) score -= 15;
+  else if (signals.sizeBytes >= 128 * 1024 * 1024) score -= 8;
+  score -= signals.pastRegressions * REGRESSION_PENALTY;
+  return Math.min(REORDER_MAX_SCORE, clamp(score));
+}
+
 // What the dashboard suggests as an auto-approval threshold, and why. Set high
 // enough that only the two arguments the engine can prove — redundancy, and
 // idleness across a trustworthy history — clear it with evidence behind them.

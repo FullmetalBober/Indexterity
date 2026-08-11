@@ -1,3 +1,9 @@
+// FIRST, for the same reason as main.ts — and this is the entrypoint where it
+// matters most: a job that throws here is what #31 calls invisible unless
+// someone happens to be reading container logs at the time.
+import "./instrument.worker";
+// Before the runner and everything it pulls in — see env.worker.ts (#126).
+import "./env.worker";
 import { consoleLogFactory, Logger } from "graphile-worker";
 import { drainPool } from "./jobs/connection-pool";
 import { closeJobDb } from "./jobs/db";

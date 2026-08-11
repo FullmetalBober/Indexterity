@@ -1,5 +1,6 @@
 import { promises as dns } from "node:dns";
 import { isIP } from "node:net";
+import { workerEnv } from "../config/env";
 
 // SSRF guard for customer-supplied connection strings. The control plane dials
 // whatever an owner pastes, so without this an authenticated user can use it to
@@ -197,5 +198,5 @@ export async function assertTargetsAllowed(
 }
 
 export function allowPrivateTargets(): boolean {
-  return process.env.ALLOW_PRIVATE_CLUSTER_TARGETS === "true";
+  return workerEnv().ALLOW_PRIVATE_CLUSTER_TARGETS;
 }

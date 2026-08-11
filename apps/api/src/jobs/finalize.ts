@@ -60,7 +60,7 @@ export async function finalizeCluster(clusterId: string): Promise<number> {
       and(
         eq(recommendations.clusterId, clusterId),
         eq(recommendations.state, "ACTIVE"),
-        inArray(recommendations.type, ["CREATE", "UPDATE", "MERGE"]),
+        inArray(recommendations.type, ["CREATE", "UPDATE", "MERGE", "REORDER"]),
       ),
     );
   if (due.length === 0 && watched.length === 0) return 0;
@@ -314,7 +314,14 @@ export async function finalizeCluster(clusterId: string): Promise<number> {
 async function retireSuperseded(
   db: ReturnType<typeof jobDb>,
   clusterId: string,
-  rec: { id: string; database: string; collection: string; indexName: string; targetSpec: unknown },
+  rec: {
+    id: string;
+    type: string;
+    database: string;
+    collection: string;
+    indexName: string;
+    targetSpec: unknown;
+  },
 ): Promise<void> {
   const target = rec.targetSpec;
   if (typeof target !== "object" || target === null) return;
@@ -322,6 +329,13 @@ async function retireSuperseded(
   if (!Array.isArray(retire)) return;
   const names = retire.filter((name): name is string => typeof name === "string");
   if (names.length === 0) return;
+  // A REORDER retires a PROTECTED index, which every other drop path refuses on
+  // sight. The row therefore names what replaced it, and preflightDrop re-checks
+  // that claim against LIVE state before the drop: same key set, same options,
+  // present and not hidden. Naming it here rather than trusting the type is what
+  // keeps the exemption tied to a specific replacement instead of widening
+  // isNeverDrop for a whole class of rows.
+  const supersededBy = rec.type === "REORDER" ? { supersededBy: rec.indexName } : {};
 
   for (const name of names) {
     // Nothing to do if a proposal for it already exists, or it is already on
@@ -353,9 +367,19 @@ async function retireSuperseded(
       database: rec.database,
       collection: rec.collection,
       indexName: name,
-      rationale: `Superseded by ${rec.indexName}, which has now survived its post-build watch.`,
+      rationale:
+        rec.type === "REORDER"
+          ? `Superseded by ${rec.indexName}, which carries the same keys in the same order with ` +
+            `the directions the workload needs, and the same options — including the unique ` +
+            `constraint, which it has been enforcing alongside this one since it was built. It ` +
+            `has now survived its post-build watch, so this one is no longer doing anything the ` +
+            `replacement is not.`
+          : `Superseded by ${rec.indexName}, which has now survived its post-build watch.`,
       score: SUPERSEDED_SCORE,
       estimatedBytesSaved: 0,
+      ...(Object.keys(supersededBy).length === 0
+        ? {}
+        : { targetSpec: { keys: [], retire: [], ...supersededBy } }),
     });
     await db.insert(actions).values({
       recommendationId: rec.id,

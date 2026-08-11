@@ -281,6 +281,55 @@
       "when": 1786111262951,
       "tag": "0039_cluster_tls_overrides",
       "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1786121130528,
+      "tag": "0040_cluster_name_unique_per_org",
+      "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1786128608610,
+      "tag": "0041_better_auth_rate_limit",
+      "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "7",
+      "when": 1786129064537,
+      "tag": "0042_security_events",
+      "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1786131633424,
+      "tag": "0043_two_factor",
+      "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "7",
+      "when": 1786189119644,
+      "tag": "0044_cluster_rosters",
+      "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "7",
+      "when": 1786307257559,
+      "tag": "0045_reorder_recommendation_type",
+      "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "7",
+      "when": 1786349169767,
+      "tag": "0046_drop_org_plan_default",
+      "breakpoints": true
     }
   ]
 }

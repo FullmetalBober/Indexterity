@@ -55,6 +55,25 @@ export function isStatus(error: unknown, status: number): boolean {
   return statusOf(error) === status;
 }
 
+// The api's "you are an owner, but you signed in too long ago" (#52,
+// TenancyService.requireFreshOwner). Its own check rather than a status,
+// because the caller can FIX this one: the mutation hooks hand it to a re-auth
+// dialog instead of a toast, and the action re-fires once the password lands.
+export function isSessionStale(error: unknown): boolean {
+  return error instanceof ORPCError && error.code === "SESSION_NOT_FRESH";
+}
+
+// The api's "owners must add a second factor first" (#55) — also fixable by
+// the caller, but not from where they are standing: the fix is an enrolment on
+// the account page, so the hooks show the api's own words, which say where to
+// go, instead of a generic "failed".
+export function isTwoFactorRequired(error: unknown): boolean {
+  return (
+    (error instanceof ORPCError || error instanceof AuthApiError) &&
+    error.code === "TWO_FACTOR_REQUIRED"
+  );
+}
+
 // The api's own words when the status says they were meant for the reader, and
 // the caller's fallback otherwise. Endpoints that answer with guidance under
 // other statuses pass their own list: a 502 from a cluster dial says what to

@@ -73,6 +73,16 @@ jobs:
       - run: npm run build
       - run: npm run typecheck
       - run: npm run test
+      # Advisories against the half of the tree that ships. Deliberately not a
+      # bare `npm audit`: that counts the dev-server hole in drizzle-kit's
+      # bundled esbuild the same as one in the HTTP router, and a gate that
+      # fires on everything is a gate people learn to ignore. See the header of
+      # scripts/audit-gate.ts for what is carried on purpose and why.
+      #
+      # In `check` rather than a job of its own because it needs the installed
+      # tree and nothing else — a second job would re-run `npm ci` to read a
+      # lockfile that is already sitting here.
+      - run: npm run audit:gate
 
   # Every supported major, because version behaviour is load-bearing: the floor,
   # the $queryStats plan-metrics gate, and the profiler fallback below 8.0 are
@@ -162,9 +172,22 @@ jobs:
         image: mongo:8
         ports:
           - "27017:27017"
+      # A second mongod, with authentication on and a user that can create users.
+      # The one above has auth disabled, which is the single state where the
+      # scoped-user offer cannot appear whatever the code does — so the consent
+      # path from D15 had no coverage anywhere (#86). The root user this creates
+      # carries userAdminAnyDatabase, which is what the offer is gated on.
+      mongo-auth:
+        image: mongo:8
+        env:
+          MONGO_INITDB_ROOT_USERNAME: root
+          MONGO_INITDB_ROOT_PASSWORD: e2e-root
+        ports:
+          - "27018:27017"
     env:
       DATABASE_URL: postgres://mongo_optimizer:mongo_optimizer@localhost:5432/mongo_optimizer
       MONGO_URL: mongodb://localhost:27017
+      MONGO_ADMIN_URL: mongodb://root:e2e-root@localhost:27018
       BETTER_AUTH_SECRET: e2e-secret
       MASTER_KEY: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
     steps:
@@ -211,6 +234,212 @@ jobs:
           name: playwright-report
           path: apps/web/playwright-report/
           retention-days: 7
+
+  # OWASP ZAP, passive, against the origin a browser actually gets.
+  #
+  # Passive only — the baseline scan spiders and reads, it does not attack. That
+  # is not timidity: an active scan against this app would submit forms as an
+  # authenticated owner, and the things it would find its way to are `connect a
+  # cluster` and `apply a recommendation`. Deciding to run one is deciding what it
+  # is allowed to touch, which is a separate piece of work (#21).
+  #
+  # The target is the DASHBOARD's port, not the api's, because that is the whole
+  # surface: the web server answers /api itself (src/lib/api-passthrough.ts), so
+  # one origin covers documents, assets and the api alike — the same shape a
+  # browser sees in production, minus the proxy.
+  #
+  # No mongo service. The scan signs in to nothing and connects no cluster, so
+  # the only backing store either process opens is postgres.
+  zap:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: mongo_optimizer
+          POSTGRES_PASSWORD: mongo_optimizer
+          POSTGRES_DB: mongo_optimizer
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd "pg_isready -U mongo_optimizer"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://mongo_optimizer:mongo_optimizer@localhost:5432/mongo_optimizer
+      BETTER_AUTH_SECRET: zap-secret
+      MASTER_KEY: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+      # One origin, the dashboard's. Both servers have to agree on it: the api
+      # builds better-auth's URLs from it and checks Origin against it, and the
+      # dashboard forwards /api to the api's own port server-side.
+      WEB_ORIGIN: http://127.0.0.1:3000
+      BETTER_AUTH_URL: http://127.0.0.1:3000
+      API_PORT: "3001"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "26"
+          cache: npm
+      - uses: actions/cache@v6
+        id: modules
+        with:
+          path: |
+            node_modules
+            apps/*/node_modules
+            packages/*/node_modules
+          key: modules-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+      - run: npm ci
+        if: steps.modules.outputs.cache-hit != 'true'
+      - uses: actions/cache@v6
+        with:
+          path: .turbo
+          key: turbo-zap-${{ github.sha }}
+          restore-keys: |
+            turbo-zap-
+            turbo-
+      - run: npm run build
+      - run: npm run db:migrate
+
+      # Started by hand rather than through playwright's webServer, because the
+      # scanner is not a test run: the servers have to outlive the step that
+      # starts them. Logs go to files so a scan that fails on a 500 can be told
+      # apart from one that fails on a header.
+      - name: boot the api and the dashboard
+        run: |
+          node apps/api/dist/main.js > /tmp/api.log 2>&1 &
+          echo $! > /tmp/api.pid
+          PORT=3000 API_URL=http://127.0.0.1:3001 \
+            node apps/web/.output/server/index.mjs > /tmp/web.log 2>&1 &
+          echo $! > /tmp/web.pid
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:3001/api/health > /dev/null \
+               && curl -fsS http://127.0.0.1:3000/ > /dev/null; then
+              echo "both up after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::the stack did not come up in 60s"
+          echo "--- api ---"; cat /tmp/api.log
+          echo "--- web ---"; cat /tmp/web.log
+          exit 1
+
+      # Sign in, so the scan sees the product rather than its front door.
+      #
+      # Without this the spider reached thirteen URLs — `/`, `/app` rendering the
+      # sign-in screen, `/reset-password`, robots, sitemap and the assets — and
+      # every authenticated page, which is where a tenant's data is, went
+      # unscanned. The alerts that matter most are only reachable here: whether an
+      # authenticated document says no-store, whether the session cookie carries
+      # the flags it should, whether a cluster name or an org id leaks into a URL.
+      #
+      # `SIGNUP_MODE` is deliberately NOT set. The default is invite-only and the
+      # FIRST account always bootstraps an install, so a fresh service-container
+      # database lets this through on the same posture a real deployment runs —
+      # switching to `open` would scan a configuration nobody deploys.
+      #
+      # The organization matters as much as the account: without one the dashboard
+      # draws a create-org screen and nothing below it, so the pages worth scanning
+      # would still not exist. No cluster is connected — that needs a mongod and
+      # would have the scanner dialling a database, which is a bigger decision than
+      # this job should make on its own.
+      - name: sign in, so the scan reaches the dashboard
+        run: |
+          set -euo pipefail
+          cookies() { grep -i '^set-cookie:' "$1" | sed -E 's/^[Ss]et-[Cc]ookie: *//' | cut -d';' -f1 | paste -sd'; ' -; }
+
+          curl -fsS -D /tmp/signup.h -o /tmp/signup.json \
+            -X POST http://127.0.0.1:3001/api/auth/sign-up/email \
+            -H 'content-type: application/json' -H "origin: $WEB_ORIGIN" \
+            -d '{"email":"zap@scan.invalid","password":"scanner-password-12345","name":"ZAP"}'
+          COOKIE="$(cookies /tmp/signup.h)"
+          if [ -z "$COOKIE" ]; then
+            echo "::error::sign-up returned no session cookie"; cat /tmp/signup.json; exit 1
+          fi
+          # Never let the session reach a log, even though the whole stack dies
+          # with the job.
+          echo "::add-mask::$COOKIE"
+
+          curl -fsS -o /tmp/org.json \
+            -X POST http://127.0.0.1:3001/api/auth/organization/create \
+            -H 'content-type: application/json' -H "origin: $WEB_ORIGIN" -H "cookie: $COOKIE" \
+            -d '{"name":"ZAP Scan Org","slug":"zap-scan-org"}'
+
+          # The action forwards these three into the container with a bare `-e`,
+          # so they have to be in the job environment by the time it runs. ZAP
+          # then sets the header on every request to the named site — the default
+          # header is Authorization, and this app authenticates by cookie.
+          {
+            echo "ZAP_AUTH_HEADER=Cookie"
+            echo "ZAP_AUTH_HEADER_VALUE=$COOKIE"
+            echo "ZAP_AUTH_HEADER_SITE=127.0.0.1"
+          } >> "$GITHUB_ENV"
+
+          # Proof the session works before handing it to the scanner. A cookie that
+          # has silently stopped authenticating would produce a clean scan of the
+          # sign-in page — passing, and meaning nothing.
+          #
+          # Asked of the api rather than the dashboard, deliberately. `/api/org`
+          # answers 200 with the org for a resolved session and 401 "sign in
+          # required" without one, which is exactly the question being asked. The
+          # obvious alternative — following /app and checking where it lands — also
+          # works but couples the check to routing: /app redirects to a real route
+          # only once the session resolves an organization, so it would answer "not
+          # authenticated" for a state that is authenticated. Both were measured
+          # against the built servers before choosing.
+          STATUS="$(curl -sS -o /tmp/org.json -w '%{http_code}' -H "cookie: $COOKIE" http://127.0.0.1:3001/api/org)"
+          if [ "$STATUS" != "200" ]; then
+            echo "::error::the session cookie does not authenticate — /api/org answered $STATUS"
+            cat /tmp/org.json
+            exit 1
+          fi
+          echo "signed in, organization created, /api/org answers 200"
+
+      # `--network=host` is the action's own default, so 127.0.0.1 inside the ZAP
+      # container is the runner's loopback and the servers above are reachable.
+      #
+      # allow_issue_writing is off deliberately. On, this opens and rewrites a
+      # GitHub issue on every run, which turns the repo's issue list into a scan
+      # log; the report is uploaded as an artefact instead, and a real finding is
+      # worth someone filing by hand.
+      #
+      # fail_action is ON. A scan that cannot fail is a report nobody is obliged
+      # to read — and .zap/rules.tsv is where an alert we have decided about goes,
+      # with the reason next to it, so silence is always something someone wrote.
+      #
+      # `-j` is the browser-driven spider, and it is not optional here. **The
+      # dashboard's pages contain no `href` at all** — measured on the built
+      # output, signed in and signed out, zero in both — because TanStack Router
+      # navigates on the client. So the traditional spider, which reads HTML and
+      # follows links, cannot discover a single route beyond the entry page: it is
+      # what left the first runs scanning thirteen URLs, none of them the product.
+      # A browser that runs the bundle finds what a user would.
+      #
+      # It is still a PASSIVE scan. The spider drives the app as a signed-in owner
+      # and ZAP reads the responses; nothing injects a payload, which is the line
+      # #21 drew and this stays on the right side of. What the browser can reach is
+      # bounded on purpose: no cluster is connected, so there is nothing to
+      # disconnect or drop, and deleting the organization needs its name typed into
+      # a confirm dialog. The database is a service container that dies with the
+      # job either way.
+      - name: ZAP baseline scan
+        uses: zaproxy/action-baseline@v0.15.0
+        with:
+          target: http://127.0.0.1:3000
+          rules_file_name: .zap/rules.tsv
+          cmd_options: -j
+          allow_issue_writing: false
+          fail_action: true
+          artifact_name: zap-baseline
+
+      - name: server logs
+        if: always()
+        run: |
+          echo "--- api ---"; cat /tmp/api.log || true
+          echo "--- web ---"; cat /tmp/web.log || true
+          kill "$(cat /tmp/api.pid)" "$(cat /tmp/web.pid)" 2>/dev/null || true
 
   # Does this change touch what the chart job tests?
   #

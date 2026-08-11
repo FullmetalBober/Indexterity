@@ -1,5 +1,5 @@
 import { Injectable, type OnApplicationShutdown } from "@nestjs/common";
-import { requiredEnv } from "../env";
+import { coreEnv } from "../config/env";
 import { drainPool } from "../jobs/connection-pool";
 import { closeJobDb } from "../jobs/db";
 import { closeDatabase, createDatabase, type Database } from "./client";
@@ -9,7 +9,7 @@ import { closeDatabase, createDatabase, type Database } from "./client";
 // this pg pool, the jobs' shared pg pool, and the mongo client pool.
 @Injectable()
 export class DatabaseService implements OnApplicationShutdown {
-  readonly db: Database = createDatabase(requiredEnv("DATABASE_URL"));
+  readonly db: Database = createDatabase(coreEnv().DATABASE_URL);
 
   async onApplicationShutdown(): Promise<void> {
     await drainPool();

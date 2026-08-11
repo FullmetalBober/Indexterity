@@ -46,6 +46,9 @@ services:
       # customer databases.
       ALLOW_INSECURE_CLUSTER_TLS: "true"
       SIGNUP_MODE: open
+      # Off in dev so nothing demands an authenticator app of a test account;
+      # a hosted install sets it (see .env.example, REQUIRE_OWNER_2FA).
+      REQUIRE_OWNER_2FA: "false"
       # The DASHBOARD's origin, not this container's port: better-auth appends
       # /api/auth itself, and the browser reaches all of it on 3000. It is also
       # what the reset links in emails are built from.
@@ -64,6 +67,11 @@ services:
       # the picture, so each gets its own host port: api 9464, worker 9465,
       # web 9466.
       METRICS_ENABLED: "true"
+      # Error reporting, off unless SENTRY_DSN_API is in .env. Reads plain
+      # SENTRY_DSN here; which project that is belongs to the deployment, and
+      # for this one it is indexterity-api.
+      SENTRY_DSN: ${SENTRY_DSN_API:-}
+      SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-}
     ports:
       # Published for curl and the OpenAPI document, not for the browser. The
       # dashboard reaches the api at /api on its OWN origin (localhost:3000),
@@ -83,7 +91,6 @@ services:
     working_dir: /app
     command: sh -c "npm install && exec npx turbo run dev --filter=@repo/web"
     environment:
-      WEB_PORT: "3000"
       # Two things read this. The web server's own SSR reads, which happen in
       # this container — so the address has to be one this container can reach,
       # not the one the browser uses — and the /api passthrough, which forwards
@@ -96,6 +103,11 @@ services:
       API_URL: http://api:3001
       WEB_ORIGIN: http://localhost:3000
       METRICS_ENABLED: "true"
+      # Error reporting, off unless SENTRY_DSN_WEB is in .env. Reads plain
+      # SENTRY_DSN here; which project that is belongs to the deployment, and
+      # for this one it is indexterity-web.
+      SENTRY_DSN: ${SENTRY_DSN_WEB:-}
+      SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-}
     ports:
       # The one origin a browser uses, /api included. There was an nginx service
       # in front of this doing the ingress's /api split; the dashboard server
@@ -137,6 +149,11 @@ services:
       SMTP_PASS: ${SMTP_PASS}
       MAIL_FROM: ${MAIL_FROM}
       METRICS_ENABLED: "true"
+      # Error reporting, off unless SENTRY_DSN_API is in .env. Reads plain
+      # SENTRY_DSN here; which project that is belongs to the deployment, and
+      # for this one it is indexterity-api.
+      SENTRY_DSN: ${SENTRY_DSN_API:-}
+      SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-}
     ports:
       - "9465:9464"
     volumes:

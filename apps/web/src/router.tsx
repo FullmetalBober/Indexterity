@@ -1,3 +1,7 @@
+// A side-effect import, and it has to precede the first Radix dialog rather than
+// any particular module — see the file for what it hands over and why it is read
+// from the DOM instead of embedded in it.
+import "./lib/style-nonce";
 import { createRouter, Link } from "@tanstack/react-router";
 import { setupRouterSsrQueryIntegration } from "@tanstack/react-router-ssr-query";
 import { createAppQueryClient } from "./lib/queries/client";

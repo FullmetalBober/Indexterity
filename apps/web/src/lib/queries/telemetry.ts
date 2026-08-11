@@ -7,7 +7,12 @@
 // one of the three fetched all three. Nothing about the collector's schedule
 // required them to share an entry — that is a fact about *why* they go stale, not
 // about who reads them.
-import type { CollectionLatencySeries, CollectionStat, LatencySummary } from "@repo/contracts";
+import type {
+  ClusterLatencySeries,
+  ClusterNodes,
+  CollectionStat,
+  LatencySummary,
+} from "@repo/contracts";
 import { queryOptions, useQuery } from "@tanstack/react-query";
 import { api } from "../api";
 import { queryKeys } from "./keys";
@@ -17,7 +22,13 @@ import type { Read } from "./read";
 // an absent or failed read, and a fresh [] each render would re-run every memo
 // downstream of it.
 export const NO_LATENCY: LatencySummary[] = [];
-export const NO_SERIES: CollectionLatencySeries[] = [];
+// The whole payload: totalCollections is the honest denominator for the
+// server-side cap (#64), and folding it away here would silence the cut.
+export const NO_SERIES: ClusterLatencySeries = {
+  clusterId: "",
+  totalCollections: 0,
+  collections: [],
+};
 export const NO_COLLECTIONS: CollectionStat[] = [];
 
 // The cluster is already resolved by the caller — the dashboard's loader picks it
@@ -41,8 +52,7 @@ export function latencyQuery(clusterId: string | null) {
 export function latencySeriesQuery(clusterId: string | null) {
   return queryOptions({
     queryKey: queryKeys.latencySeries(clusterId),
-    queryFn: async () =>
-      clusterId === null ? NO_SERIES : (await api().getLatencySeries({ clusterId })).collections,
+    queryFn: async () => (clusterId === null ? NO_SERIES : api().getLatencySeries({ clusterId })),
   });
 }
 
@@ -54,6 +64,16 @@ export function collectionsQuery(clusterId: string | null) {
   });
 }
 
+// The whole payload, not just the array: collectedAt is the panel's "as of",
+// and a roster without its moment is a topology claim nobody made (#100).
+export function nodesQuery(clusterId: string | null) {
+  return queryOptions({
+    queryKey: queryKeys.nodes(clusterId),
+    queryFn: async (): Promise<ClusterNodes | null> =>
+      clusterId === null ? null : api().getNodes({ clusterId }),
+  });
+}
+
 // Each returns the payload AND whether this is the first fetch — see read.ts for
 // why the bare payload was not enough.
 export function useLatency(clusterId: string | null): Read<LatencySummary[]> {
@@ -61,12 +81,17 @@ export function useLatency(clusterId: string | null): Read<LatencySummary[]> {
   return { data, pending: isPending };
 }
 
-export function useLatencySeries(clusterId: string | null): Read<CollectionLatencySeries[]> {
+export function useLatencySeries(clusterId: string | null): Read<ClusterLatencySeries> {
   const { data = NO_SERIES, isPending } = useQuery(latencySeriesQuery(clusterId));
   return { data, pending: isPending };
 }
 
 export function useCollections(clusterId: string | null): Read<CollectionStat[]> {
   const { data = NO_COLLECTIONS, isPending } = useQuery(collectionsQuery(clusterId));
+  return { data, pending: isPending };
+}
+
+export function useNodes(clusterId: string | null): Read<ClusterNodes | null> {
+  const { data = null, isPending } = useQuery(nodesQuery(clusterId));
   return { data, pending: isPending };
 }

@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import { loadEnv } from "../config/env";
 import {
   hasQueryStatsPlanMetrics,
   meetsVersionFloor,
@@ -68,6 +69,13 @@ describe("unsupportedVersionMessage", () => {
   });
 });
 
+// Read from the validated environment, which is parsed once at boot — so a test
+// that wants a different one says when the process read it.
+afterEach(() => {
+  delete process.env.ALLOW_UNTESTED_MONGO_VERSION;
+  loadEnv("api");
+});
+
 describe("version ceiling", () => {
   it("accepts the tested range", () => {
     for (const v of ["6.0.28", "7.0.39", "8.2.9"]) {
@@ -83,13 +91,10 @@ describe("version ceiling", () => {
 
   it("lets an operator opt in to an untested release", () => {
     process.env.ALLOW_UNTESTED_MONGO_VERSION = "true";
-    try {
-      expect(versionRefusal(parseServerVersion("9.0.0"))).toBeNull();
-      // The floor is NOT overridable — the ceiling escape hatch does not open it.
-      expect(versionRefusal(parseServerVersion("5.0.33"))).toContain("end-of-life");
-    } finally {
-      delete process.env.ALLOW_UNTESTED_MONGO_VERSION;
-    }
+    loadEnv("api");
+    expect(versionRefusal(parseServerVersion("9.0.0"))).toBeNull();
+    // The floor is NOT overridable — the ceiling escape hatch does not open it.
+    expect(versionRefusal(parseServerVersion("5.0.33"))).toContain("end-of-life");
   });
 
   it("prefers the floor's explanation when a version is unreadable", () => {

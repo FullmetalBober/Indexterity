@@ -25,6 +25,7 @@ const PACKAGES = [
   "apps/web/package.json",
   "packages/config/package.json",
   "packages/contracts/package.json",
+  "packages/errors/package.json",
   "packages/metrics/package.json",
 ];
 const CHART = "deploy/helm/indexterity/Chart.yaml";
@@ -33,15 +34,22 @@ const CHART = "deploy/helm/indexterity/Chart.yaml";
 // reimplementing the spec.
 const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 
-function readJson(rel) {
-  return JSON.parse(readFileSync(join(ROOT, rel), "utf8"));
+// The one field this script reads, plus everything else it must write back
+// untouched. `version` is optional because a package.json that has lost it is
+// exactly the state `check` exists to report, not to crash on.
+type PackageJson = { version?: string } & Record<string, unknown>;
+
+function readJson(rel: string): PackageJson {
+  return JSON.parse(readFileSync(join(ROOT, rel), "utf8")) as PackageJson;
 }
 
-function writeJson(rel, value) {
+function writeJson(rel: string, value: PackageJson): void {
   writeFileSync(join(ROOT, rel), `${JSON.stringify(value, null, 2)}\n`);
 }
 
-function chartVersions() {
+type ChartVersions = { text: string; version?: string; appVersion?: string };
+
+function chartVersions(): ChartVersions {
   const text = readFileSync(join(ROOT, CHART), "utf8");
   return {
     text,
@@ -50,7 +58,7 @@ function chartVersions() {
   };
 }
 
-function set(version) {
+function set(version: string): void {
   if (!SEMVER.test(version)) {
     console.error(`not a version: ${version} (expected e.g. 0.2.0)`);
     process.exit(1);
@@ -73,17 +81,26 @@ function set(version) {
   );
 }
 
-function check(expected) {
+function check(expected?: string): void {
   const root = readJson("package.json").version;
   const want = expected ?? root;
-  const wrong = [];
+  // The source of truth having no version at all is its own failure, and one
+  // worth naming: without this every file below would be reported as wrong
+  // against `undefined`.
+  if (want === undefined) {
+    console.error("package.json has no version field, so there is nothing to check against");
+    process.exit(1);
+  }
+  const wrong: string[] = [];
   for (const rel of PACKAGES) {
     const found = readJson(rel).version;
-    if (found !== want) wrong.push(`${rel}: ${found}`);
+    if (found !== want) wrong.push(`${rel}: ${found ?? "(no version field)"}`);
   }
   const chart = chartVersions();
-  if (chart.version !== want) wrong.push(`${CHART} version: ${chart.version}`);
-  if (chart.appVersion !== want) wrong.push(`${CHART} appVersion: ${chart.appVersion}`);
+  if (chart.version !== want) wrong.push(`${CHART} version: ${chart.version ?? "(not found)"}`);
+  if (chart.appVersion !== want) {
+    wrong.push(`${CHART} appVersion: ${chart.appVersion ?? "(not found)"}`);
+  }
   if (wrong.length > 0) {
     console.error(`expected ${want} everywhere, found:\n  ${wrong.join("\n  ")}`);
     console.error(`fix with: npm run version:set ${want}`);
@@ -96,6 +113,6 @@ const [command, value] = process.argv.slice(2);
 if (command === "set") set(value ?? "");
 else if (command === "check") check(value);
 else {
-  console.error("usage: set-version.mjs set <version> | check [expected]");
+  console.error("usage: set-version.ts set <version> | check [expected]");
   process.exit(1);
 }

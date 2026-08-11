@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { ReauthDialog } from "~/components/app/reauth-dialog";
 import { ConfirmButton } from "~/components/confirm-button";
 import { Button } from "~/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
@@ -27,14 +28,20 @@ interface ClusterConnectionInfo {
 export function ClusterConnection({ cluster }: { cluster: ClusterConnectionInfo }) {
   const [rotateOpen, setRotateOpen] = useState(false);
   const [rotateString, setRotateString] = useState("");
+  // Set when the api answered SESSION_NOT_FRESH (#52): the retry the re-auth
+  // dialog fires once the password proves the owner is still at the keyboard.
+  // One slot for all three actions — only one refusal can be on screen.
+  const [staleRetry, setStaleRetry] = useState<(() => void) | null>(null);
+  const onStale = (retry: () => void) => setStaleRetry(() => retry);
 
-  const toggleMode = useSetClusterMode(cluster.id);
-  const disconnect = useDisconnectCluster(cluster.id);
+  const toggleMode = useSetClusterMode(cluster.id, { onStale });
+  const disconnect = useDisconnectCluster(cluster.id, { onStale });
   const rotate = useRotateConnection(cluster.id, {
     onRotated: () => {
       setRotateOpen(false);
       setRotateString("");
     },
+    onStale,
   });
 
   return (
@@ -133,6 +140,8 @@ export function ClusterConnection({ cluster }: { cluster: ClusterConnectionInfo 
             Everything collected about this cluster is deleted. It cannot be undone.
           </p>
         </div>
+
+        <ReauthDialog retry={staleRetry} onDone={() => setStaleRetry(null)} />
       </CardContent>
     </Card>
   );

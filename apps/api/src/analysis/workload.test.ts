@@ -412,6 +412,36 @@ describe("sortOrderAdvisories", () => {
   it("ignores a shape that is scanning rather than sorting in memory", () => {
     expect(sortOrderAdvisories([shape(["a"], [atDesc], [], 9)], [], options)).toHaveLength(0);
   });
+
+  // The silence this used to keep. A protected index was excluded from being a
+  // blocker here, while recommendCreates suppresses the create whenever an index
+  // covers the fields with no such exclusion — so a unique index with the wrong
+  // directions produced nothing at all, in either direction, forever. Where a
+  // re-order can fix one properly jobs/suggest.ts proposes that instead; where
+  // it cannot, this is what a human gets.
+  it("reports a PROTECTED index whose directions cannot serve the sort", () => {
+    const query: QueryShape = {
+      equality: [],
+      sort: [
+        { field: "a", direction: 1 },
+        { field: "b", direction: -1 },
+      ],
+      range: [],
+      collscan: false,
+      sortedInMemory: true,
+      count: 6,
+    };
+    const protectedIdx: IndexSpec = {
+      ...directedIdx("a_1_b_1", [
+        { field: "a", direction: 1 },
+        { field: "b", direction: 1 },
+      ]),
+      unique: true,
+    };
+    const out = sortOrderAdvisories([query], [protectedIdx], options);
+    expect(out).toHaveLength(1);
+    expect(out[0]?.existingIndex).toBe("a_1_b_1");
+  });
 });
 
 describe("recommendNarrowing", () => {

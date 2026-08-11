@@ -77,6 +77,18 @@ export function workloadKey(database: string, collection: string): string {
 
 // Read-only statistics surface — everything the engine needs to decide, and
 // deliberately nothing that can read customer data rows.
+// One node of the cluster as the last collect saw it (#100). Engine-neutral:
+// the roles are what any topology can honestly claim, and a single-server
+// engine is a roster of one "standalone".
+export interface ClusterNode {
+  readonly host: string;
+  readonly role: "primary" | "secondary" | "mongos" | "standalone" | "unknown";
+  // answered — dialled and spoke; unreachable — the dial failed;
+  // refused — this deployment's net guard would not dial the address the
+  // cluster named (policy, not member health).
+  readonly state: "answered" | "unreachable" | "refused";
+}
+
 export interface IndexCollector {
   listCollectionNames(database: string): Promise<string[]>;
   listIndexes(database: string, collection: string): Promise<IndexSpec[]>;
@@ -96,6 +108,11 @@ export interface IndexCollector {
   // Server-wide query-engine counters. Null when the credentials cannot read
   // them — the privilege is optional, and everything else still works.
   collectServerHealth(): Promise<ServerHealth | null>;
+  // Every node this collect could see and how each answered (#100). Null when
+  // even that could not be established; a relational engine reports the one
+  // server it is. No extra privilege: built from the dials the collector
+  // makes anyway, plus each node's own handshake.
+  collectNodes(): Promise<readonly ClusterNode[] | null>;
   // Indexes named explicitly with hint(). Hiding one breaks its queries instead
   // of slowing them, so no latency gate can catch the mistake.
   collectHintedIndexes(database: string, collection: string): Promise<string[]>;
@@ -104,7 +121,13 @@ export interface IndexCollector {
 export interface CreateIndexOptions {
   readonly name?: string;
   readonly unique?: boolean;
-  readonly partialFilterExpression?: Readonly<Record<string, string | number | boolean>>;
+  // Index only the documents that HAVE the field. Carried when a REORDER
+  // rebuilds an index that had it, and when an undo restores one — a sparse
+  // index that comes back dense indexes documents the original never did, and a
+  // unique+sparse pair is the "unique among documents that have it" pattern,
+  // which a dense rebuild would refuse to build at all.
+  readonly sparse?: boolean;
+  readonly partialFilterExpression?: Readonly<Record<string, unknown>>;
   readonly collation?: { readonly locale: string };
 }
 
@@ -125,7 +148,13 @@ export interface IndexExecutor {
 // One privilege the engine needs, and whether these credentials have it.
 // CORE = analysis is impossible without it; APPLY = the cluster can still be
 // analyzed but nothing can be changed; WORKLOAD = an optional signal source.
-export type PrivilegeTier = "CORE" | "APPLY" | "WORKLOAD";
+//
+// PROVISION is not about the engine at all: it is whether these credentials
+// could create the least-privilege user we would rather run as. Reported as
+// checks and not only as `canProvision` below, because a bare `false` renders as
+// nothing and leaves "your user cannot create users" and "we could not tell what
+// your user can do" looking identical (#86).
+export type PrivilegeTier = "CORE" | "APPLY" | "WORKLOAD" | "PROVISION";
 
 export interface PrivilegeCheck {
   readonly key: string;
@@ -144,6 +173,9 @@ export interface ConnectionDiagnosis {
   readonly message: string | null;
   readonly username: string | null;
   readonly authEnabled: boolean;
+  // Every PROVISION check granted — so the offer to create a scoped user is
+  // worth making. The checks themselves are in `privileges`; this is the summary
+  // the form branches on.
   readonly canProvision: boolean;
   readonly ready: boolean;
   readonly canApply: boolean;

@@ -44,6 +44,7 @@ export const recommendationType = pgEnum("recommendation_type", [
   "MERGE",
   "CREATE",
   "UPDATE",
+  "REORDER",
   "ADVISORY_REVIEW",
 ]);
 export const recommendationState = pgEnum("recommendation_state", [
@@ -87,9 +88,36 @@ export const user = pgTable("user", {
   email: text("email").notNull().unique(),
   emailVerified: boolean("email_verified").notNull().default(false),
   image: text("image"),
+  // The twoFactor plugin's flag, and the only 2FA fact most requests need:
+  // true only after the first TOTP code verifies, not on enrolment (#55).
+  twoFactorEnabled: boolean("two_factor_enabled").notNull().default(false),
   createdAt,
   updatedAt,
 });
+
+// better-auth's twoFactor plugin, one row per enrolled user: the TOTP secret
+// and the backup codes, both encrypted with BETTER_AUTH_SECRET before they get
+// here (`returned: false` in the plugin's schema — they never leave the api).
+// The lockout columns are the plugin's own brute-force brake on top of the
+// rate limit it registers for /two-factor/*.
+export const twoFactor = pgTable(
+  "two_factor",
+  {
+    id: text("id").primaryKey(),
+    secret: text("secret").notNull(),
+    backupCodes: text("backup_codes").notNull(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    verified: boolean("verified").notNull().default(true),
+    failedVerificationCount: integer("failed_verification_count").notNull().default(0),
+    lockedUntil: timestamp("locked_until", { withTimezone: true }),
+  },
+  (table) => [
+    index("two_factor_user").on(table.userId),
+    index("two_factor_secret").on(table.secret),
+  ],
+);
 
 export const session = pgTable(
   "session",
@@ -157,6 +185,28 @@ export const verification = pgTable("verification", {
   updatedAt,
 });
 
+// better-auth's rate-limit counters, one row per (client address, auth path).
+//
+// It kept these in this process's memory, which made the limit per pod: the
+// ceiling was really max × replicas, which pod a request landed on decided which
+// bucket it spent, and a rollout handed every attacker their budget back (#54).
+// `rateLimit.storage: "database"` (auth/rate-limit.ts) puts them here instead, so
+// every replica counts against one total.
+//
+// The shape is better-auth's, not ours — the property names are what its adapter
+// looks up, so `lastRequest` cannot be renamed even though the column can.
+// `lastRequest` is epoch milliseconds and declared bigint by better-auth, which
+// is right: it compares it to Date.now(), and 2^31 ms ran out in 1994.
+//
+// No retention job: better-auth deletes rows past the widest window on every
+// write, so the table stays the size of whatever is currently being limited.
+export const rateLimit = pgTable("rate_limit", {
+  id: text("id").primaryKey(),
+  key: text("key").notNull().unique(),
+  count: integer("count").notNull(),
+  lastRequest: bigint("last_request", { mode: "number" }).notNull(),
+});
+
 // --- tenancy -------------------------------------------------------------
 //
 // Owned by better-auth's organization plugin (auth/auth.config.ts maps its
@@ -182,7 +232,15 @@ export const organizations = pgTable("organizations", {
   // What this org is entitled to — the rules live in billing/plans.ts, this is
   // only which set applies. Text rather than an enum so adding a plan is a
   // constant, not a migration; unrecognised values fall back to FREE.
-  plan: text("plan").notNull().default("FREE"),
+  //
+  // No DDL default, deliberately (#132). It had one, `FREE`, and a default on a
+  // column nobody wrote is not a fallback — it is the decision. The organization
+  // plugin inserts without a plan, so `FREE` is what every self-hosted install
+  // got while the chart asked for `SELF_HOSTED` and no code read the variable.
+  // auth/organization.ts stamps it now, and a column that cannot fall back is
+  // what makes a future path that forgets fail at the insert instead of quietly
+  // choosing the most restrictive plan.
+  plan: text("plan").notNull(),
   planUpdatedAt: timestamp("plan_updated_at", { withTimezone: true }),
   // Why it is on that plan: an invoice number, a trial end, "founding
   // customer". Written by whoever changed it, shown to nobody but operators.
@@ -297,7 +355,21 @@ export const clusters = pgTable(
     createdAt,
   },
   // Every cluster list is scoped to an org, and deleting an org cascades here.
-  (table) => [index("clusters_org").on(table.orgId)],
+  //
+  // The name is unique WITHIN the org, and only exactly (#96). Two clusters
+  // called "staging" are indistinguishable in the nav rail and, worse, in an
+  // alert subject line — `[Indexterity] staging: regression on …` names neither
+  // of them. Per org rather than globally, because one customer calling theirs
+  // "production" must not stop another from doing the same.
+  //
+  // Case is not folded. "Staging" and "staging" are allowed to coexist, and are
+  // told apart everywhere the name is drawn; a lower(name) index would refuse a
+  // rename for looking like one that already exists, which is a rule nobody
+  // asked for.
+  (table) => [
+    index("clusters_org").on(table.orgId),
+    unique("clusters_org_name").on(table.orgId, table.name),
+  ],
 );
 
 // One index, and the shape it had. The dimension half of the snapshot series:
@@ -524,6 +596,23 @@ export const recommendations = pgTable(
       keys: string[];
       retire: string[];
       partial?: Record<string, string | number | boolean>;
+      // REORDER only: the ORIGINAL index's options, carried verbatim so the
+      // replacement enforces exactly what it replaced. Recorded at proposal
+      // time rather than re-read at build time — by then the original may have
+      // been changed by somebody else, and inheriting that silently is how an
+      // option gets dropped. A missing `options` is an older row or another
+      // type, and the build refuses a REORDER without one.
+      options?: {
+        unique: boolean;
+        sparse: boolean;
+        collation: string | null;
+        partialFilter?: Record<string, unknown>;
+      };
+      // On the DROP_REDUNDANT row that retires a re-ordered index: the index
+      // that replaced it. The only thing that lets a protected index be dropped
+      // at all, and it is a claim rather than a permission — preflightDrop
+      // re-checks it against live state at the moment of the drop.
+      supersededBy?: string;
     }>(),
     createdAt,
     updatedAt,
@@ -658,6 +747,22 @@ export const indexCooldowns = pgTable(
 // reports the same four cumulative counters every time. There is no dimension
 // half to split out here, because every column IS a measurement — the namespace
 // stays on the row.
+// The node roster (#100): every member the LAST collect saw and how each
+// answered, one row per cluster, replaced whole on every collect. Deliberately
+// not a history table — "which nodes, right now, and did we reach them" is the
+// question the panel answers, and a per-collect log of it would grow with the
+// cadence like latency_samples does (D39) for a fact nobody asks about the
+// past of. jsonb because the members ARE one fact: a roster read half-replaced
+// would be a topology that never existed.
+export const clusterRosters = pgTable("cluster_rosters", {
+  clusterId: uuid("cluster_id")
+    .primaryKey()
+    .references(() => clusters.id, { onDelete: "cascade" }),
+  // ClusterNode[] from engine/ports.ts: { host, role, state }.
+  nodes: jsonb("nodes").$type<{ host: string; role: string; state: string }[]>().notNull(),
+  collectedAt: timestamp("collected_at", { withTimezone: true }).notNull(),
+});
+
 export const latencySamples = pgTable(
   "latency_samples",
   {
@@ -699,5 +804,79 @@ export const latencySamples = pgTable(
       table.collection,
       table.capturedAt.desc(),
     ),
+  ],
+);
+
+// --- the security trail --------------------------------------------------
+//
+// `actions` is the other half of this: an immutable record of every index
+// operation, per cluster. It answers "what removed this index, and who approved
+// it" — and stops there. How that person came to be an owner, whether their
+// session was still theirs at the time, who else was in the org that week: none
+// of it left a row anywhere (#53). `session` and `account` are current state, not
+// events; a revoked session is a deleted row.
+//
+// So this table records the OWNER-LEVEL ACTS: signing in and failing to, signing
+// out, revoking a session, promoting and demoting, removing a member, inviting
+// one, an invitation being accepted, an org being made or destroyed, and the four
+// things that can be done to a cluster's access (connected, disconnected,
+// credentials rotated, mode flipped). One row per act, never updated.
+//
+// Separate from `actions` rather than a nullable column on it, deliberately.
+// `actions` hangs off a recommendation, cascades from a cluster, and ages out with
+// the plan's history window; these are per ORG, some have no cluster at all, and
+// they must not age out on a billing clock — the incident that needs them is
+// usually older than the day it is noticed.
+//
+// Nothing cascades INTO this table for the same reason: every foreign key here is
+// `set null`, so deleting an org, a cluster or a user cannot erase the trail of
+// what was done to it. The names are kept alongside the ids (`actor_email`,
+// `target`) so a row still reads after the row it pointed at is gone.
+export const securityEvents = pgTable(
+  "security_events",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    // A SecurityEventName (src/audit/security-events.ts). Text, not an enum, for
+    // the reason `actions.kind` is: recording a new kind of act should be a
+    // constant, not a migration.
+    event: text("event").notNull(),
+    orgId: uuid("org_id").references(() => organizations.id, { onDelete: "set null" }),
+    // Set on the four cluster events; null on everything else, including a
+    // sign-in, which belongs to no cluster.
+    clusterId: uuid("cluster_id").references(() => clusters.id, { onDelete: "set null" }),
+    // Who did it. Null for a failed sign-in, where the address typed is all there
+    // is — and, deliberately, is recorded as the target rather than as the actor:
+    // whoever it was did not prove they were that person.
+    actorUserId: text("actor_user_id").references(() => user.id, { onDelete: "set null" }),
+    actorEmail: text("actor_email"),
+    // What it was done to, in whatever form the reader recognises: the member's
+    // address, the cluster's name, the invited address, the session's id.
+    target: text("target"),
+    // The specifics of that act and nothing else — the roles either side of a
+    // promotion, the mode a cluster was flipped to. Never credentials.
+    metadata: jsonb("metadata").$type<Record<string, unknown>>(),
+    // Personal data, kept on purpose and no more of it than `session` already
+    // holds: an incident asks which address and which client, and an answer of
+    // "an owner, from somewhere, on something" is not one.
+    //
+    // Null rather than wrong when the address cannot be established. The api sees
+    // a forwarded header, and reads it only when TRUST_PROXY says a proxy is in
+    // front (env.ts) — recording the proxy's own address for every request would
+    // be a column full of one number that looks like an answer.
+    ipAddress: text("ip_address"),
+    userAgent: text("user_agent"),
+    createdAt,
+  },
+  (table) => [
+    // Every read is one org's trail, newest first.
+    index("security_events_org_time").on(table.orgId, table.createdAt.desc()),
+    // "Everything this account did", which is the other question an incident
+    // asks, and it crosses orgs.
+    index("security_events_actor_time").on(table.actorUserId, table.createdAt.desc()),
+    // Not for a reader — no page asks for one cluster's security events. It backs
+    // the `set null` on cluster deletion, which would otherwise scan this table
+    // every time a cluster is disconnected, and it is what the suite's
+    // "no foreign key without an index" check asks for.
+    index("security_events_cluster").on(table.clusterId),
   ],
 );

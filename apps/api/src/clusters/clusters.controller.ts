@@ -3,13 +3,26 @@ import { implement } from "@orpc/nest";
 import { ORPCError } from "@orpc/server";
 import { contract } from "@repo/contracts";
 import type { FastifyRequest } from "fastify";
+import { actorFromRequest } from "../audit/http-actor";
+import { recordSecurityEvent, type SecurityEventInput } from "../audit/security-events";
 import { requireUserId } from "../auth/session";
-import { and, clusters, desc, envKeyProvider, eq, inArray, indexSnapshots, seal, sql } from "../db";
+import { currentKeyVersion, masterKeyBytesFor } from "../config/env";
+import {
+  and,
+  clusters,
+  desc,
+  envKeyProvider,
+  eq,
+  inArray,
+  indexSnapshots,
+  ne,
+  seal,
+  sql,
+} from "../db";
 import { DatabaseService } from "../db/database.service";
 import { allowPrivateTargets, assertTargetsAllowed, BlockedTargetError } from "../engine/net-guard";
 import { NO_TLS_OVERRIDES, type TlsOverrides } from "../engine/ports";
 import { adapterFor, engineSupported } from "../engine/registry";
-import { currentKeyVersion, masterKeyBytesFor } from "../env";
 import { consumeDialBudget } from "../errors/dial-budget";
 import { mapClusterError, toCluster, toDiagnosis } from "../http/mappers";
 import { TenancyService } from "../http/tenancy.service";
@@ -22,6 +35,42 @@ import {
 } from "../mongo";
 import { Implement } from "../orpc/implement";
 import { restoreHiddenIndexes, revokeCommandFor } from "./offboard";
+
+const CLUSTER_NAME_CONSTRAINT = "clusters_org_name";
+
+// `clusters_org_name` refused the write: this org already has a cluster by that
+// name (db/schema.ts). Postgres reports it on the driver's error rather than
+// through anything drizzle models, and the constraint is named in the schema
+// precisely so this check can be about that one rule instead of "some unique
+// index somewhere on clusters".
+//
+// Caught as well as pre-checked with a SELECT: two writers racing on the same
+// name would both find nothing and both go ahead, and the constraint is the only
+// answer that cannot lose that race.
+//
+// Walks the cause chain, because drizzle wraps what the driver threw — the pg
+// error with `code`/`constraint` on it is the cause of a DrizzleQueryError, not
+// the error itself. Reading the top-level object only was a 500 for a duplicate
+// name, which is the failure this function exists to prevent.
+function isDuplicateClusterName(error: unknown): boolean {
+  let current: unknown = error;
+  // Bounded: a cause chain that points back at itself must not spin here.
+  for (let depth = 0; depth < 5; depth += 1) {
+    if (typeof current !== "object" || current === null) return false;
+    if (
+      Reflect.get(current, "code") === "23505" &&
+      Reflect.get(current, "constraint") === CLUSTER_NAME_CONSTRAINT
+    ) {
+      return true;
+    }
+    current = Reflect.get(current, "cause");
+  }
+  return false;
+}
+
+function duplicateNameMessage(name: string): string {
+  return `this organization already has a cluster called "${name}" — pick another name`;
+}
 
 // Connecting, diagnosing, rotating and disconnecting customer clusters — the
 // endpoints that dial a host the user named. Owner-only throughout.
@@ -47,21 +96,32 @@ export class ClustersController {
       new TextEncoder().encode(connectionString),
       envKeyProvider(masterKeyBytesFor(keyVersion)),
     );
-    const [row] = await this.database.db
-      .insert(clusters)
-      .values({
-        orgId,
-        name,
-        connectionMode: "HOSTED_DIRECT",
-        engine,
-        readOnly: true,
-        sealedDek: Buffer.from(sealed.dek),
-        sealedData: Buffer.from(sealed.data),
-        keyVersion,
-        provisionedUsername,
-        tlsOverrides,
-      })
-      .returning();
+    // The name was checked before the dial (assertNameFree); this is the same
+    // refusal for the case that check cannot see, which is another connect
+    // committing the same name in between.
+    let row: typeof clusters.$inferSelect | undefined;
+    try {
+      [row] = await this.database.db
+        .insert(clusters)
+        .values({
+          orgId,
+          name,
+          connectionMode: "HOSTED_DIRECT",
+          engine,
+          readOnly: true,
+          sealedDek: Buffer.from(sealed.dek),
+          sealedData: Buffer.from(sealed.data),
+          keyVersion,
+          provisionedUsername,
+          tlsOverrides,
+        })
+        .returning();
+    } catch (error) {
+      if (isDuplicateClusterName(error)) {
+        throw new ORPCError("BAD_REQUEST", { message: duplicateNameMessage(name) });
+      }
+      throw error;
+    }
     if (row === undefined) throw new Error("failed to create cluster");
     // Collect once, now, rather than at the next scheduled pass. Connecting a
     // cluster and then waiting up to six hours for the dashboard to say anything
@@ -92,6 +152,52 @@ export class ClustersController {
       );
     }
     return row;
+  }
+
+  // Refuse a name the org is already using, BEFORE anything is dialed.
+  //
+  // The constraint is what actually enforces it, and it is caught at the insert
+  // too — but only as the backstop for two connects racing. Asking first is what
+  // keeps a collision from being discovered after `provisionCluster` has created
+  // a user on somebody's cluster, which nothing would then clean up.
+  // `exceptClusterId` is the cluster being renamed: a rename that keeps the name
+  // is a no-op, not a collision with itself.
+  private async assertNameFree(
+    orgId: string,
+    name: string,
+    errors: { BAD_REQUEST: (options: { message: string }) => Error },
+    exceptClusterId?: string,
+  ): Promise<void> {
+    const [taken] = await this.database.db
+      .select({ id: clusters.id })
+      .from(clusters)
+      .where(
+        and(
+          eq(clusters.orgId, orgId),
+          eq(clusters.name, name),
+          ...(exceptClusterId === undefined ? [] : [ne(clusters.id, exceptClusterId)]),
+        ),
+      )
+      .limit(1);
+    if (taken !== undefined) throw errors.BAD_REQUEST({ message: duplicateNameMessage(name) });
+  }
+
+  // One row in the security trail for something done to a cluster's access
+  // (#53). Connecting, disconnecting, rotating credentials and flipping the mode
+  // are all owner-level acts on somebody's production database, and until now
+  // only the index pipeline left any record — `actions` covers what the engine
+  // did and nothing about who let it.
+  //
+  // After the act, never in front of it, and it cannot fail the request:
+  // recordSecurityEvent logs a lost row instead of throwing (see its comment).
+  private async record(
+    req: FastifyRequest,
+    entry: Omit<SecurityEventInput, "actorUserId" | "actorEmail" | "ipAddress" | "userAgent">,
+  ): Promise<void> {
+    const actor = await actorFromRequest(this.database.db, req);
+    await recordSecurityEvent(this.database.db, { ...entry, ...actor }, (message) =>
+      this.log.warn(message),
+    );
   }
 
   // Everything that must be true before the control plane dials a customer
@@ -213,8 +319,10 @@ export class ClustersController {
     return implement(contract.createCluster).handler(async ({ input, errors }) => {
       const orgId = await this.tenancy.requireOwner(req);
       // Before the dial, not after: refusing on the plan should not first spend
-      // several seconds connecting to a cluster we are not going to keep.
+      // several seconds connecting to a cluster we are not going to keep. Same
+      // for the name.
       await this.tenancy.requireRoomFor(orgId, "clusters");
+      await this.assertNameFree(orgId, input.name, errors);
       const engine = input.engine ?? "MONGODB";
       const adapter = adapterFor(engine);
       const overrides = input.tlsOverrides ?? NO_TLS_OVERRIDES;
@@ -237,7 +345,17 @@ export class ClustersController {
             "Indexterity provision a scoped one.",
         });
       }
-      return toCluster(await this.storeCluster(orgId, input.name, engine, value, null, overrides));
+      const row = await this.storeCluster(orgId, input.name, engine, value, null, overrides);
+      await this.record(req, {
+        event: "CLUSTER_CONNECTED",
+        orgId,
+        clusterId: row.id,
+        target: row.name,
+        // Which concessions were made and whether we are holding somebody's own
+        // credentials — the two facts an incident asks about a connection.
+        metadata: { engine, provisioned: false, tlsOverrides: overrides },
+      });
+      return toCluster(row);
     });
   }
 
@@ -250,6 +368,7 @@ export class ClustersController {
       const orgId = await this.tenancy.requireOwner(req);
       // Before creating a user on someone's cluster, not after.
       await this.tenancy.requireRoomFor(orgId, "clusters");
+      await this.assertNameFree(orgId, input.name, errors);
       // Provisioning is engine-specific; MONGODB is the only adapter with the
       // capability today (see EngineCapabilities.provisionScopedUsers).
       const overrides = input.tlsOverrides ?? NO_TLS_OVERRIDES;
@@ -275,6 +394,20 @@ export class ClustersController {
         provisioned.username,
         overrides,
       );
+      await this.record(req, {
+        event: "CLUSTER_CONNECTED",
+        orgId,
+        clusterId: row.id,
+        target: row.name,
+        // The username, never the string: this row is read by people who are not
+        // meant to be able to dial the cluster from it.
+        metadata: {
+          engine: "MONGODB",
+          provisioned: true,
+          provisionedUsername: provisioned.username,
+          tlsOverrides: overrides,
+        },
+      });
       return {
         cluster: toCluster(row),
         username: provisioned.username,
@@ -291,7 +424,9 @@ export class ClustersController {
   @Implement(contract.rotateConnection)
   rotateConnection(@Req() req: FastifyRequest) {
     return implement(contract.rotateConnection).handler(async ({ input, errors }) => {
-      const orgId = await this.tenancy.requireOwner(req);
+      // Fresh, not merely owner: this replaces the credentials the engine
+      // dials the customer's cluster with (#52).
+      const orgId = await this.tenancy.requireFreshOwner(req);
       const [row] = await this.database.db
         .select()
         .from(clusters)
@@ -338,6 +473,19 @@ export class ClustersController {
         .returning();
       if (updated === undefined) throw errors.NOT_FOUND({ message: "cluster not found" });
       await evictCluster(input.clusterId);
+      await this.record(req, {
+        event: "CLUSTER_CREDENTIALS_ROTATED",
+        orgId,
+        clusterId: updated.id,
+        target: updated.name,
+        // Whether the cluster is still running as a user we created, which is what
+        // decides who can revoke that access afterwards.
+        metadata: {
+          provisionedUsername,
+          keptScopedUser: provisionedUsername !== null,
+          tlsOverrides: overrides,
+        },
+      });
       return toCluster(updated);
     });
   }
@@ -350,7 +498,9 @@ export class ClustersController {
   @Implement(contract.deleteCluster)
   deleteCluster(@Req() req: FastifyRequest) {
     return implement(contract.deleteCluster).handler(async ({ input, errors }) => {
-      const orgId = await this.tenancy.requireOwner(req);
+      // Fresh, not merely owner: everything collected is deleted and cannot
+      // be re-collected as it was (#52).
+      const orgId = await this.tenancy.requireFreshOwner(req);
       const [row] = await this.database.db
         .select()
         .from(clusters)
@@ -359,7 +509,53 @@ export class ClustersController {
       if (row === undefined) throw errors.NOT_FOUND({ message: "cluster not found" });
       const unhidden = await restoreHiddenIndexes(this.database.db, input.clusterId);
       await this.database.db.delete(clusters).where(eq(clusters.id, input.clusterId));
+      // `clusterId` stays null here and the id goes in the metadata: the row it
+      // would point at has just been deleted, and this event is the one that has
+      // to outlive it — everything else about that cluster is gone.
+      await this.record(req, {
+        event: "CLUSTER_DISCONNECTED",
+        orgId,
+        target: row.name,
+        metadata: {
+          clusterId: row.id,
+          unhidden,
+          provisionedUsername: row.provisionedUsername,
+        },
+      });
       return { unhidden, revokeCommand: revokeCommandFor(row.provisionedUsername) };
+    });
+  }
+
+  // Owner-only rename. A plain update of one column, and the only way there has
+  // ever been to correct a name: before this, the sole route to a different one
+  // was disconnect and reconnect, which deletes every snapshot, recommendation,
+  // ROI figure and audit row the cluster had. A cluster observed for three months
+  // could not be renamed at any acceptable price (#96).
+  //
+  // Nothing on the customer's cluster is affected — the provisioned user is
+  // derived from the admin connection string, never from this name.
+  @Implement(contract.renameCluster)
+  renameCluster(@Req() req: FastifyRequest) {
+    return implement(contract.renameCluster).handler(async ({ input, errors }) => {
+      const orgId = await this.tenancy.requireOwner(req);
+      await this.assertNameFree(orgId, input.name, errors, input.clusterId);
+      let row: typeof clusters.$inferSelect | undefined;
+      try {
+        [row] = await this.database.db
+          .update(clusters)
+          .set({ name: input.name })
+          .where(and(eq(clusters.id, input.clusterId), eq(clusters.orgId, orgId)))
+          .returning();
+      } catch (error) {
+        if (isDuplicateClusterName(error)) {
+          throw errors.BAD_REQUEST({ message: duplicateNameMessage(input.name) });
+        }
+        throw error;
+      }
+      // Scoped to the org in the WHERE, so another tenant's cluster is not found
+      // rather than renamed — the same shape as mode and rotation next door.
+      if (row === undefined) throw errors.NOT_FOUND({ message: "cluster not found" });
+      return toCluster(row);
     });
   }
 
@@ -367,13 +563,26 @@ export class ClustersController {
   @Implement(contract.setClusterMode)
   setClusterMode(@Req() req: FastifyRequest) {
     return implement(contract.setClusterMode).handler(async ({ input, errors }) => {
-      const orgId = await this.tenancy.requireOwner(req);
+      // Going live is the moment the engine gains permission to write, so it
+      // takes a fresh sign-in. The way BACK to read-only deliberately does
+      // not: an emergency stop that waits on a password re-prompt is not an
+      // emergency stop (#52).
+      const orgId = input.readOnly
+        ? await this.tenancy.requireOwner(req)
+        : await this.tenancy.requireFreshOwner(req);
       const [row] = await this.database.db
         .update(clusters)
         .set({ readOnly: input.readOnly })
         .where(and(eq(clusters.id, input.clusterId), eq(clusters.orgId, orgId)))
         .returning();
       if (row === undefined) throw errors.NOT_FOUND({ message: "cluster not found" });
+      await this.record(req, {
+        event: "CLUSTER_MODE_CHANGED",
+        orgId,
+        clusterId: row.id,
+        target: row.name,
+        metadata: { readOnly: input.readOnly },
+      });
       return toCluster(row);
     });
   }

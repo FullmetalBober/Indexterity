@@ -5,6 +5,7 @@ import {
   createClusterInput,
   policyKnobsInput,
   provisionClusterInput,
+  renameClusterInput,
   rotateConnectionInput,
 } from "./inputs.js";
 import {
@@ -14,7 +15,9 @@ import {
   clusterEvent,
   clusterLatency,
   clusterLatencySeries,
+  clusterNodes,
   clusterPolicyView,
+  clusterRecommendations,
   clusterRoi,
   connectionDiagnosis,
   myInvite,
@@ -36,14 +39,18 @@ export const contract = {
     .route({ method: "GET", path: "/clusters", summary: "List connected clusters" })
     .output(z.array(cluster)),
 
+  // Capped at the RECOMMENDATIONS_CAP highest-scoring, with the true total
+  // beside them (#64). Nobody has asked to page through 20k proposals — they
+  // want the top ones, which is what the default sort already gives — so the
+  // cap carries an honest count rather than a cursor.
   listRecommendations: oc
     .route({
       method: "GET",
       path: "/clusters/{clusterId}/recommendations",
-      summary: "List recommendations for a cluster",
+      summary: "The cluster's recommendations: the highest-scoring, and how many exist",
     })
     .input(clusterId)
-    .output(z.array(recommendation)),
+    .output(clusterRecommendations),
 
   getRoi: oc
     .route({
@@ -80,6 +87,16 @@ export const contract = {
     })
     .input(clusterId)
     .output(clusterCollections),
+
+  getNodes: oc
+    .route({
+      method: "GET",
+      path: "/clusters/{clusterId}/nodes",
+      summary:
+        "The node roster from the last collect: every member the cluster admitted to, its role, and whether it answered",
+    })
+    .input(clusterId)
+    .output(clusterNodes),
 
   listActions: oc
     .route({
@@ -159,6 +176,21 @@ export const contract = {
     })
     .errors({ NOT_FOUND: {}, BAD_REQUEST: {} })
     .input(clusterId.extend(rotateConnectionInput.shape))
+    .output(cluster),
+
+  // PATCH on the cluster itself, not on a sub-path: the name IS the cluster's
+  // own attribute, unlike its connection or its mode. Owner-only, like both of
+  // those, and BAD_REQUEST for a name another cluster in the org already has —
+  // the rail and every alert subject line are the reason it has to be unique.
+  renameCluster: oc
+    .route({
+      method: "PATCH",
+      path: "/clusters/{clusterId}",
+      summary:
+        "Rename a cluster (owner only) — the name in the rail, the header and every alert subject; unique within the org",
+    })
+    .errors({ NOT_FOUND: {}, BAD_REQUEST: {} })
+    .input(clusterId.extend(renameClusterInput.shape))
     .output(cluster),
 
   setClusterMode: oc

@@ -16,7 +16,12 @@ import { z } from "zod";
 import { clusterEngine, clusterPolicy, tlsOverrides } from "./schemas.js";
 
 // Fields, shared by whichever inputs use them.
-export const clusterName = z.string().min(1, "Give the cluster a name");
+//
+// Trimmed before the length check, so "   " is an empty name rather than a
+// three-character one — and so `clusters_org_name` means what it says: without
+// this, " staging" and "staging" are two different rows to the constraint and one
+// indistinguishable pair to everybody reading the sidebar (#96).
+export const clusterName = z.string().trim().min(1, "Give the cluster a name");
 export const connectionString = z.string().min(1, "Paste a connection string");
 export const orgName = z.string().min(1, "An org needs a name").max(120, "120 characters at most");
 // Owner and member, and no third rung — see ORG_ROLES in apps/api/src/auth/
@@ -29,6 +34,19 @@ export const emailAddress = z.email("That does not look like an email address");
 // has to refuse exactly what the api would, and "8" written twice is how the
 // two stop agreeing.
 export const PASSWORD_MIN_LENGTH = 8;
+
+// How recently a session must have been SIGNED IN for the acts that change what
+// the engine may do to a customer's database: going live, rotating credentials,
+// disconnecting. Holding an owner session is not the same claim as being the
+// owner at the keyboard right now — a week-old tab on a borrowed laptop holds
+// one and is not the other (#52).
+//
+// Shared because both sides act on it: the api refuses (SESSION_NOT_FRESH, see
+// TenancyService.requireFreshOwner) and the dashboard explains the refusal and
+// asks for the password again. An hour, not better-auth's day: long enough that
+// connect-then-configure never trips it, short enough that "signed in recently"
+// still means something.
+export const SESSION_FRESH_AGE_SECONDS = 60 * 60;
 export const password = z
   .string()
   .min(PASSWORD_MIN_LENGTH, `At least ${PASSWORD_MIN_LENGTH} characters`);
@@ -65,6 +83,11 @@ export const rotateConnectionInput = z.object({
   tlsOverrides: tlsOverrides.optional(),
 });
 
+// The same field as the connect form's, deliberately: a name the create form
+// accepts and the rename form refuses (or the reverse) is the drift this file
+// exists to stop.
+export const renameClusterInput = z.object({ name: clusterName });
+
 // The engine knobs minus the cluster they belong to, which the route carries as
 // a path param. Derived from the output schema so a knob cannot be settable and
 // readable under two different rules.
@@ -100,3 +123,5 @@ export const changePasswordInput = z.object({
   currentPassword: z.string().min(1, "Your current password"),
   newPassword: password,
 });
+// The same email rule sign-up applies — a change is a sign-up for the address.
+export const changeEmailInput = z.object({ newEmail: emailAddress });

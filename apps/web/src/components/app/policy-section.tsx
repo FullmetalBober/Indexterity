@@ -137,7 +137,7 @@ export function PolicySection({ policy }: { policy: PolicyView }) {
               {(field) => (
                 <field.CheckboxField
                   label="Workload analysis"
-                  description="propose CREATE/UPDATE/MERGE from query shapes"
+                  description="propose CREATE/UPDATE/MERGE/REORDER from query shapes"
                 />
               )}
             </form.AppField>

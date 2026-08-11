@@ -42,6 +42,7 @@ spec:
             {{- end }}
           env:
             {{- include "indexterity.metricsEnv" . | nindent 12 }}
+            {{- include "indexterity.errorsEnv" (dict "root" . "dsn" (default .Values.errorReporting.dsn .Values.errorReporting.webDsn)) | nindent 12 }}
             - name: PORT
               value: {{ .Values.web.port | quote }}
             # The web server's own reads during SSR, at runtime so one image

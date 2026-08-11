@@ -1,8 +1,8 @@
 import { join } from "node:path";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { makeWorkerUtils } from "graphile-worker";
+import { coreEnv, loadEnvOrExit } from "./config/env";
 import { closeDatabase, createDatabase } from "./db";
-import { requiredEnv } from "./env";
 
 // Production migration entrypoint: `node dist/migrate.js`. drizzle-kit is a
 // devDependency and is pruned from the runtime image, so deployments (the Helm
@@ -19,11 +19,14 @@ import { requiredEnv } from "./env";
 //
 // Migration is where schemas get created, so both are created here. Keep this
 // in step with the db:migrate script, which does the same for dev and CI.
+// The Helm pre-install hook gives this Job DATABASE_URL and nothing else, so it
+// validates the narrowest of the three schemas.
 async function main(): Promise<void> {
-  const db = createDatabase(requiredEnv("DATABASE_URL"));
+  loadEnvOrExit("migrate");
+  const db = createDatabase(coreEnv().DATABASE_URL);
   try {
     await migrate(db, { migrationsFolder: join(__dirname, "..", "drizzle") });
-    const utils = await makeWorkerUtils({ connectionString: requiredEnv("DATABASE_URL") });
+    const utils = await makeWorkerUtils({ connectionString: coreEnv().DATABASE_URL });
     try {
       await utils.migrate();
     } finally {
