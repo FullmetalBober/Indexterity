@@ -65,3 +65,31 @@
     color: var(--foreground);
   }
 }
+
+/* Reader has asked their system for less motion, so give them less of it.
+   Nothing here honoured that before, and there is motion to honour: every
+   dialog and dropdown enters and leaves on `animate-in`/`animate-out`, the
+   skeletons pulse forever while a read is in flight, and the spinner spins.
+
+   Durations, not `animation: none`. The reason usually given for this is wrong
+   here and worth writing down so nobody re-derives it: Radix does unmount a
+   closed dialog on `animationend`, but its Presence checks the computed name
+   first — `else if (currentAnimationName === "none" || styles?.display ===
+   "none") send("UNMOUNT")` — so cancelling outright is safe too, measured with
+   both spellings and the whole cluster spec passing under either. The short
+   duration is the widely used form and it keeps `animationend` firing for
+   anything that is not Radix, which this file cannot know about.
+   `iteration-count: 1` settles `animate-pulse` rather than freezing it.
+
+   Scroll behaviour goes too, because `scrollRestoration` (router.tsx) jumps the
+   page on every navigation. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
