@@ -49,8 +49,26 @@
     "//#typecheck:scripts": {
       "inputs": ["scripts/**/*.ts", "tsconfig.scripts.json", "packages/config/tsconfig.base.json"]
     },
-    "test": {},
-    "lint": {},
+    // `^build`, not nothing. Both suites import @repo/contracts, whose package
+    // main is dist/index.js — so without a dependency here `npm test` on a fresh
+    // clone cannot resolve it, and, worse, turbo has no reason to re-run a suite
+    // when the contract it asserts against changes: append a line to
+    // packages/contracts/src/index.ts and @repo/api:test is still FULL TURBO.
+    // The suite that would have caught the change is the one that exists to
+    // catch it — contract-routes.test.ts is the CSRF "no state-changing GET"
+    // check, reading the contract by reflection. CI restores `.turbo` by prefix
+    // (turbo-, ci.yml), so the stale hit is reachable there too, not just
+    // locally. A transit node would give the awareness without the wait, but
+    // these tests genuinely need the built output, not just knowledge of it.
+    "test": {
+      "dependsOn": ["^build"]
+    },
+    // No `lint` task: nothing to register one for. Linting is one biome pass
+    // over the whole repo plus the tailwind check (root package.json), because
+    // biome reads every workspace from one config and splitting it per package
+    // would be slower than the ~1s it takes. Declared as a turbo task it matched
+    // no package script, so `turbo run lint` answered "No tasks were executed"
+    // — config that promised caching and delivered nothing.
     "dev": {
       "cache": false,
       "persistent": true,
