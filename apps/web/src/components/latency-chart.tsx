@@ -91,12 +91,25 @@ export function tooltipTime(point: TooltipPoint | undefined): string {
   return point === undefined ? "" : timeLabel(point.xValue);
 }
 
+// How a y value is written, for the axis ticks and the tooltip both. Rounding to
+// a whole number is right for µs/op and wrong for bytes, where every value on a
+// small cluster would round to the same integer — so the caller that plots bytes
+// passes fmtBytes and the unit label goes with it.
+export type ValueFormat = (value: number) => string;
+
+const roundToWhole: ValueFormat = (value) => String(Math.round(value));
+
 // `—` rather than a number for the null points that draw the gaps: no ops went
 // through, so there is no µs/op, and rounding null to `0 µs` would report an
-// idle collection as an instant one.
-export function tooltipValue(point: TooltipPoint | undefined, unit: string): string {
+// idle collection as an instant one. Same rule for a byte series, where the null
+// is a day nobody collected and `0 B` would be a cluster that shed every index.
+export function tooltipValue(
+  point: TooltipPoint | undefined,
+  unit: string,
+  format: ValueFormat = roundToWhole,
+): string {
   const value = point?.yValue;
-  return typeof value === "number" && Number.isFinite(value) ? `${Math.round(value)} ${unit}` : "—";
+  return typeof value === "number" && Number.isFinite(value) ? `${format(value)} ${unit}` : "—";
 }
 
 // One line per series over a shared time axis. Nulls break the line (a gap, not
@@ -109,10 +122,14 @@ export function LineChart({
   series,
   pending = false,
   emptyNote,
+  format = roundToWhole,
 }: {
   title: string;
   unit: string;
   series: readonly ChartSeries[];
+  // How a value is written on the axis and in the tooltip. Defaults to whole
+  // numbers, which is what µs/op wants; a byte series passes fmtBytes.
+  format?: ValueFormat;
   // The first fetch is still out. Distinct from an empty `series`, which means
   // the collector has answered and there is not enough to plot — "Not enough
   // samples yet" is a statement about the cluster, and it used to be made before
@@ -192,11 +209,7 @@ export function LineChart({
       scale: scaleLinear,
       nice: true,
       grid: true,
-      axis: {
-        line: false,
-        label: unit,
-        ticks: { format: (value: number) => String(Math.round(value)) },
-      },
+      axis: { line: false, label: unit, ticks: { format } },
     },
     // Explicit domain and range rather than an inferred order: the palette's
     // slots were validated in that order, and a series appearing or disappearing
@@ -207,7 +220,7 @@ export function LineChart({
     },
     tooltip: {
       use: tooltip,
-      format: (point) => tooltipValue(point, unit),
+      format: (point) => tooltipValue(point, unit, format),
       // Every point in a group shares the timestamp, so the first one names it.
       formatGroup: (points) => tooltipTime(points[0]),
     },

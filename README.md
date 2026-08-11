@@ -37,7 +37,12 @@ observe window, a pre-flight check, and a read-latency regression test.
 4. **Apply** safely: `hide → observe → drop` for removals, `build` for
    additions. Clusters start read-only; an owner flips them live.
 5. **Prove ROI**: freed bytes and the $/month they cost, index-count delta, and
-   a before/after latency trend per collection.
+   a before/after latency trend per collection. Beside it, the number ROI cannot
+   report: total index bytes per day over the trend window. Both ROI figures are
+   cumulative and only ever climb, because they count what the engine removed —
+   a cluster where it freed 4 GB while the application added 6 GB has a
+   triumphant ROI card and a bigger bill, and the footprint series is what says
+   so. A day nobody collected renders as a gap, never as a zero.
 
 The dashboard follows the engine live: a pass landing, a drop going hidden, a
 build graduating or a regression firing arrives over SSE and refetches exactly
@@ -286,7 +291,8 @@ apps/web                dashboard
   src/routes/app.index  resolves "no cluster named" — redirects to the first
                         cluster, or to connecting one
   src/routes/app.clusters.$clusterId       one cluster: the heading and its tabs
-    …$clusterId.index      overview — ROI, recommendations, latency, collections
+    …$clusterId.index      overview — ROI, index footprint over time,
+                           recommendations, latency, nodes, collections
     …$clusterId.settings   name, policy, mode, credentials, disconnect
   src/routes/app.clusters.new   connecting a cluster, which is onboarding
   src/routes/app.settings       organization · organizations · account

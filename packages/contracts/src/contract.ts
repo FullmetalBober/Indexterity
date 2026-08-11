@@ -14,6 +14,7 @@ import {
   clusterCollections,
   clusterCooldowns,
   clusterEvent,
+  clusterIndexSizeSeries,
   clusterLatency,
   clusterLatencySeries,
   clusterNodes,
@@ -79,6 +80,21 @@ export const contract = {
     })
     .input(clusterId)
     .output(clusterLatencySeries),
+
+  // Bucketed server-side, one point per day (#160). The rows behind it are
+  // run-length encoded, so an unchanged index extends the row it has rather than
+  // adding another — sending one point per run would be a payload that grows
+  // with how much the cluster CHANGES, which is exactly the unbounded shape #64
+  // bounded everywhere else.
+  getIndexSizeSeries: oc
+    .route({
+      method: "GET",
+      path: "/clusters/{clusterId}/index-size-series",
+      summary:
+        "Total index bytes per day over the trend window — is the footprint going down, net of what the application added",
+    })
+    .input(clusterId)
+    .output(clusterIndexSizeSeries),
 
   getCollections: oc
     .route({

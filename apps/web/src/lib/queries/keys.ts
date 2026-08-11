@@ -44,6 +44,11 @@ export const queryKeys = {
   latency: (clusterId: string | null) => ["latency", clusterId] as const,
   latencySeries: (clusterId: string | null) => ["latency-series", clusterId] as const,
   collections: (clusterId: string | null) => ["collections", clusterId] as const,
+  // The footprint trend (#160). Its own key beside `collections`, which is the
+  // same measurement at one instant: they go stale together, on the collect, but
+  // one is a 31-point series and the other is a row per collection, and the page
+  // draws them in different places.
+  indexSizeSeries: (clusterId: string | null) => ["index-size-series", clusterId] as const,
   nodes: (clusterId: string | null) => ["nodes", clusterId] as const,
   // Its own key rather than a field on `recommendations`: a cooldown outlives
   // the recommendation that caused it, and the two are moved by different
