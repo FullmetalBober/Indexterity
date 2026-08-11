@@ -13,6 +13,19 @@ import { ORPCError } from "@orpc/client";
 // Everything else keeps a generic message — a 500 must not leak internals.
 const READABLE_STATUSES = [400, 402, 403, 404, 409];
 
+// Codes whose message is for the reader whatever status it rides on, and
+// whatever list the call site narrowed to.
+//
+// DIAL_BUDGET is the api's per-account outbound-dial budget (#162,
+// api/src/errors/dial-budget.ts). It answers 429, which is not readable by
+// default and must not become so — the other 429 in this product is better-auth's
+// per-address rate limit — and every one of the four routes that can raise it
+// passes its own list of the failures it expects (400 for the string, 502 for the
+// cluster), so a status rule would have to be repeated in four places and
+// remembered in the fifth. The refusal names the limit and when it resets; hiding
+// that behind "failed to connect cluster" is what made it a support question.
+const READABLE_CODES = ["DIAL_BUDGET"];
+
 // better-auth's client does not throw: every call resolves to `{ data, error }`.
 // A mutation needs a rejection to have an onError at all, and a query needs one
 // for its data to be an answer rather than a maybe — so `unwrap` below turns the
@@ -83,8 +96,8 @@ export function apiMessage(
   fallback: string,
   readable: readonly number[] = READABLE_STATUSES,
 ): string {
+  if (!(error instanceof Error)) return fallback;
+  if (error instanceof ORPCError && READABLE_CODES.includes(error.code)) return error.message;
   const status = statusOf(error);
-  return status !== null && readable.includes(status) && error instanceof Error
-    ? error.message
-    : fallback;
+  return status !== null && readable.includes(status) ? error.message : fallback;
 }
