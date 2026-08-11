@@ -1,7 +1,7 @@
 import type { Recommendation } from "@repo/contracts";
 import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderInApp } from "~/test-utils";
 import { RecommendationsTable } from "./recommendations-table";
 
@@ -223,5 +223,61 @@ describe("RecommendationsTable", () => {
     expect(screen.queryByText("No recommendations yet")).not.toBeInTheDocument();
     expect(screen.getByRole("table")).toBeInTheDocument();
     expect(screen.getByLabelText("Filter recommendations")).toBeDisabled();
+  });
+});
+
+// A clipped index name is worse than a clipped sentence: half of
+// `orders_customerId_1_createdAt_-1` names nothing, and it is the string a reader
+// carries to mongosh. jsdom lays nothing out, so the widths are stubbed — the
+// component's own measurement is covered in truncated.test.tsx.
+describe("RecommendationsTable, a long index name", () => {
+  const stubWidths = (scrollWidth: number, clientWidth: number): void => {
+    for (const [name, value] of [
+      ["scrollWidth", scrollWidth],
+      ["clientWidth", clientWidth],
+    ] as const) {
+      Object.defineProperty(HTMLElement.prototype, name, { configurable: true, get: () => value });
+    }
+  };
+
+  afterEach(() => {
+    for (const name of ["scrollWidth", "clientWidth"]) {
+      Reflect.deleteProperty(HTMLElement.prototype, name);
+    }
+  });
+
+  const long = "orders_customerId_1_createdAt_-1_status_1_region_1";
+
+  it("offers the whole name in a tooltip once the column clips it", () => {
+    stubWidths(520, 200);
+    renderInApp(
+      <RecommendationsTable
+        clusterId="c1"
+        total={1}
+        recommendations={[rec({ indexName: long })]}
+        loading={false}
+      />,
+    );
+
+    expect(screen.getByText(long)).toHaveAttribute("data-slot", "tooltip-trigger");
+    // And not the browser's own box as well: two tooltips for one cell is the
+    // native one drawn on top of ours.
+    expect(screen.getByText(long)).not.toHaveAttribute("title");
+  });
+
+  it("leaves a name that fits as plain text", () => {
+    stubWidths(200, 200);
+    renderInApp(
+      <RecommendationsTable
+        clusterId="c1"
+        total={1}
+        recommendations={[rec({ indexName: "idx_a" })]}
+        loading={false}
+      />,
+    );
+
+    const cell = screen.getByText("idx_a");
+    expect(cell).not.toHaveAttribute("data-slot", "tooltip-trigger");
+    expect(cell.className).toContain("truncate");
   });
 });
