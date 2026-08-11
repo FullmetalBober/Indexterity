@@ -221,6 +221,16 @@ un-hidden first — and the confirmation dialog makes you type the org's name an
 names every least-privilege user Indexterity created on your clusters, with the
 command to drop it.
 
+**Everything owner-level leaves a row, and owners can read them.** Sign-ins and
+failed sign-ins, every two-factor event, role changes, invitations, and the four
+things that can be done to a cluster's access — 23 kinds of act, at **Settings →
+Security**, filterable by kind and by actor and paged back to the day the trail
+shipped. It never ages out on a billing clock: the incident that needs a row is
+usually older than the day it is noticed. Owner-only, because every row carries
+the address and client a colleague acted from. A failed sign-in is shown with no
+actor and the typed address worded as an attempt — nobody proved they were that
+person, and the account holder is who it was done to.
+
 **The three acts that reach your database ask for a fresh sign-in.** Going
 live, rotating credentials and disconnecting refuse an owner session signed in
 more than an hour ago — the dashboard asks for the password again and then
@@ -272,7 +282,8 @@ apps/api                control plane
   src/engine            engine-neutral ports (collector, executor, session)
   src/mongo             the MongoDB adapter; zod-parses driver output at the boundary
   src/jobs              graphile-worker tasks (collect/classify/suggest/apply/finalize)
-  src/audit             the security trail — who signed in, who changed a role
+  src/audit             the security trail — who signed in, who changed a role,
+                        read at Settings → Security by owners only
   src/db                Drizzle schema, client, secret sealing
 apps/web                dashboard
   src/routes/app.tsx    the /app shell — auth gate, org switcher, the nav rail
@@ -282,7 +293,7 @@ apps/web                dashboard
     …$clusterId.index      overview — ROI, recommendations, latency, collections
     …$clusterId.settings   name, policy, mode, credentials, disconnect
   src/routes/app.clusters.new   connecting a cluster, which is onboarding
-  src/routes/app.settings       organization · organizations · account
+  src/routes/app.settings       organization · organizations · account · security
   src/lib/api.ts        one oRPC client, isomorphic: same-origin in the browser,
                         API_URL with the caller's cookie during SSR
   src/lib/queries       the query layer: the client, one key per api call in

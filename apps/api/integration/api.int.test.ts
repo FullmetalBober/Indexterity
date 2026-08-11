@@ -3,6 +3,7 @@ import {
   LATENCY_SERIES_MAX_COLLECTIONS,
   LATENCY_SERIES_WINDOW_DAYS,
   RECOMMENDATIONS_CAP,
+  SECURITY_TRAIL_PAGE,
 } from "@repo/contracts";
 import { makeWorkerUtils } from "graphile-worker";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -21,6 +22,7 @@ import {
   indexCooldowns,
   indexSnapshots,
   latencySamples,
+  members,
   organizations,
   policies,
   recommendations,
@@ -2530,6 +2532,133 @@ describe("security trail", () => {
     if (gone !== undefined) {
       expect(gone.clusterId).toBeNull();
       expect(gone.metadata).toMatchObject({ clusterId: expect.any(String) });
+    }
+  });
+
+  // #158. Everything above asserts against the TABLE, because until now nothing
+  // read it back. These assert against the route a reader actually uses.
+  it("serves the org's trail to an owner, newest first, with the true total", async () => {
+    const res = await api("/security-events", owner);
+    expect(res.status).toBe(200);
+    const body = asRecord(await res.json());
+    const events = body.events as { id: string; event: string; createdAt: string }[];
+    expect(events.length).toBeGreaterThan(0);
+    expect(events.length).toBeLessThanOrEqual(SECURITY_TRAIL_PAGE);
+    // Against the table, so the count is the org's trail and not the page.
+    expect(body.total).toBe((await eventsFor(ownerOrgId)).length);
+    const stamps = events.map((row) => Date.parse(row.createdAt));
+    expect([...stamps].sort((a, b) => b - a)).toEqual(stamps);
+    // Scoped to the caller's org. The actor index crosses orgs on purpose; a
+    // tenant's read must not.
+    const ids = new Set((await eventsFor(ownerOrgId)).map((row) => row.id));
+    expect(events.every((row) => ids.has(row.id))).toBe(true);
+  });
+
+  it("filters by kind and by actor, at the api rather than in the browser", async () => {
+    const byKind = asRecord(
+      await (await api("/security-events?event=CLUSTER_MODE_CHANGED", owner)).json(),
+    );
+    const kinds = (byKind.events as { event: string }[]).map((row) => row.event);
+    expect(kinds.length).toBeGreaterThan(0);
+    expect(new Set(kinds)).toEqual(new Set(["CLUSTER_MODE_CHANGED"]));
+    // The total is of what MATCHES, so a filtered page cannot report the whole
+    // trail's size beside a handful of rows.
+    expect(byKind.total).toBe(kinds.length);
+
+    const ownerId = (await eventsFor(ownerOrgId)).find(
+      (row) => row.actorUserId !== null,
+    )?.actorUserId;
+    if (ownerId === undefined || ownerId === null) throw new Error("no actor in the trail");
+    const byActor = asRecord(
+      await (await api(`/security-events?actorUserId=${ownerId}`, owner)).json(),
+    );
+    const actors = (byActor.events as { actorUserId: string | null }[]).map(
+      (row) => row.actorUserId,
+    );
+    expect(actors.length).toBeGreaterThan(0);
+    expect(new Set(actors)).toEqual(new Set([ownerId]));
+
+    // A kind nobody has performed answers with an empty page and a zero total,
+    // not with the unfiltered trail.
+    const none = asRecord(await (await api("/security-events?event=ORG_DELETED", owner)).json());
+    expect(none.events).toEqual([]);
+    expect(none.total).toBe(0);
+  });
+
+  // Keyset, not offset: the trail grows at the head, and an offset page would
+  // repeat the row a fresh sign-in pushed across the boundary.
+  it("pages backwards through the trail without repeating or skipping a row", async () => {
+    // One row per page, by asking for the page after each row in turn — the
+    // cursor is what is under test, not the page size.
+    const all = await eventsFor(ownerOrgId);
+    if (all.length < 3) throw new Error("not enough trail to page through");
+    const first = asRecord(await (await api("/security-events", owner)).json());
+    const firstIds = (first.events as { id: string }[]).map((row) => row.id);
+    expect(firstIds[0]).toBe(all[0]?.id);
+
+    const cursor = all[0];
+    if (cursor === undefined) throw new Error("no cursor row");
+    const second = asRecord(
+      await (
+        await api(
+          `/security-events?beforeCreatedAt=${encodeURIComponent(cursor.createdAt.toISOString())}&beforeId=${cursor.id}`,
+          owner,
+        )
+      ).json(),
+    );
+    const secondIds = (second.events as { id: string }[]).map((row) => row.id);
+    // The cursor row itself is excluded, and the next one is the row after it.
+    expect(secondIds).not.toContain(cursor.id);
+    expect(secondIds[0]).toBe(all[1]?.id);
+    // The total does not change with the page: it counts the filter, not the
+    // slice, so "showing 100 of 4,312" stays true on page four.
+    expect(second.total).toBe(first.total);
+  });
+
+  // The load-bearing rule of the whole route. Everywhere else a member reads
+  // everything in their org; here every row carries a colleague's address.
+  //
+  // Every account owns the org its sign-up made, so a session read from where it
+  // is standing answers 200 about its OWN trail and proves nothing. The refusal
+  // only means something once the caller is standing in the owner's org holding
+  // the member role — which is a membership row and an active org, both put in
+  // place here and both taken out again, so nothing after this inherits either.
+  //
+  // The row goes in directly rather than through an invitation: this file is one
+  // sequential narrative sharing one address with the auth rate limiter, and four
+  // more auth POSTs here showed up as unrelated failures three describes later.
+  it("refuses a member, because this is who-did-what and not team-wide reading", async () => {
+    const ownOrgId = asString(asRecord(await (await api("/org", member)).json()).id);
+    expect(ownOrgId).not.toBe(ownerOrgId);
+    // The control: as the owner of their own org, the route answers. It is what
+    // makes the refusal below about the role rather than about a broken route.
+    expect((await api("/security-events", member)).status).toBe(200);
+
+    const [account] = await db
+      .select({ id: user.id })
+      .from(user)
+      .where(eq(user.email, member.email))
+      .limit(1);
+    if (account === undefined) throw new Error("no user row for the member session");
+    await db
+      .insert(members)
+      .values({ orgId: ownerOrgId, userId: account.id, role: "member" })
+      .onConflictDoNothing();
+    try {
+      const into = await authPost("/organization/set-active", member, {
+        organizationId: ownerOrgId,
+      });
+      expect(into.status).toBe(200);
+      const res = await api("/security-events", member);
+      expect(res.status).toBe(403);
+    } finally {
+      const back = await authPost("/organization/set-active", member, {
+        organizationId: ownOrgId,
+      });
+      expect(back.status).toBe(200);
+      await db
+        .delete(members)
+        .where(and(eq(members.orgId, ownerOrgId), eq(members.userId, account.id)));
     }
   });
 
