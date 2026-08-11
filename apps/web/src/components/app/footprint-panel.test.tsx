@@ -105,6 +105,28 @@ describe("FootprintPanel", () => {
     expect(screen.queryByText("0 KB")).not.toBeInTheDocument();
   });
 
+  // The axis and the tooltip are labelled for a DAILY series. The default
+  // format writes `8/9 03:00`, which is precise to the minute about a whole
+  // day's total and, read in the local zone, names the previous day for anybody
+  // west of UTC — against a scale that positions the point correctly.
+  it("labels the axis in whole days, with no time of day", () => {
+    const { container } = render(<FootprintPanel series={payload()} loading={false} />);
+    const ticks = [...container.querySelectorAll("text")].map((node) => node.textContent ?? "");
+    expect(ticks.length).toBeGreaterThan(0);
+    expect(ticks.some((text) => /^\d+\/\d+$/.test(text))).toBe(true);
+    // No `HH:MM` anywhere on the axis.
+    expect(ticks.some((text) => /\d:\d\d/.test(text))).toBe(false);
+  });
+
+  // Not "per collection": this series is the cluster's total, and the
+  // Collections table below is where a per-namespace figure lives.
+  it("names itself as a cluster-wide daily series", () => {
+    render(<FootprintPanel series={payload()} loading={false} />);
+    expect(
+      screen.getByLabelText("Total index bytes across the cluster, one point per day"),
+    ).toBeInTheDocument();
+  });
+
   // The panel claims nothing about the cluster before the read has answered.
   it("stays quiet while the first fetch is out", () => {
     render(

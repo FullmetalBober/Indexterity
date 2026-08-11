@@ -3,6 +3,7 @@ import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import {
   type ChartSeries,
+  dayLabel,
   LineChart,
   SERIES_PALETTE,
   tooltipTime,
@@ -195,5 +196,63 @@ describe("the tooltip reads the datum, not the pixel", () => {
     expect(tooltipTime(undefined)).toBe("");
     expect(tooltipTime({ xValue: null })).toBe("");
     expect(tooltipTime({ xValue: "not a date" })).toBe("");
+  });
+});
+
+// A series whose points ARE days must not be labelled to the minute, and must
+// not be read in the reader's zone: the buckets are UTC midnights and the scale
+// is scaleUtc, so local getters name the day before for anybody west of UTC.
+describe("a daily series is labelled in whole UTC days", () => {
+  it("writes the day and no time of day", () => {
+    expect(dayLabel(new Date("2026-08-09T00:00:00.000Z"))).toBe("8/9");
+  });
+
+  // The visible half of the bug: `8/9 03:00` on a chart of daily totals.
+  it("does not carry the hour the default format would have added", () => {
+    const midnight = new Date("2026-08-09T00:00:00.000Z");
+    expect(dayLabel(midnight)).not.toMatch(/:/);
+  });
+
+  // The half that was actually wrong. A UTC-midnight bucket is 19:00 the
+  // PREVIOUS day in New York, so the local reading named the wrong day — while
+  // the scale positioned the point correctly, so the axis disagreed with itself.
+  it("names the bucket's own day, not the reader's", () => {
+    const midnight = new Date("2026-08-09T00:00:00.000Z");
+    // Whatever this machine's zone, the UTC day is the answer.
+    expect(dayLabel(midnight)).toBe(`${midnight.getUTCMonth() + 1}/${midnight.getUTCDate()}`);
+    // And the last instant of the same UTC day still reads as that day.
+    expect(dayLabel(new Date("2026-08-09T23:59:59.000Z"))).toBe("8/9");
+  });
+
+  it("says nothing for a time it cannot read", () => {
+    expect(dayLabel(null)).toBe("");
+    expect(dayLabel(undefined)).toBe("");
+    expect(dayLabel("not a date")).toBe("");
+  });
+
+  it("is what the tooltip heading uses when it is handed one", () => {
+    const at = new Date("2026-08-09T00:00:00.000Z");
+    expect(tooltipTime({ xValue: at }, dayLabel)).toBe("8/9");
+    // And the default is unchanged for the latency charts.
+    expect(tooltipTime({ xValue: at })).toBe(label(at));
+  });
+});
+
+// fmtBytes writes "4.0 GB" on its own, so appending the axis label as well read
+// "4.0 GB bytes".
+describe("a value whose format already carries its unit", () => {
+  const at = new Date("2026-08-09T00:00:00.000Z");
+  const asBytes = (value: number) => `${(value / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+
+  it("is not given a second unit", () => {
+    expect(tooltipValue({ xValue: at, yValue: 4 * 1024 ** 3 }, "", asBytes)).toBe("4.0 GB");
+  });
+
+  it("still draws a gap as a dash", () => {
+    expect(tooltipValue({ xValue: at, yValue: null }, "", asBytes)).toBe("—");
+  });
+
+  it("leaves the suffix alone for a bare number", () => {
+    expect(tooltipValue({ xValue: at, yValue: 58_000 }, "µs")).toBe("58000 µs");
   });
 });
