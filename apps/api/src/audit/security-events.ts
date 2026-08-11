@@ -1,5 +1,6 @@
 import type { Database } from "../db";
 import { securityEvents } from "../db";
+import type { ClusterEngine, TlsOverrides } from "../engine/ports";
 
 // Who did what, to whom, from where — for the acts that are not index operations.
 //
@@ -51,17 +52,76 @@ export const SECURITY_EVENTS = [
 
 export type SecurityEventName = (typeof SECURITY_EVENTS)[number];
 
-export interface SecurityEventInput {
-  readonly event: SecurityEventName;
+// What each act records BESIDE the columns every row has, one entry per act that
+// records anything. An act absent from here carries no specifics.
+//
+// The column is jsonb and was typed `Record<string, unknown>`, which is to say
+// not typed: `{ readOnly }` and `{ readonly }` were equally acceptable, and the
+// second reads back as an act with no mode in it. Nothing catches that later,
+// because nothing READS these payloads — they are written for a person during an
+// incident, so the first reader is the person who most needs them to be right,
+// and by then the act is months old. This is the check that has to happen at the
+// call site or nowhere (#24).
+export interface SecurityEventMetadata {
+  CLUSTER_CONNECTED: {
+    engine: ClusterEngine;
+    provisioned: boolean;
+    // Only on the provisioned path — a user we created, so a name we can revoke.
+    provisionedUsername?: string;
+    tlsOverrides: TlsOverrides;
+  };
+  // `clusterId` here rather than in the column: the row it would point at is
+  // deleted by the act this records.
+  CLUSTER_DISCONNECTED: {
+    clusterId: string;
+    unhidden: number;
+    provisionedUsername: string | null;
+  };
+  CLUSTER_CREDENTIALS_ROTATED: {
+    provisionedUsername: string | null;
+    keptScopedUser: boolean;
+    tlsOverrides: TlsOverrides;
+  };
+  CLUSTER_MODE_CHANGED: { readOnly: boolean };
+  // Which of better-auth's two revoke endpoints answered, since neither may
+  // record the session token itself.
+  SESSION_REVOKED: { scope: "one" | "others" };
+  MEMBER_ROLE_CHANGED: { role: string | null };
+  INVITE_CREATED: { role: string | null };
+}
+
+interface SecurityEventColumns {
   readonly orgId?: string | null;
   readonly clusterId?: string | null;
   readonly actorUserId?: string | null;
   readonly actorEmail?: string | null;
   readonly target?: string | null;
-  readonly metadata?: Record<string, unknown> | null;
   readonly ipAddress?: string | null;
   readonly userAgent?: string | null;
 }
+
+// Distributed over the 23 names, so `event` decides what `metadata` may be: the
+// shape above for an act that has one, and nothing at all for an act that does
+// not. `metadata` stays optional on the acts that have a shape because
+// auth-trail.ts builds one base object for every act and then fills in per case.
+export type SecurityEventInput = {
+  [K in SecurityEventName]: SecurityEventColumns & {
+    readonly event: K;
+  } & (K extends keyof SecurityEventMetadata
+      ? { readonly metadata?: Readonly<SecurityEventMetadata[K]> | null }
+      : { readonly metadata?: never });
+}[SecurityEventName];
+
+// The same event, minus the fields a caller with a request in hand does not
+// supply — `actorFromRequest` fills those in. Distributive on purpose: a plain
+// `Omit` over a union collapses it into one object whose `event` is every name
+// and whose `metadata` is every shape, which is the type this file exists to
+// stop existing.
+export type SecurityEventDetails = SecurityEventInput extends infer T
+  ? T extends SecurityEventInput
+    ? Omit<T, "actorUserId" | "actorEmail" | "ipAddress" | "userAgent">
+    : never
+  : never;
 
 // Where the client came from, as far as this deployment can honestly tell.
 //

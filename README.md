@@ -373,8 +373,8 @@ on a Tailwind arbitrary value that has a canonical utility (`w-[220px]` is
 worker start together and whoever queues a job first would otherwise race a
 schema that is not there yet.
 
-**Four test layers**, currently 457 api unit, 244 web unit, 81 integration and
-24 end-to-end.
+**Four test layers**, currently 600 api unit, 317 web unit, 104 integration and
+31 end-to-end.
 
 | layer | what it needs | what only it catches |
 |---|---|---|

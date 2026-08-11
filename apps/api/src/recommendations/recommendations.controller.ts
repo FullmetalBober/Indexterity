@@ -2,7 +2,6 @@ import { Controller, Req } from "@nestjs/common";
 import { implement } from "@orpc/nest";
 import { contract, RECOMMENDATIONS_CAP } from "@repo/contracts";
 import type { FastifyRequest } from "fastify";
-import { z } from "zod";
 import { parseStoredSpec, rebuildKeys, rebuildOptions } from "../analysis";
 import { actions, and, clusters, desc, eq, recommendations, roiMetrics, sql } from "../db";
 import { DatabaseService } from "../db/database.service";
@@ -16,9 +15,6 @@ import { Implement } from "../orpc/implement";
 // How long a cancelled drop stays off the table before the engine may propose
 // it again — long enough that an owner is not re-rejecting the same row weekly.
 const VETO_COOLDOWN_DAYS = 90;
-
-// A drop rollback token carries the dropped index serialized spec.
-const rollbackTokenSchema = z.object({ spec: z.unknown() });
 
 // The recommendations themselves and the three things a human can do to one:
 // approve it, cancel it while it is hidden, or undo it after the drop.
@@ -109,8 +105,14 @@ export class RecommendationsController {
         .from(actions)
         .where(and(eq(actions.recommendationId, rec.id), eq(actions.kind, "DROP")))
         .orderBy(desc(actions.createdAt));
-      const withToken = dropActions.find((action) => action.rollbackToken !== null);
-      if (withToken === undefined || withToken.rollbackToken === null) {
+      // A DROP row's token carries the spec; a CREATE row's carries a name
+      // (db/schema.ts). This query asks for DROP rows only, so the `in` narrows
+      // the union rather than guarding against something that happens — and it
+      // is where a row written before the token existed drops out.
+      const token = dropActions
+        .map((action) => action.rollbackToken)
+        .find((value) => value !== null && "spec" in value);
+      if (token === undefined || token === null || !("spec" in token)) {
         throw errors.CONFLICT({ message: "no rollback token recorded for this drop" });
       }
       let keys: Record<string, 1 | -1> | null = null;
@@ -119,7 +121,7 @@ export class RecommendationsController {
       // putting it back — see analysis/rollback.ts.
       let options: CreateIndexOptions = { name: rec.indexName };
       try {
-        const spec = parseStoredSpec(rollbackTokenSchema.parse(withToken.rollbackToken).spec);
+        const spec = parseStoredSpec(token.spec);
         keys = rebuildKeys(spec);
         options = rebuildOptions(spec);
       } catch {
