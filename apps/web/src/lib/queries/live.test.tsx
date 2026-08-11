@@ -55,6 +55,7 @@ describe("invalidationKeys", () => {
   it("a landed collect moves the telemetry and the cluster list", () => {
     expect(invalidationKeys(CLUSTER, { kind: "PASS_FINISHED", task: "collect" })).toEqual([
       queryKeys.collections(CLUSTER),
+      queryKeys.indexSizeSeries(CLUSTER),
       queryKeys.latency(CLUSTER),
       queryKeys.latencySeries(CLUSTER),
       queryKeys.nodes(CLUSTER),

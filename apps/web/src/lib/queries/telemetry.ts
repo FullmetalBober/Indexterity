@@ -8,6 +8,7 @@
 // required them to share an entry — that is a fact about *why* they go stale, not
 // about who reads them.
 import type {
+  ClusterIndexSizeSeries,
   ClusterLatencySeries,
   ClusterNodes,
   CollectionStat,
@@ -30,6 +31,17 @@ export const NO_SERIES: ClusterLatencySeries = {
   collections: [],
 };
 export const NO_COLLECTIONS: CollectionStat[] = [];
+// The whole payload again, for the same reason: the three summary fields are
+// read off the DRAWABLE ends of a series that has holes in it, and recomputing
+// them from `points` in the browser is exactly the mistake the api computes them
+// to avoid (#160).
+export const NO_INDEX_SIZE_SERIES: ClusterIndexSizeSeries = {
+  clusterId: "",
+  firstBytes: null,
+  latestBytes: null,
+  changeBytes: null,
+  points: [],
+};
 
 // The cluster is already resolved by the caller — the dashboard's loader picks it
 // out of the cluster list with the same selectCluster the bar uses, so the id is
@@ -64,6 +76,14 @@ export function collectionsQuery(clusterId: string | null) {
   });
 }
 
+export function indexSizeSeriesQuery(clusterId: string | null) {
+  return queryOptions({
+    queryKey: queryKeys.indexSizeSeries(clusterId),
+    queryFn: () =>
+      clusterId === null ? NO_INDEX_SIZE_SERIES : api().getIndexSizeSeries({ clusterId }),
+  });
+}
+
 // The whole payload, not just the array: collectedAt is the panel's "as of",
 // and a roster without its moment is a topology claim nobody made (#100).
 export function nodesQuery(clusterId: string | null) {
@@ -88,6 +108,11 @@ export function useLatencySeries(clusterId: string | null): Read<ClusterLatencyS
 
 export function useCollections(clusterId: string | null): Read<CollectionStat[]> {
   const { data = NO_COLLECTIONS, isPending } = useQuery(collectionsQuery(clusterId));
+  return { data, pending: isPending };
+}
+
+export function useIndexSizeSeries(clusterId: string | null): Read<ClusterIndexSizeSeries> {
+  const { data = NO_INDEX_SIZE_SERIES, isPending } = useQuery(indexSizeSeriesQuery(clusterId));
   return { data, pending: isPending };
 }
 

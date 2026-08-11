@@ -3916,4 +3916,135 @@ describe("bounded per-cluster reads", () => {
     const summarized = summary.collections as { collection: string }[];
     expect(summarized.map((entry) => entry.collection)).toContain("ancient");
   });
+
+  // #160. The footprint history was stored and only its newest value was drawn.
+  //
+  // Buckets are found by containment rather than by index, so this does not
+  // depend on the database's timezone: the bucket holding an instant is the last
+  // one that starts at or before it.
+  it("buckets the index footprint by day, and a day nobody collected is a gap", async () => {
+    const sizeId = await bareCluster("Footprint Trend");
+    const now = Date.now();
+    const DAY = 86_400_000;
+    const at = (daysAgo: number, hour: number) => new Date(now - daysAgo * DAY + hour * 3_600_000);
+    const spec = { key: { a: 1 } };
+    // Runs, not readings: an index that has not changed extends the row it has,
+    // so each of these stands for however many collects saw the same counters.
+    await insertSnapshots(db, [
+      // Four days ago, both indexes seen.
+      {
+        clusterId: sizeId,
+        database: "app",
+        collection: "orders",
+        indexName: "a_1",
+        spec,
+        sizeBytes: 1_000,
+        perMember: [],
+        capturedAt: at(4, -6),
+        lastSeenAt: at(4, -1),
+      },
+      {
+        clusterId: sizeId,
+        database: "app",
+        collection: "orders",
+        indexName: "b_1",
+        spec,
+        sizeBytes: 500,
+        perMember: [],
+        capturedAt: at(4, -6),
+        lastSeenAt: at(4, -1),
+      },
+      // Two days ago, only one of them — the other was dropped, and the total
+      // has to fall rather than carry the missing index forward.
+      {
+        clusterId: sizeId,
+        database: "app",
+        collection: "orders",
+        indexName: "a_1",
+        spec,
+        sizeBytes: 2_000,
+        perMember: [],
+        capturedAt: at(2, -6),
+        lastSeenAt: at(2, -1),
+      },
+      // And now, both again and bigger.
+      {
+        clusterId: sizeId,
+        database: "app",
+        collection: "orders",
+        indexName: "a_1",
+        spec,
+        sizeBytes: 3_000,
+        perMember: [],
+        capturedAt: new Date(now - 600_000),
+        lastSeenAt: new Date(now),
+      },
+      {
+        clusterId: sizeId,
+        database: "app",
+        collection: "orders",
+        indexName: "b_1",
+        spec,
+        sizeBytes: 700,
+        perMember: [],
+        capturedAt: new Date(now - 600_000),
+        lastSeenAt: new Date(now),
+      },
+      // Inside the plan's 90-day history and outside the trend window, so it
+      // must not become the series' first point.
+      {
+        clusterId: sizeId,
+        database: "app",
+        collection: "orders",
+        indexName: "a_1",
+        spec,
+        sizeBytes: 99_000,
+        perMember: [],
+        capturedAt: at(LATENCY_SERIES_WINDOW_DAYS + 20, 0),
+        lastSeenAt: at(LATENCY_SERIES_WINDOW_DAYS + 20, 1),
+      },
+    ]);
+
+    const body = asRecord(await (await api(`/clusters/${sizeId}/index-size-series`, owner)).json());
+    const points = body.points as { day: string; totalBytes: number | null; indexCount: number }[];
+    const bucketOf = (when: Date) =>
+      points.filter((point) => new Date(point.day).getTime() <= when.getTime()).at(-1);
+    const indexOf = (when: Date) =>
+      points.findLastIndex((point) => new Date(point.day).getTime() <= when.getTime());
+
+    // Both indexes, summed, at the size the newest run of that day reported.
+    expect(bucketOf(at(4, -1))).toMatchObject({ totalBytes: 1_500, indexCount: 2 });
+    // One index left: the sum falls, and the count says which kind of fall it is.
+    expect(bucketOf(at(2, -1))).toMatchObject({ totalBytes: 2_000, indexCount: 1 });
+    expect(bucketOf(new Date(now))).toMatchObject({ totalBytes: 3_700, indexCount: 2 });
+
+    // The day between them is a gap, not a zero and not a straight line: no run
+    // overlapped it, so nothing is known about the footprint that day.
+    const between = points.slice(indexOf(at(4, -1)) + 1, indexOf(at(2, -1)));
+    expect(between.length).toBeGreaterThan(0);
+    expect(between.every((point) => point.totalBytes === null && point.indexCount === 0)).toBe(
+      true,
+    );
+
+    // The summary reads the DRAWABLE ends. The trailing point is today's, and
+    // the leading one is four days ago — not the 99 KB run outside the window,
+    // and not a null.
+    expect(body.firstBytes).toBe(1_500);
+    expect(body.latestBytes).toBe(3_700);
+    expect(body.changeBytes).toBe(2_200);
+    // Bucketed server-side: one point per day of the window, not one per run.
+    expect(points.length).toBeLessThanOrEqual(LATENCY_SERIES_WINDOW_DAYS + 1);
+
+    // Another tenant gets the empty shape rather than a refusal, like the other
+    // per-cluster reads.
+    const stranger = await signUp("footprint-stranger");
+    createdEmails.push(stranger.email);
+    createdOrgIds.push(asString(asRecord(await (await api("/org", stranger)).json()).id));
+    const foreign = asRecord(
+      await (await api(`/clusters/${sizeId}/index-size-series`, stranger)).json(),
+    );
+    expect(foreign.points).toEqual([]);
+    expect(foreign.latestBytes).toBeNull();
+    expect(foreign.changeBytes).toBeNull();
+  });
 });

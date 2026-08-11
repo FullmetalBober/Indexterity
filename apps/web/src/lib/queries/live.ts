@@ -17,8 +17,9 @@ import { queryKeys } from "./keys";
 // worker actually writes, instead of trusting a blanket "something changed".
 //
 //   collect            snapshots and latency samples landed: the collection
-//                      footprint, both latency reads, and the cluster list —
-//                      lastCollectedAt is how the bar shows freshness
+//                      footprint and its trend over time, both latency reads,
+//                      the node roster, and the cluster list — lastCollectedAt
+//                      is how the bar shows freshness
 //   classify/suggest   recommendations were deleted/re-inserted or created
 //   apply/finalize     rows changed state, the trail and the ROI headline
 //                      moved with them
@@ -39,6 +40,7 @@ export function invalidationKeys(
         case "collect":
           return [
             queryKeys.collections(clusterId),
+            queryKeys.indexSizeSeries(clusterId),
             queryKeys.latency(clusterId),
             queryKeys.latencySeries(clusterId),
             queryKeys.nodes(clusterId),

@@ -9,6 +9,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { ActivityTable } from "~/components/app/activity-table";
 import { CollectionsTable, toCollectionRows } from "~/components/app/collections-table";
+import { FootprintPanel } from "~/components/app/footprint-panel";
 import { fmtBytes } from "~/components/app/format";
 import { latencyCharts } from "~/components/app/latency-series";
 import { NodesPanel } from "~/components/app/nodes-panel";
@@ -25,10 +26,12 @@ import {
 } from "~/lib/queries/pipeline";
 import {
   collectionsQuery,
+  indexSizeSeriesQuery,
   latencyQuery,
   latencySeriesQuery,
   nodesQuery,
   useCollections,
+  useIndexSizeSeries,
   useLatency,
   useLatencySeries,
   useNodes,
@@ -41,8 +44,9 @@ export const Route = createFileRoute("/app/clusters/$clusterId/")({
   // read one entry. First paint does not wait for the browser to boot and ask
   // again.
   //
-  // Six reads, and only the six this page draws. The policy is not among them
-  // any more: it belongs to the settings tab, which warms it in its own loader.
+  // Eight reads, and only the eight this page draws. The policy is not among
+  // them any more: it belongs to the settings tab, which warms it in its own
+  // loader.
   //
   // No resolving of "which cluster" left to do — the param is the answer, which
   // is what a cluster being a route buys. What it used to cost: the id was
@@ -63,6 +67,7 @@ export const Route = createFileRoute("/app/clusters/$clusterId/")({
       context.queryClient.ensureQueryData(latencyQuery(id)),
       context.queryClient.ensureQueryData(latencySeriesQuery(id)),
       context.queryClient.ensureQueryData(collectionsQuery(id)),
+      context.queryClient.ensureQueryData(indexSizeSeriesQuery(id)),
       context.queryClient.ensureQueryData(nodesQuery(id)),
     ]);
   },
@@ -84,6 +89,7 @@ function ClusterOverview() {
   const latency = useLatency(id);
   const latencySeries = useLatencySeries(id);
   const collectionStats = useCollections(id);
+  const footprint = useIndexSizeSeries(id);
   const nodes = useNodes(id);
 
   const proposed = recommendations.data.recommendations.filter((rec) => rec.state === "PROPOSED");
@@ -188,6 +194,22 @@ function ClusterOverview() {
           </CardContent>
         </Card>
       ) : null}
+
+      {/* Directly under the two cumulative cards, because it is the number that
+          corrects them (#160). "Reclaimed 4 GB" is true and is not an answer to
+          "is my index footprint smaller than it was" — a cluster whose
+          application added 6 GB in the same month has a triumphant ROI card and
+          a bigger bill. */}
+      <section className="mt-8">
+        <h2 className="font-semibold text-lg">Index footprint</h2>
+        <p className="text-muted-foreground text-sm">
+          Total index bytes across the cluster, one point per day. A day nobody collected is a gap,
+          not a zero.
+        </p>
+        <div className="mt-3">
+          <FootprintPanel series={footprint.data} loading={footprint.pending} />
+        </div>
+      </section>
 
       <RecommendationsTable
         clusterId={id}

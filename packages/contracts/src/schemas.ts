@@ -303,6 +303,45 @@ export const clusterLatencySeries = z.object({
 });
 export type ClusterLatencySeries = z.infer<typeof clusterLatencySeries>;
 
+// One day's total index footprint for a cluster (#160).
+//
+// `totalBytes` is null for a day nothing was collected, and that distinction is
+// the whole reason this is bucketed on the server. Zero would mean "this cluster
+// had no indexes", which is a claim about the cluster; null means "nobody
+// looked", which is a claim about us — and a straight line drawn across a week
+// of outage says the footprint held steady when nothing was known about it.
+export const indexSizePoint = z.object({
+  day: z.string(),
+  totalBytes: z.number().int().nonnegative().nullable(),
+  // How many indexes that total is the sum of. Zero exactly when totalBytes is
+  // null, and worth carrying: a footprint that fell because 40 indexes became 30
+  // is a different event from one that fell because 40 indexes got smaller.
+  indexCount: z.int().nonnegative(),
+});
+export type IndexSizePoint = z.infer<typeof indexSizePoint>;
+
+// Total index bytes per day over the same window the latency series uses.
+//
+// The question the ROI panel cannot answer. ROI is cumulative and only ever goes
+// up, because it counts what the engine removed; neither of its numbers says
+// whether the cluster's footprint is smaller than it was. A cluster where the
+// engine freed 4 GB while the application added 6 GB has a triumphant ROI panel
+// and a bill that went up, and nothing on the dashboard used to show that.
+export const clusterIndexSizeSeries = z.object({
+  clusterId: z.uuid(),
+  // The two ends of the drawable series and the distance between them, resolved
+  // here rather than on the client: the series has holes in it, so "the first
+  // point" and "points[0]" are not the same thing, and getting that wrong would
+  // report a gap day as a footprint of zero.
+  firstBytes: z.number().int().nonnegative().nullable(),
+  latestBytes: z.number().int().nonnegative().nullable(),
+  // Negative = the cluster carries less index than it did. Null until two
+  // different days have been collected, because one point is not a trend.
+  changeBytes: z.number().int().nullable(),
+  points: z.array(indexSizePoint),
+});
+export type ClusterIndexSizeSeries = z.infer<typeof clusterIndexSizeSeries>;
+
 // Same treatment for the proposals: 4,000 of them (the one-per-index worst
 // case) measured 1.86 MB. The cap keeps the client-side sort and filter D33
 // decided (they work over what arrives), and `total` keeps the truncation
