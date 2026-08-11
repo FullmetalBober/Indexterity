@@ -86,9 +86,13 @@ describe("every contract route names an authorization level", () => {
       // The decorator, then the method, then the builder. Non-greedy up to the
       // next `@Implement` or the end, so one route's level cannot vouch for the
       // route below it.
-      for (const match of text.matchAll(/@Implement\(contract\.(\w+)\)([\s\S]*?)(?=@Implement\(|$)/g)) {
+      for (const match of text.matchAll(
+        /@Implement\(contract\.(\w+)\)([\s\S]*?)(?=@Implement\(|$)/g,
+      )) {
         const [, name = "", body = ""] = match;
-        const gated = new RegExp(`route\\(\\s*this\\.tenancy,\\s*contract\\.${name},[^)]*"(${LEVELS})"`);
+        const gated = new RegExp(
+          `route\\(\\s*this\\.tenancy,\\s*contract\\.${name},[^)]*"(${LEVELS})"`,
+        );
         if (!gated.test(body)) offenders.push(`${file.split("/src/")[1] ?? file}: ${name}`);
       }
     }
