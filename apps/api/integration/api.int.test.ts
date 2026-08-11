@@ -2053,12 +2053,63 @@ describe("cancelling a pending drop", () => {
     expect(cooldown?.regressionCount).toBe(0);
     expect((cooldown?.until.getTime() ?? 0) > Date.now()).toBe(true);
 
+    // And a reader can now see it (#159). The row above was written by exactly
+    // one function and read by no controller until this route existed.
+    //
+    // Asserted per row rather than on the total: earlier scenarios in this file
+    // park indexes on the same cluster, so a fixed count here would be a claim
+    // about the order of the whole suite. The two totals are checked as
+    // invariants against the list instead, which is what they have to be.
+    const parked = asRecord(await (await api(`/clusters/${clusterId}/cooldowns`, owner)).json());
+    const entries = parked.parked as {
+      indexName: string;
+      reason: string;
+      regressionCount: number;
+      active: boolean;
+      until: string;
+    }[];
+    const kept = entries.find((entry) => entry.indexName === "keep_1");
+    expect(kept?.reason).toBe("drop cancelled by an owner");
+    expect(kept?.regressionCount).toBe(0);
+    expect(kept?.active).toBe(true);
+    expect(kept?.until).toBe(cooldown?.until.toISOString());
+
+    const stillParked = entries.filter((entry) => entry.active);
+    expect(parked.activeCount).toBe(stillParked.length);
+    // The SOONEST one still in force, which is what "next eligible" means.
+    expect(parked.nextEligibleAt).toBe(stillParked.map((entry) => entry.until).sort()[0] ?? null);
+    // Newest expiry first, so the panel reads top-down from the longest park.
+    expect([...entries].sort((a, b) => b.until.localeCompare(a.until))).toEqual(entries);
+
+    // Another tenant sees an empty set, not a refusal — the same shape as a
+    // cluster that has never parked anything.
+    const stranger = await signUp("cooldowns-stranger");
+    createdEmails.push(stranger.email);
+    createdOrgIds.push(asString(asRecord(await (await api("/org", stranger)).json()).id));
+    const foreign = asRecord(
+      await (await api(`/clusters/${clusterId}/cooldowns`, stranger)).json(),
+    );
+    expect(foreign.activeCount).toBe(0);
+    expect(foreign.nextEligibleAt).toBeNull();
+    expect(foreign.parked).toEqual([]);
+
     // Second call is a conflict — it is no longer hidden.
     const again = await api(`/recommendations/${rec.id}/unhide`, owner, {
       method: "POST",
       body: JSON.stringify({}),
     });
     expect(again.status).toBe(409);
+
+    // A cooldown OUTLIVES the recommendation that caused it, which is why this
+    // route reads the table on its own: deleting the row that was cancelled must
+    // not take the park with it. Retention and the next classify pass both do
+    // exactly this, and a join would lose the longest-standing entries.
+    await db.delete(recommendations).where(eq(recommendations.id, rec.id));
+    const orphaned = asRecord(await (await api(`/clusters/${clusterId}/cooldowns`, owner)).json());
+    expect(orphaned.activeCount).toBe(parked.activeCount);
+    expect(
+      (orphaned.parked as { indexName: string }[]).some((entry) => entry.indexName === "keep_1"),
+    ).toBe(true);
 
     await coll.drop().catch(() => {});
   });

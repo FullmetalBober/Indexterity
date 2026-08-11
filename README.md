@@ -139,6 +139,13 @@ the index is still hidden: it becomes visible again immediately and is parked
 for 90 days. **Undo** rebuilds a dropped index from the spec captured at drop
 time and corrects the ROI headline back down. Neither counts as a regression.
 
+Everything parked, from either source, is listed on the cluster page under
+**Parked**: what the engine has agreed not to propose again, in whose words,
+until when, and how many times each index has regressed. An index that has
+regressed three times says something about the collection that one rejection
+does not, and that count is recorded nowhere else — so an expired cooldown stays
+on the list, marked back in scope, rather than disappearing with its date.
+
 Undo is available for as long as the plan keeps history — the spec it rebuilds
 from lives in the audit trail, and a settled recommendation ages out with it.
 Live ones never do, however old: an index hidden through a long outage is still

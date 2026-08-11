@@ -53,17 +53,32 @@ export function invalidationKeys(
             queryKeys.recommendations(clusterId),
             queryKeys.activity(clusterId),
             queryKeys.roi(clusterId),
+            // finalize is where both regression gates run, and each of them
+            // parks an index (#159). apply shares this arm and writes no
+            // cooldown of its own — an invalidation that refetches an unchanged
+            // list is cheaper than two arms that have to be kept apart.
+            queryKeys.cooldowns(clusterId),
           ];
         default:
           return [];
       }
     case "DROP_HIDDEN":
     case "BUILD_GRADUATED":
+      return [
+        queryKeys.recommendations(clusterId),
+        queryKeys.activity(clusterId),
+        queryKeys.roi(clusterId),
+      ];
+    // The one event that always writes a cooldown: both places that fire it call
+    // recordRegression first (jobs/finalize.ts). The parked panel is the only
+    // screen that shows what a regression cost, so it moves when the row does
+    // rather than waiting for the pass to end.
     case "REGRESSION_FIRED":
       return [
         queryKeys.recommendations(clusterId),
         queryKeys.activity(clusterId),
         queryKeys.roi(clusterId),
+        queryKeys.cooldowns(clusterId),
       ];
   }
 }

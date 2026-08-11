@@ -12,6 +12,7 @@ import {
   auditAction,
   cluster,
   clusterCollections,
+  clusterCooldowns,
   clusterEvent,
   clusterLatency,
   clusterLatencySeries,
@@ -87,6 +88,21 @@ export const contract = {
     })
     .input(clusterId)
     .output(clusterCollections),
+
+  // Read on its own, never joined to `recommendations` (#159). A cooldown
+  // OUTLIVES the recommendation that caused it: cancelling a pending drop parks
+  // the index for 90 days and the row that was cancelled can be pruned or
+  // rewritten by the next classify pass long before that. A join would quietly
+  // drop exactly the cooldowns that have been in force the longest.
+  listCooldowns: oc
+    .route({
+      method: "GET",
+      path: "/clusters/{clusterId}/cooldowns",
+      summary:
+        "Indexes the engine has agreed not to propose again, why, how many times each has regressed, and until when",
+    })
+    .input(clusterId)
+    .output(clusterCooldowns),
 
   getNodes: oc
     .route({
