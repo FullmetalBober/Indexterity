@@ -3824,6 +3824,133 @@ describe("owner two-factor requirement (second api with REQUIRE_OWNER_2FA)", () 
   });
 });
 
+// #161. `per_member` was collected on every member and summed by every reader
+// before it reached a screen, so the whole point of collecting per member went
+// on making the total honest.
+describe("per-node index usage reaches the reader", () => {
+  it("carries the split beside the rows, from the last collect's batch", async () => {
+    const splitId = await bareCluster("Per Node Usage");
+    const now = Date.now();
+    const spec = { key: { a: 1 } };
+    await insertSnapshots(db, [
+      // An older run, deliberately: the reading must come from the newest batch,
+      // not from whichever row postgres reaches first.
+      {
+        clusterId: splitId,
+        database: "app",
+        collection: "orders",
+        indexName: "reporting_1",
+        spec,
+        sizeBytes: 4_096,
+        perMember: [{ member: "a:27017", ops: 5 }],
+        capturedAt: new Date(now - 7_200_000),
+        lastSeenAt: new Date(now - 7_200_000),
+      },
+      // All of it on one secondary — the reporting replica case.
+      {
+        clusterId: splitId,
+        database: "app",
+        collection: "orders",
+        indexName: "reporting_1",
+        spec,
+        sizeBytes: 4_096,
+        perMember: [
+          { member: "a:27017", ops: 0 },
+          { member: "b:27017", ops: 40_000 },
+        ],
+        capturedAt: new Date(now - 600_000),
+        lastSeenAt: new Date(now),
+      },
+      // The same total, spread — indistinguishable before this shipped.
+      {
+        clusterId: splitId,
+        database: "app",
+        collection: "orders",
+        indexName: "spread_1",
+        spec,
+        sizeBytes: 4_096,
+        perMember: [
+          { member: "a:27017", ops: 20_000 },
+          { member: "b:27017", ops: 20_000 },
+        ],
+        capturedAt: new Date(now - 600_000),
+        lastSeenAt: new Date(now),
+      },
+    ]);
+    await db.insert(recommendations).values([
+      {
+        clusterId: splitId,
+        type: "DROP_UNUSED" as const,
+        state: "PROPOSED" as const,
+        database: "app",
+        collection: "orders",
+        indexName: "reporting_1",
+        rationale: "no reads on the primary",
+        score: 60,
+        estimatedBytesSaved: 4_096,
+      },
+      {
+        clusterId: splitId,
+        type: "DROP_UNUSED" as const,
+        state: "PROPOSED" as const,
+        database: "app",
+        collection: "orders",
+        indexName: "spread_1",
+        rationale: "low reads",
+        score: 50,
+        estimatedBytesSaved: 4_096,
+      },
+      // No snapshot at all: the last collect did not see it, so it gets no
+      // usage entry rather than a row of zeroes.
+      {
+        clusterId: splitId,
+        type: "DROP_UNUSED" as const,
+        state: "PROPOSED" as const,
+        database: "app",
+        collection: "orders",
+        indexName: "vanished_1",
+        rationale: "gone since the last collect",
+        score: 40,
+        estimatedBytesSaved: 4_096,
+      },
+    ]);
+
+    const body = asRecord(await (await api(`/clusters/${splitId}/recommendations`, owner)).json());
+    const rows = body.recommendations as { id: string; indexName: string }[];
+    const usage = body.usage as {
+      recommendationId: string;
+      totalOps: number;
+      perMember: { member: string; ops: number }[];
+    }[];
+    const idOf = (name: string) => rows.find((row) => row.indexName === name)?.id;
+    const usageOf = (name: string) => usage.find((entry) => entry.recommendationId === idOf(name));
+
+    // Same total, different objects — which is the whole of the issue.
+    expect(usageOf("reporting_1")?.totalOps).toBe(40_000);
+    expect(usageOf("spread_1")?.totalOps).toBe(40_000);
+    // Busiest first, so concentration is visible without sorting on the client.
+    expect(usageOf("reporting_1")?.perMember).toEqual([
+      { member: "b:27017", ops: 40_000 },
+      { member: "a:27017", ops: 0 },
+    ]);
+    expect(usageOf("spread_1")?.perMember).toHaveLength(2);
+    // The older run's 5 ops on one member is not what came back.
+    expect(usageOf("reporting_1")?.perMember).toHaveLength(2);
+    // No reading rather than an invented zero.
+    expect(usageOf("vanished_1")).toBeUndefined();
+
+    // Another tenant gets the empty shape, usage included.
+    const stranger = await signUp("per-node-stranger");
+    createdEmails.push(stranger.email);
+    createdOrgIds.push(asString(asRecord(await (await api("/org", stranger)).json()).id));
+    const foreign = asRecord(
+      await (await api(`/clusters/${splitId}/recommendations`, stranger)).json(),
+    );
+    expect(foreign.usage).toEqual([]);
+    expect(foreign.recommendations).toEqual([]);
+  });
+});
+
 // The bounds #64 measured its way to. Both caps are asserted against real
 // rows through the real handler, because the whole point of the issue was that
 // nobody had measured what the reads actually ship.

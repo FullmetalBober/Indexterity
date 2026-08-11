@@ -189,9 +189,15 @@ function ClusterOverview() {
         </Card>
       ) : null}
 
+      {/* The roster comes from the read the Nodes panel below already makes, not
+          from a second copy in the recommendations payload: the members are a
+          fact about the cluster's last collect, identical for every row, and
+          repeating them 500 times would be the same fact 500 times (#161). */}
       <RecommendationsTable
         clusterId={id}
         recommendations={recommendations.data.recommendations}
+        usage={recommendations.data.usage}
+        roster={nodes.data}
         total={recommendations.data.total}
         loading={recommendations.pending}
       />

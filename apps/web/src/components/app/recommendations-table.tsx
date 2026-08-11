@@ -1,6 +1,7 @@
-import type { Recommendation } from "@repo/contracts";
+import type { ClusterNodes, IndexUsage, Recommendation } from "@repo/contracts";
 import { useMemo } from "react";
 import { badgeVariant, dropsOn } from "~/components/app/format";
+import { type UsageSplit, usageDetail, usageLine, usageSplit } from "~/components/app/index-usage";
 import { ConfirmButton } from "~/components/confirm-button";
 import { type DashboardColumns, DataTable, dashboardColumns } from "~/components/data-table";
 import { Truncated } from "~/components/truncated";
@@ -94,7 +95,39 @@ function action(rec: Recommendation, actions: Actions) {
   return <span className="text-muted-foreground text-xs">{rec.state}</span>;
 }
 
-function buildColumns(actions: Actions): DashboardColumns<Recommendation> {
+// The per-node split, under the usage class it qualifies.
+//
+// Absent for an index the last collect did not see — no line at all rather than
+// "0 ops on 0 nodes", which would be a measurement nobody took. A blind spot is
+// named in the tooltip and counted in its own clause here, never folded into the
+// node ratio: a member we could not reach and a member that reported zero are
+// different facts, and telling them apart is the point of the whole thing.
+function UsageSplitLine({ split }: { split: SplitEntry | undefined }) {
+  if (split === undefined) return null;
+  const { usage, detail } = split;
+  const line = usageLine(usage);
+  const blind = usage.blindSpots.length;
+  return (
+    <Truncated
+      className={usage.concentrated ? "text-amber-700" : "text-muted-foreground"}
+      full={
+        <span className="block whitespace-pre-line">
+          {usage.concentrated
+            ? "Nearly all of this index's operations are on one member — it is likely serving a read-preference client rather than the application.\n\n"
+            : ""}
+          {detail.join("\n")}
+        </span>
+      }
+    >
+      {blind === 0 ? line : `${line} · ${blind} not reported`}
+    </Truncated>
+  );
+}
+
+function buildColumns(
+  actions: Actions,
+  splits: Map<string, SplitEntry>,
+): DashboardColumns<Recommendation> {
   // column.columns() rather than a bare array: it threads each column's own
   // value type out through a variadic tuple, so a string column and a number
   // column can sit in one list without both widening to unknown.
@@ -150,11 +183,19 @@ function buildColumns(actions: Actions): DashboardColumns<Recommendation> {
         );
       },
     }),
+    // The class, and under it the split the class cannot express (#161). Sorted
+    // by the class still: it is the categorical answer, and "which of these is
+    // concentrated on one node" is a question you scan for rather than sort by.
     column.accessor((rec) => rec.usageClass ?? "—", {
       id: "usageClass",
       header: "Usage",
       sortFn: "text",
-      cell: (info) => info.getValue(),
+      cell: (info) => (
+        <div className="text-xs">
+          <span>{info.getValue()}</span>
+          <UsageSplitLine split={splits.get(info.row.original.id)} />
+        </div>
+      ),
     }),
     column.accessor("rationale", {
       header: "Rationale",
@@ -174,14 +215,36 @@ function buildColumns(actions: Actions): DashboardColumns<Recommendation> {
   ]);
 }
 
+// Built once per payload rather than per cell: `usageSplit` walks the roster for
+// every index, and the columns are memoized on it, so a fresh map each render
+// would rebuild every row model on every keystroke in the filter box.
+interface SplitEntry {
+  readonly usage: UsageSplit;
+  readonly detail: string[];
+}
+
 export function RecommendationsTable({
   clusterId,
   recommendations,
+  // Both default to "nothing to say", which is a real state rather than a
+  // convenience: a cluster whose roster read failed, or one collected before
+  // per-member usage was surfaced, has no split to draw and must not have one
+  // invented for it.
+  usage = [],
+  roster = null,
   total,
   loading,
 }: {
   clusterId: string | null;
   recommendations: Recommendation[];
+  // Per-node usage for the rows above, beside them rather than on them — see the
+  // contract's note on why the row shape does not carry it (#161).
+  usage?: IndexUsage[];
+  // The node roster from the same collect. It is what turns "3 members reported"
+  // into "and these two did not", and the page has already fetched it for the
+  // panel below. Null before it has answered: no roster is not evidence of full
+  // coverage, so nothing is claimed until it arrives.
+  roster?: ClusterNodes | null;
   // How many exist server-side; the api sends the RECOMMENDATIONS_CAP
   // highest-scoring of them (#64). Sorting and filtering below work over what
   // arrived — D33's client-side behaviour, deliberately kept — so when the
@@ -194,9 +257,23 @@ export function RecommendationsTable({
   const unhide = useUnhideRecommendation(clusterId);
   const undo = useRollbackRecommendation(clusterId);
 
+  const splits = useMemo(() => {
+    const built = new Map<string, SplitEntry>();
+    for (const entry of usage) {
+      const split = usageSplit(entry, roster);
+      if (split === null) continue;
+      built.set(entry.recommendationId, {
+        usage: split,
+        detail: usageDetail(split, entry.observedAt),
+      });
+    }
+    return built;
+  }, [usage, roster]);
+
   const columns = useMemo(
-    () => buildColumns({ approve: approve.mutate, unhide: unhide.mutate, undo: undo.mutate }),
-    [approve.mutate, unhide.mutate, undo.mutate],
+    () =>
+      buildColumns({ approve: approve.mutate, unhide: unhide.mutate, undo: undo.mutate }, splits),
+    [approve.mutate, unhide.mutate, undo.mutate, splits],
   );
 
   const truncated = total > recommendations.length;
@@ -226,7 +303,11 @@ export function RecommendationsTable({
         // the most because it is prose and wraps; the two names after it are the other
         // unpredictable ones. Fixing these is what stops the table re-laying itself out
         // as virtualized rows swap — see DataTable's columnWidths.
-        columnWidths={[132, 200, 200, 104, 120, 280, 132]}
+        //
+        // Usage went from 120 to 176 when it gained the per-node line under the
+        // class (#161): `40,000 ops · 1 of 3 nodes` does not fit in 120, and a
+        // clipped one would hide exactly the half that is new.
+        columnWidths={[132, 200, 200, 104, 176, 280, 132]}
         // The rationale takes the slack, and takes all of it: the table fills the
         // page now, and the alternative to a long line is a clipped one. Past the
         // column's width the cell truncates and the tooltip carries the rest, so
