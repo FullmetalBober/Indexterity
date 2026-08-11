@@ -212,6 +212,22 @@ export function createAuth(config: AuthConfig) {
     // pod's, and the configured number is the one that applies to a sign-in.
     // See auth/rate-limit.ts for what is left at better-auth's defaults and why.
     rateLimit: authRateLimit(config.authRateLimitMax),
+    account: {
+      // The GitHub token this deployment never uses, encrypted at rest (#24).
+      //
+      // `account.access_token` and `refresh_token` are better-auth's columns and
+      // it fills them on every social sign-in whether or not anything reads them
+      // — and nothing here does: the token is not used to call GitHub for
+      // anybody. So the control-plane database was holding a live credential to
+      // somebody else's account, for no feature, in plaintext. AES-256-GCM under
+      // the same secret, which costs nothing given nothing decrypts it.
+      //
+      // Rows written before this stay plaintext and are left alone: better-auth
+      // only decrypts what looks encrypted, and no reader would notice either
+      // way. Deleting the columns would be the stronger answer and is not ours
+      // to make — the adapter writes them.
+      encryptOAuthTokens: true,
+    },
     user: {
       // The address you sign in with, and every notice goes to (#83). The full
       // chain for a VERIFIED account is deliberately two-step: the current
@@ -478,6 +494,23 @@ export function createAuth(config: AuthConfig) {
       // @repo/contracts inputs.ts. A default is not a shared rule.
       minPasswordLength: PASSWORD_MIN_LENGTH,
       requireEmailVerification: config.requireEmailVerification,
+      // A reset ends every session, not just the password (#24).
+      //
+      // better-auth defaults this off, and off is wrong here specifically:
+      // three of the emails this file sends tell the reader that resetting is
+      // the remedy — "someone has your session or password, reset it now",
+      // "someone has your password, change it now", "do NOT click the link,
+      // change your password instead". Without this, all three are advice that
+      // does not do what they imply: the intruder's session survives the reset
+      // for the rest of its seven days, and the person who acted on the warning
+      // has locked the door behind the burglar.
+      //
+      // Sign in again afterwards is the cost, which is what the reader already
+      // expects of a password change. The cookie cache (session.cookieCache
+      // above) still answers for up to its maxAge on a browser holding one, so
+      // the row deletion lands within five minutes rather than instantly —
+      // shorter than the alternative by seven days.
+      revokeSessionsOnPasswordReset: true,
       sendResetPassword: async ({ user, url }) => {
         await sendMail(
           user.email,
