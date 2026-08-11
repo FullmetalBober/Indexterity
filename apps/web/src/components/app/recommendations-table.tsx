@@ -3,6 +3,7 @@ import { useMemo } from "react";
 import { badgeVariant, dropsOn } from "~/components/app/format";
 import { ConfirmButton } from "~/components/confirm-button";
 import { type DashboardColumns, DataTable, dashboardColumns } from "~/components/data-table";
+import { Truncated } from "~/components/truncated";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import {
@@ -156,7 +157,11 @@ function buildColumns(actions: Actions): DashboardColumns<Recommendation> {
       header: "Rationale",
       // Prose. Sorting it alphabetically orders nothing a reader is looking for.
       enableSorting: false,
-      cell: (info) => <span className="text-muted-foreground">{info.getValue()}</span>,
+      // The cell that outgrows its column. `columnWidths` clips every cell and the
+      // primitive sets `whitespace-nowrap`, so a long rationale used to be cut off
+      // mid-sentence with no ellipsis to say so and no way to read the rest — the
+      // one column here where the text IS the answer.
+      cell: (info) => <Truncated className="text-muted-foreground">{info.getValue()}</Truncated>,
     }),
     column.display({
       id: "action",
@@ -219,10 +224,11 @@ export function RecommendationsTable({
         // unpredictable ones. Fixing these is what stops the table re-laying itself out
         // as virtualized rows swap — see DataTable's columnWidths.
         columnWidths={[132, 200, 200, 104, 120, 280, 132]}
-        // The rationale: prose, and the only cell here that reads better on one line than
-        // on three. Capped at a comfortable measure rather than the whole page — a line
-        // much past ninety characters is hard to track back from.
-        flexColumn={{ index: 5, max: 620 }}
+        // The rationale takes the slack, and takes all of it: the table fills the
+        // page now, and the alternative to a long line is a clipped one. Past the
+        // column's width the cell truncates and the tooltip carries the rest, so
+        // the length of the line is no longer what decides whether it is readable.
+        flexColumn={{ index: 5 }}
         empty={{
           title: "No recommendations yet",
           description:
