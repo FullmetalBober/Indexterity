@@ -402,6 +402,20 @@ config:
   # concurrent use of a single connection is five reads. Raise it only if a
   # cluster's collect pass is visibly waiting on connections.
   mongoMaxPoolSize: 10
+  # Postgres connections PER POOL — and a process holds more than one. The api has
+  # a request pool, the jobs' pool and better-auth's; the worker has the jobs' pool
+  # and graphile-worker's own. They are deliberately not merged: one shared pool
+  # would let a slow report starve a sign-in of a connection, and that isolation is
+  # worth a handful of backends.
+  #
+  # So the number to size your postgres against is roughly:
+  #   api replicas x 3 x pgPoolMax  +  worker (pgPoolMax + concurrency + 1)
+  # which at the defaults is about 20 for a single-replica install. A self-hosted
+  # postgres ships max_connections=100.
+  #
+  # Too low is latency, not failure — a query waits for a free connection rather
+  # than erroring. Raise it alongside worker.concurrency.
+  pgPoolMax: 5
   # Per-IP request budgets, per minute. Raise them for a shared egress IP or a
   # test suite. Read rateLimitMax as PER REPLICA (see the api Deployment);
   # authRateLimitMax is read twice — Fastify applies it per replica to

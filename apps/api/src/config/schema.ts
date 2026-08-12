@@ -180,6 +180,16 @@ const migrateShape = {
 // decrypt error, hours after the deploy that caused it.
 const workerShape = {
   ...migrateShape,
+  // Postgres connections PER POOL, and this process holds more than one: the api
+  // has a request pool, the jobs' pool and better-auth's, each capped by this. They
+  // are deliberately not merged — a slow report must not be able to starve sign-in
+  // of a connection — so the budget to size against postgres is this times the
+  // number of pools, plus graphile-worker's own.
+  //
+  // Too low is latency, not failure: pg queues a request until a connection frees.
+  // Raise it alongside WORKER_CONCURRENCY, which is what makes the jobs' pool ask
+  // for more than one at a time.
+  PG_POOL_MAX: positiveInteger(5),
   MASTER_KEY: masterKey(),
   // KEK rotation: v1 = MASTER_KEY, v2+ = MASTER_KEY_V<n>. Each cluster row
   // records the version that sealed it, so old rows stay readable through a

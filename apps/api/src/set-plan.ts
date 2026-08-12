@@ -108,7 +108,8 @@ async function backfill(db: Database, plan: Plan, apply: boolean): Promise<void>
 
 async function main(): Promise<void> {
   loadEnvOrExit("migrate");
-  const db = createDatabase(coreEnv().DATABASE_URL);
+  // A one-shot operator command.
+  const db = createDatabase(coreEnv().DATABASE_URL, 2);
   const argv = process.argv.slice(2);
 
   if (argv[0] === "--backfill") {

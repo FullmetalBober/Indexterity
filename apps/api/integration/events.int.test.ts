@@ -38,7 +38,7 @@ async function orgIdOf(session: Session): Promise<string> {
 
 beforeAll(async () => {
   server = await startApi();
-  db = createDatabase(databaseUrl());
+  db = createDatabase(databaseUrl(), 2);
   owner = await signUp("events-owner");
   createdEmails.push(owner.email);
   outsider = await signUp("events-outsider");

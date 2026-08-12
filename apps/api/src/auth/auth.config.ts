@@ -16,6 +16,10 @@ import { hasCredentialAccount } from "./two-factor-gate";
 
 export interface AuthConfig {
   readonly databaseUrl: string;
+  // Postgres connections this instance's own pool may take. better-auth gets its
+  // own rather than sharing the request pool, so a slow read elsewhere cannot
+  // leave a sign-in waiting for a connection.
+  readonly poolMax: number;
   readonly secret: string;
   readonly baseURL: string;
   // Set `Secure` on the session cookie. Decided explicitly rather than inferred
@@ -116,7 +120,7 @@ function asActor(
 
 // GitHub OAuth + email/password, backed by the Drizzle/Postgres control-plane DB.
 export function createAuth(config: AuthConfig) {
-  const db = createDatabase(config.databaseUrl);
+  const db = createDatabase(config.databaseUrl, config.poolMax);
   // The email is stored alongside the id on every row (`actor_email`), because
   // `actor_user_id` is `set null` on user deletion and a trail whose actor column
   // empties when the account goes answers none of the questions it exists for.

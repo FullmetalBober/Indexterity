@@ -202,6 +202,11 @@ test and the port-forward in NOTES.txt all read the same number they did before.
 # case multiplies by the fleet — and they are spent on the customer's mongod.
 - name: MONGO_MAX_POOL_SIZE
   value: {{ .Values.config.mongoMaxPoolSize | quote }}
+# Postgres connections PER POOL. The api holds three (requests, jobs, auth), kept
+# apart so a slow read cannot starve a sign-in — so size postgres for this times
+# the pools, plus graphile-worker's own.
+- name: PG_POOL_MAX
+  value: {{ .Values.config.pgPoolMax | quote }}
 - name: ALLOW_INSECURE_CLUSTER_TLS
   value: {{ .Values.config.allowInsecureClusterTls | quote }}
 {{- if .Values.config.allowUntestedMongoVersion }}
