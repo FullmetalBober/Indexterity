@@ -241,9 +241,12 @@ printf '  deploy/%s: %s\n' "$SERVING" "$GOT_CONTAINERS"
 # from 1.33 and reading it prints a warning on every run, which is the sort of
 # noise the log check below exists to keep out.
 for svc in indexterity-api indexterity-web; do
+  # READY endpoints only. An EndpointSlice lists a not-yet-ready address too, with
+  # conditions.ready=false — so the unfiltered form reported an endpoint for a pod
+  # that was still booting and called it proof.
   addrs=$(kubectl -n "$NS" get endpointslices -l "kubernetes.io/service-name=$svc" \
-    -o jsonpath='{.items[*].endpoints[*].addresses[*]}')
-  [ -n "$addrs" ] || { echo "svc/$svc has no endpoints"; exit 1; }
+    -o jsonpath='{.items[*].endpoints[?(@.conditions.ready==true)].addresses[*]}')
+  [ -n "$addrs" ] || { echo "svc/$svc has no ready endpoints"; exit 1; }
   printf '  svc/%s -> %s\n' "$svc" "$addrs"
 done
 
