@@ -97,6 +97,13 @@ function exampleEnv(): Set<string> {
 // home has to name it and a chart that did would be overriding the image.
 const FROM_THE_IMAGE = new Set(["NODE_ENV"]);
 
+// Configure the node RUNTIME rather than this application, so no schema declares
+// them and none should. The chart sets NODE_OPTIONS to cap V8's heap below the
+// container's memory limit — node's own sizing stops scaling down at ~262 MB, so
+// under a small limit a process would otherwise believe it may hold more heap
+// than the cgroup allows.
+const NODE_RUNTIME_VARS = new Set(["NODE_OPTIONS"]);
+
 // The dashboard server's own variables, whose schema lives in
 // apps/web/src/lib/env.ts. Named here because the chart sets all four in one
 // place and the drift check below would otherwise read them as unknown.
@@ -153,6 +160,7 @@ describe("nothing is set that no schema knows", () => {
     ...DEPLOYMENT_ONLY,
     ...COMPOSE_INFRA,
     ...SUPERVISOR_VARS,
+    ...NODE_RUNTIME_VARS,
   ]);
   // MASTER_KEY_V<n> is dynamically named by the rotation, so it is matched by
   // shape rather than listed.

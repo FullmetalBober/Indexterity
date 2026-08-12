@@ -603,8 +603,10 @@ one is installed.
 ### Metrics
 
 `METRICS_ENABLED=true` serves Prometheus metrics on port 9464 (`METRICS_PORT`)
-from all three workloads. The chart turns it on and can install a ServiceMonitor
-per workload; compose publishes them on 9464 (api), 9465 (worker) and 9466 (web).
+from all three workloads. Off unless asked for — an exporter costs memory in
+every process, and an install with nothing scraping it pays that for nobody. The
+chart can turn it on and install a ServiceMonitor per workload; compose has it on
+and publishes 9464 (api), 9465 (worker) and 9466 (web).
 
 Each answers for what only it can see, so scrape all three. The five things a
 service that drops other people's indexes has to be able to state:

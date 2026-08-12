@@ -198,12 +198,16 @@ case "$TOPOLOGY" in
 esac
 # allowInsecureAuthUrl: a Kind cluster terminates no TLS, and the api refuses a
 # non-https auth URL in production. trustProxy: kube-proxy hides the client
-# address, so without it the per-IP rate limits share one bucket.
+# address, so without it the per-IP rate limits share one bucket. metrics: off by
+# default since the exporter costs memory in every process, and set here on
+# purpose — the chart's own test asserts the endpoints, so leaving it at the
+# default would quietly retire those assertions.
 # Never: every image is already in the node, and a pull would only be a slower
 # way to fetch what is there — or a spurious failure if the registry blinks.
 # shellcheck disable=SC2086  # CHART_ARGS is a deliberate word split
 helm upgrade --install indexterity "$CHART" $CHART_ARGS -n "$NS" --wait --timeout 5m \
   --set "topology=$TOPOLOGY,api.replicas=1,web.replicas=1" \
+  --set "metrics.enabled=true" \
   --set "$IMAGE_ARGS" \
   --set "$WORKER_ARGS" \
   --set "config.signupMode=open,config.allowPrivateClusterTargets=true" \

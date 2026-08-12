@@ -113,6 +113,82 @@ host restarts the container instead of leaving a dashboard serving 502s from a
 passthrough with nothing behind it. `RUN_WORKER` defaults to `true` in this image
 and nowhere else: a single container has nowhere else to put the scheduler.
 
+## Memory
+
+**V8 sizes its heap from the container's limit, not the host's memory.** It grows
+into that ceiling happily, collecting only as it approaches — so RSS follows the
+limit rather than the workload. The same api image, doing the same nothing:
+
+| limit | V8 heap ceiling | RSS idle |
+|---|---|---|
+| none (16 GB host) | 4192 MB | 228 MB |
+| 512 MiB | 268 MB | 104 MB |
+
+Which means **raising a limit raises usage**. "Give it headroom to be safe" is how
+a 128 MB service becomes a 512 MB one. Raise a limit when something is actually
+OOMKilled, not in anticipation.
+
+**But that sizing stops helping below 512 MiB, which is where this chart now
+sits.** Measured on node 26, V8's default ceiling scales down to a point and then
+flattens:
+
+| container limit | 1 GiB | 512Mi | 384Mi | 320Mi | 256Mi | 192Mi | 96Mi |
+|---|---|---|---|---|---|---|---|
+| default heap ceiling | 536 MB | 268 MB | 268 MB | 268 MB | 262 MB | 262 MB | 262 MB |
+
+At any limit of 256 MiB or below, a process believes it may hold **more heap than
+its cgroup allows** — so a heap-heavy pass is killed for memory where it should
+have been collected. The chart therefore sets `NODE_OPTIONS` on each container to
+65% of that container's own limit, leaving the rest for what is not heap. Verified
+against the images: a 208 MB cap produces a 220 MB ceiling under a 320 MiB limit,
+a 166 MB cap a 172 MB ceiling under 256 MiB. `NODE_OPTIONS` in `extraEnv`
+overrides it, and nothing is set when the share would fall below 64 MB — a heap
+that small collects instead of serving.
+
+The defaults are measured under load — page renders, api calls and concurrent
+sign-ups, against the published images:
+
+| workload | request | limit | measured serving |
+|---|---|---|---|
+| api | 128Mi | 320Mi | 99 MB under a 192 MiB limit |
+| web | 96Mi | 256Mi | 93 MB under a 128 MiB limit |
+| worker | 96Mi | 256Mi | 65 MB under a 128 MiB limit |
+| all-in-one | 192Mi | 384Mi | 85 MB under a 192 MiB limit |
+
+They are floors for a small fleet. The collectors hold per-collection statistics
+while they work, so an api and a worker managing many clusters sit higher — watch
+`container_memory_working_set_bytes` on your own install before tightening
+further.
+
+Two things do not show up in steady-state observation:
+
+- **Password hashing is memory-hard by design.** scrypt allocates roughly 32 MB
+  per hash *in flight*, so a handful of simultaneous sign-ins is tens of megabytes
+  that an idle graph never hints at. `config.authRateLimitMax` bounds the rate but
+  not the concurrency, so the limit has to absorb it — which is why the api's is
+  the largest of the three. This is not a knob to turn down: the cost *is* the
+  brute-force resistance.
+- **`worker.concurrency` multiplies rather than shares.** Each concurrent job
+  holds its own working set. It defaults to 1; raise it with the limit, not alone.
+
+`single-container` is the one container the chart does **not** cap from here,
+because one cap would be handed to both processes. Its supervisor divides the
+budget at runtime instead — 40% of the container's limit to the api, 22% to the
+dashboard, the rest unallocated for two runtimes' code and native allocation and
+for scrypt, which allocates outside the heap. Without that split both runtimes
+read the same cgroup and each claim the full default ceiling: 536 MB of heap
+promised inside a 512 MiB container, invisible until both are busy at once.
+`NODE_OPTIONS` in the environment overrides it, and the container logs what it
+chose:
+
+```
+supervisor: memory limit 384MB — heap ceilings: api 153MB, web 84MB
+```
+
+`single-pod` needs no such split: Kubernetes gives each container in a pod its own
+cgroup — verified in-cluster, the api container reads a 320 MiB limit and the web
+container 256 MiB — so the two are capped from their own limits like any other.
+
 ## Back up MASTER_KEY
 
 Every customer connection string is sealed with `MASTER_KEY` (envelope
@@ -169,14 +245,15 @@ stays off by default — the dashboard does not need it.
 | `config.signupMode` | `invite` (default), `open` or `closed`. The first account always bootstraps the install; after that invite-only. `open` lets any stranger register — and every account can make the control plane dial hosts it names |
 | `config.allowPrivateClusterTargets` | Set `true` when the MongoDB you manage is on a private network (the normal self-hosted case). Leave `false` for anything strangers can reach, or accounts can probe your internal network. Cloud metadata stays blocked either way |
 | `config.allowInsecureClusterTls` | Set `true` only when the MongoDB you manage genuinely serves no certificate and the network between is trusted. Every outbound connection requires validated TLS otherwise — including the ones the worker makes from stored credentials, so a cluster connected without it stops being collected and its owners are told why. Kept apart from `allowPrivateClusterTargets` on purpose: a VPC-peered or PrivateLink cluster is a private address that must still be forced to TLS |
-| `metrics.enabled` | Prometheus metrics on port `metrics.port` (9464) for all three workloads. On by default; the endpoint is never routed by the ingress |
+| `metrics.enabled` | Prometheus metrics on port `metrics.port` (9464) for all three workloads. **Off by default** — an exporter costs memory in every process, and an install with nothing scraping it was paying that for nobody. Turn it on if anything is; the endpoint is never routed by the ingress |
 | `metrics.serviceMonitor.enabled` | One Prometheus Operator ServiceMonitor per workload. Off by default — it needs the `monitoring.coreos.com` CRDs, and a chart that assumes them cannot install without them |
 | `metrics.prometheusRule.enabled` | 18 alerting rules for the failures nothing else reports. Same CRD requirement, also off by default. Thresholds under `metrics.prometheusRule.thresholds` |
 
 ## Metrics
 
-All three workloads serve `/metrics` on port 9464, and each answers for what only
-it can see — scrape all three:
+Off by default (`metrics.enabled=true` to serve it). With it on, all three
+workloads serve `/metrics` on port 9464, and each answers for what only it can
+see — scrape all three:
 
 | workload | reports |
 |---|---|

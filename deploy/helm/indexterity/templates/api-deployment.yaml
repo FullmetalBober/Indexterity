@@ -77,6 +77,14 @@ spec:
             {{- end }}
             {{- end }}
           env:
+            {{- if not $allInOne }}
+            {{- /* Single-container is the one case this must NOT be set from here:
+                   the supervisor divides the container's budget between two
+                   processes at runtime, and an inherited cap is its signal that
+                   the deployment has already decided — it would then hand the
+                   same ceiling to both. */}}
+            {{- include "indexterity.heapEnv" (dict "limit" .Values.api.resources.limits.memory) | nindent 12 }}
+            {{- end }}
             {{- include "indexterity.coreEnv" . | nindent 12 }}
             {{- include "indexterity.mailEnv" . | nindent 12 }}
             {{- include "indexterity.metricsEnv" (dict "root" . "port" .Values.metrics.port) | nindent 12 }}

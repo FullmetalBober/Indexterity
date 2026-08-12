@@ -35,7 +35,8 @@
     "INT_API_PORT",
     "WEB_METRICS_PORT",
     "WEB_SENTRY_DSN",
-    "SUPERVISOR_GRACE_MS"
+    "SUPERVISOR_GRACE_MS",
+    "NODE_OPTIONS"
   ],
   "tasks": {
     "build": {

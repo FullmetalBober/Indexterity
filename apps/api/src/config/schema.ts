@@ -194,7 +194,12 @@ const workerShape = {
   ALLOW_PRIVATE_CLUSTER_TARGETS: flag(false),
   ALLOW_INSECURE_CLUSTER_TLS: flag(false),
   ALLOW_UNTESTED_MONGO_VERSION: flag(false),
-  WORKER_CONCURRENCY: positiveInteger(2),
+  // One job at a time. Each concurrent job holds its own working set — a collect
+  // pass keeps a cluster's index and collection statistics in memory while it
+  // runs — so this multiplies a worker's memory rather than sharing it, and the
+  // pipeline is not latency-critical. Raise it deliberately, with the memory
+  // limit raised alongside.
+  WORKER_CONCURRENCY: positiveInteger(1),
   SMTP_HOST: z.string().optional(),
   SMTP_PORT: positive(465),
   SMTP_USER: z.string().optional(),

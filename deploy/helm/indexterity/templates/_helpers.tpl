@@ -210,6 +210,66 @@ test and the port-forward in NOTES.txt all read the same number they did before.
 {{- end }}
 {{- end -}}
 
+{{/*
+A Kubernetes memory quantity in bytes, or empty when it is not a shape this
+understands — in which case the caller leaves the heap alone rather than guessing.
+*/}}
+{{- define "indexterity.memoryBytes" -}}
+{{- $q := . | toString | trim -}}
+{{- if regexMatch "^[0-9]+$" $q -}}
+{{- $q -}}
+{{- else if regexMatch "^[0-9]+Ki$" $q -}}
+{{- mul (trimSuffix "Ki" $q | int64) 1024 -}}
+{{- else if regexMatch "^[0-9]+Mi$" $q -}}
+{{- mul (trimSuffix "Mi" $q | int64) 1048576 -}}
+{{- else if regexMatch "^[0-9]+Gi$" $q -}}
+{{- mul (trimSuffix "Gi" $q | int64) 1073741824 -}}
+{{- else if regexMatch "^[0-9]+M$" $q -}}
+{{- mul (trimSuffix "M" $q | int64) 1000000 -}}
+{{- else if regexMatch "^[0-9]+G$" $q -}}
+{{- mul (trimSuffix "G" $q | int64) 1000000000 -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+NODE_OPTIONS capping V8's old space, for a container running ONE node process:
+include "indexterity.heapEnv" (dict "limit" .Values.web.resources.limits.memory)
+
+This is not an optimisation, it is a safety cap, and it is needed because node's
+own sizing stops helping exactly where this chart now sits. V8 derives its default
+ceiling from the container's limit — but only downwards to a point. Measured on
+node 26: a 1 GiB limit gives a 536 MB ceiling and 512 MiB gives 268 MB, then it
+FLATTENS — 384 MiB, 320 MiB, 256 MiB, 192 MiB and 96 MiB all give ~262 MB. So at
+any limit at or below 256 MiB the process believes it may hold more heap than the
+cgroup allows, and a heap-heavy pass is killed for memory instead of collected.
+
+65% of the limit, and the rest is deliberately unallocated: a heap ceiling is not
+a process's memory. Node's own code and stacks live outside it, and so does the
+~32 MB scrypt allocates per password hash in flight — bounded by libuv's
+threadpool (four by default), not by the rate limits.
+
+Nothing is emitted when the share works out below 64 MB, or when the limit is
+absent or in a shape this cannot read. A heap that small collects instead of
+serving, and an operator who set a limit that low against a node process has a
+bigger problem than the ceiling — so node's own sizing is left in place, and with
+it the chance of being OOMKilled that this define otherwise removes.
+
+Emitted before extraEnv, so an operator's own NODE_OPTIONS there wins.
+*/}}
+{{- define "indexterity.heapEnv" -}}
+{{- $bytes := include "indexterity.memoryBytes" (default "" .limit) -}}
+{{- if $bytes -}}
+{{- $mb := div (mul ($bytes | int64) 65) 104857600 -}}
+{{- if ge $mb 64 -}}
+# V8's default ceiling does not scale below a 512Mi limit (it flattens at ~262MB),
+# so at this limit the heap has to be capped explicitly or the container is
+# OOMKilled where it should have collected.
+- name: NODE_OPTIONS
+  value: {{ printf "--max-old-space-size=%v" $mb | quote }}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
 {{/* The metrics endpoint. Takes the listener's port as `port` because a merged pod
      serves two of them from one network namespace:
      include "indexterity.metricsEnv" (dict "root" . "port" .Values.metrics.port). */}}
@@ -403,6 +463,7 @@ reads differently depending on a value three files away.
       containerPort: {{ include "indexterity.webMetricsPort" . }}
     {{- end }}
   env:
+    {{- include "indexterity.heapEnv" (dict "limit" .Values.web.resources.limits.memory) | nindent 4 }}
     {{- include "indexterity.metricsEnv" (dict "root" . "port" (include "indexterity.webMetricsPort" .)) | nindent 4 }}
     {{- include "indexterity.errorsEnv" (dict "root" . "dsn" (default .Values.errorReporting.dsn .Values.errorReporting.webDsn)) | nindent 4 }}
     {{- include "indexterity.webEnv" (dict "root" . "shared" false) | nindent 4 }}
