@@ -61,9 +61,94 @@ app.kubernetes.io/component: {{ .component }}
 {{- printf "%s:%s" .Values.web.image.repository (default .Chart.AppVersion .Values.web.image.tag) -}}
 {{- end -}}
 
-{{/* In-cluster api base URL — what the web pods and better-auth default to. */}}
+{{- define "indexterity.allInOneImage" -}}
+{{- printf "%s:%s" .Values.allInOne.image.repository (default .Chart.AppVersion .Values.allInOne.image.tag) -}}
+{{- end -}}
+
+{{/*
+Whichever image carries the api build — for the workloads that run one of its
+other entrypoints, the migration and the worker. The all-in-one image contains
+the same apps/api/dist, so in single-container the whole release pulls exactly one
+image, which is the reason to be in that topology in the first place.
+*/}}
+{{- define "indexterity.apiRuntimeImage" -}}
+{{- if eq .Values.topology "single-container" -}}
+{{- include "indexterity.allInOneImage" . -}}
+{{- else -}}
+{{- include "indexterity.apiImage" . -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "indexterity.apiRuntimePullPolicy" -}}
+{{- if eq .Values.topology "single-container" -}}
+{{- .Values.allInOne.image.pullPolicy -}}
+{{- else -}}
+{{- .Values.api.image.pullPolicy -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Whether the api and the web server share a pod — true for both merged
+topologies, empty (falsey to `if`) for the default. Everything downstream keys
+off this rather than off the value, so the two merged shapes cannot drift on the
+things they have in common: one pod, one loopback hop, two metrics ports.
+*/}}
+{{- define "indexterity.merged" -}}
+{{- if or (eq .Values.topology "single-pod") (eq .Values.topology "single-container") -}}true{{- end -}}
+{{- end -}}
+
+{{/*
+Which POD answers for a workload: include "indexterity.podComponent" (dict "root" . "workload" "web").
+
+Merged, the api and the web server are one pod and it cannot carry two component
+labels, so it carries `app` and both Services select that. The Services keep
+their own api/web labels — the ServiceMonitors select Services, so they, the
+ingress and every in-cluster caller are unaffected by the topology.
+*/}}
+{{- define "indexterity.podComponent" -}}
+{{- if and (include "indexterity.merged" .root) (has .workload (list "api" "web")) }}app{{ else }}{{ .workload }}{{ end -}}
+{{- end -}}
+
+{{/* In-cluster api base URL — what better-auth defaults to. */}}
 {{- define "indexterity.internalApiUrl" -}}
 {{- printf "http://%s-api:%v" (include "indexterity.fullname" .) .Values.api.service.port -}}
+{{- end -}}
+
+{{/*
+Where the WEB SERVER reaches the api. Merged, that is the container beside it (or
+in single-container the process beside it), so the loopback address rather than
+the Service: same pod, no kube-proxy, and it keeps answering while the Service
+has no ready endpoints — which during a rollout is exactly when the dashboard is
+being asked to render.
+*/}}
+{{- define "indexterity.webApiUrl" -}}
+{{- if .Values.web.apiUrl -}}
+{{- .Values.web.apiUrl -}}
+{{- else if include "indexterity.merged" . -}}
+{{- printf "http://127.0.0.1:%v" .Values.api.port -}}
+{{- else -}}
+{{- include "indexterity.internalApiUrl" . -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+The port the web server serves /metrics on. One number in the default topology,
+where it is alone in its network namespace; merged, the api has already bound
+metrics.port in that namespace, so the second listener has to move or the
+dashboard container crash-loops on EADDRINUSE.
+
+Only the containerPort and this variable move. Both Services still publish
+metrics.port, because they are different Services — so scrapers, the chart's own
+test and the port-forward in NOTES.txt all read the same number they did before.
+*/}}
+{{- define "indexterity.webMetricsPort" -}}
+{{- if .Values.metrics.webPort -}}
+{{- .Values.metrics.webPort -}}
+{{- else if include "indexterity.merged" . -}}
+{{- add .Values.metrics.port 1 -}}
+{{- else -}}
+{{- .Values.metrics.port -}}
+{{- end -}}
 {{- end -}}
 
 {{/* The dashboard's public origin: explicit value, else derived from the ingress host. */}}
@@ -125,13 +210,54 @@ app.kubernetes.io/component: {{ .component }}
 {{- end }}
 {{- end -}}
 
-{{/* The metrics endpoint — shared by the api and the worker, which export different halves of it. */}}
+{{/* The metrics endpoint. Takes the listener's port as `port` because a merged pod
+     serves two of them from one network namespace:
+     include "indexterity.metricsEnv" (dict "root" . "port" .Values.metrics.port). */}}
 {{- define "indexterity.metricsEnv" -}}
-{{- if .Values.metrics.enabled }}
+{{- if .root.Values.metrics.enabled }}
 - name: METRICS_ENABLED
   value: "true"
 - name: METRICS_PORT
-  value: {{ .Values.metrics.port | quote }}
+  value: {{ .port | quote }}
+{{- end }}
+{{- end -}}
+
+{{/*
+The dashboard server's own variables (schema: apps/web/src/lib/env.ts), in a
+helper because two topologies render them: its own Deployment, and the merged pod
+where they sit beside the api's.
+
+`shared` says the api's env block is in the SAME container — single-container,
+where one process list reads one environment. WEB_ORIGIN and TRUST_PROXY are
+dropped there because the api already sets both from the same helpers, and two
+entries of one name in one container is a value that depends on ordering.
+*/}}
+{{- define "indexterity.webEnv" -}}
+- name: PORT
+  value: {{ .root.Values.web.port | quote }}
+# The web SERVER's own reads during SSR, and its /api passthrough. Read at
+# runtime so one image deploys everywhere. The browser does not use this and is
+# not told it: it calls /api on the origin that served the page.
+- name: API_URL
+  value: {{ include "indexterity.webApiUrl" .root | quote }}
+{{- if not .shared }}
+- name: WEB_ORIGIN
+  value: {{ include "indexterity.webOrigin" .root | quote }}
+# Only read when this pod answers /api itself — which it does when the ingress
+# has no /api rule. Same switch and same reasoning as the api's: forwarding a
+# header the client could have written lets a caller pick its own address and
+# never reach a rate limit, so it is off unless something in front is known to
+# set it.
+- name: TRUST_PROXY
+  value: {{ include "indexterity.trustProxy" .root | quote }}
+{{- end }}
+{{- with .root.Values.web.siteUrl }}
+# Canonical/og:url override for forks and indexed staging copies.
+- name: SITE_URL
+  value: {{ . | quote }}
+{{- end }}
+{{- with .root.Values.web.extraEnv }}
+{{- toYaml . | nindent 0 }}
 {{- end }}
 {{- end -}}
 
@@ -187,6 +313,142 @@ app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 {{- if not .Values.secrets.masterKey -}}
 {{- fail "secrets.masterKey is required (or set secrets.existingSecret). Generate one: openssl rand -base64 32 — losing it makes every stored connection string unreadable" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+The api's own variables — everything it reads that is not shared with the worker
+(coreEnv, mailEnv) or parameterised per listener (metricsEnv, errorsEnv). Those
+four stay at the call site rather than nesting here, because they are also the
+worker's and the migration's, and one flat list per container is what makes the
+env homes readable (apps/api/src/config/homes.test.ts).
+*/}}
+{{- define "indexterity.apiEnv" -}}
+- name: API_PORT
+  value: {{ .Values.api.port | quote }}
+# Browser auth requests arrive through the dashboard's server functions, which
+# send this origin — better-auth must trust it.
+- name: WEB_ORIGIN
+  value: {{ include "indexterity.webOrigin" . | quote }}
+# Only the api serves auth, so the signing key lives here rather than in the
+# shared core env. It was written into the Secret and never referenced by any
+# container — the api could not boot.
+- name: BETTER_AUTH_SECRET
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "indexterity.secretName" . }}
+      key: BETTER_AUTH_SECRET
+- name: BETTER_AUTH_URL
+  value: {{ include "indexterity.betterAuthUrl" . | quote }}
+{{- if .Values.config.allowInsecureAuthUrl }}
+- name: ALLOW_INSECURE_AUTH_URL
+  value: "true"
+{{- end }}
+- name: TRUST_PROXY
+  value: {{ include "indexterity.trustProxy" . | quote }}
+# Per-IP request budgets, per minute and PER REPLICA — the counters live in each
+# api process's memory, so two replicas allow twice this and a rolling deploy
+# hands every bucket back at zero.
+- name: RATE_LIMIT_MAX
+  value: {{ .Values.config.rateLimitMax | quote }}
+- name: AUTH_RATE_LIMIT_MAX
+  value: {{ .Values.config.authRateLimitMax | quote }}
+# One-container mode for the job runner. Off while the worker Deployment is on,
+# or the schedule would be installed twice — validateWorkerTopology refuses that
+# combination rather than letting it install.
+- name: RUN_WORKER
+  value: {{ .Values.api.runWorker | quote }}
+- name: REQUIRE_EMAIL_VERIFICATION
+  value: {{ .Values.config.requireEmailVerification | quote }}
+- name: SIGNUP_MODE
+  value: {{ .Values.config.signupMode | quote }}
+- name: REQUIRE_OWNER_2FA
+  value: {{ .Values.config.requireOwnerTwoFactor | quote }}
+{{- if .Values.secrets.github.clientId }}
+- name: GITHUB_CLIENT_ID
+  value: {{ .Values.secrets.github.clientId | quote }}
+- name: GITHUB_CLIENT_SECRET
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "indexterity.secretName" . }}
+      key: GITHUB_CLIENT_SECRET
+{{- end }}
+{{- with .Values.api.extraEnv }}
+{{- toYaml . | nindent 0 }}
+{{- end }}
+{{- end -}}
+
+{{/*
+The dashboard container, in a helper because it is rendered from two templates:
+its own Deployment in the default topology, and beside the api in single-pod.
+Meant for `nindent 8`, which is where a container lands in both.
+
+Its ports are named web-* in every topology rather than only in the merged one.
+A pod's port names have to be unique across its containers, so merged they cannot
+both be `http` — and one naming scheme that always holds beats a conditional that
+reads differently depending on a value three files away.
+*/}}
+{{- define "indexterity.webContainer" -}}
+- name: web
+  image: {{ include "indexterity.webImage" . }}
+  imagePullPolicy: {{ .Values.web.image.pullPolicy }}
+  securityContext:
+    {{- toYaml .Values.securityContext | nindent 4 }}
+  ports:
+    - name: web-http
+      containerPort: {{ .Values.web.port }}
+    {{- if .Values.metrics.enabled }}
+    - name: web-metrics
+      containerPort: {{ include "indexterity.webMetricsPort" . }}
+    {{- end }}
+  env:
+    {{- include "indexterity.metricsEnv" (dict "root" . "port" (include "indexterity.webMetricsPort" .)) | nindent 4 }}
+    {{- include "indexterity.errorsEnv" (dict "root" . "dsn" (default .Values.errorReporting.dsn .Values.errorReporting.webDsn)) | nindent 4 }}
+    {{- include "indexterity.webEnv" (dict "root" . "shared" false) | nindent 4 }}
+  readinessProbe:
+    httpGet:
+      # The landing page is static and survives an api outage.
+      path: /
+      port: web-http
+    initialDelaySeconds: 3
+    periodSeconds: 10
+  livenessProbe:
+    httpGet:
+      path: /
+      port: web-http
+    initialDelaySeconds: 15
+    periodSeconds: 20
+  resources:
+    {{- toYaml .Values.web.resources | nindent 4 }}
+{{- end -}}
+
+{{/*
+Fail on a topology nobody implements, rather than rendering the default and
+leaving the operator to work out from `kubectl get deploy` that their value was a
+typo. `single_pod` and `singlePod` are the two spellings that get tried.
+*/}}
+{{- define "indexterity.validateTopology" -}}
+{{- if not (has .Values.topology (list "split" "single-pod" "single-container")) -}}
+{{- fail (printf "topology is %q — it must be \"split\" (three Deployments), \"single-pod\" (one pod, an api and a web container) or \"single-container\" (one pod, one all-in-one container)" .Values.topology) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+The crontab is installed by whoever runs the job runner, and graphile-worker
+schedules it per process rather than per cluster — so two runners mean every
+scheduled job is enqueued twice. Both halves of that were prose in values.yaml
+and nothing enforced either. A merged topology is where an operator meets them:
+folding three Deployments into one is exactly when worker.enabled comes off and
+api.runWorker goes on, and doing only the second is silent.
+*/}}
+{{- define "indexterity.validateWorkerTopology" -}}
+{{- if .Values.api.runWorker -}}
+{{- if .Values.worker.enabled -}}
+{{- fail "api.runWorker=true with worker.enabled=true installs the cron schedule twice — every collect, apply, retention and digest would be enqueued by both. Set worker.enabled=false to embed the runner in the api, or api.runWorker=false to keep the separate Deployment." -}}
+{{- end -}}
+{{- if gt (int .Values.api.replicas) 1 -}}
+{{- fail (printf "api.runWorker=true with api.replicas=%v installs the cron schedule once per replica. The embedded runner is for a single-replica install; scale out with worker.enabled=true and api.runWorker=false instead." .Values.api.replicas) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

@@ -1,21 +1,35 @@
+{{- include "indexterity.validateTopology" . -}}
+{{- include "indexterity.validateWorkerTopology" . -}}
 {{- include "indexterity.validateAuthUrl" . -}}
+{{- /*
+The api Deployment in the default topology, and the WHOLE serving tier in the
+merged ones — the dashboard joins it here rather than in a template of its own, so
+that there is one place where the pod's containers are listed and no second
+Deployment to keep in step with this one. web-deployment.yaml renders nothing
+merged; the Services and the ingress are unchanged either way.
+*/ -}}
+{{- $merged := include "indexterity.merged" . -}}
+{{- $allInOne := eq .Values.topology "single-container" -}}
+{{- $component := include "indexterity.podComponent" (dict "root" . "workload" "api") -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "indexterity.fullname" . }}-api
+  name: {{ include "indexterity.fullname" . }}{{ if not $merged }}-api{{ end }}
   labels:
     {{- include "indexterity.labels" . | nindent 4 }}
-    app.kubernetes.io/component: api
+    app.kubernetes.io/component: {{ $component }}
 spec:
+  # The pod count for every topology: merged, this counts pods that serve the
+  # dashboard too, and web.replicas is ignored.
   replicas: {{ .Values.api.replicas }}
   selector:
     matchLabels:
-      {{- include "indexterity.selectorLabels" (dict "root" . "component" "api") | nindent 6 }}
+      {{- include "indexterity.selectorLabels" (dict "root" . "component" $component) | nindent 6 }}
   template:
     metadata:
       labels:
         {{- include "indexterity.labels" . | nindent 8 }}
-        app.kubernetes.io/component: api
+        app.kubernetes.io/component: {{ $component }}
       annotations:
         # Roll the pods when the managed Secret changes.
         {{- if not .Values.secrets.existingSecret }}
@@ -23,6 +37,11 @@ spec:
         {{- end }}
         {{- with .Values.api.podAnnotations }}
         {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- if $merged }}
+        {{- with .Values.web.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
         {{- end }}
     spec:
       serviceAccountName: {{ include "indexterity.serviceAccountName" . }}
@@ -33,9 +52,12 @@ spec:
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
-        - name: api
-          image: {{ include "indexterity.apiImage" . }}
-          imagePullPolicy: {{ .Values.api.image.pullPolicy }}
+        # `app` rather than `api` in single-container, because this container is
+        # not the api: it is a supervisor running the api, the dashboard and —
+        # with api.runWorker — the job runner. `kubectl logs` returns all of them.
+        - name: {{ if $allInOne }}app{{ else }}api{{ end }}
+          image: {{ if $allInOne }}{{ include "indexterity.allInOneImage" . }}{{ else }}{{ include "indexterity.apiImage" . }}{{ end }}
+          imagePullPolicy: {{ if $allInOne }}{{ .Values.allInOne.image.pullPolicy }}{{ else }}{{ .Values.api.image.pullPolicy }}{{ end }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
           ports:
@@ -45,76 +67,74 @@ spec:
             - name: metrics
               containerPort: {{ .Values.metrics.port }}
             {{- end }}
+            {{- if $allInOne }}
+            - name: web-http
+              containerPort: {{ .Values.web.port }}
+            {{- if .Values.metrics.enabled }}
+            # The second listener in one network namespace, so not metrics.port.
+            - name: web-metrics
+              containerPort: {{ include "indexterity.webMetricsPort" . }}
+            {{- end }}
+            {{- end }}
           env:
             {{- include "indexterity.coreEnv" . | nindent 12 }}
             {{- include "indexterity.mailEnv" . | nindent 12 }}
-            {{- include "indexterity.metricsEnv" . | nindent 12 }}
+            {{- include "indexterity.metricsEnv" (dict "root" . "port" .Values.metrics.port) | nindent 12 }}
             {{- include "indexterity.errorsEnv" (dict "root" . "dsn" .Values.errorReporting.dsn) | nindent 12 }}
-            - name: API_PORT
-              value: {{ .Values.api.port | quote }}
-            # Browser auth requests arrive through the dashboard's server
-            # functions, which send this origin — better-auth must trust it.
-            - name: WEB_ORIGIN
-              value: {{ include "indexterity.webOrigin" . | quote }}
-            # Only the api serves auth, so the signing key lives here rather
-            # than in the shared core env. It was written into the Secret and
-            # never referenced by any container — the api could not boot.
-            - name: BETTER_AUTH_SECRET
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "indexterity.secretName" . }}
-                  key: BETTER_AUTH_SECRET
-            - name: BETTER_AUTH_URL
-              value: {{ include "indexterity.betterAuthUrl" . | quote }}
-            {{- if .Values.config.allowInsecureAuthUrl }}
-            - name: ALLOW_INSECURE_AUTH_URL
-              value: "true"
+            {{- include "indexterity.apiEnv" . | nindent 12 }}
+            {{- if $allInOne }}
+            {{- /* Read by the SUPERVISOR, not by either process: one environment
+                   has to describe two of them, and these are the two variables
+                   they would otherwise fight over. */}}
+            {{- if .Values.metrics.enabled }}
+            - name: WEB_METRICS_PORT
+              value: {{ include "indexterity.webMetricsPort" . | quote }}
             {{- end }}
-            - name: TRUST_PROXY
-              value: {{ include "indexterity.trustProxy" . | quote }}
-            # Per-IP request budgets, per minute and PER REPLICA — the counters
-            # live in each api process's memory, so two replicas allow twice
-            # this and a rolling deploy hands every bucket back at zero.
-            - name: RATE_LIMIT_MAX
-              value: {{ .Values.config.rateLimitMax | quote }}
-            - name: AUTH_RATE_LIMIT_MAX
-              value: {{ .Values.config.authRateLimitMax | quote }}
-            # One-container mode. Off while the worker Deployment is on, or the
-            # schedule would be installed twice.
-            - name: RUN_WORKER
-              value: {{ .Values.api.runWorker | quote }}
-            - name: REQUIRE_EMAIL_VERIFICATION
-              value: {{ .Values.config.requireEmailVerification | quote }}
-            - name: SIGNUP_MODE
-              value: {{ .Values.config.signupMode | quote }}
-            - name: REQUIRE_OWNER_2FA
-              value: {{ .Values.config.requireOwnerTwoFactor | quote }}
-            {{- if .Values.secrets.github.clientId }}
-            - name: GITHUB_CLIENT_ID
-              value: {{ .Values.secrets.github.clientId | quote }}
-            - name: GITHUB_CLIENT_SECRET
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "indexterity.secretName" . }}
-                  key: GITHUB_CLIENT_SECRET
+            {{- with .Values.errorReporting.webDsn }}
+            # A second Sentry project for the dashboard. Absent, the supervisor
+            # hands the web server the api's DSN, which is what the split
+            # topology does when webDsn is empty.
+            - name: WEB_SENTRY_DSN
+              value: {{ . | quote }}
             {{- end }}
-            {{- with .Values.api.extraEnv }}
-            {{- toYaml . | nindent 12 }}
+            {{- include "indexterity.webEnv" (dict "root" . "shared" true) | nindent 12 }}
             {{- end }}
           readinessProbe:
             httpGet:
+              {{- if $allInOne }}
+              # /api/health through the dashboard's own /api passthrough, which is
+              # the one request that proves all of it: the web server answered,
+              # the api answered it, and the loopback hop between them works. A
+              # probe on either port alone would report a half-dead container
+              # ready.
+              path: /api/health
+              port: web-http
+              {{- else }}
               path: /api/health
               port: http
+              {{- end }}
             initialDelaySeconds: 3
             periodSeconds: 10
           livenessProbe:
             httpGet:
+              {{- if $allInOne }}
+              # The landing page, not /api/health: liveness restarts the
+              # container, and losing Postgres for a minute is not a reason to
+              # kill the dashboard with the api. The supervisor already exits when
+              # a process actually dies, which is what a restart is for.
+              path: /
+              port: web-http
+              {{- else }}
               path: /api/health
               port: http
+              {{- end }}
             initialDelaySeconds: 15
             periodSeconds: 20
           resources:
-            {{- toYaml .Values.api.resources | nindent 12 }}
+            {{- toYaml (ternary .Values.allInOne.resources .Values.api.resources $allInOne) | nindent 12 }}
+        {{- if and $merged (not $allInOne) }}
+        {{- include "indexterity.webContainer" . | nindent 8 }}
+        {{- end }}
       {{- with .Values.api.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

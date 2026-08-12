@@ -13,6 +13,48 @@
 nameOverride: ""
 fullnameOverride: ""
 
+# How the workloads are PACKAGED. The code is identical in all three; this only
+# decides how many Deployments and containers it lands in.
+#
+#   split             Three Deployments from two images. The default, and what a
+#                     hosted install runs: api, web and worker roll, scale and
+#                     fail independently, so an api rollout cannot take the
+#                     landing page down with it.
+#
+#   single-pod        ONE Deployment for the serving tier, an api container and a
+#                     web container beside each other. Same two images — nothing
+#                     extra to build or pull — and the dashboard reaches the api
+#                     over 127.0.0.1. For an install where three Deployments are
+#                     three things to watch and one is enough.
+#
+#   single-container  One Deployment, ONE container, from the all-in-one image
+#                     below: both processes under a supervisor that is PID 1.
+#                     This is the one for a host that runs a single container per
+#                     service and has no pods at all — Fly, Render, Cloud Run,
+#                     Docker Compose, `docker run`. The image is usable entirely
+#                     without this chart.
+#
+# Neither one folds in the WORKER: that is worker.enabled and api.runWorker
+# below, and it is a separate decision because it changes what runs on a
+# schedule rather than where it is packaged. `worker.enabled=false` with
+# `api.runWorker=true` (and api.replicas=1) is what makes a merged topology
+# genuinely one workload.
+#
+# What both merged topologies do, and what they cost:
+#   - api.replicas is the pod count; web.replicas is ignored. The two scale
+#     together now, and a dashboard change rolls the api with it.
+#   - the -api and -web Services keep their names, ports and labels, and the
+#     ingress is unchanged. Both simply select the same pod, so nothing in front
+#     of the chart has to know which topology is installed.
+#   - the web metrics listener moves to metrics.port + 1 (see metrics.webPort):
+#     one network namespace cannot bind one port twice.
+#   - the whole install is one failure domain. That is the trade being made.
+#
+# Switching an existing release replaces Deployments rather than editing them —
+# expect the old ones to go and one to appear, which is a normal rollout, not a
+# reinstall. Your data is in Postgres and untouched either way.
+topology: split
+
 # Applied to every pod. Useful for imagePullSecrets and a shared registry.
 global:
   imagePullSecrets: []
@@ -56,6 +98,8 @@ web:
     repository: ghcr.io/fullmetalbober/indexterity-web
     tag: ""
     pullPolicy: IfNotPresent
+  # Ignored in the merged topologies — there is one pod and api.replicas counts
+  # it. See `topology` at the top of this file.
   replicas: 2
   port: 3000
   service:
@@ -66,8 +110,9 @@ web:
   # trusts it for auth requests and session cookies are stored against it.
   publicUrl: ""
   # Where the WEB SERVER reaches the api, for its own server-side rendering.
-  # Defaults to the in-cluster Service. Not what the browser uses — that is
-  # /api on publicUrl, routed by the ingress.
+  # Defaults to the in-cluster Service, or to 127.0.0.1 in the merged topologies,
+  # where the api is in the same pod. Not what the browser uses — that is /api on
+  # publicUrl, routed by the ingress.
   apiUrl: ""
   # Overrides the canonical URL in the landing page's SEO tags (canonical,
   # og:url, og:image). Leave empty to keep the product's own public domain —
@@ -84,6 +129,32 @@ web:
   affinity: {}
   podAnnotations: {}
   extraEnv: []
+
+# Read only when topology is single-container. One image carrying the api build,
+# the web build and a supervisor; api.image and web.image are never pulled in
+# that topology, and neither is a second copy of node.
+#
+# The supervisor is PID 1 and runs both processes: it splits the one environment
+# into two (the api's METRICS_PORT and SENTRY_DSN stay as they are, the web
+# server gets WEB_METRICS_PORT and WEB_SENTRY_DSN), points the dashboard at the
+# api over loopback, forwards SIGTERM to both, and exits non-zero the moment
+# either process does — so a half-dead container is restarted rather than left
+# serving pages with no api behind them.
+allInOne:
+  image:
+    repository: ghcr.io/fullmetalbober/indexterity-all-in-one
+    # Defaults to .Chart.AppVersion, like the other two.
+    tag: ""
+    pullPolicy: IfNotPresent
+  # One container, both processes, so this is the api's and the web's budgets
+  # added together rather than either of them. The job runner lands here too when
+  # api.runWorker is on, which is the usual reason to be in this topology at all.
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      memory: 1Gi
 
 worker:
   # Runs the cron schedule (collect, apply, finalize, retention, digest).
@@ -118,6 +189,15 @@ worker:
 metrics:
   enabled: true
   port: 9464
+  # The web server's listener. Empty means metrics.port when the dashboard has a
+  # pod to itself, and metrics.port + 1 in the merged topologies, where the api
+  # has already bound metrics.port in the same network namespace and a second
+  # listener on it would crash-loop on EADDRINUSE.
+  #
+  # This is the containerPort only. Both Services still publish metrics.port, so
+  # scrapers, the chart's own test and the port-forward in the install notes read
+  # the same number in every topology.
+  webPort: ""
   # A Prometheus Operator ServiceMonitor per workload. Needs the
   # monitoring.coreos.com CRDs — off by default because a chart that assumes
   # them fails to install on a cluster that scrapes some other way.

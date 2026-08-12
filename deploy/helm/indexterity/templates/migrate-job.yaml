@@ -37,8 +37,8 @@ spec:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
         - name: migrate
-          image: {{ include "indexterity.apiImage" . }}
-          imagePullPolicy: {{ .Values.api.image.pullPolicy }}
+          image: {{ include "indexterity.apiRuntimeImage" . }}
+          imagePullPolicy: {{ include "indexterity.apiRuntimePullPolicy" . }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
           # drizzle-kit is a devDependency and pruned from the runtime image;

@@ -1,7 +1,9 @@
 # Indexterity Helm chart
 
 Deploys the three workloads — **api**, **web** (dashboard) and **worker**
-(scheduler) — from two images, plus a pre-upgrade migration job.
+(scheduler) — from two images, plus a pre-upgrade migration job. `topology`
+folds the first two into one pod, or one container, when three Deployments is
+more than an install needs.
 
 PostgreSQL is **not** bundled: point `secrets.databaseUrl` at a managed
 instance or your own postgres release. That is the control-plane store; the
@@ -37,6 +39,79 @@ The web image does **not** need rebuilding per environment: `API_URL` and
 `WEB_ORIGIN` are read at runtime, and the browser bundle contains no api address
 at all — it calls `/api` on whatever origin served the page. `API_URL` is the web
 server's own server-side rendering, nothing else.
+
+## Topology: how many things to deploy
+
+`topology` decides only how the same code is packaged. Nothing about the app
+changes, and nothing in front of the chart does either: the `-api` and `-web`
+Services keep their names, their ports and their labels in every case, so the
+ingress, the ServiceMonitors and every in-cluster caller are unaffected.
+
+| `topology` | What is installed | Images pulled |
+|---|---|---|
+| `split` (default) | Three Deployments. api, web and worker roll, scale and fail independently — an api rollout cannot take the landing page down with it. What the hosted install runs | api, web |
+| `single-pod` | One Deployment for the serving tier: an **api container and a web container in one pod**, the dashboard reaching the api over `127.0.0.1`. The worker keeps its own Deployment unless you embed it | api, web |
+| `single-container` | One Deployment, **one container**, from the all-in-one image: both processes under a supervisor that is PID 1 | all-in-one |
+
+```bash
+# One pod, two containers. Nothing new to build — the two published images.
+helm install indexterity … --set topology=single-pod
+
+# One container, everything in it, including the scheduler.
+helm install indexterity … \
+  --set topology=single-container \
+  --set worker.enabled=false --set api.runWorker=true --set api.replicas=1
+```
+
+What the merged topologies cost, and it is the same trade twice:
+
+- **One failure domain.** api and web scale together (`api.replicas` counts the
+  pods; `web.replicas` is ignored), and a dashboard change rolls the api with it.
+- **The web metrics listener moves to `metrics.port + 1`** — one network
+  namespace cannot bind one port twice. Both Services still *publish* 9464, so
+  scrapers and `port-forward` read the same number as before; only the
+  containerPort moved. `metrics.webPort` overrides it.
+- **The worker is a separate decision.** Merging the serving tier does not touch
+  the schedule. `worker.enabled=false` with `api.runWorker=true` (and
+  `api.replicas=1`) is what makes a merged topology genuinely one workload; the
+  chart refuses the combinations that would install the crontab twice.
+
+Switching an existing release replaces Deployments rather than editing them —
+the old ones go and one appears. That is a rollout, not a reinstall; the data is
+in Postgres and untouched.
+
+### The all-in-one image, without this chart
+
+`ghcr.io/fullmetalbober/indexterity-all-in-one` is the whole product in one
+container, which is what a host that has no pods wants — Fly, Render, Cloud Run,
+Compose, a single VM:
+
+```bash
+docker run -p 3000:3000 \
+  -e DATABASE_URL='postgres://…' \
+  -e BETTER_AUTH_SECRET="$(openssl rand -base64 32)" \
+  -e MASTER_KEY="$(openssl rand -base64 32)" \
+  -e BETTER_AUTH_URL=https://indexterity.example.com \
+  -e WEB_ORIGIN=https://indexterity.example.com \
+  ghcr.io/fullmetalbober/indexterity-all-in-one:0.4.0
+```
+
+Port 3000 is the only one that has to be published: the dashboard answers `/api`
+itself, so one origin serves the browser everything. Migrations are not automatic
+outside the chart — run them first, from the same image:
+
+```bash
+docker run --rm -e DATABASE_URL='postgres://…' \
+  ghcr.io/fullmetalbober/indexterity-all-in-one:0.4.0 node apps/api/dist/migrate.js
+```
+
+The supervisor (`deploy/all-in-one/supervisor.mjs`) splits the two variables the
+processes would otherwise fight over — `WEB_METRICS_PORT` (default
+`METRICS_PORT + 1`) and `WEB_SENTRY_DSN` (default: the api's project) — forwards
+`SIGTERM` to both, and **exits non-zero the moment either process does**, so the
+host restarts the container instead of leaving a dashboard serving 502s from a
+passthrough with nothing behind it. `RUN_WORKER` defaults to `true` in this image
+and nowhere else: a single container has nowhere else to put the scheduler.
 
 ## Back up MASTER_KEY
 
@@ -77,6 +152,9 @@ stays off by default — the dashboard does not need it.
 
 | Value | Why it matters |
 |---|---|
+| `topology` | `split` (default), `single-pod` or `single-container` — see above. Packaging only; the Services, the ingress and the app are the same in all three |
+| `allInOne.*` | Image and resources for `topology: single-container`. `api.image` and `web.image` are never pulled in that topology, and neither is a second copy of node |
+| `metrics.webPort` | The dashboard's metrics containerPort. Empty means `metrics.port`, or `metrics.port + 1` when it shares a network namespace with the api |
 | `secrets.existingSecret` | Bring your own Secret (`DATABASE_URL`, `BETTER_AUTH_SECRET`, `MASTER_KEY`, optionally `SMTP_PASS`, `GITHUB_CLIENT_SECRET`) instead of putting values in Helm |
 | `web.publicUrl` | The dashboard's public origin. Defaults to the ingress host; the api trusts it for auth and session cookies are bound to it |
 | `worker.enabled` | Off means nothing is collected, applied or finalized on a schedule — the dashboard still works and can collect on demand |
@@ -108,6 +186,12 @@ it can see — scrape all three:
 
 With `worker.enabled=false` and `RUN_WORKER=true` on the api instead, the api
 serves the worker's half as well.
+
+In the merged topologies all of that is still served, and still separately: the
+api's listener stays on 9464 and the dashboard's moves to 9465, because they are
+now in one network namespace. Both Services publish 9464 either way, so scrape
+`<release>-api` and `<release>-web` exactly as in `split` — they simply happen to
+resolve to the same pod.
 
 `metrics.serviceMonitor.enabled=true` installs a ServiceMonitor for each. Without
 the Prometheus Operator, point your own scraper at the `metrics` port on
@@ -182,7 +266,7 @@ page, under Security):
   pod means duplicate scheduling. Scale job throughput with
   `worker.concurrency` instead.
 - **api and web scale horizontally.** Both are stateless; sessions live in
-  Postgres.
+  Postgres. In a merged topology they scale as one unit, on `api.replicas`.
 - The worker drains its connection pool on `SIGTERM`
   (`terminationGracePeriodSeconds: 60`).
 - **The worker's only Service is `-worker-metrics`**, and it is headless. Nothing
@@ -193,6 +277,17 @@ page, under Security):
 ```bash
 helm lint deploy/helm/indexterity
 helm template rel deploy/helm/indexterity --set secrets.existingSecret=s | kubeconform -strict -
+```
+
+Rendering is not installing, and the topologies are where that gap is widest — a
+merged pod that renders can still bind a port twice or leave a Service with no
+endpoints. `deploy/kind-test.sh` installs into a throwaway Kind cluster and runs
+the same assertions against each packaging; CI runs all three in parallel on any
+change under `deploy/`:
+
+```bash
+TOPOLOGY=single-pod deploy/kind-test.sh
+TOPOLOGY=single-container deploy/kind-test.sh
 ```
 
 The alert rules need their own check — a typo'd expression installs cleanly and

@@ -110,6 +110,15 @@ const COMPOSE_INFRA = new Set(["POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_D
 // the two DSNs to be mapped from.
 const DEPLOYMENT_ONLY = new Set(["SENTRY_DSN_API", "SENTRY_DSN_WEB"]);
 
+// Read by the all-in-one image's supervisor (deploy/all-in-one/supervisor.mjs)
+// and by neither process. That image runs the api and the dashboard in one
+// container, so one environment has to describe two of them — and these are the
+// two variables they would otherwise fight over: both read METRICS_PORT (one
+// network namespace, so the second listener has to move) and both read
+// SENTRY_DSN (two projects). The supervisor splits them and hands each process
+// the name it already reads, which is why no schema declares these.
+const SUPERVISOR_VARS = new Set(["WEB_METRICS_PORT", "WEB_SENTRY_DSN"]);
+
 describe("every required variable is registered in every home", () => {
   // The gap #126 names: a required variable the chart does not set is a
   // CrashLoopBackOff, discovered by deploying.
@@ -143,6 +152,7 @@ describe("nothing is set that no schema knows", () => {
     ...WEB_VARS,
     ...DEPLOYMENT_ONLY,
     ...COMPOSE_INFRA,
+    ...SUPERVISOR_VARS,
   ]);
   // MASTER_KEY_V<n> is dynamically named by the rotation, so it is matched by
   // shape rather than listed.

@@ -32,7 +32,10 @@
     "SENTRY_DSN_API",
     "SENTRY_DSN_WEB",
     "SENTRY_ENVIRONMENT",
-    "INT_API_PORT"
+    "INT_API_PORT",
+    "WEB_METRICS_PORT",
+    "WEB_SENTRY_DSN",
+    "SUPERVISOR_GRACE_MS"
   ],
   "tasks": {
     "build": {

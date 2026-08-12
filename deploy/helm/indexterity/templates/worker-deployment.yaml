@@ -37,8 +37,8 @@ spec:
       terminationGracePeriodSeconds: 60
       containers:
         - name: worker
-          image: {{ include "indexterity.apiImage" . }}
-          imagePullPolicy: {{ .Values.api.image.pullPolicy }}
+          image: {{ include "indexterity.apiRuntimeImage" . }}
+          imagePullPolicy: {{ include "indexterity.apiRuntimePullPolicy" . }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
           command: ["node", "apps/api/dist/worker.js"]
@@ -50,7 +50,7 @@ spec:
           env:
             {{- include "indexterity.coreEnv" . | nindent 12 }}
             {{- include "indexterity.mailEnv" . | nindent 12 }}
-            {{- include "indexterity.metricsEnv" . | nindent 12 }}
+            {{- include "indexterity.metricsEnv" (dict "root" . "port" .Values.metrics.port) | nindent 12 }}
             {{- include "indexterity.errorsEnv" (dict "root" . "dsn" .Values.errorReporting.dsn) | nindent 12 }}
             - name: WORKER_CONCURRENCY
               value: {{ .Values.worker.concurrency | quote }}
