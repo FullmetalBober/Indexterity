@@ -35,7 +35,15 @@ RUN --mount=type=cache,target=/root/.cache/turbo turbo run build --filter=@repo/
 # tailwind, which are devDependencies. The api's runtime needs node_modules and
 # the nitro output needs none, so what survives here is exactly the api's tree
 # plus apps/web/.output.
-RUN npm prune --omit=dev
+#
+# Reinstalled from stripped manifests rather than pruned, for the reason the api's
+# Dockerfile gives at length: `turbo prune` regenerates a lockfile with no dev
+# markers, so `npm prune --omit=dev` reads the whole graph as production and keeps
+# typescript, drizzle-kit, @rolldown and esbuild. This image carries both apps, so
+# it was paying that once for a tree only the api reads at runtime.
+COPY deploy/prod-manifests.mts /tmp/prod-manifests.mts
+RUN --mount=type=cache,target=/root/.npm \
+    node /tmp/prod-manifests.mts . && rm -rf node_modules && npm install --omit=dev
 
 FROM docker.io/library/node:26-slim AS runtime
 WORKDIR /app

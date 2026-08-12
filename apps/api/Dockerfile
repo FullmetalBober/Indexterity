@@ -20,7 +20,22 @@ COPY --from=pruner /app/out/json/ .
 RUN --mount=type=cache,target=/root/.npm npm install
 COPY --from=pruner /app/out/full/ .
 RUN --mount=type=cache,target=/root/.cache/turbo turbo run build --filter=@repo/api
-RUN npm prune --omit=dev
+# Reinstall from manifests with no devDependencies in them, rather than pruning.
+#
+# `npm prune --omit=dev` was here and did nothing measurable: `turbo prune --docker`
+# regenerates the lockfile for the subset it kept, and the regenerated one carries
+# no `dev: true` markers, so npm reads the whole graph as production. Measured, the
+# runtime image shipped 284 MB of node_modules for 5 MB of application code —
+# typescript (24 MB), drizzle-kit (20 MB), @rolldown (37 MB) and esbuild (11 MB)
+# among them. Deleting devDependencies from the manifests first takes it to 153 MB,
+# because npm cannot resolve what nothing asks for.
+#
+# After the build, never before it: this removes exactly the packages the build
+# needs. The tree is rebuilt in place, so everything downstream still finds its
+# files where they were.
+COPY deploy/prod-manifests.mts /tmp/prod-manifests.mts
+RUN --mount=type=cache,target=/root/.npm \
+    node /tmp/prod-manifests.mts . && rm -rf node_modules && npm install --omit=dev
 
 FROM docker.io/library/node:26-slim AS runtime
 WORKDIR /app

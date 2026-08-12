@@ -15,6 +15,7 @@ import { apiEnv, trustProxySetting } from "./config/env";
 import { DatabaseService } from "./db/database.service";
 import { AppExceptionFilter } from "./errors/exception.filter";
 import { captureAuthFailure } from "./errors/reporting";
+import { quietProbes } from "./http/quiet-probes";
 import { securityHeaders } from "./http/security-headers";
 import { embeddedWorkerEnabled, startWorker } from "./jobs/runner";
 import { instrumentHttp, registerControlPlaneGauges, startMetricsServer } from "./metrics";
@@ -50,6 +51,12 @@ async function bootstrap(): Promise<void> {
   // controller would miss every endpoint that handles a credential.
   instrumentHttp(fastify);
   securityHeaders(fastify);
+  // Same window as the two above, and for the same reason: it decides something
+  // about routes before they exist. The health route stops writing a request log
+  // — a kubelet asks for it nine times a minute per pod and the answer is a
+  // literal. It is still counted by instrumentHttp above, so the metric that says
+  // whether this api is answering does not go quiet with it.
+  quietProbes(fastify);
 
   // Global ceiling per IP, with a tight budget on the auth endpoints — they are
   // the brute-force target (sign-in/sign-up).
