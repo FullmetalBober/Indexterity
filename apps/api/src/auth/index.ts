@@ -1,4 +1,5 @@
 import { apiEnv, requireOwnerTwoFactor, trustedProxyCidrs, trustsProxy } from "../config/env";
+import { createDatabase } from "../db";
 import { createAuth } from "./auth.config";
 import { assertProductionUrl, useSecureCookies } from "./cookies";
 
@@ -15,8 +16,10 @@ assertProductionUrl(baseURL, env.NODE_ENV, env.ALLOW_INSECURE_AUTH_URL);
 
 // Single configured auth instance for the app.
 export const auth = createAuth({
-  databaseUrl: env.DATABASE_URL,
-  poolMax: env.PG_POOL_MAX,
+  // A pool of its own, decided here rather than inside auth.config.ts. Sharing the
+  // api's request pool would let a slow report starve a sign-in of a connection,
+  // and that isolation is worth more than the handful of backends it costs.
+  db: createDatabase(env.DATABASE_URL, env.PG_POOL_MAX),
   secret: env.BETTER_AUTH_SECRET,
   baseURL,
   secureCookies: useSecureCookies(baseURL, env.NODE_ENV),

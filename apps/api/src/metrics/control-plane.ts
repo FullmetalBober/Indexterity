@@ -79,14 +79,14 @@ export async function observeControlPlane(
 // Registered by the api only. The worker could run the same queries, but two
 // deployments reporting one set of database facts is two chances to disagree,
 // and the api is the workload that is always there.
-export function registerControlPlaneGauges(
-  db: () => Database,
-  log: (message: string) => void,
-): void {
+// The database itself, not a thunk returning it. The indirection existed only to
+// defer a module-level singleton that no longer exists — the caller now holds the
+// pool it wants these gauges to read through.
+export function registerControlPlaneGauges(db: Database, log: (message: string) => void): void {
   meter.addBatchObservableCallback(
     async (result) => {
       try {
-        await observeControlPlane(result, db());
+        await observeControlPlane(result, db);
       } catch (error) {
         // A database that is down must not fail the whole collection — the rest
         // of the scrape is still worth serving, and the failure is reported as a

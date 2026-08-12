@@ -5,8 +5,9 @@ import "./instrument.worker";
 // Before the runner and everything it pulls in — see env.worker.ts (#126).
 import "./env.worker";
 import { consoleLogFactory, Logger } from "graphile-worker";
+import { coreEnv, workerEnv } from "./config/env";
+import { closeDatabase, createDatabase } from "./db";
 import { drainPool } from "./jobs/connection-pool";
-import { closeJobDb } from "./jobs/db";
 import { startWorker } from "./jobs/runner";
 import { startMetricsServer } from "./metrics";
 
@@ -26,14 +27,18 @@ async function main(): Promise<void> {
     info: (message) => logger.info(message),
     warn: (message) => logger.warn(message),
   });
-  const runner = await startWorker();
+  // This process's control-plane pool, created here because this is the process:
+  // every task reaches it through the runner rather than through a module-level
+  // singleton, so the thing that opens it is also the thing that closes it below.
+  const db = createDatabase(coreEnv().DATABASE_URL, workerEnv().PG_POOL_MAX);
+  const runner = await startWorker(db);
 
   // Graceful shutdown: finish in-flight jobs, then drain every pool.
   const stop = async (): Promise<void> => {
     await runner.stop();
     await metrics?.stop();
     await drainPool();
-    await closeJobDb();
+    await closeDatabase(db);
     process.exit(0);
   };
   process.once("SIGTERM", () => void stop());

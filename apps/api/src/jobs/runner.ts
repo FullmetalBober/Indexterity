@@ -1,11 +1,11 @@
 import { type Runner, run } from "graphile-worker";
 import { apiEnv, workerEnv } from "../config/env";
+import type { Database } from "../db";
 import { captureError } from "../errors/reporting";
 import { ALERT_COOLDOWN_MS, alertAllowed, notifyClusterOwners } from "../mail/notify";
 import { instrumentRunner } from "../metrics";
-import { jobDb } from "./db";
 import { clusterIdOf, finalClusterFailure } from "./failure";
-import { taskList } from "./tasks";
+import { createTaskList } from "./tasks";
 
 // Recurring schedule (per cluster via the dispatcher tasks):
 //  - collect + classify hourly
@@ -58,12 +58,18 @@ const CRONTAB = [
 
 // Start the job runner. Used by the standalone worker process, and by the api
 // itself when RUN_WORKER=true collapses both into one container.
-export async function startWorker(): Promise<Runner> {
+export async function startWorker(db: Database): Promise<Runner> {
   const values = workerEnv();
   const runner = await run({
+    // graphile-worker keeps its OWN pool from this string, and should: it holds a
+    // long-lived LISTEN connection, so sharing `db` would tie up one of that
+    // pool's slots permanently and make the queue compete with everything else
+    // for the rest.
     connectionString: values.DATABASE_URL,
     concurrency: values.WORKER_CONCURRENCY,
-    taskList,
+    // The db reaches every task through here — one argument at the composition
+    // root, where before each task reached for a module-level singleton.
+    taskList: createTaskList(db),
     crontab: CRONTAB,
   });
   // Job counters come off the same events, so they are registered here and
@@ -103,7 +109,7 @@ export async function startWorker(): Promise<Runner> {
     if (clusterId === null) return;
     if (!alertAllowed(`${clusterId}:${job.task_identifier}`, ALERT_COOLDOWN_MS)) return;
     void notifyClusterOwners(
-      jobDb(),
+      db,
       clusterId,
       `${job.task_identifier} keeps failing`,
       `The background ${job.task_identifier} task gave up after ${job.attempts} attempts.\n\n` +

@@ -1,16 +1,15 @@
 import { inChangeWindow } from "../analysis";
+import type { Database } from "../db";
 import { actions, and, eq, inArray, policies, recommendations } from "../db";
 import { effectiveChangeWindow } from "./change-window";
 import { openClusterSession } from "./cluster-connection";
-import { jobDb } from "./db";
 
 // APPROVED CREATE/UPDATE/MERGE -> build the index (executor.create) -> ACTIVE.
 // Retiring superseded indexes is left to the next classify pass, which sees them
 // as DROP_REDUNDANT and routes them through the safe hide -> observe -> drop path.
 // At build time the collection's write latency is recorded as the baseline for
 // the post-build regression watch (finalize drops the index if writes regress).
-export async function applyCreatesForCluster(clusterId: string): Promise<number> {
-  const db = jobDb();
+export async function applyCreatesForCluster(db: Database, clusterId: string): Promise<number> {
   const approved = await db
     .select()
     .from(recommendations)

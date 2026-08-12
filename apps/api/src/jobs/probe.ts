@@ -1,7 +1,6 @@
 import { assessHealth, DEFAULT_PRESSURE, readPressure } from "../analysis";
 import { type Database, desc, eq, latencySamples } from "../db";
 import { openClusterSession } from "./cluster-connection";
-import { jobDb } from "./db";
 
 // The five-minute check: is a collection suddenly much slower to read than it
 // has been? That is what a missing index looks like from outside, and unlike
@@ -46,8 +45,7 @@ export function latestBaselines(db: Database, clusterId: string) {
 
 // Returns the collections found under read pressure. The caller decides what to
 // do about it; this only measures.
-export async function probeCluster(clusterId: string): Promise<PressureFinding[]> {
-  const db = jobDb();
+export async function probeCluster(db: Database, clusterId: string): Promise<PressureFinding[]> {
   // The most recent stored sample per collection is the baseline, and `distinct
   // on` is the whole point here: this used to select EVERY latency_samples row for
   // the cluster and pick the newest per namespace in JS. That is one row per
