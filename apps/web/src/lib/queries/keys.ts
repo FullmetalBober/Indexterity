@@ -36,6 +36,23 @@ export const queryKeys = {
   // that answers for somebody who is in no org at all, which is exactly who
   // needs it.
   myInvites: () => ["my-invites"] as const,
+  // The org's security trail (#158). The filter and the page cursor are IN the
+  // key: they are what the api was asked, so two filters are two answers, and
+  // one entry holding both would show the previous filter's rows under the new
+  // one's heading while it loaded.
+  securityEvents: (filter: {
+    event?: string | undefined;
+    actorUserId?: string | undefined;
+    beforeCreatedAt?: string | undefined;
+    beforeId?: string | undefined;
+  }) =>
+    [
+      "security-events",
+      filter.event ?? null,
+      filter.actorUserId ?? null,
+      filter.beforeCreatedAt ?? null,
+      filter.beforeId ?? null,
+    ] as const,
 
   // Per cluster.
   recommendations: (clusterId: string | null) => ["recommendations", clusterId] as const,
@@ -44,6 +61,15 @@ export const queryKeys = {
   latency: (clusterId: string | null) => ["latency", clusterId] as const,
   latencySeries: (clusterId: string | null) => ["latency-series", clusterId] as const,
   collections: (clusterId: string | null) => ["collections", clusterId] as const,
+  // The footprint trend (#160). Its own key beside `collections`, which is the
+  // same measurement at one instant: they go stale together, on the collect, but
+  // one is a 31-point series and the other is a row per collection, and the page
+  // draws them in different places.
+  indexSizeSeries: (clusterId: string | null) => ["index-size-series", clusterId] as const,
   nodes: (clusterId: string | null) => ["nodes", clusterId] as const,
+  // Its own key rather than a field on `recommendations`: a cooldown outlives
+  // the recommendation that caused it, and the two are moved by different
+  // writes — a regression parks an index without touching the proposal list.
+  cooldowns: (clusterId: string | null) => ["cooldowns", clusterId] as const,
   policy: (clusterId: string | null) => ["policy", clusterId] as const,
 };

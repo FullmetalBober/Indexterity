@@ -54,14 +54,46 @@ function toSamples(series: readonly ChartSeries[]): Sample[] {
 // Empty for anything that is not a readable instant. It used to render one
 // regardless, which is how a pixel offset came out as `1/1 03:00`: small numbers
 // are milliseconds after the epoch, and `new Date(null)` is the epoch exactly.
-function timeLabel(at: unknown): string {
-  // `null` first, and not as a formality: `new Date(null)` is the epoch, so
-  // without this an absent value reads as a real instant in 1970 rather than as
-  // nothing — which is the same wrong answer the pixel was giving.
-  if (at === null || at === undefined) return "";
+// How an x value is written, on the axis ticks and in the tooltip heading. Two
+// of them, because the two series this chart draws are sampled at different
+// rates and a label that suits one lies about the other — see `dayLabel`.
+export type TimeFormat = (at: unknown) => string;
+
+// Null and unreadable values first, and not as a formality: `new Date(null)` is
+// the epoch, so without this an absent value reads as a real instant in 1970
+// rather than as nothing — which is the wrong answer a pixel offset was giving.
+function instantOf(at: unknown): Date | null {
+  if (at === null || at === undefined) return null;
   const date = at instanceof Date ? at : new Date(at as string | number);
-  if (Number.isNaN(date.getTime())) return "";
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+// Day and time, in the reader's own zone. For the latency series, whose points
+// are one collect apart.
+function timeLabel(at: unknown): string {
+  const date = instantOf(at);
+  if (date === null) return "";
   return `${date.getMonth() + 1}/${date.getDate()} ${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
+// The day alone, in UTC. For a series whose points ARE days.
+//
+// Two things wrong with using `timeLabel` on one, and the second is the one that
+// matters. The visible half: every point in a daily series sits at midnight, so
+// the label read `8/9 03:00` — an hour precise to the minute about a number that
+// is a whole day's total, which invites reading the chart as hourly.
+//
+// The half that was actually wrong: the buckets are UTC midnights
+// (`date_trunc('day', …)`) and the scale is `scaleUtc`, while `timeLabel` reads
+// its parts with the LOCAL getters. East of UTC that shows as a harmless-looking
+// hour; west of it the local date is the day BEFORE, so every tick and every
+// tooltip on the footprint chart named the wrong day for readers in the
+// Americas — off-by-one against an axis that was positioning them correctly.
+// UTC getters here because the bucket is a UTC fact, not a local one.
+export function dayLabel(at: unknown): string {
+  const date = instantOf(at);
+  if (date === null) return "";
+  return `${date.getUTCMonth() + 1}/${date.getUTCDate()}`;
 }
 
 // A tooltip point carries the datum AND where it was painted: `xValue`/`yValue`
@@ -87,16 +119,39 @@ interface TooltipPoint {
   readonly y?: unknown;
 }
 
-export function tooltipTime(point: TooltipPoint | undefined): string {
-  return point === undefined ? "" : timeLabel(point.xValue);
+export function tooltipTime(
+  point: TooltipPoint | undefined,
+  format: TimeFormat = timeLabel,
+): string {
+  return point === undefined ? "" : format(point.xValue);
 }
+
+// How a y value is written, for the axis ticks and the tooltip both. Rounding to
+// a whole number is right for µs/op and wrong for bytes, where every value on a
+// small cluster would round to the same integer — so the caller that plots bytes
+// passes fmtBytes and the unit label goes with it.
+export type ValueFormat = (value: number) => string;
+
+const roundToWhole: ValueFormat = (value) => String(Math.round(value));
 
 // `—` rather than a number for the null points that draw the gaps: no ops went
 // through, so there is no µs/op, and rounding null to `0 µs` would report an
-// idle collection as an instant one.
-export function tooltipValue(point: TooltipPoint | undefined, unit: string): string {
+// idle collection as an instant one. Same rule for a byte series, where the null
+// is a day nobody collected and `0 B` would be a cluster that shed every index.
+//
+// `unit` is a SUFFIX and not always the axis label. The axis names the quantity
+// once, at the side; the tooltip has to name it on every value, and a formatter
+// that already writes one must not be given a second — `fmtBytes` returns
+// "4.0 GB", so appending the axis label read "4.0 GB bytes". Callers whose
+// format carries its own unit pass "".
+export function tooltipValue(
+  point: TooltipPoint | undefined,
+  unit: string,
+  format: ValueFormat = roundToWhole,
+): string {
   const value = point?.yValue;
-  return typeof value === "number" && Number.isFinite(value) ? `${Math.round(value)} ${unit}` : "—";
+  if (typeof value !== "number" || !Number.isFinite(value)) return "—";
+  return unit === "" ? format(value) : `${format(value)} ${unit}`;
 }
 
 // One line per series over a shared time axis. Nulls break the line (a gap, not
@@ -109,10 +164,30 @@ export function LineChart({
   series,
   pending = false,
   emptyNote,
+  format = roundToWhole,
+  timeFormat = timeLabel,
+  tooltipUnit = unit,
+  ariaLabel,
 }: {
   title: string;
+  // The axis label — the quantity, named once at the side.
   unit: string;
   series: readonly ChartSeries[];
+  // How a value is written on the axis and in the tooltip. Defaults to whole
+  // numbers, which is what µs/op wants; a byte series passes fmtBytes.
+  format?: ValueFormat;
+  // What the tooltip appends after each value. Defaults to the axis label,
+  // which is right when the format is a bare number. A format that writes its
+  // own unit passes "" — otherwise the tooltip reads "4.0 GB bytes".
+  tooltipUnit?: string;
+  // The chart's accessible name. Defaults to the per-collection phrasing the
+  // latency charts want; a cluster-wide series says what it actually is rather
+  // than inheriting a claim about collections it does not make.
+  ariaLabel?: string;
+  // How an instant is written, in the same two places. Defaults to day-and-time
+  // in the reader's own zone, which is right for points one collect apart; a
+  // series whose points are whole UTC days passes `dayLabel`.
+  timeFormat?: TimeFormat;
   // The first fetch is still out. Distinct from an empty `series`, which means
   // the collector has answered and there is not enough to plot — "Not enough
   // samples yet" is a statement about the cluster, and it used to be made before
@@ -186,17 +261,13 @@ export function LineChart({
     x: {
       scale: scaleUtc,
       grid: false,
-      axis: { line: false, ticks: { format: timeLabel } },
+      axis: { line: false, ticks: { format: timeFormat } },
     },
     y: {
       scale: scaleLinear,
       nice: true,
       grid: true,
-      axis: {
-        line: false,
-        label: unit,
-        ticks: { format: (value: number) => String(Math.round(value)) },
-      },
+      axis: { line: false, label: unit, ticks: { format } },
     },
     // Explicit domain and range rather than an inferred order: the palette's
     // slots were validated in that order, and a series appearing or disappearing
@@ -207,9 +278,9 @@ export function LineChart({
     },
     tooltip: {
       use: tooltip,
-      format: (point) => tooltipValue(point, unit),
+      format: (point) => tooltipValue(point, tooltipUnit, format),
       // Every point in a group shares the timestamp, so the first one names it.
-      formatGroup: (points) => tooltipTime(points[0]),
+      formatGroup: (points) => tooltipTime(points[0], timeFormat),
     },
     // The data moves once every six hours. An animation here is decoration on a
     // number nobody is watching change.
@@ -236,7 +307,7 @@ export function LineChart({
           className="mt-1 w-full text-xs"
           height={CHART_HEIGHT}
           definition={definition}
-          ariaLabel={`${title} per collection, in ${unit}`}
+          ariaLabel={ariaLabel ?? `${title} per collection, in ${unit}`}
         />
       ) : (
         <div className="mt-1 w-full" style={{ height: CHART_HEIGHT }} aria-hidden="true" />

@@ -1,4 +1,4 @@
-import type { Recommendation } from "@repo/contracts";
+import type { ClusterNodes, IndexUsage, Recommendation } from "@repo/contracts";
 import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -279,5 +279,95 @@ describe("RecommendationsTable, a long index name", () => {
     const cell = screen.getByText("idx_a");
     expect(cell).not.toHaveAttribute("data-slot", "tooltip-trigger");
     expect(cell.className).toContain("truncate");
+  });
+});
+
+// #161. The class alone cannot tell a reporting replica's index from the
+// application's — both come back CONTINUOUS with the same total.
+describe("RecommendationsTable, the per-node usage split", () => {
+  const ROSTER: ClusterNodes = {
+    clusterId: "c1",
+    collectedAt: "2026-08-11T09:00:00.000Z",
+    nodes: [
+      { host: "a:27017", role: "primary", state: "answered" },
+      { host: "b:27017", role: "secondary", state: "answered" },
+      { host: "c:27017", role: "secondary", state: "answered" },
+    ],
+  };
+
+  function usage(perMember: { member: string; ops: number }[]): IndexUsage {
+    return {
+      recommendationId: "r1",
+      totalOps: perMember.reduce((sum, entry) => sum + entry.ops, 0),
+      perMember,
+      observedAt: "2026-08-11T09:00:00.000Z",
+    };
+  }
+
+  it("draws the split under the usage class", () => {
+    renderInApp(
+      <RecommendationsTable
+        clusterId="c1"
+        total={1}
+        recommendations={[rec({ usageClass: "CONTINUOUS" })]}
+        usage={[
+          usage([
+            { member: "b:27017", ops: 40_000 },
+            { member: "a:27017", ops: 0 },
+            { member: "c:27017", ops: 0 },
+          ]),
+        ]}
+        roster={ROSTER}
+        loading={false}
+      />,
+    );
+    expect(screen.getByText("CONTINUOUS")).toBeInTheDocument();
+    expect(screen.getByText("40,000 ops · 1 of 3 nodes")).toBeInTheDocument();
+  });
+
+  // Never folded into the ratio: a member we could not reach and a member that
+  // reported zero are different facts, and the whole feature is worthless if the
+  // cell cannot tell them apart.
+  it("counts an unreachable member as not reported, not as a zero", () => {
+    renderInApp(
+      <RecommendationsTable
+        clusterId="c1"
+        total={1}
+        recommendations={[rec({ usageClass: "CONTINUOUS" })]}
+        usage={[
+          usage([
+            { member: "a:27017", ops: 300 },
+            { member: "b:27017", ops: 100 },
+          ]),
+        ]}
+        roster={{
+          ...ROSTER,
+          nodes: [
+            ROSTER.nodes[0] as ClusterNodes["nodes"][number],
+            ROSTER.nodes[1] as ClusterNodes["nodes"][number],
+            { host: "c:27017", role: "unknown", state: "unreachable" },
+          ],
+        }}
+        loading={false}
+      />,
+    );
+    expect(screen.getByText("400 ops · 2 of 2 nodes · 1 not reported")).toBeInTheDocument();
+  });
+
+  // An index the last collect did not see gets no line at all — "0 ops on 0
+  // nodes" would be a measurement nobody took.
+  it("says nothing when there is no reading for the row", () => {
+    renderInApp(
+      <RecommendationsTable
+        clusterId="c1"
+        total={1}
+        recommendations={[rec({ usageClass: "CONTINUOUS" })]}
+        usage={[]}
+        roster={ROSTER}
+        loading={false}
+      />,
+    );
+    expect(screen.getByText("CONTINUOUS")).toBeInTheDocument();
+    expect(screen.queryByText(/ops ·/)).not.toBeInTheDocument();
   });
 });

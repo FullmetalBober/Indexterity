@@ -12,7 +12,9 @@ import {
   auditAction,
   cluster,
   clusterCollections,
+  clusterCooldowns,
   clusterEvent,
+  clusterIndexSizeSeries,
   clusterLatency,
   clusterLatencySeries,
   clusterNodes,
@@ -26,6 +28,7 @@ import {
   orgSummary,
   provisionedCluster,
   recommendation,
+  securityTrail,
 } from "./schemas.js";
 
 const clusterId = z.object({ clusterId: z.uuid() });
@@ -79,6 +82,21 @@ export const contract = {
     .input(clusterId)
     .output(clusterLatencySeries),
 
+  // Bucketed server-side, one point per day (#160). The rows behind it are
+  // run-length encoded, so an unchanged index extends the row it has rather than
+  // adding another — sending one point per run would be a payload that grows
+  // with how much the cluster CHANGES, which is exactly the unbounded shape #64
+  // bounded everywhere else.
+  getIndexSizeSeries: oc
+    .route({
+      method: "GET",
+      path: "/clusters/{clusterId}/index-size-series",
+      summary:
+        "Total index bytes per day over the trend window — is the footprint going down, net of what the application added",
+    })
+    .input(clusterId)
+    .output(clusterIndexSizeSeries),
+
   getCollections: oc
     .route({
       method: "GET",
@@ -87,6 +105,21 @@ export const contract = {
     })
     .input(clusterId)
     .output(clusterCollections),
+
+  // Read on its own, never joined to `recommendations` (#159). A cooldown
+  // OUTLIVES the recommendation that caused it: cancelling a pending drop parks
+  // the index for 90 days and the row that was cancelled can be pruned or
+  // rewritten by the next classify pass long before that. A join would quietly
+  // drop exactly the cooldowns that have been in force the longest.
+  listCooldowns: oc
+    .route({
+      method: "GET",
+      path: "/clusters/{clusterId}/cooldowns",
+      summary:
+        "Indexes the engine has agreed not to propose again, why, how many times each has regressed, and until when",
+    })
+    .input(clusterId)
+    .output(clusterCooldowns),
 
   getNodes: oc
     .route({
@@ -291,6 +324,44 @@ export const contract = {
       summary: "Every org the caller belongs to, with the active one flagged",
     })
     .output(z.array(orgSummary)),
+
+  // The org's security trail (#158): sign-ins and failed sign-ins, every 2FA
+  // event, role changes, invitations, and the four things that can be done to a
+  // cluster's access. Written since #53 and read by nothing until now.
+  //
+  // OWNER-ONLY, and that is the load-bearing part of this route: it is
+  // who-did-what, and every row carries a colleague's IP address and user agent.
+  // A member reading everything in their org — the rule everywhere else — is the
+  // wrong rule for this one.
+  //
+  // Scoped to the caller's active org, always. `security_events_actor_time`
+  // exists for the other incident question, "everything this account did", which
+  // crosses orgs — that is an operator's query and not a tenant's, so nothing
+  // here can ask it.
+  //
+  // No plan window. Retention skips this table on purpose, so what a reader may
+  // see is not an entitlement to sell; it is the whole trail back to the day it
+  // shipped.
+  listSecurityEvents: oc
+    .route({
+      method: "GET",
+      path: "/security-events",
+      summary:
+        "The organization's security trail, newest first (owner only) — filterable by kind and by actor",
+    })
+    .input(
+      z.object({
+        // Both optional, and both exact: these are the two questions the table's
+        // indexes were built for.
+        event: z.string().optional(),
+        actorUserId: z.string().optional(),
+        // The cursor from the previous page. Both halves or neither — a time
+        // without its tiebreak would skip a row that shares the microsecond.
+        beforeCreatedAt: z.string().optional(),
+        beforeId: z.uuid().optional(),
+      }),
+    )
+    .output(securityTrail),
 
   // Answered outside any org on purpose: someone in no organization at all is
   // exactly who needs to see they have been invited to one.

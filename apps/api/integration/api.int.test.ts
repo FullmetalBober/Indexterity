@@ -3,6 +3,7 @@ import {
   LATENCY_SERIES_MAX_COLLECTIONS,
   LATENCY_SERIES_WINDOW_DAYS,
   RECOMMENDATIONS_CAP,
+  SECURITY_TRAIL_PAGE,
 } from "@repo/contracts";
 import { makeWorkerUtils } from "graphile-worker";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -21,6 +22,7 @@ import {
   indexCooldowns,
   indexSnapshots,
   latencySamples,
+  members,
   organizations,
   policies,
   recommendations,
@@ -2053,12 +2055,63 @@ describe("cancelling a pending drop", () => {
     expect(cooldown?.regressionCount).toBe(0);
     expect((cooldown?.until.getTime() ?? 0) > Date.now()).toBe(true);
 
+    // And a reader can now see it (#159). The row above was written by exactly
+    // one function and read by no controller until this route existed.
+    //
+    // Asserted per row rather than on the total: earlier scenarios in this file
+    // park indexes on the same cluster, so a fixed count here would be a claim
+    // about the order of the whole suite. The two totals are checked as
+    // invariants against the list instead, which is what they have to be.
+    const parked = asRecord(await (await api(`/clusters/${clusterId}/cooldowns`, owner)).json());
+    const entries = parked.parked as {
+      indexName: string;
+      reason: string;
+      regressionCount: number;
+      active: boolean;
+      until: string;
+    }[];
+    const kept = entries.find((entry) => entry.indexName === "keep_1");
+    expect(kept?.reason).toBe("drop cancelled by an owner");
+    expect(kept?.regressionCount).toBe(0);
+    expect(kept?.active).toBe(true);
+    expect(kept?.until).toBe(cooldown?.until.toISOString());
+
+    const stillParked = entries.filter((entry) => entry.active);
+    expect(parked.activeCount).toBe(stillParked.length);
+    // The SOONEST one still in force, which is what "next eligible" means.
+    expect(parked.nextEligibleAt).toBe(stillParked.map((entry) => entry.until).sort()[0] ?? null);
+    // Newest expiry first, so the panel reads top-down from the longest park.
+    expect([...entries].sort((a, b) => b.until.localeCompare(a.until))).toEqual(entries);
+
+    // Another tenant sees an empty set, not a refusal — the same shape as a
+    // cluster that has never parked anything.
+    const stranger = await signUp("cooldowns-stranger");
+    createdEmails.push(stranger.email);
+    createdOrgIds.push(asString(asRecord(await (await api("/org", stranger)).json()).id));
+    const foreign = asRecord(
+      await (await api(`/clusters/${clusterId}/cooldowns`, stranger)).json(),
+    );
+    expect(foreign.activeCount).toBe(0);
+    expect(foreign.nextEligibleAt).toBeNull();
+    expect(foreign.parked).toEqual([]);
+
     // Second call is a conflict — it is no longer hidden.
     const again = await api(`/recommendations/${rec.id}/unhide`, owner, {
       method: "POST",
       body: JSON.stringify({}),
     });
     expect(again.status).toBe(409);
+
+    // A cooldown OUTLIVES the recommendation that caused it, which is why this
+    // route reads the table on its own: deleting the row that was cancelled must
+    // not take the park with it. Retention and the next classify pass both do
+    // exactly this, and a join would lose the longest-standing entries.
+    await db.delete(recommendations).where(eq(recommendations.id, rec.id));
+    const orphaned = asRecord(await (await api(`/clusters/${clusterId}/cooldowns`, owner)).json());
+    expect(orphaned.activeCount).toBe(parked.activeCount);
+    expect(
+      (orphaned.parked as { indexName: string }[]).some((entry) => entry.indexName === "keep_1"),
+    ).toBe(true);
 
     await coll.drop().catch(() => {});
   });
@@ -2530,6 +2583,133 @@ describe("security trail", () => {
     if (gone !== undefined) {
       expect(gone.clusterId).toBeNull();
       expect(gone.metadata).toMatchObject({ clusterId: expect.any(String) });
+    }
+  });
+
+  // #158. Everything above asserts against the TABLE, because until now nothing
+  // read it back. These assert against the route a reader actually uses.
+  it("serves the org's trail to an owner, newest first, with the true total", async () => {
+    const res = await api("/security-events", owner);
+    expect(res.status).toBe(200);
+    const body = asRecord(await res.json());
+    const events = body.events as { id: string; event: string; createdAt: string }[];
+    expect(events.length).toBeGreaterThan(0);
+    expect(events.length).toBeLessThanOrEqual(SECURITY_TRAIL_PAGE);
+    // Against the table, so the count is the org's trail and not the page.
+    expect(body.total).toBe((await eventsFor(ownerOrgId)).length);
+    const stamps = events.map((row) => Date.parse(row.createdAt));
+    expect([...stamps].sort((a, b) => b - a)).toEqual(stamps);
+    // Scoped to the caller's org. The actor index crosses orgs on purpose; a
+    // tenant's read must not.
+    const ids = new Set((await eventsFor(ownerOrgId)).map((row) => row.id));
+    expect(events.every((row) => ids.has(row.id))).toBe(true);
+  });
+
+  it("filters by kind and by actor, at the api rather than in the browser", async () => {
+    const byKind = asRecord(
+      await (await api("/security-events?event=CLUSTER_MODE_CHANGED", owner)).json(),
+    );
+    const kinds = (byKind.events as { event: string }[]).map((row) => row.event);
+    expect(kinds.length).toBeGreaterThan(0);
+    expect(new Set(kinds)).toEqual(new Set(["CLUSTER_MODE_CHANGED"]));
+    // The total is of what MATCHES, so a filtered page cannot report the whole
+    // trail's size beside a handful of rows.
+    expect(byKind.total).toBe(kinds.length);
+
+    const ownerId = (await eventsFor(ownerOrgId)).find(
+      (row) => row.actorUserId !== null,
+    )?.actorUserId;
+    if (ownerId === undefined || ownerId === null) throw new Error("no actor in the trail");
+    const byActor = asRecord(
+      await (await api(`/security-events?actorUserId=${ownerId}`, owner)).json(),
+    );
+    const actors = (byActor.events as { actorUserId: string | null }[]).map(
+      (row) => row.actorUserId,
+    );
+    expect(actors.length).toBeGreaterThan(0);
+    expect(new Set(actors)).toEqual(new Set([ownerId]));
+
+    // A kind nobody has performed answers with an empty page and a zero total,
+    // not with the unfiltered trail.
+    const none = asRecord(await (await api("/security-events?event=ORG_DELETED", owner)).json());
+    expect(none.events).toEqual([]);
+    expect(none.total).toBe(0);
+  });
+
+  // Keyset, not offset: the trail grows at the head, and an offset page would
+  // repeat the row a fresh sign-in pushed across the boundary.
+  it("pages backwards through the trail without repeating or skipping a row", async () => {
+    // One row per page, by asking for the page after each row in turn — the
+    // cursor is what is under test, not the page size.
+    const all = await eventsFor(ownerOrgId);
+    if (all.length < 3) throw new Error("not enough trail to page through");
+    const first = asRecord(await (await api("/security-events", owner)).json());
+    const firstIds = (first.events as { id: string }[]).map((row) => row.id);
+    expect(firstIds[0]).toBe(all[0]?.id);
+
+    const cursor = all[0];
+    if (cursor === undefined) throw new Error("no cursor row");
+    const second = asRecord(
+      await (
+        await api(
+          `/security-events?beforeCreatedAt=${encodeURIComponent(cursor.createdAt.toISOString())}&beforeId=${cursor.id}`,
+          owner,
+        )
+      ).json(),
+    );
+    const secondIds = (second.events as { id: string }[]).map((row) => row.id);
+    // The cursor row itself is excluded, and the next one is the row after it.
+    expect(secondIds).not.toContain(cursor.id);
+    expect(secondIds[0]).toBe(all[1]?.id);
+    // The total does not change with the page: it counts the filter, not the
+    // slice, so "showing 100 of 4,312" stays true on page four.
+    expect(second.total).toBe(first.total);
+  });
+
+  // The load-bearing rule of the whole route. Everywhere else a member reads
+  // everything in their org; here every row carries a colleague's address.
+  //
+  // Every account owns the org its sign-up made, so a session read from where it
+  // is standing answers 200 about its OWN trail and proves nothing. The refusal
+  // only means something once the caller is standing in the owner's org holding
+  // the member role — which is a membership row and an active org, both put in
+  // place here and both taken out again, so nothing after this inherits either.
+  //
+  // The row goes in directly rather than through an invitation: this file is one
+  // sequential narrative sharing one address with the auth rate limiter, and four
+  // more auth POSTs here showed up as unrelated failures three describes later.
+  it("refuses a member, because this is who-did-what and not team-wide reading", async () => {
+    const ownOrgId = asString(asRecord(await (await api("/org", member)).json()).id);
+    expect(ownOrgId).not.toBe(ownerOrgId);
+    // The control: as the owner of their own org, the route answers. It is what
+    // makes the refusal below about the role rather than about a broken route.
+    expect((await api("/security-events", member)).status).toBe(200);
+
+    const [account] = await db
+      .select({ id: user.id })
+      .from(user)
+      .where(eq(user.email, member.email))
+      .limit(1);
+    if (account === undefined) throw new Error("no user row for the member session");
+    await db
+      .insert(members)
+      .values({ orgId: ownerOrgId, userId: account.id, role: "member" })
+      .onConflictDoNothing();
+    try {
+      const into = await authPost("/organization/set-active", member, {
+        organizationId: ownerOrgId,
+      });
+      expect(into.status).toBe(200);
+      const res = await api("/security-events", member);
+      expect(res.status).toBe(403);
+    } finally {
+      const back = await authPost("/organization/set-active", member, {
+        organizationId: ownOrgId,
+      });
+      expect(back.status).toBe(200);
+      await db
+        .delete(members)
+        .where(and(eq(members.orgId, ownerOrgId), eq(members.userId, account.id)));
     }
   });
 
@@ -3824,6 +4004,133 @@ describe("owner two-factor requirement (second api with REQUIRE_OWNER_2FA)", () 
   });
 });
 
+// #161. `per_member` was collected on every member and summed by every reader
+// before it reached a screen, so the whole point of collecting per member went
+// on making the total honest.
+describe("per-node index usage reaches the reader", () => {
+  it("carries the split beside the rows, from the last collect's batch", async () => {
+    const splitId = await bareCluster("Per Node Usage");
+    const now = Date.now();
+    const spec = { key: { a: 1 } };
+    await insertSnapshots(db, [
+      // An older run, deliberately: the reading must come from the newest batch,
+      // not from whichever row postgres reaches first.
+      {
+        clusterId: splitId,
+        database: "app",
+        collection: "orders",
+        indexName: "reporting_1",
+        spec,
+        sizeBytes: 4_096,
+        perMember: [{ member: "a:27017", ops: 5 }],
+        capturedAt: new Date(now - 7_200_000),
+        lastSeenAt: new Date(now - 7_200_000),
+      },
+      // All of it on one secondary — the reporting replica case.
+      {
+        clusterId: splitId,
+        database: "app",
+        collection: "orders",
+        indexName: "reporting_1",
+        spec,
+        sizeBytes: 4_096,
+        perMember: [
+          { member: "a:27017", ops: 0 },
+          { member: "b:27017", ops: 40_000 },
+        ],
+        capturedAt: new Date(now - 600_000),
+        lastSeenAt: new Date(now),
+      },
+      // The same total, spread — indistinguishable before this shipped.
+      {
+        clusterId: splitId,
+        database: "app",
+        collection: "orders",
+        indexName: "spread_1",
+        spec,
+        sizeBytes: 4_096,
+        perMember: [
+          { member: "a:27017", ops: 20_000 },
+          { member: "b:27017", ops: 20_000 },
+        ],
+        capturedAt: new Date(now - 600_000),
+        lastSeenAt: new Date(now),
+      },
+    ]);
+    await db.insert(recommendations).values([
+      {
+        clusterId: splitId,
+        type: "DROP_UNUSED" as const,
+        state: "PROPOSED" as const,
+        database: "app",
+        collection: "orders",
+        indexName: "reporting_1",
+        rationale: "no reads on the primary",
+        score: 60,
+        estimatedBytesSaved: 4_096,
+      },
+      {
+        clusterId: splitId,
+        type: "DROP_UNUSED" as const,
+        state: "PROPOSED" as const,
+        database: "app",
+        collection: "orders",
+        indexName: "spread_1",
+        rationale: "low reads",
+        score: 50,
+        estimatedBytesSaved: 4_096,
+      },
+      // No snapshot at all: the last collect did not see it, so it gets no
+      // usage entry rather than a row of zeroes.
+      {
+        clusterId: splitId,
+        type: "DROP_UNUSED" as const,
+        state: "PROPOSED" as const,
+        database: "app",
+        collection: "orders",
+        indexName: "vanished_1",
+        rationale: "gone since the last collect",
+        score: 40,
+        estimatedBytesSaved: 4_096,
+      },
+    ]);
+
+    const body = asRecord(await (await api(`/clusters/${splitId}/recommendations`, owner)).json());
+    const rows = body.recommendations as { id: string; indexName: string }[];
+    const usage = body.usage as {
+      recommendationId: string;
+      totalOps: number;
+      perMember: { member: string; ops: number }[];
+    }[];
+    const idOf = (name: string) => rows.find((row) => row.indexName === name)?.id;
+    const usageOf = (name: string) => usage.find((entry) => entry.recommendationId === idOf(name));
+
+    // Same total, different objects — which is the whole of the issue.
+    expect(usageOf("reporting_1")?.totalOps).toBe(40_000);
+    expect(usageOf("spread_1")?.totalOps).toBe(40_000);
+    // Busiest first, so concentration is visible without sorting on the client.
+    expect(usageOf("reporting_1")?.perMember).toEqual([
+      { member: "b:27017", ops: 40_000 },
+      { member: "a:27017", ops: 0 },
+    ]);
+    expect(usageOf("spread_1")?.perMember).toHaveLength(2);
+    // The older run's 5 ops on one member is not what came back.
+    expect(usageOf("reporting_1")?.perMember).toHaveLength(2);
+    // No reading rather than an invented zero.
+    expect(usageOf("vanished_1")).toBeUndefined();
+
+    // Another tenant gets the empty shape, usage included.
+    const stranger = await signUp("per-node-stranger");
+    createdEmails.push(stranger.email);
+    createdOrgIds.push(asString(asRecord(await (await api("/org", stranger)).json()).id));
+    const foreign = asRecord(
+      await (await api(`/clusters/${splitId}/recommendations`, stranger)).json(),
+    );
+    expect(foreign.usage).toEqual([]);
+    expect(foreign.recommendations).toEqual([]);
+  });
+});
+
 // The bounds #64 measured its way to. Both caps are asserted against real
 // rows through the real handler, because the whole point of the issue was that
 // nobody had measured what the reads actually ship.
@@ -3915,5 +4222,136 @@ describe("bounded per-cluster reads", () => {
     const summary = asRecord(await (await api(`/clusters/${seriesId}/latency`, owner)).json());
     const summarized = summary.collections as { collection: string }[];
     expect(summarized.map((entry) => entry.collection)).toContain("ancient");
+  });
+
+  // #160. The footprint history was stored and only its newest value was drawn.
+  //
+  // Buckets are found by containment rather than by index, so this does not
+  // depend on the database's timezone: the bucket holding an instant is the last
+  // one that starts at or before it.
+  it("buckets the index footprint by day, and a day nobody collected is a gap", async () => {
+    const sizeId = await bareCluster("Footprint Trend");
+    const now = Date.now();
+    const DAY = 86_400_000;
+    const at = (daysAgo: number, hour: number) => new Date(now - daysAgo * DAY + hour * 3_600_000);
+    const spec = { key: { a: 1 } };
+    // Runs, not readings: an index that has not changed extends the row it has,
+    // so each of these stands for however many collects saw the same counters.
+    await insertSnapshots(db, [
+      // Four days ago, both indexes seen.
+      {
+        clusterId: sizeId,
+        database: "app",
+        collection: "orders",
+        indexName: "a_1",
+        spec,
+        sizeBytes: 1_000,
+        perMember: [],
+        capturedAt: at(4, -6),
+        lastSeenAt: at(4, -1),
+      },
+      {
+        clusterId: sizeId,
+        database: "app",
+        collection: "orders",
+        indexName: "b_1",
+        spec,
+        sizeBytes: 500,
+        perMember: [],
+        capturedAt: at(4, -6),
+        lastSeenAt: at(4, -1),
+      },
+      // Two days ago, only one of them — the other was dropped, and the total
+      // has to fall rather than carry the missing index forward.
+      {
+        clusterId: sizeId,
+        database: "app",
+        collection: "orders",
+        indexName: "a_1",
+        spec,
+        sizeBytes: 2_000,
+        perMember: [],
+        capturedAt: at(2, -6),
+        lastSeenAt: at(2, -1),
+      },
+      // And now, both again and bigger.
+      {
+        clusterId: sizeId,
+        database: "app",
+        collection: "orders",
+        indexName: "a_1",
+        spec,
+        sizeBytes: 3_000,
+        perMember: [],
+        capturedAt: new Date(now - 600_000),
+        lastSeenAt: new Date(now),
+      },
+      {
+        clusterId: sizeId,
+        database: "app",
+        collection: "orders",
+        indexName: "b_1",
+        spec,
+        sizeBytes: 700,
+        perMember: [],
+        capturedAt: new Date(now - 600_000),
+        lastSeenAt: new Date(now),
+      },
+      // Inside the plan's 90-day history and outside the trend window, so it
+      // must not become the series' first point.
+      {
+        clusterId: sizeId,
+        database: "app",
+        collection: "orders",
+        indexName: "a_1",
+        spec,
+        sizeBytes: 99_000,
+        perMember: [],
+        capturedAt: at(LATENCY_SERIES_WINDOW_DAYS + 20, 0),
+        lastSeenAt: at(LATENCY_SERIES_WINDOW_DAYS + 20, 1),
+      },
+    ]);
+
+    const body = asRecord(await (await api(`/clusters/${sizeId}/index-size-series`, owner)).json());
+    const points = body.points as { day: string; totalBytes: number | null; indexCount: number }[];
+    const bucketOf = (when: Date) =>
+      points.filter((point) => new Date(point.day).getTime() <= when.getTime()).at(-1);
+    const indexOf = (when: Date) =>
+      points.findLastIndex((point) => new Date(point.day).getTime() <= when.getTime());
+
+    // Both indexes, summed, at the size the newest run of that day reported.
+    expect(bucketOf(at(4, -1))).toMatchObject({ totalBytes: 1_500, indexCount: 2 });
+    // One index left: the sum falls, and the count says which kind of fall it is.
+    expect(bucketOf(at(2, -1))).toMatchObject({ totalBytes: 2_000, indexCount: 1 });
+    expect(bucketOf(new Date(now))).toMatchObject({ totalBytes: 3_700, indexCount: 2 });
+
+    // The day between them is a gap, not a zero and not a straight line: no run
+    // overlapped it, so nothing is known about the footprint that day.
+    const between = points.slice(indexOf(at(4, -1)) + 1, indexOf(at(2, -1)));
+    expect(between.length).toBeGreaterThan(0);
+    expect(between.every((point) => point.totalBytes === null && point.indexCount === 0)).toBe(
+      true,
+    );
+
+    // The summary reads the DRAWABLE ends. The trailing point is today's, and
+    // the leading one is four days ago — not the 99 KB run outside the window,
+    // and not a null.
+    expect(body.firstBytes).toBe(1_500);
+    expect(body.latestBytes).toBe(3_700);
+    expect(body.changeBytes).toBe(2_200);
+    // Bucketed server-side: one point per day of the window, not one per run.
+    expect(points.length).toBeLessThanOrEqual(LATENCY_SERIES_WINDOW_DAYS + 1);
+
+    // Another tenant gets the empty shape rather than a refusal, like the other
+    // per-cluster reads.
+    const stranger = await signUp("footprint-stranger");
+    createdEmails.push(stranger.email);
+    createdOrgIds.push(asString(asRecord(await (await api("/org", stranger)).json()).id));
+    const foreign = asRecord(
+      await (await api(`/clusters/${sizeId}/index-size-series`, stranger)).json(),
+    );
+    expect(foreign.points).toEqual([]);
+    expect(foreign.latestBytes).toBeNull();
+    expect(foreign.changeBytes).toBeNull();
   });
 });

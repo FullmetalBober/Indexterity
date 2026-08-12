@@ -221,6 +221,55 @@ export const clusterNodes = z.object({
 });
 export type ClusterNodes = z.infer<typeof clusterNodes>;
 
+// One index the engine has agreed not to touch, and until when (#159).
+//
+// Written from three places — the regression gate when reads got worse after a
+// drop was hidden, the post-build watch when writes got worse, and an owner
+// cancelling or undoing a drop. `reason` is the writer's own sentence, so the
+// panel does not have to keep a translation table of engine decisions in sync
+// with the engine.
+//
+// `regressionCount` is the field with no other home anywhere in the product: an
+// index that has regressed three times is saying something about the collection
+// that a single rejection does not. Zero on the two owner paths, deliberately —
+// nothing regressed there, somebody simply knows something the engine does not,
+// and counting it would feed the escalating backoff a fact that never happened.
+export const parkedIndex = z.object({
+  database: z.string(),
+  collection: z.string(),
+  indexName: z.string(),
+  reason: z.string(),
+  regressionCount: z.int().nonnegative(),
+  until: z.string(),
+  // Whether `until` is still in the future. Computed by the api against ITS
+  // clock, not left to the browser's: a laptop an hour behind would draw a
+  // parked index as eligible, and this is the field the panel's headline counts.
+  active: z.boolean(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type ParkedIndex = z.infer<typeof parkedIndex>;
+
+// Every index this cluster has ever parked, active ones first.
+//
+// Uncapped, like getCollections and unlike the two reads #64 bounded. The bound
+// is structural rather than measured: the table is unique on (cluster, database,
+// collection, index), so it holds at most one row per index — and only per index
+// that a regression or an owner has actually parked, which is a rare event by
+// construction rather than something a collect writes on a schedule.
+export const clusterCooldowns = z.object({
+  clusterId: z.uuid(),
+  // Of the rows below, how many are still parked. The panel leads with this and
+  // the list carries the expired ones underneath, so `parked.length` is never
+  // the headline number.
+  activeCount: z.int().nonnegative(),
+  // The soonest `until` still in the future — "next eligible" — or null when
+  // nothing is parked.
+  nextEligibleAt: z.string().nullable(),
+  parked: z.array(parkedIndex),
+});
+export type ClusterCooldowns = z.infer<typeof clusterCooldowns>;
+
 // The result of disconnecting a cluster: how many in-flight hidden indexes were
 // restored, and the command to revoke the provisioned user (null when the
 // cluster was connected with a pasted string).
@@ -303,6 +352,74 @@ export const clusterLatencySeries = z.object({
 });
 export type ClusterLatencySeries = z.infer<typeof clusterLatencySeries>;
 
+// One replica-set member's share of an index's operations (#161).
+//
+// The whole point of collecting per member. An index with 40,000 ops that are
+// ALL on one secondary is a different object from one with 40,000 spread evenly:
+// the first is serving a reporting replica or an analytics client with a read
+// preference, and dropping it breaks something nobody was watching; the second
+// is serving the application. Summed, they were the same row on this dashboard.
+export const memberOps = z.object({
+  member: z.string(),
+  ops: z.int().nonnegative(),
+});
+export type MemberOps = z.infer<typeof memberOps>;
+
+// What the last collect saw of one index's usage, per member.
+export const indexUsage = z.object({
+  recommendationId: z.uuid(),
+  // The number that was already on screen, kept: it is still the right headline,
+  // and the split is what it was missing.
+  totalOps: z.int().nonnegative(),
+  // Only the members that ANSWERED and reported this index. A member the collect
+  // could not reach is not in here and must not be drawn as a zero — the roster
+  // (getNodes) is what names it, and the two are read together.
+  perMember: z.array(memberOps),
+  // When this reading was last confirmed. A per-node split from a collect that
+  // failed three days ago is a claim about three days ago.
+  observedAt: z.string(),
+});
+export type IndexUsage = z.infer<typeof indexUsage>;
+
+// One day's total index footprint for a cluster (#160).
+//
+// `totalBytes` is null for a day nothing was collected, and that distinction is
+// the whole reason this is bucketed on the server. Zero would mean "this cluster
+// had no indexes", which is a claim about the cluster; null means "nobody
+// looked", which is a claim about us — and a straight line drawn across a week
+// of outage says the footprint held steady when nothing was known about it.
+export const indexSizePoint = z.object({
+  day: z.string(),
+  totalBytes: z.number().int().nonnegative().nullable(),
+  // How many indexes that total is the sum of. Zero exactly when totalBytes is
+  // null, and worth carrying: a footprint that fell because 40 indexes became 30
+  // is a different event from one that fell because 40 indexes got smaller.
+  indexCount: z.int().nonnegative(),
+});
+export type IndexSizePoint = z.infer<typeof indexSizePoint>;
+
+// Total index bytes per day over the same window the latency series uses.
+//
+// The question the ROI panel cannot answer. ROI is cumulative and only ever goes
+// up, because it counts what the engine removed; neither of its numbers says
+// whether the cluster's footprint is smaller than it was. A cluster where the
+// engine freed 4 GB while the application added 6 GB has a triumphant ROI panel
+// and a bill that went up, and nothing on the dashboard used to show that.
+export const clusterIndexSizeSeries = z.object({
+  clusterId: z.uuid(),
+  // The two ends of the drawable series and the distance between them, resolved
+  // here rather than on the client: the series has holes in it, so "the first
+  // point" and "points[0]" are not the same thing, and getting that wrong would
+  // report a gap day as a footprint of zero.
+  firstBytes: z.number().int().nonnegative().nullable(),
+  latestBytes: z.number().int().nonnegative().nullable(),
+  // Negative = the cluster carries less index than it did. Null until two
+  // different days have been collected, because one point is not a trend.
+  changeBytes: z.number().int().nullable(),
+  points: z.array(indexSizePoint),
+});
+export type ClusterIndexSizeSeries = z.infer<typeof clusterIndexSizeSeries>;
+
 // Same treatment for the proposals: 4,000 of them (the one-per-index worst
 // case) measured 1.86 MB. The cap keeps the client-side sort and filter D33
 // decided (they work over what arrives), and `total` keeps the truncation
@@ -314,6 +431,15 @@ export const clusterRecommendations = z.object({
   clusterId: z.uuid(),
   total: z.int().nonnegative(),
   recommendations: z.array(recommendation),
+  // Beside the rows rather than on them (#161), and that is not a style choice:
+  // `recommendation` is also what approve, undo and un-hide return, and those
+  // answer about a ROW. A usage field on that shape would come back null from
+  // every mutation and read as "this index has no recorded usage", which is a
+  // measurement none of them took.
+  //
+  // Absent for an index the last collect did not see — dropped since, or a
+  // collect that never reached the member holding it.
+  usage: z.array(indexUsage),
 });
 export type ClusterRecommendations = z.infer<typeof clusterRecommendations>;
 
@@ -391,6 +517,114 @@ export const clusterPolicyView = clusterPolicy.extend({
   inferredWindowReason: z.string().nullable(),
 });
 export type ClusterPolicyView = z.infer<typeof clusterPolicyView>;
+
+// The 23 acts the security trail records (#53), and the one list of them.
+//
+// It lived in the api (`src/audit/security-events.ts`) while nothing read the
+// table. A screen needs the same list to label rows and to offer the kind
+// filter, and two copies of it would drift the moment an act is added — so the
+// names live here and the writer imports them. The per-act metadata SHAPES stay
+// in the api, where the call sites that fill them in are.
+//
+// Text in the column, not an enum, on purpose: recording a new kind of act
+// should be a constant and not a migration (db/schema.ts). The api validates
+// nothing against this on the way IN — an older row whose act has since been
+// renamed still has to read — so `securityEvent.event` below is a string.
+export const SECURITY_EVENTS = [
+  // Authentication.
+  "ACCOUNT_CREATED",
+  "SIGN_IN",
+  "SIGN_IN_FAILED",
+  "SIGN_OUT",
+  "SESSION_REVOKED",
+  // The second factor (#55).
+  "TWO_FACTOR_ENABLED",
+  "TWO_FACTOR_DISABLED",
+  "TWO_FACTOR_VERIFIED",
+  "TWO_FACTOR_FAILED",
+  "TWO_FACTOR_CODES_REGENERATED",
+  "TWO_FACTOR_OTP_SENT",
+  // The account.
+  "EMAIL_CHANGE_REQUESTED",
+  // Membership — the acts that decide who can do everything else.
+  "MEMBER_ROLE_CHANGED",
+  "MEMBER_REMOVED",
+  "MEMBER_LEFT",
+  "INVITE_CREATED",
+  "INVITE_ACCEPTED",
+  "ORG_CREATED",
+  "ORG_DELETED",
+  // A cluster's access, which is what the control plane holds of a customer's.
+  "CLUSTER_CONNECTED",
+  "CLUSTER_DISCONNECTED",
+  "CLUSTER_CREDENTIALS_ROTATED",
+  "CLUSTER_MODE_CHANGED",
+] as const;
+
+export type SecurityEventName = (typeof SECURITY_EVENTS)[number];
+
+// The acts where the ADDRESS ON THE ROW IS NOT SOMEBODY WHO DID SOMETHING.
+//
+// `SIGN_IN_FAILED` deliberately records the address that was typed as the
+// TARGET and leaves the actor null, because whoever it was did not prove they
+// were that person (db/schema.ts). A screen that draws every row as
+// "<address> did <act>" turns that into an accusation against the account
+// holder — who, in the case worth reading, is the victim. The same applies to a
+// failed second factor.
+//
+// Exported so the screen and its tests read the rule from one place rather than
+// each spelling out a pair of event names.
+export const UNPROVEN_ACTOR_EVENTS: readonly SecurityEventName[] = [
+  "SIGN_IN_FAILED",
+  "TWO_FACTOR_FAILED",
+];
+
+// One row of the trail.
+//
+// `event` is a string rather than the enum above: the column is text so that
+// adding an act is a constant, and a row written under a name this build does
+// not know still has to render. The screen labels what it recognises and shows
+// the raw name for what it does not.
+export const securityEvent = z.object({
+  id: z.uuid(),
+  event: z.string(),
+  // Null once the account is deleted — every foreign key on this table is
+  // `set null` so that deleting an org, a cluster or a user cannot erase the
+  // trail of what was done to it. The email beside it is kept for exactly that
+  // moment, and is what the screen shows.
+  actorUserId: z.string().nullable(),
+  actorEmail: z.string().nullable(),
+  target: z.string().nullable(),
+  clusterId: z.uuid().nullable(),
+  // The specifics of the act — the roles either side of a promotion, the mode a
+  // cluster was flipped to. Never credentials. Loose here for the same reason
+  // the column is: the shape differs per act.
+  metadata: z.record(z.string(), z.unknown()).nullable(),
+  ipAddress: z.string().nullable(),
+  userAgent: z.string().nullable(),
+  createdAt: z.string(),
+});
+export type SecurityEvent = z.infer<typeof securityEvent>;
+
+// One page of it. The trail never ages out — retention skips it deliberately,
+// because the incident that needs a row is usually older than the day it is
+// noticed — so it is the one table that grows forever and the read has to be
+// paged rather than capped.
+export const SECURITY_TRAIL_PAGE = 100;
+
+export const securityTrail = z.object({
+  events: z.array(securityEvent),
+  // How many rows match the filter, so a page can say "100 of 4,312" instead of
+  // implying it is everything.
+  total: z.int().nonnegative(),
+  // The cursor for the page after this one, or null at the end of the trail.
+  // A compound key, not a timestamp: two acts can land in the same microsecond
+  // (an invite accepted is a membership row and a session), and a cursor that
+  // is only a time would skip whichever one sorted second.
+  nextCreatedAt: z.string().nullable(),
+  nextId: z.uuid().nullable(),
+});
+export type SecurityTrail = z.infer<typeof securityTrail>;
 
 export const orgMember = z.object({
   // The membership row's id, which is what the plugin's updateMemberRole and
