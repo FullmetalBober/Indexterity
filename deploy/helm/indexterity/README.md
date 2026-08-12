@@ -170,6 +170,9 @@ Two things do not show up in steady-state observation:
   brute-force resistance.
 - **`worker.concurrency` multiplies rather than shares.** Each concurrent job
   holds its own working set. It defaults to 1; raise it with the limit, not alone.
+- **Sockets are memory too, and some of them are not ours.** The driver would open
+  up to 100 per connected cluster by default, held in a per-cluster session —
+  `config.mongoMaxPoolSize` caps it at 10 and returns the surplus after 60s idle.
 
 `single-container` is the one container the chart does **not** cap from here,
 because one cap would be handed to both processes. Its supervisor divides the
@@ -239,6 +242,7 @@ stays off by default — the dashboard does not need it.
 | `config.requireEmailVerification` | Production posture — needs working SMTP, or nobody can sign in |
 | `config.storageUsdPerGbMonth` | Your storage price, for the $/month ROI headline |
 | `config.retentionDays` | Your ceiling on history, in days. Storage is your bill, so it caps both what is kept and what any plan may see. Empty means each plan's own window decides |
+| `config.mongoMaxPoolSize` | Sockets the driver may open against **one** connected cluster — 10, against the driver's own default of 100. A session is held per cluster, so the worst case multiplies by the fleet, and the sockets are spent on the customer's mongod rather than ours. Surplus sockets are returned after 60s idle |
 | `config.rateLimitMax` / `config.authRateLimitMax` | Per-IP request budgets a minute. `rateLimitMax` is counted in each api process's memory, so it is **per replica**; `authRateLimitMax` is read twice — per replica for `/api/auth/*`, and by better-auth for the credential endpoints, which counts in Postgres and so applies to the whole deployment |
 | `config.allowUntestedMongoVersion` | Lets a cluster on a MongoDB major series newer than this release was tested against connect. The floor is not overridable; this is the ceiling |
 | `api.runWorker` | Embed the job runner in the api, for a single-replica install that sets `worker.enabled=false`. Leave `false` otherwise — with the worker Deployment on, or with more than one api replica, the cron schedule would be installed more than once |

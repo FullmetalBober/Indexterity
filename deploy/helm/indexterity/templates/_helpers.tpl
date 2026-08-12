@@ -198,6 +198,10 @@ test and the port-forward in NOTES.txt all read the same number they did before.
   value: {{ .Values.config.logLevel | quote }}
 - name: ALLOW_PRIVATE_CLUSTER_TARGETS
   value: {{ .Values.config.allowPrivateClusterTargets | quote }}
+# Sockets opened against ONE connected cluster. Held per cluster, so the worst
+# case multiplies by the fleet — and they are spent on the customer's mongod.
+- name: MONGO_MAX_POOL_SIZE
+  value: {{ .Values.config.mongoMaxPoolSize | quote }}
 - name: ALLOW_INSECURE_CLUSTER_TLS
   value: {{ .Values.config.allowInsecureClusterTls | quote }}
 {{- if .Values.config.allowUntestedMongoVersion }}

@@ -391,6 +391,17 @@ config:
   # what any plan keeps AND what any plan may see. Empty means no ceiling — each
   # plan's own window decides.
   retentionDays: ""
+  # Sockets the MongoDB driver may open against ONE connected cluster. The
+  # driver's own default is 100, which is the wrong number twice here: a session
+  # is held per cluster, so the worst case multiplies by the size of the fleet,
+  # and the sockets are opened against a database that belongs to the customer,
+  # whose connection budget is not ours to spend.
+  #
+  # Ten is well above what the collectors ask for — their fan-outs are per
+  # replica-set member and each member has its own client, so the widest
+  # concurrent use of a single connection is five reads. Raise it only if a
+  # cluster's collect pass is visibly waiting on connections.
+  mongoMaxPoolSize: 10
   # Per-IP request budgets, per minute. Raise them for a shared egress IP or a
   # test suite. Read rateLimitMax as PER REPLICA (see the api Deployment);
   # authRateLimitMax is read twice — Fastify applies it per replica to
