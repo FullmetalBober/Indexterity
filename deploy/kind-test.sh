@@ -255,6 +255,24 @@ if ! helm test indexterity -n "$NS" --timeout 3m; then
   echo "--- test pod log (the last line it echoed is the last assertion that PASSED) ---"
   # The pod survives a failure: its delete policy only removes it on success.
   kubectl -n "$NS" logs -l app.kubernetes.io/component=test --tail=-1 || true
+  # And what the assertion was talking TO. Without this a CI failure says only
+  # which curl failed, which is the question rather than the answer: a refused
+  # connection to a Service with endpoints means the pod behind it restarted, or
+  # never bound that port, and only the pod can say which. RESTARTS is the column
+  # that matters — a container the supervisor took down and the kubelet brought
+  # back is indistinguishable from a slow boot until you look at the count.
+  echo "--- pods (RESTARTS is the interesting column) ---"
+  kubectl -n "$NS" get pods -o wide || true
+  for c in $COMPONENTS; do
+    echo "--- describe: $c (look for OOMKilled, Last State, probe failures) ---"
+    kubectl -n "$NS" describe pod -l "app.kubernetes.io/component=$c" | sed -n '/Containers:/,/Events:/p' || true
+    echo "--- logs: $c (current) ---"
+    kubectl -n "$NS" logs -l "app.kubernetes.io/component=$c" --all-containers --tail=80 || true
+    # The log of the instance that DIED, which the current one has replaced and
+    # which is the only place a crash reason is written.
+    echo "--- logs: $c (previous instance, if it restarted) ---"
+    kubectl -n "$NS" logs -l "app.kubernetes.io/component=$c" --all-containers --previous --tail=80 2>/dev/null || echo "  (no previous instance — it did not restart)"
+  done
   exit 1
 fi
 

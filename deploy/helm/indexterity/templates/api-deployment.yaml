@@ -123,21 +123,33 @@ spec:
               {{- end }}
             initialDelaySeconds: 3
             periodSeconds: 10
+            # One hop through the dashboard in single-container, and the default
+            # probe timeout is one second. See the liveness note below.
+            timeoutSeconds: 5
           livenessProbe:
             httpGet:
-              {{- if $allInOne }}
-              # The landing page, not /api/health: liveness restarts the
-              # container, and losing Postgres for a minute is not a reason to
-              # kill the dashboard with the api. The supervisor already exits when
-              # a process actually dies, which is what a restart is for.
-              path: /
-              port: web-http
-              {{- else }}
+              # /api/health on the api's own port in every topology, including
+              # single-container — where this probe restarts BOTH processes, so
+              # what it asks has to be cheap and true.
+              #
+              # It asked for `/` here, reasoning that liveness should not die of a
+              # Postgres blip. The reasoning was right and the target was wrong:
+              # `/` is a server-side React render, measured at 908ms cold against
+              # kubernetes' ONE SECOND default probe timeout, so on a loaded node
+              # three misses restart a container that was serving perfectly. CI
+              # found it and no local run could — this endpoint is 1.7ms and
+              # touches no database, so it stays inside any timeout, and it still
+              # does not fail on a Postgres outage because the handler returns a
+              # literal.
+              #
+              # Nothing is lost by not probing the dashboard from here: the
+              # supervisor exits the container the moment either process dies,
+              # which is the same guarantee a probe would give and arrives sooner.
               path: /api/health
               port: http
-              {{- end }}
             initialDelaySeconds: 15
             periodSeconds: 20
+            timeoutSeconds: 5
           resources:
             {{- toYaml (ternary .Values.allInOne.resources .Values.api.resources $allInOne) | nindent 12 }}
         {{- if and $merged (not $allInOne) }}

@@ -476,6 +476,11 @@ reads differently depending on a value three files away.
     {{- include "indexterity.metricsEnv" (dict "root" . "port" (include "indexterity.webMetricsPort" .)) | nindent 4 }}
     {{- include "indexterity.errorsEnv" (dict "root" . "dsn" (default .Values.errorReporting.dsn .Values.errorReporting.webDsn)) | nindent 4 }}
     {{- include "indexterity.webEnv" (dict "root" . "shared" false) | nindent 4 }}
+  {{- /* timeoutSeconds is set on both, and it is not decoration: kubernetes
+         defaults httpGet probes to ONE second, and `/` is a server-side React
+         render. Measured on the built image with two CPUs, a cold render is 908ms
+         — inside the default by 92ms, which is not a margin, it is a coin toss on
+         a loaded node. Three of those in a row restart the container. */}}
   readinessProbe:
     httpGet:
       # The landing page is static and survives an api outage.
@@ -483,12 +488,14 @@ reads differently depending on a value three files away.
       port: web-http
     initialDelaySeconds: 3
     periodSeconds: 10
+    timeoutSeconds: 5
   livenessProbe:
     httpGet:
       path: /
       port: web-http
     initialDelaySeconds: 15
     periodSeconds: 20
+    timeoutSeconds: 5
   resources:
     {{- toYaml .Values.web.resources | nindent 4 }}
 {{- end -}}
