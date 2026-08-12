@@ -105,7 +105,7 @@ docker run --rm -e DATABASE_URL='postgres://…' \
   ghcr.io/fullmetalbober/indexterity-all-in-one:0.4.0 node apps/api/dist/migrate.js
 ```
 
-The supervisor (`deploy/all-in-one/supervisor.mjs`) splits the two variables the
+The supervisor (`deploy/all-in-one/supervisor.ts`) splits the two variables the
 processes would otherwise fight over — `WEB_METRICS_PORT` (default
 `METRICS_PORT + 1`) and `WEB_SENTRY_DSN` (default: the api's project) — forwards
 `SIGTERM` to both, and **exits non-zero the moment either process does**, so the

@@ -117,7 +117,7 @@ const COMPOSE_INFRA = new Set(["POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_D
 // the two DSNs to be mapped from.
 const DEPLOYMENT_ONLY = new Set(["SENTRY_DSN_API", "SENTRY_DSN_WEB"]);
 
-// Read by the all-in-one image's supervisor (deploy/all-in-one/supervisor.mjs)
+// Read by the all-in-one image's supervisor (deploy/all-in-one/supervisor.ts)
 // and by neither process. That image runs the api and the dashboard in one
 // container, so one environment has to describe two of them — and these are the
 // two variables they would otherwise fight over: both read METRICS_PORT (one

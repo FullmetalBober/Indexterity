@@ -22,8 +22,14 @@
 //     non-zero, so the orchestrator restarts the container instead of leaving a
 //     dashboard serving 502s from a passthrough with nothing behind it.
 //
-// No dependencies: it runs from the runtime image, before anything is resolved.
-import { spawn } from "node:child_process";
+// No dependencies and no build step: node strips the types on the way in, which is
+// the same deal `scripts/*.ts` have (tsconfig.scripts.json typechecks both). So
+// nothing has to be compiled before PID 1 can start, and the file that runs is the
+// file in the repository — but it must stay ERASABLE TypeScript: an `enum`, a
+// parameter property or a `namespace` needs code generated for it and would fail
+// at runtime here. `erasableSyntaxOnly` in that tsconfig makes each of those a type
+// error instead.
+import { type ChildProcess, spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 
 // Both processes read these from their own schemas, so the defaults here have to
@@ -51,11 +57,11 @@ const GRACE_MS = Number(process.env.SUPERVISOR_GRACE_MS ?? 15000);
 // and measurably: both processes read the same cgroup and each claimed 268 MB of
 // one 512 MiB container. Idle they never meet, so it looks fine; under load the
 // container is over budget before either process thinks it is near its own.
-function cgroupMemoryLimit() {
+function cgroupMemoryLimit(): number | null {
   // cgroup v2 first, then v1. A v1 kernel reports a sentinel near 2^63 rather
   // than "max" when unlimited, hence the sanity ceiling.
   for (const path of ["/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"]) {
-    let raw;
+    let raw: string;
     try {
       raw = readFileSync(path, "utf8").trim();
     } catch {
@@ -97,7 +103,7 @@ const MIN_HEAP_MB = 64;
 // Never overrides an operator's own --max-old-space-size: if the environment
 // already carries one, the deployment has made this decision and this should not
 // unmake it.
-function heapOptionFor(share, limitBytes, inherited) {
+function heapOptionFor(share: number, limitBytes: number | null, inherited: string): string | null {
   if (limitBytes === null) return null;
   if (/--max[-_]old[-_]space[-_]size/.test(inherited)) return null;
   const mb = Math.floor((limitBytes * share) / 1048576);
@@ -107,24 +113,31 @@ function heapOptionFor(share, limitBytes, inherited) {
 const MEMORY_LIMIT = cgroupMemoryLimit();
 const INHERITED_NODE_OPTIONS = process.env.NODE_OPTIONS ?? "";
 
-function nodeOptionsFor(share) {
+// Spread into a child's env, so returning nothing is how "leave node's own sizing
+// alone" is expressed — there is no NODE_OPTIONS to unset.
+function nodeOptionsFor(share: number): Record<string, string> {
   const option = heapOptionFor(share, MEMORY_LIMIT, INHERITED_NODE_OPTIONS);
   if (option === null) return {};
   return { NODE_OPTIONS: `${INHERITED_NODE_OPTIONS} ${option}`.trim() };
 }
 
-const children = new Map();
+const children = new Map<string, ChildProcess>();
 let stopping = false;
 let exitCode = 0;
 
-function log(message) {
+function log(message: string): void {
   // Plain text on purpose: the api's pino lines and the dashboard's own logs are
   // both on this stream, and a fake JSON envelope around this handful of
   // supervisor messages would be a third format claiming to be the second.
   console.log(`supervisor: ${message}`);
 }
 
-function start(name, entry, cwd, env) {
+function start(
+  name: string,
+  entry: string,
+  cwd: string,
+  env: Record<string, string>,
+): ChildProcess {
   const child = spawn(process.execPath, [entry], {
     cwd,
     env: { ...process.env, ...env },
@@ -150,7 +163,7 @@ function start(name, entry, cwd, env) {
     shutdown("SIGTERM");
   });
 
-  child.on("error", (error) => {
+  child.on("error", (error: Error) => {
     log(`${name} could not be started — ${String(error)}`);
     children.delete(name);
     exitCode = 1;
@@ -160,7 +173,7 @@ function start(name, entry, cwd, env) {
   return child;
 }
 
-function shutdown(signal) {
+function shutdown(signal: NodeJS.Signals): void {
   if (stopping) return;
   stopping = true;
   if (children.size === 0) process.exit(exitCode);
@@ -175,7 +188,8 @@ function shutdown(signal) {
   }, GRACE_MS).unref();
 }
 
-for (const signal of ["SIGTERM", "SIGINT"]) {
+const FORWARDED: NodeJS.Signals[] = ["SIGTERM", "SIGINT"];
+for (const signal of FORWARDED) {
   process.on(signal, () => shutdown(signal));
 }
 
@@ -208,7 +222,7 @@ if (process.env.METRICS_ENABLED === "true") {
 if (MEMORY_LIMIT === null) {
   log("no container memory limit — leaving both heaps to node's own sizing");
 } else {
-  const ceiling = (share) => {
+  const ceiling = (share: number): string => {
     const option = heapOptionFor(share, MEMORY_LIMIT, INHERITED_NODE_OPTIONS);
     return option === null ? "node's own" : `${option.split("=")[1]}MB`;
   };

@@ -45,7 +45,11 @@ ENV NODE_ENV=production
 # (cwd /app/apps/web, entry .output/server/index.mjs) rather than a layout that
 # only exists here.
 COPY --from=builder /app .
-COPY deploy/all-in-one/supervisor.mjs ./supervisor.mjs
+# Copied, not built: node strips the types when it loads it, so what runs in the
+# container is the file in the repository. The pruned root package.json that came
+# with the tree above is `"type": "module"`, which is what makes this an ES module
+# — apps/api keeps its own `"type": "commonjs"`, so the api's dist is unaffected.
+COPY deploy/all-in-one/supervisor.ts ./supervisor.ts
 # The job runner too, because a single-container deployment has nowhere else to
 # put it: without this the schedule never runs and nothing is ever collected. The
 # Helm chart overrides it from api.runWorker, and any host can with RUN_WORKER=false.
@@ -54,4 +58,4 @@ ENV RUN_WORKER=true
 # METRICS_ENABLED=true; deliberately not published here, since the endpoint has no
 # auth and exposing it is a decision.
 EXPOSE 3000 3001
-CMD ["node", "supervisor.mjs"]
+CMD ["node", "supervisor.ts"]
