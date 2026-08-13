@@ -31,8 +31,9 @@ import { RecommendationsController } from "./recommendations/recommendations.con
 // a cache hit; without one, there is nothing to order.
 function sentryImports(): DynamicModule[] {
   if (!errorReportingEnabled()) return [];
-  const { SentryModule } = require("@sentry/nestjs/setup") as typeof import("@sentry/nestjs/setup");
-  return [SentryModule.forRoot()];
+  // Annotated, not cast — see the note in errors/reporting.ts.
+  const setup: typeof import("@sentry/nestjs/setup") = require("@sentry/nestjs/setup");
+  return [setup.SentryModule.forRoot()];
 }
 
 @Module({

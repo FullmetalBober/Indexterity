@@ -29,11 +29,17 @@ import { APP_VERSION } from "../version";
 // not become async. An awaited import inside instrument.api.ts would hand control
 // back to main.ts and let the imports below it evaluate first, which is the one
 // thing the ordering exists to prevent.
+//
+// `require` is untyped, so the type comes from an ANNOTATION rather than a cast:
+// the SDK's own `import type` above is the declaration being checked against, and
+// every use of the returned namespace is type-checked normally. §16's "no `as`
+// overrides" holds — there is nothing here to override.
 let loaded: typeof SentrySdk | undefined;
 
 function sdk(): typeof SentrySdk {
-  loaded ??= require("@sentry/nestjs") as typeof SentrySdk;
-  return loaded;
+  const sentry: typeof SentrySdk = loaded ?? require("@sentry/nestjs");
+  loaded = sentry;
+  return sentry;
 }
 
 export type Service = "api" | "worker" | "api+worker";
