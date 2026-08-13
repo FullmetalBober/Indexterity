@@ -9,6 +9,18 @@ import { APP_VERSION } from "../version";
 // import of their entrypoint. That ordering is load-bearing: the SDK patches
 // modules as they are required, so an init that runs inside bootstrap() — after
 // every other import has already been evaluated — instruments nothing.
+//
+// The import is unconditional, DSN or not — a deliberate choice, not an
+// oversight. #176 measured this at 12.5 MB of heap and 322 ms with no DSN, and a
+// lazy `require` was tried: it removed the cost, but `require` is declared
+// `(id: string): any`, so nothing short of a runtime guard could make the result
+// trustworthy, and a real `await import()` cannot substitute — it is async, and
+// the next `require` in main.ts would run before it resolved, which is exactly
+// the ordering this file exists to protect. Weighed against that, full static
+// typing won: this file now has the SDK's real types with nothing narrowed and
+// nothing guarded. The dashboard's half of #176 (lib/errors/provider.ts,
+// server.ts) keeps the saving — real ESM there, so `await import()` is both
+// type-safe and ordering-safe, and ordering was never load-bearing on that side.
 
 export type Service = "api" | "worker" | "api+worker";
 
