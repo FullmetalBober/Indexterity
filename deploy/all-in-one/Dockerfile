@@ -13,7 +13,18 @@
 # the same artefacts as apps/api/Dockerfile and apps/web/Dockerfile; only the
 # packaging is different, so a bug here cannot be a bug the split images do not
 # have.
-FROM docker.io/library/node:26-slim AS base
+#
+# alpine, same base and same reasoning as the two images above (D76). 558 MB → 487.
+#
+# Measuring that turned up something this file should say out loud: its
+# node_modules is 338 MB where the api image's is 153 MB, for the same api. The
+# difference is the DASHBOARD's production dependency tree — `@tanstack/react-start`
+# is a dependency of @repo/web and correctly so, but in a runtime that starts the
+# dashboard from apps/web/.output it is build-time, and the strip below only removes
+# devDependencies. Two prebuilt lightningcss bindings (gnu and musl, 9.6 MB each,
+# one of which can never load) arrive that way. Present on slim too, so the base
+# swap neither caused nor cured it. #182.
+FROM docker.io/library/node:26-alpine AS base
 WORKDIR /app
 RUN npm install -g turbo@2.10.5
 
@@ -45,7 +56,7 @@ COPY deploy/prod-manifests.mts /tmp/prod-manifests.mts
 RUN --mount=type=cache,target=/root/.npm \
     node /tmp/prod-manifests.mts . && rm -rf node_modules && npm install --omit=dev
 
-FROM docker.io/library/node:26-slim AS runtime
+FROM docker.io/library/node:26-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 # The whole pruned tree, which already contains apps/web/.output where the builder
