@@ -13,7 +13,7 @@
 import type { Cluster, MyInvite, OrgInfo, OrgSummary } from "@repo/contracts";
 import { type QueryClient, queryOptions, useQuery } from "@tanstack/react-query";
 import { api } from "../api";
-import { isStatus } from "./errors";
+import { isStatus, statusOf } from "./errors";
 import { queryKeys } from "./keys";
 
 // Stable fallbacks — see the note in telemetry.ts.
@@ -63,9 +63,21 @@ export function useMyInvites(): MyInvite[] {
 }
 
 // What the /app layout needs in order to decide what to draw at all: signed in,
-// signed out, or unable to ask. Derived over the three queries rather than kept as
-// a fourth cache entry, because no endpoint answers it — it was always an
-// inference from how the reads failed.
+// signed out, still finding out, or unable to ask. Derived over the four
+// queries rather than kept as a fifth cache entry, because no endpoint answers
+// it — it was always an inference from how the reads failed, or hadn't
+// answered yet.
+//
+// What the api actually said, when it said anything. `status` is null for a
+// request that got no response at all (DNS, refused, timed out) — the one case
+// "unreachable" is literally true for — and a number when the api was reached
+// and answered with something other than 401. A 500 is not the same failure as
+// a dropped connection, and the layout draws them differently (#183 follow-up:
+// the card used to say "unreachable" for both).
+export interface ApiFailure {
+  readonly status: number | null;
+}
+
 export type Shell =
   | {
       readonly authed: true;
@@ -73,12 +85,25 @@ export type Shell =
       readonly orgs: OrgSummary[];
       readonly invites: MyInvite[];
     }
-  | { readonly authed: false; readonly apiDown: boolean };
+  | { readonly authed: false; readonly state: "signed-out" }
+  // Genuinely still in flight, nothing cached yet, nothing wrong — the /app
+  // loader's ensureQueryData had not settled by the time this rendered. Found
+  // live, not assumed: a cold SSR render of a deep-linked child route (e.g.
+  // /app/clusters/:id, hit with no session at all) can render before the
+  // loader's Promise.allSettled has actually populated the cache this hook
+  // reads, so every one of the four sits at `status: "pending"` here — no
+  // error, because nothing has answered yet either way. THIS branch is what a
+  // reader saw as "The API is unreachable right now", for a beat, before the
+  // real answer (usually the sign-in form) replaced it. It was folded into
+  // `apiDown` before, which is why a loading state and a real outage looked
+  // identical; kept separate now so the layout can draw neither as a failure.
+  | { readonly authed: false; readonly state: "loading" }
+  | { readonly authed: false; readonly state: "down"; readonly failure: ApiFailure };
 
 // A failure is not an error to render. 401 means signed out and anything else
-// means the api could not be asked — both are answers the layout knows how to
-// draw. Any one of the three reporting 401 is enough: they go to the same api
-// with the same cookie.
+// means the api could not be asked as intended — both are answers the layout
+// knows how to draw. Any one of the four reporting 401 is enough: they go to
+// the same api with the same cookie.
 export function useShell(): Shell {
   const clusters = useQuery(clustersQuery());
   const org = useQuery(orgQuery());
@@ -88,21 +113,33 @@ export function useShell(): Shell {
   const errors = [clusters.error, org.error, orgs.error, invites.error].filter(
     (error) => error !== null,
   );
-  if (errors.some((error) => isStatus(error, 401))) return { authed: false, apiDown: false };
-  if (errors.length > 0) return { authed: false, apiDown: true };
+  if (errors.some((error) => isStatus(error, 401))) return { authed: false, state: "signed-out" };
+  if (errors.length > 0) {
+    return { authed: false, state: "down", failure: describeFailure(errors) };
+  }
 
-  // Still in flight with nothing cached. Reachable only if the cache were empty,
-  // which the /app loader and the SSR payload between them rule out — but "we
-  // could not ask" is the honest answer to have here rather than a signed-out
-  // one, which would show the sign-in form to someone who is signed in.
+  // Still in flight with nothing cached, and no error either — a fetch that
+  // has not settled is not a failure, and must not be drawn as one.
   if (clusters.data === undefined || orgs.data === undefined || invites.data === undefined) {
-    return { authed: false, apiDown: true };
+    return { authed: false, state: "loading" };
   }
 
   // org.data is deliberately not required to be present: it is `null` for a
   // reader who belongs to no organization, which is a signed-in state and the
   // one the create-org screen exists for.
   return { authed: true, clusters: clusters.data, orgs: orgs.data, invites: invites.data };
+}
+
+// Any one of the four having a real status beats all of them having none: a
+// status means the api was reached, which is a narrower, more specific problem
+// than nothing answering at all — and worth surfacing over the less informative
+// shape if both are present.
+function describeFailure(errors: readonly unknown[]): ApiFailure {
+  for (const error of errors) {
+    const status = statusOf(error);
+    if (status !== null) return { status };
+  }
+  return { status: null };
 }
 
 // What the layout's Retry button does when the api could not be reached. It lives

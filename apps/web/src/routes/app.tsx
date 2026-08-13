@@ -51,24 +51,55 @@ function AppShell() {
   const signOut = useSignOut();
 
   if (!data.authed) {
-    if (data.apiDown) {
+    // Genuinely still finding out, not a failure — the loader's reads had not
+    // settled yet. Empty rather than a skeleton: this state is meant to be
+    // gone by the time anything paints, and it used to render the same card as
+    // a real outage, which is the bug a reader saw as "the API is unreachable"
+    // for a beat on a cold, deep-linked visit before the real answer replaced
+    // it (found live, not assumed).
+    if (data.state === "loading") return null;
+
+    if (data.state === "down") {
+      const { status } = data.failure;
+      // Three different failures, not one. `null` is the literal, honest
+      // "unreachable" — nothing answered, which is the one case that copy was
+      // ever true for. A status means the api was reached: 429 is the caller
+      // going too fast, not a fault to apologise for, and any other status is
+      // a real problem on the api's side that "unreachable" mis-describes as a
+      // networking issue on the reader's. The status number is shown on
+      // purpose — it costs nothing to leak and is the one fact worth having
+      // ready before writing in.
+      const description =
+        status === 429
+          ? "Too many requests right now."
+          : status !== null
+            ? "Something went wrong loading your account."
+            : "The API is unreachable right now.";
       return (
         <main className="mx-auto mt-24 max-w-sm p-8">
           <Card>
             <CardHeader>
               <CardTitle className="text-2xl">Indexterity</CardTitle>
-              <CardDescription>The API is unreachable right now.</CardDescription>
+              <CardDescription>{description}</CardDescription>
             </CardHeader>
-            <CardContent>
+            <CardContent className="flex flex-col gap-3">
+              {status === 429 ? (
+                <p className="text-muted-foreground text-sm">Wait a moment, then try again.</p>
+              ) : null}
               {/* This was the one router.invalidate() the app was going to
                   keep, and it cannot be: re-running the loader calls
-                  ensureQueryData, which resolves with the cached "api is
-                  unreachable" and never asks again. The button would look
-                  like a button and do nothing until a full page reload.
-                  Refetching the key is what actually retries. */}
+                  ensureQueryData, which resolves with the cached failure and
+                  never asks again. The button would look like a button and do
+                  nothing until a full page reload. Refetching the key is what
+                  actually retries. */}
               <Button variant="outline" onClick={() => void refetchShell(queryClient)}>
                 Retry
               </Button>
+              {status !== null && status !== 429 ? (
+                <p className="text-muted-foreground text-xs">
+                  Status {status} — if this keeps happening, let us know.
+                </p>
+              ) : null}
             </CardContent>
           </Card>
         </main>
