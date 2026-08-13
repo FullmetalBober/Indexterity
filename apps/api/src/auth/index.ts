@@ -16,6 +16,7 @@ assertProductionUrl(baseURL, env.NODE_ENV, env.ALLOW_INSECURE_AUTH_URL);
 // Single configured auth instance for the app.
 export const auth = createAuth({
   databaseUrl: env.DATABASE_URL,
+  poolMax: env.PG_POOL_MAX,
   secret: env.BETTER_AUTH_SECRET,
   baseURL,
   secureCookies: useSecureCookies(baseURL, env.NODE_ENV),

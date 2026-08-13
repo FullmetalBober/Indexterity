@@ -97,7 +97,7 @@ const createdOrgIds: string[] = [];
 
 beforeAll(async () => {
   server = await startApi();
-  db = createDatabase(databaseUrl());
+  db = createDatabase(databaseUrl(), 2);
   mongo = new MongoConnection(MONGO_URL);
   await mongo.connect();
   // Setup, not just teardown. A run that dies before afterAll leaves indexes

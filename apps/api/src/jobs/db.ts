@@ -1,4 +1,4 @@
-import { coreEnv } from "../config/env";
+import { coreEnv, workerEnv } from "../config/env";
 import { createDatabase, type Database } from "../db";
 
 // One shared pg pool per process. Jobs run repeatedly — a fresh pool per run
@@ -6,7 +6,9 @@ import { createDatabase, type Database } from "../db";
 let shared: Database | null = null;
 
 export function jobDb(): Database {
-  shared ??= createDatabase(coreEnv().DATABASE_URL);
+  // PG_POOL_MAX is per pool, and WORKER_CONCURRENCY is what makes this one ask
+  // for more than a single connection at a time — raise them together.
+  shared ??= createDatabase(coreEnv().DATABASE_URL, workerEnv().PG_POOL_MAX);
   return shared;
 }
 

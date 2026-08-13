@@ -417,7 +417,7 @@ schema that is not there yet.
 | `npm run test` | nothing | the pure decision engine; components in jsdom with the api client mocked at `~/lib/api` |
 | `npm run test:int -w @repo/api` | migrated postgres + a mongod | CI runs it against **6.0, 7.0 and 8.x** — the three take different paths through the workload collector |
 | `npm run test:e2e` | both apps built | a real browser all the way to postgres and mongo, with **no proxy in front**, so the passthrough is the path under test |
-| `deploy/kind-test.sh` | Kind | the chart actually installing, `helm test`, sign-up over cluster DNS; fails if any pod logged a warning |
+| `deploy/kind-test.sh` | Kind | the chart actually installing, `helm test`, sign-up over cluster DNS; fails if any pod logged a warning. `TOPOLOGY=` runs the same assertions against each packaging, which is what holds them to being blind to it |
 
 The top ones are not decoration. The e2e suite found the api's session cookie
 being percent-encoded a second time on its way through the web server — both
@@ -513,6 +513,21 @@ docker build -f apps/api/Dockerfile -t indexterity-api .
 docker build -f apps/web/Dockerfile -t indexterity-web .
 ```
 
+There is a third, for hosts that run one container per service and have no pods
+at all — Fly, Render, Cloud Run, a single VM. Same builds, same artefacts, both
+processes under a supervisor that is PID 1, forwards `SIGTERM` to both and exits
+non-zero if either dies:
+
+```bash
+docker build -f deploy/all-in-one/Dockerfile -t indexterity-all-in-one .
+docker run -p 3000:3000 -e DATABASE_URL=… -e MASTER_KEY=… indexterity-all-in-one
+```
+
+Port 3000 is the only one that has to be published: the dashboard answers `/api`
+itself, so the browser gets everything from one origin. The Helm chart can deploy
+this shape too — `topology: single-container`, or `single-pod` to keep the two
+images and put them in one pod.
+
 ### Configuration
 
 **Every process validates its environment before it serves anything**, against
@@ -579,13 +594,19 @@ has the table.
 
 A Helm chart is in [`deploy/helm/indexterity`](./deploy/helm/indexterity) —
 api + dashboard + worker, a pre-upgrade migration hook, ingress, and a
-`helm test`. Bring your own PostgreSQL.
+`helm test`. Bring your own PostgreSQL. `topology` folds the three workloads into
+one pod (`single-pod`) or one container (`single-container`) for an install where
+three Deployments is more than it needs; the Services, the ingress and the app
+are identical in all three, so nothing in front of the chart has to know which
+one is installed.
 
 ### Metrics
 
 `METRICS_ENABLED=true` serves Prometheus metrics on port 9464 (`METRICS_PORT`)
-from all three workloads. The chart turns it on and can install a ServiceMonitor
-per workload; compose publishes them on 9464 (api), 9465 (worker) and 9466 (web).
+from all three workloads. Off unless asked for — an exporter costs memory in
+every process, and an install with nothing scraping it pays that for nobody. The
+chart can turn it on and install a ServiceMonitor per workload; compose has it on
+and publishes 9464 (api), 9465 (worker) and 9466 (web).
 
 Each answers for what only it can see, so scrape all three. The five things a
 service that drops other people's indexes has to be able to state:

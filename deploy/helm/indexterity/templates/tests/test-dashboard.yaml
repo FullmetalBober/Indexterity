@@ -14,29 +14,40 @@ spec:
     - name: probe
       image: curlimages/curl:8.11.0
       # The landing page must render, and the api must answer its health check.
+      #
+      # Every curl retries a REFUSED connection, which is not the same as
+      # tolerating a broken api. A ClusterIP with no programmed backend rejects
+      # instantly, and readiness is not that programming: kube-proxy writes the
+      # rule some moments after the pod reports ready. `helm test` runs as soon as
+      # the install returns, so it can land inside that gap — and it does exactly
+      # where the gap is widest, in the merged topologies, where ONE pod becoming
+      # ready is the last thing that happens before the test starts. Without the
+      # retry this asserts how fast a dataplane converges rather than whether the
+      # release works. A connection that is refused for 20s still fails.
       command:
         - sh
         - -c
         - |
           set -e
-          curl -fsS "http://{{ include "indexterity.fullname" . }}-web:{{ .Values.web.service.port }}/" > /dev/null
+          RETRY="--retry 10 --retry-connrefused --retry-delay 2"
+          curl -fsS $RETRY "http://{{ include "indexterity.fullname" . }}-web:{{ .Values.web.service.port }}/" > /dev/null
           echo "dashboard ok"
-          curl -fsS "http://{{ include "indexterity.fullname" . }}-api:{{ .Values.api.service.port }}/api/health" > /dev/null
+          curl -fsS $RETRY "http://{{ include "indexterity.fullname" . }}-api:{{ .Values.api.service.port }}/api/health" > /dev/null
           echo "api ok"
           {{- if .Values.metrics.enabled }}
           # Scraping the api is the one check that proves the control-plane
           # queries run against the deployed database — grep for the queue gauge,
           # which is the last thing the collector observes.
-          curl -fsS "http://{{ include "indexterity.fullname" . }}-api:{{ .Values.metrics.port }}/metrics" \
+          curl -fsS $RETRY "http://{{ include "indexterity.fullname" . }}-api:{{ .Values.metrics.port }}/metrics" \
             | grep -q "^indexterity_jobs_oldest_queued_age_seconds"
           echo "api metrics ok"
           # The dashboard server renders a page before it can report one, and the
           # landing page above was that page.
-          curl -fsS "http://{{ include "indexterity.fullname" . }}-web:{{ .Values.metrics.port }}/metrics" \
+          curl -fsS $RETRY "http://{{ include "indexterity.fullname" . }}-web:{{ .Values.metrics.port }}/metrics" \
             | grep -q "^indexterity_web_document_duration_seconds_count"
           echo "web metrics ok"
           {{- if .Values.worker.enabled }}
-          curl -fsS "http://{{ include "indexterity.fullname" . }}-worker-metrics:{{ .Values.metrics.port }}/metrics" \
+          curl -fsS $RETRY "http://{{ include "indexterity.fullname" . }}-worker-metrics:{{ .Values.metrics.port }}/metrics" \
             | grep -q "^target_info"
           echo "worker metrics ok"
           {{- end }}

@@ -1,3 +1,11 @@
+{{- if not (include "indexterity.merged" .) }}
+{{- /*
+The dashboard's own Deployment — the default topology only. Merged, the same
+container is rendered beside the api by api-deployment.yaml (single-pod) or
+replaced by the all-in-one image (single-container), and this file renders
+nothing. The container itself is one definition either way:
+indexterity.webContainer in _helpers.tpl.
+*/ -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -28,60 +36,7 @@ spec:
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
-        - name: web
-          image: {{ include "indexterity.webImage" . }}
-          imagePullPolicy: {{ .Values.web.image.pullPolicy }}
-          securityContext:
-            {{- toYaml .Values.securityContext | nindent 12 }}
-          ports:
-            - name: http
-              containerPort: {{ .Values.web.port }}
-            {{- if .Values.metrics.enabled }}
-            - name: metrics
-              containerPort: {{ .Values.metrics.port }}
-            {{- end }}
-          env:
-            {{- include "indexterity.metricsEnv" . | nindent 12 }}
-            {{- include "indexterity.errorsEnv" (dict "root" . "dsn" (default .Values.errorReporting.dsn .Values.errorReporting.webDsn)) | nindent 12 }}
-            - name: PORT
-              value: {{ .Values.web.port | quote }}
-            # The web server's own reads during SSR, at runtime so one image
-            # deploys everywhere. The browser does not use this and is not told
-            # it: it calls /api on the origin the ingress already routes.
-            - name: API_URL
-              value: {{ default (include "indexterity.internalApiUrl" .) .Values.web.apiUrl | quote }}
-            - name: WEB_ORIGIN
-              value: {{ include "indexterity.webOrigin" . | quote }}
-            # Only read when this pod answers /api itself — which it does when
-            # the ingress has no /api rule. Same switch and same reasoning as
-            # the api's: forwarding a header the client could have written lets
-            # a caller pick its own address and never reach a rate limit, so it
-            # is off unless something in front is known to set it.
-            - name: TRUST_PROXY
-              value: {{ include "indexterity.trustProxy" . | quote }}
-            {{- with .Values.web.siteUrl }}
-            # Canonical/og:url override for forks and indexed staging copies.
-            - name: SITE_URL
-              value: {{ . | quote }}
-            {{- end }}
-            {{- with .Values.web.extraEnv }}
-            {{- toYaml . | nindent 12 }}
-            {{- end }}
-          readinessProbe:
-            httpGet:
-              # The landing page is static and survives an api outage.
-              path: /
-              port: http
-            initialDelaySeconds: 3
-            periodSeconds: 10
-          livenessProbe:
-            httpGet:
-              path: /
-              port: http
-            initialDelaySeconds: 15
-            periodSeconds: 20
-          resources:
-            {{- toYaml .Values.web.resources | nindent 12 }}
+        {{- include "indexterity.webContainer" . | nindent 8 }}
       {{- with .Values.web.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
@@ -94,3 +49,4 @@ spec:
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+{{- end }}

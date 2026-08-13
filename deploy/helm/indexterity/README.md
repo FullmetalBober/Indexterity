@@ -1,7 +1,9 @@
 # Indexterity Helm chart
 
 Deploys the three workloads — **api**, **web** (dashboard) and **worker**
-(scheduler) — from two images, plus a pre-upgrade migration job.
+(scheduler) — from two images, plus a pre-upgrade migration job. `topology`
+folds the first two into one pod, or one container, when three Deployments is
+more than an install needs.
 
 PostgreSQL is **not** bundled: point `secrets.databaseUrl` at a managed
 instance or your own postgres release. That is the control-plane store; the
@@ -37,6 +39,158 @@ The web image does **not** need rebuilding per environment: `API_URL` and
 `WEB_ORIGIN` are read at runtime, and the browser bundle contains no api address
 at all — it calls `/api` on whatever origin served the page. `API_URL` is the web
 server's own server-side rendering, nothing else.
+
+## Topology: how many things to deploy
+
+`topology` decides only how the same code is packaged. Nothing about the app
+changes, and nothing in front of the chart does either: the `-api` and `-web`
+Services keep their names, their ports and their labels in every case, so the
+ingress, the ServiceMonitors and every in-cluster caller are unaffected.
+
+| `topology` | What is installed | Images pulled |
+|---|---|---|
+| `split` (default) | Three Deployments. api, web and worker roll, scale and fail independently — an api rollout cannot take the landing page down with it. What the hosted install runs | api, web |
+| `single-pod` | One Deployment for the serving tier: an **api container and a web container in one pod**, the dashboard reaching the api over `127.0.0.1`. The worker keeps its own Deployment unless you embed it | api, web |
+| `single-container` | One Deployment, **one container**, from the all-in-one image: both processes under a supervisor that is PID 1 | all-in-one |
+
+```bash
+# One pod, two containers. Nothing new to build — the two published images.
+helm install indexterity … --set topology=single-pod
+
+# One container, everything in it, including the scheduler.
+helm install indexterity … \
+  --set topology=single-container \
+  --set worker.enabled=false --set api.runWorker=true --set api.replicas=1
+```
+
+What the merged topologies cost, and it is the same trade twice:
+
+- **One failure domain.** api and web scale together (`api.replicas` counts the
+  pods; `web.replicas` is ignored), and a dashboard change rolls the api with it.
+- **The web metrics listener moves to `metrics.port + 1`** — one network
+  namespace cannot bind one port twice. Both Services still *publish* 9464, so
+  scrapers and `port-forward` read the same number as before; only the
+  containerPort moved. `metrics.webPort` overrides it.
+- **The worker is a separate decision.** Merging the serving tier does not touch
+  the schedule. `worker.enabled=false` with `api.runWorker=true` (and
+  `api.replicas=1`) is what makes a merged topology genuinely one workload; the
+  chart refuses the combinations that would install the crontab twice.
+
+Switching an existing release replaces Deployments rather than editing them —
+the old ones go and one appears. That is a rollout, not a reinstall; the data is
+in Postgres and untouched.
+
+### The all-in-one image, without this chart
+
+`ghcr.io/fullmetalbober/indexterity-all-in-one` is the whole product in one
+container, which is what a host that has no pods wants — Fly, Render, Cloud Run,
+Compose, a single VM:
+
+```bash
+docker run -p 3000:3000 \
+  -e DATABASE_URL='postgres://…' \
+  -e BETTER_AUTH_SECRET="$(openssl rand -base64 32)" \
+  -e MASTER_KEY="$(openssl rand -base64 32)" \
+  -e BETTER_AUTH_URL=https://indexterity.example.com \
+  -e WEB_ORIGIN=https://indexterity.example.com \
+  ghcr.io/fullmetalbober/indexterity-all-in-one:0.4.0
+```
+
+Port 3000 is the only one that has to be published: the dashboard answers `/api`
+itself, so one origin serves the browser everything. Migrations are not automatic
+outside the chart — run them first, from the same image:
+
+```bash
+docker run --rm -e DATABASE_URL='postgres://…' \
+  ghcr.io/fullmetalbober/indexterity-all-in-one:0.4.0 node apps/api/dist/migrate.js
+```
+
+The supervisor (`deploy/all-in-one/supervisor.ts`) splits the two variables the
+processes would otherwise fight over — `WEB_METRICS_PORT` (default
+`METRICS_PORT + 1`) and `WEB_SENTRY_DSN` (default: the api's project) — forwards
+`SIGTERM` to both, and **exits non-zero the moment either process does**, so the
+host restarts the container instead of leaving a dashboard serving 502s from a
+passthrough with nothing behind it. `RUN_WORKER` defaults to `true` in this image
+and nowhere else: a single container has nowhere else to put the scheduler.
+
+## Memory
+
+**V8 sizes its heap from the container's limit, not the host's memory.** It grows
+into that ceiling happily, collecting only as it approaches — so RSS follows the
+limit rather than the workload. The same api image, doing the same nothing:
+
+| limit | V8 heap ceiling | RSS idle |
+|---|---|---|
+| none (16 GB host) | 4192 MB | 228 MB |
+| 512 MiB | 268 MB | 104 MB |
+
+Which means **raising a limit raises usage**. "Give it headroom to be safe" is how
+a 128 MB service becomes a 512 MB one. Raise a limit when something is actually
+OOMKilled, not in anticipation.
+
+**But that sizing stops helping below 512 MiB, which is where this chart now
+sits.** Measured on node 26, V8's default ceiling scales down to a point and then
+flattens:
+
+| container limit | 1 GiB | 512Mi | 384Mi | 320Mi | 256Mi | 192Mi | 96Mi |
+|---|---|---|---|---|---|---|---|
+| default heap ceiling | 536 MB | 268 MB | 268 MB | 268 MB | 262 MB | 262 MB | 262 MB |
+
+At any limit of 256 MiB or below, a process believes it may hold **more heap than
+its cgroup allows** — so a heap-heavy pass is killed for memory where it should
+have been collected. The chart therefore sets `NODE_OPTIONS` on each container to
+65% of that container's own limit, leaving the rest for what is not heap. Verified
+against the images: a 208 MB cap produces a 220 MB ceiling under a 320 MiB limit,
+a 166 MB cap a 172 MB ceiling under 256 MiB. `NODE_OPTIONS` in `extraEnv`
+overrides it, and nothing is set when the share would fall below 64 MB — a heap
+that small collects instead of serving.
+
+The defaults are measured under load — page renders, api calls and concurrent
+sign-ups, against the published images:
+
+| workload | request | limit | measured serving |
+|---|---|---|---|
+| api | 128Mi | 320Mi | 99 MB under a 192 MiB limit |
+| web | 96Mi | 256Mi | 93 MB under a 128 MiB limit |
+| worker | 96Mi | 256Mi | 65 MB under a 128 MiB limit |
+| all-in-one | 192Mi | 384Mi | 85 MB under a 192 MiB limit |
+
+They are floors for a small fleet. The collectors hold per-collection statistics
+while they work, so an api and a worker managing many clusters sit higher — watch
+`container_memory_working_set_bytes` on your own install before tightening
+further.
+
+Two things do not show up in steady-state observation:
+
+- **Password hashing is memory-hard by design.** scrypt allocates roughly 32 MB
+  per hash *in flight*, so a handful of simultaneous sign-ins is tens of megabytes
+  that an idle graph never hints at. `config.authRateLimitMax` bounds the rate but
+  not the concurrency, so the limit has to absorb it — which is why the api's is
+  the largest of the three. This is not a knob to turn down: the cost *is* the
+  brute-force resistance.
+- **`worker.concurrency` multiplies rather than shares.** Each concurrent job
+  holds its own working set. It defaults to 1; raise it with the limit, not alone.
+- **Sockets are memory too, and some of them are not ours.** The driver would open
+  up to 100 per connected cluster by default, held in a per-cluster session —
+  `config.mongoMaxPoolSize` caps it at 10 and returns the surplus after 60s idle.
+
+`single-container` is the one container the chart does **not** cap from here,
+because one cap would be handed to both processes. Its supervisor divides the
+budget at runtime instead — 40% of the container's limit to the api, 22% to the
+dashboard, the rest unallocated for two runtimes' code and native allocation and
+for scrypt, which allocates outside the heap. Without that split both runtimes
+read the same cgroup and each claim the full default ceiling: 536 MB of heap
+promised inside a 512 MiB container, invisible until both are busy at once.
+`NODE_OPTIONS` in the environment overrides it, and the container logs what it
+chose:
+
+```
+supervisor: memory limit 384MB — heap ceilings: api 153MB, web 84MB
+```
+
+`single-pod` needs no such split: Kubernetes gives each container in a pod its own
+cgroup — verified in-cluster, the api container reads a 320 MiB limit and the web
+container 256 MiB — so the two are capped from their own limits like any other.
 
 ## Back up MASTER_KEY
 
@@ -77,6 +231,9 @@ stays off by default — the dashboard does not need it.
 
 | Value | Why it matters |
 |---|---|
+| `topology` | `split` (default), `single-pod` or `single-container` — see above. Packaging only; the Services, the ingress and the app are the same in all three |
+| `allInOne.*` | Image and resources for `topology: single-container`. `api.image` and `web.image` are never pulled in that topology, and neither is a second copy of node |
+| `metrics.webPort` | The dashboard's metrics containerPort. Empty means `metrics.port`, or `metrics.port + 1` when it shares a network namespace with the api |
 | `secrets.existingSecret` | Bring your own Secret (`DATABASE_URL`, `BETTER_AUTH_SECRET`, `MASTER_KEY`, optionally `SMTP_PASS`, `GITHUB_CLIENT_SECRET`) instead of putting values in Helm |
 | `web.publicUrl` | The dashboard's public origin. Defaults to the ingress host; the api trusts it for auth and session cookies are bound to it |
 | `worker.enabled` | Off means nothing is collected, applied or finalized on a schedule — the dashboard still works and can collect on demand |
@@ -85,20 +242,22 @@ stays off by default — the dashboard does not need it.
 | `config.requireEmailVerification` | Production posture — needs working SMTP, or nobody can sign in |
 | `config.storageUsdPerGbMonth` | Your storage price, for the $/month ROI headline |
 | `config.retentionDays` | Your ceiling on history, in days. Storage is your bill, so it caps both what is kept and what any plan may see. Empty means each plan's own window decides |
+| `config.mongoMaxPoolSize` | Sockets the driver may open against **one** connected cluster — 10, against the driver's own default of 100. A session is held per cluster, so the worst case multiplies by the fleet, and the sockets are spent on the customer's mongod rather than ours. Surplus sockets are returned after 60s idle |
 | `config.rateLimitMax` / `config.authRateLimitMax` | Per-IP request budgets a minute. `rateLimitMax` is counted in each api process's memory, so it is **per replica**; `authRateLimitMax` is read twice — per replica for `/api/auth/*`, and by better-auth for the credential endpoints, which counts in Postgres and so applies to the whole deployment |
 | `config.allowUntestedMongoVersion` | Lets a cluster on a MongoDB major series newer than this release was tested against connect. The floor is not overridable; this is the ceiling |
 | `api.runWorker` | Embed the job runner in the api, for a single-replica install that sets `worker.enabled=false`. Leave `false` otherwise — with the worker Deployment on, or with more than one api replica, the cron schedule would be installed more than once |
 | `config.signupMode` | `invite` (default), `open` or `closed`. The first account always bootstraps the install; after that invite-only. `open` lets any stranger register — and every account can make the control plane dial hosts it names |
 | `config.allowPrivateClusterTargets` | Set `true` when the MongoDB you manage is on a private network (the normal self-hosted case). Leave `false` for anything strangers can reach, or accounts can probe your internal network. Cloud metadata stays blocked either way |
 | `config.allowInsecureClusterTls` | Set `true` only when the MongoDB you manage genuinely serves no certificate and the network between is trusted. Every outbound connection requires validated TLS otherwise — including the ones the worker makes from stored credentials, so a cluster connected without it stops being collected and its owners are told why. Kept apart from `allowPrivateClusterTargets` on purpose: a VPC-peered or PrivateLink cluster is a private address that must still be forced to TLS |
-| `metrics.enabled` | Prometheus metrics on port `metrics.port` (9464) for all three workloads. On by default; the endpoint is never routed by the ingress |
+| `metrics.enabled` | Prometheus metrics on port `metrics.port` (9464) for all three workloads. **Off by default** — an exporter costs memory in every process, and an install with nothing scraping it was paying that for nobody. Turn it on if anything is; the endpoint is never routed by the ingress |
 | `metrics.serviceMonitor.enabled` | One Prometheus Operator ServiceMonitor per workload. Off by default — it needs the `monitoring.coreos.com` CRDs, and a chart that assumes them cannot install without them |
 | `metrics.prometheusRule.enabled` | 18 alerting rules for the failures nothing else reports. Same CRD requirement, also off by default. Thresholds under `metrics.prometheusRule.thresholds` |
 
 ## Metrics
 
-All three workloads serve `/metrics` on port 9464, and each answers for what only
-it can see — scrape all three:
+Off by default (`metrics.enabled=true` to serve it). With it on, all three
+workloads serve `/metrics` on port 9464, and each answers for what only it can
+see — scrape all three:
 
 | workload | reports |
 |---|---|
@@ -108,6 +267,12 @@ it can see — scrape all three:
 
 With `worker.enabled=false` and `RUN_WORKER=true` on the api instead, the api
 serves the worker's half as well.
+
+In the merged topologies all of that is still served, and still separately: the
+api's listener stays on 9464 and the dashboard's moves to 9465, because they are
+now in one network namespace. Both Services publish 9464 either way, so scrape
+`<release>-api` and `<release>-web` exactly as in `split` — they simply happen to
+resolve to the same pod.
 
 `metrics.serviceMonitor.enabled=true` installs a ServiceMonitor for each. Without
 the Prometheus Operator, point your own scraper at the `metrics` port on
@@ -182,7 +347,7 @@ page, under Security):
   pod means duplicate scheduling. Scale job throughput with
   `worker.concurrency` instead.
 - **api and web scale horizontally.** Both are stateless; sessions live in
-  Postgres.
+  Postgres. In a merged topology they scale as one unit, on `api.replicas`.
 - The worker drains its connection pool on `SIGTERM`
   (`terminationGracePeriodSeconds: 60`).
 - **The worker's only Service is `-worker-metrics`**, and it is headless. Nothing
@@ -193,6 +358,17 @@ page, under Security):
 ```bash
 helm lint deploy/helm/indexterity
 helm template rel deploy/helm/indexterity --set secrets.existingSecret=s | kubeconform -strict -
+```
+
+Rendering is not installing, and the topologies are where that gap is widest — a
+merged pod that renders can still bind a port twice or leave a Service with no
+endpoints. `deploy/kind-test.sh` installs into a throwaway Kind cluster and runs
+the same assertions against each packaging; CI runs all three in parallel on any
+change under `deploy/`:
+
+```bash
+TOPOLOGY=single-pod deploy/kind-test.sh
+TOPOLOGY=single-container deploy/kind-test.sh
 ```
 
 The alert rules need their own check — a typo'd expression installs cleanly and

@@ -477,6 +477,17 @@ jobs:
     needs: scope
     if: needs.scope.outputs.chart == 'true'
     runs-on: ubuntu-latest
+    # One leg per packaging (see `topology` in values.yaml). The same assertions
+    # run against all three, which is the only way to hold the claim they are
+    # meant to hold: that the api and the dashboard are reachable at the same
+    # Service names, with the same ports, however many pods and containers they
+    # were folded into. Legs run in parallel, and each builds only the images its
+    # topology pulls — split and single-pod share the two the cache is already
+    # warm for, single-container builds the all-in-one on its own.
+    strategy:
+      fail-fast: false
+      matrix:
+        topology: [split, single-pod, single-container]
     steps:
       - uses: actions/checkout@v7
       - uses: helm/kind-action@v1
@@ -489,12 +500,15 @@ jobs:
       # Prometheus Operator CRDs — and a rule with a typo'd expression installs
       # cleanly and then never fires, which is the worst failure available to a
       # monitoring change. promtool parses every expression instead.
+      # Once, not once per topology: the rules are the same document in all three
+      # (they select on component labels, which the Services keep either way).
       - name: alert rules must parse
+        if: matrix.topology == 'split'
         run: |
           helm template rel deploy/helm/indexterity \
             --set secrets.databaseUrl=p --set secrets.betterAuthSecret=s \
             --set secrets.masterKey=k --set config.allowInsecureAuthUrl=true \
-            --set metrics.prometheusRule.enabled=true \
+            --set metrics.enabled=true --set metrics.prometheusRule.enabled=true \
             | python3 -c "
           import sys, yaml
           for doc in yaml.safe_load_all(sys.stdin):
@@ -519,6 +533,7 @@ jobs:
       # and gets on with testing the chart.
       - uses: docker/setup-buildx-action@v4
       - uses: docker/build-push-action@v7
+        if: matrix.topology != 'single-container'
         with:
           context: .
           file: apps/api/Dockerfile
@@ -527,6 +542,7 @@ jobs:
           cache-from: type=gha,scope=api
           cache-to: type=gha,scope=api,mode=max
       - uses: docker/build-push-action@v7
+        if: matrix.topology != 'single-container'
         with:
           context: .
           file: apps/web/Dockerfile
@@ -534,8 +550,21 @@ jobs:
           load: true
           cache-from: type=gha,scope=web
           cache-to: type=gha,scope=web,mode=max
+      # The all-in-one image builds both apps, so it shares no layers with either
+      # of the two above — its own cache scope, same name the release workflow
+      # uses so the two warm each other.
+      - uses: docker/build-push-action@v7
+        if: matrix.topology == 'single-container'
+        with:
+          context: .
+          file: deploy/all-in-one/Dockerfile
+          tags: indexterity/all-in-one:0.1.0
+          load: true
+          cache-from: type=gha,scope=all-in-one
+          cache-to: type=gha,scope=all-in-one,mode=max
 
       - run: deploy/kind-test.sh
         env:
           CTR: docker
           PREBUILT: "1"
+          TOPOLOGY: ${{ matrix.topology }}

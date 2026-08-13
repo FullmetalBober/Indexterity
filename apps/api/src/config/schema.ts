@@ -180,6 +180,16 @@ const migrateShape = {
 // decrypt error, hours after the deploy that caused it.
 const workerShape = {
   ...migrateShape,
+  // Postgres connections PER POOL, and this process holds more than one: the api
+  // has a request pool, the jobs' pool and better-auth's, each capped by this. They
+  // are deliberately not merged — a slow report must not be able to starve sign-in
+  // of a connection — so the budget to size against postgres is this times the
+  // number of pools, plus graphile-worker's own.
+  //
+  // Too low is latency, not failure: pg queues a request until a connection frees.
+  // Raise it alongside WORKER_CONCURRENCY, which is what makes the jobs' pool ask
+  // for more than one at a time.
+  PG_POOL_MAX: positiveInteger(5),
   MASTER_KEY: masterKey(),
   // KEK rotation: v1 = MASTER_KEY, v2+ = MASTER_KEY_V<n>. Each cluster row
   // records the version that sealed it, so old rows stay readable through a
@@ -194,7 +204,21 @@ const workerShape = {
   ALLOW_PRIVATE_CLUSTER_TARGETS: flag(false),
   ALLOW_INSECURE_CLUSTER_TLS: flag(false),
   ALLOW_UNTESTED_MONGO_VERSION: flag(false),
-  WORKER_CONCURRENCY: positiveInteger(2),
+  // One job at a time. Each concurrent job holds its own working set — a collect
+  // pass keeps a cluster's index and collection statistics in memory while it
+  // runs — so this multiplies a worker's memory rather than sharing it, and the
+  // pipeline is not latency-critical. Raise it deliberately, with the memory
+  // limit raised alongside.
+  WORKER_CONCURRENCY: positiveInteger(1),
+  // Sockets the driver may open against ONE connected cluster. The driver's own
+  // default is 100, and it is the wrong default twice over here: a session is
+  // held per cluster (jobs/connection-pool.ts), so the worst case multiplies by
+  // the fleet, and the sockets are opened against a database that is not ours.
+  //
+  // Ten is generous for what the collectors actually ask for. Their fan-outs are
+  // per replica-set MEMBER and each member has its own client; the widest
+  // concurrent use of a single connection is the five reads in mongo/snapshots.ts.
+  MONGO_MAX_POOL_SIZE: positiveInteger(10),
   SMTP_HOST: z.string().optional(),
   SMTP_PORT: positive(465),
   SMTP_USER: z.string().optional(),
