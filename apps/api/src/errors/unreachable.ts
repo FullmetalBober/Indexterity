@@ -20,6 +20,14 @@ const UNREACHABLE_NAME =
 // `querySrv`/`queryTxt` join `getaddrinfo` for the same reason: those three are
 // how a hostname fails to become an address, and which one answers depends only
 // on whether the string was SRV.
+//
+// `Server selection timed out` is load-bearing for a second reason since the
+// images moved to musl (D76). Measured on both libcs against the same resolver: a
+// hostname that does not resolve surfaces as `getaddrinfo EAI_AGAIN <host>` on
+// glibc and as a bare `Server selection timed out after Nms` on musl, because the
+// driver's own timeout wins the race there. Both are matched, so the
+// classification is identical on both — but only because that alternative is in
+// this list, which is exactly the D64 failure mode one libc away.
 const UNREACHABLE_MESSAGE =
   /getaddrinfo|querySrv|queryTxt|ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ENETUNREACH|ETIMED?OUT|Server selection timed out/i;
 

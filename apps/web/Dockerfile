@@ -1,6 +1,11 @@
 # syntax=docker/dockerfile:1
 # Separate image so web deploys independently. Build context = repo root.
-FROM docker.io/library/node:26-slim AS base
+#
+# alpine, for the reason apps/api/Dockerfile gives at length — and it is starkest
+# here: nitro's `.output` is 16 MB and this image was 264 MB, so the base was
+# ~95% of it. 193 MB now. The runtime stage copies `.output` and nothing else,
+# which is why this is the one of the three with no dependency question at all.
+FROM docker.io/library/node:26-alpine AS base
 WORKDIR /app
 RUN npm install -g turbo@2.10.5
 
@@ -24,7 +29,7 @@ RUN --mount=type=cache,target=/root/.npm npm install
 COPY --from=pruner /app/out/full/ .
 RUN --mount=type=cache,target=/root/.cache/turbo turbo run build --filter=@repo/web
 
-FROM docker.io/library/node:26-slim AS runtime
+FROM docker.io/library/node:26-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 # The nitro build output is self-contained — no node_modules needed at runtime.

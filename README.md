@@ -506,13 +506,17 @@ is deliberately not done:
 
 ## Deploy
 
-Slim images via `turbo prune`, and slim on purpose: the api's runtime tree is
-installed from manifests with `devDependencies` deleted rather than pruned after
-the fact (`deploy/prod-manifests.mjs`). `npm prune --omit=dev` was measured to
-change nothing here — `turbo prune` regenerates a lockfile with no `dev` markers,
-so npm reads the whole graph as production and ships typescript, drizzle-kit,
-@rolldown and esbuild. api 375 MB (was 510), web 264 MB, all-in-one 559 MB (was
-714):
+Small images via `turbo prune`, and small on purpose, in two passes. The api's
+runtime tree is installed from manifests with `devDependencies` deleted rather
+than pruned after the fact (`deploy/prod-manifests.mjs`): `npm prune --omit=dev`
+was measured to change nothing here — `turbo prune` regenerates a lockfile with no
+`dev` markers, so npm reads the whole graph as production and ships typescript,
+drizzle-kit, @rolldown and esbuild. Then the base itself, which was most of what
+remained: **`node:26-alpine`** (181 MB) instead of `node:26-slim` (252 MB). The
+shipped api tree contains no native binaries, so that is a base swap and not a
+musl rebuild — and `mongodb+srv://`, the one lookup that would care, is tested on
+musl rather than assumed ([D76](./docs/decisions.md)). api **303 MB** (was 510),
+web **193 MB** (was 264), all-in-one **487 MB** (was 714):
 
 ```bash
 docker build -f apps/api/Dockerfile -t indexterity-api .
