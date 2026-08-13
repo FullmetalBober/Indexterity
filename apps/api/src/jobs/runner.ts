@@ -41,10 +41,24 @@ const CRONTAB = [
   // Why not thirty minutes, which the load would allow: a collect takes 0.66s against
   // ~100 collections, and since collections are walked serially with five commands in
   // flight each, a remote cluster costs about one round trip per collection — roughly
-  // four minutes at 5,000 collections and 50ms. Load is not the constraint. The
-  // constraint is that getLatencySeries is still unbounded (#64) and there is no
-  // downsampling of old latency history, so twelve times the rows would land on a
-  // read that already has no limit. Hourly first, then that, then revisit.
+  // four minutes at 5,000 collections and 50ms. Load is not the constraint. Neither is
+  // the read's payload any more: #64 is closed, and getLatencySeries is bounded on both
+  // axes — a 30-day window over the top 8 collections, however often this runs.
+  //
+  // What is left is the write rate against the half of that read #64 did not bound.
+  // Capping the RESPONSE did not cap the QUERY: loadLatencyReadings selects every
+  // collection's rows inside the window and slices to the top 8 in JS afterwards, so
+  // the rows a dashboard load scans are collections × this cadence × up to 30 days,
+  // and latency_samples is the table where nothing run-length-collapses. Halving the
+  // interval doubles that scan, and doubles the storage held inside RETENTION_DAYS.
+  //
+  // What it buys is 48 points a day instead of 24. That is not what the raise was for:
+  // the floor was four a day reading as broken, and hourly clears it six times over.
+  // The signal that has to be fast is scheduleProbe's, five minutes below.
+  //
+  // So hourly stays on its own merits, not on a blocker. What would change the answer
+  // is downsampling old latency history and slicing that read in SQL — the cost side
+  // would drop and the reader side would still say 24 is enough.
   //
   // Offset from scheduleSuggest at :30 so the two hourly passes do not dial the same
   // cluster at the same minute.
