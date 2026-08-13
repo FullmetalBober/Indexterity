@@ -18,3 +18,8 @@ graphify-out/
 test-results/
 playwright-report/
 blob-report/
+
+# vendored agent skills — restored from skills-lock.json (npm run skills:install);
+# .claude/skills entries are symlinks into .agents/skills, both regenerated the same way
+.agents/skills/
+.claude/skills/
