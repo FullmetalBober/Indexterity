@@ -642,7 +642,12 @@ and the two alert traps worth knowing, are in
 
 The metrics above say how *often* something failed. `SENTRY_DSN` says *what*.
 Every process reads that one variable; leave it empty — the default here, in
-compose and in the chart — and nothing is initialised at all.
+compose and in the chart — and neither app initialises the SDK. The dashboard
+does not even load it: importing `@sentry/tanstackstart-react` costs 17.3 MB of
+heap, measured, and a dynamic `import()` there is real ESM, so a default install
+skips it entirely. The api loads `@sentry/nestjs` (12.5 MB) either way — a
+deliberate tradeoff, not an oversight, kept for full static typing over that
+saving. See [D75](./docs/decisions.md) for why the two apps land differently.
 
 **The DSN is yours.** A self-hosted install reports to your own Sentry
 organisation or your own self-hosted Sentry, never to us.

@@ -7,7 +7,7 @@ import "~/lib/errors/provider";
 // instead of a default that quietly took effect (#126). After the reporter, so
 // the refusal is itself reportable.
 import "~/lib/env";
-import { wrapFetchWithSentry } from "@sentry/tanstackstart-react";
+import { errorReportingEnabled } from "@repo/errors";
 import { createStartHandler, defaultStreamHandler } from "@tanstack/react-start/server";
 import { createServerEntry } from "@tanstack/react-start/server-entry";
 import { isApiRequest, passThroughToApi } from "~/lib/api-passthrough";
@@ -115,4 +115,17 @@ const handleRequest = (request: Request, opts?: unknown): Response | Promise<Res
       : withSecurityHeaders(await fetch(request, opts as Parameters<typeof fetch>[1])),
   );
 
-export default createServerEntry(wrapFetchWithSentry({ fetch: handleRequest }));
+// The wrapper only when there is something to report to (#176). This was the
+// second of the dashboard's two loads of a 17.3 MB SDK, and the one that made
+// gating the other pointless: a static `import { wrapFetchWithSentry }` here pulls
+// the whole package in whether or not lib/errors/provider ever initialises it.
+//
+// Unwrapped, the entry is the object the wrapper would have returned anyway —
+// `wrapFetchWithSentry` takes a ServerEntry and gives back a ServerEntry — so
+// nothing downstream can tell the two apart except by whether a throw gets
+// reported, which is the thing being switched off.
+const entry = errorReportingEnabled()
+  ? (await import("@sentry/tanstackstart-react")).wrapFetchWithSentry({ fetch: handleRequest })
+  : { fetch: handleRequest };
+
+export default createServerEntry(entry);
