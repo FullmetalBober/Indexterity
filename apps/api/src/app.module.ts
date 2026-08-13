@@ -1,7 +1,8 @@
-import { type DynamicModule, Module } from "@nestjs/common";
+import { Module } from "@nestjs/common";
 import { ConfigModule } from "@nestjs/config";
 import { ORPCModule } from "@orpc/nest";
 import { errorReportingEnabled } from "@repo/errors";
+import { SentryModule } from "@sentry/nestjs/setup";
 import { ClustersController } from "./clusters/clusters.controller";
 import { DatabaseService } from "./db/database.service";
 import { ClusterEventsService } from "./events/cluster-events.service";
@@ -18,31 +19,15 @@ import { RecommendationsController } from "./recommendations/recommendations.con
 // which of the things it catches are faults (see errors/exception.filter.ts).
 // What forRoot() actually registers is one APP_INTERCEPTOR, SentryTracingInterceptor.
 //
-// Conditional, and the IMPORT is conditional with it (#176). `import { SentryModule }
-// from "@sentry/nestjs/setup"` is itself what loads the SDK, so wrapping only
-// `forRoot()` in a `dsn ? … : []` would have saved nothing — the module was in the
-// require graph either way. With no DSN this leaves an interceptor off every
+// The IMPORT is unconditional (see errors/reporting.ts for why #176 tried
+// otherwise and why that was reverted). Only the forRoot() CALL stays gated on a
+// DSN, and that costs nothing to keep either way — SentryModule is already a real
+// typed class reference, gating which array it lands in needs no require, no
+// annotation, nothing to narrow. With no DSN this leaves an interceptor off every
 // request that had nothing to trace: tracesSampleRate is 0 by decision (D28 put
 // measurement on OpenTelemetry) and the client was never initialised.
-//
-// Requiring here rather than in instrument.api.ts is safe because the ordering
-// question is already settled by the time Nest reads this metadata: with a DSN,
-// instrument.api.ts loaded the SDK before any other import of main.ts, so this is
-// a cache hit; without one, there is nothing to order.
-// Annotated and then checked, never asserted — same reasoning, and the same one
-// name held to, as the note in errors/reporting.ts.
-type SentrySetup = Pick<typeof import("@sentry/nestjs/setup"), "SentryModule">;
-
-function sentryImports(): DynamicModule[] {
-  if (!errorReportingEnabled()) return [];
-  const setup: SentrySetup = require("@sentry/nestjs/setup");
-  if (typeof setup.SentryModule?.forRoot !== "function") {
-    throw new Error(
-      "@sentry/nestjs/setup loaded without SentryModule.forRoot() — refusing to boot " +
-        "with a DSN set and no instrumentation to show for it",
-    );
-  }
-  return [setup.SentryModule.forRoot()];
+function sentryImports() {
+  return errorReportingEnabled() ? [SentryModule.forRoot()] : [];
 }
 
 @Module({
