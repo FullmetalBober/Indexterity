@@ -1,12 +1,11 @@
 import { monthlySavingsUsd } from "../analysis";
+import type { Database } from "../db";
 import { and, clusters, desc, eq, recommendations } from "../db";
 import { notifyClusterOwners } from "../mail/notify";
-import { jobDb } from "./db";
 
 // Weekly "here's what we WOULD have done" email for clusters still in
 // read-only mode — the go-live conversion driver. Skips quiet clusters.
-export async function runDigest(): Promise<number> {
-  const db = jobDb();
+export async function runDigest(db: Database): Promise<number> {
   const readOnlyClusters = await db.select().from(clusters).where(eq(clusters.readOnly, true));
   let sent = 0;
   for (const cluster of readOnlyClusters) {

@@ -18,7 +18,6 @@ import { emitClusterEvent } from "../events/emit";
 import { serializeSpec } from "../mongo";
 import { effectiveChangeWindow } from "./change-window";
 import { openClusterSession } from "./cluster-connection";
-import { jobDb } from "./db";
 import { historyWindow, planForCluster } from "./plan";
 import { preflightDrop } from "./preflight";
 
@@ -64,8 +63,7 @@ export async function promoteByScore(
 // with a rollback token. A failed pre-flight re-proposes instead of hiding.
 // Anything the threshold above promotes goes through the same gates as a drop
 // a human approved by hand.
-export async function applyCluster(clusterId: string): Promise<number> {
-  const db = jobDb();
+export async function applyCluster(db: Database, clusterId: string): Promise<number> {
   const [policy] = await db
     .select()
     .from(policies)

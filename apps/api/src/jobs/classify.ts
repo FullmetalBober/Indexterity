@@ -7,6 +7,7 @@ import {
   recommendForCollection,
 } from "../analysis";
 import { runFrom } from "../analysis/types";
+import type { Database } from "../db";
 import {
   and,
   clusterIndexes,
@@ -20,7 +21,6 @@ import {
   recommendations,
 } from "../db";
 import { activeCooldownKeys, cooldownKey } from "./cooldowns";
-import { jobDb } from "./db";
 import { historyWindow } from "./plan";
 import { pendingRemovalKeys, watchedIndexKeys, watchKey } from "./watched";
 
@@ -72,8 +72,7 @@ const CLASSIFY_OPTIONS = {
 
 // Read a cluster's snapshots, run the pure engine per collection, and replace
 // the cluster's PROPOSED recommendations. Returns the number proposed.
-export async function classifyCluster(clusterId: string): Promise<number> {
-  const db = jobDb();
+export async function classifyCluster(db: Database, clusterId: string): Promise<number> {
   const cooled = await activeCooldownKeys(db, clusterId);
   const [policy] = await db
     .select({ observeWindowDays: policies.observeWindowDays })
