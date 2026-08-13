@@ -26,12 +26,16 @@ const CLUSTER = {
 const ORG = { id: "o1", name: "Acme", plan: {}, members: [], pendingInvites: [] };
 const ORGS = [{ orgId: "o1", name: "Acme", role: "owner", active: true }];
 
-// The three states the layout draws from, printed so a test can read one off the
+// The four states the layout draws from, printed so a test can read one off the
 // DOM. useShell is a hook over four queries, so it needs a component to live in.
+// The status rides along on "down" — "none" for a request that got no response
+// at all, a number for one the api actually answered.
 function Probe() {
   const shell: Shell = useShell();
   if (shell.authed) return <p>authed:{shell.clusters.length}</p>;
-  return <p>{shell.apiDown ? "api-down" : "signed-out"}</p>;
+  if (shell.state === "loading") return <p>loading</p>;
+  if (shell.state === "signed-out") return <p>signed-out</p>;
+  return <p>down:{shell.failure.status ?? "none"}</p>;
 }
 
 beforeEach(() => {
@@ -67,11 +71,39 @@ describe("useShell", () => {
   );
 
   // Anything that is not a 401 is "we could not ask", which gets the retry card
-  // rather than a sign-in form the reader has already filled in once.
-  it("reads any other failure as the api being unreachable", async () => {
+  // rather than a sign-in form the reader has already filled in once. A plain
+  // Error — nothing the api answered with, a dropped connection — carries no
+  // status, which is the layout's cue to say "unreachable" rather than
+  // guessing at a cause the failure never stated.
+  it("reads a connection failure as unreachable, with no status", async () => {
     getOrg.mockRejectedValue(new Error("offline"));
     renderInApp(<Probe />);
-    expect(await screen.findByText("api-down")).toBeInTheDocument();
+    expect(await screen.findByText("down:none")).toBeInTheDocument();
+  });
+
+  // The api WAS reached here — a 500 is its own answer, not silence — so the
+  // layout has a status to show instead of calling this "unreachable" too.
+  it("carries a 500's status through, rather than flattening it to unreachable", async () => {
+    getOrg.mockRejectedValue(apiError(500, "internal error"));
+    renderInApp(<Probe />);
+    expect(await screen.findByText("down:500")).toBeInTheDocument();
+  });
+
+  // 429 is the caller going too fast, not the api being down — a status the
+  // layout reads differently again (Retry, but say to wait first).
+  it("carries a 429 through the same way", async () => {
+    listClusters.mockRejectedValue(apiError(429, "rate limited"));
+    renderInApp(<Probe />);
+    expect(await screen.findByText("down:429")).toBeInTheDocument();
+  });
+
+  // When more than one of the four fails and their shapes differ, the one
+  // that actually answered wins — it says more than "nothing came back".
+  it("prefers a status over no status when both are present", async () => {
+    getOrg.mockRejectedValue(new Error("offline"));
+    listOrgs.mockRejectedValue(apiError(503, "database unreachable"));
+    renderInApp(<Probe />);
+    expect(await screen.findByText("down:503")).toBeInTheDocument();
   });
 
   // A reader who belongs to no organization is signed IN. getOrg answers null
@@ -102,7 +134,14 @@ describe("useShell", () => {
   // auth gate is deliberately not: it needs the cluster list, the org list and the
   // invitations before it will call someone signed in, or the layout would draw a
   // cluster bar above an org switcher that is still empty.
-  it("waits for the others rather than deciding on the first", async () => {
+  //
+  // "loading", not "down": this is the exact shape a cold SSR render of a
+  // deep-linked route sees before the loader's reads have settled — nothing has
+  // failed, nothing has answered yet either. It used to read as "down" (nothing
+  // cached was folded into the same bucket as an actual failure), which is what
+  // showed "The API is unreachable right now" on a plain page load that just
+  // had not finished loading.
+  it("is loading, not down, while the others are still in flight", async () => {
     let releaseOrgs = (): void => {};
     listOrgs.mockReturnValue(
       new Promise((resolve) => {
@@ -112,7 +151,7 @@ describe("useShell", () => {
 
     renderInApp(<Probe />);
 
-    expect(await screen.findByText("api-down")).toBeInTheDocument();
+    expect(await screen.findByText("loading")).toBeInTheDocument();
     releaseOrgs();
     await waitFor(() => expect(screen.getByText("authed:1")).toBeInTheDocument());
   });

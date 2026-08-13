@@ -30,7 +30,9 @@
     "down": "bash scripts/compose.sh down",
     "compose": "bash scripts/compose.sh",
     "version:set": "node scripts/set-version.ts set",
-    "version:check": "node scripts/set-version.ts check"
+    "version:check": "node scripts/set-version.ts check",
+    "skills:install": "npx skills experimental_install",
+    "skills:update": "npx skills update -p"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.5",
