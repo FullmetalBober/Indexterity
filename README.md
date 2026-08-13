@@ -506,7 +506,13 @@ is deliberately not done:
 
 ## Deploy
 
-Slim images via `turbo prune` (api ≈ 390 MB, web ≈ 235 MB):
+Slim images via `turbo prune`, and slim on purpose: the api's runtime tree is
+installed from manifests with `devDependencies` deleted rather than pruned after
+the fact (`deploy/prod-manifests.mjs`). `npm prune --omit=dev` was measured to
+change nothing here — `turbo prune` regenerates a lockfile with no `dev` markers,
+so npm reads the whole graph as production and ships typescript, drizzle-kit,
+@rolldown and esbuild. api 375 MB (was 510), web 264 MB, all-in-one 559 MB (was
+714):
 
 ```bash
 docker build -f apps/api/Dockerfile -t indexterity-api .

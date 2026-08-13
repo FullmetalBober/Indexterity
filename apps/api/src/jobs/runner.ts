@@ -7,6 +7,11 @@ import { instrumentRunner } from "../metrics";
 import { clusterIdOf, finalClusterFailure } from "./failure";
 import { createTaskList } from "./tasks";
 
+// How long an idle runner waits before asking postgres whether anything became
+// due. See the note at the call site for why this is safe to raise: an enqueued
+// job arrives by NOTIFY, not by poll.
+const POLL_INTERVAL_MS = 10_000;
+
 // Recurring schedule (per cluster via the dispatcher tasks):
 //  - collect + classify hourly
 //  - workload analysis hourly (a missing index costs on every execution, so
@@ -67,6 +72,22 @@ export async function startWorker(db: Database): Promise<Runner> {
     // for the rest.
     connectionString: values.DATABASE_URL,
     concurrency: values.WORKER_CONCURRENCY,
+    // Derived rather than configured, and bounded rather than left at
+    // graphile-worker's own default of 10 — separate from our pools is not the
+    // same as unbounded, and seven idle backends per worker is a cost paid on the
+    // DATABASE server. It needs one connection per job plus the LISTEN client, so
+    // concurrency + 2 is the floor with a spare; deriving it means raising
+    // WORKER_CONCURRENCY cannot leave the queue starved of connections.
+    maxPoolSize: values.WORKER_CONCURRENCY + 2,
+    // Ten seconds, against a default of two. Polling is the FALLBACK here, not
+    // the mechanism: add_job runs `pg_notify('jobs:insert', …)` and this runner
+    // holds `LISTEN "jobs:insert"`, so anything enqueued — including the
+    // dashboard's collect button — still starts immediately. What waits up to
+    // this long is work that becomes due by the clock: a cron tick, or a retry
+    // whose backoff expired. The tightest schedule in CRONTAB is five minutes, so
+    // ten seconds of slack there costs nothing and takes the idle query rate from
+    // 30 a minute to 6.
+    pollInterval: POLL_INTERVAL_MS,
     // The db reaches every task through here — one argument at the composition
     // root, where before each task reached for a module-level singleton.
     taskList: createTaskList(db),
