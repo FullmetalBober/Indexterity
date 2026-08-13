@@ -30,14 +30,39 @@ import { APP_VERSION } from "../version";
 // back to main.ts and let the imports below it evaluate first, which is the one
 // thing the ordering exists to prevent.
 //
-// `require` is untyped, so the type comes from an ANNOTATION rather than a cast:
-// the SDK's own `import type` above is the declaration being checked against, and
-// every use of the returned namespace is type-checked normally. §16's "no `as`
-// overrides" holds — there is nothing here to override.
-let loaded: typeof SentrySdk | undefined;
+// No assertion anywhere in here, and the untyped surface is held to three names.
+//
+// `require` is declared `(id: string): any` by @types/node, so a type has to come
+// from somewhere. It comes from an ANNOTATION — the value flows into a declared
+// type rather than overriding the checker, so nothing here can outrank it. But an
+// annotation over an `any` is still trust, not proof: TypeScript cannot verify a
+// dynamically loaded module's call signatures by any route, `as` included. So the
+// trust is made as small and as loud as it can be:
+//
+//   - the type is `Pick<>`ed down to the three functions this module actually
+//     calls, taken from the SDK's OWN declarations. A rename in the package is a
+//     build error here, not a discovery at 3am.
+//   - the three are CHECKED at load. A guard, not a cast: if the shape is ever not
+//     what the declarations promise, the api refuses to boot and says which name is
+//     missing, instead of reporting nothing and looking perfectly healthy — which
+//     is the failure mode an error reporter has and a normal dependency does not.
+type SentryApi = Pick<typeof SentrySdk, "init" | "withScope" | "captureException">;
 
-function sdk(): typeof SentrySdk {
-  const sentry: typeof SentrySdk = loaded ?? require("@sentry/nestjs");
+const REQUIRED: readonly (keyof SentryApi)[] = ["init", "withScope", "captureException"];
+
+let loaded: SentryApi | undefined;
+
+function sdk(): SentryApi {
+  if (loaded !== undefined) return loaded;
+  const sentry: SentryApi = require("@sentry/nestjs");
+  for (const name of REQUIRED) {
+    if (typeof sentry[name] !== "function") {
+      throw new Error(
+        `@sentry/nestjs loaded without ${name}() — error reporting cannot be wired, ` +
+          `and a reporter that silently does nothing is worse than none`,
+      );
+    }
+  }
   loaded = sentry;
   return sentry;
 }

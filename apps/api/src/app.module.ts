@@ -29,10 +29,19 @@ import { RecommendationsController } from "./recommendations/recommendations.con
 // question is already settled by the time Nest reads this metadata: with a DSN,
 // instrument.api.ts loaded the SDK before any other import of main.ts, so this is
 // a cache hit; without one, there is nothing to order.
+// Annotated and then checked, never asserted — same reasoning, and the same one
+// name held to, as the note in errors/reporting.ts.
+type SentrySetup = Pick<typeof import("@sentry/nestjs/setup"), "SentryModule">;
+
 function sentryImports(): DynamicModule[] {
   if (!errorReportingEnabled()) return [];
-  // Annotated, not cast — see the note in errors/reporting.ts.
-  const setup: typeof import("@sentry/nestjs/setup") = require("@sentry/nestjs/setup");
+  const setup: SentrySetup = require("@sentry/nestjs/setup");
+  if (typeof setup.SentryModule?.forRoot !== "function") {
+    throw new Error(
+      "@sentry/nestjs/setup loaded without SentryModule.forRoot() — refusing to boot " +
+        "with a DSN set and no instrumentation to show for it",
+    );
+  }
   return [setup.SentryModule.forRoot()];
 }
 
