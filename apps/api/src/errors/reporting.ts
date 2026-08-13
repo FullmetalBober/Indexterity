@@ -1,5 +1,5 @@
 import { errorReportingEnabled, sentryDefaults } from "@repo/errors";
-import * as Sentry from "@sentry/nestjs";
+import type * as SentrySdk from "@sentry/nestjs";
 import { APP_VERSION } from "../version";
 
 // Error reporting for the api and the worker (#31). What is reported, and from
@@ -10,15 +10,42 @@ import { APP_VERSION } from "../version";
 // modules as they are required, so an init that runs inside bootstrap() — after
 // every other import has already been evaluated — instruments nothing.
 
+// The SDK is REQUIRED rather than imported, and that is the whole of #176. As a
+// static `import * as Sentry`, it cost 13.9 MB of heap and 313 ms in every
+// process — measured inside the runtime image, ~14% of the api's steady state
+// against a 320Mi limit — including the default install, which has no DSN and
+// ships nothing anywhere. `initErrorReporting` already returned early there; the
+// import had happened regardless, because the cost is the import and not the
+// init.
+//
+// The constraint that decides the SHAPE is the ordering above: the require has to
+// end up EARLIER than a static import would be tempting to make it, not later. It
+// runs inside initErrorReporting, which instrument.api.ts calls from its own
+// module body — so with a DSN set the SDK is still loaded during the first import
+// of main.ts, ahead of Nest, Fastify, pg and the driver, exactly as before. A
+// version of this that loaded on first report would patch nothing.
+//
+// `require` rather than `await import`: the api is `type: commonjs`, and this must
+// not become async. An awaited import inside instrument.api.ts would hand control
+// back to main.ts and let the imports below it evaluate first, which is the one
+// thing the ordering exists to prevent.
+let loaded: typeof SentrySdk | undefined;
+
+function sdk(): typeof SentrySdk {
+  loaded ??= require("@sentry/nestjs") as typeof SentrySdk;
+  return loaded;
+}
+
 export type Service = "api" | "worker" | "api+worker";
 
 export function initErrorReporting(service: Service): void {
   // No DSN, no init at all — rather than an init with an undefined dsn, which
   // the SDK accepts and turns into a no-op client that still installs its
-  // integrations. A self-hosted install ships nothing anywhere by default.
+  // integrations. A self-hosted install ships nothing anywhere by default, and
+  // now does not load the SDK to decide that either.
   if (!errorReportingEnabled()) return;
 
-  Sentry.init({
+  sdk().init({
     ...sentryDefaults({ service, release: APP_VERSION }),
     // Default integrations are kept, and two of them are the point: the SDK's
     // onUncaughtException / onUnhandledRejection handlers are the "no
@@ -40,6 +67,7 @@ export interface ErrorContext {
 
 export function captureError(error: unknown, context: ErrorContext = {}): void {
   if (!errorReportingEnabled()) return;
+  const Sentry = sdk();
   Sentry.withScope((scope) => {
     if (context.requestId !== undefined) scope.setTag("request_id", context.requestId);
     if (context.clusterId !== undefined) scope.setTag("cluster_id", context.clusterId);
