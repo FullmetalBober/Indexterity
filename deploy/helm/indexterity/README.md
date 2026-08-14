@@ -232,6 +232,7 @@ stays off by default — the dashboard does not need it.
 | Value | Why it matters |
 |---|---|
 | `topology` | `split` (default), `single-pod` or `single-container` — see above. Packaging only; the Services, the ingress and the app are the same in all three |
+| `api.replicas` / `web.replicas` | **One each by default.** Raise for HA or throughput — both are stateless. `rateLimitMax` is per api process and Postgres connections grow ~15 per api replica; `api.runWorker=true` pins the api at 1 |
 | `allInOne.*` | Image and resources for `topology: single-container`. `api.image` and `web.image` are never pulled in that topology, and neither is a second copy of node |
 | `metrics.webPort` | The dashboard's metrics containerPort. Empty means `metrics.port`, or `metrics.port + 1` when it shares a network namespace with the api |
 | `secrets.existingSecret` | Bring your own Secret (`DATABASE_URL`, `BETTER_AUTH_SECRET`, `MASTER_KEY`, optionally `SMTP_PASS`, `GITHUB_CLIENT_SECRET`) instead of putting values in Helm |
@@ -346,8 +347,17 @@ page, under Security):
   through Postgres, but every replica would install the crontab, so a second
   pod means duplicate scheduling. Scale job throughput with
   `worker.concurrency` instead.
-- **api and web scale horizontally.** Both are stateless; sessions live in
-  Postgres. In a merged topology they scale as one unit, on `api.replicas`.
+- **api and web default to one replica each.** The common install is a single
+  organization managing its own clusters, where a second pod is memory spent on
+  availability nobody asked for. The cost is that a node drain, an eviction or an
+  OOMKill is a gap in service rather than a lost replica — rolling upgrades are
+  unaffected, since a Deployment at one replica surges before it terminates.
+- **Both scale horizontally when you want that.** They are stateless and sessions
+  live in Postgres, so `api.replicas` and `web.replicas` are the only change.
+  Two things move with them: `config.rateLimitMax` is counted per api process, so
+  the real ceiling multiplies (`config.authRateLimitMax` does not — better-auth's
+  half counts in Postgres), and each api replica adds roughly 15 Postgres
+  connections. In a merged topology they scale as one unit, on `api.replicas`.
 - The worker drains its connection pool on `SIGTERM`
   (`terminationGracePeriodSeconds: 60`).
 - **The worker's only Service is `-worker-metrics`**, and it is headless. Nothing
