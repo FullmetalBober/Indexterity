@@ -9,8 +9,9 @@
 # It is a base swap and not a rebuild: `find node_modules -name "*.node"` in the
 # shipped tree returns ZERO, so there is no native code to recompile for musl. That
 # was measured on the built image, not assumed — and the same check on the
-# all-in-one returns 2, both prebuilt lightningcss variants that the web build
-# pulls in (see #182).
+# all-in-one returned 2 at the time, both prebuilt lightningcss variants that the
+# web build pulled in. It returns 0 there too since #182 stopped installing the
+# dashboard's dependencies into a runtime that resolves nothing from them.
 #
 # The risk worth naming is musl's resolver, not the packages: this product dials
 # customer clusters by hostname, and `mongodb+srv://` is an SRV lookup. See D76 for

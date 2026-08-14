@@ -14,16 +14,18 @@
 # packaging is different, so a bug here cannot be a bug the split images do not
 # have.
 #
-# alpine, same base and same reasoning as the two images above (D76). 558 MB → 487.
+# alpine, same base and same reasoning as the two images above (D76): 558 MB → 487.
 #
-# Measuring that turned up something this file should say out loud: its
-# node_modules is 338 MB where the api image's is 153 MB, for the same api. The
-# difference is the DASHBOARD's production dependency tree — `@tanstack/react-start`
-# is a dependency of @repo/web and correctly so, but in a runtime that starts the
-# dashboard from apps/web/.output it is build-time, and the strip below only removes
-# devDependencies. Two prebuilt lightningcss bindings (gnu and musl, 9.6 MB each,
-# one of which can never load) arrive that way. Present on slim too, so the base
-# swap neither caused nor cured it. #182.
+# Measuring that turned up a second thing, and it is fixed at the strip below
+# rather than here: this image's node_modules was 338 MB where the api image's is
+# 153 MB, for the SAME api. The difference was the DASHBOARD's production
+# dependency tree, installed into a runtime that starts the dashboard from
+# apps/web/.output and resolves nothing from it. Those are dependencies and not
+# devDependencies — correctly so, `@tanstack/react-start` is the framework — so the
+# strip only removing devDependencies never reached them. `--build-only` does:
+# node_modules 338 → 153 MB, the api image's number to the megabyte, and
+# `find -name "*.node"` 2 → 0 as the two prebuilt lightningcss bindings go with it.
+# 487 MB → 322. #182, D77.
 FROM docker.io/library/node:26-alpine AS base
 WORKDIR /app
 RUN npm install -g turbo@2.10.5
@@ -52,9 +54,28 @@ RUN --mount=type=cache,target=/root/.cache/turbo turbo run build --filter=@repo/
 # markers, so `npm prune --omit=dev` reads the whole graph as production and keeps
 # typescript, drizzle-kit, @rolldown and esbuild. This image carries both apps, so
 # it was paying that once for a tree only the api reads at runtime.
+#
+# `--build-only @repo/web` drops the dashboard's `dependencies` as well, which the
+# api image has no equivalent of because it prunes @repo/web away entirely. Nothing
+# here resolves a module from that tree: the dashboard is started from
+# apps/web/.output, and the nitro bundle is self-contained — it carries its own
+# traced copies in .output/server/node_modules, listed in .output/server/package.json
+# under the name @repo/web-prod, which is why apps/web/Dockerfile's runtime stage
+# can ship `.output` and no node_modules at all. (That name is also why the strip
+# leaves the trace manifest alone: it is not @repo/web.) So this was 185 MB of the
+# framework and its build plugins, kept because they are dependencies and not
+# devDependencies. Every runtime package the api shares with the dashboard
+# (@opentelemetry/api, @orpc/*, better-auth, drizzle-orm, zod, the three @repo/*
+# packages) is in apps/api/package.json under its own name, so the api's tree is
+# unchanged by this — which is why the target is the api image's 153 MB exactly.
+#
+# The two package.json imports in the dashboard's source are build-time: vite
+# inlines the version into `.output` before this step runs.
 COPY deploy/prod-manifests.mts /tmp/prod-manifests.mts
 RUN --mount=type=cache,target=/root/.npm \
-    node /tmp/prod-manifests.mts . && rm -rf node_modules && npm install --omit=dev
+    node /tmp/prod-manifests.mts . --build-only @repo/web \
+    && rm -rf node_modules \
+    && npm install --omit=dev
 
 FROM docker.io/library/node:26-alpine AS runtime
 WORKDIR /app
