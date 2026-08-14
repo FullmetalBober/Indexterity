@@ -1,0 +1,399 @@
+import type { IndexKey, IndexSpec, QueryShape, ServerHealth } from "../analysis";
+import type {
+  ClusterNode,
+  CollectionLatency,
+  CollectionStorage,
+  DeletePattern,
+  IndexCollector,
+  IndexUsageStat,
+  LatencyPair,
+  WorkloadTarget,
+} from "../engine/ports";
+import {
+  asNumber,
+  MssqlConnection,
+  qualifiedTable,
+  quoteIdent,
+  splitCollectionName,
+} from "./connection";
+
+// The SQL Server implementation of the collector port, over the surfaces the
+// probe validated (issue #36):
+//
+//   sys.dm_db_index_usage_stats   per-index reads/writes. Server-wide with a
+//                                 database_id column; wiped by a restart AND
+//                                 zeroed by ALTER INDEX REBUILD (verified on
+//                                 2022 CU24) — which is why `since` is the
+//                                 server start time and analysis/classify.ts
+//                                 additionally distrusts any counter that went
+//                                 backwards.
+//   sys.dm_db_partition_stats     sizes. A disabled index owns no pages and
+//                                 honestly reports 0.
+//   Query Store                   the workload/latency source: the only one
+//                                 that survives a restart (verified). Read/write
+//                                 latency per table is attributed by matching
+//                                 the plan XML's Object element, whose
+//                                 attributes are adjacent in a stable order
+//                                 (Database, Schema, Table — verified).
+//
+// Everything is three-part qualified ([db].sys.…), which retargets catalog
+// views, database-scoped DMVs and Query Store views alike (verified from the
+// master context), so one connection serves every database the login can see.
+//
+// Create-side signals (query shapes, missing-index DMVs, delete patterns) are
+// deliberately empty in v1 — the drop side is the product here, and the
+// missing-index DMVs need the recurrence and cost gates #36 describes before
+// they are safe to repeat to anyone.
+
+// LIKE-escape inside a pattern: [ opens a character class, % and _ are wild.
+function likeEscape(value: string): string {
+  return value.replace(/[[%_]/g, (match) => `[${match}]`);
+}
+
+// The pattern that finds every Query Store plan touching a table. Bracketed
+// exactly as showplan XML writes it: Schema="[dbo]" Table="[orders]".
+function tablePlanPattern(collection: string): string {
+  const { schema, table } = splitCollectionName(collection);
+  return `%Schema="${likeEscape(`[${schema}]`)}" Table="${likeEscape(`[${table}]`)}"%`;
+}
+
+interface IndexRow {
+  readonly indexName: string;
+  readonly indexType: number;
+  readonly isUnique: boolean;
+  readonly isPrimaryKey: boolean;
+  readonly isUniqueConstraint: boolean;
+  readonly isDisabled: boolean;
+  readonly hasFilter: boolean;
+  readonly filterDefinition: string | null;
+  readonly keyOrdinal: number;
+  readonly isDescending: boolean;
+  readonly columnName: string;
+}
+
+// Rowstore only: 1 = clustered, 2 = nonclustered. Columnstore, XML, spatial and
+// full-text indexes serve queries b-tree reasoning does not describe, so they
+// are invisible to the pipeline rather than mis-modelled by it.
+const ROWSTORE_TYPES = "(1, 2)";
+
+export function toMssqlIndexSpec(rows: readonly IndexRow[]): IndexSpec | null {
+  const first = rows[0];
+  if (first === undefined) return null;
+  const keys: IndexKey[] = [...rows]
+    .sort((a, b) => a.keyOrdinal - b.keyOrdinal)
+    .map((row) => ({ field: row.columnName, direction: row.isDescending ? -1 : 1 }));
+  return {
+    name: first.indexName,
+    keys,
+    // is_unique is set on PK and unique-constraint indexes too; the or-chain is
+    // belt and braces because `unique` is what isNeverDrop keys on, and every
+    // one of these classes suspends its constraint while disabled (verified —
+    // a duplicate insert succeeded under a disabled unique index).
+    unique: first.isUnique || first.isPrimaryKey || first.isUniqueConstraint,
+    ttl: false,
+    partial: first.hasFilter,
+    // The filter is a T-SQL predicate, not a mongo expression; carried under a
+    // `definition` key so a REORDER or an undo can rebuild it verbatim.
+    partialFilter: first.filterDefinition === null ? null : { definition: first.filterDefinition },
+    sparse: false,
+    // A disabled index is the hidden state: invisible to the planner, not
+    // maintained, definition retained. Same lifecycle slot as collMod hidden.
+    hidden: first.isDisabled,
+    // The clustered index IS the table — dropping it is a rebuild of the whole
+    // table's storage, and disabling it takes the table offline (verified,
+    // Msg 8655). isShardKey is the port's "the cluster does not work without
+    // it" flag, and this is exactly that.
+    isShardKey: first.indexType === 1,
+    collation: null,
+  };
+}
+
+// Index names extracted from `WITH (INDEX(…))` hints in statement text, and
+// from Index="[…]" attributes in forced plans. Over-reporting is the safe
+// direction — a name that is not an index on this table is ignored by the
+// snapshot layer, and a hinted index that goes unreported would be hidden and
+// break its queries with Msg 315 (verified).
+export function indexNamesFromHintText(text: string): string[] {
+  const names: string[] = [];
+  const hint = /\bINDEX\s*[(=]\s*(\[[^\]]+\]|[A-Za-z0-9_#$@]+)/gi;
+  for (const match of text.matchAll(hint)) {
+    const raw = match[1] ?? "";
+    const name = raw.startsWith("[") ? raw.slice(1, -1) : raw;
+    // Positional hints (INDEX(1)) name the clustered index by ordinal; the
+    // pipeline never hides a clustered index, so they are safely dropped here.
+    if (name.length > 0 && !/^\d+$/.test(name)) names.push(name);
+  }
+  return names;
+}
+
+export function indexNamesFromForcedPlan(planXml: string): string[] {
+  const names: string[] = [];
+  for (const match of planXml.matchAll(/Index="\[((?:[^\]]|\]\])+)\]"/g)) {
+    const name = match[1];
+    if (name !== undefined) names.push(name.replaceAll("]]", "]"));
+  }
+  return names;
+}
+
+export class MssqlIndexCollector implements IndexCollector {
+  constructor(private readonly conn: MssqlConnection) {}
+
+  async listCollectionNames(database: string): Promise<string[]> {
+    const rows = await this.conn.query<{ name: string }>(
+      `SELECT s.name + '.' + t.name AS name
+       FROM ${quoteIdent(database)}.sys.tables t
+       JOIN ${quoteIdent(database)}.sys.schemas s ON s.schema_id = t.schema_id
+       WHERE t.is_ms_shipped = 0
+       ORDER BY s.name, t.name`,
+    );
+    return rows.map((row) => row.name);
+  }
+
+  async listIndexes(database: string, collection: string): Promise<IndexSpec[]> {
+    const rows = await this.conn.query<IndexRow>(
+      `SELECT
+         i.name AS indexName,
+         i.type AS indexType,
+         i.is_unique AS isUnique,
+         i.is_primary_key AS isPrimaryKey,
+         i.is_unique_constraint AS isUniqueConstraint,
+         i.is_disabled AS isDisabled,
+         i.has_filter AS hasFilter,
+         i.filter_definition AS filterDefinition,
+         ic.key_ordinal AS keyOrdinal,
+         ic.is_descending_key AS isDescending,
+         c.name AS columnName
+       FROM ${quoteIdent(database)}.sys.indexes i
+       JOIN ${quoteIdent(database)}.sys.index_columns ic
+         ON ic.object_id = i.object_id AND ic.index_id = i.index_id
+       JOIN ${quoteIdent(database)}.sys.columns c
+         ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+       WHERE i.object_id = OBJECT_ID(@qualified)
+         AND i.type IN ${ROWSTORE_TYPES}
+         AND i.is_hypothetical = 0
+         AND i.name IS NOT NULL
+         AND ic.key_ordinal > 0
+       ORDER BY i.index_id, ic.key_ordinal`,
+      { qualified: qualifiedTable(database, collection) },
+    );
+    const grouped = new Map<string, IndexRow[]>();
+    for (const row of rows) {
+      const bucket = grouped.get(row.indexName) ?? [];
+      bucket.push(row);
+      grouped.set(row.indexName, bucket);
+    }
+    const specs: IndexSpec[] = [];
+    for (const bucket of grouped.values()) {
+      const spec = toMssqlIndexSpec(bucket);
+      if (spec !== null) specs.push(spec);
+    }
+    return specs;
+  }
+
+  // One member: the server. An Availability Group's readable secondaries keep
+  // their own usage stats exactly like replica-set members do; reading them is
+  // follow-up work, and until then the roster honestly names the one node the
+  // connection string reaches.
+  async collectNodes(): Promise<readonly ClusterNode[] | null> {
+    try {
+      const identity = await this.conn.serverIdentity();
+      return [{ host: identity.serverName, role: "standalone", state: "answered" }];
+    } catch {
+      return null;
+    }
+  }
+
+  async collectUsage(database: string, collection: string): Promise<IndexUsageStat[]> {
+    const identity = await this.conn.serverIdentity();
+    const rows = await this.conn.query<{ indexName: string; ops: number }>(
+      // LEFT JOIN: an index with no row has served nothing since the counters
+      // started, and that absence is a reading of zero, not a gap. The usage
+      // DMV is server-wide with a database_id column — no retargeting needed.
+      `SELECT
+         i.name AS indexName,
+         COALESCE(s.user_seeks, 0) + COALESCE(s.user_scans, 0) + COALESCE(s.user_lookups, 0) AS ops
+       FROM ${quoteIdent(database)}.sys.indexes i
+       LEFT JOIN sys.dm_db_index_usage_stats s
+         ON s.database_id = DB_ID(@db) AND s.object_id = i.object_id AND s.index_id = i.index_id
+       WHERE i.object_id = OBJECT_ID(@qualified)
+         AND i.type IN ${ROWSTORE_TYPES}
+         AND i.is_hypothetical = 0
+         AND i.name IS NOT NULL`,
+      { db: database, qualified: qualifiedTable(database, collection) },
+    );
+    return rows.map((row) => ({
+      indexName: row.indexName,
+      host: identity.serverName,
+      // bigint columns arrive as strings — see asNumber.
+      ops: asNumber(row.ops),
+      // When the counters started: the service start. A REBUILD also restarts
+      // one index's counter WITHOUT moving this (verified on 2022) — that case
+      // is caught engine-neutrally by the ops-went-backwards rule in
+      // analysis/classify.ts.
+      since: identity.startedAt,
+    }));
+  }
+
+  async collectionStorage(database: string, collection: string): Promise<CollectionStorage> {
+    const rows = await this.conn.query<{ dataSizeBytes: number; docCount: number }>(
+      // Index ids 0 and 1 are the heap or the clustered index — the table
+      // itself. Partitions sum; row_count is per partition of the data.
+      `SELECT
+         COALESCE(SUM(p.used_page_count), 0) * 8192 AS dataSizeBytes,
+         COALESCE(SUM(p.row_count), 0) AS docCount
+       FROM ${quoteIdent(database)}.sys.dm_db_partition_stats p
+       WHERE p.object_id = OBJECT_ID(@qualified) AND p.index_id IN (0, 1)`,
+      { qualified: qualifiedTable(database, collection) },
+    );
+    const row = rows[0];
+    return { dataSizeBytes: asNumber(row?.dataSizeBytes), docCount: asNumber(row?.docCount) };
+  }
+
+  async indexSizes(database: string, collection: string): Promise<Record<string, number>> {
+    const rows = await this.conn.query<{ indexName: string; sizeBytes: number }>(
+      `SELECT i.name AS indexName, COALESCE(SUM(p.used_page_count), 0) * 8192 AS sizeBytes
+       FROM ${quoteIdent(database)}.sys.indexes i
+       LEFT JOIN ${quoteIdent(database)}.sys.dm_db_partition_stats p
+         ON p.object_id = i.object_id AND p.index_id = i.index_id
+       WHERE i.object_id = OBJECT_ID(@qualified)
+         AND i.type IN ${ROWSTORE_TYPES}
+         AND i.is_hypothetical = 0
+         AND i.name IS NOT NULL
+       GROUP BY i.name`,
+      { qualified: qualifiedTable(database, collection) },
+    );
+    const totals: Record<string, number> = {};
+    for (const row of rows) totals[row.indexName] = asNumber(row.sizeBytes);
+    return totals;
+  }
+
+  // Read/write ops and latency per table, from Query Store: executions and
+  // average duration (microseconds) summed over every plan whose XML touches
+  // the table, split read/write on the statement type. Cumulative in spirit —
+  // Query Store accumulates across restarts (verified) — with two honest
+  // caveats the gates already tolerate: size-based cleanup can retire old
+  // intervals (a counter that shrinks reads as UNOBSERVABLE, never as a
+  // verdict), and a hard crash loses the last unflushed interval (default
+  // 15 minutes).
+  async collectionLatency(database: string, collection: string): Promise<CollectionLatency> {
+    const enabled = await this.queryStoreEnabled(database);
+    if (!enabled) {
+      return {
+        reads: { ops: 0, latencyMicros: 0 },
+        writes: { ops: 0, latencyMicros: 0 },
+      };
+    }
+    const rows = await this.conn.query<{
+      readOps: number;
+      readMicros: number;
+      writeOps: number;
+      writeMicros: number;
+    }>(
+      `SELECT
+         COALESCE(SUM(CASE WHEN plans.xml LIKE '%StatementType="SELECT"%'
+           THEN rs.count_executions ELSE 0 END), 0) AS readOps,
+         COALESCE(SUM(CASE WHEN plans.xml LIKE '%StatementType="SELECT"%'
+           THEN rs.count_executions * rs.avg_duration ELSE 0 END), 0) AS readMicros,
+         COALESCE(SUM(CASE WHEN plans.xml LIKE '%StatementType="SELECT"%'
+           THEN 0 ELSE rs.count_executions END), 0) AS writeOps,
+         COALESCE(SUM(CASE WHEN plans.xml LIKE '%StatementType="SELECT"%'
+           THEN 0 ELSE rs.count_executions * rs.avg_duration END), 0) AS writeMicros
+       FROM (
+         SELECT p.plan_id, CAST(p.query_plan AS nvarchar(max)) AS xml
+         FROM ${quoteIdent(database)}.sys.query_store_plan p
+       ) plans
+       JOIN ${quoteIdent(database)}.sys.query_store_runtime_stats rs
+         ON rs.plan_id = plans.plan_id
+       WHERE plans.xml LIKE @pattern`,
+      { pattern: tablePlanPattern(collection) },
+    );
+    const row = rows[0];
+    return {
+      reads: {
+        ops: asNumber(row?.readOps),
+        latencyMicros: Math.round(asNumber(row?.readMicros)),
+      },
+      writes: {
+        ops: asNumber(row?.writeOps),
+        latencyMicros: Math.round(asNumber(row?.writeMicros)),
+      },
+    };
+  }
+
+  async readLatency(database: string, collection: string): Promise<LatencyPair> {
+    const { reads } = await this.collectionLatency(database, collection);
+    return reads;
+  }
+
+  // Indexes named explicitly in the workload: `WITH (INDEX(…))` hints in Query
+  // Store statement texts, plus every index a FORCED plan pins (freezing a plan
+  // is the moral equivalent of a hint, and disabling an index a forced plan
+  // uses breaks the force). Msg 315 is what hiding a hinted index does to its
+  // queries (verified) — the same break-not-slow trap as mongo hint().
+  async collectHintedIndexes(database: string, collection: string): Promise<string[]> {
+    if (!(await this.queryStoreEnabled(database))) return [];
+    const names = new Set<string>();
+    const hinted = await this.conn.query<{ text: string }>(
+      `SELECT DISTINCT qt.query_sql_text AS text
+       FROM ${quoteIdent(database)}.sys.query_store_query_text qt
+       WHERE qt.query_sql_text LIKE @tableLike AND qt.query_sql_text LIKE '%INDEX%'`,
+      { tableLike: `%${likeEscape(splitCollectionName(collection).table)}%` },
+    );
+    for (const row of hinted) {
+      for (const name of indexNamesFromHintText(row.text)) names.add(name);
+    }
+    const forced = await this.conn.query<{ xml: string }>(
+      `SELECT CAST(p.query_plan AS nvarchar(max)) AS xml
+       FROM ${quoteIdent(database)}.sys.query_store_plan p
+       WHERE p.is_forced_plan = 1
+         AND CAST(p.query_plan AS nvarchar(max)) LIKE @pattern`,
+      { pattern: tablePlanPattern(collection) },
+    );
+    for (const row of forced) {
+      for (const name of indexNamesFromForcedPlan(row.xml)) names.add(name);
+    }
+    return [...names];
+  }
+
+  // Create-side signals: none in v1 (see the header comment and #36).
+  collectSlowQueries(_database: string, _collection: string): Promise<QueryShape[]> {
+    return Promise.resolve([]);
+  }
+
+  collectWorkload(
+    _targets: readonly WorkloadTarget[],
+  ): Promise<Map<string, readonly QueryShape[]>> {
+    return Promise.resolve(new Map());
+  }
+
+  collectDeletePatterns(_database: string, _collection: string): Promise<DeletePattern[]> {
+    return Promise.resolve([]);
+  }
+
+  // No mapping yet: the mongo counters this feeds (collection scans per
+  // interval, docs-per-key) have no per-server twins cheap enough to trust.
+  // Null is the port's "could not read", and everything else works without it.
+  collectServerHealth(): Promise<ServerHealth | null> {
+    return Promise.resolve(null);
+  }
+
+  private readonly queryStoreState = new Map<string, boolean>();
+
+  private async queryStoreEnabled(database: string): Promise<boolean> {
+    const cached = this.queryStoreState.get(database);
+    if (cached !== undefined) return cached;
+    let enabled = false;
+    try {
+      const rows = await this.conn.query<{ state: number }>(
+        // 1 = READ_ONLY (history still readable), 2 = READ_WRITE.
+        `SELECT actual_state AS state
+         FROM ${quoteIdent(database)}.sys.database_query_store_options`,
+      );
+      enabled = rows[0] !== undefined && rows[0].state > 0;
+    } catch {
+      enabled = false;
+    }
+    this.queryStoreState.set(database, enabled);
+    return enabled;
+  }
+}

@@ -5,8 +5,12 @@
 //
 // The socket-level codes are Node's and apply to every driver; the named errors
 // are the Mongo driver's. Other engines add their own names here as they land.
+// ConnectionError is tedious (the SQL Server driver): every dial failure —
+// refused, timed out, DNS — arrives under that one name, with the detail in
+// the message. ELOGIN (bad credentials) is deliberately NOT unreachable: it
+// surfaces as its own error so nobody retries a wrong password five times.
 const UNREACHABLE_NAME =
-  /MongoServerSelectionError|MongoNetworkError|MongoNetworkTimeoutError|MongoTimeoutError/;
+  /MongoServerSelectionError|MongoNetworkError|MongoNetworkTimeoutError|MongoTimeoutError|^ConnectionError$/;
 // `ETIMED?OUT` covers both spellings, and they are two different errors from two
 // different parts of Node: a socket that gave up is `ETIMEDOUT`, and a DNS query
 // that got no answer is `ETIMEOUT`. Matching only the first missed every
@@ -28,8 +32,10 @@ const UNREACHABLE_NAME =
 // driver's own timeout wins the race there. Both are matched, so the
 // classification is identical on both — but only because that alternative is in
 // this list, which is exactly the D64 failure mode one libc away.
+// ESOCKET and "Failed to connect" are tedious's socket-level failures; the
+// Node codes before them cover every driver.
 const UNREACHABLE_MESSAGE =
-  /getaddrinfo|querySrv|queryTxt|ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ENETUNREACH|ETIMED?OUT|Server selection timed out/i;
+  /getaddrinfo|querySrv|queryTxt|ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ENETUNREACH|ETIMED?OUT|ESOCKET|Failed to connect|Server selection timed out/i;
 
 export function isUnreachableError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;

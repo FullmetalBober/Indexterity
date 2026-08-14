@@ -204,6 +204,7 @@ const workerShape = {
   ALLOW_PRIVATE_CLUSTER_TARGETS: flag(false),
   ALLOW_INSECURE_CLUSTER_TLS: flag(false),
   ALLOW_UNTESTED_MONGO_VERSION: flag(false),
+  ALLOW_UNTESTED_MSSQL_VERSION: flag(false),
   // One job at a time. Each concurrent job holds its own working set — a collect
   // pass keeps a cluster's index and collection statistics in memory while it
   // runs — so this multiplies a worker's memory rather than sharing it, and the

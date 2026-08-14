@@ -63,18 +63,28 @@ function parseTime(value: string | undefined): number | null {
   return Number.isFinite(time) ? time : null;
 }
 
-// Did any member's $indexStats counter restart inside this history? The
-// counter resets to zero when mongod restarts or the index is rebuilt, and
-// `accesses.since` jumps forward to mark it. Two ways to notice:
+// Did any member's usage counter restart inside this history? The counter
+// resets to zero when the server restarts or the index is rebuilt. Three ways
+// to notice:
 //
 //   1. `since` advanced for a member between two snapshots, or
 //   2. the newest counters are YOUNGER than the window being judged — i.e.
 //      they cannot possibly account for the whole period we are claiming was
-//      idle (architecture §6.2).
+//      idle (architecture §6.2), or
+//   3. a member's cumulative ops went BACKWARDS between two snapshots. A
+//      cumulative counter cannot shrink; one that did restarted, whatever its
+//      `since` claims. This is the only trigger that catches SQL Server's
+//      ALTER INDEX REBUILD, which zeroes the index's row in
+//      sys.dm_db_index_usage_stats without the service restarting (verified on
+//      2022 CU24) — and index-rebuild maintenance jobs are routine in MSSQL
+//      shops, so without it a busy index reads as dead the week after every
+//      rebuild. Mongo's $indexStats moves `since` on its resets, so rule 1
+//      already covers it there; this is belt and braces for every engine.
 //
 // Snapshots collected before `since` was persisted carry none, and are simply
-// skipped: no evidence either way, and the irreversible step downstream is
-// still guarded by the regression gate.
+// skipped by rules 1 and 2: no evidence either way, and the irreversible step
+// downstream is still guarded by the regression gate. Rule 3 needs no `since`
+// at all.
 export function countersRestartedDuring(history: readonly UsageSnapshot[]): boolean {
   const sorted = sortedRuns(history);
   const first = sorted[0];
@@ -82,8 +92,12 @@ export function countersRestartedDuring(history: readonly UsageSnapshot[]): bool
   if (first === undefined || last === undefined) return false;
 
   const earliestSince = new Map<string, number>();
+  const previousOps = new Map<string, number>();
   for (const snapshot of sorted) {
     for (const member of snapshot.perMember) {
+      const before = previousOps.get(member.member);
+      if (before !== undefined && member.ops < before) return true;
+      previousOps.set(member.member, member.ops);
       const since = parseTime(member.since);
       if (since === null) continue;
       const previous = earliestSince.get(member.member);

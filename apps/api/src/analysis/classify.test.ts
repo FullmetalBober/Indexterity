@@ -236,6 +236,37 @@ describe("countersRestartedDuring", () => {
     expect(countersRestartedDuring(history)).toBe(true);
   });
 
+  it("catches a cumulative counter that went backwards, even when since holds still", () => {
+    // The SQL Server trap (#36): ALTER INDEX REBUILD zeroes the index's usage
+    // row without the service restarting, so `since` — the server start —
+    // never moves. Verified on 2022 CU24. A counter cannot shrink; one that
+    // did restarted.
+    const history = [
+      snap(1, [{ member: "a", ops: 500, since: OLD }]),
+      snap(2, [{ member: "a", ops: 520, since: OLD }]),
+      snap(3, [{ member: "a", ops: 0, since: OLD }]),
+    ];
+    expect(countersRestartedDuring(history)).toBe(true);
+  });
+
+  it("catches a backwards counter on legacy rows with no since at all", () => {
+    const history = [
+      snap(1, [{ member: "a", ops: 300 }]),
+      snap(2, [{ member: "a", ops: 40 }]),
+      snap(3, [{ member: "a", ops: 45 }]),
+    ];
+    expect(countersRestartedDuring(history)).toBe(true);
+  });
+
+  it("does not read ordinary growth as a restart", () => {
+    const history = [
+      snap(1, [{ member: "a", ops: 100, since: OLD }]),
+      snap(2, [{ member: "a", ops: 100, since: OLD }]),
+      snap(3, [{ member: "a", ops: 260, since: OLD }]),
+    ];
+    expect(countersRestartedDuring(history)).toBe(false);
+  });
+
   it("says nothing when snapshots predate the field (legacy rows)", () => {
     const history = [
       snap(1, [{ member: "a", ops: 0 }]),

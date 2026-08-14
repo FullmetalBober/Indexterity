@@ -148,6 +148,49 @@ jobs:
       - run: npm run db:migrate
       - run: npm run test:int -w @repo/api
 
+  # The MSSQL adapter against a real SQL Server 2022 — its own job rather than a
+  # fourth matrix leg, because the mongo matrix would start the (heavy) mssql
+  # container three times to run one file. Adapter-level: no api is spawned, so
+  # postgres is not needed; DATABASE_URL only satisfies the env schema.
+  integration-mssql:
+    runs-on: ubuntu-latest
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: "Int3gration!Pass"
+        ports:
+          - "1433:1433"
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P 'Int3gration!Pass' -Q 'SELECT 1' -b"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 12
+          --health-start-period 20s
+    env:
+      DATABASE_URL: postgres://unused:unused@localhost:5432/unused
+      MSSQL_URL: "mssql://sa:Int3gration%21Pass@localhost:1433?trustservercertificate=true"
+      BETTER_AUTH_SECRET: integration-secret
+      MASTER_KEY: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "26"
+          cache: npm
+      - uses: actions/cache@v6
+        id: modules
+        with:
+          path: |
+            node_modules
+            apps/*/node_modules
+            packages/*/node_modules
+          key: modules-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+      - run: npm ci
+        if: steps.modules.outputs.cache-hit != 'true'
+      - run: npm run test:int -w @repo/api -- integration/mssql.int.test.ts
+
   # The only layer that exercises browser -> web server -> api -> postgres/mongo.
   # It caught the session-cookie relay double-encoding every request after
   # sign-in, which no unit or api test could see: each side was correct on its

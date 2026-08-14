@@ -20,7 +20,7 @@ import {
 import { DatabaseService } from "../db/database.service";
 import { allowPrivateTargets, assertTargetsAllowed, BlockedTargetError } from "../engine/net-guard";
 import { NO_TLS_OVERRIDES, type TlsOverrides } from "../engine/ports";
-import { adapterFor, engineSupported } from "../engine/registry";
+import { adapterFor, detectEngine, engineSupported, supportedEngines } from "../engine/registry";
 import { consumeDialBudget } from "../errors/dial-budget";
 import { mapClusterError, toCluster, toDiagnosis } from "../http/mappers";
 import { TenancyService } from "../http/tenancy.service";
@@ -208,13 +208,15 @@ export class ClustersController {
   ): Promise<void> {
     if (!engineSupported(engine)) {
       throw errors.BAD_REQUEST({
-        message: `${engine} support is planned — only MONGODB clusters can connect today`,
+        message:
+          `${engine} support is planned — ` +
+          `${supportedEngines().join(" and ")} clusters can connect today`,
       });
     }
     const adapter = adapterFor(engine);
     if (!adapter.isConnString(value)) {
       throw errors.BAD_REQUEST({
-        message: "connection string must be mongodb:// or mongodb+srv://",
+        message: `connection string must be ${adapter.connStringHint}`,
       });
     }
     await consumeDialBudget(this.database.db, userId);
@@ -301,7 +303,11 @@ export class ClustersController {
     return route(this.tenancy, contract.checkConnection, req, "owner").handler(
       async ({ input, errors, context }) => {
         await this.tenancy.requireOwner(req);
-        const engine = input.engine ?? "MONGODB";
+        // An explicit engine wins; otherwise the string itself says (mongodb:// vs
+        // mssql:// vs ADO Server=… are disjoint), so the web form needs no
+        // engine picker to connect a SQL Server. MONGODB last, for strings
+        // nothing claims — its adapter then refuses with the right hint.
+        const engine = input.engine ?? detectEngine(input.connectionString) ?? "MONGODB";
         const adapter = adapterFor(engine);
         // The checkboxes are applied to the string BEFORE anything looks at it, so
         // the preflight answers for the connection that would actually be stored
@@ -324,7 +330,11 @@ export class ClustersController {
         // for the name.
         await this.tenancy.requireRoomFor(orgId, "clusters");
         await this.assertNameFree(orgId, input.name, errors);
-        const engine = input.engine ?? "MONGODB";
+        // An explicit engine wins; otherwise the string itself says (mongodb:// vs
+        // mssql:// vs ADO Server=… are disjoint), so the web form needs no
+        // engine picker to connect a SQL Server. MONGODB last, for strings
+        // nothing claims — its adapter then refuses with the right hint.
+        const engine = input.engine ?? detectEngine(input.connectionString) ?? "MONGODB";
         const adapter = adapterFor(engine);
         const overrides = input.tlsOverrides ?? NO_TLS_OVERRIDES;
         const value = adapter.applySecureTransport(input.connectionString, overrides);
