@@ -6,3 +6,4 @@ export * from "./connection";
 export * from "./diagnose";
 export * from "./executor";
 export * from "./version";
+export * from "./workload";

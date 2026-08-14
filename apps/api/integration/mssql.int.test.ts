@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { EngineSession } from "../src/engine/ports";
+import { type EngineSession, workloadKey } from "../src/engine/ports";
 import { detectEngine } from "../src/engine/registry";
 import { collectSnapshots } from "../src/mongo/snapshots";
 import { mssqlAdapter } from "../src/mssql/adapter";
@@ -48,8 +48,35 @@ describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", 
        SELECT TOP 5000 ABS(CHECKSUM(NEWID())) % 500, CONVERT(varchar(80), NEWID())
        FROM sys.all_columns a CROSS JOIN sys.all_columns b`,
     );
-    // Drive seeks through ix_customer so usage stats have something to say.
-    await seed.query(`SELECT COUNT(*) AS n FROM [${DB}].dbo.orders WHERE customer_id = 42`);
+    // 2022 creates new databases with QUERY_CAPTURE_MODE = AUTO, which skips
+    // cheap one-off statements — the workload assertions need the seeded
+    // queries captured deterministically.
+    await seed.execute(`ALTER DATABASE [${DB}] SET QUERY_STORE (QUERY_CAPTURE_MODE = ALL)`);
+    // Drive seeks through ix_customer so usage stats have something to say,
+    // and workload shapes for collectWorkload: equality + an in-memory sort.
+    // Two things are deliberate here. The queries run IN the analyzed
+    // database's context (USE) — Query Store records a query in the database
+    // it ran in, not the one it read, and a three-part query from master
+    // would land in master's nonexistent store. And the sort column is one NO
+    // index can order by: SQL Server serves ORDER BY <indexed col> DESC with
+    // a backward scan and emits no Sort operator at all (#207). The two
+    // literal variants prove shape merging across Query Store's per-text
+    // fragmentation.
+    await seed.query(`USE [${DB}]; SELECT COUNT(*) AS n FROM dbo.orders WHERE customer_id = 42`);
+    await seed.query(
+      `USE [${DB}]; SELECT TOP 3 id FROM dbo.orders WHERE customer_id = 7 ORDER BY status DESC`,
+    );
+    await seed.query(
+      `USE [${DB}]; SELECT TOP 3 id FROM dbo.orders WHERE customer_id = 8 ORDER BY status DESC`,
+    );
+    // Equality + range in one seek. Two predicates on purpose: the server
+    // auto-parameterizes single-predicate trivial plans AND removes those
+    // Query Store entries again on index DDL against the table (observed
+    // live) — the hide-lifecycle test below performs exactly such DDL, so
+    // the workload assertions ride only on non-trivial plans.
+    await seed.query(
+      `USE [${DB}]; SELECT COUNT(*) AS n FROM dbo.orders WHERE customer_id = 9 AND id > 100`,
+    );
     session = await mssqlAdapter.open(MSSQL_URL as string, OVERRIDES);
   }, 120_000);
 
@@ -137,5 +164,44 @@ describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", 
     await expect(
       session.executor(true).create(DB, "dbo.orders", { status: 1 }, {}),
     ).rejects.toThrow(/read-only/);
+  });
+
+  it("collects query shapes from Query Store plans (#201)", async () => {
+    const workload = await session.collector.collectWorkload([
+      { database: DB, collection: "dbo.orders" },
+    ]);
+    const shapes = workload.get(workloadKey(DB, "dbo.orders")) ?? [];
+    expect(shapes.length).toBeGreaterThan(0);
+
+    // The seeded equality + in-memory sort arrives as a shape. Nothing about
+    // exact counts or merged constants is asserted live: whether the two
+    // literal variants merge depends on the plans the optimizer happened to
+    // pick (auto-parameterization, seek vs scan), which varies across fresh
+    // servers — CI proved it. Merge arithmetic is pinned by the unit tests;
+    // this suite proves extraction against a real server.
+    const sorted = shapes.find(
+      (shape) => shape.sortedInMemory === true && shape.equality.includes("customer_id"),
+    );
+    expect(sorted, JSON.stringify(shapes)).toBeDefined();
+    expect(sorted?.count).toBeGreaterThanOrEqual(1);
+    expect(sorted?.sort).toEqual([{ field: "status", direction: -1 }]);
+    expect(sorted?.docsExamined ?? 0).toBeGreaterThan(0);
+
+    // The two-predicate seek arrives with the equality/range split intact.
+    // No constants are asserted anywhere live: auto-parameterization can
+    // erase literals server-side, so constants are best-effort by design
+    // (unit tests pin the extraction itself).
+    const seek = shapes.find(
+      (shape) => shape.equality.includes("customer_id") && shape.range.includes("id"),
+    );
+    expect(seek, JSON.stringify(shapes)).toBeDefined();
+    expect(seek?.sortedInMemory).toBe(false);
+    expect(seek?.count).toBeGreaterThanOrEqual(1);
+
+    // And nothing DDL-shaped: the hide-lifecycle test built and dropped
+    // ix_cycle before this ran, and CREATE INDEX's own scan+sort plan must
+    // not read as workload.
+    const phantom = shapes.find((shape) => shape.sort.length >= 3 && shape.equality.length === 0);
+    expect(phantom).toBeUndefined();
   });
 });
