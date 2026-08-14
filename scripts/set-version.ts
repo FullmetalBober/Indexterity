@@ -13,6 +13,22 @@
 // The release workflow takes the version from the git tag and asserts it
 // matches what is committed here, so a tag cannot claim a version the tree does
 // not have.
+//
+// `package-lock.json` is one of the files, and was not for three releases (#186).
+// npm records a workspace's version there too, so a bump that skipped it left a
+// tree `npm ci` REFUSES while `version:check` reported success — the one command
+// whose whole job is reporting version drift, silent about the drift that stops
+// the build. 0.3.0, 0.4.0 and 0.5.0 each fixed it by hand with
+// `npm install --package-lock-only`.
+//
+// Written directly rather than by shelling out to that command, for three
+// reasons: it cannot re-resolve a transitive dependency as a side effect of a
+// version bump, it needs no registry and so no warm cache (a release should not
+// depend on the network to renumber itself), and `set` and `check` then read the
+// same list of places and cannot drift apart. That is only safe because npm's
+// own formatting is exactly `JSON.stringify(lock, null, 2)` plus a newline —
+// verified byte-for-byte on the committed lockfile — so a round trip through
+// here changes the version lines and nothing else.
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,6 +45,7 @@ const PACKAGES = [
   "packages/metrics/package.json",
 ];
 const CHART = "deploy/helm/indexterity/Chart.yaml";
+const LOCKFILE = "package-lock.json";
 
 // Semver, optionally with a prerelease — enough to reject a typo without
 // reimplementing the spec.
@@ -43,8 +60,48 @@ function readJson(rel: string): PackageJson {
   return JSON.parse(readFileSync(join(ROOT, rel), "utf8")) as PackageJson;
 }
 
-function writeJson(rel: string, value: PackageJson): void {
+function writeJson(rel: string, value: object): void {
   writeFileSync(join(ROOT, rel), `${JSON.stringify(value, null, 2)}\n`);
+}
+
+// The lockfile, as far as this file is concerned: a version at the document root
+// and one per entry in `packages`, keyed by directory.
+type LockEntry = { version?: string } & Record<string, unknown>;
+type Lockfile = {
+  lockfileVersion: number;
+  version?: string;
+  packages: Record<string, LockEntry>;
+} & Record<string, unknown>;
+
+// Where the lockfile states the version of the manifest at `rel`: a workspace is
+// keyed by its directory, the root by the empty string.
+//
+// The root's version is stated TWICE — once as `packages[""]` and once at the
+// document root — and `node_modules/@repo/*` states it not at all, those being
+// links carrying a `resolved` path instead. Eight fields between them, which is
+// why renumbering shows up as a 16-line lockfile diff.
+function lockKey(rel: string): string {
+  return rel === "package.json" ? "" : dirname(rel);
+}
+
+function readLockfile(): Lockfile {
+  const raw: unknown = JSON.parse(readFileSync(join(ROOT, LOCKFILE), "utf8"));
+  const lock = raw as Lockfile;
+  // Refuse a shape this does not recognise rather than quietly touch nothing in
+  // it. Updating no fields and reporting success is the exact failure #186 was,
+  // and a lockfileVersion bump is the likeliest way to reintroduce it.
+  if (lock.lockfileVersion !== 3) {
+    console.error(
+      `${LOCKFILE} is lockfileVersion ${JSON.stringify(lock.lockfileVersion)}, and this ` +
+        "script knows 3. Check where npm records workspace versions now, then update lockKey().",
+    );
+    process.exit(1);
+  }
+  if (typeof lock.packages !== "object" || lock.packages === null) {
+    console.error(`${LOCKFILE} has no "packages" map, so there is nothing to renumber in it`);
+    process.exit(1);
+  }
+  return lock;
 }
 
 type ChartVersions = { text: string; version?: string; appVersion?: string };
@@ -63,6 +120,26 @@ function set(version: string): void {
     console.error(`not a version: ${version} (expected e.g. 0.2.0)`);
     process.exit(1);
   }
+  // Everything that can refuse, before anything is written. A run that renumbers
+  // the manifests and then bails on the lockfile leaves precisely the tree #186
+  // is about — and leaves it behind a non-zero exit, which reads as "nothing
+  // happened". So the lockfile is read and its entries are resolved up front, and
+  // the writes below cannot fail partway for a reason this could have known.
+  const lock = readLockfile();
+  const entries: LockEntry[] = [];
+  for (const rel of PACKAGES) {
+    const key = lockKey(rel);
+    const entry = lock.packages[key];
+    // A manifest with no lockfile entry means the two have drifted about which
+    // workspaces exist, and renumbering the rest would hide that.
+    if (entry === undefined) {
+      console.error(`${LOCKFILE} has no packages entry for ${JSON.stringify(key)} (${rel})`);
+      console.error("run npm install first, so the lockfile knows about every workspace");
+      process.exit(1);
+    }
+    entries.push(entry);
+  }
+
   for (const rel of PACKAGES) {
     const pkg = readJson(rel);
     pkg.version = version;
@@ -75,9 +152,18 @@ function set(version: string): void {
       .replace(/^version: .+$/m, `version: ${version}`)
       .replace(/^appVersion: .+$/m, `appVersion: "${version}"`),
   );
-  console.log(`${version} written to ${PACKAGES.length} package.json files and the chart`);
+  lock.version = version;
+  for (const entry of entries) entry.version = version;
+  writeJson(LOCKFILE, lock);
+
   console.log(
-    `next: git commit -am "Release ${version}" && git tag v${version} && git push --tags`,
+    `${version} written to ${PACKAGES.length} package.json files, the chart and ${LOCKFILE}`,
+  );
+  // Deliberately not `git commit -am`: the tree here is shared with whatever else
+  // is in progress, and a release is the worst commit to widen by accident.
+  console.log(
+    `next: review the diff (${PACKAGES.length + 2} files), commit them, ` +
+      `then git tag v${version} && git push --tags`,
   );
 }
 
@@ -101,12 +187,29 @@ function check(expected?: string): void {
   if (chart.appVersion !== want) {
     wrong.push(`${CHART} appVersion: ${chart.appVersion ?? "(not found)"}`);
   }
+  // The lockfile too, and this is the half that earns its keep: it turns an
+  // `npm ci` refusal further down the pipeline — reported as a lockfile mismatch,
+  // which names nothing about releases — into a failure here, where the version
+  // was set. `release.yml` calls this against the tag before it builds anything
+  // and before any install, so it is also what stops a tag being published
+  // against a lockfile that still says the old number.
+  const lock = readLockfile();
+  if (lock.version !== want) wrong.push(`${LOCKFILE} version: ${lock.version ?? "(not found)"}`);
+  for (const rel of PACKAGES) {
+    const key = lockKey(rel);
+    const label = `${LOCKFILE} packages[${JSON.stringify(key)}]`;
+    const entry = lock.packages[key];
+    if (entry === undefined) wrong.push(`${label}: (no entry — run npm install)`);
+    else if (entry.version !== want) wrong.push(`${label}: ${entry.version ?? "(no version)"}`);
+  }
   if (wrong.length > 0) {
     console.error(`expected ${want} everywhere, found:\n  ${wrong.join("\n  ")}`);
     console.error(`fix with: npm run version:set ${want}`);
     process.exit(1);
   }
-  console.log(`version ${want} agrees across ${PACKAGES.length} packages and the chart`);
+  console.log(
+    `version ${want} agrees across ${PACKAGES.length} packages, the chart and ${LOCKFILE}`,
+  );
 }
 
 const [command, value] = process.argv.slice(2);

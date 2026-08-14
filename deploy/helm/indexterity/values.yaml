@@ -102,7 +102,12 @@ api:
     # Defaults to .Chart.AppVersion.
     tag: ""
     pullPolicy: IfNotPresent
-  replicas: 2
+  # One by default: the common install is a single organization managing its own
+  # clusters, and a second pod there buys availability nobody asked for while
+  # doubling the memory. Raise it for HA — both processes are stateless and
+  # sessions live in Postgres — and read config.rateLimitMax as per replica when
+  # you do. api.runWorker=true pins this at 1; the chart refuses anything else.
+  replicas: 1
   port: 3001
   service:
     type: ClusterIP
@@ -139,9 +144,10 @@ web:
     repository: ghcr.io/fullmetalbober/indexterity-web
     tag: ""
     pullPolicy: IfNotPresent
-  # Ignored in the merged topologies — there is one pod and api.replicas counts
-  # it. See `topology` at the top of this file.
-  replicas: 2
+  # One by default, for the same reason as api.replicas above. Ignored in the
+  # merged topologies — there is one pod and api.replicas counts it. See
+  # `topology` at the top of this file.
+  replicas: 1
   port: 3000
   service:
     type: ClusterIP
@@ -410,8 +416,8 @@ config:
   #
   # So the number to size your postgres against is roughly:
   #   api replicas x 3 x pgPoolMax  +  worker (pgPoolMax + concurrency + 1)
-  # which at the defaults is about 20 for a single-replica install. A self-hosted
-  # postgres ships max_connections=100.
+  # which is about 20 at the defaults, and grows by 15 per api replica you add. A
+  # self-hosted postgres ships max_connections=100.
   #
   # Too low is latency, not failure — a query waits for a free connection rather
   # than erroring. Raise it alongside worker.concurrency.
