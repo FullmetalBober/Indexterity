@@ -2,8 +2,8 @@
 
 Deploys the three workloads — **api**, **web** (dashboard) and **worker**
 (scheduler) — from two images, plus a pre-upgrade migration job. `topology`
-folds the first two into one pod, or one container, when three Deployments is
-more than an install needs.
+folds the whole release into one container when three Deployments is more than
+an install needs.
 
 PostgreSQL is **not** bundled: point `secrets.databaseUrl` at a managed
 instance or your own postgres release. That is the control-plane store; the
@@ -50,20 +50,16 @@ ingress, the ServiceMonitors and every in-cluster caller are unaffected.
 | `topology` | What is installed | Images pulled |
 |---|---|---|
 | `split` (default) | Three Deployments. api, web and worker roll, scale and fail independently — an api rollout cannot take the landing page down with it. What the hosted install runs | api, web |
-| `single-pod` | One Deployment for the serving tier: an **api container and a web container in one pod**, the dashboard reaching the api over `127.0.0.1`. The worker keeps its own Deployment unless you embed it | api, web |
 | `single-container` | One Deployment, **one container**, from the all-in-one image: both processes under a supervisor that is PID 1 | all-in-one |
 
 ```bash
-# One pod, two containers. Nothing new to build — the two published images.
-helm install indexterity … --set topology=single-pod
-
 # One container, everything in it, including the scheduler.
 helm install indexterity … \
   --set topology=single-container \
   --set worker.enabled=false --set api.runWorker=true --set api.replicas=1
 ```
 
-What the merged topologies cost, and it is the same trade twice:
+What `single-container` costs:
 
 - **One failure domain.** api and web scale together (`api.replicas` counts the
   pods; `web.replicas` is ignored), and a dashboard change rolls the api with it.
@@ -73,7 +69,7 @@ What the merged topologies cost, and it is the same trade twice:
   containerPort moved. `metrics.webPort` overrides it.
 - **The worker is a separate decision.** Merging the serving tier does not touch
   the schedule. `worker.enabled=false` with `api.runWorker=true` (and
-  `api.replicas=1`) is what makes a merged topology genuinely one workload; the
+  `api.replicas=1`) is what makes single-container genuinely one workload; the
   chart refuses the combinations that would install the crontab twice.
 
 Switching an existing release replaces Deployments rather than editing them —
@@ -188,9 +184,8 @@ chose:
 supervisor: memory limit 384MB — heap ceilings: api 153MB, web 84MB
 ```
 
-`single-pod` needs no such split: Kubernetes gives each container in a pod its own
-cgroup — verified in-cluster, the api container reads a 320 MiB limit and the web
-container 256 MiB — so the two are capped from their own limits like any other.
+`split` needs no such split: each container has a pod to itself, reads its own
+cgroup, and is capped from its own limit like any other workload.
 
 ## Back up MASTER_KEY
 
@@ -231,7 +226,7 @@ stays off by default — the dashboard does not need it.
 
 | Value | Why it matters |
 |---|---|
-| `topology` | `split` (default), `single-pod` or `single-container` — see above. Packaging only; the Services, the ingress and the app are the same in all three |
+| `topology` | `split` (default) or `single-container` — see above. Packaging only; the Services, the ingress and the app are the same in both |
 | `api.replicas` / `web.replicas` | **One each by default.** Raise for HA or throughput — both are stateless. `rateLimitMax` is per api process and Postgres connections grow ~15 per api replica; `api.runWorker=true` pins the api at 1 |
 | `allInOne.*` | Image and resources for `topology: single-container`. `api.image` and `web.image` are never pulled in that topology, and neither is a second copy of node |
 | `metrics.webPort` | The dashboard's metrics containerPort. Empty means `metrics.port`, or `metrics.port + 1` when it shares a network namespace with the api |
@@ -269,7 +264,7 @@ see — scrape all three:
 With `worker.enabled=false` and `RUN_WORKER=true` on the api instead, the api
 serves the worker's half as well.
 
-In the merged topologies all of that is still served, and still separately: the
+In single-container all of that is still served, and still separately: the
 api's listener stays on 9464 and the dashboard's moves to 9465, because they are
 now in one network namespace. Both Services publish 9464 either way, so scrape
 `<release>-api` and `<release>-web` exactly as in `split` — they simply happen to
@@ -357,7 +352,7 @@ page, under Security):
   Two things move with them: `config.rateLimitMax` is counted per api process, so
   the real ceiling multiplies (`config.authRateLimitMax` does not — better-auth's
   half counts in Postgres), and each api replica adds roughly 15 Postgres
-  connections. In a merged topology they scale as one unit, on `api.replicas`.
+  connections. In single-container they scale as one unit, on `api.replicas`.
 - The worker drains its connection pool on `SIGTERM`
   (`terminationGracePeriodSeconds: 60`).
 - **The worker's only Service is `-worker-metrics`**, and it is headless. Nothing
@@ -373,11 +368,11 @@ helm template rel deploy/helm/indexterity --set secrets.existingSecret=s | kubec
 Rendering is not installing, and the topologies are where that gap is widest — a
 merged pod that renders can still bind a port twice or leave a Service with no
 endpoints. `deploy/kind-test.sh` installs into a throwaway Kind cluster and runs
-the same assertions against each packaging; CI runs all three in parallel on any
+the same assertions against each packaging; CI runs both in parallel on any
 change under `deploy/`:
 
 ```bash
-TOPOLOGY=single-pod deploy/kind-test.sh
+deploy/kind-test.sh                          # split, the default
 TOPOLOGY=single-container deploy/kind-test.sh
 ```
 

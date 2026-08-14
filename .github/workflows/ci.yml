@@ -450,57 +450,43 @@ jobs:
   # first time on main. The rule is the same rule, applied to the diff instead
   # of the branch.
   #
-  # It answers a second question now: WHICH topologies. #172 rewired `startWorker`,
-  # `main.ts` and every job entrypoint, and this job said `chart=false` — packaging
-  # paths were the whole filter, and how the api boots is not a packaging path. The
-  # only reason that shipped safely is that both Kind topologies were run by hand.
+  # The filter widened once already. #172 rewired `startWorker`, `main.ts` and
+  # every job entrypoint, and this job said `chart=false` — packaging paths were
+  # the whole filter, and how the api boots is not a packaging path. The only
+  # reason that shipped safely is that both Kind topologies were run by hand.
   # Nothing else in CI covers it: the integration suite calls the job functions
   # directly, so it never sees `startWorker`, the crontab installing, or a
   # supervisor's view of a process that dies at boot (#177).
   #
-  # Those paths get TWO legs rather than three, because the topologies differ in
-  # exactly the way that matters here — `worker.enabled` (see kind-test.sh):
+  # Those paths get BOTH legs, because the two topologies differ in exactly the
+  # way that matters here — `worker.enabled` (see kind-test.sh):
   #
   #   split             worker.enabled=true   the standalone worker.ts Deployment
-  #   single-pod        worker.enabled=true   the same Deployment, api+web merged
   #   single-container  api.runWorker=true    the embedded runner, no worker.ts
   #
-  # So a job-pipeline change has two kubelet-visible shapes, not one: `worker.ts`
-  # as its own process, and `main.ts` running the runner inside the api. `split`
-  # and `single-container` cover both. `single-pod` differs from `split` only in
-  # where the api and the dashboard are packaged, which a change under `jobs/`
-  # cannot break, so it is the leg left out — three Kind clusters on every job
-  # change is a real cost and the third one answers nothing new.
+  # So a job-pipeline change has two kubelet-visible shapes: `worker.ts` as its
+  # own process, and `main.ts` running the runner inside the api. Both legs run on
+  # every path that reaches this job, so the matrix below is a literal rather than
+  # something this job has to decide.
   scope:
     runs-on: ubuntu-latest
     outputs:
       chart: ${{ steps.diff.outputs.chart }}
-      topologies: ${{ steps.diff.outputs.topologies }}
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - id: diff
-        # `topologies` is never emitted empty, including on the skip path: `chart`
-        # is the gate, so the matrix is only expanded when the job actually runs,
-        # and an empty matrix is a shape nobody should have to reason about.
         run: |
-          all='["split","single-pod","single-container"]'
           if [ "${{ github.event_name }}" = "push" ]; then
             echo "chart=true" >> "$GITHUB_OUTPUT"
-            echo "topologies=$all" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           changed=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD")
-          if echo "$changed" | grep -qE '^(deploy/|apps/[a-z]+/Dockerfile|\.github/workflows/ci\.yml)'; then
+          if echo "$changed" | grep -qE '^(deploy/|apps/[a-z]+/Dockerfile|\.github/workflows/ci\.yml)|^apps/api/src/(jobs/|main\.ts|worker\.ts)'; then
             echo "chart=true" >> "$GITHUB_OUTPUT"
-            echo "topologies=$all" >> "$GITHUB_OUTPUT"
-          elif echo "$changed" | grep -qE '^apps/api/src/(jobs/|main\.ts|worker\.ts)'; then
-            echo "chart=true" >> "$GITHUB_OUTPUT"
-            echo 'topologies=["split","single-container"]' >> "$GITHUB_OUTPUT"
           else
             echo "chart=false" >> "$GITHUB_OUTPUT"
-            echo "topologies=$all" >> "$GITHUB_OUTPUT"
           fi
 
   # Installs the chart into a throwaway Kind cluster. `helm lint` renders YAML;
@@ -511,21 +497,16 @@ jobs:
     if: needs.scope.outputs.chart == 'true'
     runs-on: ubuntu-latest
     # One leg per packaging (see `topology` in values.yaml). The same assertions
-    # run against all three, which is the only way to hold the claim they are
-    # meant to hold: that the api and the dashboard are reachable at the same
-    # Service names, with the same ports, however many pods and containers they
-    # were folded into. Legs run in parallel, and each builds only the images its
-    # topology pulls — split and single-pod share the two the cache is already
-    # warm for, single-container builds the all-in-one on its own.
-    #
-    # Which legs comes from `scope`, not from this list: a packaging change gets
-    # all three, a job-pipeline change gets the two that differ in `worker.enabled`.
-    # See the note above that job for why the third answers nothing there. Every
-    # list it can emit contains `split`, which the promtool step below is gated on.
+    # run against both, which is the only way to hold the claim they are meant to
+    # hold: that the api and the dashboard are reachable at the same Service
+    # names, with the same ports, however many pods and containers they were
+    # folded into. Legs run in parallel, and each builds only the images its
+    # topology pulls — split the api and web pair, single-container the all-in-one
+    # on its own.
     strategy:
       fail-fast: false
       matrix:
-        topology: ${{ fromJSON(needs.scope.outputs.topologies) }}
+        topology: [split, single-container]
     steps:
       - uses: actions/checkout@v7
       - uses: helm/kind-action@v1
@@ -538,7 +519,7 @@ jobs:
       # Prometheus Operator CRDs — and a rule with a typo'd expression installs
       # cleanly and then never fires, which is the worst failure available to a
       # monitoring change. promtool parses every expression instead.
-      # Once, not once per topology: the rules are the same document in all three
+      # Once, not once per topology: the rules are the same document in both
       # (they select on component labels, which the Services keep either way).
       - name: alert rules must parse
         if: matrix.topology == 'split'

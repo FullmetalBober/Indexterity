@@ -50,19 +50,13 @@ fullnameOverride: ""
 # container_memory_working_set_bytes on your own install before tightening
 # further.
 
-# How the workloads are PACKAGED. The code is identical in all three; this only
+# How the workloads are PACKAGED. The code is identical in both; this only
 # decides how many Deployments and containers it lands in.
 #
 #   split             Three Deployments from two images. The default, and what a
 #                     hosted install runs: api, web and worker roll, scale and
 #                     fail independently, so an api rollout cannot take the
 #                     landing page down with it.
-#
-#   single-pod        ONE Deployment for the serving tier, an api container and a
-#                     web container beside each other. Same two images — nothing
-#                     extra to build or pull — and the dashboard reaches the api
-#                     over 127.0.0.1. For an install where three Deployments are
-#                     three things to watch and one is enough.
 #
 #   single-container  One Deployment, ONE container, from the all-in-one image
 #                     below: both processes under a supervisor that is PID 1.
@@ -71,13 +65,12 @@ fullnameOverride: ""
 #                     Docker Compose, `docker run`. The image is usable entirely
 #                     without this chart.
 #
-# Neither one folds in the WORKER: that is worker.enabled and api.runWorker
-# below, and it is a separate decision because it changes what runs on a
-# schedule rather than where it is packaged. `worker.enabled=false` with
-# `api.runWorker=true` (and api.replicas=1) is what makes a merged topology
-# genuinely one workload.
+# Neither folds in the WORKER: that is worker.enabled and api.runWorker below,
+# and it is a separate decision because it changes what runs on a schedule rather
+# than where it is packaged. `worker.enabled=false` with `api.runWorker=true`
+# (and api.replicas=1) is what makes single-container genuinely one workload.
 #
-# What both merged topologies do, and what they cost:
+# What single-container does, and what it costs:
 #   - api.replicas is the pod count; web.replicas is ignored. The two scale
 #     together now, and a dashboard change rolls the api with it.
 #   - the -api and -web Services keep their names, ports and labels, and the
@@ -144,8 +137,8 @@ web:
     repository: ghcr.io/fullmetalbober/indexterity-web
     tag: ""
     pullPolicy: IfNotPresent
-  # One by default, for the same reason as api.replicas above. Ignored in the
-  # merged topologies — there is one pod and api.replicas counts it. See
+  # One by default, for the same reason as api.replicas above. Ignored in
+  # single-container — there is one pod and api.replicas counts it. See
   # `topology` at the top of this file.
   replicas: 1
   port: 3000
@@ -157,7 +150,7 @@ web:
   # trusts it for auth requests and session cookies are stored against it.
   publicUrl: ""
   # Where the WEB SERVER reaches the api, for its own server-side rendering.
-  # Defaults to the in-cluster Service, or to 127.0.0.1 in the merged topologies,
+  # Defaults to the in-cluster Service, or to 127.0.0.1 in single-container,
   # where the api is in the same pod. Not what the browser uses — that is /api on
   # publicUrl, routed by the ingress.
   apiUrl: ""
@@ -259,7 +252,7 @@ metrics:
   enabled: false
   port: 9464
   # The web server's listener. Empty means metrics.port when the dashboard has a
-  # pod to itself, and metrics.port + 1 in the merged topologies, where the api
+  # pod to itself, and metrics.port + 1 in single-container, where the api
   # has already bound metrics.port in the same network namespace and a second
   # listener on it would crash-loop on EADDRINUSE.
   #

@@ -88,13 +88,15 @@ image, which is the reason to be in that topology in the first place.
 {{- end -}}
 
 {{/*
-Whether the api and the web server share a pod — true for both merged
-topologies, empty (falsey to `if`) for the default. Everything downstream keys
-off this rather than off the value, so the two merged shapes cannot drift on the
-things they have in common: one pod, one loopback hop, two metrics ports.
+Whether the api and the web server share a pod — true for single-container,
+empty (falsey to `if`) for the default. There is one merged shape, so this is
+the same question as `eq .Values.topology "single-container"`; it stays a named
+predicate because five templates ask it, and one definition is what stops them
+disagreeing about what merged implies — one pod, one loopback hop, two metrics
+ports.
 */}}
 {{- define "indexterity.merged" -}}
-{{- if or (eq .Values.topology "single-pod") (eq .Values.topology "single-container") -}}true{{- end -}}
+{{- if eq .Values.topology "single-container" -}}true{{- end -}}
 {{- end -}}
 
 {{/*
@@ -449,65 +451,13 @@ env homes readable (apps/api/src/config/homes.test.ts).
 {{- end -}}
 
 {{/*
-The dashboard container, in a helper because it is rendered from two templates:
-its own Deployment in the default topology, and beside the api in single-pod.
-Meant for `nindent 8`, which is where a container lands in both.
-
-Its ports are named web-* in every topology rather than only in the merged one.
-A pod's port names have to be unique across its containers, so merged they cannot
-both be `http` — and one naming scheme that always holds beats a conditional that
-reads differently depending on a value three files away.
-*/}}
-{{- define "indexterity.webContainer" -}}
-- name: web
-  image: {{ include "indexterity.webImage" . }}
-  imagePullPolicy: {{ .Values.web.image.pullPolicy }}
-  securityContext:
-    {{- toYaml .Values.securityContext | nindent 4 }}
-  ports:
-    - name: web-http
-      containerPort: {{ .Values.web.port }}
-    {{- if .Values.metrics.enabled }}
-    - name: web-metrics
-      containerPort: {{ include "indexterity.webMetricsPort" . }}
-    {{- end }}
-  env:
-    {{- include "indexterity.heapEnv" (dict "limit" .Values.web.resources.limits.memory) | nindent 4 }}
-    {{- include "indexterity.metricsEnv" (dict "root" . "port" (include "indexterity.webMetricsPort" .)) | nindent 4 }}
-    {{- include "indexterity.errorsEnv" (dict "root" . "dsn" (default .Values.errorReporting.dsn .Values.errorReporting.webDsn)) | nindent 4 }}
-    {{- include "indexterity.webEnv" (dict "root" . "shared" false) | nindent 4 }}
-  {{- /* timeoutSeconds is set on both, and it is not decoration: kubernetes
-         defaults httpGet probes to ONE second, and `/` is a server-side React
-         render. Measured on the built image with two CPUs, a cold render is 908ms
-         — inside the default by 92ms, which is not a margin, it is a coin toss on
-         a loaded node. Three of those in a row restart the container. */}}
-  readinessProbe:
-    httpGet:
-      # The landing page is static and survives an api outage.
-      path: /
-      port: web-http
-    initialDelaySeconds: 3
-    periodSeconds: 10
-    timeoutSeconds: 5
-  livenessProbe:
-    httpGet:
-      path: /
-      port: web-http
-    initialDelaySeconds: 15
-    periodSeconds: 20
-    timeoutSeconds: 5
-  resources:
-    {{- toYaml .Values.web.resources | nindent 4 }}
-{{- end -}}
-
-{{/*
 Fail on a topology nobody implements, rather than rendering the default and
 leaving the operator to work out from `kubectl get deploy` that their value was a
-typo. `single_pod` and `singlePod` are the two spellings that get tried.
+typo. `single_container` and `singleContainer` are the spellings that get tried.
 */}}
 {{- define "indexterity.validateTopology" -}}
-{{- if not (has .Values.topology (list "split" "single-pod" "single-container")) -}}
-{{- fail (printf "topology is %q — it must be \"split\" (three Deployments), \"single-pod\" (one pod, an api and a web container) or \"single-container\" (one pod, one all-in-one container)" .Values.topology) -}}
+{{- if not (has .Values.topology (list "split" "single-container")) -}}
+{{- fail (printf "topology is %q — it must be \"split\" (three Deployments) or \"single-container\" (one pod, one all-in-one container)" .Values.topology) -}}
 {{- end -}}
 {{- end -}}
 
