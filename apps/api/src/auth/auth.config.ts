@@ -7,7 +7,7 @@ import { expireCookie } from "better-auth/cookies";
 import { twoFactor } from "better-auth/plugins/two-factor";
 import { authTrailEntry, sessionEndedEntry, type TrailActor } from "../audit/auth-trail";
 import { authEventFor, recordSecurityEvent } from "../audit/security-events";
-import { and, createDatabase, eq, members, schema, user as userTable } from "../db";
+import { and, type Database, eq, members, schema, user as userTable } from "../db";
 import { mailEnabled, sendMail } from "../mail/mailer";
 import { organizationPlugin } from "./organization";
 import { authRateLimit } from "./rate-limit";
@@ -15,7 +15,12 @@ import { evaluateSignup } from "./signup-gate";
 import { hasCredentialAccount } from "./two-factor-gate";
 
 export interface AuthConfig {
-  readonly databaseUrl: string;
+  // The control-plane database this instance reads and writes through, handed in
+  // rather than built here. Whether auth shares the api's pool or gets one of its
+  // own is a deployment decision, and this module is not the place it is made —
+  // auth/index.ts gives it a dedicated pool, so a slow read elsewhere cannot leave
+  // a sign-in waiting for a connection.
+  readonly db: Database;
   readonly secret: string;
   readonly baseURL: string;
   // Set `Secure` on the session cookie. Decided explicitly rather than inferred
@@ -116,7 +121,7 @@ function asActor(
 
 // GitHub OAuth + email/password, backed by the Drizzle/Postgres control-plane DB.
 export function createAuth(config: AuthConfig) {
-  const db = createDatabase(config.databaseUrl);
+  const { db } = config;
   // The email is stored alongside the id on every row (`actor_email`), because
   // `actor_user_id` is `set null` on user deletion and a trail whose actor column
   // empties when the account goes answers none of the questions it exists for.

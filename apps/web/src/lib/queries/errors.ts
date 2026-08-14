@@ -58,7 +58,10 @@ export async function unwrap<T>(
   return data as T;
 }
 
-function statusOf(error: unknown): number | null {
+// Exported for the shell's unreachable/down distinction (lib/queries/shell.ts):
+// null means nothing answered at all, a number means the api was reached and
+// said something — a materially different failure worth telling apart.
+export function statusOf(error: unknown): number | null {
   if (error instanceof ORPCError) return error.status;
   if (error instanceof AuthApiError) return error.status;
   return null;

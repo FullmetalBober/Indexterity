@@ -97,6 +97,13 @@ function exampleEnv(): Set<string> {
 // home has to name it and a chart that did would be overriding the image.
 const FROM_THE_IMAGE = new Set(["NODE_ENV"]);
 
+// Configure the node RUNTIME rather than this application, so no schema declares
+// them and none should. The chart sets NODE_OPTIONS to cap V8's heap below the
+// container's memory limit — node's own sizing stops scaling down at ~262 MB, so
+// under a small limit a process would otherwise believe it may hold more heap
+// than the cgroup allows.
+const NODE_RUNTIME_VARS = new Set(["NODE_OPTIONS"]);
+
 // The dashboard server's own variables, whose schema lives in
 // apps/web/src/lib/env.ts. Named here because the chart sets all four in one
 // place and the drift check below would otherwise read them as unknown.
@@ -109,6 +116,15 @@ const COMPOSE_INFRA = new Set(["POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_D
 // onto one SENTRY_DSN per container, and .env.example is where an operator puts
 // the two DSNs to be mapped from.
 const DEPLOYMENT_ONLY = new Set(["SENTRY_DSN_API", "SENTRY_DSN_WEB"]);
+
+// Read by the all-in-one image's supervisor (deploy/all-in-one/supervisor.ts)
+// and by neither process. That image runs the api and the dashboard in one
+// container, so one environment has to describe two of them — and these are the
+// two variables they would otherwise fight over: both read METRICS_PORT (one
+// network namespace, so the second listener has to move) and both read
+// SENTRY_DSN (two projects). The supervisor splits them and hands each process
+// the name it already reads, which is why no schema declares these.
+const SUPERVISOR_VARS = new Set(["WEB_METRICS_PORT", "WEB_SENTRY_DSN"]);
 
 describe("every required variable is registered in every home", () => {
   // The gap #126 names: a required variable the chart does not set is a
@@ -143,6 +159,8 @@ describe("nothing is set that no schema knows", () => {
     ...WEB_VARS,
     ...DEPLOYMENT_ONLY,
     ...COMPOSE_INFRA,
+    ...SUPERVISOR_VARS,
+    ...NODE_RUNTIME_VARS,
   ]);
   // MASTER_KEY_V<n> is dynamically named by the rotation, so it is matched by
   // shape rather than listed.

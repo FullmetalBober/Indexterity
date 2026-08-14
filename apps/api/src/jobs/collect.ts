@@ -13,7 +13,6 @@ import {
 import { type ClusterNode, workloadKey } from "../engine/ports";
 import { type CollectedLatency, type CollectedSnapshot, collectSnapshots } from "../mongo";
 import { openClusterSession } from "./cluster-connection";
-import { jobDb } from "./db";
 import { type CurrentRun, counterFingerprint, extendsRun, latencyFingerprint } from "./runs";
 import { watchKey } from "./watched";
 
@@ -332,8 +331,7 @@ async function recordRoster(
     });
 }
 
-export async function collectCluster(clusterId: string): Promise<number> {
-  const db = jobDb();
+export async function collectCluster(db: Database, clusterId: string): Promise<number> {
   const { session, release } = await openClusterSession(db, clusterId);
   try {
     // The roster costs one hello per member on connections the usage pass

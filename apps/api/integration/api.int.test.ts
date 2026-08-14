@@ -41,7 +41,6 @@ import { collectCluster } from "../src/jobs/collect";
 import { drainPool } from "../src/jobs/connection-pool";
 import { activeCooldownKeys, cooldownKey } from "../src/jobs/cooldowns";
 import { applyCreatesForCluster } from "../src/jobs/create";
-import { closeJobDb, jobDb } from "../src/jobs/db";
 import { finalizeCluster } from "../src/jobs/finalize";
 import { planForCluster } from "../src/jobs/plan";
 import { latestBaselines } from "../src/jobs/probe";
@@ -97,7 +96,7 @@ const createdOrgIds: string[] = [];
 
 beforeAll(async () => {
   server = await startApi();
-  db = createDatabase(databaseUrl());
+  db = createDatabase(databaseUrl(), 2);
   mongo = new MongoConnection(MONGO_URL);
   await mongo.connect();
   // Setup, not just teardown. A run that dies before afterAll leaves indexes
@@ -131,9 +130,10 @@ async function giveRoom(session: Session): Promise<string> {
 }
 
 afterAll(async () => {
-  // The change-window test ran job code in THIS process — release its pools.
+  // The change-window test ran job code in THIS process — release its pools. The
+  // job code no longer opens one of its own: it runs against the `db` this suite
+  // created, which is closed with the rest of the teardown below.
   await drainPool();
-  await closeJobDb();
   // Before the orgs and accounts go, not after. Every foreign key on
   // `security_events` is `set null` on purpose — deleting an org must not erase
   // the trail of what was done to it — so rows deleted by cascade is exactly what
@@ -259,7 +259,7 @@ describe("cluster lifecycle", () => {
     expect(rotated.status).toBe(200);
     // Run the job directly: the endpoint only queues now, so a 200 from it
     // would prove a row was inserted, not that the new string dials.
-    expect(await collectCluster(clusterId)).toBeGreaterThan(0);
+    expect(await collectCluster(db, clusterId)).toBeGreaterThan(0);
     const queued = await api(`/clusters/${clusterId}/collect`, owner, {
       method: "POST",
       body: JSON.stringify({}),
@@ -360,7 +360,7 @@ describe("cluster rename", () => {
   // The history is the whole reason this endpoint exists rather than "disconnect
   // and connect again", so the rename has to leave it where it was.
   it("keeps everything collected about the cluster", async () => {
-    const collected = await collectCluster(renameId);
+    const collected = await collectCluster(db, renameId);
     expect(collected).toBeGreaterThan(0);
     const before = await db
       .select({ id: indexSnapshots.id })
@@ -580,7 +580,7 @@ describe("collect, audit trail and undo", () => {
     });
     expect(res.status).toBe(200);
     expect(asRecord(await res.json()).queued).toBe(true);
-    expect(await collectCluster(clusterId)).toBeGreaterThan(0);
+    expect(await collectCluster(db, clusterId)).toBeGreaterThan(0);
   });
 
   it("summarizes the per-collection index footprint", async () => {
@@ -1167,7 +1167,7 @@ describe("least-privilege provisioning", () => {
     expect(asRecord(Array.isArray(roles) ? roles[0] : {}).role).toBe("indexterityEngine");
 
     // The sealed string the engine dials is the scoped one — collect works on it.
-    expect(await collectCluster(provisionedId)).toBeGreaterThan(0);
+    expect(await collectCluster(db, provisionedId)).toBeGreaterThan(0);
 
     await mongo.db("admin").command({ dropUser: username });
   });
@@ -1417,13 +1417,13 @@ describe("change window gates elective builds", () => {
     // A window that excludes the current hour: nothing may build.
     const hour = new Date().getUTCHours();
     await setWindow((hour + 2) % 24, (hour + 3) % 24);
-    expect(await applyCreatesForCluster(clusterId)).toBe(0);
+    expect(await applyCreatesForCluster(db, clusterId)).toBe(0);
     const [held] = await db.select().from(recommendations).where(eq(recommendations.id, rec.id));
     expect(held?.state).toBe("APPROVED");
 
     // Clearing the window lets the same tick build it.
     await setWindow(null, null);
-    expect(await applyCreatesForCluster(clusterId)).toBe(1);
+    expect(await applyCreatesForCluster(db, clusterId)).toBe(1);
     const specs = await mongo.db("inttest").collection("orders").indexes();
     expect(specs.some((spec) => spec.name === "winidx_1")).toBe(true);
     await mongo.db("inttest").collection("orders").dropIndex("winidx_1");
@@ -1483,7 +1483,7 @@ describe("change window gates elective builds", () => {
 
     // Build first. The options travel with the row, so the replacement arrives
     // unique — an index rebuilt without it would be the constraint removed.
-    expect(await applyCreatesForCluster(clusterId)).toBe(1);
+    expect(await applyCreatesForCluster(db, clusterId)).toBe(1);
     const built = await coll.indexes();
     const replacement = built.find((spec) => spec.name === "a_1_b_-1");
     expect(replacement?.unique).toBe(true);
@@ -1498,7 +1498,7 @@ describe("change window gates elective builds", () => {
       .update(recommendations)
       .set({ builtAt: new Date(Date.now() - 60 * 86_400_000) })
       .where(eq(recommendations.id, rec.id));
-    await finalizeCluster(clusterId);
+    await finalizeCluster(db, clusterId);
     const [retirement] = await db
       .select()
       .from(recommendations)
@@ -1522,7 +1522,7 @@ describe("change window gates elective builds", () => {
     await mongo
       .db("inttest")
       .command({ collMod: "reorder", index: { name: "a_1_b_1", hidden: true } });
-    await finalizeCluster(clusterId);
+    await finalizeCluster(db, clusterId);
 
     const after = await coll.indexes();
     expect(after.some((spec) => spec.name === "a_1_b_1")).toBe(false);
@@ -1571,7 +1571,7 @@ describe("dynamic observe window", () => {
       .returning();
     if (rec === undefined) throw new Error("failed to insert recommendation");
 
-    expect(await applyCluster(clusterId)).toBe(1);
+    expect(await applyCluster(db, clusterId)).toBe(1);
     const [hidden] = await db.select().from(recommendations).where(eq(recommendations.id, rec.id));
     expect(hidden?.state).toBe("HIDDEN");
     expect(hidden?.observeDays).toBe(40);
@@ -1635,7 +1635,7 @@ describe("outage resilience", () => {
       .returning();
     if (rec === undefined) throw new Error("failed to insert recommendation");
 
-    await finalizeCluster(clusterId);
+    await finalizeCluster(db, clusterId);
 
     const [after] = await db.select().from(recommendations).where(eq(recommendations.id, rec.id));
     // Not dropped, and not left hidden either: restored and re-proposed.
@@ -1707,7 +1707,7 @@ describe("outage resilience", () => {
       })),
     );
 
-    expect(await classifyCluster(idleId)).toBe(1);
+    expect(await classifyCluster(db, idleId)).toBe(1);
     const [proposal] = await db
       .select()
       .from(recommendations)
@@ -1766,7 +1766,7 @@ describe("outage resilience", () => {
       })),
     );
 
-    expect(await classifyCluster(lostId)).toBe(0);
+    expect(await classifyCluster(db, lostId)).toBe(0);
     expect(
       await db.select().from(recommendations).where(eq(recommendations.clusterId, lostId)),
     ).toHaveLength(0);
@@ -1809,7 +1809,7 @@ describe("outage resilience", () => {
       })),
     );
 
-    expect(await classifyCluster(gappedId)).toBe(0);
+    expect(await classifyCluster(db, gappedId)).toBe(0);
     const proposals = await db
       .select()
       .from(recommendations)
@@ -1886,7 +1886,7 @@ describe("outage resilience", () => {
       },
     ]);
 
-    expect(await classifyCluster(restartId)).toBe(0);
+    expect(await classifyCluster(db, restartId)).toBe(0);
     const proposals = await db
       .select()
       .from(recommendations)
@@ -2198,7 +2198,7 @@ describe("auto-approval is one threshold", () => {
     // And the threshold applyCluster reads is the stored policy value.
     await db.insert(policies).values({ clusterId: thresholdId, autoApplyScore: 95 });
     await seed();
-    await applyCluster(thresholdId).catch(() => {
+    await applyCluster(db, thresholdId).catch(() => {
       // The fixture's sealed bytes are dummies, so opening a session fails —
       // after the promotion, which is the step under test.
     });
@@ -2297,7 +2297,7 @@ describe("workload collection is batched", () => {
         changeWindowEndHour: null,
       }),
     });
-    expect(await suggestForCluster(clusterId)).toBeGreaterThanOrEqual(0);
+    expect(await suggestForCluster(db, clusterId)).toBeGreaterThanOrEqual(0);
   });
 });
 
@@ -2386,7 +2386,7 @@ describe("an index the engine is still watching", () => {
       .returning();
     if (created === undefined) throw new Error("failed to insert recommendation");
 
-    expect(await classifyCluster(watchId)).toBe(0);
+    expect(await classifyCluster(db, watchId)).toBe(0);
 
     // Graduated: watch elapsed, baselines cleared. Now it is an ordinary index
     // and the usual rules apply — the guard must release, not protect forever.
@@ -2399,7 +2399,7 @@ describe("an index the engine is still watching", () => {
       })
       .where(eq(recommendations.id, created.id));
 
-    expect(await classifyCluster(watchId)).toBe(1);
+    expect(await classifyCluster(db, watchId)).toBe(1);
     const [proposal] = await db
       .select()
       .from(recommendations)
@@ -2837,7 +2837,7 @@ describe("dead-letter retention", () => {
     // Back-dated rather than slept on: the window is the thing under test, and
     // a test that only passes because time passed is not testing it.
     const exhaust = (id: string, age: string) =>
-      jobDb().execute(
+      db.execute(
         sql`update graphile_worker._private_jobs
             set attempts = max_attempts, locked_at = null, locked_by = null,
                 updated_at = now() - ${sql.raw(`interval '${age}'`)}
@@ -2846,9 +2846,9 @@ describe("dead-letter retention", () => {
     await exhaust(staleId, "91 days");
     await exhaust(freshId, "1 hour");
 
-    expect(await pruneDeadLetterJobs()).toBeGreaterThanOrEqual(1);
+    expect(await pruneDeadLetterJobs(db)).toBeGreaterThanOrEqual(1);
 
-    const remaining = await jobDb().execute(
+    const remaining = await db.execute(
       sql`select id::text as id from graphile_worker.jobs
           where id::text in (${staleId}, ${freshId}, ${liveId})`,
     );
@@ -2858,7 +2858,7 @@ describe("dead-letter retention", () => {
     expect(ids).toContain(freshId);
     expect(ids).toContain(liveId);
 
-    await jobDb().execute(
+    await db.execute(
       sql`delete from graphile_worker._private_jobs where id::text in (${freshId}, ${liveId})`,
     );
   });
@@ -3106,7 +3106,7 @@ describe("retention follows the plan", () => {
     };
 
     // On SCALE the row is inside the entitlement, so it is both kept and shown.
-    await pruneOldSamples();
+    await pruneOldSamples(db);
     expect(
       await db
         .select()
@@ -3118,7 +3118,7 @@ describe("retention follows the plan", () => {
     // Downgrade. The row is now outside what FREE may see, but well inside the
     // deployment's physical window — so it stays on disk and stops being served.
     await db.update(organizations).set({ plan: "FREE" }).where(eq(organizations.id, orgId));
-    await pruneOldSamples();
+    await pruneOldSamples(db);
     expect(
       await db
         .select()
@@ -3156,7 +3156,7 @@ describe("retention follows the plan", () => {
         capturedAt: new Date(Date.now() - 400 * 86_400_000),
       },
     ]);
-    await pruneOldSamples();
+    await pruneOldSamples(db);
     expect(
       await db.select().from(latencySamples).where(eq(latencySamples.clusterId, hardId)),
     ).toHaveLength(0);
@@ -3194,7 +3194,7 @@ describe("retention follows the plan", () => {
     process.env.RETENTION_DAYS = "7";
     loadEnv("api");
     try {
-      await pruneOldSamples();
+      await pruneOldSamples(db);
     } finally {
       if (previous === undefined) delete process.env.RETENTION_DAYS;
       else process.env.RETENTION_DAYS = previous;
@@ -3300,7 +3300,7 @@ describe("retiring a narrowed index", () => {
 
     // Nothing new to find: a_1_b_1 IS a key-prefix of a_1_b_1_c_1, but the
     // longer index is on its way out and cannot justify dropping anything.
-    expect(await classifyCluster(narrowId)).toBe(0);
+    expect(await classifyCluster(db, narrowId)).toBe(0);
     const after = await db
       .select()
       .from(recommendations)
@@ -3317,7 +3317,7 @@ describe("retiring a narrowed index", () => {
       .where(
         and(eq(clusterIndexes.clusterId, narrowId), eq(clusterIndexes.indexName, "a_1_b_1_c_1")),
       );
-    await classifyCluster(narrowId);
+    await classifyCluster(db, narrowId);
     expect(
       await db.select().from(recommendations).where(eq(recommendations.clusterId, narrowId)),
     ).toHaveLength(0);
@@ -3392,7 +3392,7 @@ describe("finished decisions age out, the ROI they earned does not", () => {
       periodEnd: old,
     });
 
-    await pruneOldSamples();
+    await pruneOldSamples(db);
 
     const left = await db
       .select()
@@ -3527,7 +3527,7 @@ describe("collecting twice writes almost nothing the second time", () => {
   it("extends the runs it has instead of inserting a row per index", async () => {
     // Two collects driven from here rather than left to the scheduler: connecting
     // only enqueues a tick, and the suite runs no worker.
-    await collectCluster(runClusterId);
+    await collectCluster(db, runClusterId);
     const before = await db
       .select({ id: indexSnapshots.id })
       .from(indexSnapshots)
@@ -3540,7 +3540,7 @@ describe("collecting twice writes almost nothing the second time", () => {
     // The first look is a run of one for every index it saw.
     expect(dimensionsBefore.length).toBe(before.length);
 
-    await collectCluster(runClusterId);
+    await collectCluster(db, runClusterId);
 
     const after = await db
       .select()
@@ -3769,7 +3769,7 @@ describe("collecting twice writes almost nothing the second time", () => {
       },
     ]);
 
-    await pruneOldSamples();
+    await pruneOldSamples(db);
 
     const left = await db
       .select({ collection: clusterIndexes.collection })

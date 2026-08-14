@@ -1,4 +1,5 @@
 import { evaluateRegression, inChangeWindow } from "../analysis";
+import type { Database } from "../db";
 import { actions, and, eq, inArray, policies, recommendations, roiMetrics } from "../db";
 import { emitClusterEvent } from "../events/emit";
 import { notifyClusterOwners } from "../mail/notify";
@@ -7,7 +8,6 @@ import { serializeSpec } from "../mongo";
 import { effectiveChangeWindow } from "./change-window";
 import { openClusterSession } from "./cluster-connection";
 import { recordRegression } from "./cooldowns";
-import { jobDb } from "./db";
 import { preflightDrop } from "./preflight";
 
 const DEFAULT_OBSERVE_DAYS = 30;
@@ -21,8 +21,7 @@ const SUPERSEDED_SCORE = 55;
 // The drop is the only irreversible step. A failed pre-flight during observe
 // un-hides the index and re-proposes it (the reversible safety path). Freed
 // bytes are recorded to roi_metrics for the dashboard headline.
-export async function finalizeCluster(clusterId: string): Promise<number> {
-  const db = jobDb();
+export async function finalizeCluster(db: Database, clusterId: string): Promise<number> {
   const periodStart = new Date();
   const [policy] = await db
     .select()
@@ -312,7 +311,7 @@ export async function finalizeCluster(clusterId: string): Promise<number> {
 // They are PROPOSED, not dropped: same approval, same hide, same observe window
 // and regression gate as any other drop. This only ensures the finding exists.
 async function retireSuperseded(
-  db: ReturnType<typeof jobDb>,
+  db: Database,
   clusterId: string,
   rec: {
     id: string;

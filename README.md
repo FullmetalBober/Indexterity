@@ -417,7 +417,7 @@ schema that is not there yet.
 | `npm run test` | nothing | the pure decision engine; components in jsdom with the api client mocked at `~/lib/api` |
 | `npm run test:int -w @repo/api` | migrated postgres + a mongod | CI runs it against **6.0, 7.0 and 8.x** — the three take different paths through the workload collector |
 | `npm run test:e2e` | both apps built | a real browser all the way to postgres and mongo, with **no proxy in front**, so the passthrough is the path under test |
-| `deploy/kind-test.sh` | Kind | the chart actually installing, `helm test`, sign-up over cluster DNS; fails if any pod logged a warning |
+| `deploy/kind-test.sh` | Kind | the chart actually installing, `helm test`, sign-up over cluster DNS; fails if any pod logged a warning. `TOPOLOGY=` runs the same assertions against each packaging, which is what holds them to being blind to it |
 
 The top ones are not decoration. The e2e suite found the api's session cookie
 being percent-encoded a second time on its way through the web server — both
@@ -506,12 +506,43 @@ is deliberately not done:
 
 ## Deploy
 
-Slim images via `turbo prune` (api ≈ 390 MB, web ≈ 235 MB):
+Small images via `turbo prune`, and small on purpose, in three passes. The api's
+runtime tree is installed from manifests with `devDependencies` deleted rather
+than pruned after the fact (`deploy/prod-manifests.mts`): `npm prune --omit=dev`
+was measured to change nothing here — `turbo prune` regenerates a lockfile with no
+`dev` markers, so npm reads the whole graph as production and ships typescript,
+drizzle-kit, @rolldown and esbuild. Then the base itself, which was most of what
+remained: **`node:26-alpine`** (181 MB) instead of `node:26-slim` (252 MB). The
+shipped api tree contains no native binaries, so that is a base swap and not a
+musl rebuild — and `mongodb+srv://`, the one lookup that would care, is tested on
+musl rather than assumed ([D76](./docs/decisions.md)). Then the same manifest lever
+a second time, for the all-in-one only, pointed at the dashboard's `dependencies`:
+those are not devDependencies and the manifest is right to list them, but a runtime
+that starts the dashboard from a self-contained `.output` bundle resolves nothing
+from them, and they were 185 MB — including two prebuilt lightningcss bindings, one
+of which can never load ([D77](./docs/decisions.md)). api **303 MB** (was 510),
+web **193 MB** (was 264), all-in-one **322 MB** (was 714), whose `node_modules` is
+now the api's 153 MB to the megabyte:
 
 ```bash
 docker build -f apps/api/Dockerfile -t indexterity-api .
 docker build -f apps/web/Dockerfile -t indexterity-web .
 ```
+
+There is a third, for hosts that run one container per service and have no pods
+at all — Fly, Render, Cloud Run, a single VM. Same builds, same artefacts, both
+processes under a supervisor that is PID 1, forwards `SIGTERM` to both and exits
+non-zero if either dies:
+
+```bash
+docker build -f deploy/all-in-one/Dockerfile -t indexterity-all-in-one .
+docker run -p 3000:3000 -e DATABASE_URL=… -e MASTER_KEY=… indexterity-all-in-one
+```
+
+Port 3000 is the only one that has to be published: the dashboard answers `/api`
+itself, so the browser gets everything from one origin. The Helm chart can deploy
+this shape too — `topology: single-container`, or `single-pod` to keep the two
+images and put them in one pod.
 
 ### Configuration
 
@@ -579,13 +610,19 @@ has the table.
 
 A Helm chart is in [`deploy/helm/indexterity`](./deploy/helm/indexterity) —
 api + dashboard + worker, a pre-upgrade migration hook, ingress, and a
-`helm test`. Bring your own PostgreSQL.
+`helm test`. Bring your own PostgreSQL. `topology` folds the three workloads into
+one pod (`single-pod`) or one container (`single-container`) for an install where
+three Deployments is more than it needs; the Services, the ingress and the app
+are identical in all three, so nothing in front of the chart has to know which
+one is installed.
 
 ### Metrics
 
 `METRICS_ENABLED=true` serves Prometheus metrics on port 9464 (`METRICS_PORT`)
-from all three workloads. The chart turns it on and can install a ServiceMonitor
-per workload; compose publishes them on 9464 (api), 9465 (worker) and 9466 (web).
+from all three workloads. Off unless asked for — an exporter costs memory in
+every process, and an install with nothing scraping it pays that for nobody. The
+chart can turn it on and install a ServiceMonitor per workload; compose has it on
+and publishes 9464 (api), 9465 (worker) and 9466 (web).
 
 Each answers for what only it can see, so scrape all three. The five things a
 service that drops other people's indexes has to be able to state:
@@ -615,7 +652,12 @@ and the two alert traps worth knowing, are in
 
 The metrics above say how *often* something failed. `SENTRY_DSN` says *what*.
 Every process reads that one variable; leave it empty — the default here, in
-compose and in the chart — and nothing is initialised at all.
+compose and in the chart — and neither app initialises the SDK. The dashboard
+does not even load it: importing `@sentry/tanstackstart-react` costs 17.3 MB of
+heap, measured, and a dynamic `import()` there is real ESM, so a default install
+skips it entirely. The api loads `@sentry/nestjs` (12.5 MB) either way — a
+deliberate tradeoff, not an oversight, kept for full static typing over that
+saving. See [D75](./docs/decisions.md) for why the two apps land differently.
 
 **The DSN is yours.** A self-hosted install reports to your own Sentry
 organisation or your own self-hosted Sentry, never to us.

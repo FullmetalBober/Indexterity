@@ -13,15 +13,35 @@ Dashboard:
   rule removes. Set web.publicUrl to whatever origin you actually reach it on.
 {{- end }}
 
-Workloads:
+Workloads (topology: {{ .Values.topology }}):
+{{- if eq .Values.topology "single-container" }}
+  app     {{ .Values.api.replicas }} replica(s), one container — {{ include "indexterity.allInOneImage" . }}
+          The api and the dashboard run under a supervisor inside it, so
+          `kubectl logs` returns both and a restart restarts both.
+{{- else if eq .Values.topology "single-pod" }}
+  app     {{ .Values.api.replicas }} replica(s), two containers — api and web share the pod
+          api: {{ include "indexterity.apiImage" . }}
+          web: {{ include "indexterity.webImage" . }}
+          web.replicas is ignored here; api.replicas counts the pods.
+{{- else }}
   api     {{ .Values.api.replicas }} replica(s)  — {{ include "indexterity.apiImage" . }}
   web     {{ .Values.web.replicas }} replica(s)  — {{ include "indexterity.webImage" . }}
-  worker  {{ if .Values.worker.enabled }}1 replica (cron: collect, apply, finalize, retention, digest){{ else }}DISABLED — nothing is collected or applied on a schedule{{ end }}
+{{- end }}
+  worker  {{ if .Values.worker.enabled }}1 replica (cron: collect, apply, finalize, retention, digest){{ else if .Values.api.runWorker }}embedded in the api process (RUN_WORKER=true) — no Deployment of its own{{ else }}DISABLED — nothing is collected or applied on a schedule{{ end }}
+{{- if and (include "indexterity.merged" .) .Values.worker.enabled }}
+
+  NOTE: the serving tier is merged but the worker still has its own Deployment,
+  so this release is two of them. For one, set worker.enabled=false and
+  api.runWorker=true — with api.replicas=1, which the embedded runner requires.
+{{- end }}
 
 {{- if .Values.metrics.enabled }}
 
 Metrics: port {{ .Values.metrics.port }} on {{ include "indexterity.fullname" . }}-api,
 {{ include "indexterity.fullname" . }}-web
+{{- if include "indexterity.merged" . }} (both Services reach the one pod, whose
+dashboard listener is on {{ include "indexterity.webMetricsPort" . }} — the api already has {{ .Values.metrics.port }} in that
+network namespace){{ end }}
 {{- if .Values.worker.enabled }} and {{ include "indexterity.fullname" . }}-worker-metrics{{ end }}, path /metrics.
 {{- if .Values.metrics.serviceMonitor.enabled }}
   A ServiceMonitor is installed for each. Scrape them all — the api reports HTTP

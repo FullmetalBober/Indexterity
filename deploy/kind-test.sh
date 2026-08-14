@@ -12,6 +12,17 @@
 # Usage:   deploy/kind-test.sh [--keep]
 #          RELEASE=0.1.0 deploy/kind-test.sh   # the PUBLISHED artifacts instead
 #          PREBUILT=1 deploy/kind-test.sh      # images already in the engine
+#          TOPOLOGY=single-container deploy/kind-test.sh
+#
+# TOPOLOGY runs the same assertions against a different packaging (see `topology`
+# in values.yaml), because that is where they earn the most: the checks below
+# reach the api and the dashboard through their Services and know nothing about
+# how many pods or containers are behind them, so running them per topology is
+# what proves the claim that nothing in front of the chart has to care.
+#   split             three Deployments, two images (the default)
+#   single-pod        one pod, an api and a web container, plus the worker's own
+#   single-container  one pod, ONE container from the all-in-one image, with the
+#                     job runner embedded — the whole release in one container
 #
 # RELEASE mode answers a question the default cannot: does what we shipped
 # work? The default builds from the working tree, so it passes even if the
@@ -44,6 +55,15 @@ NS=${NS:-indexterity}
 # In RELEASE mode the version under test IS the tag, so the two cannot drift.
 RELEASE=${RELEASE:-}
 TAG=${TAG:-${RELEASE:-0.1.0}}
+TOPOLOGY=${TOPOLOGY:-split}
+case "$TOPOLOGY" in
+  split | single-pod) IMAGES="api web" ;;
+  # One image, and that is the point of the topology: the migration Job and the
+  # worker run their own entrypoints out of it too, so nothing here pulls the
+  # other two.
+  single-container) IMAGES="all-in-one" ;;
+  *) echo "TOPOLOGY must be split, single-pod or single-container (got $TOPOLOGY)"; exit 1 ;;
+esac
 GHCR_OWNER=${GHCR_OWNER:-fullmetalbober}
 # Pinned so the preload and the manifests can never disagree about a tag.
 PG_IMAGE=${PG_IMAGE:-docker.io/library/postgres:18-alpine}
@@ -61,6 +81,14 @@ step() { printf '\n\033[1m==> %s\033[0m\n' "$1"; }
 # podman tags into localhost/; docker does not.
 image_ref() {
   if [ "$CTR" = "podman" ]; then echo "localhost/indexterity/$1:$TAG"; else echo "indexterity/$1:$TAG"; fi
+}
+# Which Dockerfile builds each name in IMAGES. The api's and the web's sit with
+# the app they build; the all-in-one's builds both, so it sits with the deployment.
+dockerfile_for() {
+  case "$1" in
+    all-in-one) echo "$ROOT/deploy/all-in-one/Dockerfile" ;;
+    *) echo "$ROOT/apps/$1/Dockerfile" ;;
+  esac
 }
 
 cleanup() {
@@ -92,7 +120,7 @@ if [ -n "$RELEASE" ]; then
   # never depends on DNS through the container network. It also proves the
   # packages are public: an anonymous pull is what a stranger gets.
   step "pulling the published images ($RELEASE)"
-  for img in api web; do
+  for img in $IMAGES; do
     $CTR pull "ghcr.io/$GHCR_OWNER/indexterity-$img:$RELEASE"
     kind load docker-image "ghcr.io/$GHCR_OWNER/indexterity-$img:$RELEASE" --name "$CLUSTER"
   done
@@ -102,18 +130,19 @@ else
   # tags are the contract; where they came from is not this script's business.
   if [ -z "${PREBUILT:-}" ]; then
     step "building images"
-    "$CTR" build -f "$ROOT/apps/api/Dockerfile" -t "indexterity/api:$TAG" "$ROOT"
-    "$CTR" build -f "$ROOT/apps/web/Dockerfile" -t "indexterity/web:$TAG" "$ROOT"
+    for img in $IMAGES; do
+      "$CTR" build -f "$(dockerfile_for "$img")" -t "indexterity/$img:$TAG" "$ROOT"
+    done
   else
     step "using prebuilt images"
-    for img in api web; do
+    for img in $IMAGES; do
       $CTR image inspect "$(image_ref "$img")" >/dev/null 2>&1 ||
         { echo "PREBUILT is set but $(image_ref "$img") is not in $CTR"; exit 1; }
     done
   fi
 
   step "loading images into the cluster"
-  for img in api web; do
+  for img in $IMAGES; do
     kind load docker-image "$(image_ref "$img")" --name "$CLUSTER"
   done
 fi
@@ -134,33 +163,92 @@ kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f - >/d
 kubectl apply -n "$NS" -f "$ROOT/deploy/kind-dependencies.yaml"
 kubectl -n "$NS" wait --for=condition=available deploy/postgres deploy/mongo --timeout=180s
 
-step "installing the chart"
+step "installing the chart (topology: $TOPOLOGY)"
 if [ -n "$RELEASE" ]; then
   CHART="oci://ghcr.io/$GHCR_OWNER/charts/indexterity"
   CHART_ARGS="--version $RELEASE"
-  API_REPO="ghcr.io/$GHCR_OWNER/indexterity-api"
-  WEB_REPO="ghcr.io/$GHCR_OWNER/indexterity-web"
+  repo_for() { echo "ghcr.io/$GHCR_OWNER/indexterity-$1"; }
 else
   CHART="$ROOT/deploy/helm/indexterity"
   CHART_ARGS=""
-  API_REPO=$(image_ref api | sed "s/:$TAG//")
-  WEB_REPO=$(image_ref web | sed "s/:$TAG//")
+  repo_for() { image_ref "$1" | sed "s/:$TAG//"; }
 fi
+
+# The image the topology actually pulls, and — for the merged ones — the worker
+# shape that goes with it. single-container embeds the job runner (RUN_WORKER),
+# which is the appliance the image exists for and the only place that code path
+# is exercised under a kubelet; single-pod keeps the worker's own Deployment, so
+# between them the matrix covers both.
+case "$TOPOLOGY" in
+  single-container)
+    IMAGE_ARGS="allInOne.image.repository=$(repo_for all-in-one),allInOne.image.tag=$TAG,allInOne.image.pullPolicy=Never"
+    WORKER_ARGS="worker.enabled=false,api.runWorker=true"
+    COMPONENTS="app"
+    ;;
+  single-pod)
+    IMAGE_ARGS="api.image.repository=$(repo_for api),api.image.tag=$TAG,api.image.pullPolicy=Never,web.image.repository=$(repo_for web),web.image.tag=$TAG,web.image.pullPolicy=Never"
+    WORKER_ARGS="worker.enabled=true"
+    COMPONENTS="app worker"
+    ;;
+  *)
+    IMAGE_ARGS="api.image.repository=$(repo_for api),api.image.tag=$TAG,api.image.pullPolicy=Never,web.image.repository=$(repo_for web),web.image.tag=$TAG,web.image.pullPolicy=Never"
+    WORKER_ARGS="worker.enabled=true"
+    COMPONENTS="api web worker"
+    ;;
+esac
 # allowInsecureAuthUrl: a Kind cluster terminates no TLS, and the api refuses a
 # non-https auth URL in production. trustProxy: kube-proxy hides the client
-# address, so without it the per-IP rate limits share one bucket.
+# address, so without it the per-IP rate limits share one bucket. metrics: off by
+# default since the exporter costs memory in every process, and set here on
+# purpose — the chart's own test asserts the endpoints, so leaving it at the
+# default would quietly retire those assertions.
 # Never: every image is already in the node, and a pull would only be a slower
 # way to fetch what is there — or a spurious failure if the registry blinks.
 # shellcheck disable=SC2086  # CHART_ARGS is a deliberate word split
 helm upgrade --install indexterity "$CHART" $CHART_ARGS -n "$NS" --wait --timeout 5m \
-  --set "api.image.repository=$API_REPO,api.image.tag=$TAG,api.image.pullPolicy=Never,api.replicas=1" \
-  --set "web.image.repository=$WEB_REPO,web.image.tag=$TAG,web.image.pullPolicy=Never,web.replicas=1" \
+  --set "topology=$TOPOLOGY,api.replicas=1,web.replicas=1" \
+  --set "metrics.enabled=true" \
+  --set "$IMAGE_ARGS" \
+  --set "$WORKER_ARGS" \
   --set "config.signupMode=open,config.allowPrivateClusterTargets=true" \
   --set "config.allowInsecureClusterTls=true" \
   --set "config.allowInsecureAuthUrl=true,config.trustProxy=true" \
   --set "secrets.databaseUrl=postgres://indexterity:indexterity@postgres:5432/indexterity" \
   --set "secrets.betterAuthSecret=kind-test-secret-not-for-real-use-0000" \
   --set "secrets.masterKey=MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+
+step "the topology installed is the one that was asked for"
+# Without this the whole run would pass on a chart that quietly ignored
+# `topology` and installed the default — every assertion below reaches the api
+# and the dashboard through their Services, which is exactly the property that
+# makes them blind to what is behind them.
+case "$TOPOLOGY" in
+  split) SERVING=indexterity-api; WANT_CONTAINERS="api" ;;
+  single-pod) SERVING=indexterity; WANT_CONTAINERS="api web" ;;
+  single-container) SERVING=indexterity; WANT_CONTAINERS="app" ;;
+esac
+GOT_CONTAINERS=$(kubectl -n "$NS" get deploy "$SERVING" -o jsonpath='{.spec.template.spec.containers[*].name}')
+if [ "$GOT_CONTAINERS" != "$WANT_CONTAINERS" ]; then
+  echo "deploy/$SERVING has containers [$GOT_CONTAINERS], expected [$WANT_CONTAINERS]"
+  kubectl -n "$NS" get deploy
+  exit 1
+fi
+printf '  deploy/%s: %s\n' "$SERVING" "$GOT_CONTAINERS"
+# Both Services have to have endpoints whatever is behind them — merged, that is
+# one pod answering two Services, which is the seam that keeps the ingress and
+# every in-cluster caller ignorant of the topology.
+# EndpointSlices rather than `get endpoints`: the v1 Endpoints API is deprecated
+# from 1.33 and reading it prints a warning on every run, which is the sort of
+# noise the log check below exists to keep out.
+for svc in indexterity-api indexterity-web; do
+  # READY endpoints only. An EndpointSlice lists a not-yet-ready address too, with
+  # conditions.ready=false — so the unfiltered form reported an endpoint for a pod
+  # that was still booting and called it proof.
+  addrs=$(kubectl -n "$NS" get endpointslices -l "kubernetes.io/service-name=$svc" \
+    -o jsonpath='{.items[*].endpoints[?(@.conditions.ready==true)].addresses[*]}')
+  [ -n "$addrs" ] || { echo "svc/$svc has no ready endpoints"; exit 1; }
+  printf '  svc/%s -> %s\n' "$svc" "$addrs"
+done
 
 step "helm test"
 # The probe pod echoes after each assertion it passes, so its log names the one
@@ -170,6 +258,24 @@ if ! helm test indexterity -n "$NS" --timeout 3m; then
   echo "--- test pod log (the last line it echoed is the last assertion that PASSED) ---"
   # The pod survives a failure: its delete policy only removes it on success.
   kubectl -n "$NS" logs -l app.kubernetes.io/component=test --tail=-1 || true
+  # And what the assertion was talking TO. Without this a CI failure says only
+  # which curl failed, which is the question rather than the answer: a refused
+  # connection to a Service with endpoints means the pod behind it restarted, or
+  # never bound that port, and only the pod can say which. RESTARTS is the column
+  # that matters — a container the supervisor took down and the kubelet brought
+  # back is indistinguishable from a slow boot until you look at the count.
+  echo "--- pods (RESTARTS is the interesting column) ---"
+  kubectl -n "$NS" get pods -o wide || true
+  for c in $COMPONENTS; do
+    echo "--- describe: $c (look for OOMKilled, Last State, probe failures) ---"
+    kubectl -n "$NS" describe pod -l "app.kubernetes.io/component=$c" | sed -n '/Containers:/,/Events:/p' || true
+    echo "--- logs: $c (current) ---"
+    kubectl -n "$NS" logs -l "app.kubernetes.io/component=$c" --all-containers --tail=80 || true
+    # The log of the instance that DIED, which the current one has replaced and
+    # which is the only place a crash reason is written.
+    echo "--- logs: $c (previous instance, if it restarted) ---"
+    kubectl -n "$NS" logs -l "app.kubernetes.io/component=$c" --all-containers --previous --tail=80 2>/dev/null || echo "  (no previous instance — it did not restart)"
+  done
   exit 1
 fi
 
@@ -211,17 +317,22 @@ kubectl -n "$NS" run kind-check --rm -i --restart=Never --image="$CURL_IMAGE" --
 '
 
 step "logs must be clean (house rule: no errors, no warnings)"
+# Per COMPONENT rather than per workload, because merged they are the same pod:
+# `app` covers the api and the dashboard together, and in single-container that
+# is one container whose log holds both processes' output plus the supervisor's.
 noisy=0
-for c in api web worker; do
-  n=$(kubectl -n "$NS" logs -l "app.kubernetes.io/component=$c" --tail=500 2>/dev/null \
+for c in $COMPONENTS; do
+  # --all-containers, because `app` is two of them in single-pod and kubectl
+  # otherwise refuses a selector that matches a multi-container pod.
+  n=$(kubectl -n "$NS" logs -l "app.kubernetes.io/component=$c" --all-containers --tail=500 2>/dev/null \
       | grep -icE '"level":(40|50|60)|ERROR|WARN' || true)
   printf '  %-7s %s\n' "$c" "$n"
   [ "$n" = "0" ] || noisy=1
 done
 if [ "$noisy" != "0" ]; then
   echo "FAILED: a pod logged a warning or error"
-  for c in api web worker; do
-    kubectl -n "$NS" logs -l "app.kubernetes.io/component=$c" --tail=500 2>/dev/null | grep -iE 'ERROR|WARN' | head -5
+  for c in $COMPONENTS; do
+    kubectl -n "$NS" logs -l "app.kubernetes.io/component=$c" --all-containers --tail=500 2>/dev/null | grep -iE 'ERROR|WARN' | head -5
   done
   exit 1
 fi

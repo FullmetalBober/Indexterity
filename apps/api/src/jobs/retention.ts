@@ -5,6 +5,7 @@ import {
   and,
   clusterIndexes,
   clusters,
+  type Database,
   eq,
   inArray,
   indexSnapshots,
@@ -14,7 +15,6 @@ import {
   recommendations,
   sql,
 } from "../db";
-import { jobDb } from "./db";
 
 const DAY_MS = 86_400_000;
 // One batch per run. A backlog drains over consecutive days rather than holding
@@ -41,8 +41,8 @@ function deadLetterCutoff(): Date {
 // `graphile_worker.jobs` is the public view; `_private_jobs` is private and its
 // shape moves between releases. completeJobs() is the supported way to delete a
 // job row, so the ids come from the view and the deletion goes through the API.
-export async function pruneDeadLetterJobs(): Promise<number> {
-  const rows = await jobDb().execute(sql`
+export async function pruneDeadLetterJobs(db: Database): Promise<number> {
+  const rows = await db.execute(sql`
     select id::text as id from graphile_worker.jobs
     where attempts >= max_attempts
       and locked_at is null
@@ -90,13 +90,12 @@ export async function pruneDeadLetterJobs(): Promise<number> {
 // call an index unused at all — so the window is applied to the engine's reads as
 // well as the dashboard's. Retained-but-invisible has to be invisible to
 // classify.ts too, or the entitlement is advertised rather than enforced.
-export async function pruneOldSamples(): Promise<number> {
-  const db = jobDb();
+export async function pruneOldSamples(db: Database): Promise<number> {
   const owned = await db
     .select({ clusterId: clusters.id, plan: organizations.plan })
     .from(clusters)
     .innerJoin(organizations, eq(clusters.orgId, organizations.id));
-  if (owned.length === 0) return await pruneDeadLetterJobs();
+  if (owned.length === 0) return await pruneDeadLetterJobs(db);
   const clusterIds = owned.map((row) => row.clusterId);
 
   let pruned = 0;
@@ -183,5 +182,5 @@ export async function pruneOldSamples(): Promise<number> {
       .returning({ id: recommendations.id });
     pruned += decisions.length;
   }
-  return pruned + (await pruneDeadLetterJobs());
+  return pruned + (await pruneDeadLetterJobs(db));
 }

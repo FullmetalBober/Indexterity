@@ -1,11 +1,14 @@
 import type { JobHelpers } from "graphile-worker";
+import type { Database } from "../db";
 import { clusters } from "../db";
 import { observeClusterFleet } from "../metrics";
-import { jobDb } from "./db";
 
 // Fan a per-cluster data-plane task out to every connected cluster.
-export async function dispatchToAllClusters(task: string, helpers: JobHelpers): Promise<number> {
-  const db = jobDb();
+export async function dispatchToAllClusters(
+  db: Database,
+  task: string,
+  helpers: JobHelpers,
+): Promise<number> {
   const rows = await db.select({ id: clusters.id }).from(clusters);
   // The fleet as it stands, so the unreachable gauge forgets a cluster that was
   // offboarded while we could not reach it.

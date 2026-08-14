@@ -1,11 +1,16 @@
 import { type Runner, run } from "graphile-worker";
 import { apiEnv, workerEnv } from "../config/env";
+import type { Database } from "../db";
 import { captureError } from "../errors/reporting";
 import { ALERT_COOLDOWN_MS, alertAllowed, notifyClusterOwners } from "../mail/notify";
 import { instrumentRunner } from "../metrics";
-import { jobDb } from "./db";
 import { clusterIdOf, finalClusterFailure } from "./failure";
-import { taskList } from "./tasks";
+import { createTaskList } from "./tasks";
+
+// How long an idle runner waits before asking postgres whether anything became
+// due. See the note at the call site for why this is safe to raise: an enqueued
+// job arrives by NOTIFY, not by poll.
+const POLL_INTERVAL_MS = 10_000;
 
 // Recurring schedule (per cluster via the dispatcher tasks):
 //  - collect + classify hourly
@@ -36,10 +41,24 @@ const CRONTAB = [
   // Why not thirty minutes, which the load would allow: a collect takes 0.66s against
   // ~100 collections, and since collections are walked serially with five commands in
   // flight each, a remote cluster costs about one round trip per collection — roughly
-  // four minutes at 5,000 collections and 50ms. Load is not the constraint. The
-  // constraint is that getLatencySeries is still unbounded (#64) and there is no
-  // downsampling of old latency history, so twelve times the rows would land on a
-  // read that already has no limit. Hourly first, then that, then revisit.
+  // four minutes at 5,000 collections and 50ms. Load is not the constraint. Neither is
+  // the read's payload any more: #64 is closed, and getLatencySeries is bounded on both
+  // axes — a 30-day window over the top 8 collections, however often this runs.
+  //
+  // What is left is the write rate against the half of that read #64 did not bound.
+  // Capping the RESPONSE did not cap the QUERY: loadLatencyReadings selects every
+  // collection's rows inside the window and slices to the top 8 in JS afterwards, so
+  // the rows a dashboard load scans are collections × this cadence × up to 30 days,
+  // and latency_samples is the table where nothing run-length-collapses. Halving the
+  // interval doubles that scan, and doubles the storage held inside RETENTION_DAYS.
+  //
+  // What it buys is 48 points a day instead of 24. That is not what the raise was for:
+  // the floor was four a day reading as broken, and hourly clears it six times over.
+  // The signal that has to be fast is scheduleProbe's, five minutes below.
+  //
+  // So hourly stays on its own merits, not on a blocker. What would change the answer
+  // is downsampling old latency history and slicing that read in SQL — the cost side
+  // would drop and the reader side would still say 24 is enough.
   //
   // Offset from scheduleSuggest at :30 so the two hourly passes do not dial the same
   // cluster at the same minute.
@@ -58,12 +77,34 @@ const CRONTAB = [
 
 // Start the job runner. Used by the standalone worker process, and by the api
 // itself when RUN_WORKER=true collapses both into one container.
-export async function startWorker(): Promise<Runner> {
+export async function startWorker(db: Database): Promise<Runner> {
   const values = workerEnv();
   const runner = await run({
+    // graphile-worker keeps its OWN pool from this string, and should: it holds a
+    // long-lived LISTEN connection, so sharing `db` would tie up one of that
+    // pool's slots permanently and make the queue compete with everything else
+    // for the rest.
     connectionString: values.DATABASE_URL,
     concurrency: values.WORKER_CONCURRENCY,
-    taskList,
+    // Derived rather than configured, and bounded rather than left at
+    // graphile-worker's own default of 10 — separate from our pools is not the
+    // same as unbounded, and seven idle backends per worker is a cost paid on the
+    // DATABASE server. It needs one connection per job plus the LISTEN client, so
+    // concurrency + 2 is the floor with a spare; deriving it means raising
+    // WORKER_CONCURRENCY cannot leave the queue starved of connections.
+    maxPoolSize: values.WORKER_CONCURRENCY + 2,
+    // Ten seconds, against a default of two. Polling is the FALLBACK here, not
+    // the mechanism: add_job runs `pg_notify('jobs:insert', …)` and this runner
+    // holds `LISTEN "jobs:insert"`, so anything enqueued — including the
+    // dashboard's collect button — still starts immediately. What waits up to
+    // this long is work that becomes due by the clock: a cron tick, or a retry
+    // whose backoff expired. The tightest schedule in CRONTAB is five minutes, so
+    // ten seconds of slack there costs nothing and takes the idle query rate from
+    // 30 a minute to 6.
+    pollInterval: POLL_INTERVAL_MS,
+    // The db reaches every task through here — one argument at the composition
+    // root, where before each task reached for a module-level singleton.
+    taskList: createTaskList(db),
     crontab: CRONTAB,
   });
   // Job counters come off the same events, so they are registered here and
@@ -103,7 +144,7 @@ export async function startWorker(): Promise<Runner> {
     if (clusterId === null) return;
     if (!alertAllowed(`${clusterId}:${job.task_identifier}`, ALERT_COOLDOWN_MS)) return;
     void notifyClusterOwners(
-      jobDb(),
+      db,
       clusterId,
       `${job.task_identifier} keeps failing`,
       `The background ${job.task_identifier} task gave up after ${job.attempts} attempts.\n\n` +

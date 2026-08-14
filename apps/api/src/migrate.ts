@@ -23,7 +23,9 @@ import { closeDatabase, createDatabase } from "./db";
 // validates the narrowest of the three schemas.
 async function main(): Promise<void> {
   loadEnvOrExit("migrate");
-  const db = createDatabase(coreEnv().DATABASE_URL);
+  // Two, not PG_POOL_MAX: this process applies migrations in sequence and exits,
+  // so a pool sized for a serving workload would open connections it never uses.
+  const db = createDatabase(coreEnv().DATABASE_URL, 2);
   try {
     await migrate(db, { migrationsFolder: join(__dirname, "..", "drizzle") });
     const utils = await makeWorkerUtils({ connectionString: coreEnv().DATABASE_URL });

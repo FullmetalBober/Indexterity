@@ -1,11 +1,15 @@
 {
   "$schema": "https://json.schemastore.org/tsconfig",
-  // The repo's own scripts, which belong to no workspace. Without this file
+  // The repo's own TypeScript that belongs to no workspace. Without this file
   // `npm run typecheck` fans out to apps/* and packages/* and reads none of
-  // them — so `scripts/` was the only source in the tree that nothing checked.
+  // it — so `scripts/` was the only source in the tree that nothing checked.
   //
-  // They are run by `node scripts/x.ts` directly, with no build step: Node
-  // strips types on the way in. Everything here exists to keep that true.
+  // Two kinds live here now: `scripts/` and the all-in-one image's supervisor,
+  // which is PID 1 of a container and so is the last file in the repo that should
+  // go unchecked.
+  //
+  // Both are run by `node <file>.ts` directly, with no build step: Node strips
+  // types on the way in. Everything here exists to keep that true.
   "extends": "./packages/config/tsconfig.base.json",
   "compilerOptions": {
     "noEmit": true,
@@ -20,5 +24,5 @@
     "sourceMap": false,
     "types": ["node"]
   },
-  "include": ["scripts/**/*.ts"]
+  "include": ["scripts/**/*.ts", "deploy/**/*.ts", "deploy/**/*.mts"]
 }

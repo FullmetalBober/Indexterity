@@ -6,6 +6,16 @@ import { workerEnv } from "../config/env";
 // 30s default, so requests surface a 502 quickly.
 const SERVER_SELECTION_TIMEOUT_MS = 5000;
 
+// Return a socket to the operating system after this long unused. The driver
+// keeps pooled sockets indefinitely by default, and a session here outlives the
+// job that opened it — connection-pool.ts holds one per cluster for five idle
+// minutes so the next job skips a fresh handshake. That is worth keeping, but
+// holding every socket the busiest moment needed for the whole five minutes is
+// not: this returns the surplus while leaving the session itself warm. A
+// reconnect costs one handshake, which is what the 5s selection timeout above
+// already budgets for.
+const MAX_IDLE_TIME_MS = 60_000;
+
 // The driver options that keep TLS switched on while turning off the part that
 // makes it worth having, each paired with the consent that permits it. A
 // connection nobody validates the certificate of is a connection anyone in the
@@ -46,6 +56,13 @@ export const NO_TLS_OVERRIDES: TlsOverrides = {
 // to an addressing rule would quietly weaken real deployments.
 export function allowInsecureTls(): boolean {
   return workerEnv().ALLOW_INSECURE_CLUSTER_TLS;
+}
+
+// Read per call rather than captured at module load, for the same reason the flag
+// above is: the schema is validated at boot, and reading through it keeps one
+// answer for what the environment says.
+export function maxPoolSize(): number {
+  return workerEnv().MONGO_MAX_POOL_SIZE;
 }
 
 // Whether the transport is encrypted at all.
@@ -157,5 +174,14 @@ export function assertTlsEnforced(value: string, overrides: TlsOverrides = NO_TL
 // fail in.
 export function mongoClient(uri: string, overrides: TlsOverrides = NO_TLS_OVERRIDES): MongoClient {
   assertTlsEnforced(uri, overrides);
-  return new MongoClient(uri, { serverSelectionTimeoutMS: SERVER_SELECTION_TIMEOUT_MS });
+  return new MongoClient(uri, {
+    serverSelectionTimeoutMS: SERVER_SELECTION_TIMEOUT_MS,
+    // Bounded on purpose. The driver's default of 100 per client is a ceiling
+    // nothing here approaches — the collectors fan out per replica-set member,
+    // and each member has its own client — while the cost of it is paid twice:
+    // by this process, which holds a session per connected cluster, and by the
+    // customer's mongod, whose connection budget is not ours to spend.
+    maxPoolSize: maxPoolSize(),
+    maxIdleTimeMS: MAX_IDLE_TIME_MS,
+  });
 }

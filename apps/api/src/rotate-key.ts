@@ -20,7 +20,8 @@ async function main(): Promise<void> {
   // The worker schema: this rewraps stored credentials, so it needs MASTER_KEY
   // and every MASTER_KEY_V<n> the rotation names.
   loadEnvOrExit("worker");
-  const db = createDatabase(workerEnv().DATABASE_URL);
+  // A one-shot re-seal, run by hand and one row at a time.
+  const db = createDatabase(workerEnv().DATABASE_URL, 2);
   const target = currentKeyVersion();
   const targetKey = envKeyProvider(masterKeyBytesFor(target));
 

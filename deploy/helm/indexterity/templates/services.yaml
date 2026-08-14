@@ -25,8 +25,12 @@ spec:
       targetPort: metrics
       protocol: TCP
     {{- end }}
+  # The pod behind this Service is the api's own, or — in the merged topologies —
+  # the one pod that serves both. The label above and the name are unchanged
+  # either way, which is what keeps the ingress, the ServiceMonitors and every
+  # in-cluster caller ignorant of the topology.
   selector:
-    {{- include "indexterity.selectorLabels" (dict "root" . "component" "api") | nindent 4 }}
+    {{- include "indexterity.selectorLabels" (dict "root" . "component" (include "indexterity.podComponent" (dict "root" . "workload" "api"))) | nindent 4 }}
 ---
 apiVersion: v1
 kind: Service
@@ -44,18 +48,22 @@ spec:
   ports:
     - name: http
       port: {{ .Values.web.service.port }}
-      targetPort: http
+      # web-* rather than http/metrics: a pod's port names are unique across its
+      # containers, so merged these cannot carry the same names as the api's.
+      # The names are the container's; the ports published here are the same
+      # numbers in every topology.
+      targetPort: web-http
       protocol: TCP
     {{- if .Values.metrics.enabled }}
     # Same reasoning as the api's: the ingress routes the http port by name, so
     # this one is not published with it.
     - name: metrics
       port: {{ .Values.metrics.port }}
-      targetPort: metrics
+      targetPort: web-metrics
       protocol: TCP
     {{- end }}
   selector:
-    {{- include "indexterity.selectorLabels" (dict "root" . "component" "web") | nindent 4 }}
+    {{- include "indexterity.selectorLabels" (dict "root" . "component" (include "indexterity.podComponent" (dict "root" . "workload" "web"))) | nindent 4 }}
 {{- if and .Values.metrics.enabled .Values.worker.enabled }}
 ---
 # The worker's only Service, and it exists solely so a scrape can find the pod:

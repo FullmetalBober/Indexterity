@@ -1,4 +1,5 @@
 import type { JobHelpers } from "graphile-worker";
+import type { Database } from "../db";
 import { isUnreachableError } from "../errors/unreachable";
 import { emitPassFinished } from "../events/emit";
 import { ALERT_COOLDOWN_MS, alertAllowed, notifyClusterOwners } from "../mail/notify";
@@ -11,7 +12,6 @@ import { classifyCluster } from "./classify";
 import { ClusterCredentialsError, ClusterGoneError } from "./cluster-connection";
 import { collectCluster } from "./collect";
 import { applyCreatesForCluster } from "./create";
-import { jobDb } from "./db";
 import { runDigest } from "./digest";
 import { dispatchToAllClusters } from "./dispatch";
 import { finalizeCluster } from "./finalize";
@@ -117,100 +117,117 @@ export async function runClusterTask(
   }
 }
 
-function depsFor(helpers: JobHelpers): ClusterTaskDeps {
+// Takes the database to CLOSE OVER, not to expose: the two functions below need
+// it, and runClusterTask does not. Keeping it out of ClusterTaskDeps is what keeps
+// that interface three functions wide and testable with no database at all.
+function depsFor(db: Database, helpers: JobHelpers): ClusterTaskDeps {
   return {
     logger: helpers.logger,
     // Best-effort: a mail failure must not turn a skipped tick into a hard one.
     alertOwners: async (clusterId, subject, body) => {
       try {
-        await notifyClusterOwners(jobDb(), clusterId, subject, body);
+        await notifyClusterOwners(db, clusterId, subject, body);
       } catch (error) {
         helpers.logger.error(`alert for cluster ${clusterId} failed: ${String(error)}`);
       }
     },
-    emitPassFinished: (clusterId, task) => emitPassFinished(jobDb(), clusterId, task),
+    emitPassFinished: (clusterId, task) => emitPassFinished(db, clusterId, task),
   };
 }
 
 function onCluster(
+  db: Database,
   task: string,
   payload: unknown,
   helpers: JobHelpers,
   run: (clusterId: string) => Promise<unknown>,
 ): Promise<void> {
-  return runClusterTask(task, clusterIdFromPayload(payload), depsFor(helpers), run);
+  return runClusterTask(task, clusterIdFromPayload(payload), depsFor(db, helpers), run);
 }
 
 // graphile-worker task registry. Per-cluster tasks (collect/classify/suggest/
 // apply/finalize) plus cron dispatchers that fan those out to every cluster.
-export const taskList = {
-  collect: async (payload: unknown, helpers: JobHelpers): Promise<void> => {
-    await onCluster("collect", payload, helpers, async (clusterId) => {
-      await collectCluster(clusterId);
-      // Only chase a collect that actually landed — re-analysing an unchanged
-      // history just re-derives yesterday's answer.
-      await helpers.addJob("classify", { clusterId });
-      await helpers.addJob("suggest", { clusterId });
-    });
-  },
-  classify: async (payload: unknown, helpers: JobHelpers): Promise<void> => {
-    await onCluster("classify", payload, helpers, async (clusterId) => {
-      await classifyCluster(clusterId);
-      // Same trigger, same evidence: re-derive the change window from the
-      // traffic the collect just recorded.
-      await refreshInferredWindow(jobDb(), clusterId);
-    });
-  },
-  suggest: async (payload: unknown, helpers: JobHelpers): Promise<void> => {
-    // suggest builds its own auto-approved creates inline rather than waiting
-    // for the next apply tick; create.ts decides which may run outside the
-    // change window.
-    await onCluster("suggest", payload, helpers, suggestForCluster);
-  },
-  apply: async (payload: unknown, helpers: JobHelpers): Promise<void> => {
-    await onCluster("apply", payload, helpers, async (clusterId) => {
-      await applyCluster(clusterId);
-      await applyCreatesForCluster(clusterId);
-    });
-  },
-  finalize: async (payload: unknown, helpers: JobHelpers): Promise<void> => {
-    await onCluster("finalize", payload, helpers, finalizeCluster);
-  },
-  // Every 5 minutes: is anything suddenly much slower to read than usual? If so,
-  // look for the missing index now rather than at the next hourly pass.
-  probe: async (payload: unknown, helpers: JobHelpers): Promise<void> => {
-    await onCluster("probe", payload, helpers, async (clusterId) => {
-      const findings = await probeCluster(clusterId);
-      if (findings.length === 0) return;
-      for (const finding of findings) {
-        helpers.logger.info(
-          finding.database === null
-            ? `probe: cluster under index-related pressure — ${finding.reason}`
-            : `probe: ${finding.database}.${finding.collection} under read pressure — ${finding.reason}`,
-        );
-      }
-      await helpers.addJob("suggest", { clusterId });
-    });
-  },
-  scheduleProbe: async (_payload: unknown, helpers: JobHelpers): Promise<void> => {
-    await dispatchToAllClusters("probe", helpers);
-  },
-  scheduleCollect: async (_payload: unknown, helpers: JobHelpers): Promise<void> => {
-    await dispatchToAllClusters("collect", helpers);
-  },
-  scheduleSuggest: async (_payload: unknown, helpers: JobHelpers): Promise<void> => {
-    await dispatchToAllClusters("suggest", helpers);
-  },
-  scheduleApply: async (_payload: unknown, helpers: JobHelpers): Promise<void> => {
-    await dispatchToAllClusters("apply", helpers);
-  },
-  scheduleFinalize: async (_payload: unknown, helpers: JobHelpers): Promise<void> => {
-    await dispatchToAllClusters("finalize", helpers);
-  },
-  retention: async (): Promise<void> => {
-    await pruneOldSamples();
-  },
-  digest: async (): Promise<void> => {
-    await runDigest();
-  },
-};
+//
+// A function of the database rather than a constant, because the database is the
+// one thing every task here needs and the process that starts the runner is the
+// thing that owns it (jobs/runner.ts). Before this, each task reached for a
+// module-level singleton instead — which worked, and meant the pool's lifetime
+// belonged to whichever module was imported first rather than to whoever composed
+// the worker.
+export function createTaskList(db: Database) {
+  return {
+    collect: async (payload: unknown, helpers: JobHelpers): Promise<void> => {
+      await onCluster(db, "collect", payload, helpers, async (clusterId) => {
+        await collectCluster(db, clusterId);
+        // Only chase a collect that actually landed — re-analysing an unchanged
+        // history just re-derives yesterday's answer.
+        await helpers.addJob("classify", { clusterId });
+        await helpers.addJob("suggest", { clusterId });
+      });
+    },
+    classify: async (payload: unknown, helpers: JobHelpers): Promise<void> => {
+      await onCluster(db, "classify", payload, helpers, async (clusterId) => {
+        await classifyCluster(db, clusterId);
+        // Same trigger, same evidence: re-derive the change window from the
+        // traffic the collect just recorded.
+        await refreshInferredWindow(db, clusterId);
+      });
+    },
+    suggest: async (payload: unknown, helpers: JobHelpers): Promise<void> => {
+      // suggest builds its own auto-approved creates inline rather than waiting
+      // for the next apply tick; create.ts decides which may run outside the
+      // change window.
+      await onCluster(db, "suggest", payload, helpers, (clusterId) =>
+        suggestForCluster(db, clusterId),
+      );
+    },
+    apply: async (payload: unknown, helpers: JobHelpers): Promise<void> => {
+      await onCluster(db, "apply", payload, helpers, async (clusterId) => {
+        await applyCluster(db, clusterId);
+        await applyCreatesForCluster(db, clusterId);
+      });
+    },
+    finalize: async (payload: unknown, helpers: JobHelpers): Promise<void> => {
+      await onCluster(db, "finalize", payload, helpers, (clusterId) =>
+        finalizeCluster(db, clusterId),
+      );
+    },
+    // Every 5 minutes: is anything suddenly much slower to read than usual? If so,
+    // look for the missing index now rather than at the next hourly pass.
+    probe: async (payload: unknown, helpers: JobHelpers): Promise<void> => {
+      await onCluster(db, "probe", payload, helpers, async (clusterId) => {
+        const findings = await probeCluster(db, clusterId);
+        if (findings.length === 0) return;
+        for (const finding of findings) {
+          helpers.logger.info(
+            finding.database === null
+              ? `probe: cluster under index-related pressure — ${finding.reason}`
+              : `probe: ${finding.database}.${finding.collection} under read pressure — ${finding.reason}`,
+          );
+        }
+        await helpers.addJob("suggest", { clusterId });
+      });
+    },
+    scheduleProbe: async (_payload: unknown, helpers: JobHelpers): Promise<void> => {
+      await dispatchToAllClusters(db, "probe", helpers);
+    },
+    scheduleCollect: async (_payload: unknown, helpers: JobHelpers): Promise<void> => {
+      await dispatchToAllClusters(db, "collect", helpers);
+    },
+    scheduleSuggest: async (_payload: unknown, helpers: JobHelpers): Promise<void> => {
+      await dispatchToAllClusters(db, "suggest", helpers);
+    },
+    scheduleApply: async (_payload: unknown, helpers: JobHelpers): Promise<void> => {
+      await dispatchToAllClusters(db, "apply", helpers);
+    },
+    scheduleFinalize: async (_payload: unknown, helpers: JobHelpers): Promise<void> => {
+      await dispatchToAllClusters(db, "finalize", helpers);
+    },
+    retention: async (): Promise<void> => {
+      await pruneOldSamples(db);
+    },
+    digest: async (): Promise<void> => {
+      await runDigest(db);
+    },
+  };
+}

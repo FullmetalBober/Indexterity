@@ -12,10 +12,11 @@ import { AppModule } from "./app.module";
 import { auth } from "./auth";
 import { sessionCookiesFor } from "./auth/session";
 import { apiEnv, trustProxySetting } from "./config/env";
+import { DatabaseService } from "./db/database.service";
 import { AppExceptionFilter } from "./errors/exception.filter";
 import { captureAuthFailure } from "./errors/reporting";
+import { quietProbes } from "./http/quiet-probes";
 import { securityHeaders } from "./http/security-headers";
-import { jobDb } from "./jobs/db";
 import { embeddedWorkerEnabled, startWorker } from "./jobs/runner";
 import { instrumentHttp, registerControlPlaneGauges, startMetricsServer } from "./metrics";
 
@@ -50,6 +51,12 @@ async function bootstrap(): Promise<void> {
   // controller would miss every endpoint that handles a credential.
   instrumentHttp(fastify);
   securityHeaders(fastify);
+  // Same window as the two above, and for the same reason: it decides something
+  // about routes before they exist. The health route stops writing a request log
+  // — a kubelet asks for it nine times a minute per pod and the answer is a
+  // literal. It is still counted by instrumentHttp above, so the metric that says
+  // whether this api is answering does not go quiet with it.
+  quietProbes(fastify);
 
   // Global ceiling per IP, with a tight budget on the auth endpoints — they are
   // the brute-force target (sign-in/sign-up).
@@ -126,10 +133,13 @@ async function bootstrap(): Promise<void> {
   app.enableShutdownHooks();
 
   // Its own port, off unless METRICS_ENABLED=true (see metrics/provider.ts). The
-  // control-plane gauges reuse the jobs pool rather than opening a third one;
-  // this process already drains it on shutdown. Started before the embedded
-  // worker below, and before listen, so no measurement predates the endpoint.
-  registerControlPlaneGauges(jobDb, (message) => fastify.log.warn(message));
+  // control-plane gauges read through the api's OWN pool, which DatabaseService
+  // owns and drains — they used to reach for the jobs' pool, which meant an api
+  // serving no jobs opened a second pool to answer a scrape. Started before the
+  // embedded worker below, and before listen, so no measurement predates the
+  // endpoint.
+  const database = app.get(DatabaseService);
+  registerControlPlaneGauges(database.db, (message) => fastify.log.warn(message));
   const metrics = await startMetricsServer({
     info: (message) => fastify.log.info(message),
     warn: (message) => fastify.log.warn(message),
@@ -143,10 +153,19 @@ async function bootstrap(): Promise<void> {
   // hosted keeps the worker separate so an api rollout cannot abort an
   // in-flight index build, and so the alert cooldown stays single-replica.
   if (embeddedWorkerEnabled()) {
-    const runner = await startWorker();
+    // The api's own pool, shared with the jobs it now runs. One process, one
+    // control-plane pool: the tasks used to open a second one of their own the
+    // first time a job asked for it.
+    //
+    // Stopping the runner is registered HERE rather than left to Nest's shutdown
+    // hooks, and the ordering matters: enableShutdownHooks above registered its
+    // SIGTERM handler first, so DatabaseService would otherwise drain this pool
+    // while a job was still running against it.
+    const runner = await startWorker(database.db);
     app.getHttpAdapter().getInstance().log.info("RUN_WORKER=true — job runner embedded in the api");
-    process.once("SIGTERM", () => void runner.stop());
-    process.once("SIGINT", () => void runner.stop());
+    const stopRunner = (): void => void runner.stop();
+    process.once("SIGTERM", stopRunner);
+    process.once("SIGINT", stopRunner);
   }
 
   const port = apiEnv().API_PORT;

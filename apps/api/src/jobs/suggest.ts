@@ -17,12 +17,12 @@ import {
   weeklyScanCost,
 } from "../analysis";
 import { entitledAutomation } from "../billing/plans";
+import type { Database } from "../db";
 import { and, eq, indexCooldowns, policies, recommendations } from "../db";
 import { type WorkloadTarget, workloadKey } from "../engine/ports";
 import { openClusterSession } from "./cluster-connection";
 import { activeCooldownKeys, cooldownKey } from "./cooldowns";
 import { applyCreatesForCluster } from "./create";
-import { jobDb } from "./db";
 import { planForCluster } from "./plan";
 
 // A shape must recur before it earns a recommendation, measured two ways.
@@ -63,8 +63,7 @@ function encodeKeys(keys: readonly SortKey[]): string[] {
 // A brand-new index on a critical collection, when instantCreate is opted in and
 // the cluster is writable, is auto-approved and built immediately
 // (creates only — never drops; the wiki's Architecture page, Apply pipeline).
-export async function suggestForCluster(clusterId: string): Promise<number> {
-  const db = jobDb();
+export async function suggestForCluster(db: Database, clusterId: string): Promise<number> {
   const [policy] = await db
     .select()
     .from(policies)
@@ -496,6 +495,6 @@ export async function suggestForCluster(clusterId: string): Promise<number> {
   }
   // Build the auto-approved creates now rather than waiting for the scheduler.
   // Anything not marked urgent still waits for the change window inside.
-  if (instantApproved > 0) await applyCreatesForCluster(clusterId);
+  if (instantApproved > 0) await applyCreatesForCluster(db, clusterId);
   return created;
 }

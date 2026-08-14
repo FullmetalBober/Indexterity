@@ -1,6 +1,6 @@
 name: Release
 
-# Tag-driven: `git tag v0.2.0 && git push --tags` publishes the two images and
+# Tag-driven: `git tag v0.2.0 && git push --tags` publishes the three images and
 # the chart, all versioned from that tag. Nothing publishes from main, so a
 # merge can never move what someone's cluster pulls.
 on:
@@ -76,6 +76,23 @@ jobs:
           cache-from: type=gha,scope=web
           cache-to: type=gha,scope=web,mode=max
 
+      # Both apps and a supervisor in one container, for a host that runs one
+      # container per service and has no pods — and for the chart's
+      # `topology: single-container`, where it is the only image the release
+      # pulls. Published from the same tag as the other two, because a chart
+      # version has to name images it was tested against whichever it points at.
+      - name: Build and push the all-in-one image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: deploy/all-in-one/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ steps.meta.outputs.owner }}/indexterity-all-in-one:${{ steps.meta.outputs.version }}
+            ghcr.io/${{ steps.meta.outputs.owner }}/indexterity-all-in-one:latest
+          cache-from: type=gha,scope=all-in-one
+          cache-to: type=gha,scope=all-in-one,mode=max
+
       - uses: azure/setup-helm@v5
 
       - name: Package and push the chart
@@ -110,6 +127,15 @@ jobs:
   smoke:
     needs: publish
     runs-on: ubuntu-latest
+    # Both packagings are published, so both are verified against the registry.
+    # `split` proves indexterity-api and indexterity-web are public and boot;
+    # `single-container` proves the same of indexterity-all-in-one, which is the
+    # only image its topology pulls — a leg that never ran it would leave a
+    # published image nothing had ever started.
+    strategy:
+      fail-fast: false
+      matrix:
+        topology: [split, single-container]
     steps:
       - uses: actions/checkout@v7
       - uses: helm/kind-action@v1
@@ -123,3 +149,4 @@ jobs:
           CTR: docker
           GHCR_OWNER: ${{ needs.publish.outputs.owner }}
           RELEASE: ${{ needs.publish.outputs.version }}
+          TOPOLOGY: ${{ matrix.topology }}

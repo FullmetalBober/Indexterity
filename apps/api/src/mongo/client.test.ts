@@ -4,6 +4,8 @@ import {
   applyTlsOverrides,
   assertTlsEnforced,
   InsecureConnectionError,
+  maxPoolSize,
+  mongoClient,
   unconsentedTlsOverrides,
   usesTls,
 } from "./client";
@@ -15,6 +17,7 @@ const CERTS = { ...NONE, allowInvalidCertificates: true };
 // — so a test that wants a different one says when the process read it.
 afterEach(() => {
   delete process.env.ALLOW_INSECURE_CLUSTER_TLS;
+  delete process.env.MONGO_MAX_POOL_SIZE;
   loadEnv("api");
 });
 
@@ -175,5 +178,35 @@ describe("applyTlsOverrides", () => {
 
   it("leaves a string it cannot parse for the scheme guard to refuse", () => {
     expect(applyTlsOverrides("not a connection string", CERTS)).toBe("not a connection string");
+  });
+});
+
+// The pool bound is the kind of setting that is easy to write and easy to have no
+// effect: pass it under a misspelt name, or read it from an environment the
+// process never validated, and the driver silently keeps its own default of 100 —
+// against a database that is not ours. So this reads the options back off a
+// constructed client rather than trusting the call site.
+describe("connection pool bounds", () => {
+  it("caps the sockets one cluster may take, well below the driver's 100", () => {
+    const client = mongoClient("mongodb://h:27017/app?tls=true");
+    expect(client.options.maxPoolSize).toBe(10);
+    expect(client.options.maxPoolSize).toBeLessThan(100);
+    // Nothing is pre-opened: sockets are a response to demand, not a reservation.
+    expect(client.options.minPoolSize).toBe(0);
+    // And the surplus is handed back rather than held for the life of the session.
+    expect(client.options.maxIdleTimeMS).toBe(60_000);
+  });
+
+  it("takes the operator's bound when the environment sets one", () => {
+    process.env.MONGO_MAX_POOL_SIZE = "3";
+    loadEnv("api");
+    expect(maxPoolSize()).toBe(3);
+    expect(mongoClient("mongodb://h:27017/app?tls=true").options.maxPoolSize).toBe(3);
+  });
+
+  // The TLS chokepoint still runs first. A bound is not a reason to let a
+  // plaintext string through.
+  it("still refuses a connection the transport rule refuses", () => {
+    expect(() => mongoClient("mongodb://h:27017/app?tls=false")).toThrow(InsecureConnectionError);
   });
 });
