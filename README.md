@@ -506,17 +506,23 @@ is deliberately not done:
 
 ## Deploy
 
-Small images via `turbo prune`, and small on purpose, in two passes. The api's
+Small images via `turbo prune`, and small on purpose, in three passes. The api's
 runtime tree is installed from manifests with `devDependencies` deleted rather
-than pruned after the fact (`deploy/prod-manifests.mjs`): `npm prune --omit=dev`
+than pruned after the fact (`deploy/prod-manifests.mts`): `npm prune --omit=dev`
 was measured to change nothing here — `turbo prune` regenerates a lockfile with no
 `dev` markers, so npm reads the whole graph as production and ships typescript,
 drizzle-kit, @rolldown and esbuild. Then the base itself, which was most of what
 remained: **`node:26-alpine`** (181 MB) instead of `node:26-slim` (252 MB). The
 shipped api tree contains no native binaries, so that is a base swap and not a
 musl rebuild — and `mongodb+srv://`, the one lookup that would care, is tested on
-musl rather than assumed ([D76](./docs/decisions.md)). api **303 MB** (was 510),
-web **193 MB** (was 264), all-in-one **487 MB** (was 714):
+musl rather than assumed ([D76](./docs/decisions.md)). Then the same manifest lever
+a second time, for the all-in-one only, pointed at the dashboard's `dependencies`:
+those are not devDependencies and the manifest is right to list them, but a runtime
+that starts the dashboard from a self-contained `.output` bundle resolves nothing
+from them, and they were 185 MB — including two prebuilt lightningcss bindings, one
+of which can never load ([D77](./docs/decisions.md)). api **303 MB** (was 510),
+web **193 MB** (was 264), all-in-one **322 MB** (was 714), whose `node_modules` is
+now the api's 153 MB to the megabyte:
 
 ```bash
 docker build -f apps/api/Dockerfile -t indexterity-api .
