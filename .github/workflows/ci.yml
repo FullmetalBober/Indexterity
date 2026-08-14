@@ -148,15 +148,22 @@ jobs:
       - run: npm run db:migrate
       - run: npm run test:int -w @repo/api
 
-  # The MSSQL adapter against a real SQL Server 2022 — its own job rather than a
-  # fourth matrix leg, because the mongo matrix would start the (heavy) mssql
-  # container three times to run one file. Adapter-level: no api is spawned, so
-  # postgres is not needed; DATABASE_URL only satisfies the env schema.
+  # The MSSQL adapter against real SQL Servers — its own job rather than extra
+  # mongo-matrix legs, because that matrix would start the (heavy) mssql
+  # container once per mongo version to run one file. Both supported series
+  # run, because the tested ceiling (mssql/version.ts) is a promise this job
+  # keeps: DISABLE/REBUILD semantics and the usage-stats reset have moved
+  # between releases before. Adapter-level: no api is spawned, so postgres is
+  # not needed; DATABASE_URL only satisfies the env schema.
   integration-mssql:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mssql: ["2022-latest", "2025-latest"]
     services:
       mssql:
-        image: mcr.microsoft.com/mssql/server:2022-latest
+        image: mcr.microsoft.com/mssql/server:${{ matrix.mssql }}
         env:
           ACCEPT_EULA: "Y"
           MSSQL_SA_PASSWORD: "Int3gration!Pass"

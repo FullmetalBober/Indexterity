@@ -31,9 +31,13 @@ export function mssqlProductName(version: MssqlServerVersion): string {
 }
 
 export const MSSQL_MIN_MAJOR = 13; // 2016
-// Probed against a live 2022 (16.0, CU24): DISABLE/REBUILD semantics, the
-// rebuild counter reset, Query Store persistence. 2025 (17.x) has not been.
-export const MSSQL_MAX_TESTED_MAJOR = 16;
+// Probed against live servers — 2022 (16.0, CU24) and 2025 (17.0.4075): the
+// DISABLE/REBUILD semantics, the rebuild counter reset (still resets on 17.0),
+// restart wipes, Query Store persistence and plan-XML anatomy, and the
+// internal-query flag on index builds are identical on both. 2025's new index
+// types (VECTOR = 8, JSON = 9) fall outside the rowstore filter and stay
+// invisible to the pipeline by design (#209).
+export const MSSQL_MAX_TESTED_MAJOR = 17;
 
 export function allowUntestedMssqlVersions(): boolean {
   return workerEnv().ALLOW_UNTESTED_MSSQL_VERSION;
@@ -68,7 +72,7 @@ export function mssqlVersionRefusal(version: MssqlServerVersion | null): string 
   }
   if (version.major > MSSQL_MAX_TESTED_MAJOR && !allowUntestedMssqlVersions()) {
     return (
-      `${mssqlProductName(version)} is newer than the SQL Server 2022 series this ` +
+      `${mssqlProductName(version)} is newer than the SQL Server 2025 series this ` +
       "engine has been tested against. Refusing rather than guessing: DISABLE/REBUILD " +
       "semantics and the usage-stats reset behaviour have moved between releases " +
       "before. Set ALLOW_UNTESTED_MSSQL_VERSION=true to proceed anyway"

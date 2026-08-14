@@ -20,10 +20,11 @@ describe("parseMssqlVersion", () => {
 });
 
 describe("mssqlVersionRefusal", () => {
-  it("accepts 2016 through 2022", () => {
+  it("accepts 2016 through 2025", () => {
     expect(mssqlVersionRefusal(parseMssqlVersion("13.0.5026.0"))).toBeNull();
     expect(mssqlVersionRefusal(parseMssqlVersion("15.0.4360.2"))).toBeNull();
     expect(mssqlVersionRefusal(parseMssqlVersion("16.0.4250.1"))).toBeNull();
+    expect(mssqlVersionRefusal(parseMssqlVersion("17.0.4075.5"))).toBeNull();
   });
 
   it("refuses below the 2016 floor, naming the product", () => {
@@ -35,7 +36,7 @@ describe("mssqlVersionRefusal", () => {
   });
 
   it("refuses newer than tested, naming the escape hatch", () => {
-    expect(mssqlVersionRefusal(parseMssqlVersion("17.0.100.0"))).toContain(
+    expect(mssqlVersionRefusal(parseMssqlVersion("18.0.100.0"))).toContain(
       "ALLOW_UNTESTED_MSSQL_VERSION",
     );
   });
@@ -43,7 +44,7 @@ describe("mssqlVersionRefusal", () => {
   it("lets an operator opt in to an untested release — the floor stays shut", () => {
     process.env.ALLOW_UNTESTED_MSSQL_VERSION = "true";
     loadEnv("api");
-    expect(mssqlVersionRefusal(parseMssqlVersion("17.0.100.0"))).toBeNull();
+    expect(mssqlVersionRefusal(parseMssqlVersion("18.0.100.0"))).toBeNull();
     expect(mssqlVersionRefusal(parseMssqlVersion("12.0.6024.0"))).toContain("2016");
   });
 });
