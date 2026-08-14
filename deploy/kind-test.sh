@@ -20,7 +20,6 @@
 # how many pods or containers are behind them, so running them per topology is
 # what proves the claim that nothing in front of the chart has to care.
 #   split             three Deployments, two images (the default)
-#   single-pod        one pod, an api and a web container, plus the worker's own
 #   single-container  one pod, ONE container from the all-in-one image, with the
 #                     job runner embedded — the whole release in one container
 #
@@ -57,12 +56,12 @@ RELEASE=${RELEASE:-}
 TAG=${TAG:-${RELEASE:-0.1.0}}
 TOPOLOGY=${TOPOLOGY:-split}
 case "$TOPOLOGY" in
-  split | single-pod) IMAGES="api web" ;;
+  split) IMAGES="api web" ;;
   # One image, and that is the point of the topology: the migration Job and the
   # worker run their own entrypoints out of it too, so nothing here pulls the
   # other two.
   single-container) IMAGES="all-in-one" ;;
-  *) echo "TOPOLOGY must be split, single-pod or single-container (got $TOPOLOGY)"; exit 1 ;;
+  *) echo "TOPOLOGY must be split or single-container (got $TOPOLOGY)"; exit 1 ;;
 esac
 GHCR_OWNER=${GHCR_OWNER:-fullmetalbober}
 # Pinned so the preload and the manifests can never disagree about a tag.
@@ -174,21 +173,16 @@ else
   repo_for() { image_ref "$1" | sed "s/:$TAG//"; }
 fi
 
-# The image the topology actually pulls, and — for the merged ones — the worker
-# shape that goes with it. single-container embeds the job runner (RUN_WORKER),
-# which is the appliance the image exists for and the only place that code path
-# is exercised under a kubelet; single-pod keeps the worker's own Deployment, so
-# between them the matrix covers both.
+# The image the topology actually pulls, and the worker shape that goes with it.
+# single-container embeds the job runner (RUN_WORKER), which is the appliance the
+# image exists for and the only place that code path is exercised under a
+# kubelet; split keeps the worker's own Deployment, so between them the matrix
+# covers both.
 case "$TOPOLOGY" in
   single-container)
     IMAGE_ARGS="allInOne.image.repository=$(repo_for all-in-one),allInOne.image.tag=$TAG,allInOne.image.pullPolicy=Never"
     WORKER_ARGS="worker.enabled=false,api.runWorker=true"
     COMPONENTS="app"
-    ;;
-  single-pod)
-    IMAGE_ARGS="api.image.repository=$(repo_for api),api.image.tag=$TAG,api.image.pullPolicy=Never,web.image.repository=$(repo_for web),web.image.tag=$TAG,web.image.pullPolicy=Never"
-    WORKER_ARGS="worker.enabled=true"
-    COMPONENTS="app worker"
     ;;
   *)
     IMAGE_ARGS="api.image.repository=$(repo_for api),api.image.tag=$TAG,api.image.pullPolicy=Never,web.image.repository=$(repo_for web),web.image.tag=$TAG,web.image.pullPolicy=Never"
@@ -224,7 +218,6 @@ step "the topology installed is the one that was asked for"
 # makes them blind to what is behind them.
 case "$TOPOLOGY" in
   split) SERVING=indexterity-api; WANT_CONTAINERS="api" ;;
-  single-pod) SERVING=indexterity; WANT_CONTAINERS="api web" ;;
   single-container) SERVING=indexterity; WANT_CONTAINERS="app" ;;
 esac
 GOT_CONTAINERS=$(kubectl -n "$NS" get deploy "$SERVING" -o jsonpath='{.spec.template.spec.containers[*].name}')
@@ -322,8 +315,9 @@ step "logs must be clean (house rule: no errors, no warnings)"
 # is one container whose log holds both processes' output plus the supervisor's.
 noisy=0
 for c in $COMPONENTS; do
-  # --all-containers, because `app` is two of them in single-pod and kubectl
-  # otherwise refuses a selector that matches a multi-container pod.
+  # --all-containers: no pod carries two containers today, but the flag is a
+  # no-op on a one-container pod and it is what keeps this honest if one ever
+  # does — kubectl otherwise refuses a selector matching a multi-container pod.
   n=$(kubectl -n "$NS" logs -l "app.kubernetes.io/component=$c" --all-containers --tail=500 2>/dev/null \
       | grep -icE '"level":(40|50|60)|ERROR|WARN' || true)
   printf '  %-7s %s\n' "$c" "$n"

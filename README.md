@@ -541,8 +541,7 @@ docker run -p 3000:3000 -e DATABASE_URL=… -e MASTER_KEY=… indexterity-all-in
 
 Port 3000 is the only one that has to be published: the dashboard answers `/api`
 itself, so the browser gets everything from one origin. The Helm chart can deploy
-this shape too — `topology: single-container`, or `single-pod` to keep the two
-images and put them in one pod.
+this shape too — `topology: single-container`.
 
 ### Configuration
 
@@ -611,10 +610,9 @@ has the table.
 A Helm chart is in [`deploy/helm/indexterity`](./deploy/helm/indexterity) —
 api + dashboard + worker, a pre-upgrade migration hook, ingress, and a
 `helm test`. Bring your own PostgreSQL. `topology` folds the three workloads into
-one pod (`single-pod`) or one container (`single-container`) for an install where
-three Deployments is more than it needs; the Services, the ingress and the app
-are identical in all three, so nothing in front of the chart has to know which
-one is installed.
+one container (`single-container`) for an install where three Deployments is more
+than it needs; the Services, the ingress and the app are identical either way, so
+nothing in front of the chart has to know which one is installed.
 
 ### Metrics
 

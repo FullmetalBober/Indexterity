@@ -18,10 +18,6 @@ Workloads (topology: {{ .Values.topology }}):
   app     {{ .Values.api.replicas }} replica(s), one container — {{ include "indexterity.allInOneImage" . }}
           The api and the dashboard run under a supervisor inside it, so
           `kubectl logs` returns both and a restart restarts both.
-{{- else if eq .Values.topology "single-pod" }}
-  app     {{ .Values.api.replicas }} replica(s), two containers — api and web share the pod
-          api: {{ include "indexterity.apiImage" . }}
-          web: {{ include "indexterity.webImage" . }}
           web.replicas is ignored here; api.replicas counts the pods.
 {{- else }}
   api     {{ .Values.api.replicas }} replica(s)  — {{ include "indexterity.apiImage" . }}
