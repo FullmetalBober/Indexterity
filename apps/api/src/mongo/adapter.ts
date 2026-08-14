@@ -56,6 +56,7 @@ class MongoEngineSession implements EngineSession {
 export const mongoAdapter: EngineAdapter = {
   engine: "MONGODB",
   capabilities: { hideIndexes: true, provisionScopedUsers: true },
+  connStringHint: "mongodb:// or mongodb+srv://",
   isConnString: isMongoConnString,
   hostsOf: mongoHosts,
   assertSecureTransport: assertTlsEnforced,

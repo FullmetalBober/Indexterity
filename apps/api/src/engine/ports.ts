@@ -208,6 +208,9 @@ export interface EngineSession {
 export interface EngineAdapter {
   readonly engine: ClusterEngine;
   readonly capabilities: EngineCapabilities;
+  // What a valid string looks like, for the refusal isConnString produces —
+  // the one user-facing sentence an engine owns about its own syntax.
+  readonly connStringHint: string;
   // Shape-validates a connection string BEFORE any dial (scheme guard).
   isConnString(value: string): boolean;
   // Every host the string would dial, for the network guard to vet.

@@ -1,8 +1,11 @@
 # Indexterity
 
-Index dexterity for MongoDB. A SaaS that watches your indexes and manages them
-safely — drop the unused and redundant, merge overlapping, extend prefixes,
-create the missing — and proves the result in freed bytes and latency.
+Index dexterity for MongoDB and SQL Server. A SaaS that watches your indexes
+and manages them safely — drop the unused and redundant, merge overlapping,
+extend prefixes, create the missing — and proves the result in freed bytes and
+latency. (SQL Server is drop-side today: collect, classify, hide, observe,
+drop. Create-side recommendations are MongoDB-only until its workload signals
+land — see the wiki's Architecture §9.3.)
 
 Read-only by default. The one irreversible step, a drop, is gated behind an
 observe window, a pre-flight check, and a read-latency regression test.
@@ -298,6 +301,7 @@ apps/api                control plane
   src/analysis          pure decision engine — no I/O, unit-tested without infra
   src/engine            engine-neutral ports (collector, executor, session)
   src/mongo             the MongoDB adapter; zod-parses driver output at the boundary
+  src/mssql             the SQL Server adapter — DMVs + Query Store behind the same ports
   src/jobs              graphile-worker tasks (collect/classify/suggest/apply/finalize)
   src/audit             the security trail — who signed in, who changed a role,
                         read at Settings → Security by owners only
@@ -341,7 +345,8 @@ the server render and the browser read one cache entry; mutations invalidate a
 key rather than re-running loaders, **one key per api call**. Forms validate
 against the api's own input schemas from `packages/contracts`, so a rule lives in
 exactly one place. Everything engine-specific sits behind the ports in
-`src/engine`, so PostgreSQL and SQL Server adapters can slot in without pipeline
+`src/engine` — the SQL Server adapter slotted in as one directory plus one
+registry line, and a PostgreSQL adapter can do the same without pipeline
 changes.
 
 Every key, component and the things that turned out to be load-bearing:
