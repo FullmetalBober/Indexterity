@@ -385,7 +385,7 @@ several processes in one host-network container.
 npm run build · npm run typecheck · npm run lint · npm run test
 npm run db:generate · npm run db:migrate
 npm run db:deploy -w @repo/api        # production migrations, compiled migrator
-npm run version:set 0.2.0             # one version for every workspace + the chart
+npm run version:set 0.2.0             # workspaces + the chart + the lockfile
 ```
 
 `npm run up` is a convenience, not a requirement — `podman-compose up` works
