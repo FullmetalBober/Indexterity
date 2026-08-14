@@ -1,10 +1,9 @@
 {{- if not (include "indexterity.merged" .) }}
 {{- /*
-The dashboard's own Deployment — the default topology only. Merged, the same
-container is rendered beside the api by api-deployment.yaml (single-pod) or
-replaced by the all-in-one image (single-container), and this file renders
-nothing. The container itself is one definition either way:
-indexterity.webContainer in _helpers.tpl.
+The dashboard's own Deployment — the default topology only. In single-container
+the dashboard is a process inside the all-in-one image rather than a container of
+its own, so this file renders nothing and api-deployment.yaml is the whole
+serving tier.
 */ -}}
 apiVersion: apps/v1
 kind: Deployment
@@ -36,7 +35,51 @@ spec:
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
-        {{- include "indexterity.webContainer" . | nindent 8 }}
+        {{- /* Ports are named web-* here even though this container is alone in
+               its pod, because the all-in-one container carries both pairs and a
+               pod's port names must be unique across its containers. One naming
+               scheme that always holds beats a name that reads differently
+               depending on a value three files away — and the Services address
+               these by name. */}}
+        - name: web
+          image: {{ include "indexterity.webImage" . }}
+          imagePullPolicy: {{ .Values.web.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: web-http
+              containerPort: {{ .Values.web.port }}
+            {{- if .Values.metrics.enabled }}
+            - name: web-metrics
+              containerPort: {{ include "indexterity.webMetricsPort" . }}
+            {{- end }}
+          env:
+            {{- include "indexterity.heapEnv" (dict "limit" .Values.web.resources.limits.memory) | nindent 12 }}
+            {{- include "indexterity.metricsEnv" (dict "root" . "port" (include "indexterity.webMetricsPort" .)) | nindent 12 }}
+            {{- include "indexterity.errorsEnv" (dict "root" . "dsn" (default .Values.errorReporting.dsn .Values.errorReporting.webDsn)) | nindent 12 }}
+            {{- include "indexterity.webEnv" (dict "root" . "shared" false) | nindent 12 }}
+          {{- /* timeoutSeconds is set on both, and it is not decoration: kubernetes
+                 defaults httpGet probes to ONE second, and `/` is a server-side React
+                 render. Measured on the built image with two CPUs, a cold render is 908ms
+                 — inside the default by 92ms, which is not a margin, it is a coin toss on
+                 a loaded node. Three of those in a row restart the container. */}}
+          readinessProbe:
+            httpGet:
+              # The landing page is static and survives an api outage.
+              path: /
+              port: web-http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /
+              port: web-http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml .Values.web.resources | nindent 12 }}
       {{- with .Values.web.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
