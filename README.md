@@ -603,7 +603,11 @@ twice: the same per-replica way for `/api/auth/*`, and by better-auth for the
 credential endpoints, which counts in Postgres — so that half is one budget for the
 whole deployment. Set `TRUST_PROXY` to the CIDR ranges of whatever sits in front,
 not to `true`: better-auth resolves a client address only from a forwarded header
-it can attribute, and without ranges every caller shares one bucket.
+it can attribute, and without ranges every caller shares one bucket. The chart
+**requires** it whenever its ingress is on and infers nothing — it derived the
+value from `ingress.enabled` once, which chose `true` with an ingress and `false`
+without one, and a proxy routed to the Services from outside the chart is
+invisible to that test.
 [Architecture §10.5](https://github.com/FullmetalBober/Indexterity/wiki/Architecture)
 has the table.
 

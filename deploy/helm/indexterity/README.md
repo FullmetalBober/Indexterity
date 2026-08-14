@@ -29,7 +29,8 @@ helm install indexterity deploy/helm/indexterity \
   --set ingress.enabled=true \
   --set ingress.host=indexterity.alivlad.com \
   --set ingress.tls.enabled=true \
-  --set ingress.tls.secretName=indexterity-tls
+  --set ingress.tls.secretName=indexterity-tls \
+  --set config.trustProxy=10.0.0.0/8
 
 # 3. Verify.
 helm test indexterity -n indexterity
@@ -239,6 +240,7 @@ stays off by default — the dashboard does not need it.
 | `config.storageUsdPerGbMonth` | Your storage price, for the $/month ROI headline |
 | `config.retentionDays` | Your ceiling on history, in days. Storage is your bill, so it caps both what is kept and what any plan may see. Empty means each plan's own window decides |
 | `config.mongoMaxPoolSize` | Sockets the driver may open against **one** connected cluster — 10, against the driver's own default of 100. A session is held per cluster, so the worst case multiplies by the fleet, and the sockets are spent on the customer's mongod rather than ours. Surplus sockets are returned after 60s idle |
+| `config.trustProxy` | **Required with `ingress.enabled`**, and nothing is inferred. The pod network's CIDR — `10.0.0.0/8` on many clusters, k3s `10.42.0.0/16`, Calico `192.168.0.0/16`, an EKS default VPC `172.31.0.0/16`. Prefer a range over `true`, which better-auth cannot attribute a forwarded header from. Narrow it: this is who may claim to be someone else, so on a CNI giving pods VPC addresses it is every workload in the VPC. An install whose proxy is arranged outside the chart still has to set it — `helm install` prints what it resolved |
 | `config.rateLimitMax` / `config.authRateLimitMax` | Per-IP request budgets a minute. `rateLimitMax` is counted in each api process's memory, so it is **per replica**; `authRateLimitMax` is read twice — per replica for `/api/auth/*`, and by better-auth for the credential endpoints, which counts in Postgres and so applies to the whole deployment |
 | `config.allowUntestedMongoVersion` | Lets a cluster on a MongoDB major series newer than this release was tested against connect. The floor is not overridable; this is the ceiling |
 | `api.runWorker` | Embed the job runner in the api, for a single-replica install that sets `worker.enabled=false`. Leave `false` otherwise — with the worker Deployment on, or with more than one api replica, the cron schedule would be installed more than once |
