@@ -3,9 +3,9 @@
 Index dexterity for MongoDB and SQL Server. A SaaS that watches your indexes
 and manages them safely — drop the unused and redundant, merge overlapping,
 extend prefixes, create the missing — and proves the result in freed bytes and
-latency. (SQL Server is drop-side today: collect, classify, hide, observe,
-drop. Create-side recommendations are MongoDB-only until its workload signals
-land — see the wiki's Architecture §9.3.)
+latency. On SQL Server the workload signal comes from Query Store plans, with
+the server's own missing-index suggestions folded in behind the same
+recurrence and cost gates every other signal passes (Architecture §9.3).
 
 Read-only by default. The one irreversible step, a drop, is gated behind an
 observe window, a pre-flight check, and a read-latency regression test.

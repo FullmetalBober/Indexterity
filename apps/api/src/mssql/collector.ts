@@ -16,6 +16,13 @@ import {
   quoteIdent,
   splitCollectionName,
 } from "./connection";
+import { type PlanRow, shapesFromPlans } from "./workload";
+
+// Plans read per database and collect. Query Store defaults to a 1GB store —
+// a few thousand plans — so the cap is headroom, not a working truncation;
+// when it does bind, the ORDER BY keeps the most recently executed plans and
+// drops the stalest, which is the end the recurrence gates ignore anyway.
+const MAX_PLANS_PER_DATABASE = 5000;
 
 // The SQL Server implementation of the collector port, over the surfaces the
 // probe validated (issue #36):
@@ -355,15 +362,74 @@ export class MssqlIndexCollector implements IndexCollector {
     return [...names];
   }
 
-  // Create-side signals: none in v1 (see the header comment and #36).
+  // Query Store is the ONE workload store — there is no second source to fall
+  // back to (mongo's profiler has no twin here), so the slow-query fallback
+  // stays empty and everything create-side flows through collectWorkload.
   collectSlowQueries(_database: string, _collection: string): Promise<QueryShape[]> {
     return Promise.resolve([]);
   }
 
-  collectWorkload(
-    _targets: readonly WorkloadTarget[],
+  // Query shapes per namespace, from Query Store plans (#201): one pass per
+  // database, every plan's XML parsed once and bucketed to the targets it
+  // touches — see mssql/workload.ts for the anatomy. Capped at the most
+  // recently executed plans; a store larger than the cap contributes its
+  // busiest recent shapes rather than everything, which is what the
+  // recurrence gates read anyway.
+  async collectWorkload(
+    targets: readonly WorkloadTarget[],
   ): Promise<Map<string, readonly QueryShape[]>> {
-    return Promise.resolve(new Map());
+    const result = new Map<string, readonly QueryShape[]>();
+    const byDatabase = new Map<string, WorkloadTarget[]>();
+    for (const target of targets) {
+      const bucket = byDatabase.get(target.database) ?? [];
+      bucket.push(target);
+      byDatabase.set(target.database, bucket);
+    }
+    const now = new Date();
+    for (const [database, databaseTargets] of byDatabase) {
+      if (!(await this.queryStoreEnabled(database))) continue;
+      const rows = await this.conn.query<{
+        planXml: string;
+        execs: unknown;
+        totalIo: unknown;
+        firstSeen: Date | string | null;
+        lastSeen: Date | string | null;
+      }>(
+        // is_internal_query = 0 keeps the server's own work out of the
+        // workload: an index build is recorded as an internal
+        // "insert … select * from …" plan — StatementType INSERT, full scan
+        // plus a sort — which would otherwise hand the suggest engine a
+        // phantom missing-index shape every time an index is BUILT, ours
+        // included (observed live on 2022).
+        `SELECT TOP ${MAX_PLANS_PER_DATABASE}
+           CAST(p.query_plan AS nvarchar(max)) AS planXml,
+           agg.execs, agg.totalIo, agg.firstSeen, agg.lastSeen
+         FROM (
+           SELECT plan_id,
+             SUM(count_executions) AS execs,
+             SUM(count_executions * avg_logical_io_reads) AS totalIo,
+             MIN(first_execution_time) AS firstSeen,
+             MAX(last_execution_time) AS lastSeen
+           FROM ${quoteIdent(database)}.sys.query_store_runtime_stats
+           GROUP BY plan_id
+         ) agg
+         JOIN ${quoteIdent(database)}.sys.query_store_plan p ON p.plan_id = agg.plan_id
+         JOIN ${quoteIdent(database)}.sys.query_store_query q ON q.query_id = p.query_id
+         WHERE q.is_internal_query = 0
+         ORDER BY agg.lastSeen DESC`,
+      );
+      const planRows: PlanRow[] = rows.map((row) => ({
+        planXml: row.planXml,
+        execs: asNumber(row.execs),
+        totalIo: asNumber(row.totalIo),
+        firstSeen: row.firstSeen,
+        lastSeen: row.lastSeen,
+      }));
+      for (const [key, shapes] of shapesFromPlans(databaseTargets, database, planRows, now)) {
+        result.set(key, shapes);
+      }
+    }
+    return result;
   }
 
   collectDeletePatterns(_database: string, _collection: string): Promise<DeletePattern[]> {

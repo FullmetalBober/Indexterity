@@ -33,6 +33,7 @@
     "@sentry/nestjs": "^10.69.0",
     "better-auth": "^1.6.24",
     "drizzle-orm": "^0.45.2",
+    "fast-xml-parser": "^5.10.1",
     "graphile-worker": "^0.17.3",
     "mongodb": "^7.5.0",
     "mongodb-connection-string-url": "^7.0.2",
