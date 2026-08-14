@@ -1,6 +1,7 @@
 {{- include "indexterity.validateTopology" . -}}
 {{- include "indexterity.validateWorkerTopology" . -}}
 {{- include "indexterity.validateAuthUrl" . -}}
+{{- include "indexterity.validateTrustProxy" . -}}
 {{- /*
 The api Deployment in the default topology, and the WHOLE serving tier in
 single-container — where the dashboard is a second process inside this container

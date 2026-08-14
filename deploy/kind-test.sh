@@ -192,7 +192,10 @@ case "$TOPOLOGY" in
 esac
 # allowInsecureAuthUrl: a Kind cluster terminates no TLS, and the api refuses a
 # non-https auth URL in production. trustProxy: kube-proxy hides the client
-# address, so without it the per-IP rate limits share one bucket. metrics: off by
+# address, so without it the per-IP rate limits share one bucket — and it is
+# Kind's pod CIDR rather than "true", because "true" is the dialect better-auth
+# cannot attribute a forwarded header from, and a test should exercise what the
+# chart tells operators to use. metrics: off by
 # default since the exporter costs memory in every process, and set here on
 # purpose — the chart's own test asserts the endpoints, so leaving it at the
 # default would quietly retire those assertions.
@@ -206,7 +209,8 @@ helm upgrade --install indexterity "$CHART" $CHART_ARGS -n "$NS" --wait --timeou
   --set "$WORKER_ARGS" \
   --set "config.signupMode=open,config.allowPrivateClusterTargets=true" \
   --set "config.allowInsecureClusterTls=true" \
-  --set "config.allowInsecureAuthUrl=true,config.trustProxy=true" \
+  --set "config.allowInsecureAuthUrl=true" \
+  --set "config.trustProxy=10.244.0.0/16" \
   --set "secrets.databaseUrl=postgres://indexterity:indexterity@postgres:5432/indexterity" \
   --set "secrets.betterAuthSecret=kind-test-secret-not-for-real-use-0000" \
   --set "secrets.masterKey=MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="

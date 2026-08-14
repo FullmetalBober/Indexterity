@@ -506,13 +506,43 @@ the second is legitimate for a local smoke test and has to be said out loud.
 {{- end -}}
 
 {{/*
-TRUST_PROXY. Explicit value wins; otherwise an ingress in front means the
-forwarded address is the real client and the rate limiters should use it.
+TRUST_PROXY, verbatim. It used to be inferred from ingress.enabled, and that was
+wrong in both directions.
+
+With an ingress and no explicit value it emitted `"true"` — the one dialect
+values.yaml warns against eight lines above the knob. Fastify accepts it, but
+better-auth resolves a client address only from a forwarded header it can
+attribute, and with `"true"` it believes X-Forwarded-For only when the header
+carries a SINGLE address, which it never does once an ingress has appended
+itself. So the chart's default happy path produced exactly the shared auth
+bucket D41 exists to have fixed.
+
+Without one it emitted `"false"`, which is only right if nothing is in front —
+and routing lives outside the chart often enough that this cannot be assumed. A
+Traefik IngressRoute pointing at the -web Service is a proxy the chart never
+sees, and every request then carries the proxy's pod address as its socket
+address: one bucket again, silently.
+
+`ingress.enabled` is not evidence about what sits in front of the api, so
+nothing is inferred from it. validateTrustProxy below refuses the one case the
+chart can prove is proxied; NOTES.txt reports the effective value for the rest.
 */}}
 {{- define "indexterity.trustProxy" -}}
-{{- if .Values.config.trustProxy -}}
 {{- .Values.config.trustProxy -}}
-{{- else -}}
-{{- ternary "true" "false" .Values.ingress.enabled -}}
+{{- end -}}
+
+{{/*
+An ingress means a proxy is in front, and an unset TRUST_PROXY there is not a
+default — it is every caller sharing one rate-limit bucket, which reads as a
+working install until someone is throttled by a stranger. The chart already
+refuses a missing ingress.host and a missing databaseUrl for smaller reasons.
+
+Only ingress.enabled is checked, because it is the only proxy the chart knows
+about. Routing arranged outside it cannot be detected here, which is why the
+value is reported at install rather than only validated.
+*/}}
+{{- define "indexterity.validateTrustProxy" -}}
+{{- if and .Values.ingress.enabled (not .Values.config.trustProxy) -}}
+{{- fail "config.trustProxy is required when ingress.enabled — every request then arrives from the ingress, and without it each per-IP rate limit collapses into one bucket shared by every caller. Set it to the pod network's CIDR, usually \"10.0.0.0/8\" (k3s 10.42.0.0/16, Calico 192.168.0.0/16, an EKS default VPC 172.31.0.0/16 — check yours rather than pasting). Prefer a range over \"true\": better-auth attributes a forwarded header only from ranges, and with \"true\" it resolves nothing once the ingress has appended itself, which leaves the auth limits shared." -}}
 {{- end -}}
 {{- end -}}

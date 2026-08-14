@@ -13,6 +13,26 @@ Dashboard:
   rule removes. Set web.publicUrl to whatever origin you actually reach it on.
 {{- end }}
 
+{{/* Reported rather than only validated: validateTrustProxy can refuse the
+     ingress case, but a proxy routed to the Services from outside the chart is
+     invisible here, and that install has the same shared-bucket failure. */}}
+Client addresses: {{ if .Values.config.trustProxy }}TRUST_PROXY={{ .Values.config.trustProxy }}
+{{- if eq (toString .Values.config.trustProxy) "true" }}
+
+  WARNING: "true" is the weak dialect. Fastify honours it, but better-auth
+  attributes a forwarded header only from RANGES — with "true" it resolves
+  nothing once a proxy has appended itself, so the auth limits (counted in
+  Postgres, across replicas) apply to everybody together instead of per client.
+  Set the pod network's CIDR instead.
+{{- end }}
+{{- else }}not trusted — the per-IP rate limits use the socket address.
+
+  Right if the api is reached directly. If ANYTHING proxies to it — an
+  IngressRoute, a service mesh, a load balancer onto the Services — every
+  request arrives from that proxy and all callers share one rate-limit bucket.
+  Set config.trustProxy to the pod network's CIDR if so.
+{{- end }}
+
 Workloads (topology: {{ .Values.topology }}):
 {{- if eq .Values.topology "single-container" }}
   app     {{ .Values.api.replicas }} replica(s), one container — {{ include "indexterity.allInOneImage" . }}

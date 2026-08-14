@@ -425,16 +425,29 @@ config:
   # Whether a trusted proxy sits in front of the api. Behind an ingress or a
   # Service, every request arrives from the proxy, so the per-IP rate limits
   # collapse into one shared bucket unless the forwarded address is trusted.
-  # Empty = decide from ingress.enabled. "true", a hop count ("1"), or a CIDR
-  # list are all accepted. Leave it off when the api is directly exposed:
-  # trusting a forwarded header then lets any client forge an address.
+  # "true", a hop count ("1"), or a CIDR list are all accepted. Leave it empty
+  # when the api is directly exposed: trusting a forwarded header then lets any
+  # client forge an address.
+  #
+  # REQUIRED with ingress.enabled, and nothing is inferred. This was derived
+  # from ingress.enabled once and was wrong both ways — with an ingress it chose
+  # "true", the dialect the paragraph below warns against, and without one it
+  # chose "false" even though routing arranged outside the chart (a Traefik
+  # IngressRoute onto the -web Service, say) is a proxy this chart cannot see.
+  # An install with no ingress and a proxy in front still has to set this; the
+  # chart says what it resolved at install time so the omission is visible.
   #
   # Prefer the CIDR list. better-auth counts the auth limits per client address
   # too — in Postgres, so across replicas — and it accepts only ranges: with
   # "true" it believes X-Forwarded-For only when the header holds a single
   # address, which it does not once an ingress has added itself. The auth limits
-  # then apply to everybody together rather than per client. The pod network's
-  # range is the usual answer here (10.0.0.0/8 on most clusters).
+  # then apply to everybody together rather than per client.
+  #
+  # Use YOUR pod network's range rather than a habit: 10.0.0.0/8 covers many
+  # clusters, k3s is 10.42.0.0/16, Calico defaults to 192.168.0.0/16 and an EKS
+  # default VPC is 172.31.0.0/16. Narrower is better — this range is who may
+  # claim to be someone else, so on a CNI that gives pods VPC addresses it is
+  # every workload in the VPC, not just the ingress.
   trustProxy: ""
   # The plan a newly created organization lands on.
   #
