@@ -76,6 +76,16 @@ interface IndexRow {
   readonly keyOrdinal: number;
   readonly isDescending: boolean;
   readonly columnName: string;
+  // sys.index_columns lists an INCLUDEd column as key_ordinal 0 with
+  // is_included_column 1. Both are read: the ordinal alone would also match
+  // rows a future SQL Server could add for something else.
+  readonly isIncluded: boolean;
+  // Position within the index — keys first in key order, then the includes in
+  // the order they were declared. Verified on 2022: an index created as
+  // INCLUDE (total, email) reports total before email even though email has
+  // the lower column_id, so this is the declared order and not a catalog
+  // artefact.
+  readonly indexColumnId: number;
 }
 
 // Rowstore only: 1 = clustered, 2 = nonclustered. Columnstore, XML, spatial and
@@ -86,9 +96,18 @@ const ROWSTORE_TYPES = "(1, 2)";
 export function toMssqlIndexSpec(rows: readonly IndexRow[]): IndexSpec | null {
   const first = rows[0];
   if (first === undefined) return null;
-  const keys: IndexKey[] = [...rows]
+  const keys: IndexKey[] = rows
+    .filter((row) => !row.isIncluded)
     .sort((a, b) => a.keyOrdinal - b.keyOrdinal)
     .map((row) => ({ field: row.columnName, direction: row.isDescending ? -1 : 1 }));
+  // An index whose every row is an include cannot happen — INCLUDE requires a
+  // key — so this is a malformed read rather than a keyless index, and the
+  // pipeline is better off not seeing it than seeing it as keyless.
+  if (keys.length === 0) return null;
+  const include = rows
+    .filter((row) => row.isIncluded)
+    .sort((a, b) => a.indexColumnId - b.indexColumnId)
+    .map((row) => row.columnName);
   return {
     name: first.indexName,
     keys,
@@ -112,6 +131,11 @@ export function toMssqlIndexSpec(rows: readonly IndexRow[]): IndexSpec | null {
     // it" flag, and this is exactly that.
     isShardKey: first.indexType === 1,
     collation: null,
+    // Omitted rather than empty when there are none: "carries nothing extra"
+    // and "this engine has no includes" are the same statement to every reader,
+    // and this keeps a persisted spec byte-identical to what it was before
+    // includes were captured for the indexes that have none.
+    ...(include.length === 0 ? {} : { include }),
   };
 }
 
@@ -156,6 +180,11 @@ export class MssqlIndexCollector implements IndexCollector {
     return rows.map((row) => row.name);
   }
 
+  // Key columns AND included columns, in one read: this used to filter
+  // `key_ordinal > 0`, which reported a covering index as its bare key list and
+  // let the redundancy rule offer it up as a prefix of a wider-keyed index that
+  // covers nothing it covered. The split now happens in toMssqlIndexSpec, where
+  // both halves are visible.
   async listIndexes(database: string, collection: string): Promise<IndexSpec[]> {
     const rows = await this.conn.query<IndexRow>(
       `SELECT
@@ -169,6 +198,8 @@ export class MssqlIndexCollector implements IndexCollector {
          i.filter_definition AS filterDefinition,
          ic.key_ordinal AS keyOrdinal,
          ic.is_descending_key AS isDescending,
+         ic.is_included_column AS isIncluded,
+         ic.index_column_id AS indexColumnId,
          c.name AS columnName
        FROM ${quoteIdent(database)}.sys.indexes i
        JOIN ${quoteIdent(database)}.sys.index_columns ic
@@ -179,8 +210,7 @@ export class MssqlIndexCollector implements IndexCollector {
          AND i.type IN ${ROWSTORE_TYPES}
          AND i.is_hypothetical = 0
          AND i.name IS NOT NULL
-         AND ic.key_ordinal > 0
-       ORDER BY i.index_id, ic.key_ordinal`,
+       ORDER BY i.index_id, ic.index_column_id`,
       { qualified: qualifiedTable(database, collection) },
     );
     const grouped = new Map<string, IndexRow[]>();

@@ -1,7 +1,14 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import {
+  type IndexSpec,
+  isRedundantPrefix,
+  parseStoredSpec,
+  rebuildKeys,
+  rebuildOptions,
+} from "../src/analysis";
 import { type EngineSession, workloadKey } from "../src/engine/ports";
 import { detectEngine } from "../src/engine/registry";
-import { collectSnapshots } from "../src/mongo/snapshots";
+import { collectSnapshots, serializeSpec } from "../src/mongo/snapshots";
 import { mssqlAdapter } from "../src/mssql/adapter";
 import { MssqlConnection } from "../src/mssql/connection";
 
@@ -158,6 +165,62 @@ describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", 
     await expect(session.executor(true).hide(DB, "dbo.orders", "ix_customer")).rejects.toThrow(
       /read-only/,
     );
+  });
+
+  // #204. The two halves of a covering index, against the catalog rather than
+  // against a fixture: that sys.index_columns reports the INCLUDEd columns as
+  // key_ordinal 0 rows (which the collector must keep out of the keys), and
+  // that an undo built from the stored spec puts the covering back.
+  it("reads INCLUDE columns and rebuilds them from the stored spec", async () => {
+    const executor = session.executor(false);
+    await seed.execute(
+      `CREATE INDEX ix_covering ON [${DB}].dbo.orders(customer_id) INCLUDE (status, email)`,
+    );
+
+    const specs = await session.collector.listIndexes(DB, "dbo.orders");
+    const covering = specs.find((spec) => spec.name === "ix_covering");
+    expect(covering?.keys).toEqual([{ field: "customer_id", direction: 1 }]);
+    expect(covering?.include).toEqual(["status", "email"]);
+
+    // The index the redundancy rule would have called this one a prefix of. It
+    // covers nothing ix_covering covers, so the drop must not be proposed.
+    const wider = specs.find((spec) => spec.name === "ix_customer_status");
+    expect(wider).toBeUndefined();
+    await seed.execute(
+      `CREATE INDEX ix_customer_status ON [${DB}].dbo.orders(customer_id, status)`,
+    );
+    const withWider = await session.collector.listIndexes(DB, "dbo.orders");
+    const pair = {
+      covering: withWider.find((spec) => spec.name === "ix_covering"),
+      wider: withWider.find((spec) => spec.name === "ix_customer_status"),
+    };
+    expect(pair.covering && pair.wider && isRedundantPrefix(pair.covering, pair.wider)).toBe(false);
+
+    // …and the same pair without the includes IS the redundancy the rule is for.
+    expect(
+      pair.covering &&
+        pair.wider &&
+        isRedundantPrefix({ ...pair.covering, include: undefined }, pair.wider),
+    ).toBe(true);
+
+    // The undo path: drop, then rebuild from exactly what was persisted.
+    const stored = parseStoredSpec(serializeSpec(pair.covering as IndexSpec));
+    expect(stored.include).toEqual(["status", "email"]);
+    await executor.drop(DB, "dbo.orders", "ix_covering");
+    await executor.create(
+      DB,
+      "dbo.orders",
+      rebuildKeys(stored) as Record<string, 1 | -1>,
+      rebuildOptions(stored),
+    );
+    const rebuilt = (await session.collector.listIndexes(DB, "dbo.orders")).find(
+      (spec) => spec.name === "ix_covering",
+    );
+    expect(rebuilt?.keys).toEqual(covering?.keys);
+    expect(rebuilt?.include).toEqual(["status", "email"]);
+
+    await executor.drop(DB, "dbo.orders", "ix_covering");
+    await executor.drop(DB, "dbo.orders", "ix_customer_status");
   });
 
   it("keeps a read-only executor from creating too", async () => {

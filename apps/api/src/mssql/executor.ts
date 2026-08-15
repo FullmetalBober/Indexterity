@@ -176,9 +176,17 @@ export class MssqlIndexExecutor implements IndexExecutor {
       }
       where = ` WHERE ${definition}`;
     }
+    // INCLUDE goes before WHERE — the only order CREATE INDEX accepts. A column
+    // named in both lists is rejected by the server (Msg 1911), so the key list
+    // wins and the duplicate is dropped here rather than turned into a failed
+    // undo.
+    const keyFields = new Set(columns.map(([field]) => field));
+    const included = (options.include ?? []).filter((column) => !keyFields.has(column));
+    const include =
+      included.length === 0 ? "" : ` INCLUDE (${included.map(quoteIdent).join(", ")})`;
     await this.conn.execute(
       `CREATE ${options.unique === true ? "UNIQUE " : ""}NONCLUSTERED INDEX ${quoteIdent(name)} ` +
-        `ON ${qualifiedTable(database, collection)} (${keyList})${where}`,
+        `ON ${qualifiedTable(database, collection)} (${keyList})${include}${where}`,
     );
   }
 }

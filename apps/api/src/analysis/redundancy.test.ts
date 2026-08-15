@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isRedundantPrefix } from "./redundancy";
+import { coversIncludes, isRedundantPrefix } from "./redundancy";
 import type { IndexKey, IndexSpec } from "./types";
 
 function spec(name: string, keys: IndexKey[], overrides: Partial<IndexSpec> = {}): IndexSpec {
@@ -75,5 +75,51 @@ describe("isRedundantPrefix", () => {
 
   it("false for equal-length identical keys (mongod forbids creating those)", () => {
     expect(isRedundantPrefix(spec("a", [x1]), spec("b", [x1]))).toBe(false);
+  });
+
+  // A longer key list is not a wider index. Measured on SQL Server 2022 with
+  // 200k rows: SELECT SUM(total) WHERE customer_id = 42 took 6 logical reads
+  // through (customer_id) INCLUDE (total) and 1124 once it was gone, with
+  // (customer_id, status) still there — the prefix rule alone proposes exactly
+  // that swap.
+  it("false when the wider index does not carry what the prefix covers", () => {
+    expect(isRedundantPrefix(spec("a", [x1], { include: ["total"] }), spec("ab", [x1, y1]))).toBe(
+      false,
+    );
+  });
+
+  it("true when the wider index carries the covered columns as includes", () => {
+    expect(
+      isRedundantPrefix(
+        spec("a", [x1], { include: ["total"] }),
+        spec("ab", [x1, y1], { include: ["total", "email"] }),
+      ),
+    ).toBe(true);
+  });
+
+  it("true when the wider index carries them as KEYS — a key column is covered too", () => {
+    const total1: IndexKey = { field: "total", direction: 1 };
+    expect(
+      isRedundantPrefix(spec("a", [x1], { include: ["total"] }), spec("ab", [x1, y1, total1])),
+    ).toBe(true);
+  });
+
+  it("unchanged for the engines that have no includes at all", () => {
+    expect(isRedundantPrefix(spec("a", [x1]), spec("ab", [x1, y1], { include: ["z"] }))).toBe(true);
+  });
+});
+
+describe("coversIncludes", () => {
+  it("is vacuously true without includes, however the absence is spelled", () => {
+    expect(coversIncludes(spec("a", [x1]), spec("b", [y1]))).toBe(true);
+    expect(coversIncludes(spec("a", [x1], { include: [] }), spec("b", [y1]))).toBe(true);
+  });
+
+  it("needs EVERY covered column, not just one", () => {
+    const candidate = spec("a", [x1], { include: ["total", "email"] });
+    expect(coversIncludes(candidate, spec("b", [x1, y1], { include: ["total"] }))).toBe(false);
+    expect(coversIncludes(candidate, spec("b", [x1, y1], { include: ["total", "email"] }))).toBe(
+      true,
+    );
   });
 });

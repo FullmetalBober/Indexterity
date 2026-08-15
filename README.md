@@ -74,6 +74,17 @@ Every one of those thresholds is expressed in **hours**, not in collect
 intervals, which is what made the cadence safe to move
 ([D36](./docs/decisions.md)).
 
+**Covering columns count as part of the index.** SQL Server indexes can carry
+non-key columns (`INCLUDE`) that answer a query without going back to the table,
+so a longer key list is not automatically a wider index: `(customer_id) INCLUDE
+(total)` answers `SELECT total WHERE customer_id = ?` on its own, and
+`(customer_id, status)` cannot answer it at all. Redundancy therefore folds one
+index into another only when the survivor carries every column the victim
+covered — as a key or an include — and the same check gates the advisory tier
+and the re-order replacement. Measured on SQL Server 2022 over 200k rows: 6
+logical reads with the covering index, 1124 without it
+([D80](./docs/decisions.md)).
+
 **Never dropped**, whatever the usage: `_id_`, unique (including unique partial
 and sparse — a constraint is not a performance hint), TTL, and shard-key
 indexes. They surface as advisories instead. Partial and sparse indexes without

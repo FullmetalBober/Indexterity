@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { rebuildKeys } from "./rollback";
+import { rebuildKeys, rebuildOptions } from "./rollback";
 import type { IndexKey, IndexSpec } from "./types";
 
-function spec(keys: IndexKey[]): IndexSpec {
+function spec(keys: IndexKey[], overrides: Partial<IndexSpec> = {}): IndexSpec {
   return {
     name: "idx",
     keys,
@@ -14,6 +14,7 @@ function spec(keys: IndexKey[]): IndexSpec {
     hidden: false,
     isShardKey: false,
     collation: null,
+    ...overrides,
   };
 }
 
@@ -33,5 +34,21 @@ describe("rebuildKeys", () => {
   });
   it("refuses an empty key list", () => {
     expect(rebuildKeys(spec([]))).toBeNull();
+  });
+});
+
+describe("rebuildOptions", () => {
+  const a1: IndexKey = { field: "a", direction: 1 };
+
+  it("carries covering columns, so an undo puts back an index that still covers", () => {
+    expect(rebuildOptions(spec([a1], { include: ["total"] }))).toEqual({
+      name: "idx",
+      include: ["total"],
+    });
+  });
+
+  it("says nothing about includes when the index had none", () => {
+    expect(rebuildOptions(spec([a1]))).toEqual({ name: "idx" });
+    expect(rebuildOptions(spec([a1], { include: [] }))).toEqual({ name: "idx" });
   });
 });

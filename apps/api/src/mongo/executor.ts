@@ -77,6 +77,11 @@ export class MongoIndexExecutor implements IndexExecutor {
   ): Promise<void> {
     this.assertWritable("create index");
     await this.assertSupported();
-    await this.conn.db(database).collection(collection).createIndex(keys, options);
+    // `include` is a covering-column list, which MongoDB has no concept of —
+    // createIndexes refuses an index specification field it does not recognise,
+    // so it is dropped here rather than forwarded. Nothing is lost: no mongo
+    // spec ever carries one.
+    const { include: _include, ...mongoOptions } = options;
+    await this.conn.db(database).collection(collection).createIndex(keys, mongoOptions);
   }
 }

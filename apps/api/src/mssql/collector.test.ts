@@ -14,6 +14,8 @@ function row(overrides: Partial<Parameters<typeof toMssqlIndexSpec>[0][number]> 
     keyOrdinal: 1,
     isDescending: false,
     columnName: "customer_id",
+    isIncluded: false,
+    indexColumnId: 1,
     ...overrides,
   };
 }
@@ -52,6 +54,31 @@ describe("toMssqlIndexSpec", () => {
 
   it("returns null for no rows", () => {
     expect(toMssqlIndexSpec([])).toBeNull();
+  });
+
+  // sys.index_columns reports an INCLUDEd column as key_ordinal 0 /
+  // is_included_column 1, and orders both halves by index_column_id — verified
+  // on 2022, where INCLUDE (total, email) reports total first even though email
+  // has the lower column_id. So the includes keep the order they were declared
+  // in, and never leak into the keys.
+  it("splits included columns out of the keys, in declared order", () => {
+    const spec = toMssqlIndexSpec([
+      row({ keyOrdinal: 1, indexColumnId: 1, columnName: "customer_id" }),
+      row({ keyOrdinal: 0, indexColumnId: 2, columnName: "total", isIncluded: true }),
+      row({ keyOrdinal: 0, indexColumnId: 3, columnName: "email", isIncluded: true }),
+    ]);
+    expect(spec?.keys).toEqual([{ field: "customer_id", direction: 1 }]);
+    expect(spec?.include).toEqual(["total", "email"]);
+  });
+
+  it("leaves include off an index that has none", () => {
+    expect(toMssqlIndexSpec([row()])).not.toHaveProperty("include");
+  });
+
+  it("returns null when every row is an include — INCLUDE cannot exist without a key", () => {
+    expect(toMssqlIndexSpec([row({ keyOrdinal: 0, isIncluded: true, columnName: "total" })])).toBe(
+      null,
+    );
   });
 });
 

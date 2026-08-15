@@ -41,6 +41,10 @@ export function serializeSpec(spec: IndexSpec): Record<string, unknown> {
     hidden: spec.hidden,
     isShardKey: spec.isShardKey,
     collation: spec.collation,
+    // Persisted so an undo rebuilds a covering index as covering. Kept off the
+    // object entirely when the index has none, so the specs of every engine
+    // without includes are unchanged.
+    ...(spec.include === undefined || spec.include.length === 0 ? {} : { include: spec.include }),
   };
 }
 
