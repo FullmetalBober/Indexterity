@@ -46,6 +46,44 @@ const TLS_BOXES: readonly { key: keyof TlsOverrides; label: string; help: string
   },
 ];
 
+// What the scoped user IS, per engine — the offer is engine-neutral (it hangs
+// off `canProvision`), the words cannot be: "no read access to your documents"
+// and `db.dropUser` are the wrong sentence entirely in front of a SQL Server.
+//
+// Read off the string the reader typed, and only to choose wording. The api
+// detects the engine itself and is the one that decides; a wrong guess here
+// shows the other engine's paragraph and changes nothing about what happens.
+const SCOPED_USER_COPY = {
+  MONGODB: {
+    subject: "user",
+    grant: (
+      <>
+        with the <code>indexterityEngine</code> role
+      </>
+    ),
+    withheld: "no read access to your documents",
+    revoke: <code>db.dropUser(…)</code>,
+  },
+  MSSQL: {
+    subject: "login",
+    grant: (
+      <>
+        granted <code>VIEW SERVER STATE</code>, <code>VIEW DATABASE STATE</code> and{" "}
+        <code>ALTER</code> on each schema that holds tables
+      </>
+    ),
+    withheld: "no permission to read a single row of your data",
+    revoke: <code>DROP LOGIN idx_…</code>,
+  },
+} as const;
+
+function scopedUserCopy(connectionString: string) {
+  return /^\s*(mssql|sqlserver):\/\//i.test(connectionString) ||
+    /(^|;)\s*(server|data source)\s*=/i.test(connectionString)
+    ? SCOPED_USER_COPY.MSSQL
+    : SCOPED_USER_COPY.MONGODB;
+}
+
 // Why no scoped user was offered, on a connection that is otherwise fine.
 //
 // Says which action is missing rather than that one is: `createUser` alone is a
@@ -68,10 +106,10 @@ function ProvisioningUnavailable({ diagnosis }: { diagnosis: ConnectionDiagnosis
           <code>{gap.key}</code>
         </span>
       ))}{" "}
-      on <code>admin</code>. Connecting as-is stores the string you pasted (encrypted) and dials the
-      cluster with it on every collect. Grant {gaps.length === 1 ? "that action" : "those actions"}{" "}
-      and check again, and Indexterity will offer to create an <code>idx_…</code> user with only the
-      privileges above instead — or create one yourself and connect with its string.{" "}
+      . Connecting as-is stores the string you pasted (encrypted) and dials the cluster with it on
+      every collect. Grant {gaps.length === 1 ? "that one" : "those"} and check again, and
+      Indexterity will offer to create an <code>idx_…</code> user with only the privileges above
+      instead — or create one yourself and connect with its string.{" "}
       <a href={CLUSTER_USER_DOCS_HREF} className="underline">
         The exact role is here
       </a>
@@ -309,14 +347,23 @@ export function ConnectClusterForm({ plan }: { plan: PlanInfo | null }) {
             {diagnosis.canProvision ? (
               <div className="mt-3 rounded-md bg-muted/40 p-3">
                 <p className="font-medium">
-                  These credentials can create users — let Indexterity make its own?
+                  These credentials can create{" "}
+                  {scopedUserCopy(credentials().connectionString).subject}s — let Indexterity make
+                  its own?
                 </p>
                 <p className="mt-1 text-muted-foreground text-xs">
-                  A dedicated user <code>idx_…</code> is created on your cluster with the{" "}
-                  <code>indexterityEngine</code> role: exactly the privileges listed above and
-                  nothing else — notably <strong>no read access to your documents</strong>. The
-                  admin string you pasted is used once and never stored; only the new user's string
-                  is kept (encrypted). Revoke it any time with <code>db.dropUser(…)</code>.
+                  {(() => {
+                    const copy = scopedUserCopy(credentials().connectionString);
+                    return (
+                      <>
+                        A dedicated {copy.subject} <code>idx_…</code> is created on your cluster{" "}
+                        {copy.grant}: exactly the privileges listed above and nothing else — notably{" "}
+                        <strong>{copy.withheld}</strong>. The admin string you pasted is used once
+                        and never stored; only the new {copy.subject}'s string is kept (encrypted).
+                        Revoke it any time with {copy.revoke}.
+                      </>
+                    );
+                  })()}
                 </p>
                 <div className="mt-3 flex flex-wrap gap-2">
                   <Button

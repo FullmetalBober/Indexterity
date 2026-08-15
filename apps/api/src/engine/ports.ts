@@ -234,4 +234,23 @@ export interface EngineAdapter {
   open(connectionString: string, overrides?: TlsOverrides): Promise<EngineSession>;
   // Report what these credentials may do, without writing anything.
   diagnose(connectionString: string, overrides?: TlsOverrides): Promise<ConnectionDiagnosis>;
+  // Use an admin string ONCE to create the least-privilege user this engine
+  // would rather run as, and return that user's string. The admin string is
+  // never stored, and a failed verification undoes what was created.
+  //
+  // Present exactly when `capabilities.provisionScopedUsers` is true — the flag
+  // is what callers branch on, and this is what they then call. Throws
+  // ProvisionDeniedError when the credentials cannot create the user.
+  provisionScopedUser?(
+    adminConnectionString: string,
+    overrides?: TlsOverrides,
+  ): Promise<ProvisionedUser>;
+  // The username a string authenticates as, so rotation can tell whether the
+  // stored "this is a provisioned user" marker still describes the new one.
+  connStringUsername(value: string): string | null;
+}
+
+export interface ProvisionedUser {
+  readonly connectionString: string;
+  readonly username: string;
 }

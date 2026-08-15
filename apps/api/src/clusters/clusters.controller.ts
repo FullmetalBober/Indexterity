@@ -19,18 +19,13 @@ import {
 } from "../db";
 import { DatabaseService } from "../db/database.service";
 import { allowPrivateTargets, assertTargetsAllowed, BlockedTargetError } from "../engine/net-guard";
-import { NO_TLS_OVERRIDES, type TlsOverrides } from "../engine/ports";
+import { NO_TLS_OVERRIDES, type ProvisionedUser, type TlsOverrides } from "../engine/ports";
 import { adapterFor, detectEngine, engineSupported, supportedEngines } from "../engine/registry";
 import { consumeDialBudget } from "../errors/dial-budget";
 import { mapClusterError, toCluster, toDiagnosis } from "../http/mappers";
 import { TenancyService } from "../http/tenancy.service";
 import { evictCluster } from "../jobs/connection-pool";
-import {
-  connStringUsername,
-  InsecureConnectionError,
-  ProvisionDeniedError,
-  provisionScopedUser,
-} from "../mongo";
+import { InsecureConnectionError, ProvisionDeniedError } from "../mongo";
 import { Implement, route } from "../orpc/implement";
 import { restoreHiddenIndexes, revokeCommandFor } from "./offboard";
 
@@ -382,17 +377,26 @@ export class ClustersController {
         // Before creating a user on someone's cluster, not after.
         await this.tenancy.requireRoomFor(orgId, "clusters");
         await this.assertNameFree(orgId, input.name, errors);
-        // Provisioning is engine-specific; MONGODB is the only adapter with the
-        // capability today (see EngineCapabilities.provisionScopedUsers).
+        // The string says which engine this is, exactly as createCluster reads
+        // it — so an admin SQL Server string provisions a scoped login instead
+        // of being dialled as mongo. An engine whose adapter cannot provision
+        // is refused here rather than part way through.
+        const engine = detectEngine(input.adminConnectionString) ?? "MONGODB";
+        const adapter = adapterFor(engine);
+        const provision = adapter.provisionScopedUser;
+        if (!adapter.capabilities.provisionScopedUsers || provision === undefined) {
+          throw errors.BAD_REQUEST({
+            message:
+              `${engine} cannot provision a scoped user — connect with credentials that ` +
+              "already have what the engine needs instead.",
+          });
+        }
         const overrides = input.tlsOverrides ?? NO_TLS_OVERRIDES;
-        const adminValue = adapterFor("MONGODB").applySecureTransport(
-          input.adminConnectionString,
-          overrides,
-        );
-        await this.guardDial(context.userId, "MONGODB", adminValue, errors, overrides);
-        let provisioned: Awaited<ReturnType<typeof provisionScopedUser>>;
+        const adminValue = adapter.applySecureTransport(input.adminConnectionString, overrides);
+        await this.guardDial(context.userId, engine, adminValue, errors, overrides);
+        let provisioned: ProvisionedUser;
         try {
-          provisioned = await provisionScopedUser(adminValue, overrides);
+          provisioned = await provision(adminValue, overrides);
         } catch (error) {
           if (error instanceof ProvisionDeniedError) {
             throw new ORPCError("PROVISION_DENIED", { status: 422, message: error.message });
@@ -402,7 +406,7 @@ export class ClustersController {
         const row = await this.storeCluster(
           orgId,
           input.name,
-          "MONGODB",
+          engine,
           provisioned.connectionString,
           provisioned.username,
           overrides,
@@ -415,7 +419,7 @@ export class ClustersController {
           // The username, never the string: this row is read by people who are not
           // meant to be able to dial the cluster from it.
           metadata: {
-            engine: "MONGODB",
+            engine,
             provisioned: true,
             provisionedUsername: provisioned.username,
             tlsOverrides: overrides,
@@ -473,7 +477,7 @@ export class ClustersController {
         // authenticates as that user; anything else is a user we didn't create.
         const provisionedUsername =
           row.provisionedUsername !== null &&
-          connStringUsername(input.connectionString) === row.provisionedUsername
+          adapter.connStringUsername(input.connectionString) === row.provisionedUsername
             ? row.provisionedUsername
             : null;
         const [updated] = await this.database.db

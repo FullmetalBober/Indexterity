@@ -8,8 +8,11 @@ import {
 } from "../src/analysis";
 import { type EngineSession, workloadKey } from "../src/engine/ports";
 import { detectEngine } from "../src/engine/registry";
+import { ProvisionDeniedError } from "../src/mongo/provision";
 import { collectSnapshots, serializeSpec } from "../src/mongo/snapshots";
 import { mssqlAdapter } from "../src/mssql/adapter";
+import { MssqlIndexCollector } from "../src/mssql/collector";
+import { withMssqlCredentials } from "../src/mssql/conn-string";
 import { asNumber, MssqlConnection } from "../src/mssql/connection";
 
 // Adapter-level integration against a real SQL Server (2022 in CI). Everything
@@ -221,6 +224,105 @@ describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", 
 
     await executor.drop(DB, "dbo.orders", "ix_covering");
     await executor.drop(DB, "dbo.orders", "ix_customer_status");
+  });
+
+  // #203. The contract provisioning has to keep: it creates precisely what
+  // diagnose probes, so a cluster we provisioned always diagnoses clean — and
+  // the login it creates cannot read a single customer row.
+  it("provisions a scoped login that diagnoses clean and cannot read rows", async () => {
+    const admin = await mssqlAdapter.diagnose(MSSQL_URL as string, OVERRIDES);
+    expect(admin.canProvision).toBe(true);
+
+    const provision = mssqlAdapter.provisionScopedUser;
+    expect(provision).toBeDefined();
+    // Deliberately through a string that NAMES an initial database: a
+    // server-scoped GRANT is refused outside master (Msg 4621), so provisioning
+    // has to reach master itself rather than inherit the caller's context.
+    const scoped = await (provision as NonNullable<typeof provision>)(
+      (MSSQL_URL as string).replace("localhost:1433", `localhost:1433/${DB}`),
+      OVERRIDES,
+    );
+    try {
+      expect(scoped.username).toMatch(/^idx_[0-9a-f]{12}$/);
+
+      const diagnosis = await mssqlAdapter.diagnose(scoped.connectionString, OVERRIDES);
+      expect(diagnosis.username, JSON.stringify(diagnosis)).toBe(scoped.username);
+      expect(diagnosis.reachable).toBe(true);
+      // Both of these are the point: the scoped login can analyze AND apply,
+      // without anyone granting it anything by hand.
+      expect(diagnosis.ready, JSON.stringify(diagnosis.missing)).toBe(true);
+      expect(diagnosis.canApply, JSON.stringify(diagnosis.missing)).toBe(true);
+      // …and it could not create another login of its own.
+      expect(diagnosis.canProvision).toBe(false);
+
+      // The whole trust story, enforced by the server rather than by us.
+      const scopedConn = new MssqlConnection(scoped.connectionString, OVERRIDES);
+      await scopedConn.connect();
+      try {
+        await expect(
+          scopedConn.query(`SELECT TOP 1 email FROM [${DB}].dbo.orders`),
+        ).rejects.toThrow(/SELECT permission was denied/i);
+        // It can still do its job: the index catalog and the usage counters.
+        const specs = await new MssqlIndexCollector(scopedConn).listIndexes(DB, "dbo.orders");
+        expect(specs.map((spec) => spec.name)).toContain("ix_customer");
+        const usage = await new MssqlIndexCollector(scopedConn).collectUsage(DB, "dbo.orders");
+        expect(usage.length).toBeGreaterThan(0);
+      } finally {
+        await scopedConn.close().catch(() => {});
+      }
+    } finally {
+      await seed
+        .execute(
+          `EXEC [${DB}].sys.sp_executesql N'DROP USER IF EXISTS [${scoped.username}]';
+           DROP LOGIN [${scoped.username}]`,
+        )
+        .catch(() => {});
+    }
+  });
+
+  // The other half of #203: credentials that cannot do the job are told so
+  // BEFORE anything is created. ALTER ANY LOGIN alone is the interesting case —
+  // it creates the login happily and then cannot grant it anything (Msg 4613),
+  // which is why CONTROL SERVER is a check of its own.
+  it("refuses to provision with credentials that can create a login but not grant", async () => {
+    const weak = "idx_int_weak";
+    // Through master explicitly: the seeding above ran `USE [DB]` on this
+    // pooled connection, and a server-scoped GRANT anywhere but master is
+    // Msg 4621 — the same trap provisioning itself has to avoid.
+    await seed.execute(
+      `EXEC master.sys.sp_executesql N'IF SUSER_ID(''${weak}'') IS NOT NULL DROP LOGIN [${weak}];
+         CREATE LOGIN [${weak}] WITH PASSWORD = ''W3ak!Pass'', CHECK_POLICY = OFF;
+         GRANT ALTER ANY LOGIN TO [${weak}];
+         GRANT VIEW SERVER STATE TO [${weak}]'`,
+    );
+    const weakUrl = withMssqlCredentials(MSSQL_URL as string, weak, "W3ak!Pass");
+    try {
+      const diagnosis = await mssqlAdapter.diagnose(weakUrl, OVERRIDES);
+      expect(diagnosis.canProvision).toBe(false);
+      const provisionChecks = diagnosis.privileges.filter((check) => check.tier === "PROVISION");
+      expect(provisionChecks.find((check) => check.key === "alterAnyLogin")?.granted).toBe(true);
+      expect(provisionChecks.find((check) => check.key === "controlServer")?.granted).toBe(false);
+
+      await expect(
+        (mssqlAdapter.provisionScopedUser as NonNullable<typeof mssqlAdapter.provisionScopedUser>)(
+          weakUrl,
+          OVERRIDES,
+        ),
+      ).rejects.toBeInstanceOf(ProvisionDeniedError);
+      // …and it left nothing behind: the half-created login is dropped on the
+      // way out, or the next attempt would collide with it.
+      const leftovers = await seed.query<{ n: number }>(
+        `SELECT COUNT(*) AS n FROM sys.server_principals WHERE name LIKE 'idx_%' AND name <> @weak`,
+        { weak },
+      );
+      expect(asNumber(leftovers[0]?.n)).toBe(0);
+    } finally {
+      await seed
+        .execute(
+          `EXEC master.sys.sp_executesql N'IF SUSER_ID(''${weak}'') IS NOT NULL DROP LOGIN [${weak}]'`,
+        )
+        .catch(() => {});
+    }
   });
 
   it("keeps a read-only executor from creating too", async () => {
