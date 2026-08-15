@@ -3,6 +3,7 @@ export * from "./client";
 export * from "./collector";
 export * from "./conn-string";
 export * from "./connection";
+export * from "./delete-patterns";
 export * from "./diagnose";
 export * from "./executor";
 export * from "./version";

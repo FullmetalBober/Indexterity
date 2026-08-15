@@ -16,6 +16,7 @@ import {
   quoteIdent,
   splitCollectionName,
 } from "./connection";
+import { deletePatternsFromPlans } from "./delete-patterns";
 import type { MssqlMemberConnections } from "./members";
 import { type PlanRow, shapesFromPlans } from "./workload";
 
@@ -48,10 +49,10 @@ const MAX_PLANS_PER_DATABASE = 5000;
 // views, database-scoped DMVs and Query Store views alike (verified from the
 // master context), so one connection serves every database the login can see.
 //
-// Create-side signals (query shapes, missing-index DMVs, delete patterns) are
-// deliberately empty in v1 — the drop side is the product here, and the
-// missing-index DMVs need the recurrence and cost gates #36 describes before
-// they are safe to repeat to anyone.
+// The create-side signals #36 deferred are here now: query shapes and the
+// server's own missing-index suggestions come off the plans (#201), and the
+// age-based purge pattern comes off the DELETE plans (#206). All of them pass
+// the same recurrence and cost gates every observed signal passes.
 
 // LIKE-escape inside a pattern: [ opens a character class, % and _ are wild.
 function likeEscape(value: string): string {
@@ -509,8 +510,38 @@ export class MssqlIndexCollector implements IndexCollector {
     return result;
   }
 
-  collectDeletePatterns(_database: string, _collection: string): Promise<DeletePattern[]> {
-    return Promise.resolve([]);
+  // Recurring age-based DELETEs against this table, from Query Store (#206) —
+  // see mssql/delete-patterns.ts for the extraction. The plans are filtered
+  // server-side twice: to DELETE statements, and to plans whose XML names this
+  // table, so a database full of SELECT plans is not shipped to be discarded
+  // here.
+  async collectDeletePatterns(database: string, collection: string): Promise<DeletePattern[]> {
+    if (!(await this.queryStoreEnabled(database))) return [];
+    const rows = await this.conn.query<{ planXml: string; execs: unknown }>(
+      // is_internal_query = 0 for the same reason collectWorkload has it: the
+      // server's own maintenance runs DELETEs of its own, and none of them is
+      // this application purging by age.
+      `SELECT TOP ${MAX_PLANS_PER_DATABASE}
+         CAST(p.query_plan AS nvarchar(max)) AS planXml,
+         agg.execs
+       FROM (
+         SELECT plan_id, SUM(count_executions) AS execs, MAX(last_execution_time) AS lastSeen
+         FROM ${quoteIdent(database)}.sys.query_store_runtime_stats
+         GROUP BY plan_id
+       ) agg
+       JOIN ${quoteIdent(database)}.sys.query_store_plan p ON p.plan_id = agg.plan_id
+       JOIN ${quoteIdent(database)}.sys.query_store_query q ON q.query_id = p.query_id
+       WHERE q.is_internal_query = 0
+         AND CAST(p.query_plan AS nvarchar(max)) LIKE '%StatementType="DELETE"%'
+         AND CAST(p.query_plan AS nvarchar(max)) LIKE @pattern
+       ORDER BY agg.lastSeen DESC`,
+      { pattern: tablePlanPattern(collection) },
+    );
+    return deletePatternsFromPlans(
+      rows.map((row) => ({ planXml: row.planXml, execs: asNumber(row.execs) })),
+      database,
+      collection,
+    );
   }
 
   // No mapping yet: the mongo counters this feeds (collection scans per

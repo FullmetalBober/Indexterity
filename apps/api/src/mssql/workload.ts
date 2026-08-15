@@ -31,24 +31,24 @@ const parser = new XMLParser({
   parseTagValue: false,
 });
 
-type XmlNode = Record<string, unknown>;
+export type XmlNode = Record<string, unknown>;
 
 function asArray(value: unknown): XmlNode[] {
   if (Array.isArray(value)) return value.filter((entry): entry is XmlNode => isNode(entry));
   return isNode(value) ? [value] : [];
 }
 
-function isNode(value: unknown): value is XmlNode {
+export function isNode(value: unknown): value is XmlNode {
   return typeof value === "object" && value !== null;
 }
 
-function attr(node: XmlNode, name: string): string | null {
+export function attr(node: XmlNode, name: string): string | null {
   const value = node[`@${name}`];
   return typeof value === "string" ? value : null;
 }
 
 // Depth-first: every element named `key` anywhere under `root`.
-function collect(root: unknown, key: string, found: XmlNode[] = []): XmlNode[] {
+export function collect(root: unknown, key: string, found: XmlNode[] = []): XmlNode[] {
   if (Array.isArray(root)) {
     for (const entry of root) collect(entry, key, found);
     return found;
@@ -62,7 +62,7 @@ function collect(root: unknown, key: string, found: XmlNode[] = []): XmlNode[] {
 }
 
 // "[dbo]" → "dbo"; plan attributes bracket-quote identifiers.
-function unbracket(value: string | null): string | null {
+export function unbracket(value: string | null): string | null {
   if (value === null) return null;
   const inner = /^\[(.*)\]$/.exec(value);
   return inner === undefined || inner === null ? value : (inner[1] ?? "").replaceAll("]]", "]");
@@ -76,7 +76,7 @@ function unbracket(value: string | null): string | null {
 // parsed can hold plans over OTHER databases' tables (three-part queries).
 // Without the filter, [other].[dbo].[orders] would attribute its shape to the
 // analyzed database's own dbo.orders.
-function tableOf(node: XmlNode, database: string): string | null {
+export function tableOf(node: XmlNode, database: string): string | null {
   if (unbracket(attr(node, "Database")) !== database) return null;
   const schema = unbracket(attr(node, "Schema"));
   const table = unbracket(attr(node, "Table"));
