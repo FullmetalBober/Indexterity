@@ -7,6 +7,7 @@ export * from "./health";
 export * from "./latency";
 export * from "./observe";
 export * from "./pressure";
+export * from "./purge";
 export * from "./recommend";
 export * from "./redundancy";
 export * from "./regression";

@@ -132,6 +132,21 @@ must come from something other than a person at a prompt, so the same query from
 `mongosh` and from your app arrive as separate entries. Keys are ordered
 Equality → Sort → Range.
 
+**A recurring age-based purge** — a job that prunes by timestamp on a schedule —
+is the same signal on both engines and a different piece of advice on each,
+because SQL Server has no TTL index to recommend. On mongo the advisory names
+the TTL index and refuses to build it. On SQL Server it says what is actually
+true: a purge with no index leading with the date predicate **scans the table
+and holds locks for the whole pass**, which is the job that makes a table
+unavailable at night — so a supporting index turns it into a range seek, and
+past ten million rows the real answer is a partitioned **sliding window**, where
+retiring a period is a metadata operation instead of millions of logged row
+deletes. Advisory on both, and never an action on either. The pattern is read
+off Query Store's DELETE plans in both the shapes SQL Server writes them,
+including the parameterised `WHERE created_at < @cutoff` — where the retention
+window is simply not in the plan, and the advisory says so rather than inventing
+a number ([D85](./docs/decisions.md)).
+
 Full reasoning for all of it: [Architecture §6](https://github.com/FullmetalBober/Indexterity/wiki/Architecture).
 
 ## The safety pipeline
