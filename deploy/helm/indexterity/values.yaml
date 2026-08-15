@@ -418,6 +418,19 @@ config:
   # Too low is latency, not failure — a query waits for a free connection rather
   # than erroring. Raise it alongside worker.concurrency.
   pgPoolMax: 5
+  # How long an idle job runner waits, in milliseconds, before asking postgres
+  # whether anything became due. Empty is the app's own 10 000.
+  #
+  # Polling is the runner's FALLBACK, not its mechanism: an enqueued job arrives
+  # by NOTIFY and starts at once whatever this says. What waits is work that
+  # becomes due by the CLOCK — a cron tick, a retry whose backoff expired — so
+  # raising this buys a quieter database and costs retry latency, nothing else.
+  # Worth setting on metered postgres, where 10s is ~260k round trips a month
+  # from one idle worker and 60s is ~43k. The tightest schedule is five minutes,
+  # so anything up to a minute is invisible to the pipeline.
+  #
+  # Given to the worker AND to the api, since api.runWorker embeds the runner.
+  workerPollIntervalMs: ""
   # Per-IP request budgets, per minute. Raise them for a shared egress IP or a
   # test suite. Read rateLimitMax as PER REPLICA (see the api Deployment);
   # authRateLimitMax is read twice — Fastify applies it per replica to

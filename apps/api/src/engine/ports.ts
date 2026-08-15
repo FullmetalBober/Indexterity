@@ -54,13 +54,22 @@ export interface CollectionStorage {
   readonly docCount: number;
 }
 
-// An age-based delete pattern: recurring deleteMany({field: {$lt: date}}) — the
-// TTL-advisory signal (mongo-specific today; relational analogue: DELETE with
-// a timestamp predicate in the statement store).
+// An age-based delete pattern: recurring `deleteMany({field: {$lt: date}})` on
+// mongo, a recurring `DELETE … WHERE ts < …` in Query Store on SQL Server. The
+// SIGNAL is the same on both — a job pruning by timestamp on a schedule — and
+// the recommendation is not, because SQL Server has no TTL index; what the
+// advisory says is jobs/suggest.ts's business.
 export interface DeletePattern {
   readonly field: string;
+  // Executions of the purge, which is what the recurrence gate reads.
   readonly count: number;
-  readonly medianRetentionSeconds: number;
+  // Null when the store shows the predicate but not the value it compared
+  // against. Mongo's profiler always records the literal cutoff; a
+  // parameterised `DELETE … WHERE created_at < @cutoff` in Query Store carries
+  // `@cutoff`, and that is the most common dialect an ORM or a stored procedure
+  // produces. The advisory is worth making without the number, so this is
+  // absent rather than guessed.
+  readonly medianRetentionSeconds: number | null;
 }
 
 // One namespace to gather query shapes for.

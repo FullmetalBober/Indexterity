@@ -1,7 +1,7 @@
 import type { RecommendationType, UsageClass } from "@repo/contracts";
 import { z } from "zod";
 import { type ClassifyOptions, classifyUsage, usageHistoryIsTrustworthy } from "./classify";
-import { coversIncludes, isKeyPrefix, isRedundantPrefix } from "./redundancy";
+import { coversIncludes, isKeyPrefix, isRedundantPrefix, servedByBackwardWalk } from "./redundancy";
 import { isNeverDrop } from "./safety";
 import { dropScore } from "./score";
 import { type IndexSpec, totalObservations, type UsageSnapshot } from "./types";
@@ -94,7 +94,10 @@ export function recommendForCollection(
         type: "DROP_REDUNDANT",
         indexName: candidate.spec.name,
         usageClass: null,
-        rationale: `Key-prefix of ${covering.spec.name}, which already covers it.`,
+        rationale: servedByBackwardWalk(candidate.spec, covering.spec)
+          ? `Key-prefix of ${covering.spec.name} with every direction reversed, which the ` +
+            `server serves by reading that index backwards — so it already covers this one.`
+          : `Key-prefix of ${covering.spec.name}, which already covers it.`,
         score: dropScore({
           usageClass: null,
           snapshots: totalObservations(candidate.history),
@@ -181,7 +184,11 @@ export function recommendForCollection(
       indexName: index.spec.name,
       usageClass: null,
       rationale:
-        `Unique index whose keys are a prefix of ${wider.spec.name} — the index data is ` +
+        `Unique index whose keys are a prefix of ${wider.spec.name}` +
+        (servedByBackwardWalk(index.spec, wider.spec)
+          ? ` (with every direction reversed, which that index serves by being read backwards)`
+          : "") +
+        ` — the index data is ` +
         `redundant, but dropping it would lose the uniqueness constraint. If the constraint ` +
         `is obsolete, drop it yourself; if not, consider making ${wider.spec.name} unique ` +
         `and dropping this one. Never auto-dropped.`,
