@@ -94,6 +94,18 @@ and the re-order replacement. Measured on SQL Server 2022 over 200k rows: 6
 logical reads with the covering index, 1124 without it
 ([D80](./docs/decisions.md)).
 
+**An index read backwards is the same index.** Both engines serve a sort from a
+b-tree when the ordering it needs is the key pattern *or its exact full
+reverse*, and neither serves anything in between — so `(a DESC, b DESC, c ASC)`
+already covers `(a ASC, b ASC)`, and the narrow one is redundant. Redundancy
+used to demand key-for-key direction equality and miss exactly that pair.
+Measured on SQL Server 2022 CU26 and mongod 8.2.9 with only the wide index
+present: `ORDER BY a` and `ORDER BY a, b` plan without a Sort (`ScanDirection=
+"BACKWARD"`, IXSCAN `backward`), `ORDER BY a DESC, b DESC` plans forward, and
+the mixed `ORDER BY a, b DESC` sorts on both — which is why the rule is
+all-or-nothing across the prefix rather than per key
+([D83](./docs/decisions.md)).
+
 **Never dropped**, whatever the usage: `_id_`, unique (including unique partial
 and sparse — a constraint is not a performance hint), TTL, and shard-key
 indexes. They surface as advisories instead. Partial and sparse indexes without

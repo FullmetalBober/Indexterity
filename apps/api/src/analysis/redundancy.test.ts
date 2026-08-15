@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { coversIncludes, isRedundantPrefix } from "./redundancy";
+import { coversIncludes, isRedundantPrefix, servedByBackwardWalk } from "./redundancy";
 import type { IndexKey, IndexSpec } from "./types";
 
 function spec(name: string, keys: IndexKey[], overrides: Partial<IndexSpec> = {}): IndexSpec {
@@ -25,9 +25,33 @@ describe("isRedundantPrefix", () => {
   it("true when candidate is a proper prefix with matching direction", () => {
     expect(isRedundantPrefix(spec("a", [x1]), spec("ab", [x1, y1]))).toBe(true);
   });
-  it("false when key directions differ", () => {
+  // #207. This asserted `false`, on the reading that opposite directions are
+  // different indexes. Both engines disagree, and were asked: with ONLY the
+  // wide inverted index present, `ORDER BY x` plans without a Sort — SQL Server
+  // 2022 CU26 reports ScanDirection="BACKWARD", mongod 8.2.9 an IXSCAN with
+  // direction "backward". So the narrow one was buying nothing.
+  it("true when every direction is inverted — the wider index is read backwards", () => {
     const xDesc: IndexKey = { field: "x", direction: -1 };
-    expect(isRedundantPrefix(spec("a", [x1]), spec("ab", [xDesc, y1]))).toBe(false);
+    expect(isRedundantPrefix(spec("a", [x1]), spec("ab", [xDesc, y1]))).toBe(true);
+  });
+
+  // The half that keeps it honest, and the one case both engines refuse: a
+  // requirement that is neither the key pattern nor its full reverse. A
+  // two-key prefix whose first direction matches and whose second does not is
+  // served by no walk of the wider index — `ORDER BY x, y DESC` sorted on both
+  // engines with only `(x ASC, y ASC, z ASC)` present.
+  it("false when the directions are mixed rather than uniformly inverted", () => {
+    const yDesc: IndexKey = { field: "y", direction: -1 };
+    const z1: IndexKey = { field: "z", direction: 1 };
+    expect(isRedundantPrefix(spec("a", [x1, yDesc]), spec("abc", [x1, y1, z1]))).toBe(false);
+  });
+
+  // Reversal is a property of an ORDER, and these are not orders — nothing
+  // walks a hashed or text key backwards to get a different sequence.
+  it("false when an unordered key type would have to be 'inverted'", () => {
+    const xHashed: IndexKey = { field: "x", direction: "hashed" };
+    expect(isRedundantPrefix(spec("a", [xHashed]), spec("ab", [x1, y1]))).toBe(false);
+    expect(isRedundantPrefix(spec("a", [xHashed]), spec("ab", [xHashed, y1]))).toBe(true);
   });
   it("false for equal-length keys", () => {
     expect(isRedundantPrefix(spec("a", [x1]), spec("b", [x1]))).toBe(false);
@@ -106,6 +130,19 @@ describe("isRedundantPrefix", () => {
 
   it("unchanged for the engines that have no includes at all", () => {
     expect(isRedundantPrefix(spec("a", [x1]), spec("ab", [x1, y1], { include: ["z"] }))).toBe(true);
+  });
+});
+
+describe("servedByBackwardWalk", () => {
+  it("separates the reversed case from the key-for-key one, so a finding can say which", () => {
+    const xDesc: IndexKey = { field: "x", direction: -1 };
+    expect(servedByBackwardWalk(spec("a", [x1]), spec("ab", [xDesc, y1]))).toBe(true);
+    expect(servedByBackwardWalk(spec("a", [x1]), spec("ab", [x1, y1]))).toBe(false);
+  });
+  it("is false when the wider index does not cover the order at all", () => {
+    const yDesc: IndexKey = { field: "y", direction: -1 };
+    const z1: IndexKey = { field: "z", direction: 1 };
+    expect(servedByBackwardWalk(spec("a", [x1, yDesc]), spec("abc", [x1, y1, z1]))).toBe(false);
   });
 });
 
