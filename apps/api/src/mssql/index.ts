@@ -6,5 +6,6 @@ export * from "./connection";
 export * from "./delete-patterns";
 export * from "./diagnose";
 export * from "./executor";
+export * from "./health";
 export * from "./version";
 export * from "./workload";

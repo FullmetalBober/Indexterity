@@ -126,6 +126,22 @@ index is an error, not a slower query. Single-field, TTL and shard-key indexes
 are out of scope by construction, which makes the addressable set small
 ([D50](./docs/decisions.md)).
 
+**Server-wide distress, every five minutes.** Two readings of the query
+engine's own counters a few seconds apart say whether the pressure is
+index-shaped — scans climbing while work-per-index-key climbs with them — which
+catches a scan storm spread thinly across many collections that no single
+latency average would flag. mongod answers from one `serverStatus`; SQL Server
+has no such command, so it comes from `sys.dm_os_performance_counters` and
+`sys.dm_os_waiting_tasks`, needing only the `VIEW SERVER STATE` the scoped login
+already holds. The counters differ enough that the thresholds are per engine:
+the docs-per-key analogue is **pages per index search**, whose healthy floor is
+the b-tree descent (measured 3.01 seeking, 66.6 when scans dominated), and the
+sort signal is **tempdb spills** rather than in-memory sorts — a rarer and worse
+event, so the bar is lower rather than higher. Two candidates in the original
+mapping did not survive a live server: `Sort Warnings/sec` does not exist on
+Linux SQL Server, and `Range Scans/sec` moves for an ordinary singleton seek
+([D84](./docs/decisions.md)).
+
 **Adding** (opt-in via `workloadAnalysis`). Query shapes come from `$queryStats`
 on **mongo 8.0+**, and from the profiler below it — until 8.0 the store reports
 execution counts only, which is the difference between knowing a query ran and
