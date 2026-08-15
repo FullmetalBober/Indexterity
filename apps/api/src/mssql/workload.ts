@@ -340,7 +340,7 @@ function shapeKey(shape: {
     [...shape.equality].sort().join(","),
     shape.sort.map((key) => `${key.field}:${key.direction}`).join(","),
     [...shape.range].sort().join(","),
-  ].join(" ");
+  ].join("\u0000");
 }
 
 // Fold every plan's per-table shapes into QueryShapes per workload target.
