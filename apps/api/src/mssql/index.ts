@@ -5,5 +5,6 @@ export * from "./conn-string";
 export * from "./connection";
 export * from "./diagnose";
 export * from "./executor";
+export * from "./health";
 export * from "./version";
 export * from "./workload";

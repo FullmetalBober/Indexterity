@@ -16,6 +16,7 @@ import {
   quoteIdent,
   splitCollectionName,
 } from "./connection";
+import { collectMssqlServerHealth } from "./health";
 import type { MssqlMemberConnections } from "./members";
 import { type PlanRow, shapesFromPlans } from "./workload";
 
@@ -513,11 +514,11 @@ export class MssqlIndexCollector implements IndexCollector {
     return Promise.resolve([]);
   }
 
-  // No mapping yet: the mongo counters this feeds (collection scans per
-  // interval, docs-per-key) have no per-server twins cheap enough to trust.
-  // Null is the port's "could not read", and everything else works without it.
+  // Server-wide query-engine counters, from sys.dm_os_performance_counters and
+  // sys.dm_os_waiting_tasks — see mssql/health.ts for the mapping and for what
+  // each counter was measured doing. Null when VIEW SERVER STATE is withheld.
   collectServerHealth(): Promise<ServerHealth | null> {
-    return Promise.resolve(null);
+    return collectMssqlServerHealth(this.conn);
   }
 
   private readonly queryStoreState = new Map<string, boolean>();
