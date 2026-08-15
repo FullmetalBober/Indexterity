@@ -274,6 +274,34 @@ describe("recommendReorder", () => {
     expect(recommendReorder([shape({ sort: sortAB })], existing, OPTIONS)).toEqual([]);
   });
 
+  // #207 expected this to need an engine flag: a REORDER proposed on SQL
+  // Server for an ordering a backward scan already serves would be a rebuild
+  // for nothing. It does not — servesShapeOrder accepts the exact inversion,
+  // and the two engines were measured agreeing on it (redundancy.ts has the
+  // table). Pinned here so a future "engine-specific directions" change has to
+  // break this test on purpose rather than by accident.
+  it("says nothing when only a backward walk is needed, on either engine's rules", () => {
+    const existing = [
+      unique(
+        "a_-1_b_1",
+        keys([
+          ["a", -1],
+          ["b", 1],
+        ]),
+      ),
+    ];
+    // ORDER BY a ASC, b DESC against (a DESC, b ASC): the full reverse, which
+    // SQL Server plans as ScanDirection="BACKWARD" and mongod as a backward
+    // IXSCAN — neither sorts, so there is nothing to rebuild.
+    const reversed = shape({
+      sort: [
+        { field: "a", direction: 1 },
+        { field: "b", direction: -1 },
+      ],
+    });
+    expect(recommendReorder([reversed], existing, OPTIONS)).toEqual([]);
+  });
+
   it("says nothing for a shape that is not sorting in memory", () => {
     const existing = [
       unique(
