@@ -111,6 +111,40 @@ describe("MssqlIndexExecutor structural guards", () => {
     ]);
   });
 
+  it("restores covering columns, INCLUDE before WHERE", async () => {
+    const { conn, executed } = stubConnection(plain);
+    await new MssqlIndexExecutor(conn, false).create(
+      "db",
+      "dbo.orders",
+      { customer_id: 1 },
+      {
+        name: "ix_c",
+        include: ["total", "email"],
+        partialFilterExpression: { definition: "([status]='open')" },
+      },
+    );
+    expect(executed).toEqual([
+      "CREATE NONCLUSTERED INDEX [ix_c] ON [db].[dbo].[orders] ([customer_id] ASC) " +
+        "INCLUDE ([total], [email]) WHERE ([status]='open')",
+    ]);
+  });
+
+  // Msg 1911: a column cannot be both a key and an include. Dropping it here
+  // keeps a spec that names one in both lists from turning into a failed undo.
+  it("drops an included column that is already a key", async () => {
+    const { conn, executed } = stubConnection(plain);
+    await new MssqlIndexExecutor(conn, false).create(
+      "db",
+      "dbo.orders",
+      { customer_id: 1 },
+      { name: "ix_c", include: ["customer_id", "total"] },
+    );
+    expect(executed).toEqual([
+      "CREATE NONCLUSTERED INDEX [ix_c] ON [db].[dbo].[orders] ([customer_id] ASC) " +
+        "INCLUDE ([total])",
+    ]);
+  });
+
   it("refuses a filter it cannot translate", async () => {
     const { conn, executed } = stubConnection(plain);
     await expect(

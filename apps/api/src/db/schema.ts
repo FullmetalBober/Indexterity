@@ -607,6 +607,11 @@ export const recommendations = pgTable(
         sparse: boolean;
         collation: string | null;
         partialFilter?: Record<string, unknown>;
+        // Covering columns (SQL Server INCLUDE). A re-order rebuilds the index
+        // with new key DIRECTIONS and everything else identical; leaving these
+        // behind would quietly narrow what the replacement can answer, and the
+        // post-build watch measures writes, so nothing downstream would see it.
+        include?: string[];
       };
       // On the DROP_REDUNDANT row that retires a re-ordered index: the index
       // that replaced it. The only thing that lets a protected index be dropped

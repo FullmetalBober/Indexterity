@@ -129,6 +129,12 @@ export interface CreateIndexOptions {
   readonly sparse?: boolean;
   readonly partialFilterExpression?: Readonly<Record<string, unknown>>;
   readonly collation?: { readonly locale: string };
+  // Non-key columns carried at the leaves (SQL Server INCLUDE). Restoring an
+  // index without them gives back something that seeks the same and covers
+  // less, which no latency gate on the WRITE side would ever notice. Engines
+  // with no such concept must drop it rather than forward it — MongoDB's
+  // createIndexes rejects an option it does not know.
+  readonly include?: readonly string[];
 }
 
 // The only write surface. Implementations must enforce read-only mode

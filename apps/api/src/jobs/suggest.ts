@@ -284,6 +284,9 @@ export async function suggestForCluster(db: Database, clusterId: string): Promis
               ...(candidate.spec.partialFilter === null
                 ? {}
                 : { partialFilter: candidate.spec.partialFilter }),
+              ...(candidate.spec.include === undefined || candidate.spec.include.length === 0
+                ? {}
+                : { include: [...candidate.spec.include] }),
             },
           },
         });

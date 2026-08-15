@@ -1,7 +1,7 @@
 import type { RecommendationType, UsageClass } from "@repo/contracts";
 import { z } from "zod";
 import { type ClassifyOptions, classifyUsage, usageHistoryIsTrustworthy } from "./classify";
-import { isKeyPrefix, isRedundantPrefix } from "./redundancy";
+import { coversIncludes, isKeyPrefix, isRedundantPrefix } from "./redundancy";
 import { isNeverDrop } from "./safety";
 import { dropScore } from "./score";
 import { type IndexSpec, totalObservations, type UsageSnapshot } from "./types";
@@ -26,6 +26,10 @@ const storedSpecSchema = z.object({
   isShardKey: z.boolean(),
   // Older persisted specs predate collation capture — default to binary.
   collation: z.string().nullable().optional(),
+  // Absent for every MongoDB index, and for SQL Server specs persisted before
+  // includes were captured. Both mean the same thing to the redundancy rule:
+  // nothing is known to be covered, so nothing can be lost by a drop.
+  include: z.array(z.string()).optional(),
 });
 
 // Rehydrate an IndexSpec from a persisted snapshot's `spec` jsonb (no `as`).
@@ -163,7 +167,13 @@ export function recommendForCollection(
     if (!index.spec.unique || index.spec.name === "_id_" || index.spec.isShardKey) continue;
     if (advised.has(index.spec.name)) continue;
     const wider = indexes.find(
-      (other) => other.pendingRemoval !== true && isKeyPrefix(index.spec, other.spec),
+      (other) =>
+        other.pendingRemoval !== true &&
+        isKeyPrefix(index.spec, other.spec) &&
+        // "the index data is redundant" has to be TRUE before a human is asked
+        // to act on it, and it is not when this index covers columns the wider
+        // one does not carry.
+        coversIncludes(index.spec, other.spec),
     );
     if (wider === undefined) continue;
     candidates.push({
