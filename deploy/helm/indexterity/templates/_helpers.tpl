@@ -223,6 +223,14 @@ test and the port-forward in NOTES.txt all read the same number they did before.
 - name: RETENTION_DAYS
   value: {{ .Values.config.retentionDays | quote }}
 {{- end }}
+{{- /* Here rather than in the worker Deployment's own block, unlike
+      WORKER_CONCURRENCY: the runner also runs inside the api under
+      api.runWorker, and a single-container install is exactly the one paying a
+      metered postgres for the idle poll. */}}
+{{- if .Values.config.workerPollIntervalMs }}
+- name: WORKER_POLL_INTERVAL_MS
+  value: {{ .Values.config.workerPollIntervalMs | quote }}
+{{- end }}
 {{- end -}}
 
 {{/*

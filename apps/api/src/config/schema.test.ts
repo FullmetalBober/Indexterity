@@ -35,6 +35,9 @@ describe("absent is fine, malformed is fatal", () => {
     expect(env.SMTP_PORT).toBe(465);
     expect(env.SIGNUP_MODE).toBe("invite");
     expect(env.REQUIRE_OWNER_2FA).toBe(false);
+    // The default is the number the runner used when it was a constant, so
+    // making it settable moved nothing for an install that sets nothing.
+    expect(env.WORKER_POLL_INTERVAL_MS).toBe(10_000);
   });
 
   // The case #126 opens with: `2O` is not a positive number, so positiveEnv read
@@ -49,6 +52,15 @@ describe("absent is fine, malformed is fatal", () => {
   it("refuses zero and a negative, which are not budgets", () => {
     expect(refusal("api", { ...API, RATE_LIMIT_MAX: "0" })).toContain("RATE_LIMIT_MAX");
     expect(refusal("api", { ...API, WORKER_CONCURRENCY: "-1" })).toContain("WORKER_CONCURRENCY");
+    // A zero poll interval is graphile-worker spinning on the jobs table rather
+    // than "never poll", which is the reading an operator raising this for a
+    // metered database would want and would not get.
+    expect(refusal("api", { ...API, WORKER_POLL_INTERVAL_MS: "0" })).toContain(
+      "WORKER_POLL_INTERVAL_MS",
+    );
+    expect(refusal("api", { ...API, WORKER_POLL_INTERVAL_MS: "30s" })).toContain(
+      "expected a positive whole number",
+    );
   });
 
   // Truthiness is not a dialect anything in this repo writes: the chart quotes

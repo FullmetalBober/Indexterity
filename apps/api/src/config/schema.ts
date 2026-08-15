@@ -211,6 +211,19 @@ const workerShape = {
   // pipeline is not latency-critical. Raise it deliberately, with the memory
   // limit raised alongside.
   WORKER_CONCURRENCY: positiveInteger(1),
+  // How long an idle runner waits before asking postgres whether anything became
+  // due. Ten seconds, which is what D72 measured this down to from
+  // graphile-worker's 2000 ms default — settable because the right number
+  // depends on what the database costs you rather than on the pipeline.
+  //
+  // Polling is the FALLBACK path, not the mechanism: `add_job` runs
+  // `pg_notify('jobs:insert', …)` and the runner holds the matching LISTEN, so
+  // anything ENQUEUED still starts at once at any value here. What waits is work
+  // that becomes due by the CLOCK — a cron tick, or a retry whose backoff
+  // expired — so raising this trades retry latency for query rate and nothing
+  // else. On metered postgres the query rate is a bill: 10s is ~260k round trips
+  // a month from one idle worker, and 60s is ~43k.
+  WORKER_POLL_INTERVAL_MS: positiveInteger(10_000),
   // Sockets the driver may open against ONE connected cluster. The driver's own
   // default is 100, and it is the wrong default twice over here: a session is
   // held per cluster (jobs/connection-pool.ts), so the worst case multiplies by
