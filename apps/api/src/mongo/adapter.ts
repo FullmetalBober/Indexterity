@@ -12,6 +12,7 @@ import { MongoConnection } from "./connection";
 import { diagnoseConnection } from "./diagnose";
 import { MongoIndexExecutor } from "./executor";
 import { MemberConnections } from "./members";
+import { connStringUsername, provisionScopedUser } from "./provision";
 
 const SYSTEM_DATABASES = new Set(["admin", "local", "config"]);
 
@@ -67,4 +68,6 @@ export const mongoAdapter: EngineAdapter = {
     return new MongoEngineSession(conn, connectionString, overrides);
   },
   diagnose: diagnoseConnection,
+  provisionScopedUser,
+  connStringUsername,
 };

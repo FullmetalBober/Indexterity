@@ -25,6 +25,10 @@ observe window, a pre-flight check, and a read-latency regression test.
    what that string can actually do — nothing stored, nothing written. If it can
    create users, it *asks* before provisioning its own least-privilege user
    (`idx_<hex>`, no `find` on your collections, so it **cannot read documents**).
+   On SQL Server the same offer creates an `idx_<hex>` login holding exactly
+   `VIEW SERVER STATE`, `VIEW DATABASE STATE` and `ALTER` on each schema that
+   owns tables — per schema rather than per database, because database-wide
+   `ALTER` would also permit dropping tables, and **no `SELECT` at all**.
    The admin string is used once and never persisted; only the scoped one is
    stored, sealed with envelope encryption.
 2. **Collect** hourly via `$indexStats` / `$collStats` — usage, sizes,

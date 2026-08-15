@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { type Db, MongoServerError } from "mongodb";
 import ConnectionString from "mongodb-connection-string-url";
 import { z } from "zod";
+import type { ProvisionedUser } from "../engine/ports";
 import { mongoClient, type TlsOverrides } from "./client";
 
 export const ENGINE_ROLE = "indexterityEngine";
@@ -40,11 +41,6 @@ export const ENGINE_PRIVILEGES: readonly RolePrivilege[] = [
   { resource: { db: "", collection: "system.profile" }, actions: ["find"] },
   { resource: { db: "config", collection: "collections" }, actions: ["find"] },
 ];
-
-export interface ProvisionedUser {
-  readonly connectionString: string;
-  readonly username: string;
-}
 
 // The admin credentials lack createRole/createUser on this cluster (Atlas, for
 // one, only manages users through its own UI/API). Surfaced as a 422.

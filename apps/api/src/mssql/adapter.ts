@@ -12,6 +12,7 @@ import { MssqlConnection } from "./connection";
 import { diagnoseMssqlConnection } from "./diagnose";
 import { MssqlIndexExecutor } from "./executor";
 import { MssqlMemberConnections } from "./members";
+import { mssqlConnStringUsername, provisionMssqlScopedUser } from "./provision";
 
 class MssqlEngineSession implements EngineSession {
   readonly collector: IndexCollector;
@@ -56,7 +57,7 @@ class MssqlEngineSession implements EngineSession {
 // refuses the classes for which DISABLE is destructive.
 export const mssqlAdapter: EngineAdapter = {
   engine: "MSSQL",
-  capabilities: { hideIndexes: true, provisionScopedUsers: false },
+  capabilities: { hideIndexes: true, provisionScopedUsers: true },
   connStringHint: "mssql://user:password@host:1433 or Server=host;User Id=…;Password=…",
   isConnString: isMssqlConnString,
   hostsOf: mssqlHosts,
@@ -68,4 +69,6 @@ export const mssqlAdapter: EngineAdapter = {
     return new MssqlEngineSession(conn, connectionString, overrides);
   },
   diagnose: diagnoseMssqlConnection,
+  provisionScopedUser: provisionMssqlScopedUser,
+  connStringUsername: mssqlConnStringUsername,
 };

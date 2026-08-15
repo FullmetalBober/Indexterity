@@ -182,6 +182,33 @@ export function retargetMssqlConnString(value: string, host: string, port: numbe
   );
 }
 
+// The same server and the same options, as somebody else (#203). What the
+// scoped login gets handed after provisioning: the owner's admin string with
+// its credentials replaced, so every choice they made about transport survives
+// into the string we store — and the admin one is never persisted at all.
+export function withMssqlCredentials(value: string, user: string, password: string): string {
+  const parsed = parseMssqlConnString(value);
+  if (parsed === null) return value;
+  if (parsed.form === "url") {
+    const url = urlOf(value);
+    if (url === null) return value;
+    url.username = encodeURIComponent(user);
+    url.password = encodeURIComponent(password);
+    return url.toString();
+  }
+  const kept = splitAdoSegments(value).filter((segment) => {
+    const eq = segment.indexOf("=");
+    if (eq === -1) return segment.trim().length > 0;
+    const canonical = ADO_ALIASES[segment.slice(0, eq).trim().toLowerCase()];
+    return canonical !== "user" && canonical !== "password";
+  });
+  // Braced, because ADO's own quoting is the only thing that makes a value
+  // containing ';' or '=' survive a round trip.
+  return [...kept, `User Id={${user}}`, `Password={${password}}`]
+    .filter((segment) => segment.trim().length > 0)
+    .join(";");
+}
+
 // `tcp://ag2.corp:1433` — the shape sys.availability_replicas records a
 // replica's read-only routing URL in. Null for anything else, including the
 // bare instance names a replica without routing configured reports, which
