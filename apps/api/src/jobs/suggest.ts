@@ -6,6 +6,7 @@ import {
   isReorderable,
   MIN_WEEKLY_DOCS_EXAMINED,
   narrowScore,
+  purgeAdvisory,
   recommendCreates,
   recommendNarrowing,
   recommendReorder,
@@ -87,7 +88,7 @@ export async function suggestForCluster(db: Database, clusterId: string): Promis
     await planForCluster(db, clusterId),
   );
 
-  const { session, readOnly, release } = await openClusterSession(db, clusterId);
+  const { session, engine, readOnly, release } = await openClusterSession(db, clusterId);
   let created = 0;
   let instantApproved = 0;
   try {
@@ -111,22 +112,28 @@ export async function suggestForCluster(db: Database, clusterId: string): Promis
       }
     }
     for (const { database, collection } of namespaces) {
-      // TTL advisories run BEFORE the size gate: a collection with recurring
-      // age-based deletes is small BY DESIGN (it's being pruned). The app
-      // already deletes by age — a TTL index would do it automatically.
-      // Indexterity NEVER builds TTL indexes (they delete documents), so this
-      // is advisory-only, excluded from every auto-approve path.
+      // Purge advisories run BEFORE the size gate: a collection with recurring
+      // age-based deletes is small BY DESIGN (it's being pruned).
+      //
+      // Advisory-only on both engines, and for different reasons — mongo's
+      // recommendation is a TTL index, which DELETES DOCUMENTS and Indexterity
+      // never builds one; SQL Server has no TTL index at all, and what it
+      // recommends instead is an ordinary supporting index plus, on a large
+      // table, a partitioned sliding window, which is a schema change no index
+      // tool should make on its own. analysis/purge.ts holds both wordings.
       const deletePatterns = await collector.collectDeletePatterns(database, collection);
-      const ttlWorthy = deletePatterns.filter((pattern) => pattern.count >= TTL_MIN_DELETES);
-      if (ttlWorthy.length > 0) {
+      const purgeWorthy = deletePatterns.filter((pattern) => pattern.count >= TTL_MIN_DELETES);
+      if (purgeWorthy.length > 0) {
         const currentIndexes = await collector.listIndexes(database, collection);
-        for (const pattern of ttlWorthy) {
-          if (currentIndexes.some((idx) => idx.ttl && idx.keys[0]?.field === pattern.field)) {
-            continue;
-          }
-          const indexName = `${pattern.field}_1_ttl`;
-          if (cooled.has(cooldownKey(database, collection, indexName))) continue;
-          const days = Math.max(1, Math.round(pattern.medianRetentionSeconds / 86_400));
+        // Only read for the partition threshold, and only when there is a
+        // pattern to judge — this is inside the loop over every namespace.
+        const { docCount } = await collector
+          .collectionStorage(database, collection)
+          .catch(() => ({ docCount: 0, dataSizeBytes: 0 }));
+        for (const pattern of purgeWorthy) {
+          const advisory = purgeAdvisory(engine, pattern, collection, currentIndexes, docCount);
+          if (advisory === null) continue;
+          if (cooled.has(cooldownKey(database, collection, advisory.indexName))) continue;
           toInsert.push({
             clusterId,
             type: "ADVISORY_REVIEW",
@@ -134,12 +141,8 @@ export async function suggestForCluster(db: Database, clusterId: string): Promis
             source: "WORKLOAD",
             database,
             collection,
-            indexName,
-            rationale:
-              `Recurring age-based deletes on ${pattern.field} (${pattern.count}× in the profiler, ` +
-              `retention ≈ ${days} days). A TTL index would expire documents automatically and ` +
-              `steadily: db.${collection}.createIndex({ ${pattern.field}: 1 }, { expireAfterSeconds: ${pattern.medianRetentionSeconds} }). ` +
-              `CAUTION: TTL deletes documents — verify the retention window and create it yourself; Indexterity never builds TTL indexes.`,
+            indexName: advisory.indexName,
+            rationale: advisory.rationale,
             score: Math.min(80, 30 + pattern.count * 10),
             estimatedBytesSaved: 0,
           });

@@ -94,6 +94,18 @@ and the re-order replacement. Measured on SQL Server 2022 over 200k rows: 6
 logical reads with the covering index, 1124 without it
 ([D80](./docs/decisions.md)).
 
+**An index read backwards is the same index.** Both engines serve a sort from a
+b-tree when the ordering it needs is the key pattern *or its exact full
+reverse*, and neither serves anything in between — so `(a DESC, b DESC, c ASC)`
+already covers `(a ASC, b ASC)`, and the narrow one is redundant. Redundancy
+used to demand key-for-key direction equality and miss exactly that pair.
+Measured on SQL Server 2022 CU26 and mongod 8.2.9 with only the wide index
+present: `ORDER BY a` and `ORDER BY a, b` plan without a Sort (`ScanDirection=
+"BACKWARD"`, IXSCAN `backward`), `ORDER BY a DESC, b DESC` plans forward, and
+the mixed `ORDER BY a, b DESC` sorts on both — which is why the rule is
+all-or-nothing across the prefix rather than per key
+([D83](./docs/decisions.md)).
+
 **Never dropped**, whatever the usage: `_id_`, unique (including unique partial
 and sparse — a constraint is not a performance hint), TTL, and shard-key
 indexes. They surface as advisories instead. Partial and sparse indexes without
@@ -147,6 +159,21 @@ documents a week, whatever it holds. A shape must recur — **3+ sightings** —
 must come from something other than a person at a prompt, so the same query from
 `mongosh` and from your app arrive as separate entries. Keys are ordered
 Equality → Sort → Range.
+
+**A recurring age-based purge** — a job that prunes by timestamp on a schedule —
+is the same signal on both engines and a different piece of advice on each,
+because SQL Server has no TTL index to recommend. On mongo the advisory names
+the TTL index and refuses to build it. On SQL Server it says what is actually
+true: a purge with no index leading with the date predicate **scans the table
+and holds locks for the whole pass**, which is the job that makes a table
+unavailable at night — so a supporting index turns it into a range seek, and
+past ten million rows the real answer is a partitioned **sliding window**, where
+retiring a period is a metadata operation instead of millions of logged row
+deletes. Advisory on both, and never an action on either. The pattern is read
+off Query Store's DELETE plans in both the shapes SQL Server writes them,
+including the parameterised `WHERE created_at < @cutoff` — where the retention
+window is simply not in the plan, and the advisory says so rather than inventing
+a number ([D85](./docs/decisions.md)).
 
 Full reasoning for all of it: [Architecture §6](https://github.com/FullmetalBober/Indexterity/wiki/Architecture).
 
