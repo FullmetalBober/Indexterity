@@ -154,6 +154,51 @@ export function mssqlHosts(value: string): { hosts: string[]; isSrv: boolean } {
   return { hosts: [`${parsed.host}:${parsed.port}`], isSrv: false };
 }
 
+// The same credentials and the same options, pointed at another server (#202).
+// An Availability Group names its replicas, and each keeps its own usage
+// counters, so collecting from a secondary means dialling it directly with what
+// the owner already gave us — the string is edited in place, keeping its form,
+// so a pasted ADO string stays ADO and every option (Encrypt, the driver knobs,
+// anything unknown) travels with it. The initial database is deliberately kept:
+// it is where the login lands, not what the collector reads, and every query is
+// three-part qualified anyway.
+export function retargetMssqlConnString(value: string, host: string, port: number): string {
+  const parsed = parseMssqlConnString(value);
+  if (parsed === null) return value;
+  if (parsed.form === "url") {
+    const url = urlOf(value);
+    if (url === null) return value;
+    url.hostname = host;
+    url.port = String(port);
+    return url.toString();
+  }
+  const kept = splitAdoSegments(value).filter((segment) => {
+    const eq = segment.indexOf("=");
+    if (eq === -1) return segment.trim().length > 0;
+    return ADO_ALIASES[segment.slice(0, eq).trim().toLowerCase()] !== "server";
+  });
+  return [`Server=${host},${port}`, ...kept.filter((segment) => segment.trim().length > 0)].join(
+    ";",
+  );
+}
+
+// `tcp://ag2.corp:1433` — the shape sys.availability_replicas records a
+// replica's read-only routing URL in. Null for anything else, including the
+// bare instance names a replica without routing configured reports, which
+// cannot be dialled without guessing a port.
+export function parseRoutingUrl(value: string | null): { host: string; port: number } | null {
+  if (value === null) return null;
+  const match = /^tcp:\/\/(\[[^\]]+\]|[^:/]+)(?::(\d+))?\/?$/i.exec(value.trim());
+  if (match === null) return null;
+  const host = (match[1] ?? "").replace(/^\[|\]$/g, "");
+  if (host.length === 0) return null;
+  const port = Number(match[2]);
+  return {
+    host,
+    port: Number.isInteger(port) && port > 0 && port < 65536 ? port : DEFAULT_MSSQL_PORT,
+  };
+}
+
 // Encrypt values across driver generations: booleans, yes/no, and the 18.x
 // vocabulary (mandatory/optional/strict). "strict" is TDS 8.0 — encrypted
 // before login, certificate always validated. Absent defaults ON: that is the

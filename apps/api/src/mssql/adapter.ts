@@ -11,12 +11,24 @@ import { applyMssqlTlsOverrides, isMssqlConnString, mssqlHosts } from "./conn-st
 import { MssqlConnection } from "./connection";
 import { diagnoseMssqlConnection } from "./diagnose";
 import { MssqlIndexExecutor } from "./executor";
+import { MssqlMemberConnections } from "./members";
 
 class MssqlEngineSession implements EngineSession {
   readonly collector: IndexCollector;
+  private readonly members: MssqlMemberConnections;
 
-  constructor(private readonly conn: MssqlConnection) {
-    this.collector = new MssqlIndexCollector(conn);
+  constructor(
+    private readonly conn: MssqlConnection,
+    connString: string,
+    overrides?: TlsOverrides,
+  ) {
+    // Opened lazily on the first usage collection and held for the session's
+    // life, so a three-replica group costs three connections rather than three
+    // per collect. The replicas inherit the cluster's own consent: they are the
+    // same cluster reached one node at a time, and a certificate the owner
+    // accepted for it is accepted for its replicas too.
+    this.members = new MssqlMemberConnections(conn, connString, overrides);
+    this.collector = new MssqlIndexCollector(conn, this.members);
   }
 
   executor(readOnly: boolean): IndexExecutor {
@@ -32,8 +44,9 @@ class MssqlEngineSession implements EngineSession {
     return this.conn.ping();
   }
 
-  close(): Promise<void> {
-    return this.conn.close();
+  async close(): Promise<void> {
+    await this.members.close();
+    await this.conn.close();
   }
 }
 
@@ -52,7 +65,7 @@ export const mssqlAdapter: EngineAdapter = {
   open: async (connectionString: string, overrides?: TlsOverrides): Promise<EngineSession> => {
     const conn = new MssqlConnection(connectionString, overrides);
     await conn.connect();
-    return new MssqlEngineSession(conn);
+    return new MssqlEngineSession(conn, connectionString, overrides);
   },
   diagnose: diagnoseMssqlConnection,
 };

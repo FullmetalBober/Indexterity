@@ -10,7 +10,7 @@ import { type EngineSession, workloadKey } from "../src/engine/ports";
 import { detectEngine } from "../src/engine/registry";
 import { collectSnapshots, serializeSpec } from "../src/mongo/snapshots";
 import { mssqlAdapter } from "../src/mssql/adapter";
-import { MssqlConnection } from "../src/mssql/connection";
+import { asNumber, MssqlConnection } from "../src/mssql/connection";
 
 // Adapter-level integration against a real SQL Server (2022 in CI). Everything
 // the drop pipeline needs from the engine, proven end to end: diagnose,
@@ -268,3 +268,149 @@ describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", 
     expect(phantom).toBeUndefined();
   });
 });
+
+// #202. An Availability Group's readable secondaries keep their OWN
+// sys.dm_db_index_usage_stats, so an index serving only secondary reads looks
+// dead from the primary — the same blind spot mongo/members.ts exists to close.
+// Skipped without MSSQL_AG_URL, which must point at the PRIMARY of a group
+// whose replicas carry read-only routing URLs this process can dial. Locally,
+// two nodes on a podman network with host-published ports:
+//
+//   podman network create agnet
+//   for n in 1 2; do podman run -d --name ag$n --hostname ag$n --network agnet \
+//     -p 1433$n:1433 -e ACCEPT_EULA=Y -e 'MSSQL_SA_PASSWORD=Str0ng!Pass' \
+//     mcr.microsoft.com/mssql/server:2022-latest; done
+//   # enable hadr on both (mssql-conf set hadr.hadrenabled 1) and restart,
+//   # exchange an endpoint certificate, then CREATE AVAILABILITY GROUP … WITH
+//   # (CLUSTER_TYPE = NONE) with SECONDARY_ROLE(ALLOW_CONNECTIONS = ALL,
+//   # READ_ONLY_ROUTING_URL = 'tcp://127.0.0.1:1433<n>') on each replica.
+//
+//   ALLOW_PRIVATE_CLUSTER_TARGETS=true \
+//   MSSQL_AG_URL='mssql://sa:Str0ng!Pass@127.0.0.1:14331?trustservercertificate=true' \
+//   MSSQL_AG_SECONDARY_URL='mssql://sa:Str0ng!Pass@127.0.0.1:14332?trustservercertificate=true' \
+//     npm run test:int -w apps/api -- integration/mssql.int.test.ts
+const AG_URL = process.env.MSSQL_AG_URL;
+const AG_SECONDARY_URL = process.env.MSSQL_AG_SECONDARY_URL;
+// Created inside whichever database the group already replicates, and dropped
+// afterwards.
+const TABLE = "indexterity_ag_orders";
+
+describe.skipIf(AG_URL === undefined || AG_SECONDARY_URL === undefined)(
+  "mssql adapter against an availability group",
+  () => {
+    let primarySeed: MssqlConnection;
+    let secondarySeed: MssqlConnection;
+    let agSession: EngineSession;
+    let secondaryName: string;
+    // A database the group actually replicates — the suite does not administer
+    // the group, it reads through one. Adding a database to an AG needs a
+    // backup path and a seeding grant that belong to whoever built it.
+    let agDatabase: string;
+
+    beforeAll(async () => {
+      primarySeed = new MssqlConnection(AG_URL as string, OVERRIDES);
+      await primarySeed.connect();
+      // Read intent: a replica configured ALLOW_CONNECTIONS = READ_ONLY refuses
+      // a plain connection outright (Msg 978).
+      secondarySeed = new MssqlConnection(AG_SECONDARY_URL as string, OVERRIDES, {
+        readOnlyIntent: true,
+      });
+      await secondarySeed.connect();
+      secondaryName = (await secondarySeed.serverIdentity()).serverName;
+      const replicated = await primarySeed.query<{ name: string }>(
+        `SELECT TOP 1 database_name AS name FROM sys.availability_databases_cluster
+         ORDER BY database_name`,
+      );
+      const found = replicated[0]?.name;
+      if (found === undefined) {
+        throw new Error(
+          "MSSQL_AG_URL names a group with no databases in it — add one " +
+            "(ALTER AVAILABILITY GROUP … ADD DATABASE) so a secondary has something to read",
+        );
+      }
+      agDatabase = found;
+      agSession = await mssqlAdapter.open(AG_URL as string, OVERRIDES);
+    }, 120_000);
+
+    afterAll(async () => {
+      await agSession?.close();
+      await primarySeed
+        ?.execute(`DROP TABLE IF EXISTS [${agDatabase}].dbo.${TABLE}`)
+        .catch(() => {});
+      await primarySeed?.close().catch(() => {});
+      await secondarySeed?.close().catch(() => {});
+    });
+
+    it("names every replica in the roster, each with the role it claims itself", async () => {
+      const nodes = (await agSession.collector.collectNodes()) ?? [];
+      const primary = nodes.find((node) => node.role === "primary");
+      const secondary = nodes.find((node) => node.host === secondaryName);
+      expect(primary, JSON.stringify(nodes)).toBeDefined();
+      expect(primary?.state).toBe("answered");
+      expect(secondary, JSON.stringify(nodes)).toBeDefined();
+      expect(secondary?.role).toBe("secondary");
+      expect(secondary?.state).toBe("answered");
+    });
+
+    // The whole point of the issue: reads served by the secondary are counted
+    // by the secondary, and a collect that only asks the primary reports zero.
+    it("collects the secondary's own usage counters", async () => {
+      const table = `[${agDatabase}].dbo.${TABLE}`;
+      // DDL on the primary arrives at the secondary through the group; nothing
+      // here creates anything on the secondary itself, which is the point.
+      await primarySeed.execute(
+        `IF OBJECT_ID('${table}') IS NULL
+           EXEC('CREATE TABLE ${table}(
+                   id int IDENTITY CONSTRAINT pk_ag_orders PRIMARY KEY,
+                   customer_id int NOT NULL);
+                 CREATE INDEX ix_ag_customer ON ${table}(customer_id);
+                 INSERT INTO ${table}(customer_id)
+                   SELECT TOP 2000 ABS(CHECKSUM(NEWID())) % 200
+                   FROM sys.all_columns a CROSS JOIN sys.all_columns b;')`,
+      );
+      // Synchronous commit hardens the log on the secondary; REDO applying it
+      // to the readable copy is a moment behind, and it applies statement by
+      // statement — waiting for the TABLE is not enough, the index arrives
+      // after it. Wait for the whole shape rather than assuming either.
+      let visible = 0;
+      for (let attempt = 0; attempt < 40 && visible < 2; attempt += 1) {
+        visible = await secondarySeed
+          .query<{ n: number }>(
+            `SELECT COUNT(*) AS n FROM [${agDatabase}].sys.indexes
+             WHERE object_id = OBJECT_ID('${table}')`,
+          )
+          .then((rows) => asNumber(rows[0]?.n))
+          .catch(() => 0);
+        if (visible < 2) await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+      expect(visible, `${table} never became readable on ${secondaryName}`).toBeGreaterThan(1);
+
+      // Reads the SECONDARY serves, and only the secondary.
+      for (const customer of [42, 43, 44]) {
+        await secondarySeed.query(
+          `SELECT COUNT(*) AS n FROM ${table} WHERE customer_id = ${customer}`,
+        );
+      }
+
+      const usage = await agSession.collector.collectUsage(agDatabase, `dbo.${TABLE}`);
+      const hosts = new Set(usage.map((stat) => stat.host));
+      expect(hosts.has(secondaryName), JSON.stringify(usage)).toBe(true);
+      expect(hosts.size, JSON.stringify(usage)).toBeGreaterThan(1);
+      // Every reading carries the member's OWN counter start, not the
+      // primary's: the ops-went-backwards rule reads them per member.
+      for (const stat of usage) expect(Date.parse(stat.since)).toBeGreaterThan(0);
+
+      // WHICH index served those reads is the planner's business and not this
+      // suite's (#207): the claim under test is that whatever the secondary
+      // served, the secondary is the only member that counted it — and from the
+      // primary alone that index reads as completely unused.
+      const busy = usage.find((stat) => stat.host === secondaryName && stat.ops > 0);
+      expect(busy, JSON.stringify(usage)).toBeDefined();
+      const sameOnPrimary = usage.find(
+        (stat) => stat.host !== secondaryName && stat.indexName === busy?.indexName,
+      );
+      expect(sameOnPrimary, JSON.stringify(usage)).toBeDefined();
+      expect(sameOnPrimary?.ops).toBe(0);
+    });
+  },
+);

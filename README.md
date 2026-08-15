@@ -30,6 +30,11 @@ observe window, a pre-flight check, and a read-latency regression test.
 2. **Collect** hourly via `$indexStats` / `$collStats` — usage, sizes,
    per-collection read/write latency, from **every replica-set member** the
    cluster admits to (secondary-only traffic is invisible from the primary).
+   The same rule, and the same code shape, on SQL Server: an Availability
+   Group's readable secondaries keep their own `sys.dm_db_index_usage_stats`,
+   so each replica the group names is dialled through its read-only routing URL
+   and reports its own counters (measured on a two-node group: three seeks run
+   on the secondary read as 3 there and 0 on the primary).
    Never your documents. What gets *stored* is only what changed: an index's
    shape is written once, and an unchanged counter extends the row it already
    has instead of adding another. The dashboard's node roster shows which

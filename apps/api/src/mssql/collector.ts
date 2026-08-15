@@ -16,6 +16,7 @@ import {
   quoteIdent,
   splitCollectionName,
 } from "./connection";
+import type { MssqlMemberConnections } from "./members";
 import { type PlanRow, shapesFromPlans } from "./workload";
 
 // Plans read per database and collect. Query Store defaults to a 1GB store —
@@ -167,7 +168,13 @@ export function indexNamesFromForcedPlan(planXml: string): string[] {
 }
 
 export class MssqlIndexCollector implements IndexCollector {
-  constructor(private readonly conn: MssqlConnection) {}
+  constructor(
+    private readonly conn: MssqlConnection,
+    // Absent for a plain connection (diagnose, tests). Present from the
+    // session, where an Availability Group's readable secondaries are dialled
+    // as members — see mssql/members.ts.
+    private readonly members?: MssqlMemberConnections,
+  ) {}
 
   async listCollectionNames(database: string): Promise<string[]> {
     const rows = await this.conn.query<{ name: string }>(
@@ -227,22 +234,62 @@ export class MssqlIndexCollector implements IndexCollector {
     return specs;
   }
 
-  // One member: the server. An Availability Group's readable secondaries keep
-  // their own usage stats exactly like replica-set members do; reading them is
-  // follow-up work, and until then the roster honestly names the one node the
-  // connection string reaches.
+  // The roster (#202): the instance the connection string reaches, plus every
+  // other replica of its Availability Group and how each dial went. A
+  // standalone names no replicas and reports itself alone, exactly as before —
+  // and when even that much cannot be established, null, never a guess.
   async collectNodes(): Promise<readonly ClusterNode[] | null> {
+    let local: ClusterNode;
     try {
       const identity = await this.conn.serverIdentity();
-      return [{ host: identity.serverName, role: "standalone", state: "answered" }];
+      // Its own role, not the group's view of it. A standalone belongs to no
+      // group and is honestly a standalone.
+      const role = await this.conn.localReplicaRole().catch(() => null);
+      local = { host: identity.serverName, role: role ?? "standalone", state: "answered" };
     } catch {
       return null;
     }
+    const dials = this.members === undefined ? [] : await this.members.dials();
+    const others = await Promise.all(
+      dials.map(async (dial): Promise<ClusterNode> => {
+        if (dial.connection === null) {
+          return { host: dial.host, role: "unknown", state: dial.state };
+        }
+        const role = await dial.connection.localReplicaRole().catch(() => null);
+        return { host: dial.host, role: role ?? "unknown", state: "answered" };
+      }),
+    );
+    return [local, ...others];
   }
 
   async collectUsage(database: string, collection: string): Promise<IndexUsageStat[]> {
-    const identity = await this.conn.serverIdentity();
-    const rows = await this.conn.query<{ indexName: string; ops: number }>(
+    // Every replica, not only the one the connection string reaches: the usage
+    // DMV counts what THIS instance served, so a readable secondary's reads are
+    // invisible from the primary (mssql/members.ts has the measurement).
+    const connections = [this.conn, ...(await (this.members?.all() ?? Promise.resolve([])))];
+    const perMember = await Promise.all(
+      connections.map((conn) =>
+        // One replica failing mid-collect must not lose the others' readings:
+        // a member that answered the dial and then went away contributes
+        // nothing, which is what an unreachable member has always meant here.
+        this.usageFrom(conn, database, collection).catch(() => [] as IndexUsageStat[]),
+      ),
+    );
+    // Keyed by index AND host, NUL-separated because an index name and a server
+    // name may both contain almost anything: the same index reports once per
+    // replica, and each replica's counter has its own `since`.
+    const seen = new Map<string, IndexUsageStat>();
+    for (const stat of perMember.flat()) seen.set(`${stat.indexName}\u0000${stat.host}`, stat);
+    return [...seen.values()];
+  }
+
+  private async usageFrom(
+    conn: MssqlConnection,
+    database: string,
+    collection: string,
+  ): Promise<IndexUsageStat[]> {
+    const identity = await conn.serverIdentity();
+    const rows = await conn.query<{ indexName: string; ops: number }>(
       // LEFT JOIN: an index with no row has served nothing since the counters
       // started, and that absence is a reading of zero, not a gap. The usage
       // DMV is server-wide with a database_id column — no retargeting needed.

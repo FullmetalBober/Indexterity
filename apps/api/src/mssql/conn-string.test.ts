@@ -5,6 +5,8 @@ import {
   isMssqlConnString,
   mssqlHosts,
   parseMssqlConnString,
+  parseRoutingUrl,
+  retargetMssqlConnString,
   trustsServerCertificate,
 } from "./conn-string";
 
@@ -138,5 +140,68 @@ describe("applyMssqlTlsOverrides", () => {
     });
     expect(ado).toContain("Server=host");
     expect(ado.toLowerCase()).toContain("trustservercertificate=true");
+  });
+});
+
+// #202: the same credentials pointed at an Availability Group replica.
+describe("retargetMssqlConnString", () => {
+  it("moves a URL string to another server, keeping every option", () => {
+    const out = retargetMssqlConnString(
+      "mssql://sa:pw@ag1:1433/shop?encrypt=true&trustservercertificate=true",
+      "ag2",
+      14330,
+    );
+    const parsed = parseMssqlConnString(out);
+    expect(parsed?.host).toBe("ag2");
+    expect(parsed?.port).toBe(14330);
+    expect(parsed?.user).toBe("sa");
+    expect(parsed?.password).toBe("pw");
+    // The initial database rides along: it is where the login lands, not what
+    // the collector reads.
+    expect(parsed?.database).toBe("shop");
+    expect(parsed?.params.get("encrypt")).toBe("true");
+    expect(parsed?.params.get("trustservercertificate")).toBe("true");
+  });
+
+  it("keeps an ADO string ADO, with one Server segment", () => {
+    const out = retargetMssqlConnString(
+      "Server=tcp:ag1,1433;Database=shop;User Id=sa;Password=p;w;Encrypt=true",
+      "ag2",
+      1433,
+    );
+    const parsed = parseMssqlConnString(out);
+    expect(parsed?.form).toBe("ado");
+    expect(parsed?.host).toBe("ag2");
+    expect(parsed?.database).toBe("shop");
+    expect(parsed?.params.get("encrypt")).toBe("true");
+    expect(out.toLowerCase().split("server=").length - 1).toBe(1);
+  });
+
+  it("leaves a string it cannot parse alone", () => {
+    expect(retargetMssqlConnString("not a connection string", "ag2", 1433)).toBe(
+      "not a connection string",
+    );
+  });
+});
+
+describe("parseRoutingUrl", () => {
+  it("reads the tcp:// form sys.availability_replicas records", () => {
+    expect(parseRoutingUrl("tcp://ag2.corp:1433")).toEqual({ host: "ag2.corp", port: 1433 });
+    expect(parseRoutingUrl("TCP://ag2:14333/")).toEqual({ host: "ag2", port: 14333 });
+    expect(parseRoutingUrl("tcp://[2001:db8::1]:1433")).toEqual({
+      host: "2001:db8::1",
+      port: 1433,
+    });
+  });
+
+  it("defaults the port when the URL omits it", () => {
+    expect(parseRoutingUrl("tcp://ag2")).toEqual({ host: "ag2", port: 1433 });
+  });
+
+  it("is null for anything that is not an address", () => {
+    expect(parseRoutingUrl(null)).toBeNull();
+    expect(parseRoutingUrl("ag2")).toBeNull();
+    expect(parseRoutingUrl("HOST\\INSTANCE")).toBeNull();
+    expect(parseRoutingUrl("http://ag2:1433")).toBeNull();
   });
 });
