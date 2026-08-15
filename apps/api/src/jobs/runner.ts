@@ -6,6 +6,7 @@ import { ALERT_COOLDOWN_MS, alertAllowed, notifyClusterOwners } from "../mail/no
 import { instrumentRunner } from "../metrics";
 import { clusterIdOf, finalClusterFailure } from "./failure";
 import { createTaskList } from "./tasks";
+import { alertClaims } from "./watermark";
 
 // How long an idle runner waits before asking postgres whether anything became
 // due. See the note at the call site for why this is safe to raise: an enqueued
@@ -142,16 +143,31 @@ export async function startWorker(db: Database): Promise<Runner> {
       payload: job.payload,
     });
     if (clusterId === null) return;
-    if (!alertAllowed(`${clusterId}:${job.task_identifier}`, ALERT_COOLDOWN_MS)) return;
-    void notifyClusterOwners(
-      db,
-      clusterId,
-      `${job.task_identifier} keeps failing`,
-      `The background ${job.task_identifier} task gave up after ${job.attempts} attempts.\n\n` +
-        `Last error: ${String(error)}\n\n` +
-        `Usual causes: the cluster is unreachable, the connection string changed, or the ` +
-        `Indexterity user was removed. It will be retried on the next schedule tick.`,
-    );
+    // The cooldown is a postgres claim now rather than an in-memory Map (#212),
+    // so this arm is async — still fire-and-forget, because a mail failure must
+    // not turn a dead-lettered job into an unhandled rejection.
+    void (async () => {
+      if (
+        !(await alertAllowed(
+          alertClaims(db),
+          `${clusterId}:${job.task_identifier}`,
+          ALERT_COOLDOWN_MS,
+        ))
+      ) {
+        return;
+      }
+      await notifyClusterOwners(
+        db,
+        clusterId,
+        `${job.task_identifier} keeps failing`,
+        `The background ${job.task_identifier} task gave up after ${job.attempts} attempts.\n\n` +
+          `Last error: ${String(error)}\n\n` +
+          `Usual causes: the cluster is unreachable, the connection string changed, or the ` +
+          `Indexterity user was removed. It will be retried on the next schedule tick.`,
+      );
+    })().catch((failure: unknown) => {
+      captureError(failure, { task: job.task_identifier, clusterId });
+    });
   });
   return runner;
 }
