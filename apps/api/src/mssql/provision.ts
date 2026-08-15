@@ -64,9 +64,14 @@ function scopedPassword(): string {
 // can CREATE LOGIN and then fail to GRANT, because granting needs the
 // permission WITH GRANT OPTION or CONTROL SERVER (verified: Msg 4613, "Grantor
 // does not have GRANT permission").
+// Matched on the permission wording only. "does not exist or you do not have
+// permission" is the server's deliberately ambiguous refusal (Msg 15151 and
+// friends) and belongs here; a bare "does not exist" does NOT — that is a bug
+// on our side, and dressing it up as "your credentials cannot do this" would
+// send the reader off to change a grant that was never the problem.
 function isPermissionError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return /permission was denied|does not have GRANT permission|permission denied|Cannot find the object|principal .* does not exist|requires .* permission/i.test(
+  return /permission was denied|does not have GRANT permission|permission denied|do not have permission|requires .* permission|are not allowed/i.test(
     message,
   );
 }
