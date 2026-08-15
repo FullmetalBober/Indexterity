@@ -1,6 +1,6 @@
 import type mssql from "mssql";
 import type { TlsOverrides } from "../mongo/client";
-import { mssqlPool } from "./client";
+import { type MssqlDialOptions, mssqlPool } from "./client";
 import { type MssqlServerVersion, parseMssqlVersion } from "./version";
 
 // A named parameter for query(). Values are always bound, never interpolated;
@@ -66,6 +66,19 @@ export interface MssqlServerIdentity {
 
 const ONLINE_REBUILD_EDITIONS = new Set([3, 5, 8]);
 
+// One Availability Group replica as the catalog describes it.
+export interface MssqlReplica {
+  // replica_server_name — the instance's own @@SERVERNAME, which is also the
+  // key usage rows are tagged with.
+  readonly name: string;
+  // read_only_routing_url ('tcp://host:port'), or null when the group has no
+  // read-only routing configured for this replica.
+  readonly routingUrl: string | null;
+  // secondary_role_allow_connections: 0 NO, 1 READ_ONLY, 2 ALL.
+  readonly secondaryAllows: number;
+  readonly isLocal: boolean;
+}
+
 // Owns a driver pool — the mssql twin of MongoConnection. Every query is
 // three-part qualified, so one pool serves every database the login can see.
 export class MssqlConnection {
@@ -75,12 +88,13 @@ export class MssqlConnection {
   constructor(
     private readonly connectionString: string,
     private readonly overrides?: TlsOverrides,
+    private readonly dial?: MssqlDialOptions,
   ) {}
 
   async connect(): Promise<void> {
     // Throws InsecureConnectionError on a string that would not encrypt, or one
     // that disables a check nobody consented to — see mssql/client.ts.
-    this.pool = await mssqlPool(this.connectionString, this.overrides);
+    this.pool = await mssqlPool(this.connectionString, this.overrides, this.dial);
   }
 
   private livePool(): mssql.ConnectionPool {
@@ -158,6 +172,63 @@ export class MssqlConnection {
        ORDER BY name`,
     );
     return rows.map((row) => row.name);
+  }
+
+  // Every replica of every Availability Group this instance belongs to, as the
+  // instance itself describes them (#202). Empty on a standalone: the views
+  // exist on every edition and simply have no rows when HADR is off (verified
+  // — `SERVERPROPERTY('IsHadrEnabled')` 0, both views readable, zero rows), so
+  // discovery costs one cheap query and never needs a capability check.
+  //
+  // Deliberately NOT joined to sys.dm_hadr_availability_replica_states, though
+  // that is where the roles live: on a SECONDARY that DMV holds only the local
+  // replica's row — verified, one row against the catalog's two — so an inner
+  // join would make a connection that landed on a secondary discover nothing at
+  // all. Each replica reports its own role from its own connection instead,
+  // which is the same rule mongo's roster follows.
+  async availabilityReplicas(): Promise<MssqlReplica[]> {
+    const rows = await this.query<{
+      name: unknown;
+      routingUrl: unknown;
+      secondaryAllows: unknown;
+      isLocal: unknown;
+    }>(
+      `SELECT
+         ar.replica_server_name AS name,
+         ar.read_only_routing_url AS routingUrl,
+         ar.secondary_role_allow_connections AS secondaryAllows,
+         CASE WHEN ar.replica_server_name = @@SERVERNAME THEN 1 ELSE 0 END AS isLocal
+       FROM sys.availability_replicas ar
+       ORDER BY ar.replica_server_name`,
+    );
+    return rows.flatMap((row) => {
+      const name = typeof row.name === "string" ? row.name : null;
+      if (name === null || name.length === 0) return [];
+      return [
+        {
+          name,
+          routingUrl: typeof row.routingUrl === "string" ? row.routingUrl : null,
+          // 0 = NO, 1 = READ_ONLY (read-intent connections only), 2 = ALL —
+          // verified against the _desc column on a live group.
+          secondaryAllows: asNumber(row.secondaryAllows),
+          isLocal: asNumber(row.isLocal) === 1,
+        },
+      ];
+    });
+  }
+
+  // What this instance says IT is, right now: PRIMARY, SECONDARY, or nothing at
+  // all when it belongs to no group. Read per connection rather than from the
+  // primary's view of the group, so a roster never reports a role its owner
+  // would dispute.
+  async localReplicaRole(): Promise<"primary" | "secondary" | null> {
+    const rows = await this.query<{ role: unknown }>(
+      `SELECT role_desc AS role FROM sys.dm_hadr_availability_replica_states WHERE is_local = 1`,
+    );
+    const role = rows[0]?.role;
+    if (role === "PRIMARY") return "primary";
+    if (role === "SECONDARY") return "secondary";
+    return null;
   }
 
   async ping(): Promise<void> {

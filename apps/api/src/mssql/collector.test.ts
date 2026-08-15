@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { indexNamesFromForcedPlan, indexNamesFromHintText, toMssqlIndexSpec } from "./collector";
+import {
+  indexNamesFromForcedPlan,
+  indexNamesFromHintText,
+  MssqlIndexCollector,
+  toMssqlIndexSpec,
+} from "./collector";
+import type { MssqlConnection } from "./connection";
+import type { MssqlMemberConnections } from "./members";
 
 function row(overrides: Partial<Parameters<typeof toMssqlIndexSpec>[0][number]> = {}) {
   return {
@@ -109,5 +116,97 @@ describe("indexNamesFromForcedPlan", () => {
       'Index="[ix_orders_customer]" IndexKind="NonClustered"></Object>' +
       '<Object Index="[ix_odd]]name]"></Object>';
     expect(indexNamesFromForcedPlan(xml)).toEqual(["ix_orders_customer", "ix_odd]name"]);
+  });
+});
+
+// #202: the usage fan-out and the roster, against stubbed replicas. What each
+// member REPORTS is proven live (integration/mssql.int.test.ts); what is
+// proven here is that every member is asked, tagged with its own name and its
+// own counter start, and that one member falling over loses only itself.
+function stubMember(name: string, options: { ops?: number; fails?: boolean; role?: string } = {}) {
+  return {
+    serverIdentity: () =>
+      Promise.resolve({
+        serverName: name,
+        startedAt: `2026-08-15T0${options.ops ?? 0}:00:00.000Z`,
+        engineEdition: 3,
+        version: null,
+      }),
+    query: () =>
+      options.fails === true
+        ? Promise.reject(new Error("connection lost"))
+        : Promise.resolve([{ indexName: "ix_customer", ops: options.ops ?? 0 }]),
+    localReplicaRole: () => Promise.resolve(options.role ?? null),
+  } as unknown as MssqlConnection;
+}
+
+function stubMembers(dials: { host: string; state: string; connection: MssqlConnection | null }[]) {
+  return {
+    dials: () => Promise.resolve(dials),
+    all: () => Promise.resolve(dials.flatMap((dial) => (dial.connection ? [dial.connection] : []))),
+  } as unknown as MssqlMemberConnections;
+}
+
+describe("MssqlIndexCollector across availability replicas", () => {
+  it("reports one reading per replica, each with its own name and counter start", async () => {
+    const secondary = stubMember("ag2", { ops: 7, role: "secondary" });
+    const collector = new MssqlIndexCollector(
+      stubMember("ag1", { ops: 0, role: "primary" }),
+      stubMembers([{ host: "ag2", state: "answered", connection: secondary }]),
+    );
+    const usage = await collector.collectUsage("shop", "dbo.orders");
+    expect(usage).toEqual([
+      {
+        indexName: "ix_customer",
+        host: "ag1",
+        ops: 0,
+        since: new Date("2026-08-15T00:00:00.000Z").toISOString(),
+      },
+      {
+        indexName: "ix_customer",
+        host: "ag2",
+        ops: 7,
+        since: new Date("2026-08-15T07:00:00.000Z").toISOString(),
+      },
+    ]);
+  });
+
+  it("keeps the other members' readings when one dies mid-collect", async () => {
+    const collector = new MssqlIndexCollector(
+      stubMember("ag1", { ops: 2, role: "primary" }),
+      stubMembers([
+        { host: "ag2", state: "answered", connection: stubMember("ag2", { fails: true }) },
+      ]),
+    );
+    const usage = await collector.collectUsage("shop", "dbo.orders");
+    expect(usage.map((stat) => stat.host)).toEqual(["ag1"]);
+  });
+
+  it("names every replica in the roster, dialled or not", async () => {
+    const collector = new MssqlIndexCollector(
+      stubMember("ag1", { role: "primary" }),
+      stubMembers([
+        {
+          host: "ag2",
+          state: "answered",
+          connection: stubMember("ag2", { role: "secondary" }),
+        },
+        { host: "ag3", state: "unreachable", connection: null },
+        { host: "ag4", state: "refused", connection: null },
+      ]),
+    );
+    expect(await collector.collectNodes()).toEqual([
+      { host: "ag1", role: "primary", state: "answered" },
+      { host: "ag2", role: "secondary", state: "answered" },
+      { host: "ag3", role: "unknown", state: "unreachable" },
+      { host: "ag4", role: "unknown", state: "refused" },
+    ]);
+  });
+
+  it("a standalone is still a roster of one standalone", async () => {
+    const collector = new MssqlIndexCollector(stubMember("solo"));
+    expect(await collector.collectNodes()).toEqual([
+      { host: "solo", role: "standalone", state: "answered" },
+    ]);
   });
 });

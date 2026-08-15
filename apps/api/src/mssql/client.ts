@@ -68,7 +68,23 @@ export function assertMssqlTlsEnforced(
 // Build the driver config from the parsed string. The string is parsed by our
 // own parser rather than handed to the driver, so the hosts the network guard
 // vetted are exactly the hosts dialled.
-export function mssqlConfig(parsed: ParsedMssqlConnString, overrides?: TlsOverrides): mssql.config {
+export interface MssqlDialOptions {
+  // ApplicationIntent=ReadOnly. Set only when dialling an Availability Group
+  // replica (#202): a secondary configured ALLOW_CONNECTIONS = READ_ONLY
+  // refuses a plain connection outright — Msg 978, verified on 2022, and it
+  // refuses at the first three-part read even when the connection named no
+  // initial database — while a replica that allows ALL accepts read intent
+  // happily. NOT inferred from a pasted ApplicationIntent, which the driver
+  // config has always ignored: honouring one now would silently break the
+  // apply path for a cluster that connects fine today.
+  readonly readOnlyIntent?: boolean;
+}
+
+export function mssqlConfig(
+  parsed: ParsedMssqlConnString,
+  overrides?: TlsOverrides,
+  dial?: MssqlDialOptions,
+): mssql.config {
   const mode = encryptModeOf(parsed);
   return {
     server: parsed.host,
@@ -84,8 +100,11 @@ export function mssqlConfig(parsed: ParsedMssqlConnString, overrides?: TlsOverri
       encrypt: mode === "strict" ? ("strict" as unknown as boolean) : mode === "on",
       trustServerCertificate:
         trustsServerCertificate(parsed) && (overrides?.allowInvalidCertificates ?? false),
-      // Read-only intent is enforced structurally in the executor, not here: a
-      // readOnly cluster still needs to write during an approved apply.
+      // A cluster's read-only MODE is enforced structurally in the executor,
+      // not here: a readOnly cluster still needs to write during an approved
+      // apply. This flag is about which replica will accept the connection at
+      // all, which is why only the member dials set it.
+      readOnlyIntent: dial?.readOnlyIntent ?? false,
       appName: "indexterity",
     },
   };
@@ -94,13 +113,14 @@ export function mssqlConfig(parsed: ParsedMssqlConnString, overrides?: TlsOverri
 export async function mssqlPool(
   connectionString: string,
   overrides?: TlsOverrides,
+  dial?: MssqlDialOptions,
 ): Promise<mssql.ConnectionPool> {
   assertMssqlTlsEnforced(connectionString, overrides);
   const parsed = parseMssqlConnString(connectionString);
   if (parsed === null) {
     throw new Error("not a SQL Server connection string");
   }
-  const pool = new mssql.ConnectionPool(mssqlConfig(parsed, overrides));
+  const pool = new mssql.ConnectionPool(mssqlConfig(parsed, overrides, dial));
   await pool.connect();
   return pool;
 }
