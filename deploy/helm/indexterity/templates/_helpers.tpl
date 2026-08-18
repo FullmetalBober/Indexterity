@@ -442,6 +442,15 @@ env homes readable (apps/api/src/config/homes.test.ts).
 # combination rather than letting it install.
 - name: RUN_WORKER
   value: {{ .Values.api.runWorker | quote }}
+- name: RUN_CRONJOB
+  value: {{ .Values.api.runCronjob | quote }}
+{{- if not .Values.api.runCronjob }}
+- name: CRON_TRIGGER_SECRET
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "indexterity.secretName" . }}
+      key: CRON_TRIGGER_SECRET
+{{- end }}
 - name: REQUIRE_EMAIL_VERIFICATION
   value: {{ .Values.config.requireEmailVerification | quote }}
 - name: SIGNUP_MODE
@@ -489,6 +498,16 @@ api.runWorker goes on, and doing only the second is silent.
 {{- if gt (int .Values.api.replicas) 1 -}}
 {{- fail (printf "api.runWorker=true with api.replicas=%v installs the cron schedule once per replica. The embedded runner is for a single-replica install; scale out with worker.enabled=true and api.runWorker=false instead." .Values.api.replicas) -}}
 {{- end -}}
+{{- end -}}
+{{- /* An external clock with nothing to execute what it enqueues. The tick
+      endpoint would answer, the watermarks would advance, and every pass it
+      dispatched would sit in the queue forever — a pipeline that looks driven
+      and runs nothing, which is worse than one that is plainly off. */ -}}
+{{- if and (not .Values.api.runCronjob) (not .Values.api.runWorker) (not .Values.worker.enabled) -}}
+{{- fail "api.runCronjob=false installs no schedule, but nothing here executes jobs either — set api.runWorker=true (one deployment, the tick endpoint drives it) or worker.enabled=true." -}}
+{{- end -}}
+{{- if and (not .Values.api.runCronjob) (not .Values.secrets.cronTriggerSecret) (not .Values.secrets.existingSecret) -}}
+{{- fail "api.runCronjob=false needs secrets.cronTriggerSecret — POST /api/internal/tick is the only thing that can start a pass, and it authorises the whole pipeline. Generate one with `openssl rand -hex 32`." -}}
 {{- end -}}
 {{- end -}}
 

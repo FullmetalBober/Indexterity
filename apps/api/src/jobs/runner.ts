@@ -73,8 +73,12 @@ const CRONTAB = [
 
 // Start the job runner. Used by the standalone worker process, and by the api
 // itself when RUN_WORKER=true collapses both into one container.
-export async function startWorker(db: Database): Promise<Runner> {
-  const values = workerEnv();
+// `ownsSchedule` is the api's RUN_CRONJOB, passed rather than read: the
+// standalone worker validates workerShape, which does not declare an api-only
+// variable, so reading it here would throw in the one process that has always
+// owned the schedule unconditionally.
+export async function startWorker(db: Database, ownsSchedule = true): Promise<Runner> {
+  const values = { ...workerEnv(), RUN_CRONJOB: ownsSchedule };
   const runner = await run({
     // graphile-worker keeps its OWN pool from this string, and should: it holds a
     // long-lived LISTEN connection, so sharing `db` would tie up one of that
@@ -105,7 +109,14 @@ export async function startWorker(db: Database): Promise<Runner> {
     // The db reaches every task through here — one argument at the composition
     // root, where before each task reached for a module-level singleton.
     taskList: createTaskList(db),
-    crontab: CRONTAB,
+    // Installed only when THIS process owns the schedule. With RUN_CRONJOB=false
+    // the clock is outside — something posts /api/internal/tick, which enqueues
+    // the passes that became due — and installing the crontab as well would run
+    // every pass twice, from two clocks that do not know about each other.
+    //
+    // graphile-worker treats an absent crontab as "no schedule", not as an
+    // error, so the runner still claims, executes and retries exactly as before.
+    ...(values.RUN_CRONJOB ? { crontab: CRONTAB } : {}),
   });
   // Job counters come off the same events, so they are registered here and
   // cover the embedded mode below as well as the standalone worker.

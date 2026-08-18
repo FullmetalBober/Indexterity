@@ -651,6 +651,31 @@ The worker deploys from the api image with `CMD ["node",
 a one-container install. Hosted should keep them separate: an api rollout would
 otherwise abort an in-flight index build.
 
+**One deployment, with the clock outside.** `RUN_WORKER` decides whether a
+process *executes* jobs; `RUN_CRONJOB` decides whether it also decides *when*
+they are due. They used to be one flag, which is why taking the schedule from
+outside meant giving up running jobs too. Set `RUN_WORKER=true` and
+`RUN_CRONJOB=false` and you get a single api that runs the pipeline on a clock
+you own:
+
+```
+POST /api/internal/tick     Authorization: Bearer $CRON_TRIGGER_SECRET
+  → {"dispatched":["scheduleApply","scheduleProbe"],"alreadyClaimed":[]}
+```
+
+The request only **enqueues** — it works out which passes became due and writes
+the rows, then returns in milliseconds. It never drains, which is what keeps it
+clear of platform request timeouts. The api's own runner holds
+`LISTEN "jobs:insert"`, so the work starts the instant the row lands.
+
+**Safe to call as often as you like**, and that is a property rather than a
+promise: passes are claimed against their *occurrence* in `worker_watermarks`,
+so a hundred calls inside one five-minute bucket enqueue at most one
+`scheduleApply`. `CRON_TRIGGER_SECRET` is required when `RUN_CRONJOB=false` —
+the endpoint authorises the whole pipeline and there is no user session behind
+it — and the boot refuses without it, because a deployment with no crontab and
+no way in is a pipeline that is silently dead.
+
 **Burst mode, for hosts that sleep.** The resident worker holds a permanent
 `LISTEN` connection and a cron, both of which need a process that outlives the
 intervals they describe — so on a host that sleeps when idle, or a database that

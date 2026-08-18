@@ -44,6 +44,16 @@ Workloads (topology: {{ .Values.topology }}):
   web     {{ .Values.web.replicas }} replica(s)  — {{ include "indexterity.webImage" . }}
 {{- end }}
   worker  {{ if .Values.worker.enabled }}1 replica (cron: collect, apply, finalize, retention, digest){{ else if .Values.api.runWorker }}embedded in the api process (RUN_WORKER=true) — no Deployment of its own{{ else }}DISABLED — nothing is collected or applied on a schedule{{ end }}
+{{- if not .Values.api.runCronjob }}
+  clock   EXTERNAL (RUN_CRONJOB=false). Nothing recurs until something posts:
+
+            curl -fsS -X POST https://<host>/api/internal/tick \
+              -H "Authorization: Bearer $CRON_TRIGGER_SECRET"
+
+          It enqueues what became due and returns at once; the runner executes
+          it. Safe to call as often as you like — passes are claimed per
+          occurrence, so repeats inside one bucket enqueue nothing.
+{{- end }}
 {{- if and (include "indexterity.merged" .) .Values.worker.enabled }}
 
   NOTE: the serving tier is merged but the worker still has its own Deployment,
