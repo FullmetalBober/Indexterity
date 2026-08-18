@@ -19,6 +19,7 @@ import { clusterIdFromPayload } from "./payload";
 import { probeCluster } from "./probe";
 import { pruneOldSamples } from "./retention";
 import { suggestForCluster } from "./suggest";
+import { alertClaims } from "./watermark";
 
 // What a cluster task needs from the outside world, narrowed to three
 // functions so the decision below is testable without a queue or a database.
@@ -26,6 +27,10 @@ import { suggestForCluster } from "./suggest";
 export interface ClusterTaskDeps {
   readonly logger: { warn(message: string): void; error(message: string): void };
   readonly alertOwners: (clusterId: string, subject: string, body: string) => Promise<void>;
+  // Whether this alert is outside its cooldown window. A function rather than
+  // the store itself for the same reason the other three are: this interface's
+  // value is that a task can be tested without a queue or a database.
+  readonly alertAllowed: (scope: string) => Promise<boolean>;
   readonly emitPassFinished: (clusterId: string, task: string) => Promise<void>;
 }
 
@@ -63,7 +68,7 @@ export async function runClusterTask(
     if (error instanceof UnsupportedServerError) {
       recordClusterTask(task, clusterId, "unsupported");
       deps.logger.warn(`${task}: cluster ${clusterId} — ${error.message}`);
-      if (!alertAllowed(`${clusterId}:unsupported`, ALERT_COOLDOWN_MS)) return;
+      if (!(await deps.alertAllowed(`${clusterId}:unsupported`))) return;
       await deps.alertOwners(clusterId, "cluster version not supported", error.message);
       return;
     }
@@ -76,7 +81,7 @@ export async function runClusterTask(
     if (error instanceof InsecureConnectionError) {
       recordClusterTask(task, clusterId, "insecure");
       deps.logger.warn(`${task}: cluster ${clusterId} — ${error.message}`);
-      if (!alertAllowed(`${clusterId}:insecure`, ALERT_COOLDOWN_MS)) return;
+      if (!(await deps.alertAllowed(`${clusterId}:insecure`))) return;
       await deps.alertOwners(
         clusterId,
         `${task} skipped — this cluster's connection string is not using TLS`,
@@ -105,7 +110,7 @@ export async function runClusterTask(
     deps.logger.warn(
       `${task}: cluster ${clusterId} unreachable — skipped, retrying on the next tick`,
     );
-    if (!alertAllowed(`${clusterId}:${task}`, ALERT_COOLDOWN_MS)) return;
+    if (!(await deps.alertAllowed(`${clusterId}:${task}`))) return;
     await deps.alertOwners(
       clusterId,
       `${task} skipped — cluster unreachable`,
@@ -131,6 +136,7 @@ function depsFor(db: Database, helpers: JobHelpers): ClusterTaskDeps {
         helpers.logger.error(`alert for cluster ${clusterId} failed: ${String(error)}`);
       }
     },
+    alertAllowed: (scope) => alertAllowed(alertClaims(db), scope, ALERT_COOLDOWN_MS),
     emitPassFinished: (clusterId, task) => emitPassFinished(db, clusterId, task),
   };
 }

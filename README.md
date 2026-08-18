@@ -651,6 +651,44 @@ The worker deploys from the api image with `CMD ["node",
 a one-container install. Hosted should keep them separate: an api rollout would
 otherwise abort an in-flight index build.
 
+**Burst mode, for hosts that sleep.** The resident worker holds a permanent
+`LISTEN` connection and a cron, both of which need a process that outlives the
+intervals they describe — so on a host that sleeps when idle, or a database that
+suspends its compute, the pipeline does not slow down, it **stops**: hidden
+indexes overrun their observe windows and drops stall mid-pipeline. A third
+topology makes that supported rather than broken. Turn the resident runner off
+(`RUN_WORKER=false`, no worker Deployment) and have any external scheduler — a
+GitHub Actions cron, a free cron service, the host's own — run one tick:
+
+```
+npm run worker:once -w @repo/api      # or: node apps/api/dist/worker-once.js
+```
+
+A tick works out which scheduled passes became due, enqueues them, drains the
+queue — including the per-cluster jobs those passes fan out, which `runOnce()`
+picks up in the same run — and exits non-zero if anything went wrong, because a
+red cron job is the only error channel a process with no supervisor has.
+
+**Ticks are idempotent by construction.** Each pass is claimed against its most
+recent *occurrence*, not against an elapsed interval, so two crons firing a
+minute apart compute the same occurrence and only one claim wins — no lock. A
+host that slept through eleven buckets owes **one** run per pass, not eleven, so
+catching up never dials the fleet eleven times over. `retention` stays on 03:00
+and the weekly digest on Monday 09:00, which an interval reading would have
+drifted to whenever the scheduler first got round to it.
+
+**Staleness is the tick interval, and it is a latency question, not a safety
+one**: a five-minute pass ticked every fifteen minutes *is* a fifteen-minute
+pass, while the observe windows the drop pipeline runs on are measured in days.
+Ten to fifteen minutes is the sensible floor — below that the five-minute passes
+gain nothing and every tick is a fresh process paying start-up.
+
+One thing burst mode forced everywhere: the alert cooldown is now a Postgres
+claim rather than a Map in the worker's memory. A tick is a whole process, so an
+in-memory window is empty every time — a cluster unreachable since Tuesday would
+have mailed its owners on all 96 ticks of a fifteen-minute day
+([D86](./docs/decisions.md)).
+
 **One origin, guaranteed by the app.** The browser calls the api itself, so the
 session cookie only works if both answer on one origin. That is arranged twice
 over, and the difference is a hop rather than whether it works — a proxy in

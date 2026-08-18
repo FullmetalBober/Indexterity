@@ -1,5 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
-import { resetAlertCooldowns } from "../mail/notify";
+import { describe, expect, it } from "vitest";
 import { InsecureConnectionError } from "../mongo/client";
 import { UnsupportedServerError } from "../mongo/executor";
 import { ClusterCredentialsError, ClusterGoneError } from "./cluster-connection";
@@ -18,6 +17,7 @@ function recorder(): {
   const errors: string[] = [];
   const alerts: string[] = [];
   const emitted: string[] = [];
+  const claimed = new Set<string>();
   return {
     warns,
     errors,
@@ -32,6 +32,11 @@ function recorder(): {
         alerts.push(`${clusterId}:${subject}`);
         return Promise.resolve();
       },
+      // The cooldown is a postgres claim now (#212), so the recorder stands in
+      // for it with the same rule inside one test: first claim per scope wins.
+      // What the WINDOW is belongs to mail/notify.test.ts; what a task does
+      // with a suppressed alert belongs here.
+      alertAllowed: (scope) => Promise.resolve(claimed.has(scope) ? false : !!claimed.add(scope)),
       emitPassFinished: (clusterId, task) => {
         emitted.push(`${clusterId}:${task}`);
         return Promise.resolve();
@@ -45,10 +50,6 @@ function unreachable(): Error {
 }
 
 describe("runClusterTask", () => {
-  beforeEach(() => {
-    resetAlertCooldowns();
-  });
-
   // Offboarding does not reach into the queue, so a deleted cluster's ticks
   // still run. Treating that as a failure costs three retries and a stack trace
   // per orphaned job, and alerts owners about a cluster they deleted.
@@ -145,10 +146,6 @@ describe("runClusterTask", () => {
 // deployment allowed plaintext. No retry fixes it — only the owner reconnecting
 // — so it takes the shape of an unsupported version rather than of a failure.
 describe("runClusterTask on a cluster we refuse to dial", () => {
-  beforeEach(() => {
-    resetAlertCooldowns();
-  });
-
   it("skips the tick, warns every time, and mails the owners once", async () => {
     const log = recorder();
     const insecure = new InsecureConnectionError("refusing to connect without validated TLS");

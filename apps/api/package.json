@@ -8,6 +8,7 @@
     "dev": "node --watch -r @swc-node/register src/main.ts",
     "start": "node dist/main.js",
     "worker": "node -r @swc-node/register src/worker.ts",
+    "worker:once": "node -r @swc-node/register src/worker-once.ts",
     "typecheck": "tsc --noEmit && tsc --noEmit -p integration",
     "test": "vitest run",
     "test:int": "vitest run --config vitest.integration.config.ts",
