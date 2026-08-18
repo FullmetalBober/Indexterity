@@ -129,6 +129,18 @@ api:
   # Keep it false otherwise: with the worker Deployment on, or with more than one
   # api replica, the cron schedule would be installed more than once.
   runWorker: false
+  # Who owns the recurring schedule. runWorker decides whether the api EXECUTES
+  # jobs; this decides whether it also decides WHEN they are due.
+  #
+  # false installs no crontab and opens POST /api/internal/tick instead, so an
+  # external scheduler is the clock. That is the single-deployment shape: one
+  # api that runs the jobs, with something outside posting the tick. The
+  # request only ENQUEUES and returns in milliseconds; the embedded runner
+  # executes it the moment the row lands.
+  #
+  # Requires secrets.cronTriggerSecret, and requires runWorker=true — with
+  # neither a crontab nor a runner, nothing would ever execute a pass.
+  runCronjob: true
   # Extra environment variables (name/value pairs).
   extraEnv: []
 
@@ -499,6 +511,11 @@ secrets:
   databaseUrl: ""
   # Session signing key: openssl rand -base64 32
   betterAuthSecret: ""
+  # The bearer token POST /api/internal/tick demands. Required when
+  # api.runCronjob=false and ignored otherwise. It authorises the whole pipeline
+  # and there is no user session behind it, so make it long:
+  #   openssl rand -hex 32
+  cronTriggerSecret: ""
   # KEK for envelope-encrypted cluster credentials: openssl rand -base64 32
   # LOSING THIS MAKES EVERY STORED CONNECTION STRING UNREADABLE — back it up.
   masterKey: ""

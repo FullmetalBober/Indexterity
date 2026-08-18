@@ -10,6 +10,7 @@ import { EventsController } from "./events/events.controller";
 import { HealthController } from "./health/health.controller";
 import { TenancyService } from "./http/tenancy.service";
 import { InsightsController } from "./insights/insights.controller";
+import { TickController } from "./jobs/tick.controller";
 import { OrgController } from "./org/org.controller";
 import { PolicyController } from "./policy/policy.controller";
 import { RecommendationsController } from "./recommendations/recommendations.controller";
@@ -43,6 +44,7 @@ function sentryImports() {
     PolicyController,
     OrgController,
     EventsController,
+    TickController,
   ],
   providers: [DatabaseService, TenancyService, ClusterEventsService],
 })

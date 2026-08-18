@@ -262,6 +262,28 @@ const apiShape = {
   RATE_LIMIT_MAX: positive(300),
   AUTH_RATE_LIMIT_MAX: positive(20),
   RUN_WORKER: flag(false),
+  // Whether THIS process owns the recurring schedule.
+  //
+  // Split from RUN_WORKER on purpose, because they are two different questions
+  // that were one flag: RUN_WORKER asks "does this process EXECUTE jobs", and
+  // this asks "does it decide WHEN they are due". Conflated, the only way to
+  // take the schedule from outside was to give up running jobs too — which is
+  // why an external clock previously meant a second process and a file in a
+  // cron.
+  //
+  // False installs no crontab and opens POST /api/internal/tick instead, where
+  // something external says "now". The tick only ENQUEUES: this process's own
+  // runner holds `LISTEN "jobs:insert"`, so the work starts the moment the row
+  // lands and the request returns in milliseconds rather than holding a
+  // connection open for the length of a pass.
+  RUN_CRONJOB: flag(true),
+  // The bearer token that endpoint demands. Required when RUN_CRONJOB is false
+  // and refused as too short otherwise: it authorises the whole pipeline, there
+  // is no user session behind it to fall back on, and the endpoint is on the
+  // same public origin as everything else. 32 characters is the floor because
+  // the global per-IP budget (RATE_LIMIT_MAX, 300/min) is the only other thing
+  // slowing a guess down.
+  CRON_TRIGGER_SECRET: z.string().optional(),
 };
 
 // Which variables hold a secret, so the error report can name the variable
@@ -350,6 +372,36 @@ function checkMailGroup(value: Record<string, unknown>, ctx: z.RefinementCtx): v
 // refuse to boot anywhere. Drift in the OTHER direction — a variable the chart
 // sets that no schema knows — is caught by config/homes.test.ts, which is the
 // place that can tell a typo from the operating system.
+// The endpoint that runs the pipeline, with nothing in front of it.
+//
+// Booting without the secret would leave RUN_CRONJOB=false in the one state
+// where nothing can ever tick: the crontab is not installed and the only way to
+// trigger it refuses every caller. That is a silently dead pipeline, which is
+// the failure this whole file exists to move forward to boot.
+function checkCronTrigger(value: Record<string, unknown>, ctx: z.RefinementCtx): void {
+  if (value.RUN_CRONJOB !== false) return;
+  const secret = value.CRON_TRIGGER_SECRET;
+  if (typeof secret !== "string" || secret.length === 0) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["CRON_TRIGGER_SECRET"],
+      message:
+        "required: RUN_CRONJOB=false installs no schedule, so POST /api/internal/tick is the " +
+        "only thing that can start a pass — generate one with `openssl rand -hex 32`",
+    });
+    return;
+  }
+  if (secret.length < MIN_CRON_SECRET_LENGTH) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["CRON_TRIGGER_SECRET"],
+      message: `expected at least ${MIN_CRON_SECRET_LENGTH} characters — this token authorises the whole pipeline`,
+    });
+  }
+}
+
+export const MIN_CRON_SECRET_LENGTH = 32;
+
 export const migrateEnvSchema = z.looseObject(migrateShape);
 export const workerEnvSchema = z
   .looseObject(workerShape)
@@ -358,7 +410,8 @@ export const workerEnvSchema = z
 export const apiEnvSchema = z
   .looseObject(apiShape)
   .superRefine(checkRotationKeys)
-  .superRefine(checkMailGroup);
+  .superRefine(checkMailGroup)
+  .superRefine(checkCronTrigger);
 
 export const PROCESS_SCHEMAS = {
   api: apiEnvSchema,

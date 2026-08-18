@@ -161,8 +161,19 @@ async function bootstrap(): Promise<void> {
     // hooks, and the ordering matters: enableShutdownHooks above registered its
     // SIGTERM handler first, so DatabaseService would otherwise drain this pool
     // while a job was still running against it.
-    const runner = await startWorker(database.db);
-    app.getHttpAdapter().getInstance().log.info("RUN_WORKER=true — job runner embedded in the api");
+    // RUN_CRONJOB decides whether this runner also installs the schedule. False
+    // means the clock is outside: POST /api/internal/tick enqueues what became
+    // due, and this runner executes it the moment the row lands.
+    const ownsSchedule = apiEnv().RUN_CRONJOB;
+    const runner = await startWorker(database.db, ownsSchedule);
+    app
+      .getHttpAdapter()
+      .getInstance()
+      .log.info(
+        ownsSchedule
+          ? "RUN_WORKER=true — job runner embedded in the api, and it owns the schedule"
+          : "RUN_WORKER=true, RUN_CRONJOB=false — runner embedded, schedule driven by POST /api/internal/tick",
+      );
     const stopRunner = (): void => void runner.stop();
     process.once("SIGTERM", stopRunner);
     process.once("SIGINT", stopRunner);

@@ -80,6 +80,38 @@ describe("absent is fine, malformed is fatal", () => {
   });
 });
 
+// RUN_CRONJOB=false installs no crontab, so the tick endpoint is the only thing
+// that can start a pass. Booting without its secret would leave the one state
+// where nothing can ever run and nothing says so.
+describe("the external schedule needs a way in", () => {
+  it("refuses RUN_CRONJOB=false with no secret", () => {
+    const message = refusal("api", { ...API, RUN_CRONJOB: "false" });
+    expect(message).toContain("CRON_TRIGGER_SECRET");
+    // The absent-variable path replaces zod's wording with the hint in env.ts,
+    // which is where a reader in a CrashLoopBackOff will actually see it.
+    expect(message).toContain("only thing that can start a pass");
+  });
+
+  // The token authorises the whole pipeline against nothing but the global
+  // per-IP budget, so a short one is refused rather than warned about.
+  it("refuses a secret short enough to guess", () => {
+    expect(
+      refusal("api", { ...API, RUN_CRONJOB: "false", CRON_TRIGGER_SECRET: "short" }),
+    ).toContain("at least 32 characters");
+  });
+
+  it("accepts a long one", () => {
+    const env = parse("api", { ...API, RUN_CRONJOB: "false", CRON_TRIGGER_SECRET: "a".repeat(32) });
+    expect(env.RUN_CRONJOB).toBe(false);
+  });
+
+  // The default is what every install had before the flag existed: whichever
+  // process runs the worker also owns the schedule.
+  it("owns its own schedule by default, and then wants no secret", () => {
+    expect(parse("api", API).RUN_CRONJOB).toBe(true);
+  });
+});
+
 // Compose passes `SMTP_HOST: ${SMTP_HOST}` through as "" when the .env file has
 // no value, and Helm renders an unset value the same way. Telling those apart
 // from unset would refuse to boot on the stacks this repo ships.
