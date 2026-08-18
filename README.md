@@ -677,6 +677,17 @@ catching up never dials the fleet eleven times over. `retention` stays on 03:00
 and the weekly digest on Monday 09:00, which an interval reading would have
 drifted to whenever the scheduler first got round to it.
 
+**On-demand actions wait for a tick too**, and that is the part most likely to
+surprise a user rather than an operator: the dashboard's collect button and an
+approval only *enqueue* — the api has no runner to drain them, so nothing happens
+until the next tick. A click can look like it did nothing for up to your tick
+interval. There is deliberately **no HTTP endpoint that runs a tick**: a tick can
+take minutes on a real fleet against request timeouts of 30-60s, and a host that
+scales to zero may freeze the container the moment a response is sent, so
+"trigger it over HTTP" is a design question rather than a route. This is the
+strongest argument for a tighter tick — and the reason a scheduler that can only
+ping a URL is not enough to run burst mode; it has to be able to run a process.
+
 **Staleness is the tick interval, and it is a latency question, not a safety
 one**: a five-minute pass ticked every fifteen minutes *is* a fifteen-minute
 pass, while the observe windows the drop pipeline runs on are measured in days.
