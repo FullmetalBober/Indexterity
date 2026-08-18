@@ -683,6 +683,20 @@ pass, while the observe windows the drop pipeline runs on are measured in days.
 Ten to fifteen minutes is the sensible floor — below that the five-minute passes
 gain nothing and every tick is a fresh process paying start-up.
 
+**The api holds no database connection when nobody is watching.** Its SSE
+listener needs a dedicated session (`LISTEN` binds to one, so it cannot come
+from a pool), and that session used to be opened at boot and held for the life
+of the process — which after burst mode was the *only* thing an idle api held,
+and the one thing that pins a database that suspends when idle. It is lazy now:
+the session opens on the first subscriber and closes thirty seconds after the
+last one leaves. Measured on a built image with `RUN_WORKER=false`, forty
+seconds idle, no dashboard open: **zero** client backends. One while a stream is
+live, which the integration suite asserts against `pg_stat_activity` rather than
+against the service's own opinion of itself. Thirty seconds rather than zero
+because the SSE route caps a stream at five minutes to re-check ownership, so an
+open dashboard re-subscribes on a schedule and would otherwise churn the session
+([D87](./docs/decisions.md)).
+
 One thing burst mode forced everywhere: the alert cooldown is now a Postgres
 claim rather than a Map in the worker's memory. A tick is a whole process, so an
 in-memory window is empty every time — a cluster unreachable since Tuesday would
