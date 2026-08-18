@@ -645,7 +645,8 @@ start when it does not come back — three attempts, so a Postgres that was rest
 is a slow boot rather than a crashloop. The round trip is the test and the hostname
 only a hint: measured on PgBouncer 1.25, `pool_mode=transaction` loses the
 notification and `pool_mode=session` delivers it. A pooler buys this app nothing
-either way — it holds about 20 connections at its defaults.
+either way — it holds about 20 connections at its defaults
+([D89](./docs/decisions.md)).
 
 The dashboard server has its own, built on `@t3-oss/env-core`
 (`apps/web/src/lib/env.ts`), where the interesting part is the split: every
