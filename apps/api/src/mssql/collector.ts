@@ -504,7 +504,7 @@ export class MssqlIndexCollector implements IndexCollector {
         firstSeen: row.firstSeen,
         lastSeen: row.lastSeen,
       }));
-      for (const [key, shapes] of shapesFromPlans(databaseTargets, database, planRows, now)) {
+      for (const [key, shapes] of await shapesFromPlans(databaseTargets, database, planRows, now)) {
         result.set(key, shapes);
       }
     }
@@ -538,7 +538,7 @@ export class MssqlIndexCollector implements IndexCollector {
        ORDER BY agg.lastSeen DESC`,
       { pattern: tablePlanPattern(collection) },
     );
-    return deletePatternsFromPlans(
+    return await deletePatternsFromPlans(
       rows.map((row) => ({ planXml: row.planXml, execs: asNumber(row.execs) })),
       database,
       collection,
