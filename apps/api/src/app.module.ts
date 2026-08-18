@@ -11,6 +11,7 @@ import { HealthController } from "./health/health.controller";
 import { TenancyService } from "./http/tenancy.service";
 import { InsightsController } from "./insights/insights.controller";
 import { TickController } from "./jobs/tick.controller";
+import { TickService } from "./jobs/tick.service";
 import { OrgController } from "./org/org.controller";
 import { PolicyController } from "./policy/policy.controller";
 import { RecommendationsController } from "./recommendations/recommendations.controller";
@@ -46,6 +47,6 @@ function sentryImports() {
     EventsController,
     TickController,
   ],
-  providers: [DatabaseService, TenancyService, ClusterEventsService],
+  providers: [DatabaseService, TenancyService, ClusterEventsService, TickService],
 })
 export class AppModule {}

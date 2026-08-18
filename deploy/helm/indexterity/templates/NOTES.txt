@@ -50,9 +50,16 @@ Workloads (topology: {{ .Values.topology }}):
             curl -fsS -X POST https://<host>/api/internal/tick \
               -H "Authorization: Bearer $CRON_TRIGGER_SECRET"
 
-          It enqueues what became due and returns at once; the runner executes
+{{- if .Values.api.runWorker }}
+          It runs the whole tick — claims what became due, enqueues and drains
+          it — answering within 25s; `"drained": false` means ping again to
+          resume. Safe to call as often as you like — passes are claimed per
+          occurrence, so repeats inside one bucket enqueue nothing.
+{{- else }}
+          It enqueues what became due and returns at once; the worker executes
           it. Safe to call as often as you like — passes are claimed per
           occurrence, so repeats inside one bucket enqueue nothing.
+{{- end }}
 {{- end }}
 {{- if and (include "indexterity.merged" .) .Values.worker.enabled }}
 

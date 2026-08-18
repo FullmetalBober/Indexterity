@@ -441,7 +441,9 @@ config:
   # from one idle worker and 60s is ~43k. The tightest schedule is five minutes,
   # so anything up to a minute is invisible to the pipeline.
   #
-  # Given to the worker AND to the api, since api.runWorker embeds the runner.
+  # Given to the worker AND to the api, but only the standalone worker still
+  # polls — an api.runWorker install drains on its own 30s tick instead, so
+  # there this controls nothing.
   workerPollIntervalMs: ""
   # Per-IP request budgets, per minute. Raise them for a shared egress IP or a
   # test suite. Read rateLimitMax as PER REPLICA (see the api Deployment);

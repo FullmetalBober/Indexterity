@@ -1,4 +1,4 @@
-import type { Runner } from "graphile-worker";
+import type { WorkerEvents } from "graphile-worker";
 import {
   clustersUnreachable,
   clusterTaskRuns,
@@ -88,25 +88,29 @@ export function recordDrop(outcome: "dropped" | "unhidden" | "absent"): void {
 
 // Job-level counters from graphile-worker's own events, so the numbers agree with
 // what the queue believes rather than with what a task remembered to report.
-// Wired inside startWorker, which covers the standalone worker and the
-// RUN_WORKER=true api alike — and so does the unreachable gauge, which only the
-// process that runs the pipeline can answer for.
-export function instrumentRunner(runner: Runner): void {
+// Takes the EVENT STREAM rather than a Runner, because since #231 there are two
+// things that execute jobs and only one of them has a Runner: the standalone
+// worker's resident run(), and the api's tick drains, where runOnce is handed a
+// long-lived emitter instead. Both go through wireRunnerEvents (jobs/runner.ts),
+// which must be called ONCE per process — the gauge callback below would stack
+// otherwise — and only by a process that runs the pipeline, which is the only
+// one that can answer for the unreachable gauge.
+export function instrumentRunner(events: WorkerEvents): void {
   clustersUnreachable.addCallback((result) => result.observe(unreachableClusterCount()));
 
-  runner.events.on("job:success", ({ job }) => {
+  events.on("job:success", ({ job }) => {
     jobRuns.add(1, { task: job.task_identifier, outcome: "success" });
     observeDuration(job);
   });
   // job:failed follows job:error when the last retry burns, on the same
   // condition, so an errored job is counted once: as a retry, or as
   // dead-lettered.
-  runner.events.on("job:error", ({ job }) => {
+  events.on("job:error", ({ job }) => {
     if (job.attempts >= job.max_attempts) return;
     jobRuns.add(1, { task: job.task_identifier, outcome: "retry" });
     observeDuration(job);
   });
-  runner.events.on("job:failed", ({ job }) => {
+  events.on("job:failed", ({ job }) => {
     jobRuns.add(1, { task: job.task_identifier, outcome: "dead_letter" });
     observeDuration(job);
   });

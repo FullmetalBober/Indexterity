@@ -18,7 +18,8 @@ import { AppExceptionFilter } from "./errors/exception.filter";
 import { captureAuthFailure } from "./errors/reporting";
 import { quietProbes } from "./http/quiet-probes";
 import { securityHeaders } from "./http/security-headers";
-import { embeddedWorkerEnabled, startWorker } from "./jobs/runner";
+import { embeddedWorkerEnabled } from "./jobs/runner";
+import { TickService } from "./jobs/tick.service";
 import { instrumentHttp, registerControlPlaneGauges, startMetricsServer } from "./metrics";
 
 async function bootstrap(): Promise<void> {
@@ -157,32 +158,23 @@ async function bootstrap(): Promise<void> {
 
   // One-container mode for small and self-hosted installs. Off by default:
   // hosted keeps the worker separate so an api rollout cannot abort an
-  // in-flight index build, and so the alert cooldown stays single-replica.
+  // in-flight index build.
+  //
+  // No startWorker here any more (#231): graphile-worker's run() is where
+  // `LISTEN "jobs:insert"` lives, so the embedded api never enters it. Jobs run
+  // on the tick instead — claim what became due, drain with runOnce against the
+  // api's own pool — and TickService owns the whole lifecycle through Nest,
+  // which is what retires the manual SIGTERM ordering that used to live here:
+  // the drain settles in the beforeApplicationShutdown phase, one phase before
+  // DatabaseService drains the pool, so D71's race stays closed without a
+  // hand-registered handler (see the note in jobs/tick.service.ts).
   if (embeddedWorkerEnabled()) {
-    // The api's own pool, shared with the jobs it now runs. One process, one
-    // control-plane pool: the tasks used to open a second one of their own the
-    // first time a job asked for it.
-    //
-    // Stopping the runner is registered HERE rather than left to Nest's shutdown
-    // hooks, and the ordering matters: enableShutdownHooks above registered its
-    // SIGTERM handler first, so DatabaseService would otherwise drain this pool
-    // while a job was still running against it.
-    // RUN_CRONJOB decides whether this runner also installs the schedule. False
-    // means the clock is outside: POST /api/internal/tick enqueues what became
-    // due, and this runner executes it the moment the row lands.
-    const ownsSchedule = apiEnv().RUN_CRONJOB;
-    const runner = await startWorker(database.db, ownsSchedule);
-    app
-      .getHttpAdapter()
-      .getInstance()
-      .log.info(
-        ownsSchedule
-          ? "RUN_WORKER=true — job runner embedded in the api, and it owns the schedule"
-          : "RUN_WORKER=true, RUN_CRONJOB=false — runner embedded, schedule driven by POST /api/internal/tick",
-      );
-    const stopRunner = (): void => void runner.stop();
-    process.once("SIGTERM", stopRunner);
-    process.once("SIGINT", stopRunner);
+    const ownsSchedule = app.get(TickService).startInterval();
+    fastify.log.info(
+      ownsSchedule
+        ? "RUN_WORKER=true — jobs drain in-process; a 30s tick owns the schedule (no resident runner, no LISTEN)"
+        : "RUN_WORKER=true, RUN_CRONJOB=false — jobs drain in-process; the clock is external, and POST /api/internal/tick claims AND drains",
+    );
   }
 
   const port = apiEnv().API_PORT;

@@ -271,11 +271,13 @@ const apiShape = {
   // why an external clock previously meant a second process and a file in a
   // cron.
   //
-  // False installs no crontab and opens POST /api/internal/tick instead, where
-  // something external says "now". The tick only ENQUEUES: this process's own
-  // runner holds `LISTEN "jobs:insert"`, so the work starts the moment the row
-  // lands and the request returns in milliseconds rather than holding a
-  // connection open for the length of a pass.
+  // True with RUN_WORKER=true means a 30-second in-process interval runs the
+  // tick (jobs/tick.service.ts) — no crontab, no resident runner since #231.
+  // False opens POST /api/internal/tick instead, where something external says
+  // "now": with RUN_WORKER=true that request claims AND drains, bounded so it
+  // answers inside platform proxy timeouts; with RUN_WORKER=false it only
+  // enqueues, and the standalone worker's LISTEN picks the rows up the moment
+  // they land.
   RUN_CRONJOB: flag(true),
   // The bearer token that endpoint demands. Required when RUN_CRONJOB is false
   // and refused as too short otherwise: it authorises the whole pipeline, there
