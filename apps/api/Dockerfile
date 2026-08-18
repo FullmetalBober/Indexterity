@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# Separate image so the api (and worker) deploy independently. Build context = repo root.
+# Separate image so the api deploys independently of the dashboard. Build context = repo root.
 #
 # alpine rather than slim, because after D73 the base IS the image: 252 MB of
 # node:26-slim against 181 MB of node:26-alpine, and the whole shipped api tree is
@@ -60,5 +60,4 @@ WORKDIR /app
 ENV NODE_ENV=production
 COPY --from=builder /app .
 EXPOSE 3001
-# Worker deploys use the same image with: CMD ["node", "apps/api/dist/worker.js"]
 CMD ["node", "apps/api/dist/main.js"]
