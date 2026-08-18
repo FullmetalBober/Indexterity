@@ -631,6 +631,22 @@ Three schemas, because the three processes are given different things
 | `worker` | `+ MASTER_KEY` | It unseals stored credentials to dial a cluster — without it, it used to start cleanly and fail at the first job |
 | `api` | `+ BETTER_AUTH_SECRET` | Only the api serves auth |
 
+**`DATABASE_URL` has to be the direct endpoint**, not a transaction-pooled one —
+Neon's `-pooler` host, PgBouncer or Supavisor in transaction mode. `LISTEN/NOTIFY`
+does not survive transaction pooling: the `LISTEN` is accepted and the notification
+never arrives, because the listener and the notifier land on different backends.
+Nothing errors, and two things quietly stop working — the dashboard's SSE never
+fires, so panels only refresh on their own `staleTime`, and an enqueued job waits
+for the next poll instead of starting at once. Since a shape of failure that logs
+nothing is worse than one that refuses, the api and the worker each run a `NOTIFY`
+round trip at boot (`apps/api/src/db/notify-probe.ts`: `LISTEN` a throwaway channel,
+`pg_notify` it from a second connection, wait two seconds, close both) and refuse to
+start when it does not come back — three attempts, so a Postgres that was restarting
+is a slow boot rather than a crashloop. The round trip is the test and the hostname
+only a hint: measured on PgBouncer 1.25, `pool_mode=transaction` loses the
+notification and `pool_mode=session` delivers it. A pooler buys this app nothing
+either way — it holds about 20 connections at its defaults.
+
 The dashboard server has its own, built on `@t3-oss/env-core`
 (`apps/web/src/lib/env.ts`), where the interesting part is the split: every
 variable is a **server** one, so reading one in the browser throws rather than

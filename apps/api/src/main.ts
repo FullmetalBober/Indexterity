@@ -13,6 +13,7 @@ import { auth } from "./auth";
 import { sessionCookiesFor } from "./auth/session";
 import { apiEnv, trustProxySetting } from "./config/env";
 import { DatabaseService } from "./db/database.service";
+import { probeNotifyOrExit } from "./db/notify-probe";
 import { AppExceptionFilter } from "./errors/exception.filter";
 import { captureAuthFailure } from "./errors/reporting";
 import { quietProbes } from "./http/quiet-probes";
@@ -21,6 +22,11 @@ import { embeddedWorkerEnabled, startWorker } from "./jobs/runner";
 import { instrumentHttp, registerControlPlaneGauges, startMetricsServer } from "./metrics";
 
 async function bootstrap(): Promise<void> {
+  // Before anything serves: a DATABASE_URL that swallows NOTIFY is a dashboard whose
+  // live updates silently never fire, because the SSE stream is LISTEN/NOTIFY end to
+  // end and a transaction pooler drops the notification without erroring (#233).
+  // Opens two connections, closes both.
+  await probeNotifyOrExit();
   // Fastify's built-in pino: structured request/response logs with req ids,
   // secrets redacted. LOG_LEVEL=debug for verbose, silent in tests.
   const adapter = new FastifyAdapter({

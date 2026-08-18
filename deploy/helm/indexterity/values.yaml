@@ -508,6 +508,16 @@ secrets:
   # GITHUB_CLIENT_SECRET).
   existingSecret: ""
   # postgres://user:pass@host:5432/indexterity
+  #
+  # The DIRECT endpoint, not a transaction-pooled one (Neon's `-pooler` host,
+  # PgBouncer or Supavisor in transaction mode). LISTEN/NOTIFY does not survive
+  # transaction pooling — the LISTEN is accepted and the notification never
+  # arrives — so the dashboard's live updates silently never fire and an enqueued
+  # job waits for the next poll. The api and the worker test it with a NOTIFY
+  # round trip at boot and refuse to start on a URL that loses it, so this one is
+  # a CrashLoopBackOff naming the reason rather than a dashboard that looks fine
+  # and never updates. A pooler buys this release nothing either: it holds about
+  # 20 connections at the chart's defaults.
   databaseUrl: ""
   # Session signing key: openssl rand -base64 32
   betterAuthSecret: ""

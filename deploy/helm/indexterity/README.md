@@ -6,8 +6,10 @@ folds the whole release into one container when three Deployments is more than
 an install needs.
 
 PostgreSQL is **not** bundled: point `secrets.databaseUrl` at a managed
-instance or your own postgres release. That is the control-plane store; the
-MongoDB clusters Indexterity manages are added later from the dashboard.
+instance or your own postgres release — at its **direct** endpoint, since
+`LISTEN/NOTIFY` does not survive transaction pooling and the api refuses to boot
+on a URL that loses it (see the values table). That is the control-plane store;
+the MongoDB clusters Indexterity manages are added later from the dashboard.
 
 ## Install
 
@@ -231,6 +233,7 @@ stays off by default — the dashboard does not need it.
 | `api.replicas` / `web.replicas` | **One each by default.** Raise for HA or throughput — both are stateless. `rateLimitMax` is per api process and Postgres connections grow ~15 per api replica; `api.runWorker=true` pins the api at 1 |
 | `allInOne.*` | Image and resources for `topology: single-container`. `api.image` and `web.image` are never pulled in that topology, and neither is a second copy of node |
 | `metrics.webPort` | The dashboard's metrics containerPort. Empty means `metrics.port`, or `metrics.port + 1` when it shares a network namespace with the api |
+| `secrets.databaseUrl` | The control-plane Postgres, and it has to be the **direct** endpoint — not Neon's `-pooler` host, PgBouncer or Supavisor in transaction mode. `LISTEN/NOTIFY` does not survive transaction pooling: the `LISTEN` is accepted and the notification never arrives, so the dashboard's live updates silently never fire and an enqueued job waits for the next poll. The api and the worker run a `NOTIFY` round trip at boot and refuse to start when it is lost, which makes this a CrashLoopBackOff naming the reason instead of a dashboard that looks fine and never updates. A pooler buys the release nothing anyway — it holds about 20 connections at these defaults |
 | `secrets.existingSecret` | Bring your own Secret (`DATABASE_URL`, `BETTER_AUTH_SECRET`, `MASTER_KEY`, optionally `SMTP_PASS`, `GITHUB_CLIENT_SECRET`) instead of putting values in Helm |
 | `web.publicUrl` | The dashboard's public origin. Defaults to the ingress host; the api trusts it for auth and session cookies are bound to it |
 | `worker.enabled` | Off means nothing is collected, applied or finalized on a schedule — the dashboard still works and can collect on demand |
