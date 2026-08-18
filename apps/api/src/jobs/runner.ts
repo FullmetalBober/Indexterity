@@ -1,4 +1,4 @@
-import { type Runner, run } from "graphile-worker";
+import { type Runner, run, type WorkerEvents } from "graphile-worker";
 import { apiEnv, workerEnv } from "../config/env";
 import type { Database } from "../db";
 import { captureError } from "../errors/reporting";
@@ -71,12 +71,14 @@ const CRONTAB = [
   "0 9 * * 1 digest",
 ].join("\n");
 
-// Start the job runner. Used by the standalone worker process, and by the api
-// itself when RUN_WORKER=true collapses both into one container.
-// `ownsSchedule` is the api's RUN_CRONJOB, passed rather than read: the
-// standalone worker validates workerShape, which does not declare an api-only
-// variable, so reading it here would throw in the one process that has always
-// owned the schedule unconditionally.
+// Start the resident job runner. Since #231 only the standalone worker process
+// (worker.ts) calls this — the RUN_WORKER=true api drains on a tick instead
+// (tick.service.ts) and never enters graphile-worker's run(), which is where
+// `LISTEN "jobs:insert"` lives. #232 scrubs this along with the worker.
+// `ownsSchedule` is passed rather than read: the standalone worker validates
+// workerShape, which does not declare an api-only variable, so reading
+// RUN_CRONJOB here would throw in the one process that has always owned the
+// schedule unconditionally.
 export async function startWorker(db: Database, ownsSchedule = true): Promise<Runner> {
   const values = { ...workerEnv(), RUN_CRONJOB: ownsSchedule };
   const runner = await run({
@@ -118,9 +120,23 @@ export async function startWorker(db: Database, ownsSchedule = true): Promise<Ru
     // error, so the runner still claims, executes and retries exactly as before.
     ...(values.RUN_CRONJOB ? { crontab: CRONTAB } : {}),
   });
-  // Job counters come off the same events, so they are registered here and
-  // cover the embedded mode below as well as the standalone worker.
-  instrumentRunner(runner);
+  wireRunnerEvents(db, runner.events);
+  return runner;
+}
+
+// Everything the queue has to report, attached to ONE event stream per process.
+// Extracted from startWorker for #231, because the things that execute jobs are
+// now two: the standalone worker's resident run() above (until #232), and the
+// api's tick drains, where runOnce is handed a long-lived emitter through its
+// `events` option — verified to be the same stream the workers emit on, so the
+// dead-letter capture and the owner alerts survive the resident runner's
+// removal. Wire it ONCE per process, not once per drain: instrumentRunner
+// registers a gauge callback, and handlers stacked per tick would report every
+// failure N times.
+export function wireRunnerEvents(db: Database, events: WorkerEvents): void {
+  // Job counters come off the same events, so one wiring covers the standalone
+  // worker and the RUN_WORKER=true api alike.
+  instrumentRunner(events);
   // The dead-letter transition, reported once (#31). Deliberately the LAST
   // attempt rather than every failure: graphile-worker retries, so reporting
   // each one turns a single fault into five events that say the same thing, and
@@ -134,7 +150,7 @@ export async function startWorker(db: Database, ownsSchedule = true): Promise<Ru
   // Nothing that the pipeline classifies reaches here: an unreachable cluster is
   // a handled condition the queue records as a SUCCESS (§7.4.1), so job:failed
   // is already only the unexpected ones.
-  runner.events.on("job:failed", ({ job, error }) => {
+  events.on("job:failed", ({ job, error }) => {
     if (job.attempts >= job.max_attempts) {
       captureError(error, {
         task: job.task_identifier,
@@ -145,7 +161,7 @@ export async function startWorker(db: Database, ownsSchedule = true): Promise<Ru
   });
   // A cluster task that burns its last retry alerts the owners — a dead
   // connection string or revoked user otherwise fails silently forever.
-  runner.events.on("job:failed", ({ job, error }) => {
+  events.on("job:failed", ({ job, error }) => {
     const clusterId = finalClusterFailure({
       taskIdentifier: job.task_identifier,
       attempts: job.attempts,
@@ -179,13 +195,12 @@ export async function startWorker(db: Database, ownsSchedule = true): Promise<Ru
       captureError(failure, { task: job.task_identifier, clusterId });
     });
   });
-  return runner;
 }
 
 // Embedded mode is opt-in and off by default: hosted runs the worker as its own
-// deployment so an api rollout cannot abort an in-flight index build, and so the
-// in-memory alert cooldown keeps its single-replica assumption. Small and
-// self-hosted installs trade that for one container.
+// deployment so an api rollout cannot abort an in-flight index build. Small and
+// self-hosted installs trade that for one container — which since #231 means
+// the tick loop in tick.service.ts, not a resident runner.
 export function embeddedWorkerEnabled(): boolean {
   return apiEnv().RUN_WORKER;
 }

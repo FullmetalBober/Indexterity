@@ -664,9 +664,13 @@ else would have caught.
 One web image serves every environment — `API_URL` and `WEB_ORIGIN` are read at
 runtime, and nothing about the api's address is baked into the browser bundle.
 The worker deploys from the api image with `CMD ["node",
-"apps/api/dist/worker.js"]`, or set `RUN_WORKER=true` to embed it in the api for
-a one-container install. Hosted should keep them separate: an api rollout would
-otherwise abort an in-flight index build.
+"apps/api/dist/worker.js"]`, or set `RUN_WORKER=true` to run the jobs inside the
+api for a one-container install. That api holds no resident runner and no
+`LISTEN`: a 30-second in-process tick claims what became due and drains it with
+`runOnce`, so between ticks an idle api holds nothing (the interval still
+queries twice a minute — a database that suspends on idle wants the external
+clock below instead). Hosted should keep the processes separate: an api rollout
+would otherwise abort an in-flight index build.
 
 **One deployment, with the clock outside.** `RUN_WORKER` decides whether a
 process *executes* jobs; `RUN_CRONJOB` decides whether it also decides *when*
@@ -680,10 +684,14 @@ POST /api/internal/tick     Authorization: Bearer $CRON_TRIGGER_SECRET
   → {"dispatched":["scheduleApply","scheduleProbe"],"alreadyClaimed":[]}
 ```
 
-The request only **enqueues** — it works out which passes became due and writes
-the rows, then returns in milliseconds. It never drains, which is what keeps it
-clear of platform request timeouts. The api's own runner holds
-`LISTEN "jobs:insert"`, so the work starts the instant the row lands.
+With `RUN_WORKER=true` the request **claims and drains** — the same tick the
+in-process interval runs, because nothing in that api LISTENs any more, so if
+this request did not drain, nothing would. It is bounded: past 25 seconds
+(under the 30-60s platform proxy floors) the response says `"drained": false`
+while the drain carries on in-process, and pinging again resumes a partially
+drained queue rather than duplicating it. With `RUN_WORKER=false` the request
+only enqueues and returns in milliseconds — the standalone worker holds
+`LISTEN "jobs:insert"` and starts the work the instant the row lands.
 
 **Safe to call as often as you like**, and that is a property rather than a
 promise: passes are claimed against their *occurrence* in `worker_watermarks`,
@@ -723,12 +731,12 @@ drifted to whenever the scheduler first got round to it.
 surprise a user rather than an operator: the dashboard's collect button and an
 approval only *enqueue* — the api has no runner to drain them, so nothing happens
 until the next tick. A click can look like it did nothing for up to your tick
-interval. There is deliberately **no HTTP endpoint that runs a tick**: a tick can
-take minutes on a real fleet against request timeouts of 30-60s, and a host that
-scales to zero may freeze the container the moment a response is sent, so
-"trigger it over HTTP" is a design question rather than a route. This is the
-strongest argument for a tighter tick — and the reason a scheduler that can only
-ping a URL is not enough to run burst mode; it has to be able to run a process.
+interval. A scheduler that can only ping a URL is still not enough for burst
+mode: `POST /api/internal/tick` does run a bounded drain, but only when the api
+itself executes jobs (`RUN_WORKER=true`) — with `RUN_WORKER=false` it merely
+enqueues, and a host that scales to zero may freeze the container the moment a
+response is sent, mid-drain. Burst mode's scheduler has to be able to run a
+process.
 
 **Staleness is the tick interval, and it is a latency question, not a safety
 one**: a five-minute pass ticked every fifteen minutes *is* a fifteen-minute
