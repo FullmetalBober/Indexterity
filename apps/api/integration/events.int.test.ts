@@ -86,6 +86,21 @@ async function notify(targetClusterId: string, kind: string): Promise<void> {
 }
 
 describe("cluster events (SSE)", () => {
+  // FIRST, and it has to be: the two refusals below never build a stream, but
+  // any case that subscribes leaves the session up for its grace period. The
+  // regression #223 fixed is exactly this reading being 1 from boot, for the
+  // life of the process, whether or not anybody ever opened a dashboard.
+  it("holds no postgres session before anybody has subscribed", async () => {
+    const result = await db.execute<{ count: string }>(sql`
+      select count(*)::text as count
+      from pg_stat_activity
+      where datname = current_database()
+        and backend_type = 'client backend'
+        and query ilike 'listen cluster_events%'
+    `);
+    expect(Number(result.rows[0]?.count ?? "0")).toBe(0);
+  });
+
   it("refuses without a session", async () => {
     const res = await api(`/clusters/${clusterId}/events`, null);
     expect(res.status).toBe(401);
@@ -137,5 +152,53 @@ describe("cluster events (SSE)", () => {
     // Routing stays on the wire between processes; the stream's scope already
     // names the cluster, so no frame should carry an id.
     expect(buffer).not.toContain(clusterId);
+  });
+});
+
+// The claim #223 makes is about postgres SESSIONS, so it is asserted against
+// pg_stat_activity rather than against the service's own view of itself. The
+// api under test is a real child process (helpers.startApi) pointed at this
+// database, so its LISTEN — if it holds one — is visible from here.
+describe("the listener holds a session only while somebody is subscribed", () => {
+  // Every `listen cluster_events` backend on this database. The api process is
+  // the only thing in this suite that opens one.
+  async function listenSessions(): Promise<number> {
+    const result = await db.execute<{ count: string }>(sql`
+      select count(*)::text as count
+      from pg_stat_activity
+      where datname = current_database()
+        and backend_type = 'client backend'
+        and query ilike 'listen cluster_events%'
+    `);
+    return Number(result.rows[0]?.count ?? "0");
+  }
+
+  // The regression: this used to be 1 from the moment the api booted, for the
+  // life of the process, whether or not anyone had ever opened a dashboard.
+  it("opens one while a stream is live", async () => {
+    const res = await fetch(`${API_ROOT}/clusters/${clusterId}/events`, {
+      headers: { cookie: owner.cookie, accept: "text/event-stream" },
+    });
+    expect(res.status).toBe(200);
+    if (res.body === null) throw new Error("no response body to read");
+    const reader = res.body.getReader();
+    try {
+      // Read one frame, so the generator has certainly registered its listener
+      // and the acquire() has certainly run. Keepalives make this resolve even
+      // with no event to deliver.
+      await reader.read();
+      // The connect is fire-and-forget by design, so poll rather than assume it
+      // has landed by the time the first frame arrives.
+      const deadline = Date.now() + 10_000;
+      let sessions = 0;
+      while (Date.now() < deadline) {
+        sessions = await listenSessions();
+        if (sessions >= 1) break;
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+      expect(sessions).toBe(1);
+    } finally {
+      await reader.cancel().catch(() => {});
+    }
   });
 });
