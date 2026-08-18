@@ -18,7 +18,6 @@ import { AppExceptionFilter } from "./errors/exception.filter";
 import { captureAuthFailure } from "./errors/reporting";
 import { quietProbes } from "./http/quiet-probes";
 import { securityHeaders } from "./http/security-headers";
-import { embeddedWorkerEnabled } from "./jobs/runner";
 import { TickService } from "./jobs/tick.service";
 import { instrumentHttp, registerControlPlaneGauges, startMetricsServer } from "./metrics";
 
@@ -156,26 +155,20 @@ async function bootstrap(): Promise<void> {
     process.once("SIGINT", () => void metrics.stop());
   }
 
-  // One-container mode for small and self-hosted installs. Off by default:
-  // hosted keeps the worker separate so an api rollout cannot abort an
-  // in-flight index build.
-  //
-  // No startWorker here any more (#231): graphile-worker's run() is where
-  // `LISTEN "jobs:insert"` lives, so the embedded api never enters it. Jobs run
-  // on the tick instead — claim what became due, drain with runOnce against the
-  // api's own pool — and TickService owns the whole lifecycle through Nest,
-  // which is what retires the manual SIGTERM ordering that used to live here:
-  // the drain settles in the beforeApplicationShutdown phase, one phase before
-  // DatabaseService drains the pool, so D71's race stays closed without a
-  // hand-registered handler (see the note in jobs/tick.service.ts).
-  if (embeddedWorkerEnabled()) {
-    const ownsSchedule = app.get(TickService).startInterval();
-    fastify.log.info(
-      ownsSchedule
-        ? "RUN_WORKER=true — jobs drain in-process; a 30s tick owns the schedule (no resident runner, no LISTEN)"
-        : "RUN_WORKER=true, RUN_CRONJOB=false — jobs drain in-process; the clock is external, and POST /api/internal/tick claims AND drains",
-    );
-  }
+  // The pipeline lives here, always: since #232 there is no other process to
+  // put it in. Jobs run on the tick — claim what became due, drain with runOnce
+  // against the api's own pool — and TickService owns the whole lifecycle
+  // through Nest, which is what retires the manual SIGTERM ordering that used
+  // to live here: the drain settles in the beforeApplicationShutdown phase, one
+  // phase before DatabaseService drains the pool, so D71's race stays closed
+  // without a hand-registered handler (see the note in jobs/tick.service.ts).
+  // The only choice left to configuration is the CLOCK (RUN_CRONJOB).
+  const ownsSchedule = app.get(TickService).startInterval();
+  fastify.log.info(
+    ownsSchedule
+      ? "jobs drain in-process; a 30s tick owns the schedule (no resident runner, no LISTEN)"
+      : "RUN_CRONJOB=false — jobs drain in-process; the clock is external, and POST /api/internal/tick claims AND drains",
+  );
 
   const port = apiEnv().API_PORT;
   await app.listen(port, "0.0.0.0");

@@ -24,10 +24,14 @@ export type ClusterTaskOutcome =
   | "gone"
   | "error";
 
-// Clusters whose last tick could not reach them. In memory, which is sound for
-// the same reason the alert cooldown is: the worker is a single replica by
-// design, and with RUN_WORKER=true there is only the one process. It rebuilds
-// itself within a tick of a restart.
+// Clusters whose last tick could not reach them. In memory and PER REPLICA,
+// which was exactly sound while the pipeline was pinned to one process and is
+// eventually consistent now that it is not (#232 lifted the cap): every
+// replica drains from one shared queue, so a cluster's next task lands on an
+// arbitrary pod and each pod's verdict for it refreshes within a few passes. A
+// pod can therefore export a stale entry for a cluster another pod has since
+// reached — bounded by how often the hourly passes go round — which is why the
+// fleet alert is a ratio with a 15m hold rather than a zero-tolerance count.
 const unreachable = new Set<string>();
 
 export function recordClusterTask(
@@ -88,13 +92,11 @@ export function recordDrop(outcome: "dropped" | "unhidden" | "absent"): void {
 
 // Job-level counters from graphile-worker's own events, so the numbers agree with
 // what the queue believes rather than with what a task remembered to report.
-// Takes the EVENT STREAM rather than a Runner, because since #231 there are two
-// things that execute jobs and only one of them has a Runner: the standalone
-// worker's resident run(), and the api's tick drains, where runOnce is handed a
-// long-lived emitter instead. Both go through wireRunnerEvents (jobs/runner.ts),
-// which must be called ONCE per process — the gauge callback below would stack
-// otherwise — and only by a process that runs the pipeline, which is the only
-// one that can answer for the unreachable gauge.
+// Takes the EVENT STREAM rather than a Runner: the tick's drains (the only
+// thing that executes jobs since #232) hand runOnce a long-lived emitter, and
+// no Runner ever exists. Wired through wireRunnerEvents (jobs/runner.ts), which
+// must be called ONCE per process — the gauge callback below would stack
+// otherwise.
 export function instrumentRunner(events: WorkerEvents): void {
   clustersUnreachable.addCallback((result) => result.observe(unreachableClusterCount()));
 

@@ -420,7 +420,7 @@ Every key, component and the things that turned out to be load-bearing:
 ```bash
 cp .env.example .env      # then fill secrets
 npm install
-podman-compose up         # postgres + api + web + worker, hot reload
+podman-compose up         # postgres + api + web, hot reload
 # or npm run up           # the same, and recovers from stale container state
 ```
 
@@ -436,14 +436,14 @@ podman run -d --rm --name mongo --network mongo_optimizer_default \
   --network-alias mongo docker.io/library/mongo:8
 ```
 
-The second one has to be on the compose network: the api and worker are
-containers, so `localhost` is themselves, and the host is only addressable as
+The second one has to be on the compose network: the api is a container, so
+`localhost` is itself, and the host is only addressable as
 `host.containers.internal`, which resolves into `169.254.0.0/16` — a range
 `src/engine/net-guard.ts` files as FORBIDDEN and never dials, even with
 `ALLOW_PRIVATE_CLUSTER_TARGETS`, because the cloud metadata endpoint shares it.
 Clusters registered before the demo mongod was dropped from compose already hold
-`mongodb://mongo:27017`, and the worker logs `cluster <id> unreachable —
-skipped` every tick until something answers to that name.
+`mongodb://mongo:27017`, and the api logs `cluster <id> unreachable — skipped`
+every tick until something answers to that name.
 
 Anything topology-shaped needs a replica set, since `$indexStats` and
 `$collStats latencyStats` are both per-member — most easily several mongods as
@@ -473,9 +473,9 @@ backfill goes in the next migration. Both scripts verify their own cases on ever
 run, because the way a check like that fails is by matching nothing.
 
 Migration installs **two** schemas
-— `public` for Drizzle and `graphile_worker` for the queue — because the api and
-worker start together and whoever queues a job first would otherwise race a
-schema that is not there yet.
+— `public` for Drizzle and `graphile_worker` for the queue — installed before the
+api serves, because a request that queues a job would otherwise race a schema
+that is not there yet.
 
 **Four test layers**, currently 600 api unit, 317 web unit, 104 integration and
 31 end-to-end.
@@ -513,8 +513,8 @@ All three defaults exist because the control plane dials hosts that users name.
   dialing, and every host in a multi-host string is checked.
 - **Plaintext connections are refused** unless `ALLOW_INSECURE_CLUSTER_TLS=true`.
   Every client the control plane builds goes through one constructor
-  (`mongo/client.ts`) that requires validated TLS — so it holds for the worker's
-  stored strings, not only for onboarding. It refuses rather than silently
+  (`mongo/client.ts`) that requires validated TLS — so it holds for the
+  pipeline's stored strings, not only for onboarding. It refuses rather than silently
   adding `tls=true`, because a string that says `tls=false` is a statement worth
   contradicting out loud. Its own switch rather than part of the private-target
   one on purpose: a VPC-peered Atlas cluster is a private address that must
@@ -622,24 +622,22 @@ as 20, and a garbled `TRUST_PROXY` refuses instead of quietly meaning "no proxy
 in front" — which used to collapse every per-client rate limit into one shared
 bucket.
 
-Three schemas, because the three processes are given different things
+Three schemas, because three validation surfaces are given different things
 (`apps/api/src/config/schema.ts`):
 
 | Process | Demands | Because |
 |---|---|---|
 | `migrate` | `DATABASE_URL` | The pre-install Job talks to Postgres and exits |
-| `worker` | `+ MASTER_KEY` | It unseals stored credentials to dial a cluster — without it, it used to start cleanly and fail at the first job |
-| `api` | `+ BETTER_AUTH_SECRET` | Only the api serves auth |
+| `worker` | `+ MASTER_KEY` | The pipeline's subset, and what the `rotate-key` CLI validates — it unseals stored credentials without serving HTTP |
+| `api` | `+ BETTER_AUTH_SECRET` | Only the api serves auth (and it validates the pipeline's variables too, since it runs the jobs) |
 
 **`DATABASE_URL` has to be the direct endpoint**, not a transaction-pooled one —
 Neon's `-pooler` host, PgBouncer or Supavisor in transaction mode. `LISTEN/NOTIFY`
 does not survive transaction pooling: the `LISTEN` is accepted and the notification
 never arrives, because the listener and the notifier land on different backends.
-Nothing errors, and two things quietly stop working — the dashboard's SSE never
-fires, so panels only refresh on their own `staleTime`, and an enqueued job waits
-for the next poll instead of starting at once. Since a shape of failure that logs
-nothing is worse than one that refuses, the api and the worker each run a `NOTIFY`
-round trip at boot (`apps/api/src/db/notify-probe.ts`: `LISTEN` a throwaway channel,
+Nothing errors, and the dashboard's SSE quietly never fires — panels only refresh
+on their own `staleTime`. Since a shape of failure that logs nothing is worse
+than one that refuses, the api runs a `NOTIFY` round trip at boot (`apps/api/src/db/notify-probe.ts`: `LISTEN` a throwaway channel,
 `pg_notify` it from a second connection, wait two seconds, close both) and refuse to
 start when it does not come back — three attempts, so a Postgres that was restarting
 is a slow boot rather than a crashloop. The round trip is the test and the hostname
@@ -663,86 +661,57 @@ else would have caught.
 
 One web image serves every environment — `API_URL` and `WEB_ORIGIN` are read at
 runtime, and nothing about the api's address is baked into the browser bundle.
-The worker deploys from the api image with `CMD ["node",
-"apps/api/dist/worker.js"]`, or set `RUN_WORKER=true` to run the jobs inside the
-api for a one-container install. That api holds no resident runner and no
-`LISTEN`: a 30-second in-process tick claims what became due and drains it with
-`runOnce`, so between ticks an idle api holds nothing (the interval still
-queries twice a minute — a database that suspends on idle wants the external
-clock below instead). Hosted should keep the processes separate: an api rollout
-would otherwise abort an in-flight index build.
+The api runs the whole job pipeline itself (#232 retired the separate worker
+process): no resident runner, no `LISTEN` — a 30-second in-process tick claims
+what became due and drains it with `runOnce`, so between ticks an idle api holds
+nothing. Replicas are safe: passes are claimed per occurrence, so concurrent
+tickers cannot double-dispatch. The interval still queries twice a minute — a
+database that suspends on idle wants the external clock below instead.
 
-**One deployment, with the clock outside.** `RUN_WORKER` decides whether a
-process *executes* jobs; `RUN_CRONJOB` decides whether it also decides *when*
-they are due. They used to be one flag, which is why taking the schedule from
-outside meant giving up running jobs too. Set `RUN_WORKER=true` and
-`RUN_CRONJOB=false` and you get a single api that runs the pipeline on a clock
-you own:
+**The clock outside (`RUN_CRONJOB=false`).** The api always executes jobs; this
+flag hands over the decision of *when* passes become due. Nothing then fires on
+its own — an external scheduler you own posts the tick:
 
 ```
 POST /api/internal/tick     Authorization: Bearer $CRON_TRIGGER_SECRET
-  → {"dispatched":["scheduleApply","scheduleProbe"],"alreadyClaimed":[]}
+  → {"dispatched":["scheduleApply","scheduleProbe"],"alreadyClaimed":[],"drained":true}
 ```
 
-With `RUN_WORKER=true` the request **claims and drains** — the same tick the
-in-process interval runs, because nothing in that api LISTENs any more, so if
-this request did not drain, nothing would. It is bounded: past 25 seconds
-(under the 30-60s platform proxy floors) the response says `"drained": false`
-while the drain carries on in-process, and pinging again resumes a partially
-drained queue rather than duplicating it. With `RUN_WORKER=false` the request
-only enqueues and returns in milliseconds — the standalone worker holds
-`LISTEN "jobs:insert"` and starts the work the instant the row lands.
+The request **claims and drains** — the same tick the in-process interval runs,
+because nothing LISTENs any more, so if this request did not drain, nothing
+would. It is bounded: past 25 seconds (under the 30-60s platform proxy floors)
+the response says `"drained": false` while the drain carries on in-process, and
+pinging again resumes a partially drained queue rather than duplicating it —
+which is what makes even a dumb every-five-minutes ping a working scheduler.
 
 **Safe to call as often as you like**, and that is a property rather than a
 promise: passes are claimed against their *occurrence* in `worker_watermarks`,
 so a hundred calls inside one five-minute bucket enqueue at most one
-`scheduleApply`. `CRON_TRIGGER_SECRET` is required when `RUN_CRONJOB=false` —
-the endpoint authorises the whole pipeline and there is no user session behind
-it — and the boot refuses without it, because a deployment with no crontab and
-no way in is a pipeline that is silently dead.
+`scheduleApply`. Two crons firing a minute apart compute the same occurrence and
+only one claim wins — no lock. A host that slept through eleven buckets owes
+**one** run per pass, not eleven, so catching up never dials the fleet eleven
+times over; `retention` stays on 03:00 and the weekly digest on Monday 09:00,
+which an interval reading would have drifted. `CRON_TRIGGER_SECRET` is required
+when `RUN_CRONJOB=false` — the endpoint authorises the whole pipeline and there
+is no user session behind it — and the boot refuses without it, because a
+deployment with no interval and no way in is a pipeline that is silently dead.
 
-**Burst mode, for hosts that sleep.** The resident worker holds a permanent
-`LISTEN` connection and a cron, both of which need a process that outlives the
-intervals they describe — so on a host that sleeps when idle, or a database that
-suspends its compute, the pipeline does not slow down, it **stops**: hidden
-indexes overrun their observe windows and drops stall mid-pipeline. A third
-topology makes that supported rather than broken. Turn the resident runner off
-(`RUN_WORKER=false`, no worker Deployment) and have any external scheduler — a
-GitHub Actions cron, a free cron service, the host's own — run one tick:
+**Hosts that sleep are a supported topology, with caveats named.** On a host
+that sleeps when idle, or a database that suspends its compute, a resident
+schedule does not slow down, it **stops** — which is why the external clock
+exists. Any scheduler that can POST with a bearer header drives the pipeline in
+request-sized bites: the work happens *inside* the request window, which is
+exactly what a platform that freezes the container after the response needs.
+The one loss on such a platform is the post-deadline tail of a long drain — a
+frozen mid-flight job waits out graphile-worker's lock before retrying — so keep
+the ping cadence at a few minutes and the tail stays short. Ticked every
+fifteen minutes, a five-minute pass *is* a fifteen-minute pass; that is a
+latency question, not a safety one — the observe windows the drop pipeline runs
+on are measured in days.
 
-```
-npm run worker:once -w @repo/api      # or: node apps/api/dist/worker-once.js
-```
-
-A tick works out which scheduled passes became due, enqueues them, drains the
-queue — including the per-cluster jobs those passes fan out, which `runOnce()`
-picks up in the same run — and exits non-zero if anything went wrong, because a
-red cron job is the only error channel a process with no supervisor has.
-
-**Ticks are idempotent by construction.** Each pass is claimed against its most
-recent *occurrence*, not against an elapsed interval, so two crons firing a
-minute apart compute the same occurrence and only one claim wins — no lock. A
-host that slept through eleven buckets owes **one** run per pass, not eleven, so
-catching up never dials the fleet eleven times over. `retention` stays on 03:00
-and the weekly digest on Monday 09:00, which an interval reading would have
-drifted to whenever the scheduler first got round to it.
-
-**On-demand actions wait for a tick too**, and that is the part most likely to
-surprise a user rather than an operator: the dashboard's collect button and an
-approval only *enqueue* — the api has no runner to drain them, so nothing happens
-until the next tick. A click can look like it did nothing for up to your tick
-interval. A scheduler that can only ping a URL is still not enough for burst
-mode: `POST /api/internal/tick` does run a bounded drain, but only when the api
-itself executes jobs (`RUN_WORKER=true`) — with `RUN_WORKER=false` it merely
-enqueues, and a host that scales to zero may freeze the container the moment a
-response is sent, mid-drain. Burst mode's scheduler has to be able to run a
-process.
-
-**Staleness is the tick interval, and it is a latency question, not a safety
-one**: a five-minute pass ticked every fifteen minutes *is* a fifteen-minute
-pass, while the observe windows the drop pipeline runs on are measured in days.
-Ten to fifteen minutes is the sensible floor — below that the five-minute passes
-gain nothing and every tick is a fresh process paying start-up.
+**On-demand actions ride the same tick**: the dashboard's collect button and an
+approval enqueue, and the next drain — at most 30 seconds away with the
+interval, or your ping cadence without it — picks them up.
 
 **The api holds no database connection when nobody is watching.** Its SSE
 listener needs a dedicated session (`LISTEN` binds to one, so it cannot come
@@ -750,18 +719,17 @@ from a pool), and that session used to be opened at boot and held for the life
 of the process — which after burst mode was the *only* thing an idle api held,
 and the one thing that pins a database that suspends when idle. It is lazy now:
 the session opens on the first subscriber and closes thirty seconds after the
-last one leaves. Measured on a built image with `RUN_WORKER=false`, forty
-seconds idle, no dashboard open: **zero** client backends. One while a stream is
+last one leaves. Measured on a built image, forty seconds idle, no dashboard
+open: **zero** client backends. One while a stream is
 live, which the integration suite asserts against `pg_stat_activity` rather than
 against the service's own opinion of itself. Thirty seconds rather than zero
 because the SSE route caps a stream at five minutes to re-check ownership, so an
 open dashboard re-subscribes on a schedule and would otherwise churn the session
 ([D87](./docs/decisions.md)).
 
-One thing burst mode forced everywhere: the alert cooldown is now a Postgres
-claim rather than a Map in the worker's memory. A tick is a whole process, so an
-in-memory window is empty every time — a cluster unreachable since Tuesday would
-have mailed its owners on all 96 ticks of a fifteen-minute day
+One thing the tick design forced everywhere: the alert cooldown is a Postgres
+claim rather than a Map in process memory, so restarts and replicas cannot
+re-mail a cluster's owners on every tick of a bad day
 ([D86](./docs/decisions.md)).
 
 **One origin, guaranteed by the app.** The browser calls the api itself, so the
@@ -793,21 +761,21 @@ invisible to that test.
 has the table.
 
 A Helm chart is in [`deploy/helm/indexterity`](./deploy/helm/indexterity) —
-api + dashboard + worker, a pre-upgrade migration hook, ingress, and a
-`helm test`. Bring your own PostgreSQL. `topology` folds the three workloads into
-one container (`single-container`) for an install where three Deployments is more
+api (pipeline included) + dashboard, a pre-upgrade migration hook, ingress, and a
+`helm test`. Bring your own PostgreSQL. `topology` folds the two workloads into
+one container (`single-container`) for an install where two Deployments is more
 than it needs; the Services, the ingress and the app are identical either way, so
 nothing in front of the chart has to know which one is installed.
 
 ### Metrics
 
 `METRICS_ENABLED=true` serves Prometheus metrics on port 9464 (`METRICS_PORT`)
-from all three workloads. Off unless asked for — an exporter costs memory in
+from both workloads. Off unless asked for — an exporter costs memory in
 every process, and an install with nothing scraping it pays that for nobody. The
 chart can turn it on and install a ServiceMonitor per workload; compose has it on
-and publishes 9464 (api), 9465 (worker) and 9466 (web).
+and publishes 9464 (api) and 9466 (web).
 
-Each answers for what only it can see, so scrape all three. The five things a
+Each answers for what only it can see, so scrape both. The five things a
 service that drops other people's indexes has to be able to state:
 
 | question | metric |
@@ -845,18 +813,14 @@ saving. See [D75](./docs/decisions.md) for why the two apps land differently.
 **The DSN is yours.** A self-hosted install reports to your own Sentry
 organisation or your own self-hosted Sentry, never to us.
 
-**Two projects, not three.** The api and the worker share one: they are one
-image, one release and one body of code — `jobs/`, `analysis/` and the drizzle
-layer are reachable from both, so a fault there is one issue a per-workload split
-would file twice, and `RUN_WORKER=true` makes them a single process anyway. A
-`service` tag says which answered. The dashboard is a separate app and gets its
-own. In compose that is `SENTRY_DSN_API` and `SENTRY_DSN_WEB`; in the chart,
-`errorReporting.dsn` and `errorReporting.webDsn`.
+**Two projects.** The api — pipeline included, one process since #232 — and the
+dashboard, which is a separate app with a separate release. In compose that is
+`SENTRY_DSN_API` and `SENTRY_DSN_WEB`; in the chart, `errorReporting.dsn` and
+`errorReporting.webDsn`.
 
 | workload | what is reported |
 |---|---|
-| api | unhandled 500s from `AppExceptionFilter`, tagged with the request id already in the log line and the response body |
-| worker | a job that burned its last retry — the dead-letter transition — tagged with task, attempt and cluster |
+| api | unhandled 500s from `AppExceptionFilter`, tagged with the request id already in the log line and the response body — and a job that burned its last retry (the dead-letter transition), tagged with task, attempt and cluster |
 | web | server-side render failures, and anything the passthrough throws |
 
 Plus the unhandled-rejection and uncaught-exception sinks the SDK installs in

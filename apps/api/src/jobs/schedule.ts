@@ -1,10 +1,11 @@
-// The recurring schedule as something a BURST tick can evaluate (#212).
+// The recurring schedule, as something a tick can evaluate (#212, #231).
 //
-// The resident runner installs `CRONTAB` into graphile-worker, whose cron only
-// runs inside `run()` — a `runOnce()` tick would drain the queue and never
-// enqueue anything, so a host that sleeps between ticks silently stops the whole
-// pipeline. This is the same schedule, expressed so a tick can ask "what became
-// due while nobody was running?".
+// Born for burst mode, where graphile-worker's cron could not help — its cron
+// only runs inside `run()`, and a `runOnce()` tick would drain the queue and
+// never enqueue anything. Since #231 replaced the resident runner with the tick
+// and #232 removed the crontab it read, this list IS the schedule: every pass
+// the pipeline runs, expressed so any trigger can ask "what became due while
+// nobody was running?".
 //
 // Every entry is its most recent OCCURRENCE at or before `now`, not "has an
 // interval elapsed". That distinction is what makes a tick idempotent for free:
@@ -58,16 +59,26 @@ function weeklyAt(weekday: number, hour: number, minute: number) {
   };
 }
 
-// Deliberately a separate list rather than something parsed out of CRONTAB.
-// graphile-worker's cron parser is not exported, and writing one to read our own
-// seven-line constant would be more code than this with more to go wrong — but
-// the two CAN drift, so `cron` above carries the entry each line stands for and
-// jobs/schedule.test.ts holds this list to the runner's.
+// The cadences are measured, not picked (#178). Collect/suggest are HOURLY,
+// bounded from both sides: the ceiling is the write rate against
+// latency_samples — the one table where nothing run-length-collapses (#67
+// measured index_snapshots folding 76% of its looks into runs and
+// latency_samples folding NONE), so its storage and the dashboard's scan both
+// scale linearly with this number. The floor is what a reader can see: four
+// points a day is not a trend, and the latency panel reading as broken is what
+// prompted hourly. Halving to thirty minutes would double the scan and the
+// storage to buy 48 points where 24 already clears the floor six times over —
+// the signal that has to be FAST is scheduleProbe's, five minutes below, which
+// is how a missing index shows up as latency long before the next hourly pass
+// would notice. scheduleApply also runs at five minutes so an approved drop
+// hides promptly; finalize is hourly, retention daily at 03:00, and the
+// read-only digest mails Monday 09:00.
 //
-// The two five-minute passes are offset in CRONTAB so they do not contend for
-// connections in a resident worker. Under burst they are dispatched in the same
-// tick by construction, so the offset is dropped rather than faked — see
-// worker-once.ts, which runs at the concurrency the operator configured.
+// The two five-minute passes carried offsets in the old resident crontab so
+// they would not contend for connections. A tick dispatches them in the same
+// moment by construction, so the offset is dropped rather than faked; the
+// `cron` field keeps the entry each pass historically stood for, readable side
+// by side with the occurrence arithmetic.
 export const BURST_SCHEDULE: readonly ScheduledPass[] = [
   { task: "scheduleCollect", cron: "0 * * * *", occurrenceAt: everyMinutes(60) },
   // The `:30` offset keeps two hourly passes off the same cluster in the same

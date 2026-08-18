@@ -57,9 +57,8 @@ TAG=${TAG:-${RELEASE:-0.1.0}}
 TOPOLOGY=${TOPOLOGY:-split}
 case "$TOPOLOGY" in
   split) IMAGES="api web" ;;
-  # One image, and that is the point of the topology: the migration Job and the
-  # worker run their own entrypoints out of it too, so nothing here pulls the
-  # other two.
+  # One image, and that is the point of the topology: the migration Job runs its
+  # own entrypoint out of it too, so nothing here pulls the other two.
   single-container) IMAGES="all-in-one" ;;
   *) echo "TOPOLOGY must be split or single-container (got $TOPOLOGY)"; exit 1 ;;
 esac
@@ -173,21 +172,24 @@ else
   repo_for() { image_ref "$1" | sed "s/:$TAG//"; }
 fi
 
-# The image the topology actually pulls, and the worker shape that goes with it.
-# single-container embeds the job runner (RUN_WORKER), which is the appliance the
-# image exists for and the only place that code path is exercised under a
-# kubelet; split keeps the worker's own Deployment, so between them the matrix
-# covers both.
+# The image set the topology actually pulls. The pipeline runs inside the api
+# in both (#232 removed the worker Deployment), so the matrix now covers the two
+# ways the same code meets a kubelet: three containers, or one.
 case "$TOPOLOGY" in
   single-container)
     IMAGE_ARGS="allInOne.image.repository=$(repo_for all-in-one),allInOne.image.tag=$TAG,allInOne.image.pullPolicy=Never"
-    WORKER_ARGS="worker.enabled=false,api.runWorker=true"
     COMPONENTS="app"
+    API_REPLICAS=1
     ;;
   *)
     IMAGE_ARGS="api.image.repository=$(repo_for api),api.image.tag=$TAG,api.image.pullPolicy=Never,web.image.repository=$(repo_for web),web.image.tag=$TAG,web.image.pullPolicy=Never"
-    WORKER_ARGS="worker.enabled=true"
-    COMPONENTS="api web worker"
+    COMPONENTS="api web"
+    # Two on purpose: the old chart REFUSED api.replicas>1 because the resident
+    # runner installed its crontab per process. #232 lifted that — passes are
+    # claimed per occurrence, so concurrent tickers are safe — and this is the
+    # install that would have failed, passing under a kubelet. The clean-logs
+    # gate below runs across both replicas.
+    API_REPLICAS=2
     ;;
 esac
 # allowInsecureAuthUrl: a Kind cluster terminates no TLS, and the api refuses a
@@ -203,10 +205,9 @@ esac
 # way to fetch what is there — or a spurious failure if the registry blinks.
 # shellcheck disable=SC2086  # CHART_ARGS is a deliberate word split
 helm upgrade --install indexterity "$CHART" $CHART_ARGS -n "$NS" --wait --timeout 5m \
-  --set "topology=$TOPOLOGY,api.replicas=1,web.replicas=1" \
+  --set "topology=$TOPOLOGY,api.replicas=$API_REPLICAS,web.replicas=1" \
   --set "metrics.enabled=true" \
   --set "$IMAGE_ARGS" \
-  --set "$WORKER_ARGS" \
   --set "config.signupMode=open,config.allowPrivateClusterTargets=true" \
   --set "config.allowInsecureClusterTls=true" \
   --set "config.allowInsecureAuthUrl=true" \

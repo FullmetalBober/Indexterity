@@ -500,24 +500,25 @@ jobs:
   # first time on main. The rule is the same rule, applied to the diff instead
   # of the branch.
   #
-  # The filter widened once already. #172 rewired `startWorker`, `main.ts` and
+  # The filter widened once already. #172 rewired the runner, `main.ts` and
   # every job entrypoint, and this job said `chart=false` — packaging paths were
   # the whole filter, and how the api boots is not a packaging path. The only
   # reason that shipped safely is that both Kind topologies were run by hand.
-  # Nothing else in CI covers it: the integration suite calls the job functions
-  # directly, so it never sees `startWorker`, the crontab installing, or a
-  # supervisor's view of a process that dies at boot (#177).
+  # Nothing else in CI covers it: the integration suite drives the tick through
+  # a spawned api, but never a supervisor's view of a process that dies at boot
+  # (#177).
   #
-  # Those paths get BOTH legs, because the two topologies differ in exactly the
-  # way that matters here — `worker.enabled` (see kind-test.sh):
+  # Those paths get BOTH legs, because the two topologies differ in how the same
+  # pipeline meets a kubelet (see kind-test.sh):
   #
-  #   split             worker.enabled=true   the standalone worker.ts Deployment
-  #   single-container  api.runWorker=true    the embedded runner, no worker.ts
+  #   split             api + web Deployments, api.replicas=2 — the install the
+  #                     old one-replica refusal forbade, ticking concurrently
+  #   single-container  one image, one pod, everything inside
   #
-  # So a job-pipeline change has two kubelet-visible shapes: `worker.ts` as its
-  # own process, and `main.ts` running the runner inside the api. Both legs run on
-  # every path that reaches this job, so the matrix below is a literal rather than
-  # something this job has to decide.
+  # Since #232 the pipeline always runs inside the api (the tick), so the legs
+  # differ in packaging and replica count rather than in which process executes
+  # jobs. Both run on every path that reaches this job, so the matrix below is a
+  # literal rather than something this job has to decide.
   scope:
     runs-on: ubuntu-latest
     outputs:
@@ -533,7 +534,7 @@ jobs:
             exit 0
           fi
           changed=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD")
-          if echo "$changed" | grep -qE '^(deploy/|apps/[a-z]+/Dockerfile|\.github/workflows/ci\.yml)|^apps/api/src/(jobs/|main\.ts|worker\.ts)'; then
+          if echo "$changed" | grep -qE '^(deploy/|apps/[a-z]+/Dockerfile|\.github/workflows/ci\.yml)|^apps/api/src/(jobs/|main\.ts)'; then
             echo "chart=true" >> "$GITHUB_OUTPUT"
           else
             echo "chart=false" >> "$GITHUB_OUTPUT"

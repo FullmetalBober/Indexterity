@@ -51,13 +51,9 @@ const BASE = {
   BETTER_AUTH_SECRET: "unit-test-secret",
 };
 
-function load(
-  flags: { runWorker: boolean; runCronjob: boolean },
-  extra: Record<string, string> = {},
-) {
+function load(flags: { runCronjob: boolean }, extra: Record<string, string> = {}) {
   loadEnv("api", {
     ...BASE,
-    RUN_WORKER: String(flags.runWorker),
     RUN_CRONJOB: String(flags.runCronjob),
     ...(flags.runCronjob ? {} : { CRON_TRIGGER_SECRET: "s".repeat(48) }),
     ...extra,
@@ -84,7 +80,7 @@ describe("the overlap guard", () => {
   // guard is the ONLY thing between two triggers and two concurrent runOnce
   // calls against the same pool.
   it("serialises a tick that arrives while a drain is in flight", async () => {
-    load({ runWorker: true, runCronjob: true });
+    load({ runCronjob: true });
     const { service } = makeService();
 
     const first = service.tick();
@@ -107,7 +103,7 @@ describe("the overlap guard", () => {
   });
 
   it("keeps later ticks alive after a drain that failed", async () => {
-    load({ runWorker: true, runCronjob: true });
+    load({ runCronjob: true });
     const { service } = makeService();
 
     const failing = service.tick();
@@ -127,7 +123,7 @@ describe("the overlap guard", () => {
 
 describe("the bounded tick", () => {
   it("answers drained:false at the deadline and lets the drain carry on", async () => {
-    load({ runWorker: true, runCronjob: false });
+    load({ runCronjob: false });
     const { service } = makeService();
 
     const outcome = await service.tickWithin(20);
@@ -144,7 +140,7 @@ describe("the bounded tick", () => {
   });
 
   it("answers drained:true when the drain beats the deadline", async () => {
-    load({ runWorker: true, runCronjob: false });
+    load({ runCronjob: false });
     const { service } = makeService();
 
     const outcome = service.tickWithin(5_000);
@@ -158,7 +154,7 @@ describe("the drain's runOnce options", () => {
   it("hands runOnce the api's own pool, no signal handlers, and a capped concurrency", async () => {
     // PG_POOL_MAX 3 with WORKER_CONCURRENCY 4: the pool is the binding
     // constraint, so the drain gets 3 - 1 = 2 — never the whole pool.
-    load({ runWorker: true, runCronjob: true }, { WORKER_CONCURRENCY: "4", PG_POOL_MAX: "3" });
+    load({ runCronjob: true }, { WORKER_CONCURRENCY: "4", PG_POOL_MAX: "3" });
     const { service, pool } = makeService();
 
     const tick = service.tick();
@@ -173,17 +169,10 @@ describe("the drain's runOnce options", () => {
 });
 
 describe("the in-process interval", () => {
-  // Trigger 1 exists only when this process both executes jobs AND owns the
-  // schedule; every other combination has another clock or another executor.
-  it("does not start when RUN_WORKER is false", () => {
-    load({ runWorker: false, runCronjob: true });
-    const { service } = makeService();
-    expect(service.startInterval()).toBe(false);
-    expect(worker.runOnce).not.toHaveBeenCalled();
-  });
-
+  // Trigger 1 exists only when this process owns the schedule; RUN_CRONJOB=false
+  // hands the clock to the HTTP tick and nothing here may fire on its own.
   it("does not start when the clock is external (RUN_CRONJOB=false)", () => {
-    load({ runWorker: true, runCronjob: false });
+    load({ runCronjob: false });
     const { service } = makeService();
     expect(service.startInterval()).toBe(false);
     expect(worker.runOnce).not.toHaveBeenCalled();
@@ -191,7 +180,7 @@ describe("the in-process interval", () => {
 
   it("ticks once at boot and again every interval", async () => {
     vi.useFakeTimers();
-    load({ runWorker: true, runCronjob: true });
+    load({ runCronjob: true });
     const { service } = makeService();
 
     expect(service.startInterval()).toBe(true);
@@ -212,7 +201,7 @@ describe("the in-process interval", () => {
 
 describe("shutdown", () => {
   it("asks the in-flight drain to stop and waits for it before returning", async () => {
-    load({ runWorker: true, runCronjob: true });
+    load({ runCronjob: true });
     const { service } = makeService();
 
     const tick = service.tick();
@@ -242,7 +231,7 @@ describe("shutdown", () => {
   });
 
   it("refuses to start a fresh drain once shutdown has begun", async () => {
-    load({ runWorker: true, runCronjob: true });
+    load({ runCronjob: true });
     const { service } = makeService();
 
     await service.beforeApplicationShutdown();

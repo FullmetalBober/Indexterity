@@ -64,26 +64,4 @@ spec:
     {{- end }}
   selector:
     {{- include "indexterity.selectorLabels" (dict "root" . "component" (include "indexterity.podComponent" (dict "root" . "workload" "web"))) | nindent 4 }}
-{{- if and .Values.metrics.enabled .Values.worker.enabled }}
----
-# The worker's only Service, and it exists solely so a scrape can find the pod:
-# nothing calls the worker, it reaches out. Headless for the same reason — there
-# is one replica and nothing to load-balance.
-apiVersion: v1
-kind: Service
-metadata:
-  name: {{ include "indexterity.fullname" . }}-worker-metrics
-  labels:
-    {{- include "indexterity.labels" . | nindent 4 }}
-    app.kubernetes.io/component: worker
-spec:
-  type: ClusterIP
-  clusterIP: None
-  ports:
-    - name: metrics
-      port: {{ .Values.metrics.port }}
-      targetPort: metrics
-      protocol: TCP
-  selector:
-    {{- include "indexterity.selectorLabels" (dict "root" . "component" "worker") | nindent 4 }}
-{{- end }}
+

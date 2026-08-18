@@ -5,8 +5,9 @@ import { drainPool } from "../jobs/connection-pool";
 import { closeDatabase, createDatabase, type Database } from "./client";
 
 // The api's Drizzle/Postgres connection for the control plane, and now the only
-// one this process opens for it: the jobs used to reach for a second pool of their
-// own, and with RUN_WORKER=true they run against this one instead.
+// one this process opens for it: the jobs used to reach for a second pool of
+// their own, and since the pipeline moved in (#231, #232) they run against this
+// one instead.
 //
 // On shutdown (enableShutdownHooks in main.ts) both pools this process owns are
 // drained: this one and the mongo client pool. Draining happens in
