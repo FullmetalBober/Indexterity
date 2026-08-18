@@ -46,9 +46,4 @@ spec:
           curl -fsS $RETRY "http://{{ include "indexterity.fullname" . }}-web:{{ .Values.metrics.port }}/metrics" \
             | grep -q "^indexterity_web_document_duration_seconds_count"
           echo "web metrics ok"
-          {{- if .Values.worker.enabled }}
-          curl -fsS $RETRY "http://{{ include "indexterity.fullname" . }}-worker-metrics:{{ .Values.metrics.port }}/metrics" \
-            | grep -q "^target_info"
-          echo "worker metrics ok"
-          {{- end }}
           {{- end }}

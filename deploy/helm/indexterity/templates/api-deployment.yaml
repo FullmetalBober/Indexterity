@@ -1,5 +1,5 @@
 {{- include "indexterity.validateTopology" . -}}
-{{- include "indexterity.validateWorkerTopology" . -}}
+{{- include "indexterity.validateSchedule" . -}}
 {{- include "indexterity.validateAuthUrl" . -}}
 {{- include "indexterity.validateTrustProxy" . -}}
 {{- /*
@@ -53,8 +53,8 @@ spec:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
         # `app` rather than `api` in single-container, because this container is
-        # not the api: it is a supervisor running the api, the dashboard and —
-        # with api.runWorker — the job runner. `kubectl logs` returns all of them.
+        # not the api: it is a supervisor running the api (pipeline included) and
+        # the dashboard. `kubectl logs` returns both.
         - name: {{ if $merged }}app{{ else }}api{{ end }}
           image: {{ if $merged }}{{ include "indexterity.allInOneImage" . }}{{ else }}{{ include "indexterity.apiImage" . }}{{ end }}
           imagePullPolicy: {{ if $merged }}{{ .Values.allInOne.image.pullPolicy }}{{ else }}{{ .Values.api.image.pullPolicy }}{{ end }}

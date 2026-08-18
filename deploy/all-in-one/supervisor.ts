@@ -78,8 +78,8 @@ function cgroupMemoryLimit(): number | null {
 }
 
 // How the budget is divided. The api carries the heavier working set — the
-// control-plane reads, the Mongo driver, and the job runner when RUN_WORKER is on
-// — so it gets the larger share.
+// control-plane reads, the Mongo driver, and the job pipeline it always runs
+// (#232) — so it gets the larger share.
 //
 // The third that is left over is deliberately NOT allocated, for two reasons and
 // both are measured. A heap ceiling is not a process's memory: two node runtimes

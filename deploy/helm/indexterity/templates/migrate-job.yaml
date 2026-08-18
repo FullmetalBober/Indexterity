@@ -7,7 +7,7 @@ metadata:
     {{- include "indexterity.labels" . | nindent 4 }}
     app.kubernetes.io/component: migrate
   annotations:
-    # Runs to completion BEFORE any new api/web/worker pod starts, so the
+    # Runs to completion BEFORE any new api/web pod starts, so the
     # schema is never behind the code. Idempotent — applied migrations skip.
     "helm.sh/hook": pre-install,pre-upgrade
     "helm.sh/hook-weight": "-5"
