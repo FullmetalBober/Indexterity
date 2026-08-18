@@ -1,6 +1,7 @@
 import { XMLParser } from "fast-xml-parser";
 import type { ConstantValue, QueryShape, SortKey } from "../analysis/workload";
 import { type WorkloadTarget, workloadKey } from "../engine/ports";
+import { PLAN_PARSE_CHUNK, yieldToEventLoop } from "./chunk";
 
 // Query Store plan XML → QueryShape (#201). The plan, not the statement text,
 // is the source: showplan XML is machine-emitted with a structured grammar —
@@ -344,13 +345,17 @@ function shapeKey(shape: {
 }
 
 // Fold every plan's per-table shapes into QueryShapes per workload target.
-// Pure — the collector feeds it rows; tests feed it fixtures.
-export function shapesFromPlans(
+//
+// Pure — the collector feeds it rows; tests feed it fixtures. Async only
+// because it pauses for the event loop between chunks of rows; ./chunk.ts holds
+// the 1652 ms of stall those pauses exist to avoid. Same inputs, same output,
+// no I/O.
+export async function shapesFromPlans(
   targets: readonly WorkloadTarget[],
   database: string,
   rows: readonly PlanRow[],
   now: Date,
-): Map<string, QueryShape[]> {
+): Promise<Map<string, QueryShape[]>> {
   const wanted = new Map<string, string>(); // "schema.table" -> workloadKey
   for (const target of targets) {
     if (target.database === database) {
@@ -410,7 +415,11 @@ export function shapesFromPlans(
     }
   };
 
-  for (const row of rows) {
+  for (const [index, row] of rows.entries()) {
+    // Every accumulator lives outside this loop, so there is no half-built
+    // state a pause could be observed in — the fold is identical whether the
+    // 5,000 plans are parsed in one breath or in fifty.
+    if (index > 0 && index % PLAN_PARSE_CHUNK === 0) await yieldToEventLoop();
     const { perTable, missing } = parseShowplanShapes(row.planXml, database);
     for (const [table, shape] of perTable) {
       const key = wanted.get(table);

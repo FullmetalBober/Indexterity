@@ -148,10 +148,10 @@ describe("shapesFromPlans", () => {
     ...over,
   });
 
-  it("merges Query-Store-fragmented literals into one shape", () => {
+  it("merges Query-Store-fragmented literals into one shape", async () => {
     // Same shape, different constants — two query_ids in the store.
     const variant = SCAN_SORT_PLAN.replaceAll("'open'", "'closed'").replaceAll("'eu'", "'us'");
-    const shapes = shapesFromPlans(
+    const shapes = await shapesFromPlans(
       targets,
       "probe",
       [row(SCAN_SORT_PLAN, 3), row(variant, 2)],
@@ -168,15 +168,15 @@ describe("shapesFromPlans", () => {
     expect(predicateShape?.observedForHours).toBeCloseTo(24, 0);
   });
 
-  it("folds the embedded missing-index suggestion in as its own shape", () => {
-    const shapes = shapesFromPlans(targets, "probe", [row(SCAN_SORT_PLAN, 7)], NOW);
+  it("folds the embedded missing-index suggestion in as its own shape", async () => {
+    const shapes = await shapesFromPlans(targets, "probe", [row(SCAN_SORT_PLAN, 7)], NOW);
     const suggested = shapes.get(key)?.find((shape) => !shape.collscan && shape.sort.length === 0);
     expect(suggested?.equality).toEqual(["status", "region"]);
     expect(suggested?.count).toBe(7);
   });
 
-  it("keeps constants that every sample agrees on", () => {
-    const shapes = shapesFromPlans(
+  it("keeps constants that every sample agrees on", async () => {
+    const shapes = await shapesFromPlans(
       targets,
       "probe",
       [row(SCAN_SORT_PLAN, 1), row(SCAN_SORT_PLAN, 1)],
@@ -186,8 +186,8 @@ describe("shapesFromPlans", () => {
     expect(predicateShape?.constants).toEqual({ status: "open", region: "eu" });
   });
 
-  it("ignores tables nobody asked about and other databases", () => {
-    const shapes = shapesFromPlans(
+  it("ignores tables nobody asked about and other databases", async () => {
+    const shapes = await shapesFromPlans(
       [{ database: "other", collection: "dbo.orders" }],
       "probe",
       [row(SEEK_PLAN, 5)],
@@ -196,11 +196,70 @@ describe("shapesFromPlans", () => {
     expect(shapes.size).toBe(0);
   });
 
-  it("seek shapes carry the equality/range split", () => {
-    const shapes = shapesFromPlans(targets, "probe", [row(SEEK_PLAN, 8)], NOW);
+  it("seek shapes carry the equality/range split", async () => {
+    const shapes = await shapesFromPlans(targets, "probe", [row(SEEK_PLAN, 8)], NOW);
     const seek = shapes.get(key)?.find((shape) => shape.range.length === 1);
     expect(seek?.equality).toEqual(["customer_id"]);
     expect(seek?.range).toEqual(["created_at"]);
     expect(seek?.sortedInMemory).toBe(false);
+  });
+});
+
+// The parse must not hold the event loop (#230), and that is not something the
+// signature can promise: dropping the yield leaves every other test in this
+// file green while the API stops answering for the length of a suggest pass.
+// So it is measured. deletePatternsFromPlans chunks off the same ./chunk.ts
+// helper this exercises, which is the whole reason the helper is shared.
+describe("shapesFromPlans yields the event loop while it parses", () => {
+  const NOW = new Date("2026-08-14T12:00:00Z");
+  const targets = [{ database: "probe", collection: "dbo.orders" }];
+
+  // MAX_PLANS_PER_DATABASE, which is the realistic worst case for one database
+  // and the size #230 measured — a smaller corpus shrinks the gap the assertion
+  // lives in, and 5,000 of these costs about a second. Each row carries its own
+  // literal, so this is 5,000 distinct documents to parse rather than one
+  // document parsed 5,000 times.
+  const CORPUS = Array.from(
+    { length: 5000 },
+    (_unused, index): PlanRow => ({
+      planXml: SCAN_SORT_PLAN.replaceAll("'open'", `'open${index}'`),
+      execs: 1,
+      totalIo: 10,
+      firstSeen: "2026-08-13T12:00:00Z",
+      lastSeen: "2026-08-14T11:00:00Z",
+    }),
+  );
+
+  const TICK_MS = 10;
+  // Deliberately loose, because CI shares its cores and this is a wall-clock
+  // measurement: the chunked parse comes in at tens of milliseconds and the
+  // synchronous one measured 1652 ms over 5,000 plans, so a threshold anywhere
+  // between the two answers the only question being asked, and the loose end
+  // is the one that does not wake anybody at 3am over a noisy neighbour.
+  const MAX_STALL_MS = 250;
+
+  it(`parses ${CORPUS.length} plans without a stall past ${MAX_STALL_MS} ms`, async () => {
+    let worstMs = 0;
+    let dueAt = performance.now() + TICK_MS;
+    const monitor = setInterval(() => {
+      const firedAt = performance.now();
+      worstMs = Math.max(worstMs, firedAt - dueAt);
+      dueAt = firedAt + TICK_MS;
+    }, TICK_MS);
+    try {
+      const shapes = await shapesFromPlans(targets, "probe", CORPUS, NOW);
+      // A starved timer cannot report from inside the block that starved it, so
+      // clearing the monitor here would read 0 ms out of even a fully
+      // synchronous parse — that mistake is why #230's first measurement
+      // claimed there was no problem. Waiting out a couple of ticks puts the
+      // loop through a timers phase, where the overdue monitor finally fires
+      // and records how late it was.
+      await new Promise((resolve) => setTimeout(resolve, TICK_MS * 2));
+      // Only worth measuring if the corpus was actually parsed.
+      expect(shapes.get(workloadKey("probe", "dbo.orders"))?.length).toBeGreaterThan(0);
+    } finally {
+      clearInterval(monitor);
+    }
+    expect(worstMs).toBeLessThan(MAX_STALL_MS);
   });
 });

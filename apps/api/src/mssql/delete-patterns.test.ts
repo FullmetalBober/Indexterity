@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { PLAN_PARSE_CHUNK } from "./chunk";
 import { deletePatternsFromPlans, retentionSecondsFrom } from "./delete-patterns";
 
 // Cut down from real plans captured off a 2022 CU26, keeping the elements this
@@ -62,17 +63,21 @@ describe("retentionSecondsFrom", () => {
 });
 
 describe("deletePatternsFromPlans", () => {
-  it("reads the column and the retention off a DATEADD purge", () => {
+  it("reads the column and the retention off a DATEADD purge", async () => {
     expect(
-      deletePatternsFromPlans([{ planXml: deletePlan(DATEADD), execs: 5 }], "shop", "dbo.events"),
+      await deletePatternsFromPlans(
+        [{ planXml: deletePlan(DATEADD), execs: 5 }],
+        "shop",
+        "dbo.events",
+      ),
     ).toEqual([{ field: "created_at", count: 5, medianRetentionSeconds: 7_776_000 }]);
   });
 
   // The dialect an ORM or a stored procedure produces, and probably the most
   // common one. The pattern is still real; only the number is missing.
-  it("reports the pattern without a retention when the cutoff is a parameter", () => {
+  it("reports the pattern without a retention when the cutoff is a parameter", async () => {
     expect(
-      deletePatternsFromPlans(
+      await deletePatternsFromPlans(
         [{ planXml: deletePlan(PARAMETERISED), execs: 4 }],
         "shop",
         "dbo.events",
@@ -80,8 +85,8 @@ describe("deletePatternsFromPlans", () => {
     ).toEqual([{ field: "created_at", count: 4, medianRetentionSeconds: null }]);
   });
 
-  it("sums executions across the plans of one column", () => {
-    const patterns = deletePatternsFromPlans(
+  it("sums executions across the plans of one column", async () => {
+    const patterns = await deletePatternsFromPlans(
       [
         { planXml: deletePlan(DATEADD), execs: 5 },
         { planXml: deletePlan(PARAMETERISED), execs: 4 },
@@ -96,9 +101,9 @@ describe("deletePatternsFromPlans", () => {
 
   // `>` is a query for RECENT rows, not a purge, and calling it one would put
   // "you delete by age every night" on a table nobody prunes.
-  it("ignores a comparison that is not older-than", () => {
+  it("ignores a comparison that is not older-than", async () => {
     expect(
-      deletePatternsFromPlans(
+      await deletePatternsFromPlans(
         [{ planXml: deletePlan(DATEADD, { op: "GT" }), execs: 5 }],
         "shop",
         "dbo.events",
@@ -106,9 +111,9 @@ describe("deletePatternsFromPlans", () => {
     ).toEqual([]);
   });
 
-  it("ignores a SELECT with the same predicate", () => {
+  it("ignores a SELECT with the same predicate", async () => {
     expect(
-      deletePatternsFromPlans(
+      await deletePatternsFromPlans(
         [{ planXml: deletePlan(DATEADD, { statementType: "SELECT" }), execs: 5 }],
         "shop",
         "dbo.events",
@@ -119,15 +124,23 @@ describe("deletePatternsFromPlans", () => {
   // Query Store records a query in the database it RAN in, not the one it read,
   // so a plan over another database's dbo.events must not be attributed here —
   // the same trap tableOf exists for in the workload pass.
-  it("ignores a purge of another database's table of the same name", () => {
+  it("ignores a purge of another database's table of the same name", async () => {
     expect(
-      deletePatternsFromPlans([{ planXml: deletePlan(DATEADD), execs: 5 }], "other", "dbo.events"),
+      await deletePatternsFromPlans(
+        [{ planXml: deletePlan(DATEADD), execs: 5 }],
+        "other",
+        "dbo.events",
+      ),
     ).toEqual([]);
   });
 
-  it("ignores a purge of a different table in this database", () => {
+  it("ignores a purge of a different table in this database", async () => {
     expect(
-      deletePatternsFromPlans([{ planXml: deletePlan(DATEADD), execs: 5 }], "shop", "dbo.orders"),
+      await deletePatternsFromPlans(
+        [{ planXml: deletePlan(DATEADD), execs: 5 }],
+        "shop",
+        "dbo.orders",
+      ),
     ).toEqual([]);
   });
 
@@ -135,7 +148,7 @@ describe("deletePatternsFromPlans", () => {
   // the seek's EndRange. Reading only the scan shape would make the pattern
   // vanish the moment somebody indexed it — which is precisely when the table
   // is big enough for the partition half of the advice to matter.
-  it("reads the seek shape a supported purge plans as", () => {
+  it("reads the seek shape a supported purge plans as", async () => {
     const seek = `<ShowPlanXML><BatchSequence><Batch><Statements>
       <StmtSimple StatementType="DELETE"><QueryPlan><RelOp><Update><RelOp><IndexScan>
         <SeekPredicates><SeekPredicateNew><SeekKeys><EndRange ScanType="LT">
@@ -148,14 +161,45 @@ describe("deletePatternsFromPlans", () => {
         </EndRange></SeekKeys></SeekPredicateNew></SeekPredicates>
       </IndexScan></RelOp></Update></RelOp></QueryPlan></StmtSimple>
     </Statements></Batch></BatchSequence></ShowPlanXML>`;
-    expect(deletePatternsFromPlans([{ planXml: seek, execs: 3 }], "shop", "dbo.events")).toEqual([
-      { field: "created_at", count: 3, medianRetentionSeconds: 17_280_000 },
-    ]);
+    expect(
+      await deletePatternsFromPlans([{ planXml: seek, execs: 3 }], "shop", "dbo.events"),
+    ).toEqual([{ field: "created_at", count: 3, medianRetentionSeconds: 17_280_000 }]);
   });
 
-  it("says nothing about malformed XML rather than throwing mid-collect", () => {
+  it("says nothing about malformed XML rather than throwing mid-collect", async () => {
     expect(
-      deletePatternsFromPlans([{ planXml: "<not xml", execs: 5 }], "shop", "dbo.events"),
+      await deletePatternsFromPlans([{ planXml: "<not xml", execs: 5 }], "shop", "dbo.events"),
     ).toEqual([]);
+  });
+
+  // This pass parses up to MAX_PLANS_PER_DATABASE plans and must not hold the
+  // event loop for all of them (#230) — the workload pass measured 1652 ms of
+  // stall doing exactly that.
+  //
+  // The stall itself is measured over there, on the bigger corpus; what is
+  // asserted here is the thing a revert would break, and it needs no wall
+  // clock to see: a self-rescheduling setImmediate runs once per turn of the
+  // loop, so it counts the turns the parse gave away. A synchronous body —
+  // including an `async` one that never awaits — runs to completion before the
+  // loop gets one, and counts zero.
+  it("gives the event loop turns while it parses", async () => {
+    const rows = Array.from({ length: PLAN_PARSE_CHUNK * 4 }, () => ({
+      planXml: deletePlan(DATEADD),
+      execs: 1,
+    }));
+    let turns = 0;
+    let spinning = true;
+    const spin = (): void => {
+      if (!spinning) return;
+      turns += 1;
+      setImmediate(spin);
+    };
+    setImmediate(spin);
+    try {
+      await deletePatternsFromPlans(rows, "shop", "dbo.events");
+    } finally {
+      spinning = false;
+    }
+    expect(turns).toBeGreaterThan(0);
   });
 });

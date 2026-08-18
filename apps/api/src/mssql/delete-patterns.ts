@@ -1,5 +1,6 @@
 import { XMLParser } from "fast-xml-parser";
 import type { DeletePattern } from "../engine/ports";
+import { PLAN_PARSE_CHUNK, yieldToEventLoop } from "./chunk";
 import { attr, collect, tableOf, type XmlNode } from "./workload";
 
 // Recurring age-based DELETEs, from Query Store plans (#206).
@@ -167,13 +168,20 @@ function agePredicatesIn(
 // than against a server. `count` is EXECUTIONS, not distinct statements: three
 // purge jobs run nightly is the same recurring pattern as one run three times,
 // and the recurrence gate is asking how often the table gets purged.
-export function deletePatternsFromPlans(
+//
+// Async for the same reason the workload pass is, and with the same guarantee:
+// it pauses for the event loop between chunks of rows (./chunk.ts) and is
+// otherwise as pure as it was — same inputs, same output, no I/O.
+export async function deletePatternsFromPlans(
   rows: readonly DeletePlanRow[],
   database: string,
   collection: string,
-): DeletePattern[] {
+): Promise<DeletePattern[]> {
   const byField = new Map<string, { count: number; retentions: number[] }>();
-  for (const row of rows) {
+  for (const [index, row] of rows.entries()) {
+    // byField is the only state, and it lives outside the loop, so pausing
+    // here cannot be observed in the result.
+    if (index > 0 && index % PLAN_PARSE_CHUNK === 0) await yieldToEventLoop();
     // One statement may compare the same column twice (a BETWEEN-shaped purge
     // window). That is one purge, so the column is counted once per plan.
     const fields = new Map<string, number | null>();
