@@ -64,14 +64,16 @@ function envNamesIn(text: string): Set<string> {
   return names;
 }
 
-const chartEnv: Record<ProcessName, Set<string>> = {
+// No worker row since #232: the pipeline's variables ride in the api's env, and
+// the rotate-key CLI (the one process still validating the worker shape) runs
+// inside the api's pod with that same env.
+const chartEnv: Partial<Record<ProcessName, Set<string>>> = {
   api: envNamesIn(expandIncludes(read(CHART, "api-deployment.yaml"))),
-  worker: envNamesIn(expandIncludes(read(CHART, "worker-deployment.yaml"))),
   migrate: envNamesIn(expandIncludes(read(CHART, "migrate-job.yaml"))),
 };
 
-// docker-compose, split per service so the api's block is not credited with what
-// only the worker sets.
+// docker-compose, split per service so the api's block is not credited with
+// what only another service sets.
 function composeEnv(service: string): Set<string> {
   const text = read(ROOT, "docker-compose.yml");
   const start = text.indexOf(`\n  ${service}:\n`);
@@ -129,18 +131,14 @@ const SUPERVISOR_VARS = new Set(["WEB_METRICS_PORT", "WEB_SENTRY_DSN"]);
 describe("every required variable is registered in every home", () => {
   // The gap #126 names: a required variable the chart does not set is a
   // CrashLoopBackOff, discovered by deploying.
-  it.each(["api", "worker", "migrate"] as const)(
-    "the chart gives %s what it demands",
-    (process) => {
-      for (const name of requiredVars(process)) {
-        expect(chartEnv[process], `${name} is required by the ${process} schema`).toContain(name);
-      }
-    },
-  );
+  it.each(["api", "migrate"] as const)("the chart gives %s what it demands", (process) => {
+    for (const name of requiredVars(process)) {
+      expect(chartEnv[process], `${name} is required by the ${process} schema`).toContain(name);
+    }
+  });
 
   it("docker-compose runs the dev stack on the same required set", () => {
     for (const name of requiredVars("api")) expect(composeEnv("api")).toContain(name);
-    for (const name of requiredVars("worker")) expect(composeEnv("worker")).toContain(name);
   });
 
   it(".env.example documents every variable a process cannot start without", () => {
@@ -166,13 +164,13 @@ describe("nothing is set that no schema knows", () => {
   // shape rather than listed.
   const isKnown = (name: string): boolean => known.has(name) || /^MASTER_KEY_V\d+$/.test(name);
 
-  it.each(["api", "worker", "migrate"] as const)("the chart's %s env is all known", (process) => {
-    for (const name of chartEnv[process]) {
+  it.each(["api", "migrate"] as const)("the chart's %s env is all known", (process) => {
+    for (const name of chartEnv[process] ?? new Set<string>()) {
       expect(isKnown(name), `${name} is set by the chart and no schema declares it`).toBe(true);
     }
   });
 
-  it.each(["api", "worker", "web"])("docker-compose's %s env is all known", (service) => {
+  it.each(["api", "web"])("docker-compose's %s env is all known", (service) => {
     for (const name of composeEnv(service)) {
       expect(isKnown(name), `${name} is set by docker-compose and no schema declares it`).toBe(
         true,
@@ -219,13 +217,7 @@ describe("the test suites spawn processes the schema accepts", () => {
 // mentions — which is how RETENTION_DAYS and the rate limits spent a release
 // being settable by nothing but `extraEnv`.
 it("every declared variable is reachable from at least one home", () => {
-  const homes = new Set([
-    ...chartEnv.api,
-    ...chartEnv.worker,
-    ...composeEnv("api"),
-    ...composeEnv("worker"),
-    ...exampleEnv(),
-  ]);
+  const homes = new Set([...(chartEnv.api ?? []), ...composeEnv("api"), ...exampleEnv()]);
   const orphans = declaredVars("api").filter(
     (name) => !FROM_THE_IMAGE.has(name) && !homes.has(name),
   );

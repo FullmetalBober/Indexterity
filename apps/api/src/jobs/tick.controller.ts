@@ -14,23 +14,14 @@ const TICK_REQUEST_DEADLINE_MS = 25_000;
 // The schedule, driven from outside (RUN_CRONJOB=false).
 //
 // The api owns no clock in this mode, so something external — a platform cron,
-// a CI schedule, an uptime pinger that can POST — says "now". What "now" does
-// depends on whether this process executes jobs:
-//
-//   RUN_WORKER=true   the same tick the in-process interval runs (#231): claim
-//                     what became due, enqueue it, DRAIN it with runOnce. There
-//                     is no resident runner and no `LISTEN "jobs:insert"` any
-//                     more, so if this request did not drain, nothing would.
-//                     Bounded at TICK_REQUEST_DEADLINE_MS: past it the response
-//                     says drained:false while the drain carries on in-process,
-//                     and a partially drained queue is a RESUMABLE state — the
-//                     occurrence claims and job keys make the next ping cheap
-//                     and duplicate-free.
-//
-//   RUN_WORKER=false  enqueue only, exactly as #227 built it. The standalone
-//                     worker still holds its own LISTEN (until #232), so the
-//                     work starts the instant the row lands and this request
-//                     stays millisecond-scale.
+// a CI schedule, an uptime pinger that can POST — says "now", and this request
+// runs the same tick the in-process interval runs (#231): claim what became
+// due, enqueue it, DRAIN it with runOnce. Nothing LISTENs and no other process
+// exists (#232), so if this request did not drain, nothing would. Bounded at
+// TICK_REQUEST_DEADLINE_MS: past it the response says drained:false while the
+// drain carries on in-process, and a partially drained queue is a RESUMABLE
+// state — the occurrence claims and job keys make the next ping cheap and
+// duplicate-free.
 //
 // Safe to call as often as you like, and that is a property rather than a
 // promise: passes are claimed against their OCCURRENCE in worker_watermarks, so
@@ -47,7 +38,7 @@ export class TickController {
   async tick(
     @Headers("authorization") authorization?: string,
   ): Promise<
-    { dispatched: string[]; alreadyClaimed: string[]; drained?: boolean } | { error: string }
+    { dispatched: string[]; alreadyClaimed: string[]; drained: boolean } | { error: string }
   > {
     const env = apiEnv();
     // Off unless the schedule is external. Answering here while the in-process
@@ -63,16 +54,12 @@ export class TickController {
     if (secret === undefined || !presented(authorization, secret)) {
       return { error: "unauthorized" };
     }
-    if (env.RUN_WORKER) {
-      const outcome = await this.tickService.tickWithin(TICK_REQUEST_DEADLINE_MS);
-      return {
-        dispatched: [...outcome.dispatched],
-        alreadyClaimed: [...outcome.alreadyClaimed],
-        drained: outcome.drained,
-      };
-    }
-    const result = await this.tickService.enqueueDue();
-    return { dispatched: [...result.dispatched], alreadyClaimed: [...result.alreadyClaimed] };
+    const outcome = await this.tickService.tickWithin(TICK_REQUEST_DEADLINE_MS);
+    return {
+      dispatched: [...outcome.dispatched],
+      alreadyClaimed: [...outcome.alreadyClaimed],
+      drained: outcome.drained,
+    };
   }
 }
 

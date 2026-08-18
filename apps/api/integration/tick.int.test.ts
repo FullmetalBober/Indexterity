@@ -3,13 +3,12 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createDatabase, inArray, sql, workerWatermarks } from "../src/db";
 import { API_PORT, databaseUrl, startApi, stopApi } from "./helpers";
 
-// The externally-driven schedule, end to end against a real Postgres: the half
-// worth testing is what lands in the QUEUE and in worker_watermarks, and neither
-// exists in the unit suite.
-//
-// RUN_WORKER stays false here on purpose. This suite is about the endpoint —
-// which passes it claims and enqueues — and a runner would drain the rows out
-// from under the assertions while they are being read.
+// The externally-driven schedule, end to end against a real Postgres: what the
+// tick claims, what it stamps into worker_watermarks, and — since #232 made the
+// endpoint drain as well as enqueue — that the queue is actually EMPTY again
+// once the response says so. With no clusters connected the scheduler passes
+// fan out to nothing, so the drain is cheap and the assertions stay about the
+// mechanism rather than about a fleet.
 const PORT = API_PORT + 6;
 const SECRET = "t".repeat(48);
 const PASSES = [
@@ -68,10 +67,7 @@ beforeAll(async () => {
     ),
   );
   await clearQueue();
-  server = await startApi(
-    { RUN_WORKER: "false", RUN_CRONJOB: "false", CRON_TRIGGER_SECRET: SECRET },
-    PORT,
-  );
+  server = await startApi({ RUN_CRONJOB: "false", CRON_TRIGGER_SECRET: SECRET }, PORT);
 }, 120_000);
 
 afterAll(async () => {
@@ -93,22 +89,43 @@ describe("POST /api/internal/tick", () => {
 
   // A fresh install has no watermarks, so the first tick owes every pass — which
   // is right: nothing has been collected, and waiting for the top of the hour is
-  // a worse first impression than a busy minute.
-  it("enqueues every due pass on the first tick", async () => {
+  // a worse first impression than a busy minute. Since #232 the request also
+  // DRAINS. What is asserted is that the seven dispatcher jobs are gone from the
+  // queue because they RAN — they are the first claims of the drain, so they
+  // execute inside the bounded window whatever else is in the database.
+  //
+  // `drained` itself is deliberately not asserted true: this suite shares its
+  // postgres with everything run before it, so the dispatchers fan out a collect
+  // per cluster that EXISTS here, and whether that tail beats the 25 s deadline
+  // is a fact about the leftover fleet, not about the endpoint. drained:false is
+  // a documented, resumable answer — the deadline race has its own unit tests —
+  // and the shape is pinned below so the contract cannot quietly lose the field.
+  it("dispatches every due pass on the first tick, and runs the dispatchers", async () => {
     const { status, body } = await tick(SECRET);
     expect(status).toBe(200);
-    expect((body as { dispatched: string[] }).dispatched.sort()).toEqual([...PASSES].sort());
-    expect(await queuedTasks()).toEqual([...PASSES].sort());
+    const outcome = body as { dispatched: string[]; drained: boolean };
+    expect(outcome.dispatched.sort()).toEqual([...PASSES].sort());
+    expect(typeof outcome.drained).toBe("boolean");
+    expect(await queuedTasks()).toEqual([]);
   });
 
   // The property that makes this safe to expose to anything that can POST: a
   // second call inside the same buckets claims nothing, so hammering it cannot
-  // run the fleet twice.
-  it("enqueues nothing on an immediate second tick", async () => {
+  // run the fleet twice. Asserted per bucket rather than as a flat empty list,
+  // because the first tick above may legitimately hold its request for the full
+  // 25 s deadline (its drain walks whatever fleet this database carries), and a
+  // wall clock that crosses a five-minute boundary in that window makes
+  // scheduleApply/scheduleProbe genuinely due again — that is the schedule
+  // working, not a duplicate. What can NEVER appear here is an hourly, daily or
+  // weekly pass inside its own bucket; one of those would be the double
+  // dispatch this endpoint exists to prevent. The strict same-bucket case is
+  // unit-tested in burst.test.ts, where `now` is injected.
+  it("re-dispatches nothing whose bucket has not rolled, on a second tick", async () => {
     const { body } = await tick(SECRET);
-    expect((body as { dispatched: string[] }).dispatched).toEqual([]);
-    // Still one of each — the jobs from the first tick, not duplicates.
-    expect(await queuedTasks()).toEqual([...PASSES].sort());
+    const dispatched = (body as { dispatched: string[] }).dispatched;
+    const fiveMinute = ["scheduleApply", "scheduleProbe"];
+    expect(dispatched.filter((task) => !fiveMinute.includes(task))).toEqual([]);
+    expect(await queuedTasks()).toEqual([]);
   });
 
   it("comes due again once a bucket rolls over", async () => {

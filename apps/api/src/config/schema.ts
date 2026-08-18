@@ -171,24 +171,29 @@ const migrateShape = {
   SENTRY_ENVIRONMENT: z.string().optional(),
 };
 
-// The worker: the jobs, the analysis engine, mail, and the credentials it has to
-// unseal to reach a customer's cluster.
+// The pipeline: the jobs, the analysis engine, mail, and the credentials it has
+// to unseal to reach a customer's cluster. The standalone worker process that
+// once validated exactly this set is gone (#232); the shape survives as the
+// api's job-running half, and as the whole of what the rotate-key CLI — the one
+// remaining process that unseals credentials without serving HTTP — validates.
 //
 // MASTER_KEY is required HERE and not one layer down, which answers the open
-// question in #126: a worker booted without it starts fine today and fails at
-// the first job that opens a cluster — inside jobs/cluster-connection.ts, as a
+// question in #126: a process booted without it starts fine and fails at the
+// first job that opens a cluster — inside jobs/cluster-connection.ts, as a
 // decrypt error, hours after the deploy that caused it.
 const workerShape = {
   ...migrateShape,
   // Postgres connections PER POOL, and this process holds more than one: the api
-  // has a request pool, the jobs' pool and better-auth's, each capped by this. They
-  // are deliberately not merged — a slow report must not be able to starve sign-in
-  // of a connection — so the budget to size against postgres is this times the
-  // number of pools, plus graphile-worker's own.
+  // has a request pool (shared with the jobs since #231 — the tick's drains run
+  // against it) and better-auth's, each capped by this. They are deliberately
+  // not merged — a slow report must not be able to starve sign-in of a
+  // connection — so the budget to size against postgres is this times the
+  // number of pools.
   //
   // Too low is latency, not failure: pg queues a request until a connection frees.
-  // Raise it alongside WORKER_CONCURRENCY, which is what makes the jobs' pool ask
-  // for more than one at a time.
+  // Raise it alongside WORKER_CONCURRENCY, which is what makes a drain ask for
+  // more than one at a time (the drain is capped below this either way, so it
+  // can never take the whole request pool).
   PG_POOL_MAX: positiveInteger(5),
   MASTER_KEY: masterKey(),
   // KEK rotation: v1 = MASTER_KEY, v2+ = MASTER_KEY_V<n>. Each cluster row
@@ -207,23 +212,11 @@ const workerShape = {
   ALLOW_UNTESTED_MSSQL_VERSION: flag(false),
   // One job at a time. Each concurrent job holds its own working set — a collect
   // pass keeps a cluster's index and collection statistics in memory while it
-  // runs — so this multiplies a worker's memory rather than sharing it, and the
-  // pipeline is not latency-critical. Raise it deliberately, with the memory
-  // limit raised alongside.
+  // runs — so this multiplies the process's memory rather than sharing it, and
+  // the pipeline is not latency-critical. Raise it deliberately, with the memory
+  // limit raised alongside. The name survives the worker process it was named
+  // for (#232): it is how many jobs one drain runs at once.
   WORKER_CONCURRENCY: positiveInteger(1),
-  // How long an idle runner waits before asking postgres whether anything became
-  // due. Ten seconds, which is what D72 measured this down to from
-  // graphile-worker's 2000 ms default — settable because the right number
-  // depends on what the database costs you rather than on the pipeline.
-  //
-  // Polling is the FALLBACK path, not the mechanism: `add_job` runs
-  // `pg_notify('jobs:insert', …)` and the runner holds the matching LISTEN, so
-  // anything ENQUEUED still starts at once at any value here. What waits is work
-  // that becomes due by the CLOCK — a cron tick, or a retry whose backoff
-  // expired — so raising this trades retry latency for query rate and nothing
-  // else. On metered postgres the query rate is a bill: 10s is ~260k round trips
-  // a month from one idle worker, and 60s is ~43k.
-  WORKER_POLL_INTERVAL_MS: positiveInteger(10_000),
   // Sockets the driver may open against ONE connected cluster. The driver's own
   // default is 100, and it is the wrong default twice over here: a session is
   // held per cluster (jobs/connection-pool.ts), so the worst case multiplies by
@@ -261,23 +254,16 @@ const apiShape = {
   TRUST_PROXY: trustProxy(),
   RATE_LIMIT_MAX: positive(300),
   AUTH_RATE_LIMIT_MAX: positive(20),
-  RUN_WORKER: flag(false),
-  // Whether THIS process owns the recurring schedule.
+  // Whether THIS process owns the recurring schedule. The one topology question
+  // left (#232 removed RUN_WORKER along with the process it selected): every
+  // api executes jobs, and this decides WHEN they become due.
   //
-  // Split from RUN_WORKER on purpose, because they are two different questions
-  // that were one flag: RUN_WORKER asks "does this process EXECUTE jobs", and
-  // this asks "does it decide WHEN they are due". Conflated, the only way to
-  // take the schedule from outside was to give up running jobs too — which is
-  // why an external clock previously meant a second process and a file in a
-  // cron.
-  //
-  // True with RUN_WORKER=true means a 30-second in-process interval runs the
-  // tick (jobs/tick.service.ts) — no crontab, no resident runner since #231.
-  // False opens POST /api/internal/tick instead, where something external says
-  // "now": with RUN_WORKER=true that request claims AND drains, bounded so it
-  // answers inside platform proxy timeouts; with RUN_WORKER=false it only
-  // enqueues, and the standalone worker's LISTEN picks the rows up the moment
-  // they land.
+  // True means a 30-second in-process interval runs the tick
+  // (jobs/tick.service.ts) — no crontab, no resident runner since #231. False
+  // opens POST /api/internal/tick instead, where something external says "now":
+  // that request claims AND drains, bounded so it answers inside platform proxy
+  // timeouts, and a drained:false response means ping again — the occurrence
+  // claims make repeats free.
   RUN_CRONJOB: flag(true),
   // The bearer token that endpoint demands. Required when RUN_CRONJOB is false
   // and refused as too short otherwise: it authorises the whole pipeline, there

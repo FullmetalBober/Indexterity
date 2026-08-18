@@ -1,25 +1,16 @@
-import { makeWorkerUtils, runOnce } from "graphile-worker";
-import { workerEnv } from "../config/env";
 import { type Database, inArray, workerWatermarks } from "../db";
 import { BURST_SCHEDULE, duePasses } from "./schedule";
-import { createTaskList } from "./tasks";
 import { claimWatermark, passKey } from "./watermark";
 
-// One burst tick: work out what became due, enqueue it, drain the queue, exit.
+// The dispatch half of a tick: work out what became due and enqueue it.
 //
-// The pipeline is timer-driven with no HTTP surface, so on a host that sleeps
-// (Render free after 15 idle minutes) or suspends its database (Neon free at 100
-// CU-hours) the resident runner does not degrade — it stops, and hidden indexes
-// overrun their observe windows while drops stall mid-pipeline. An external
-// scheduler ticking this instead makes such a host a SUPPORTED topology.
-//
-// The thing that makes it work at all, and the thing worth verifying before
-// trusting any of it: `runOnce()` drains jobs enqueued DURING its own run, to
-// any depth. Measured against postgres 17 with graphile-worker 0.17.3 — a
-// dispatcher task enqueued two children, one child enqueued a grandchild, and a
-// single runOnce ran all four. Without that, a tick would dispatch the
-// per-cluster jobs and exit before running any of them, and the pipeline would
-// be one pass behind forever.
+// Written for burst mode (#212), where a whole process ran one tick and exited;
+// since #231 the tick lives inside the api (jobs/tick.service.ts drains what
+// this claims, with runOnce against the api's own pool) and #232 removed the
+// burst entrypoint, so this is now the only scheduler the pipeline has. The
+// property the whole design rests on is unchanged: a pass is claimed against
+// its OCCURRENCE, so any number of concurrent tickers — interval, HTTP,
+// replicas — dispatch each occurrence exactly once, with no lock.
 export interface BurstResult {
   readonly dispatched: readonly string[];
   // Passes that were due but claimed by another tick first. Not an error — it
@@ -69,49 +60,4 @@ export async function claimDuePasses(
     dispatched.push(pass.task);
   }
   return { dispatched, alreadyClaimed };
-}
-
-export interface BurstLogger {
-  info(message: string): void;
-  error(message: string): void;
-}
-
-// The whole tick, including the drain. Returns what it dispatched so the
-// entrypoint can print one honest line.
-export async function runBurstTick(
-  db: Database,
-  logger: BurstLogger,
-  now: Date = new Date(),
-): Promise<BurstResult> {
-  const values = workerEnv();
-  const utils = await makeWorkerUtils({ connectionString: values.DATABASE_URL });
-  let result: BurstResult;
-  try {
-    // The scheduler tasks take no payload and dedupe per cluster themselves
-    // (jobs/dispatch.ts). The job key here is the second guard, for the window
-    // between claiming and draining: a tick that claimed, enqueued, then died
-    // leaves a pending job that the next tick must not duplicate.
-    result = await claimDuePasses(
-      db,
-      (task) => utils.addJob(task, {}, { jobKey: `burst:${task}`, jobKeyMode: "preserve_run_at" }),
-      now,
-    );
-  } finally {
-    await utils.release();
-  }
-  logger.info(
-    result.dispatched.length === 0
-      ? `burst: nothing due${result.alreadyClaimed.length > 0 ? ` (${result.alreadyClaimed.length} claimed by another tick)` : ""}`
-      : `burst: dispatched ${result.dispatched.join(", ")}`,
-  );
-  // Always drain, even with nothing dispatched: retries whose backoff expired
-  // while the host slept are sitting in the queue, and they are most of what a
-  // sleep-prone install has to catch up on.
-  await runOnce({
-    connectionString: values.DATABASE_URL,
-    concurrency: values.WORKER_CONCURRENCY,
-    maxPoolSize: values.WORKER_CONCURRENCY + 2,
-    taskList: createTaskList(db),
-  });
-  return result;
 }

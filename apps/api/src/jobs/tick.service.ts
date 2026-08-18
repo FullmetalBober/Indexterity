@@ -36,11 +36,11 @@ export interface TickOutcome {
 
 // The tick function of #229/#231: work out what became due, enqueue it, drain
 // the queue with runOnce, all inside the api process. Two triggers share it —
-// the in-process interval (startInterval, when RUN_WORKER and RUN_CRONJOB are
-// both true) and POST /api/internal/tick (tick.controller.ts, when the clock is
-// external). This replaces the embedded resident runner: runOnce never opens
-// `LISTEN "jobs:insert"` (that lives in graphile-worker's run() path, verified
-// in dist/main.js), so an api with nothing to do holds no job machinery at all.
+// the in-process interval (startInterval, when RUN_CRONJOB is true) and POST
+// /api/internal/tick (tick.controller.ts, when the clock is external). Since
+// #232 this is the pipeline's ONLY host: runOnce never opens `LISTEN
+// "jobs:insert"` (that lives in graphile-worker's run() path, verified in
+// dist/main.js), so an api with nothing to do holds no job machinery at all.
 //
 // runOnce drains work enqueued DURING its own run, to any depth — measured in
 // #212 against postgres 17 with graphile-worker 0.17.3 — which is what makes a
@@ -76,22 +76,20 @@ export class TickService implements BeforeApplicationShutdown {
     this.events.on("pool:create", ({ workerPool }) => {
       this.activePool = workerPool;
     });
-    // Only a process that executes jobs may wire the pipeline's reporting: the
-    // unreachable gauge is per process, and a RUN_WORKER=false api registering
-    // it would export a permanent zero for a fleet it never dials.
-    if (apiEnv().RUN_WORKER) {
-      wireRunnerEvents(database.db, this.events);
-    }
+    // Unconditional since #232: with the standalone worker gone, this process
+    // is the only thing that executes jobs, so it is always the one that must
+    // answer for the dead-letter capture, the owner alerts and the counters.
+    wireRunnerEvents(database.db, this.events);
   }
 
-  // Trigger 1: the in-process clock, on when this process both executes jobs
-  // and owns the schedule. Deliberately a plain setInterval and not
-  // @nestjs/schedule — what that dependency adds is cron EXPRESSIONS, which is
-  // exactly the work duePasses already replaced with occurrence arithmetic
-  // (#229). Returns whether it started, so main.ts can log one honest line.
+  // Trigger 1: the in-process clock, on when this process owns the schedule
+  // (RUN_CRONJOB=false hands the clock to POST /api/internal/tick instead).
+  // Deliberately a plain setInterval and not @nestjs/schedule — what that
+  // dependency adds is cron EXPRESSIONS, which is exactly the work duePasses
+  // already replaced with occurrence arithmetic (#229). Returns whether it
+  // started, so main.ts can log one honest line.
   startInterval(): boolean {
-    const env = apiEnv();
-    if (!env.RUN_WORKER || !env.RUN_CRONJOB) return false;
+    if (!apiEnv().RUN_CRONJOB) return false;
     // One tick immediately, not in thirty seconds: a fresh install must collect
     // now (its first impression is an empty dashboard until it does), and a
     // host that slept owes exactly one occurrence per pass — claimDuePasses
@@ -133,7 +131,7 @@ export class TickService implements BeforeApplicationShutdown {
   // key guards the window between claiming a pass and this insert landing — a
   // tick that claimed and then died leaves a pending job the next tick must not
   // duplicate — and preserve_run_at keeps a re-key from bumping the schedule.
-  async enqueueDue(now: Date = new Date()): Promise<BurstResult> {
+  private async enqueueDue(now: Date = new Date()): Promise<BurstResult> {
     return claimDuePasses(
       this.database.db,
       (task) =>

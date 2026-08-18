@@ -43,8 +43,11 @@ const apiEnv = {
   ALLOW_INSECURE_CLUSTER_TLS: "true",
   // Verification would send mail and block sign-in on a link nobody can click.
   REQUIRE_EMAIL_VERIFICATION: "false",
-  // The scheduler would start collecting from the test clusters mid-assertion.
-  RUN_WORKER: "false",
+  // The scheduler would start collecting from the test clusters mid-assertion —
+  // since #232 every api runs the pipeline, so quiet means handing the clock to
+  // an external tick nothing here ever sends. The secret is required with it.
+  RUN_CRONJOB: "false",
+  CRON_TRIGGER_SECRET: "e2e-suite-tick-secret-0123456789abcdef",
   // The suite signs up an account per test from one address, which the
   // brute-force budget is right to distrust in production and wrong to here.
   RATE_LIMIT_MAX: "5000",

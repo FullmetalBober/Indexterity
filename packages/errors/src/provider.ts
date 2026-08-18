@@ -30,12 +30,10 @@ export function sentryEnvironment(): string {
 }
 
 export interface SentryDefaultsOptions {
-  // What answered: "api", "worker" or "web". A tag rather than a separate Sentry
-  // project, because the api and the worker are one image, one release and one
-  // body of code — jobs/, analysis/ and the drizzle layer are reachable from
-  // both, so a fault in them is ONE issue that a project split would file twice.
-  // RUN_WORKER=true settles it: that process is both, so there is no DSN a
-  // project split could correctly pick.
+  // What answered: "api" or "web". A tag rather than a separate Sentry project,
+  // because everything server-side is one image, one release and one body of
+  // code — since #232 the api IS the pipeline, so there is exactly one thing a
+  // server-side fault can be tagged as.
   readonly service: string;
   // Ties an issue to the build that produced it. Same version across every
   // package in the repo (scripts/set-version.ts).

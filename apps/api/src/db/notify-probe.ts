@@ -24,9 +24,7 @@ import { coreEnv } from "../config/env";
 // arrives. Nothing errors and nothing logs, which is the whole reason this file
 // exists: the dashboard's SSE is NOTIFY end to end (events/cluster-events.service.ts
 // LISTENs, events/emit.ts calls pg_notify), so on such a URL the live updates
-// silently never fire and the panels only ever refresh on their own staleTime, and
-// graphile-worker's `LISTEN "jobs:insert"` degrades to polling — which turns
-// WORKER_POLL_INTERVAL_MS from a query-rate knob into a proportional start delay.
+// silently never fire and the panels only ever refresh on their own staleTime.
 //
 // Refused rather than warned, on this repo's own precedent: a pooled URL is
 // malformed configuration for this application in exactly the sense config/schema.ts
@@ -280,8 +278,8 @@ function refusal(outcome: Attempt, connectionString: string, attempts: number): 
   ].join("\n");
 }
 
-// Refuse unless this DATABASE_URL delivers a notification. Called from the two
-// entrypoints that hold a LISTEN — main.ts and worker.ts — and from nowhere at
+// Refuse unless this DATABASE_URL delivers a notification. Called from main.ts
+// — since #232 the one entrypoint that holds a LISTEN — and from nowhere at
 // import time, so no unit test opens a connection by loading a module.
 export async function probeNotify(options: NotifyProbeOptions = {}): Promise<void> {
   const connectionString = options.connectionString ?? coreEnv().DATABASE_URL;

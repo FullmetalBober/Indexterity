@@ -1,21 +1,19 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import type { Database } from "../db";
 import { BURST_SCHEDULE, duePasses } from "./schedule";
+import { createTaskList } from "./tasks";
 
 const at = (iso: string): Date => new Date(iso);
 
 describe("BURST_SCHEDULE", () => {
-  // The list is written out rather than parsed from CRONTAB, so the one thing
-  // that can rot is the pairing. This is the check that fails when a pass is
-  // added to the runner's crontab and forgotten here — a burst install would
-  // otherwise never run it, silently.
-  it("covers every task the resident crontab schedules", () => {
-    const runner = readFileSync(join(__dirname, "runner.ts"), "utf8");
-    const crontab = runner.slice(runner.indexOf("const CRONTAB"), runner.indexOf("].join("));
-    const scheduled = [...crontab.matchAll(/^\s*"[^"]*\s(\w+)",$/gm)].map((match) => match[1]);
-    expect(scheduled.length).toBeGreaterThan(0);
-    expect(new Set(BURST_SCHEDULE.map((pass) => pass.task))).toEqual(new Set(scheduled));
+  // This list used to be held to the resident runner's CRONTAB; #232 removed
+  // that runner, so this is the only schedule and the drift that can still rot
+  // silently is the pairing with the task list itself: a pass naming a task
+  // nobody registered is enqueued forever and executed never. createTaskList
+  // only closes over its db, so a null stands in fine for reading the keys.
+  it("schedules only tasks the task list registers", () => {
+    const registered = new Set(Object.keys(createTaskList(null as unknown as Database)));
+    for (const pass of BURST_SCHEDULE) expect(registered).toContain(pass.task);
   });
 
   it("carries the cron entry each pass stands for, so the two read side by side", () => {
