@@ -68,6 +68,30 @@ describe("PrivilegeList", () => {
     expect(screen.getByRole("button", { name: "Copy all 2" })).toBeInTheDocument();
   });
 
+  // The failure that shipped: an api without this field sends no `command` key, so
+  // the value is undefined, and `=== null` let it through into `command.split` —
+  // "can't access property split, command is undefined", which the error boundary
+  // draws as a blank "Something broke" over the whole page. Reachable in dev the
+  // moment the web reloads and the api has not, and in prod for the length of a
+  // rolling deploy.
+  it("survives a response from an api that has never heard of the field", () => {
+    const older = privilege();
+    // Delete the key rather than setting undefined: this is the wire shape, and a
+    // present-but-undefined property is not the same object an older api sends.
+    delete (older as { command?: string | null }).command;
+
+    render(<PrivilegeList privileges={[older]} />);
+
+    expect(screen.getByText("Query Store enabled")).toBeInTheDocument();
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+  });
+
+  it("draws no command block for an empty command", () => {
+    render(<PrivilegeList privileges={[privilege({ command: "" })]} />);
+
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+  });
+
   it("draws no command block when there is nothing to run", () => {
     render(<PrivilegeList privileges={[privilege()]} />);
 

@@ -62,7 +62,18 @@ function Row({ privilege, optional }: { privilege: PrivilegeCheck; optional: boo
         {privilege.granted ? null : (
           <span className="font-normal text-muted-foreground"> — {privilege.enables}</span>
         )}
-        {privilege.command === null ? null : <FixCommand command={privilege.command} />}
+        {/* `== null`, not `=== null`, and that is the whole point of the loose
+            comparison: an api that predates this field sends no `command` key at
+            all, so the value arrives as undefined and a strict check let it
+            through — straight into `command.split`, which is a blank error screen
+            instead of a privilege list. Reachable in dev the moment the web
+            reloads and the api has not, and in prod for the length of a rolling
+            deploy, so the consumer tolerates the older shape rather than assuming
+            both sides moved together. An empty string is treated the same way:
+            nothing to run is nothing to draw. */}
+        {privilege.command == null || privilege.command === "" ? null : (
+          <FixCommand command={privilege.command} />
+        )}
       </span>
     </li>
   );
