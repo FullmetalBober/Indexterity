@@ -30,5 +30,10 @@ export function rebuildOptions(spec: IndexSpec): CreateIndexOptions {
     ...(spec.sparse ? { sparse: true } : {}),
     ...(spec.collation === null ? {} : { collation: { locale: spec.collation } }),
     ...(spec.partialFilter === null ? {} : { partialFilterExpression: spec.partialFilter }),
+    // The same argument as the options above, one step further: an index put
+    // back without its includes is not weaker in what it forbids but in what it
+    // answers, and the queries it stops covering fail slowly rather than
+    // loudly.
+    ...(spec.include === undefined || spec.include.length === 0 ? {} : { include: spec.include }),
   };
 }

@@ -19,18 +19,19 @@ import {
 } from "../db";
 import { DatabaseService } from "../db/database.service";
 import { allowPrivateTargets, assertTargetsAllowed, BlockedTargetError } from "../engine/net-guard";
-import { NO_TLS_OVERRIDES, type TlsOverrides } from "../engine/ports";
-import { adapterFor, engineSupported } from "../engine/registry";
+import { NO_TLS_OVERRIDES, type ProvisionedUser, type TlsOverrides } from "../engine/ports";
+import {
+  adapterFor,
+  detectEngine,
+  engineSupported,
+  supportedEngineOptions,
+  supportedEngines,
+} from "../engine/registry";
 import { consumeDialBudget } from "../errors/dial-budget";
 import { mapClusterError, toCluster, toDiagnosis } from "../http/mappers";
 import { TenancyService } from "../http/tenancy.service";
 import { evictCluster } from "../jobs/connection-pool";
-import {
-  connStringUsername,
-  InsecureConnectionError,
-  ProvisionDeniedError,
-  provisionScopedUser,
-} from "../mongo";
+import { InsecureConnectionError, ProvisionDeniedError } from "../mongo";
 import { Implement, route } from "../orpc/implement";
 import { restoreHiddenIndexes, revokeCommandFor } from "./offboard";
 
@@ -208,13 +209,15 @@ export class ClustersController {
   ): Promise<void> {
     if (!engineSupported(engine)) {
       throw errors.BAD_REQUEST({
-        message: `${engine} support is planned — only MONGODB clusters can connect today`,
+        message:
+          `${engine} support is planned — ` +
+          `${supportedEngines().join(" and ")} clusters can connect today`,
       });
     }
     const adapter = adapterFor(engine);
     if (!adapter.isConnString(value)) {
       throw errors.BAD_REQUEST({
-        message: "connection string must be mongodb:// or mongodb+srv://",
+        message: `connection string must be ${adapter.connStringHint}`,
       });
     }
     await consumeDialBudget(this.database.db, userId);
@@ -296,12 +299,28 @@ export class ClustersController {
     );
   }
 
+  // What this build can connect (#239). No tenant data and no org in the answer,
+  // so it is the loosest level any of these routes runs at — a signed-in reader
+  // asking what the product supports. Deliberately not public: it names the
+  // engines an installation carries, and the connect page is behind sign-in
+  // anyway, so there is nothing to gain by answering strangers.
+  @Implement(contract.listSupportedEngines)
+  listSupportedEngines(@Req() req: FastifyRequest) {
+    return route(this.tenancy, contract.listSupportedEngines, req, "session").handler(() =>
+      supportedEngineOptions(),
+    );
+  }
+
   @Implement(contract.checkConnection)
   checkConnection(@Req() req: FastifyRequest) {
     return route(this.tenancy, contract.checkConnection, req, "owner").handler(
       async ({ input, errors, context }) => {
         await this.tenancy.requireOwner(req);
-        const engine = input.engine ?? "MONGODB";
+        // An explicit engine wins; otherwise the string itself says (mongodb:// vs
+        // mssql:// vs ADO Server=… are disjoint), so the web form needs no
+        // engine picker to connect a SQL Server. MONGODB last, for strings
+        // nothing claims — its adapter then refuses with the right hint.
+        const engine = input.engine ?? detectEngine(input.connectionString) ?? "MONGODB";
         const adapter = adapterFor(engine);
         // The checkboxes are applied to the string BEFORE anything looks at it, so
         // the preflight answers for the connection that would actually be stored
@@ -309,7 +328,7 @@ export class ClustersController {
         const overrides = input.tlsOverrides ?? NO_TLS_OVERRIDES;
         const value = adapter.applySecureTransport(input.connectionString, overrides);
         await this.guardDial(context.userId, engine, value, errors, overrides);
-        return toDiagnosis(await adapter.diagnose(value, overrides));
+        return toDiagnosis(engine, await adapter.diagnose(value, overrides));
       },
     );
   }
@@ -324,7 +343,11 @@ export class ClustersController {
         // for the name.
         await this.tenancy.requireRoomFor(orgId, "clusters");
         await this.assertNameFree(orgId, input.name, errors);
-        const engine = input.engine ?? "MONGODB";
+        // An explicit engine wins; otherwise the string itself says (mongodb:// vs
+        // mssql:// vs ADO Server=… are disjoint), so the web form needs no
+        // engine picker to connect a SQL Server. MONGODB last, for strings
+        // nothing claims — its adapter then refuses with the right hint.
+        const engine = input.engine ?? detectEngine(input.connectionString) ?? "MONGODB";
         const adapter = adapterFor(engine);
         const overrides = input.tlsOverrides ?? NO_TLS_OVERRIDES;
         const value = adapter.applySecureTransport(input.connectionString, overrides);
@@ -372,17 +395,29 @@ export class ClustersController {
         // Before creating a user on someone's cluster, not after.
         await this.tenancy.requireRoomFor(orgId, "clusters");
         await this.assertNameFree(orgId, input.name, errors);
-        // Provisioning is engine-specific; MONGODB is the only adapter with the
-        // capability today (see EngineCapabilities.provisionScopedUsers).
+        // The string says which engine this is, exactly as createCluster reads
+        // it — so an admin SQL Server string provisions a scoped login instead
+        // of being dialled as mongo. An engine whose adapter cannot provision
+        // is refused here rather than part way through. An explicit engine wins
+        // for the same reason it does on the other two: the reader who overrode
+        // detection to get a diagnosis presses this button next, and re-deciding
+        // here would provision against a different engine than they were shown.
+        const engine = input.engine ?? detectEngine(input.adminConnectionString) ?? "MONGODB";
+        const adapter = adapterFor(engine);
+        const provision = adapter.provisionScopedUser;
+        if (!adapter.capabilities.provisionScopedUsers || provision === undefined) {
+          throw errors.BAD_REQUEST({
+            message:
+              `${engine} cannot provision a scoped user — connect with credentials that ` +
+              "already have what the engine needs instead.",
+          });
+        }
         const overrides = input.tlsOverrides ?? NO_TLS_OVERRIDES;
-        const adminValue = adapterFor("MONGODB").applySecureTransport(
-          input.adminConnectionString,
-          overrides,
-        );
-        await this.guardDial(context.userId, "MONGODB", adminValue, errors, overrides);
-        let provisioned: Awaited<ReturnType<typeof provisionScopedUser>>;
+        const adminValue = adapter.applySecureTransport(input.adminConnectionString, overrides);
+        await this.guardDial(context.userId, engine, adminValue, errors, overrides);
+        let provisioned: ProvisionedUser;
         try {
-          provisioned = await provisionScopedUser(adminValue, overrides);
+          provisioned = await provision(adminValue, overrides);
         } catch (error) {
           if (error instanceof ProvisionDeniedError) {
             throw new ORPCError("PROVISION_DENIED", { status: 422, message: error.message });
@@ -392,7 +427,7 @@ export class ClustersController {
         const row = await this.storeCluster(
           orgId,
           input.name,
-          "MONGODB",
+          engine,
           provisioned.connectionString,
           provisioned.username,
           overrides,
@@ -405,7 +440,7 @@ export class ClustersController {
           // The username, never the string: this row is read by people who are not
           // meant to be able to dial the cluster from it.
           metadata: {
-            engine: "MONGODB",
+            engine,
             provisioned: true,
             provisionedUsername: provisioned.username,
             tlsOverrides: overrides,
@@ -463,7 +498,7 @@ export class ClustersController {
         // authenticates as that user; anything else is a user we didn't create.
         const provisionedUsername =
           row.provisionedUsername !== null &&
-          connStringUsername(input.connectionString) === row.provisionedUsername
+          adapter.connStringUsername(input.connectionString) === row.provisionedUsername
             ? row.provisionedUsername
             : null;
         const [updated] = await this.database.db

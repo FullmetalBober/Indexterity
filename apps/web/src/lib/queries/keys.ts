@@ -36,6 +36,11 @@ export const queryKeys = {
   // that answers for somebody who is in no org at all, which is exactly who
   // needs it.
   myInvites: () => ["my-invites"] as const,
+  // Which engines this BUILD can connect (#239) — not an org read at all, and the
+  // one answer here that cannot go stale while the tab is open, since it changes
+  // only when the api is redeployed. No org in the key for that reason: switching
+  // orgs cannot change it, so it must not refetch.
+  engines: () => ["engines"] as const,
   // The org's security trail (#158). The filter and the page cursor are IN the
   // key: they are what the api was asked, so two filters are two answers, and
   // one entry holding both would show the previous filter's rows under the new

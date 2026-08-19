@@ -58,6 +58,16 @@ export async function startApi(
       // here. Same reason the e2e suite raises it.
       AUTH_RATE_LIMIT_MAX: "500",
       RATE_LIMIT_MAX: "5000",
+      // A quiet clock. Since #232 every api runs the pipeline, and the default
+      // RUN_CRONJOB=true would have each spawned api tick every 30 seconds —
+      // collecting the clusters a scenario just created, racing assertions that
+      // read the queue, and spending the mongod's dial budget mid-narrative.
+      // The suites drive the pipeline explicitly (collectCluster in-process, or
+      // POST /api/internal/tick in tick.int.test.ts), so the clock stays off
+      // unless a test opts back in through extraEnv. The secret is required the
+      // moment the clock is external, so a default rides along with it.
+      RUN_CRONJOB: "false",
+      CRON_TRIGGER_SECRET: "integration-suite-tick-secret-0123456789",
       ...extraEnv,
     },
     stdio: ["ignore", "pipe", "pipe"],

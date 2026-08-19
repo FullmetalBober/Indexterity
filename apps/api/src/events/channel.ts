@@ -1,14 +1,12 @@
 import { type ClusterEvent, clusterEvent } from "@repo/contracts";
 import { z } from "zod";
 
-// The postgres NOTIFY channel the worker's transitions travel on. Postgres is
-// the only transport both processes already share (D10 — no redis, no broker):
-// graphile-worker itself crosses the same boundary the same way, and the api
-// already talks to the worker through it (`graphile_worker.add_job` in
+// The postgres NOTIFY channel the pipeline's transitions travel on. Postgres is
+// the transport everything already shares (D10 — no redis, no broker): the
+// queue itself lives there (`graphile_worker.add_job` in
 // clusters.controller.ts). Every api replica LISTENs and fans out to its own
 // SSE subscribers, so a browser hears the event whichever replica it landed on
-// — including the RUN_WORKER=true single-container mode, where the NOTIFY just
-// arrives on the process that sent it.
+// — in a single replica the NOTIFY just arrives on the process that sent it.
 export const CLUSTER_EVENTS_CHANNEL = "cluster_events";
 
 // What travels on the wire: the contract event plus the cluster it belongs to.

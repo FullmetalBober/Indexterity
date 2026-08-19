@@ -54,13 +54,22 @@ export interface CollectionStorage {
   readonly docCount: number;
 }
 
-// An age-based delete pattern: recurring deleteMany({field: {$lt: date}}) — the
-// TTL-advisory signal (mongo-specific today; relational analogue: DELETE with
-// a timestamp predicate in the statement store).
+// An age-based delete pattern: recurring `deleteMany({field: {$lt: date}})` on
+// mongo, a recurring `DELETE … WHERE ts < …` in Query Store on SQL Server. The
+// SIGNAL is the same on both — a job pruning by timestamp on a schedule — and
+// the recommendation is not, because SQL Server has no TTL index; what the
+// advisory says is jobs/suggest.ts's business.
 export interface DeletePattern {
   readonly field: string;
+  // Executions of the purge, which is what the recurrence gate reads.
   readonly count: number;
-  readonly medianRetentionSeconds: number;
+  // Null when the store shows the predicate but not the value it compared
+  // against. Mongo's profiler always records the literal cutoff; a
+  // parameterised `DELETE … WHERE created_at < @cutoff` in Query Store carries
+  // `@cutoff`, and that is the most common dialect an ORM or a stored procedure
+  // produces. The advisory is worth making without the number, so this is
+  // absent rather than guessed.
+  readonly medianRetentionSeconds: number | null;
 }
 
 // One namespace to gather query shapes for.
@@ -129,6 +138,12 @@ export interface CreateIndexOptions {
   readonly sparse?: boolean;
   readonly partialFilterExpression?: Readonly<Record<string, unknown>>;
   readonly collation?: { readonly locale: string };
+  // Non-key columns carried at the leaves (SQL Server INCLUDE). Restoring an
+  // index without them gives back something that seeks the same and covers
+  // less, which no latency gate on the WRITE side would ever notice. Engines
+  // with no such concept must drop it rather than forward it — MongoDB's
+  // createIndexes rejects an option it does not know.
+  readonly include?: readonly string[];
 }
 
 // The only write surface. Implementations must enforce read-only mode
@@ -208,6 +223,9 @@ export interface EngineSession {
 export interface EngineAdapter {
   readonly engine: ClusterEngine;
   readonly capabilities: EngineCapabilities;
+  // What a valid string looks like, for the refusal isConnString produces —
+  // the one user-facing sentence an engine owns about its own syntax.
+  readonly connStringHint: string;
   // Shape-validates a connection string BEFORE any dial (scheme guard).
   isConnString(value: string): boolean;
   // Every host the string would dial, for the network guard to vet.
@@ -225,4 +243,23 @@ export interface EngineAdapter {
   open(connectionString: string, overrides?: TlsOverrides): Promise<EngineSession>;
   // Report what these credentials may do, without writing anything.
   diagnose(connectionString: string, overrides?: TlsOverrides): Promise<ConnectionDiagnosis>;
+  // Use an admin string ONCE to create the least-privilege user this engine
+  // would rather run as, and return that user's string. The admin string is
+  // never stored, and a failed verification undoes what was created.
+  //
+  // Present exactly when `capabilities.provisionScopedUsers` is true — the flag
+  // is what callers branch on, and this is what they then call. Throws
+  // ProvisionDeniedError when the credentials cannot create the user.
+  provisionScopedUser?(
+    adminConnectionString: string,
+    overrides?: TlsOverrides,
+  ): Promise<ProvisionedUser>;
+  // The username a string authenticates as, so rotation can tell whether the
+  // stored "this is a provisioned user" marker still describes the new one.
+  connStringUsername(value: string): string | null;
+}
+
+export interface ProvisionedUser {
+  readonly connectionString: string;
+  readonly username: string;
 }

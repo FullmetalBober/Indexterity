@@ -70,9 +70,8 @@ services:
       SMTP_USER: ${SMTP_USER}
       SMTP_PASS: ${SMTP_PASS}
       MAIL_FROM: ${MAIL_FROM}
-      # All three containers serve /metrics on 9464 and report different parts of
-      # the picture, so each gets its own host port: api 9464, worker 9465,
-      # web 9466.
+      # Both containers serve /metrics on 9464 and report different parts of
+      # the picture, so each gets its own host port: api 9464, web 9466.
       METRICS_ENABLED: "true"
       # Error reporting, off unless SENTRY_DSN_API is in .env. Reads plain
       # SENTRY_DSN here; which project that is belongs to the deployment, and
@@ -130,55 +129,7 @@ services:
     depends_on:
       - api
 
-  # Background worker: runs the cron schedule (collect/apply/finalize per cluster).
-  worker:
-    image: docker.io/library/node:26-slim
-    working_dir: /app
-    command: sh -c "npm install && npx turbo run build --filter=@repo/api^... && exec npm run worker -w @repo/api"
-    environment:
-      DATABASE_URL: postgres://mongo_optimizer:mongo_optimizer@postgres:5432/mongo_optimizer
-      MASTER_KEY: ${MASTER_KEY}
-      # A KEK rotation, and a retired key. Passed through empty when unset, which
-      # the schema reads as absent (withoutBlanks) — so these cost nothing until
-      # a rotation names them. MASTER_KEY_V1 is how an OLD first key is supplied
-      # by name while MASTER_KEY_V2 holds the live one.
-      MASTER_KEY_VERSION: ${MASTER_KEY_VERSION}
-      MASTER_KEY_V1: ${MASTER_KEY_V1}
-      MASTER_KEY_V2: ${MASTER_KEY_V2}
-      ALLOW_PRIVATE_CLUSTER_TARGETS: "true"
-      # A local mongod has no certificate, and the integration and e2e suites
-      # dial one on purpose. Never set this in a deployment that dials real
-      # customer databases.
-      ALLOW_INSECURE_CLUSTER_TLS: "true"
-      WORKER_CONCURRENCY: "2"
-      # The alerts a collect or an apply raises are sent from HERE, not from the
-      # api — the jobs run in this container. Without these the worker's mailer
-      # is the no-op branch and every alert is logged and dropped, while the
-      # api's invites and reset mails go out fine, which makes the gap look like
-      # an alerting bug rather than missing config. Helm already gives the
-      # worker deployment the same block (indexterity.mailEnv).
-      SMTP_HOST: ${SMTP_HOST}
-      SMTP_PORT: ${SMTP_PORT}
-      SMTP_USER: ${SMTP_USER}
-      SMTP_PASS: ${SMTP_PASS}
-      MAIL_FROM: ${MAIL_FROM}
-      METRICS_ENABLED: "true"
-      # Error reporting, off unless SENTRY_DSN_API is in .env. Reads plain
-      # SENTRY_DSN here; which project that is belongs to the deployment, and
-      # for this one it is indexterity-api.
-      SENTRY_DSN: ${SENTRY_DSN_API:-}
-      SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-}
-    ports:
-      - "9465:9464"
-    volumes:
-      - ./:/app
-      - worker_node_modules:/app/node_modules
-    depends_on:
-      postgres:
-        condition: service_healthy
-
 volumes:
   pgdata18:
   api_node_modules:
   web_node_modules:
-  worker_node_modules:

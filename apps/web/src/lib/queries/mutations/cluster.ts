@@ -10,7 +10,7 @@
 // The api's refusals arrive as thrown ORPCErrors now that nothing wraps them in
 // an { ok, message } envelope on the way here, so the reasons are read off the
 // error in onError (see ../errors.ts) rather than off a result.
-import type { ConnectionDiagnosis, TlsOverrides } from "@repo/contracts";
+import type { ClusterEngine, ConnectionDiagnosis, TlsOverrides } from "@repo/contracts";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
@@ -167,8 +167,14 @@ export function useCheckConnection(handlers: {
   onError: (message: string) => void;
 }) {
   return useMutation({
-    mutationFn: (input: { connectionString: string; tlsOverrides: TlsOverrides }) =>
-      api().checkConnection(input),
+    // `engine` is absent on every ordinary check: the string says which engine it
+    // is, and the api detects it. It is sent only when nothing recognised the
+    // string and the reader picked one (#239).
+    mutationFn: (input: {
+      connectionString: string;
+      tlsOverrides: TlsOverrides;
+      engine?: ClusterEngine;
+    }) => api().checkConnection(input),
     onMutate: handlers.onStart,
     onSuccess: handlers.onDiagnosis,
     onError: (error) =>
@@ -204,6 +210,7 @@ export function useConnectCluster(handlers: ConnectHandlers) {
       name: string;
       connectionString: string;
       tlsOverrides: TlsOverrides;
+      engine?: ClusterEngine;
     }) => api().createCluster(credentials),
     onMutate: handlers.onStart,
     onSuccess: async (created) => {
@@ -219,7 +226,16 @@ export function useConnectCluster(handlers: ConnectHandlers) {
 // navigation that clears the form.
 export function useProvisionCluster(
   handlers: ConnectHandlers & {
-    onProvisioned: (user: { username: string; connectionString: string }) => void;
+    // The engine comes along because the form has to print the command that
+    // revokes this login, and that command is engine-specific. Off the STORED
+    // cluster rather than off the string the reader pasted: the api decided which
+    // adapter provisioned it, so this is the same answer rather than a second
+    // guess at it.
+    onProvisioned: (user: {
+      username: string;
+      connectionString: string;
+      engine: ClusterEngine;
+    }) => void;
   },
 ) {
   const land = useLandOnNewCluster();
@@ -228,12 +244,14 @@ export function useProvisionCluster(
       name: string;
       adminConnectionString: string;
       tlsOverrides: TlsOverrides;
+      engine?: ClusterEngine;
     }) => api().provisionCluster(credentials),
     onMutate: handlers.onStart,
     onSuccess: async (created) => {
       handlers.onProvisioned({
         username: created.username,
         connectionString: created.connectionString,
+        engine: created.cluster.engine,
       });
       handlers.onConnected();
       await land(created.cluster.id);

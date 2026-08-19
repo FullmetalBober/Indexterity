@@ -171,24 +171,29 @@ const migrateShape = {
   SENTRY_ENVIRONMENT: z.string().optional(),
 };
 
-// The worker: the jobs, the analysis engine, mail, and the credentials it has to
-// unseal to reach a customer's cluster.
+// The pipeline: the jobs, the analysis engine, mail, and the credentials it has
+// to unseal to reach a customer's cluster. The standalone worker process that
+// once validated exactly this set is gone (#232); the shape survives as the
+// api's job-running half, and as the whole of what the rotate-key CLI — the one
+// remaining process that unseals credentials without serving HTTP — validates.
 //
 // MASTER_KEY is required HERE and not one layer down, which answers the open
-// question in #126: a worker booted without it starts fine today and fails at
-// the first job that opens a cluster — inside jobs/cluster-connection.ts, as a
+// question in #126: a process booted without it starts fine and fails at the
+// first job that opens a cluster — inside jobs/cluster-connection.ts, as a
 // decrypt error, hours after the deploy that caused it.
 const workerShape = {
   ...migrateShape,
   // Postgres connections PER POOL, and this process holds more than one: the api
-  // has a request pool, the jobs' pool and better-auth's, each capped by this. They
-  // are deliberately not merged — a slow report must not be able to starve sign-in
-  // of a connection — so the budget to size against postgres is this times the
-  // number of pools, plus graphile-worker's own.
+  // has a request pool (shared with the jobs since #231 — the tick's drains run
+  // against it) and better-auth's, each capped by this. They are deliberately
+  // not merged — a slow report must not be able to starve sign-in of a
+  // connection — so the budget to size against postgres is this times the
+  // number of pools.
   //
   // Too low is latency, not failure: pg queues a request until a connection frees.
-  // Raise it alongside WORKER_CONCURRENCY, which is what makes the jobs' pool ask
-  // for more than one at a time.
+  // Raise it alongside WORKER_CONCURRENCY, which is what makes a drain ask for
+  // more than one at a time (the drain is capped below this either way, so it
+  // can never take the whole request pool).
   PG_POOL_MAX: positiveInteger(5),
   MASTER_KEY: masterKey(),
   // KEK rotation: v1 = MASTER_KEY, v2+ = MASTER_KEY_V<n>. Each cluster row
@@ -204,11 +209,13 @@ const workerShape = {
   ALLOW_PRIVATE_CLUSTER_TARGETS: flag(false),
   ALLOW_INSECURE_CLUSTER_TLS: flag(false),
   ALLOW_UNTESTED_MONGO_VERSION: flag(false),
+  ALLOW_UNTESTED_MSSQL_VERSION: flag(false),
   // One job at a time. Each concurrent job holds its own working set — a collect
   // pass keeps a cluster's index and collection statistics in memory while it
-  // runs — so this multiplies a worker's memory rather than sharing it, and the
-  // pipeline is not latency-critical. Raise it deliberately, with the memory
-  // limit raised alongside.
+  // runs — so this multiplies the process's memory rather than sharing it, and
+  // the pipeline is not latency-critical. Raise it deliberately, with the memory
+  // limit raised alongside. The name survives the worker process it was named
+  // for (#232): it is how many jobs one drain runs at once.
   WORKER_CONCURRENCY: positiveInteger(1),
   // Sockets the driver may open against ONE connected cluster. The driver's own
   // default is 100, and it is the wrong default twice over here: a session is
@@ -247,7 +254,24 @@ const apiShape = {
   TRUST_PROXY: trustProxy(),
   RATE_LIMIT_MAX: positive(300),
   AUTH_RATE_LIMIT_MAX: positive(20),
-  RUN_WORKER: flag(false),
+  // Whether THIS process owns the recurring schedule. The one topology question
+  // left (#232 removed RUN_WORKER along with the process it selected): every
+  // api executes jobs, and this decides WHEN they become due.
+  //
+  // True means a 30-second in-process interval runs the tick
+  // (jobs/tick.service.ts) — no crontab, no resident runner since #231. False
+  // opens POST /api/internal/tick instead, where something external says "now":
+  // that request claims AND drains, bounded so it answers inside platform proxy
+  // timeouts, and a drained:false response means ping again — the occurrence
+  // claims make repeats free.
+  RUN_CRONJOB: flag(true),
+  // The bearer token that endpoint demands. Required when RUN_CRONJOB is false
+  // and refused as too short otherwise: it authorises the whole pipeline, there
+  // is no user session behind it to fall back on, and the endpoint is on the
+  // same public origin as everything else. 32 characters is the floor because
+  // the global per-IP budget (RATE_LIMIT_MAX, 300/min) is the only other thing
+  // slowing a guess down.
+  CRON_TRIGGER_SECRET: z.string().optional(),
 };
 
 // Which variables hold a secret, so the error report can name the variable
@@ -336,6 +360,36 @@ function checkMailGroup(value: Record<string, unknown>, ctx: z.RefinementCtx): v
 // refuse to boot anywhere. Drift in the OTHER direction — a variable the chart
 // sets that no schema knows — is caught by config/homes.test.ts, which is the
 // place that can tell a typo from the operating system.
+// The endpoint that runs the pipeline, with nothing in front of it.
+//
+// Booting without the secret would leave RUN_CRONJOB=false in the one state
+// where nothing can ever tick: the crontab is not installed and the only way to
+// trigger it refuses every caller. That is a silently dead pipeline, which is
+// the failure this whole file exists to move forward to boot.
+function checkCronTrigger(value: Record<string, unknown>, ctx: z.RefinementCtx): void {
+  if (value.RUN_CRONJOB !== false) return;
+  const secret = value.CRON_TRIGGER_SECRET;
+  if (typeof secret !== "string" || secret.length === 0) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["CRON_TRIGGER_SECRET"],
+      message:
+        "required: RUN_CRONJOB=false installs no schedule, so POST /api/internal/tick is the " +
+        "only thing that can start a pass — generate one with `openssl rand -hex 32`",
+    });
+    return;
+  }
+  if (secret.length < MIN_CRON_SECRET_LENGTH) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["CRON_TRIGGER_SECRET"],
+      message: `expected at least ${MIN_CRON_SECRET_LENGTH} characters — this token authorises the whole pipeline`,
+    });
+  }
+}
+
+export const MIN_CRON_SECRET_LENGTH = 32;
+
 export const migrateEnvSchema = z.looseObject(migrateShape);
 export const workerEnvSchema = z
   .looseObject(workerShape)
@@ -344,7 +398,8 @@ export const workerEnvSchema = z
 export const apiEnvSchema = z
   .looseObject(apiShape)
   .superRefine(checkRotationKeys)
-  .superRefine(checkMailGroup);
+  .superRefine(checkMailGroup)
+  .superRefine(checkCronTrigger);
 
 export const PROCESS_SCHEMAS = {
   api: apiEnvSchema,

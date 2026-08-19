@@ -9,7 +9,7 @@ that stops running logs nothing, because nothing runs.
 Two things in here are not obvious and are the reason this ships with the chart
 rather than being left to whoever deploys it:
 
-  - increase() CANNOT SEE A DEAD PROCESS. When the worker is gone its series go
+  - increase() CANNOT SEE A DEAD PROCESS. When the pipeline is gone its series go
     stale, so `increase(indexterity_job_runs_total[30m]) == 0` matches nothing and
     the obvious alert is silent in the worst case. The absent_over_time() alerts
     below are what fire, and they key on gauges only the relevant process reports.
@@ -18,8 +18,8 @@ rather than being left to whoever deploys it:
     the latter fires the moment the last cluster is offboarded.
 
 No expression references a `job` or `pod` label, so these hold however the
-workloads are scraped — including RUN_WORKER=true, where one process reports both
-the api's and the worker's halves.
+workloads are scraped — the api reports both the HTTP half and the pipeline's,
+since #232 made it the one process that runs jobs.
 */}}
 {{- $t := .Values.metrics.prometheusRule.thresholds }}
 apiVersion: monitoring.coreos.com/v1
@@ -57,9 +57,9 @@ spec:
             summary: "{{ $task.task }} has not succeeded in {{ $task.window }}"
             description: >-
               {{ $task.task }} runs every {{ $task.every }} and has not completed
-              successfully within {{ $task.window }}. Check the worker's logs and
+              successfully within {{ $task.window }}. Check the api's logs and
               indexterity_jobs{state="dead_letter"}. This alert cannot fire if the
-              worker is gone entirely — IndexterityWorkerNotReporting covers that.
+              pipeline is gone entirely — IndexterityWorkerNotReporting covers that.
         {{- end }}
 
         # The hole the alerts above cannot cover: a process that stopped reporting
@@ -73,9 +73,9 @@ spec:
             summary: "no workload is reporting the job pipeline"
             description: >-
               indexterity_clusters_unreachable is only ever reported by the process
-              that runs the pipeline, so its absence means no worker is being
-              scraped: the deployment is down, or worker.enabled and RUN_WORKER are
-              both off. Nothing is being collected, applied or finalized.
+              that runs the pipeline — the api, since #232 — so its absence means
+              no api is being scraped: the deployment is down, or metrics stopped
+              being served. Nothing is being collected, applied or finalized.
 
         - alert: IndexterityApiNotReporting
           expr: absent_over_time(indexterity_jobs_oldest_queued_age_seconds[10m])
@@ -97,10 +97,12 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: "a job has been waiting {{ $t.queueAgeSeconds }}s for a worker"
+            summary: "a job has been waiting {{ $t.queueAgeSeconds }}s to be claimed"
             description: >-
-              Jobs are queued and nothing is claiming them. Either the worker is
-              down or WORKER_CONCURRENCY is too low for the number of clusters.
+              Jobs are queued and nothing is claiming them. Either no tick is
+              draining (the api is down, or RUN_CRONJOB=false and nothing posts
+              the tick) or WORKER_CONCURRENCY is too low for the number of
+              clusters.
 
         - alert: IndexterityJobsDeadLettering
           expr: increase(indexterity_job_runs_total{outcome="dead_letter"}[1h]) > 0
@@ -112,7 +114,7 @@ spec:
             description: >-
               A task exhausted its five attempts within the last hour. Cluster
               tasks alert their owners on the way out; anything else is a defect
-              worth reading the worker log for.
+              worth reading the api log for.
 
         - alert: IndexterityDeadLetterBacklog
           expr: indexterity_jobs{state="dead_letter"} > {{ $t.deadLetterBacklog }}

@@ -66,8 +66,8 @@ app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 
 {{/*
-Whichever image carries the api build — for the workloads that run one of its
-other entrypoints, the migration and the worker. The all-in-one image contains
+Whichever image carries the api build — for the migration Job, which runs its
+own entrypoint out of it. The all-in-one image contains
 the same apps/api/dist, so in single-container the whole release pulls exactly one
 image, which is the reason to be in that topology in the first place.
 */}}
@@ -204,15 +204,19 @@ test and the port-forward in NOTES.txt all read the same number they did before.
 # case multiplies by the fleet — and they are spent on the customer's mongod.
 - name: MONGO_MAX_POOL_SIZE
   value: {{ .Values.config.mongoMaxPoolSize | quote }}
-# Postgres connections PER POOL. The api holds three (requests, jobs, auth), kept
-# apart so a slow read cannot starve a sign-in — so size postgres for this times
-# the pools, plus graphile-worker's own.
+# Postgres connections PER POOL. The api holds two (requests — the tick's drains
+# share that one — and auth), kept apart so a slow read cannot starve a sign-in;
+# size postgres for this times the pools.
 - name: PG_POOL_MAX
   value: {{ .Values.config.pgPoolMax | quote }}
 - name: ALLOW_INSECURE_CLUSTER_TLS
   value: {{ .Values.config.allowInsecureClusterTls | quote }}
 {{- if .Values.config.allowUntestedMongoVersion }}
 - name: ALLOW_UNTESTED_MONGO_VERSION
+  value: "true"
+{{- end }}
+{{- if .Values.config.allowUntestedMssqlVersion }}
+- name: ALLOW_UNTESTED_MSSQL_VERSION
   value: "true"
 {{- end }}
 {{- if .Values.config.retentionDays }}
@@ -332,8 +336,8 @@ entries of one name in one container is a value that depends on ordering.
 {{- end }}
 {{- end -}}
 
-{{/* Error reporting. Takes the workload's own DSN as `dsn` because the api and the
-     worker report to one Sentry project and the dashboard to another — every process
+{{/* Error reporting. Takes the workload's own DSN as `dsn` because the api
+     reports to one Sentry project and the dashboard may use another — every process
      reads a plain SENTRY_DSN, and which project that is belongs to the deployment.
      Off unless a DSN is given, and it is the OPERATOR's: this chart never defaults
      to reporting anywhere.
@@ -389,11 +393,11 @@ entries of one name in one container is a value that depends on ordering.
 {{- end -}}
 
 {{/*
-The api's own variables — everything it reads that is not shared with the worker
-(coreEnv, mailEnv) or parameterised per listener (metricsEnv, errorsEnv). Those
-four stay at the call site rather than nesting here, because they are also the
-worker's and the migration's, and one flat list per container is what makes the
-env homes readable (apps/api/src/config/homes.test.ts).
+The api's own variables — everything it reads that is not shared with the
+migration (coreEnv, mailEnv) or parameterised per listener (metricsEnv,
+errorsEnv). Those four stay at the call site rather than nesting here, because
+one flat list per container is what makes the env homes readable
+(apps/api/src/config/homes.test.ts).
 */}}
 {{- define "indexterity.apiEnv" -}}
 - name: API_PORT
@@ -425,11 +429,15 @@ env homes readable (apps/api/src/config/homes.test.ts).
   value: {{ .Values.config.rateLimitMax | quote }}
 - name: AUTH_RATE_LIMIT_MAX
   value: {{ .Values.config.authRateLimitMax | quote }}
-# One-container mode for the job runner. Off while the worker Deployment is on,
-# or the schedule would be installed twice — validateWorkerTopology refuses that
-# combination rather than letting it install.
-- name: RUN_WORKER
-  value: {{ .Values.api.runWorker | quote }}
+- name: RUN_CRONJOB
+  value: {{ .Values.api.runCronjob | quote }}
+{{- if not .Values.api.runCronjob }}
+- name: CRON_TRIGGER_SECRET
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "indexterity.secretName" . }}
+      key: CRON_TRIGGER_SECRET
+{{- end }}
 - name: REQUIRE_EMAIL_VERIFICATION
   value: {{ .Values.config.requireEmailVerification | quote }}
 - name: SIGNUP_MODE
@@ -462,21 +470,16 @@ typo. `single_container` and `singleContainer` are the spellings that get tried.
 {{- end -}}
 
 {{/*
-The crontab is installed by whoever runs the job runner, and graphile-worker
-schedules it per process rather than per cluster — so two runners mean every
-scheduled job is enqueued twice. Both halves of that were prose in values.yaml
-and nothing enforced either. A merged topology is where an operator meets them:
-folding three Deployments into one is exactly when worker.enabled comes off and
-api.runWorker goes on, and doing only the second is silent.
+The schedule needs two things to be true, and both silences are worse than a
+refusal. RUN_CRONJOB=false with no secret is an api whose only clock refuses
+every caller; both were prose in values.yaml once, and nothing enforced them.
+(The runWorker/worker.enabled arms this once held died with the worker itself —
+#232: every api executes jobs, and replicas tick concurrently because a pass is
+claimed against its occurrence.)
 */}}
-{{- define "indexterity.validateWorkerTopology" -}}
-{{- if .Values.api.runWorker -}}
-{{- if .Values.worker.enabled -}}
-{{- fail "api.runWorker=true with worker.enabled=true installs the cron schedule twice — every collect, apply, retention and digest would be enqueued by both. Set worker.enabled=false to embed the runner in the api, or api.runWorker=false to keep the separate Deployment." -}}
-{{- end -}}
-{{- if gt (int .Values.api.replicas) 1 -}}
-{{- fail (printf "api.runWorker=true with api.replicas=%v installs the cron schedule once per replica. The embedded runner is for a single-replica install; scale out with worker.enabled=true and api.runWorker=false instead." .Values.api.replicas) -}}
-{{- end -}}
+{{- define "indexterity.validateSchedule" -}}
+{{- if and (not .Values.api.runCronjob) (not .Values.secrets.cronTriggerSecret) (not .Values.secrets.existingSecret) -}}
+{{- fail "api.runCronjob=false needs secrets.cronTriggerSecret — POST /api/internal/tick is the only thing that can start a pass, and it authorises the whole pipeline. Generate one with `openssl rand -hex 32`." -}}
 {{- end -}}
 {{- end -}}
 

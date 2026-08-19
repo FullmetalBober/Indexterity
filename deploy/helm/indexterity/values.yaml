@@ -1,5 +1,5 @@
-# Indexterity Helm values. The three workloads (api, web, worker) come from two
-# images; PostgreSQL is NOT bundled — point databaseUrl at a managed instance or
+# Indexterity Helm values. The two workloads (api, web) come from two images —
+# the api runs the job pipeline itself (#232) — and PostgreSQL is NOT bundled — point databaseUrl at a managed instance or
 # your own postgres release.
 #
 #   helm install indexterity oci://ghcr.io/fullmetalbober/charts/indexterity \
@@ -45,18 +45,18 @@ fullnameOverride: ""
 #
 # Measured under load — page renders, api calls and concurrent sign-ups — against
 # the published images. They are floors for an install with a small fleet: the
-# collectors hold per-collection statistics while they work, so an api and a
-# worker managing many clusters will sit higher. Watch
+# collectors hold per-collection statistics while they work, so an api managing
+# many clusters will sit higher. Watch
 # container_memory_working_set_bytes on your own install before tightening
 # further.
 
 # How the workloads are PACKAGED. The code is identical in both; this only
 # decides how many Deployments and containers it lands in.
 #
-#   split             Three Deployments from two images. The default, and what a
-#                     hosted install runs: api, web and worker roll, scale and
-#                     fail independently, so an api rollout cannot take the
-#                     landing page down with it.
+#   split             Two Deployments from two images. The default, and what a
+#                     hosted install runs: api and web roll, scale and fail
+#                     independently, so an api rollout cannot take the landing
+#                     page down with it.
 #
 #   single-container  One Deployment, ONE container, from the all-in-one image
 #                     below: both processes under a supervisor that is PID 1.
@@ -65,10 +65,6 @@ fullnameOverride: ""
 #                     Docker Compose, `docker run`. The image is usable entirely
 #                     without this chart.
 #
-# Neither folds in the WORKER: that is worker.enabled and api.runWorker below,
-# and it is a separate decision because it changes what runs on a schedule rather
-# than where it is packaged. `worker.enabled=false` with `api.runWorker=true`
-# (and api.replicas=1) is what makes single-container genuinely one workload.
 #
 # What single-container does, and what it costs:
 #   - api.replicas is the pod count; web.replicas is ignored. The two scale
@@ -99,7 +95,8 @@ api:
   # clusters, and a second pod there buys availability nobody asked for while
   # doubling the memory. Raise it for HA — both processes are stateless and
   # sessions live in Postgres — and read config.rateLimitMax as per replica when
-  # you do. api.runWorker=true pins this at 1; the chart refuses anything else.
+  # you do. Replicas tick concurrently and safely: a pass is claimed against its
+  # occurrence in worker_watermarks, so one replica wins each and the rest skip.
   replicas: 1
   port: 3001
   service:
@@ -124,11 +121,16 @@ api:
   tolerations: []
   affinity: {}
   podAnnotations: {}
-  # Run the job runner inside the api process instead of a separate worker
-  # container, for a small single-replica install that sets worker.enabled=false.
-  # Keep it false otherwise: with the worker Deployment on, or with more than one
-  # api replica, the cron schedule would be installed more than once.
-  runWorker: false
+  # Who owns the recurring schedule. The api always executes jobs (#232); this
+  # decides WHEN passes become due.
+  #
+  # true (default): a 30-second in-process tick per replica — occurrence claims
+  # keep concurrent replicas from double-dispatching.
+  # false: nothing fires on its own; POST /api/internal/tick is the clock, for
+  # an external scheduler. The request claims AND drains, bounded at 25 s so it
+  # answers inside platform proxy timeouts; "drained": false means ping again,
+  # and repeats are free. Requires secrets.cronTriggerSecret.
+  runCronjob: true
   # Extra environment variables (name/value pairs).
   extraEnv: []
 
@@ -190,8 +192,8 @@ allInOne:
     tag: ""
     pullPolicy: IfNotPresent
   # One container, both processes, so this is the api's and the web's budgets
-  # added together rather than either of them. The job runner lands here too when
-  # api.runWorker is on, which is the usual reason to be in this topology at all.
+  # added together rather than either of them — and the api's half includes the
+  # job pipeline, which runs in it everywhere (#232).
   #
   # Measured at 85 MB under a 192 MiB limit and 214 MB under 512 MiB, serving the
   # same load — again the ceiling, not the work. 384 MiB is where the supervisor's
@@ -205,42 +207,16 @@ allInOne:
     limits:
       memory: 384Mi
 
-worker:
-  # Runs the cron schedule (collect, apply, finalize, retention, digest).
-  # Keep at ONE replica: graphile-worker coordinates through Postgres, but the
-  # crontab would otherwise be scheduled by every pod.
-  enabled: true
-  # Jobs run at once in this process. Each one holds its own working set — a
-  # collect pass keeps a cluster's index and collection statistics in memory
-  # while it runs — so this multiplies the memory below rather than sharing it.
-  # One is the right default: the pipeline is not latency-critical, and a fleet
-  # large enough to queue behind a single runner is a fleet that should raise
-  # this deliberately, with the limit raised alongside it.
-  concurrency: 1
-  # 65 MB running under a 128 MiB limit, with concurrency 2 and an idle fleet.
-  # Add roughly a job's working set per unit of concurrency above one.
-  resources:
-    requests:
-      cpu: 100m
-      memory: 96Mi
-    limits:
-      memory: 256Mi
-  nodeSelector: {}
-  tolerations: []
-  affinity: {}
-  podAnnotations: {}
-  extraEnv: []
-
-# Prometheus metrics on a second port, served by all three workloads. Never
+# Prometheus metrics on a second port, served by both workloads. Never
 # routed by the ingress and carrying no auth: queue depth, cluster counts and
 # pipeline state are operator information, so the endpoint is reachable
 # in-cluster only until you deliberately expose it.
 #
-# Each workload answers for what only it can see, so scrape all three:
-#   api     HTTP traffic, and everything read from the control-plane database —
+# Each workload answers for what only it can see, so scrape both:
+#   api     HTTP traffic, everything read from the control-plane database —
 #           clusters, recommendations by state, queue depth, dead-letter backlog
-#   worker  job outcomes and durations, the regression gate, drops executed, and
-#           which clusters it currently cannot reach
+#           — and the pipeline: job outcomes and durations, the regression gate,
+#           drops executed, and which clusters it currently cannot reach
 #   web     page render time per route, and the api as the dashboard server
 #           experiences it (including "never answered")
 metrics:
@@ -272,19 +248,20 @@ metrics:
     relabelings: []
     metricRelabelings: []
   # Alerting rules for the failures that are otherwise silent: a schedule that
-  # stopped running, a worker that is gone, observation being thrown away, the api
-  # having lost Postgres. Same CRD requirement as the ServiceMonitor, so also off
-  # by default.
+  # stopped running, a pipeline that is gone, observation being thrown away, the
+  # api having lost Postgres. Same CRD requirement as the ServiceMonitor, so also
+  # off by default.
   #
-  # The stale-schedule windows come from the crontab in jobs/runner.ts — change
-  # one there and the matching threshold here has to move with it.
+  # The stale-schedule windows come from BURST_SCHEDULE in jobs/schedule.ts —
+  # change one there and the matching threshold here has to move with it.
   prometheusRule:
     enabled: false
     # Extra labels, for an Operator that selects PrometheusRules by label.
     labels: {}
     thresholds:
-      # A runnable job no worker has claimed for this long. `apply` and `probe`
-      # tick every five minutes, so fifteen means the worker is down or saturated.
+      # A runnable job nothing has claimed for this long. `apply` and `probe`
+      # tick every five minutes, so fifteen means the pipeline is down or
+      # saturated.
       queueAgeSeconds: 900
       # Permanently failed jobs sitting in the queue. Retention prunes them after
       # a window, so a standing pile is real rather than history.
@@ -299,11 +276,11 @@ metrics:
       # and starts looking like the engine proposing bad drops.
       regressionsPerDay: 3
 
-# Error reporting to Sentry, from all three workloads. The other half of the
+# Error reporting to Sentry, from both workloads. The other half of the
 # picture above: the metrics say how OFTEN something failed, an error says WHAT
-# failed and where. The worker is the reason this exists — a job that throws
-# there is invisible unless somebody happens to be reading container logs at the
-# time.
+# failed and where. The job pipeline is the reason this exists — a job that
+# throws is invisible unless somebody happens to be reading container logs at
+# the time.
 #
 # Off unless you set a DSN, and the DSN is YOURS. This install reports to your
 # Sentry organisation (or to a self-hosted Sentry), never to ours.
@@ -315,11 +292,8 @@ metrics:
 # is unit-tested in packages/errors. Nothing here sends metrics or traces: the
 # scrape endpoint above stays the only source of those.
 errorReporting:
-  # The api AND the worker report here. One project for the two of them on
-  # purpose: they are one image, one release and one body of code — a fault in
-  # the job or analysis layer is reachable from both, so a project per workload
-  # would file it twice — and RUN_WORKER=true makes them one process anyway.
-  # A `service` tag says which one answered.
+  # The api reports here, pipeline included — one process since #232, so there
+  # is exactly one thing a server-side fault can be tagged as (`service: api`).
   #
   # https://<key>@<org>.ingest.<region>.sentry.io/<project>
   dsn: ""
@@ -369,7 +343,7 @@ config:
   # Cloud metadata and other never-a-database ranges stay blocked either way.
   allowPrivateClusterTargets: false
   # Allow connecting clusters that do not offer validated TLS. Every outbound
-  # connection requires it by default, including the ones the worker makes from
+  # connection requires it by default, including the ones the pipeline makes from
   # stored credentials — so a cluster connected without it stops being collected
   # and its owners are told why.
   #
@@ -386,6 +360,9 @@ config:
   # hides, drops and builds indexes on a live database, and a major release is
   # where command behaviour moves.
   allowUntestedMongoVersion: false
+  # Same ceiling, for SQL Server: releases newer than the 2025 series this
+  # release was probed against are refused unless this is set.
+  allowUntestedMssqlVersion: false
   # The operator's retention ceiling, in days. Storage is your bill, so this caps
   # what any plan keeps AND what any plan may see. Empty means no ceiling — each
   # plan's own window decides.
@@ -401,19 +378,18 @@ config:
   # concurrent use of a single connection is five reads. Raise it only if a
   # cluster's collect pass is visibly waiting on connections.
   mongoMaxPoolSize: 10
-  # Postgres connections PER POOL — and a process holds more than one. The api has
-  # a request pool, the jobs' pool and better-auth's; the worker has the jobs' pool
-  # and graphile-worker's own. They are deliberately not merged: one shared pool
-  # would let a slow report starve a sign-in of a connection, and that isolation is
-  # worth a handful of backends.
+  # Postgres connections PER POOL — and a process holds more than one. The api
+  # has a request pool (the tick's drains share it) and better-auth's. They are
+  # deliberately not merged: one shared pool would let a slow report starve a
+  # sign-in of a connection, and that isolation is worth a handful of backends.
   #
   # So the number to size your postgres against is roughly:
-  #   api replicas x 3 x pgPoolMax  +  worker (pgPoolMax + concurrency + 1)
-  # which is about 20 at the defaults, and grows by 15 per api replica you add. A
-  # self-hosted postgres ships max_connections=100.
+  #   api replicas x 2 x pgPoolMax
+  # which is about 10 at the defaults, and grows by 10 per api replica you add.
+  # A self-hosted postgres ships max_connections=100.
   #
   # Too low is latency, not failure — a query waits for a free connection rather
-  # than erroring. Raise it alongside worker.concurrency.
+  # than erroring.
   pgPoolMax: 5
   # Per-IP request budgets, per minute. Raise them for a shared egress IP or a
   # test suite. Read rateLimitMax as PER REPLICA (see the api Deployment);
@@ -480,9 +456,23 @@ secrets:
   # GITHUB_CLIENT_SECRET).
   existingSecret: ""
   # postgres://user:pass@host:5432/indexterity
+  #
+  # The DIRECT endpoint, not a transaction-pooled one (Neon's `-pooler` host,
+  # PgBouncer or Supavisor in transaction mode). LISTEN/NOTIFY does not survive
+  # transaction pooling — the LISTEN is accepted and the notification never
+  # arrives — so the dashboard's live updates silently never fire. The api tests
+  # it with a NOTIFY round trip at boot and refuses to start on a URL that loses
+  # it, so this one is a CrashLoopBackOff naming the reason rather than a
+  # dashboard that looks fine and never updates. A pooler buys this release
+  # nothing either: it holds about 10 connections at the chart's defaults.
   databaseUrl: ""
   # Session signing key: openssl rand -base64 32
   betterAuthSecret: ""
+  # The bearer token POST /api/internal/tick demands. Required when
+  # api.runCronjob=false and ignored otherwise. It authorises the whole pipeline
+  # and there is no user session behind it, so make it long:
+  #   openssl rand -hex 32
+  cronTriggerSecret: ""
   # KEK for envelope-encrypted cluster credentials: openssl rand -base64 32
   # LOSING THIS MAKES EVERY STORED CONNECTION STRING UNREADABLE — back it up.
   masterKey: ""

@@ -41,6 +41,8 @@ const MISSING_HINTS: Record<string, string> = {
   MASTER_KEY:
     "the key that unseals stored cluster credentials. Generate one with `openssl rand -base64 32` and back it up — losing it makes every stored connection string unreadable",
   BETTER_AUTH_SECRET: "the session signing key. Generate one with `openssl rand -base64 32`",
+  CRON_TRIGGER_SECRET:
+    "the bearer token POST /api/internal/tick demands. RUN_CRONJOB=false installs no schedule, so that endpoint is the only thing that can start a pass. Generate one with `openssl rand -hex 32`",
 };
 
 // One line per bad variable: what it is, what was expected, and — unless it
@@ -72,8 +74,8 @@ function report(process: ProcessName, raw: Record<string, string>, error: z.ZodE
 }
 
 // Validate the environment for this process and remember the result. Called
-// once, first thing, by every entrypoint — main.ts, worker.ts, migrate.ts,
-// rotate-key.ts, set-plan.ts.
+// once, first thing, by every entrypoint — main.ts, migrate.ts, rotate-key.ts,
+// set-plan.ts.
 export function loadEnv(process: ProcessName, raw: NodeJS.ProcessEnv = globalThis.process.env) {
   const present = withoutBlanks(raw);
   const result = PROCESS_SCHEMAS[process].safeParse(present);
@@ -125,15 +127,18 @@ export function coreEnv(): MigrateEnv {
   return current(["api", "worker", "migrate"], "coreEnv") as MigrateEnv;
 }
 
-// Everything the worker and the api share: the master key, the plans, the
-// cluster-dialling guards, mail, metrics.
+// The pipeline's variables: the master key, the plans, the cluster-dialling
+// guards, mail, metrics. The api validates them as part of its own shape; the
+// "worker" process name survives the worker process (#232) as the narrower
+// validation the rotate-key CLI runs under, since that tool unseals credentials
+// without ever being given the api's HTTP half.
 export function workerEnv(): WorkerEnv {
   return current(["api", "worker"], "workerEnv") as WorkerEnv;
 }
 
 // The api's own half: HTTP, auth, the rate limits, the sign-up posture. Not
-// reachable from the worker, which serves no HTTP and is never given
-// BETTER_AUTH_SECRET (see deploy/helm — the worker Deployment does not set it).
+// reachable from the rotate-key CLI, which validates workerShape and is never
+// given BETTER_AUTH_SECRET.
 export function apiEnv(): ApiEnv {
   return current(["api"], "apiEnv") as ApiEnv;
 }

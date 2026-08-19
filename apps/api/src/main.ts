@@ -13,14 +13,20 @@ import { auth } from "./auth";
 import { sessionCookiesFor } from "./auth/session";
 import { apiEnv, trustProxySetting } from "./config/env";
 import { DatabaseService } from "./db/database.service";
+import { probeNotifyOrExit } from "./db/notify-probe";
 import { AppExceptionFilter } from "./errors/exception.filter";
 import { captureAuthFailure } from "./errors/reporting";
 import { quietProbes } from "./http/quiet-probes";
 import { securityHeaders } from "./http/security-headers";
-import { embeddedWorkerEnabled, startWorker } from "./jobs/runner";
+import { TickService } from "./jobs/tick.service";
 import { instrumentHttp, registerControlPlaneGauges, startMetricsServer } from "./metrics";
 
 async function bootstrap(): Promise<void> {
+  // Before anything serves: a DATABASE_URL that swallows NOTIFY is a dashboard whose
+  // live updates silently never fire, because the SSE stream is LISTEN/NOTIFY end to
+  // end and a transaction pooler drops the notification without erroring (#233).
+  // Opens two connections, closes both.
+  await probeNotifyOrExit();
   // Fastify's built-in pino: structured request/response logs with req ids,
   // secrets redacted. LOG_LEVEL=debug for verbose, silent in tests.
   const adapter = new FastifyAdapter({
@@ -149,24 +155,20 @@ async function bootstrap(): Promise<void> {
     process.once("SIGINT", () => void metrics.stop());
   }
 
-  // One-container mode for small and self-hosted installs. Off by default:
-  // hosted keeps the worker separate so an api rollout cannot abort an
-  // in-flight index build, and so the alert cooldown stays single-replica.
-  if (embeddedWorkerEnabled()) {
-    // The api's own pool, shared with the jobs it now runs. One process, one
-    // control-plane pool: the tasks used to open a second one of their own the
-    // first time a job asked for it.
-    //
-    // Stopping the runner is registered HERE rather than left to Nest's shutdown
-    // hooks, and the ordering matters: enableShutdownHooks above registered its
-    // SIGTERM handler first, so DatabaseService would otherwise drain this pool
-    // while a job was still running against it.
-    const runner = await startWorker(database.db);
-    app.getHttpAdapter().getInstance().log.info("RUN_WORKER=true — job runner embedded in the api");
-    const stopRunner = (): void => void runner.stop();
-    process.once("SIGTERM", stopRunner);
-    process.once("SIGINT", stopRunner);
-  }
+  // The pipeline lives here, always: since #232 there is no other process to
+  // put it in. Jobs run on the tick — claim what became due, drain with runOnce
+  // against the api's own pool — and TickService owns the whole lifecycle
+  // through Nest, which is what retires the manual SIGTERM ordering that used
+  // to live here: the drain settles in the beforeApplicationShutdown phase, one
+  // phase before DatabaseService drains the pool, so D71's race stays closed
+  // without a hand-registered handler (see the note in jobs/tick.service.ts).
+  // The only choice left to configuration is the CLOCK (RUN_CRONJOB).
+  const ownsSchedule = app.get(TickService).startInterval();
+  fastify.log.info(
+    ownsSchedule
+      ? "jobs drain in-process; a 30s tick owns the schedule (no resident runner, no LISTEN)"
+      : "RUN_CRONJOB=false — jobs drain in-process; the clock is external, and POST /api/internal/tick claims AND drains",
+  );
 
   const port = apiEnv().API_PORT;
   await app.listen(port, "0.0.0.0");

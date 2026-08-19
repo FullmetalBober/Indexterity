@@ -1,4 +1,4 @@
-import type { Runner } from "graphile-worker";
+import type { WorkerEvents } from "graphile-worker";
 import {
   clustersUnreachable,
   clusterTaskRuns,
@@ -24,10 +24,14 @@ export type ClusterTaskOutcome =
   | "gone"
   | "error";
 
-// Clusters whose last tick could not reach them. In memory, which is sound for
-// the same reason the alert cooldown is: the worker is a single replica by
-// design, and with RUN_WORKER=true there is only the one process. It rebuilds
-// itself within a tick of a restart.
+// Clusters whose last tick could not reach them. In memory and PER REPLICA,
+// which was exactly sound while the pipeline was pinned to one process and is
+// eventually consistent now that it is not (#232 lifted the cap): every
+// replica drains from one shared queue, so a cluster's next task lands on an
+// arbitrary pod and each pod's verdict for it refreshes within a few passes. A
+// pod can therefore export a stale entry for a cluster another pod has since
+// reached — bounded by how often the hourly passes go round — which is why the
+// fleet alert is a ratio with a 15m hold rather than a zero-tolerance count.
 const unreachable = new Set<string>();
 
 export function recordClusterTask(
@@ -88,25 +92,27 @@ export function recordDrop(outcome: "dropped" | "unhidden" | "absent"): void {
 
 // Job-level counters from graphile-worker's own events, so the numbers agree with
 // what the queue believes rather than with what a task remembered to report.
-// Wired inside startWorker, which covers the standalone worker and the
-// RUN_WORKER=true api alike — and so does the unreachable gauge, which only the
-// process that runs the pipeline can answer for.
-export function instrumentRunner(runner: Runner): void {
+// Takes the EVENT STREAM rather than a Runner: the tick's drains (the only
+// thing that executes jobs since #232) hand runOnce a long-lived emitter, and
+// no Runner ever exists. Wired through wireRunnerEvents (jobs/runner.ts), which
+// must be called ONCE per process — the gauge callback below would stack
+// otherwise.
+export function instrumentRunner(events: WorkerEvents): void {
   clustersUnreachable.addCallback((result) => result.observe(unreachableClusterCount()));
 
-  runner.events.on("job:success", ({ job }) => {
+  events.on("job:success", ({ job }) => {
     jobRuns.add(1, { task: job.task_identifier, outcome: "success" });
     observeDuration(job);
   });
   // job:failed follows job:error when the last retry burns, on the same
   // condition, so an errored job is counted once: as a retry, or as
   // dead-lettered.
-  runner.events.on("job:error", ({ job }) => {
+  events.on("job:error", ({ job }) => {
     if (job.attempts >= job.max_attempts) return;
     jobRuns.add(1, { task: job.task_identifier, outcome: "retry" });
     observeDuration(job);
   });
-  runner.events.on("job:failed", ({ job }) => {
+  events.on("job:failed", ({ job }) => {
     jobRuns.add(1, { task: job.task_identifier, outcome: "dead_letter" });
     observeDuration(job);
   });

@@ -10,7 +10,7 @@
 //
 // They run on the web server during SSR and in the browser afterwards, off the
 // same isomorphic client (lib/api.ts).
-import type { Cluster, MyInvite, OrgInfo, OrgSummary } from "@repo/contracts";
+import type { Cluster, MyInvite, OrgInfo, OrgSummary, SupportedEngine } from "@repo/contracts";
 import { type QueryClient, queryOptions, useQuery } from "@tanstack/react-query";
 import { api } from "../api";
 import { isStatus, statusOf } from "./errors";
@@ -20,6 +20,7 @@ import { queryKeys } from "./keys";
 export const NO_CLUSTERS: Cluster[] = [];
 export const NO_ORGS: OrgSummary[] = [];
 export const NO_INVITES: MyInvite[] = [];
+export const NO_ENGINES: SupportedEngine[] = [];
 
 export function clustersQuery() {
   return queryOptions({ queryKey: queryKeys.clusters(), queryFn: () => api().listClusters() });
@@ -37,8 +38,30 @@ export function myInvitesQuery() {
   return queryOptions({ queryKey: queryKeys.myInvites(), queryFn: () => api().listMyInvites() });
 }
 
+// What this build can connect, for the connect form's helper text and its engine
+// override (#239). `staleTime: Infinity` because the answer is a property of the
+// deployed api: it changes when the api is replaced, which replaces this tab's
+// session too, and re-asking on every mount would be a request per visit to the
+// page for an answer that cannot have moved.
+export function enginesQuery() {
+  return queryOptions({
+    queryKey: queryKeys.engines(),
+    queryFn: () => api().listSupportedEngines(),
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+}
+
 export function useClusters(): Cluster[] {
   const { data = NO_CLUSTERS } = useQuery(clustersQuery());
+  return data;
+}
+
+// Empty while it has not arrived, and the form draws nothing engine-specific in
+// that window rather than a guess: an empty list is "we have not been told yet",
+// which for one render is invisible, while a hardcoded fallback sentence would
+// be a claim about a build it never asked.
+export function useEngines(): SupportedEngine[] {
+  const { data = NO_ENGINES } = useQuery(enginesQuery());
   return data;
 }
 

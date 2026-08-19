@@ -23,6 +23,18 @@ export interface IndexSpec {
   readonly hidden: boolean;
   readonly isShardKey: boolean;
   readonly collation: string | null;
+  // Columns the index carries at its leaves without ordering by them — SQL
+  // Server's INCLUDE. They are not part of the key, so they change nothing
+  // about what the index can SEEK; what they change is what it can ANSWER
+  // without going back to the table, which is exactly what makes an index
+  // covering. Two indexes with the same keys and different includes serve
+  // different queries.
+  //
+  // Absent for engines that have no such concept (MongoDB indexes every key
+  // they name and nothing else), which is why it is optional rather than an
+  // empty array everywhere: a spec that never had includes and one whose
+  // includes were not captured are the same thing to every reader here.
+  readonly include?: readonly string[];
 }
 
 // $indexStats is cumulative and per-member. `since` is when THAT member's

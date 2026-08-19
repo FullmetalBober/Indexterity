@@ -43,12 +43,19 @@ Workloads (topology: {{ .Values.topology }}):
   api     {{ .Values.api.replicas }} replica(s)  — {{ include "indexterity.apiImage" . }}
   web     {{ .Values.web.replicas }} replica(s)  — {{ include "indexterity.webImage" . }}
 {{- end }}
-  worker  {{ if .Values.worker.enabled }}1 replica (cron: collect, apply, finalize, retention, digest){{ else if .Values.api.runWorker }}embedded in the api process (RUN_WORKER=true) — no Deployment of its own{{ else }}DISABLED — nothing is collected or applied on a schedule{{ end }}
-{{- if and (include "indexterity.merged" .) .Values.worker.enabled }}
+  pipeline runs inside the api{{ if .Values.api.runCronjob }} — a 30s tick per replica owns the schedule
+          (collect, apply, finalize, retention, digest); occurrence claims keep
+          replicas from double-dispatching{{ end }}
+{{- if not .Values.api.runCronjob }}
+  clock   EXTERNAL (RUN_CRONJOB=false). Nothing recurs until something posts:
 
-  NOTE: the serving tier is merged but the worker still has its own Deployment,
-  so this release is two of them. For one, set worker.enabled=false and
-  api.runWorker=true — with api.replicas=1, which the embedded runner requires.
+            curl -fsS -X POST https://<host>/api/internal/tick \
+              -H "Authorization: Bearer $CRON_TRIGGER_SECRET"
+
+          It runs the whole tick — claims what became due, enqueues and drains
+          it — answering within 25s; `"drained": false` means ping again to
+          resume. Safe to call as often as you like — passes are claimed per
+          occurrence, so repeats inside one bucket enqueue nothing.
 {{- end }}
 
 {{- if .Values.metrics.enabled }}
@@ -58,11 +65,11 @@ Metrics: port {{ .Values.metrics.port }} on {{ include "indexterity.fullname" . 
 {{- if include "indexterity.merged" . }} (both Services reach the one pod, whose
 dashboard listener is on {{ include "indexterity.webMetricsPort" . }} — the api already has {{ .Values.metrics.port }} in that
 network namespace){{ end }}
-{{- if .Values.worker.enabled }} and {{ include "indexterity.fullname" . }}-worker-metrics{{ end }}, path /metrics.
+, path /metrics.
 {{- if .Values.metrics.serviceMonitor.enabled }}
-  A ServiceMonitor is installed for each. Scrape them all — the api reports HTTP
-  and control-plane state, the worker job outcomes and the pipeline, the web
-  render time and the api as the dashboard server sees it.
+  A ServiceMonitor is installed for each. Scrape both — the api reports HTTP,
+  control-plane state and the whole job pipeline; the web reports render time
+  and the api as the dashboard server sees it.
   If they do not show up as targets, match your Operator's serviceMonitorSelector
   with metrics.serviceMonitor.labels — that is nearly always what it is.
 {{- else }}

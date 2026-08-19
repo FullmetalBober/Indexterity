@@ -60,6 +60,31 @@ describe("enforcesTheSame", () => {
     expect(enforcesTheSame(ASC, DESC)).toBe(true);
   });
 
+  // Same constraint, less covered: the replacement forbids exactly what the
+  // original forbade and answers fewer queries from its own leaves. The
+  // post-build watch is a WRITE-latency gate, so nothing downstream sees it.
+  it("refuses a replacement that dropped the original's covering columns", () => {
+    const original = index("a_1_b_1", ASC.keys as IndexKey[], {
+      unique: true,
+      include: ["total"],
+    });
+    expect(enforcesTheSame(original, DESC)).toBe(false);
+    const carried = index("a_1_b_-1", DESC.keys as IndexKey[], {
+      unique: true,
+      include: ["total"],
+    });
+    expect(enforcesTheSame(original, carried)).toBe(true);
+  });
+
+  it("accepts a replacement that covers MORE than the original", () => {
+    const original = index("a_1_b_1", ASC.keys as IndexKey[], { unique: true, include: ["total"] });
+    const wider = index("a_1_b_-1", DESC.keys as IndexKey[], {
+      unique: true,
+      include: ["total", "email"],
+    });
+    expect(enforcesTheSame(original, wider)).toBe(true);
+  });
+
   it("refuses a different key set", () => {
     const other = index(
       "a_1_c_1",

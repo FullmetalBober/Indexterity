@@ -3,17 +3,14 @@
 {{- fail "metrics.serviceMonitor.enabled is set but metrics.enabled is false — the endpoint it would scrape is not being served" -}}
 {{- end }}
 {{/*
-One per workload. Not one for all three: they are selected by their component
-label, and each exports a different half of the picture, so a single monitor
-would hide which of them stopped answering.
+One per workload. Not one for both: they are selected by their component label,
+and each exports a different half of the picture, so a single monitor would hide
+which of them stopped answering.
 
 Requires the Prometheus Operator CRDs. Nothing here checks for them, so that a
 `helm template` run without a cluster still renders.
 */}}
 {{- $components := list "api" "web" }}
-{{- if .Values.worker.enabled }}
-{{- $components = append $components "worker" }}
-{{- end }}
 {{- $sm := .Values.metrics.serviceMonitor }}
 {{- range $component := $components }}
 ---

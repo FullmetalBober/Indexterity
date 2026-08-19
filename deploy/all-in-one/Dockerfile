@@ -90,10 +90,6 @@ COPY --from=builder /app .
 # with the tree above is `"type": "module"`, which is what makes this an ES module
 # — apps/api keeps its own `"type": "commonjs"`, so the api's dist is unaffected.
 COPY deploy/all-in-one/supervisor.ts ./supervisor.ts
-# The job runner too, because a single-container deployment has nowhere else to
-# put it: without this the schedule never runs and nothing is ever collected. The
-# Helm chart overrides it from api.runWorker, and any host can with RUN_WORKER=false.
-ENV RUN_WORKER=true
 # api, dashboard. The two metrics listeners are 9464 and 9465 when
 # METRICS_ENABLED=true; deliberately not published here, since the endpoint has no
 # auth and exposing it is a decision.

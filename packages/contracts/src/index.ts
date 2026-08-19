@@ -5,5 +5,6 @@
 import "./jit.js";
 
 export * from "./contract.js";
+export * from "./engine-hint.js";
 export * from "./inputs.js";
 export * from "./schemas.js";

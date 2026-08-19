@@ -1,5 +1,13 @@
-import { assessHealth, DEFAULT_PRESSURE, readPressure } from "../analysis";
+import {
+  assessHealth,
+  DEFAULT_HEALTH,
+  DEFAULT_PRESSURE,
+  type HealthOptions,
+  MSSQL_HEALTH,
+  readPressure,
+} from "../analysis";
 import { type Database, desc, eq, latencySamples } from "../db";
+import type { ClusterEngine } from "../engine/ports";
 import { openClusterSession } from "./cluster-connection";
 
 // The five-minute check: is a collection suddenly much slower to read than it
@@ -15,9 +23,27 @@ import { openClusterSession } from "./cluster-connection";
 // with hundreds of collections should not pay for all of them every five
 // minutes to answer a question about the ones carrying traffic.
 const PROBE_COLLECTIONS = 20;
-// Gap between the two serverStatus readings. Long enough for the counters to
-// move under real traffic, short enough that the probe stays a quick job.
+// Gap between the two health readings. Long enough for the counters to move
+// under real traffic, short enough that the probe stays a quick job.
+//
+// It also has a FLOOR now, which mongod did not impose: SQL Server serves
+// Index Searches, Page lookups and Range Scans from a snapshot that refreshes
+// on its own schedule, so two reads inside the same tick return identical
+// values while Full Scans moves eagerly (measured on 2022 CU26 — a scanning
+// workload read 30 full scans and a flat zero for the other three). At a
+// second or more apart every counter moves exactly. Five is well clear;
+// shortening this would produce silent zeros on MSSQL rather than an error.
 const HEALTH_SAMPLE_MS = 5000;
+
+// Which reading of the counters applies. The ServerHealth SHAPE is shared —
+// scans, work per key, sorts, queue — and what a number in it means is not:
+// SQL Server's docs-per-key analogue is pages per index search, and its sort
+// counter is tempdb spills rather than in-memory sorts (analysis/health.ts has
+// the derivation). Exported so the mapping is a value a test can assert on
+// rather than a branch buried in the probe.
+export function healthOptionsFor(engine: ClusterEngine): HealthOptions {
+  return engine === "MSSQL" ? MSSQL_HEALTH : DEFAULT_HEALTH;
+}
 
 export interface PressureFinding {
   // Null for a server-wide finding, which names no single collection.
@@ -74,7 +100,7 @@ export async function probeCluster(db: Database, clusterId: string): Promise<Pre
   // the leading ORDER BY, and by this point it is two hundred rows, not 292k.
   const busiest = [...baselines].sort((a, b) => b.readOps - a.readOps).slice(0, PROBE_COLLECTIONS);
 
-  const { session, release } = await openClusterSession(db, clusterId);
+  const { session, engine, release } = await openClusterSession(db, clusterId);
   try {
     const findings: PressureFinding[] = [];
 
@@ -82,14 +108,15 @@ export async function probeCluster(db: Database, clusterId: string): Promise<Pre
     // engine is doing right now — collection scans, documents walked per index
     // key, readers queued behind the global lock — which catches a scan storm
     // spread thinly across many collections that no single latency average
-    // would flag. Null when the credentials cannot read serverStatus, which is
-    // an optional privilege.
+    // would flag. Null when the credentials cannot read the counters, which is
+    // an optional privilege on both engines — `serverStatus` on mongod, and
+    // VIEW SERVER STATE for the two DMVs on SQL Server.
     const first = await session.collector.collectServerHealth();
     if (first !== null) {
       await new Promise((resolve) => setTimeout(resolve, HEALTH_SAMPLE_MS));
       const second = await session.collector.collectServerHealth();
       if (second !== null) {
-        const verdict = assessHealth(first, second);
+        const verdict = assessHealth(first, second, healthOptionsFor(engine));
         if (verdict.severity !== "HEALTHY" && verdict.indexRelated) {
           findings.push({ database: null, collection: null, reason: verdict.summary });
         }

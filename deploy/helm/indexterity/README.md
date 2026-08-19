@@ -1,13 +1,15 @@
 # Indexterity Helm chart
 
-Deploys the three workloads — **api**, **web** (dashboard) and **worker**
-(scheduler) — from two images, plus a pre-upgrade migration job. `topology`
-folds the whole release into one container when three Deployments is more than
-an install needs.
+Deploys the two workloads — **api** (which runs the job pipeline itself) and
+**web** (dashboard) — from two images, plus a pre-upgrade migration job.
+`topology` folds the whole release into one container when two Deployments is
+more than an install needs.
 
 PostgreSQL is **not** bundled: point `secrets.databaseUrl` at a managed
-instance or your own postgres release. That is the control-plane store; the
-MongoDB clusters Indexterity manages are added later from the dashboard.
+instance or your own postgres release — at its **direct** endpoint, since
+`LISTEN/NOTIFY` does not survive transaction pooling and the api refuses to boot
+on a URL that loses it (see the values table). That is the control-plane store;
+the MongoDB clusters Indexterity manages are added later from the dashboard.
 
 ## Install
 
@@ -50,14 +52,12 @@ ingress, the ServiceMonitors and every in-cluster caller are unaffected.
 
 | `topology` | What is installed | Images pulled |
 |---|---|---|
-| `split` (default) | Three Deployments. api, web and worker roll, scale and fail independently — an api rollout cannot take the landing page down with it. What the hosted install runs | api, web |
+| `split` (default) | Two Deployments. api and web roll, scale and fail independently — an api rollout cannot take the landing page down with it. What the hosted install runs | api, web |
 | `single-container` | One Deployment, **one container**, from the all-in-one image: both processes under a supervisor that is PID 1 | all-in-one |
 
 ```bash
-# One container, everything in it, including the scheduler.
-helm install indexterity … \
-  --set topology=single-container \
-  --set worker.enabled=false --set api.runWorker=true --set api.replicas=1
+# One container, everything in it, including the schedule's tick.
+helm install indexterity … --set topology=single-container
 ```
 
 What `single-container` costs:
@@ -68,10 +68,6 @@ What `single-container` costs:
   namespace cannot bind one port twice. Both Services still *publish* 9464, so
   scrapers and `port-forward` read the same number as before; only the
   containerPort moved. `metrics.webPort` overrides it.
-- **The worker is a separate decision.** Merging the serving tier does not touch
-  the schedule. `worker.enabled=false` with `api.runWorker=true` (and
-  `api.replicas=1`) is what makes single-container genuinely one workload; the
-  chart refuses the combinations that would install the crontab twice.
 
 Switching an existing release replaces Deployments rather than editing them —
 the old ones go and one appears. That is a rollout, not a reinstall; the data is
@@ -107,8 +103,8 @@ processes would otherwise fight over — `WEB_METRICS_PORT` (default
 `METRICS_PORT + 1`) and `WEB_SENTRY_DSN` (default: the api's project) — forwards
 `SIGTERM` to both, and **exits non-zero the moment either process does**, so the
 host restarts the container instead of leaving a dashboard serving 502s from a
-passthrough with nothing behind it. `RUN_WORKER` defaults to `true` in this image
-and nowhere else: a single container has nowhere else to put the scheduler.
+passthrough with nothing behind it. The pipeline runs inside the api
+in every image (#232), so there is no scheduler flag to carry.
 
 ## Memory
 
@@ -149,11 +145,10 @@ sign-ups, against the published images:
 |---|---|---|---|
 | api | 128Mi | 320Mi | 99 MB under a 192 MiB limit |
 | web | 96Mi | 256Mi | 93 MB under a 128 MiB limit |
-| worker | 96Mi | 256Mi | 65 MB under a 128 MiB limit |
 | all-in-one | 192Mi | 384Mi | 85 MB under a 192 MiB limit |
 
 They are floors for a small fleet. The collectors hold per-collection statistics
-while they work, so an api and a worker managing many clusters sit higher — watch
+while they work, so an api managing many clusters sits higher — watch
 `container_memory_working_set_bytes` on your own install before tightening
 further.
 
@@ -165,8 +160,9 @@ Two things do not show up in steady-state observation:
   not the concurrency, so the limit has to absorb it — which is why the api's is
   the largest of the three. This is not a knob to turn down: the cost *is* the
   brute-force resistance.
-- **`worker.concurrency` multiplies rather than shares.** Each concurrent job
-  holds its own working set. It defaults to 1; raise it with the limit, not alone.
+- **`WORKER_CONCURRENCY` multiplies rather than shares.** Each concurrent job
+  holds its own working set. It defaults to 1; raise it (via `api.extraEnv`) with
+  the limit, not alone.
 - **Sockets are memory too, and some of them are not ours.** The driver would open
   up to 100 per connected cluster by default, held in a per-cluster session —
   `config.mongoMaxPoolSize` caps it at 10 and returns the surplus after 60s idle.
@@ -200,10 +196,9 @@ each one must be re-onboarded. Store it outside the cluster. To rotate, add
 
 ```
                      ┌── /api ──► api ──► PostgreSQL
-browser ──► ingress ─┤              ▲        ▲
-                     └── /  ───► web ┘       │   (SSR reads, in-cluster Service)
-                                 └──────┘    │   (and /api if no ingress rule)
-                                  worker ────┴──► customer MongoDB clusters
+browser ──► ingress ─┤              ▲  └────► customer MongoDB clusters
+                     └── /  ───► web ┘           (SSR reads via the api's
+                                                  in-cluster Service)
 ```
 
 **One host, two paths.** The browser calls the api itself — that is what makes
@@ -228,12 +223,12 @@ stays off by default — the dashboard does not need it.
 | Value | Why it matters |
 |---|---|
 | `topology` | `split` (default) or `single-container` — see above. Packaging only; the Services, the ingress and the app are the same in both |
-| `api.replicas` / `web.replicas` | **One each by default.** Raise for HA or throughput — both are stateless. `rateLimitMax` is per api process and Postgres connections grow ~15 per api replica; `api.runWorker=true` pins the api at 1 |
+| `api.replicas` / `web.replicas` | **One each by default.** Raise for HA or throughput — both are stateless, and api replicas tick concurrently without double-dispatching (a pass is claimed against its occurrence in `worker_watermarks`). `rateLimitMax` is per api process and Postgres connections grow ~10 per api replica |
 | `allInOne.*` | Image and resources for `topology: single-container`. `api.image` and `web.image` are never pulled in that topology, and neither is a second copy of node |
 | `metrics.webPort` | The dashboard's metrics containerPort. Empty means `metrics.port`, or `metrics.port + 1` when it shares a network namespace with the api |
+| `secrets.databaseUrl` | The control-plane Postgres, and it has to be the **direct** endpoint — not Neon's `-pooler` host, PgBouncer or Supavisor in transaction mode. `LISTEN/NOTIFY` does not survive transaction pooling: the `LISTEN` is accepted and the notification never arrives, so the dashboard's live updates silently never fire. The api runs a `NOTIFY` round trip at boot and refuses to start when it is lost, which makes this a CrashLoopBackOff naming the reason instead of a dashboard that looks fine and never updates. A pooler buys the release nothing anyway — it holds about 10 connections at these defaults |
 | `secrets.existingSecret` | Bring your own Secret (`DATABASE_URL`, `BETTER_AUTH_SECRET`, `MASTER_KEY`, optionally `SMTP_PASS`, `GITHUB_CLIENT_SECRET`) instead of putting values in Helm |
 | `web.publicUrl` | The dashboard's public origin. Defaults to the ingress host; the api trusts it for auth and session cookies are bound to it |
-| `worker.enabled` | Off means nothing is collected, applied or finalized on a schedule — the dashboard still works and can collect on demand |
 | `migrations.enabled` | The pre-install/pre-upgrade Job runs `node dist/migrate.js` before new pods start. Disable only if you migrate out of band |
 | `smtp.*` | Without a host, invites, alerts, verification and reset mails are logged and dropped |
 | `config.requireEmailVerification` | Production posture — needs working SMTP, or nobody can sign in |
@@ -243,10 +238,12 @@ stays off by default — the dashboard does not need it.
 | `config.trustProxy` | **Required with `ingress.enabled`**, and nothing is inferred. The pod network's CIDR — `10.0.0.0/8` on many clusters, k3s `10.42.0.0/16`, Calico `192.168.0.0/16`, an EKS default VPC `172.31.0.0/16`. Prefer a range over `true`, which better-auth cannot attribute a forwarded header from. Narrow it: this is who may claim to be someone else, so on a CNI giving pods VPC addresses it is every workload in the VPC. An install whose proxy is arranged outside the chart still has to set it — `helm install` prints what it resolved |
 | `config.rateLimitMax` / `config.authRateLimitMax` | Per-IP request budgets a minute. `rateLimitMax` is counted in each api process's memory, so it is **per replica**; `authRateLimitMax` is read twice — per replica for `/api/auth/*`, and by better-auth for the credential endpoints, which counts in Postgres and so applies to the whole deployment |
 | `config.allowUntestedMongoVersion` | Lets a cluster on a MongoDB major series newer than this release was tested against connect. The floor is not overridable; this is the ceiling |
-| `api.runWorker` | Embed the job runner in the api, for a single-replica install that sets `worker.enabled=false`. Leave `false` otherwise — with the worker Deployment on, or with more than one api replica, the cron schedule would be installed more than once |
+| `config.allowUntestedMssqlVersion` | The same ceiling for SQL Server: releases newer than the 2025 series this release was probed against are refused unless set. The 2016 floor is not overridable |
+| `api.runCronjob` | Who owns the recurring schedule — the api always **executes** jobs; this decides **when** passes become due. `true` (default) runs a 30 s in-process tick per replica. `false` fires nothing on its own and opens `POST /api/internal/tick` instead, so an external scheduler is the clock: the request runs the whole tick — claims, enqueues and drains, answering within 25 s, where `"drained": false` means ping again to resume, and repeats are free because passes are claimed per occurrence. Requires `secrets.cronTriggerSecret`; the chart refuses `false` without one |
+| `secrets.cronTriggerSecret` | The bearer token that endpoint demands, required when `api.runCronjob=false`. It authorises the whole pipeline and there is no user session behind it: `openssl rand -hex 32` |
 | `config.signupMode` | `invite` (default), `open` or `closed`. The first account always bootstraps the install; after that invite-only. `open` lets any stranger register — and every account can make the control plane dial hosts it names |
 | `config.allowPrivateClusterTargets` | Set `true` when the MongoDB you manage is on a private network (the normal self-hosted case). Leave `false` for anything strangers can reach, or accounts can probe your internal network. Cloud metadata stays blocked either way |
-| `config.allowInsecureClusterTls` | Set `true` only when the MongoDB you manage genuinely serves no certificate and the network between is trusted. Every outbound connection requires validated TLS otherwise — including the ones the worker makes from stored credentials, so a cluster connected without it stops being collected and its owners are told why. Kept apart from `allowPrivateClusterTargets` on purpose: a VPC-peered or PrivateLink cluster is a private address that must still be forced to TLS |
+| `config.allowInsecureClusterTls` | Set `true` only when the MongoDB you manage genuinely serves no certificate and the network between is trusted. Every outbound connection requires validated TLS otherwise — including the ones the pipeline makes from stored credentials, so a cluster connected without it stops being collected and its owners are told why. Kept apart from `allowPrivateClusterTargets` on purpose: a VPC-peered or PrivateLink cluster is a private address that must still be forced to TLS |
 | `metrics.enabled` | Prometheus metrics on port `metrics.port` (9464) for all three workloads. **Off by default** — an exporter costs memory in every process, and an install with nothing scraping it was paying that for nobody. Turn it on if anything is; the endpoint is never routed by the ingress |
 | `metrics.serviceMonitor.enabled` | One Prometheus Operator ServiceMonitor per workload. Off by default — it needs the `monitoring.coreos.com` CRDs, and a chart that assumes them cannot install without them |
 | `metrics.prometheusRule.enabled` | 18 alerting rules for the failures nothing else reports. Same CRD requirement, also off by default. Thresholds under `metrics.prometheusRule.thresholds` |
@@ -255,16 +252,12 @@ stays off by default — the dashboard does not need it.
 
 Off by default (`metrics.enabled=true` to serve it). With it on, all three
 workloads serve `/metrics` on port 9464, and each answers for what only it can
-see — scrape all three:
+see — scrape both:
 
 | workload | reports |
 |---|---|
-| api | HTTP traffic, and everything read from the control-plane database: clusters under management, recommendations by pipeline state (`HIDDEN` is a drop mid-observe), queue depth per task, the dead-letter backlog, the age of the oldest unclaimed job |
-| worker | job outcomes and durations from graphile-worker's own events, per-cluster tick outcomes, how many clusters it currently cannot reach, regression-gate decisions, drops executed |
+| api | HTTP traffic; everything read from the control-plane database: clusters under management, recommendations by pipeline state (`HIDDEN` is a drop mid-observe), queue depth per task, the dead-letter backlog, the age of the oldest unclaimed job; and the pipeline itself — job outcomes and durations from graphile-worker's own events, per-cluster tick outcomes, how many clusters it currently cannot reach, regression-gate decisions, drops executed |
 | web | page render time per route pattern, and the api as the dashboard server experiences it — including the calls it never answered, which the api itself cannot report and which the loaders otherwise swallow into an empty panel |
-
-With `worker.enabled=false` and `RUN_WORKER=true` on the api instead, the api
-serves the worker's half as well.
 
 In single-container all of that is still served, and still separately: the
 api's listener stays on 9464 and the dashboard's moves to 9465, because they are
@@ -274,7 +267,7 @@ resolve to the same pod.
 
 `metrics.serviceMonitor.enabled=true` installs a ServiceMonitor for each. Without
 the Prometheus Operator, point your own scraper at the `metrics` port on
-`<release>-api`, `<release>-web` and `<release>-worker-metrics`, or look by hand:
+`<release>-api` and `<release>-web`, or look by hand:
 
 ```bash
 kubectl -n indexterity port-forward svc/indexterity-api 9464:9464
@@ -305,14 +298,15 @@ plane healthy, and what are readers seeing. `metrics.prometheusRule.labels` is t
 same escape hatch as above.
 
 Every threshold is under `metrics.prometheusRule.thresholds`, and the
-stale-schedule windows are derived from the crontab in `apps/api/src/jobs/runner.ts`
-— if that schedule changes, these move with it.
+stale-schedule windows are derived from `BURST_SCHEDULE` in
+`apps/api/src/jobs/schedule.ts` — if that schedule changes, these move with it.
 
 Two of them exist because the obvious rule does not work:
 
-- **`IndexterityWorkerNotReporting`** uses `absent_over_time`, not `increase`. When
-  a process dies its series go stale, so `increase(...) == 0` matches nothing and a
-  rule written that way is silent in exactly the case you care about most.
+- **`IndexterityWorkerNotReporting`** (the name predates #232 folding the worker
+  into the api; the alert outlives it) uses `absent_over_time`, not `increase`.
+  When a process dies its series go stale, so `increase(...) == 0` matches nothing
+  and a rule written that way is silent in exactly the case you care about most.
 - **The stale-schedule alerts watch the `schedule*` dispatchers**, not the
   per-cluster tasks. `scheduleCollect` ticks on cron whether or not a cluster
   exists; `collect` does not, so alerting on it fires the moment the last cluster
@@ -340,10 +334,6 @@ page, under Security):
 
 ## Notes on the workloads
 
-- **worker runs exactly one replica.** graphile-worker coordinates execution
-  through Postgres, but every replica would install the crontab, so a second
-  pod means duplicate scheduling. Scale job throughput with
-  `worker.concurrency` instead.
 - **api and web default to one replica each.** The common install is a single
   organization managing its own clusters, where a second pod is memory spent on
   availability nobody asked for. The cost is that a node drain, an eviction or an
@@ -353,12 +343,11 @@ page, under Security):
   live in Postgres, so `api.replicas` and `web.replicas` are the only change.
   Two things move with them: `config.rateLimitMax` is counted per api process, so
   the real ceiling multiplies (`config.authRateLimitMax` does not — better-auth's
-  half counts in Postgres), and each api replica adds roughly 15 Postgres
+  half counts in Postgres), and each api replica adds roughly 10 Postgres
   connections. In single-container they scale as one unit, on `api.replicas`.
-- The worker drains its connection pool on `SIGTERM`
-  (`terminationGracePeriodSeconds: 60`).
-- **The worker's only Service is `-worker-metrics`**, and it is headless. Nothing
-  calls the worker; it exists so a scrape can find the pod.
+- **The api settles an in-flight drain before its pools close on `SIGTERM`**
+  (`terminationGracePeriodSeconds: 60`) — a rollout mid-tick loses no job, it
+  retries on the next tick.
 
 ## Validating changes to this chart
 

@@ -607,6 +607,11 @@ export const recommendations = pgTable(
         sparse: boolean;
         collation: string | null;
         partialFilter?: Record<string, unknown>;
+        // Covering columns (SQL Server INCLUDE). A re-order rebuilds the index
+        // with new key DIRECTIONS and everything else identical; leaving these
+        // behind would quietly narrow what the replacement can answer, and the
+        // post-build watch measures writes, so nothing downstream would see it.
+        include?: string[];
       };
       // On the DROP_REDUNDANT row that retires a re-ordered index: the index
       // that replaced it. The only thing that lets a protected index be dropped
@@ -720,6 +725,25 @@ export const dialBudgets = pgTable("dial_budgets", {
     .references(() => user.id, { onDelete: "cascade" }),
   count: integer("count").notNull().default(0),
   resetAt: timestamp("reset_at", { withTimezone: true }).notNull(),
+});
+
+// "The last time we did X", for the two things that must not forget it when a
+// process exits (#212).
+//
+// Burst mode is what forced this. The resident runner keeps both facts in the
+// process — graphile-worker's cron holds the schedule, and the alert cooldown is
+// a module-level Map — and both assume the process outlives the interval they
+// describe. A burst tick is a whole process per tick, so on a fifteen-minute
+// cron the cooldown would be empty 96 times a day and a cluster that has been
+// unreachable since Tuesday would mail its owners 96 times.
+//
+// One table for both because it is one operation: claim this key if nothing
+// claimed it since T. `pass:<name>` for a scheduled pass, `alert:<cluster>:<task>`
+// for an alert. See jobs/watermark.ts — the claim is a single conditional upsert,
+// so two ticks racing cannot both win it.
+export const workerWatermarks = pgTable("worker_watermarks", {
+  key: text("key").primaryKey(),
+  at: timestamp("at", { withTimezone: true }).notNull(),
 });
 
 // Regression memory: an index whose drop slowed reads during observe is parked

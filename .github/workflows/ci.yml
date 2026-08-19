@@ -148,6 +148,56 @@ jobs:
       - run: npm run db:migrate
       - run: npm run test:int -w @repo/api
 
+  # The MSSQL adapter against real SQL Servers — its own job rather than extra
+  # mongo-matrix legs, because that matrix would start the (heavy) mssql
+  # container once per mongo version to run one file. Both supported series
+  # run, because the tested ceiling (mssql/version.ts) is a promise this job
+  # keeps: DISABLE/REBUILD semantics and the usage-stats reset have moved
+  # between releases before. Adapter-level: no api is spawned, so postgres is
+  # not needed; DATABASE_URL only satisfies the env schema.
+  integration-mssql:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mssql: ["2022-latest", "2025-latest"]
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:${{ matrix.mssql }}
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: "Int3gration!Pass"
+        ports:
+          - "1433:1433"
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P 'Int3gration!Pass' -Q 'SELECT 1' -b"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 12
+          --health-start-period 20s
+    env:
+      DATABASE_URL: postgres://unused:unused@localhost:5432/unused
+      MSSQL_URL: "mssql://sa:Int3gration%21Pass@localhost:1433?trustservercertificate=true"
+      BETTER_AUTH_SECRET: integration-secret
+      MASTER_KEY: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "26"
+          cache: npm
+      - uses: actions/cache@v6
+        id: modules
+        with:
+          path: |
+            node_modules
+            apps/*/node_modules
+            packages/*/node_modules
+          key: modules-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+      - run: npm ci
+        if: steps.modules.outputs.cache-hit != 'true'
+      - run: npm run test:int -w @repo/api -- integration/mssql.int.test.ts
+
   # The only layer that exercises browser -> web server -> api -> postgres/mongo.
   # It caught the session-cookie relay double-encoding every request after
   # sign-in, which no unit or api test could see: each side was correct on its
@@ -450,24 +500,25 @@ jobs:
   # first time on main. The rule is the same rule, applied to the diff instead
   # of the branch.
   #
-  # The filter widened once already. #172 rewired `startWorker`, `main.ts` and
+  # The filter widened once already. #172 rewired the runner, `main.ts` and
   # every job entrypoint, and this job said `chart=false` — packaging paths were
   # the whole filter, and how the api boots is not a packaging path. The only
   # reason that shipped safely is that both Kind topologies were run by hand.
-  # Nothing else in CI covers it: the integration suite calls the job functions
-  # directly, so it never sees `startWorker`, the crontab installing, or a
-  # supervisor's view of a process that dies at boot (#177).
+  # Nothing else in CI covers it: the integration suite drives the tick through
+  # a spawned api, but never a supervisor's view of a process that dies at boot
+  # (#177).
   #
-  # Those paths get BOTH legs, because the two topologies differ in exactly the
-  # way that matters here — `worker.enabled` (see kind-test.sh):
+  # Those paths get BOTH legs, because the two topologies differ in how the same
+  # pipeline meets a kubelet (see kind-test.sh):
   #
-  #   split             worker.enabled=true   the standalone worker.ts Deployment
-  #   single-container  api.runWorker=true    the embedded runner, no worker.ts
+  #   split             api + web Deployments, api.replicas=2 — the install the
+  #                     old one-replica refusal forbade, ticking concurrently
+  #   single-container  one image, one pod, everything inside
   #
-  # So a job-pipeline change has two kubelet-visible shapes: `worker.ts` as its
-  # own process, and `main.ts` running the runner inside the api. Both legs run on
-  # every path that reaches this job, so the matrix below is a literal rather than
-  # something this job has to decide.
+  # Since #232 the pipeline always runs inside the api (the tick), so the legs
+  # differ in packaging and replica count rather than in which process executes
+  # jobs. Both run on every path that reaches this job, so the matrix below is a
+  # literal rather than something this job has to decide.
   scope:
     runs-on: ubuntu-latest
     outputs:
@@ -483,7 +534,7 @@ jobs:
             exit 0
           fi
           changed=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD")
-          if echo "$changed" | grep -qE '^(deploy/|apps/[a-z]+/Dockerfile|\.github/workflows/ci\.yml)|^apps/api/src/(jobs/|main\.ts|worker\.ts)'; then
+          if echo "$changed" | grep -qE '^(deploy/|apps/[a-z]+/Dockerfile|\.github/workflows/ci\.yml)|^apps/api/src/(jobs/|main\.ts)'; then
             echo "chart=true" >> "$GITHUB_OUTPUT"
           else
             echo "chart=false" >> "$GITHUB_OUTPUT"

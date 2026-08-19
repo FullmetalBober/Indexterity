@@ -83,6 +83,9 @@ export async function applyCreatesForCluster(db: Database, clusterId: string): P
               ...(carried.partialFilter === undefined
                 ? {}
                 : { partialFilterExpression: carried.partialFilter }),
+              ...(carried.include === undefined || carried.include.length === 0
+                ? {}
+                : { include: carried.include }),
             }),
       });
       // Write-latency baseline at build time — the reference for the post-build watch.

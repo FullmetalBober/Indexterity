@@ -1,8 +1,11 @@
 # Indexterity
 
-Index dexterity for MongoDB. A SaaS that watches your indexes and manages them
-safely — drop the unused and redundant, merge overlapping, extend prefixes,
-create the missing — and proves the result in freed bytes and latency.
+Index dexterity for MongoDB and SQL Server. A SaaS that watches your indexes
+and manages them safely — drop the unused and redundant, merge overlapping,
+extend prefixes, create the missing — and proves the result in freed bytes and
+latency. On SQL Server the workload signal comes from Query Store plans, with
+the server's own missing-index suggestions folded in behind the same
+recurrence and cost gates every other signal passes (Architecture §9.3).
 
 Read-only by default. The one irreversible step, a drop, is gated behind an
 observe window, a pre-flight check, and a read-latency regression test.
@@ -18,15 +21,27 @@ observe window, a pre-flight check, and a read-latency regression test.
 
 ## How it works
 
-1. **Connect** a cluster with any connection string. Indexterity first reports
+1. **Connect** a cluster with any connection string — the form names the dialects
+   it takes (`mongodb://`, `mongodb+srv://`, `mssql://`, `sqlserver://` and the
+   ADO `Server=…` list), says which engine it read yours as before you press
+   anything, and asks only when nothing recognises it. Indexterity then reports
    what that string can actually do — nothing stored, nothing written. If it can
    create users, it *asks* before provisioning its own least-privilege user
    (`idx_<hex>`, no `find` on your collections, so it **cannot read documents**).
+   On SQL Server the same offer creates an `idx_<hex>` login holding exactly
+   `VIEW SERVER STATE`, `VIEW DATABASE STATE` and `ALTER` on each schema that
+   owns tables — per schema rather than per database, because database-wide
+   `ALTER` would also permit dropping tables, and **no `SELECT` at all**.
    The admin string is used once and never persisted; only the scoped one is
    stored, sealed with envelope encryption.
 2. **Collect** hourly via `$indexStats` / `$collStats` — usage, sizes,
    per-collection read/write latency, from **every replica-set member** the
    cluster admits to (secondary-only traffic is invisible from the primary).
+   The same rule, and the same code shape, on SQL Server: an Availability
+   Group's readable secondaries keep their own `sys.dm_db_index_usage_stats`,
+   so each replica the group names is dialled through its read-only routing URL
+   and reports its own counters (measured on a two-node group: three seeks run
+   on the secondary read as 3 there and 0 on the primary).
    Never your documents. What gets *stored* is only what changed: an index's
    shape is written once, and an unchanged counter extends the row it already
    has instead of adding another. The dashboard's node roster shows which
@@ -71,6 +86,29 @@ Every one of those thresholds is expressed in **hours**, not in collect
 intervals, which is what made the cadence safe to move
 ([D36](./docs/decisions.md)).
 
+**Covering columns count as part of the index.** SQL Server indexes can carry
+non-key columns (`INCLUDE`) that answer a query without going back to the table,
+so a longer key list is not automatically a wider index: `(customer_id) INCLUDE
+(total)` answers `SELECT total WHERE customer_id = ?` on its own, and
+`(customer_id, status)` cannot answer it at all. Redundancy therefore folds one
+index into another only when the survivor carries every column the victim
+covered — as a key or an include — and the same check gates the advisory tier
+and the re-order replacement. Measured on SQL Server 2022 over 200k rows: 6
+logical reads with the covering index, 1124 without it
+([D80](./docs/decisions.md)).
+
+**An index read backwards is the same index.** Both engines serve a sort from a
+b-tree when the ordering it needs is the key pattern *or its exact full
+reverse*, and neither serves anything in between — so `(a DESC, b DESC, c ASC)`
+already covers `(a ASC, b ASC)`, and the narrow one is redundant. Redundancy
+used to demand key-for-key direction equality and miss exactly that pair.
+Measured on SQL Server 2022 CU26 and mongod 8.2.9 with only the wide index
+present: `ORDER BY a` and `ORDER BY a, b` plan without a Sort (`ScanDirection=
+"BACKWARD"`, IXSCAN `backward`), `ORDER BY a DESC, b DESC` plans forward, and
+the mixed `ORDER BY a, b DESC` sorts on both — which is why the rule is
+all-or-nothing across the prefix rather than per key
+([D83](./docs/decisions.md)).
+
 **Never dropped**, whatever the usage: `_id_`, unique (including unique partial
 and sparse — a constraint is not a performance hint), TTL, and shard-key
 indexes. They surface as advisories instead. Partial and sparse indexes without
@@ -91,6 +129,22 @@ index is an error, not a slower query. Single-field, TTL and shard-key indexes
 are out of scope by construction, which makes the addressable set small
 ([D50](./docs/decisions.md)).
 
+**Server-wide distress, every five minutes.** Two readings of the query
+engine's own counters a few seconds apart say whether the pressure is
+index-shaped — scans climbing while work-per-index-key climbs with them — which
+catches a scan storm spread thinly across many collections that no single
+latency average would flag. mongod answers from one `serverStatus`; SQL Server
+has no such command, so it comes from `sys.dm_os_performance_counters` and
+`sys.dm_os_waiting_tasks`, needing only the `VIEW SERVER STATE` the scoped login
+already holds. The counters differ enough that the thresholds are per engine:
+the docs-per-key analogue is **pages per index search**, whose healthy floor is
+the b-tree descent (measured 3.01 seeking, 66.6 when scans dominated), and the
+sort signal is **tempdb spills** rather than in-memory sorts — a rarer and worse
+event, so the bar is lower rather than higher. Two candidates in the original
+mapping did not survive a live server: `Sort Warnings/sec` does not exist on
+Linux SQL Server, and `Range Scans/sec` moves for an ordinary singleton seek
+([D84](./docs/decisions.md)).
+
 **Adding** (opt-in via `workloadAnalysis`). Query shapes come from `$queryStats`
 on **mongo 8.0+**, and from the profiler below it — until 8.0 the store reports
 execution counts only, which is the difference between knowing a query ran and
@@ -108,6 +162,21 @@ documents a week, whatever it holds. A shape must recur — **3+ sightings** —
 must come from something other than a person at a prompt, so the same query from
 `mongosh` and from your app arrive as separate entries. Keys are ordered
 Equality → Sort → Range.
+
+**A recurring age-based purge** — a job that prunes by timestamp on a schedule —
+is the same signal on both engines and a different piece of advice on each,
+because SQL Server has no TTL index to recommend. On mongo the advisory names
+the TTL index and refuses to build it. On SQL Server it says what is actually
+true: a purge with no index leading with the date predicate **scans the table
+and holds locks for the whole pass**, which is the job that makes a table
+unavailable at night — so a supporting index turns it into a range seek, and
+past ten million rows the real answer is a partitioned **sliding window**, where
+retiring a period is a metadata operation instead of millions of logged row
+deletes. Advisory on both, and never an action on either. The pattern is read
+off Query Store's DELETE plans in both the shapes SQL Server writes them,
+including the parameterised `WHERE created_at < @cutoff` — where the retention
+window is simply not in the plan, and the advisory says so rather than inventing
+a number ([D85](./docs/decisions.md)).
 
 Full reasoning for all of it: [Architecture §6](https://github.com/FullmetalBober/Indexterity/wiki/Architecture).
 
@@ -298,6 +367,7 @@ apps/api                control plane
   src/analysis          pure decision engine — no I/O, unit-tested without infra
   src/engine            engine-neutral ports (collector, executor, session)
   src/mongo             the MongoDB adapter; zod-parses driver output at the boundary
+  src/mssql             the SQL Server adapter — DMVs + Query Store behind the same ports
   src/jobs              graphile-worker tasks (collect/classify/suggest/apply/finalize)
   src/audit             the security trail — who signed in, who changed a role,
                         read at Settings → Security by owners only
@@ -341,7 +411,8 @@ the server render and the browser read one cache entry; mutations invalidate a
 key rather than re-running loaders, **one key per api call**. Forms validate
 against the api's own input schemas from `packages/contracts`, so a rule lives in
 exactly one place. Everything engine-specific sits behind the ports in
-`src/engine`, so PostgreSQL and SQL Server adapters can slot in without pipeline
+`src/engine` — the SQL Server adapter slotted in as one directory plus one
+registry line, and a PostgreSQL adapter can do the same without pipeline
 changes.
 
 Every key, component and the things that turned out to be load-bearing:
@@ -352,7 +423,7 @@ Every key, component and the things that turned out to be load-bearing:
 ```bash
 cp .env.example .env      # then fill secrets
 npm install
-podman-compose up         # postgres + api + web + worker, hot reload
+podman-compose up         # postgres + api + web, hot reload
 # or npm run up           # the same, and recovers from stale container state
 ```
 
@@ -368,14 +439,14 @@ podman run -d --rm --name mongo --network mongo_optimizer_default \
   --network-alias mongo docker.io/library/mongo:8
 ```
 
-The second one has to be on the compose network: the api and worker are
-containers, so `localhost` is themselves, and the host is only addressable as
+The second one has to be on the compose network: the api is a container, so
+`localhost` is itself, and the host is only addressable as
 `host.containers.internal`, which resolves into `169.254.0.0/16` — a range
 `src/engine/net-guard.ts` files as FORBIDDEN and never dials, even with
 `ALLOW_PRIVATE_CLUSTER_TARGETS`, because the cloud metadata endpoint shares it.
 Clusters registered before the demo mongod was dropped from compose already hold
-`mongodb://mongo:27017`, and the worker logs `cluster <id> unreachable —
-skipped` every tick until something answers to that name.
+`mongodb://mongo:27017`, and the api logs `cluster <id> unreachable — skipped`
+every tick until something answers to that name.
 
 Anything topology-shaped needs a replica set, since `$indexStats` and
 `$collStats latencyStats` are both per-member — most easily several mongods as
@@ -405,12 +476,12 @@ backfill goes in the next migration. Both scripts verify their own cases on ever
 run, because the way a check like that fails is by matching nothing.
 
 Migration installs **two** schemas
-— `public` for Drizzle and `graphile_worker` for the queue — because the api and
-worker start together and whoever queues a job first would otherwise race a
-schema that is not there yet.
+— `public` for Drizzle and `graphile_worker` for the queue — installed before the
+api serves, because a request that queues a job would otherwise race a schema
+that is not there yet.
 
-**Four test layers**, currently 600 api unit, 317 web unit, 104 integration and
-31 end-to-end.
+**Four test layers**, currently 847 api unit, 417 web unit, 128 integration and
+34 end-to-end.
 
 | layer | what it needs | what only it catches |
 |---|---|---|
@@ -445,8 +516,8 @@ All three defaults exist because the control plane dials hosts that users name.
   dialing, and every host in a multi-host string is checked.
 - **Plaintext connections are refused** unless `ALLOW_INSECURE_CLUSTER_TLS=true`.
   Every client the control plane builds goes through one constructor
-  (`mongo/client.ts`) that requires validated TLS — so it holds for the worker's
-  stored strings, not only for onboarding. It refuses rather than silently
+  (`mongo/client.ts`) that requires validated TLS — so it holds for the
+  pipeline's stored strings, not only for onboarding. It refuses rather than silently
   adding `tls=true`, because a string that says `tls=false` is a statement worth
   contradicting out loud. Its own switch rather than part of the private-target
   one on purpose: a VPC-peered Atlas cluster is a private address that must
@@ -554,14 +625,29 @@ as 20, and a garbled `TRUST_PROXY` refuses instead of quietly meaning "no proxy
 in front" — which used to collapse every per-client rate limit into one shared
 bucket.
 
-Three schemas, because the three processes are given different things
+Three schemas, because three validation surfaces are given different things
 (`apps/api/src/config/schema.ts`):
 
 | Process | Demands | Because |
 |---|---|---|
 | `migrate` | `DATABASE_URL` | The pre-install Job talks to Postgres and exits |
-| `worker` | `+ MASTER_KEY` | It unseals stored credentials to dial a cluster — without it, it used to start cleanly and fail at the first job |
-| `api` | `+ BETTER_AUTH_SECRET` | Only the api serves auth |
+| `worker` | `+ MASTER_KEY` | The pipeline's subset, and what the `rotate-key` CLI validates — it unseals stored credentials without serving HTTP |
+| `api` | `+ BETTER_AUTH_SECRET` | Only the api serves auth (and it validates the pipeline's variables too, since it runs the jobs) |
+
+**`DATABASE_URL` has to be the direct endpoint**, not a transaction-pooled one —
+Neon's `-pooler` host, PgBouncer or Supavisor in transaction mode. `LISTEN/NOTIFY`
+does not survive transaction pooling: the `LISTEN` is accepted and the notification
+never arrives, because the listener and the notifier land on different backends.
+Nothing errors, and the dashboard's SSE quietly never fires — panels only refresh
+on their own `staleTime`. Since a shape of failure that logs nothing is worse
+than one that refuses, the api runs a `NOTIFY` round trip at boot (`apps/api/src/db/notify-probe.ts`: `LISTEN` a throwaway channel,
+`pg_notify` it from a second connection, wait two seconds, close both) and refuse to
+start when it does not come back — three attempts, so a Postgres that was restarting
+is a slow boot rather than a crashloop. The round trip is the test and the hostname
+only a hint: measured on PgBouncer 1.25, `pool_mode=transaction` loses the
+notification and `pool_mode=session` delivers it. A pooler buys this app nothing
+either way — it holds about 20 connections at its defaults
+([D89](./docs/decisions.md)).
 
 The dashboard server has its own, built on `@t3-oss/env-core`
 (`apps/web/src/lib/env.ts`), where the interesting part is the split: every
@@ -578,10 +664,76 @@ else would have caught.
 
 One web image serves every environment — `API_URL` and `WEB_ORIGIN` are read at
 runtime, and nothing about the api's address is baked into the browser bundle.
-The worker deploys from the api image with `CMD ["node",
-"apps/api/dist/worker.js"]`, or set `RUN_WORKER=true` to embed it in the api for
-a one-container install. Hosted should keep them separate: an api rollout would
-otherwise abort an in-flight index build.
+The api runs the whole job pipeline itself (#232 retired the separate worker
+process): no resident runner, no `LISTEN` — a 30-second in-process tick claims
+what became due and drains it with `runOnce`, so between ticks an idle api holds
+nothing. Replicas are safe: passes are claimed per occurrence, so concurrent
+tickers cannot double-dispatch. The interval still queries twice a minute — a
+database that suspends on idle wants the external clock below instead.
+
+**The clock outside (`RUN_CRONJOB=false`).** The api always executes jobs; this
+flag hands over the decision of *when* passes become due. Nothing then fires on
+its own — an external scheduler you own posts the tick:
+
+```
+POST /api/internal/tick     Authorization: Bearer $CRON_TRIGGER_SECRET
+  → {"dispatched":["scheduleApply","scheduleProbe"],"alreadyClaimed":[],"drained":true}
+```
+
+The request **claims and drains** — the same tick the in-process interval runs,
+because nothing LISTENs any more, so if this request did not drain, nothing
+would. It is bounded: past 25 seconds (under the 30-60s platform proxy floors)
+the response says `"drained": false` while the drain carries on in-process, and
+pinging again resumes a partially drained queue rather than duplicating it —
+which is what makes even a dumb every-five-minutes ping a working scheduler.
+
+**Safe to call as often as you like**, and that is a property rather than a
+promise: passes are claimed against their *occurrence* in `worker_watermarks`,
+so a hundred calls inside one five-minute bucket enqueue at most one
+`scheduleApply`. Two crons firing a minute apart compute the same occurrence and
+only one claim wins — no lock. A host that slept through eleven buckets owes
+**one** run per pass, not eleven, so catching up never dials the fleet eleven
+times over; `retention` stays on 03:00 and the weekly digest on Monday 09:00,
+which an interval reading would have drifted. `CRON_TRIGGER_SECRET` is required
+when `RUN_CRONJOB=false` — the endpoint authorises the whole pipeline and there
+is no user session behind it — and the boot refuses without it, because a
+deployment with no interval and no way in is a pipeline that is silently dead.
+
+**Hosts that sleep are a supported topology, with caveats named.** On a host
+that sleeps when idle, or a database that suspends its compute, a resident
+schedule does not slow down, it **stops** — which is why the external clock
+exists. Any scheduler that can POST with a bearer header drives the pipeline in
+request-sized bites: the work happens *inside* the request window, which is
+exactly what a platform that freezes the container after the response needs.
+The one loss on such a platform is the post-deadline tail of a long drain — a
+frozen mid-flight job waits out graphile-worker's lock before retrying — so keep
+the ping cadence at a few minutes and the tail stays short. Ticked every
+fifteen minutes, a five-minute pass *is* a fifteen-minute pass; that is a
+latency question, not a safety one — the observe windows the drop pipeline runs
+on are measured in days.
+
+**On-demand actions ride the same tick**: the dashboard's collect button and an
+approval enqueue, and the next drain — at most 30 seconds away with the
+interval, or your ping cadence without it — picks them up.
+
+**The api holds no database connection when nobody is watching.** Its SSE
+listener needs a dedicated session (`LISTEN` binds to one, so it cannot come
+from a pool), and that session used to be opened at boot and held for the life
+of the process — which after burst mode was the *only* thing an idle api held,
+and the one thing that pins a database that suspends when idle. It is lazy now:
+the session opens on the first subscriber and closes thirty seconds after the
+last one leaves. Measured on a built image, forty seconds idle, no dashboard
+open: **zero** client backends. One while a stream is
+live, which the integration suite asserts against `pg_stat_activity` rather than
+against the service's own opinion of itself. Thirty seconds rather than zero
+because the SSE route caps a stream at five minutes to re-check ownership, so an
+open dashboard re-subscribes on a schedule and would otherwise churn the session
+([D87](./docs/decisions.md)).
+
+One thing the tick design forced everywhere: the alert cooldown is a Postgres
+claim rather than a Map in process memory, so restarts and replicas cannot
+re-mail a cluster's owners on every tick of a bad day
+([D86](./docs/decisions.md)).
 
 **One origin, guaranteed by the app.** The browser calls the api itself, so the
 session cookie only works if both answer on one origin. That is arranged twice
@@ -612,21 +764,21 @@ invisible to that test.
 has the table.
 
 A Helm chart is in [`deploy/helm/indexterity`](./deploy/helm/indexterity) —
-api + dashboard + worker, a pre-upgrade migration hook, ingress, and a
-`helm test`. Bring your own PostgreSQL. `topology` folds the three workloads into
-one container (`single-container`) for an install where three Deployments is more
+api (pipeline included) + dashboard, a pre-upgrade migration hook, ingress, and a
+`helm test`. Bring your own PostgreSQL. `topology` folds the two workloads into
+one container (`single-container`) for an install where two Deployments is more
 than it needs; the Services, the ingress and the app are identical either way, so
 nothing in front of the chart has to know which one is installed.
 
 ### Metrics
 
 `METRICS_ENABLED=true` serves Prometheus metrics on port 9464 (`METRICS_PORT`)
-from all three workloads. Off unless asked for — an exporter costs memory in
+from both workloads. Off unless asked for — an exporter costs memory in
 every process, and an install with nothing scraping it pays that for nobody. The
 chart can turn it on and install a ServiceMonitor per workload; compose has it on
-and publishes 9464 (api), 9465 (worker) and 9466 (web).
+and publishes 9464 (api) and 9466 (web).
 
-Each answers for what only it can see, so scrape all three. The five things a
+Each answers for what only it can see, so scrape both. The five things a
 service that drops other people's indexes has to be able to state:
 
 | question | metric |
@@ -664,18 +816,14 @@ saving. See [D75](./docs/decisions.md) for why the two apps land differently.
 **The DSN is yours.** A self-hosted install reports to your own Sentry
 organisation or your own self-hosted Sentry, never to us.
 
-**Two projects, not three.** The api and the worker share one: they are one
-image, one release and one body of code — `jobs/`, `analysis/` and the drizzle
-layer are reachable from both, so a fault there is one issue a per-workload split
-would file twice, and `RUN_WORKER=true` makes them a single process anyway. A
-`service` tag says which answered. The dashboard is a separate app and gets its
-own. In compose that is `SENTRY_DSN_API` and `SENTRY_DSN_WEB`; in the chart,
-`errorReporting.dsn` and `errorReporting.webDsn`.
+**Two projects.** The api — pipeline included, one process since #232 — and the
+dashboard, which is a separate app with a separate release. In compose that is
+`SENTRY_DSN_API` and `SENTRY_DSN_WEB`; in the chart, `errorReporting.dsn` and
+`errorReporting.webDsn`.
 
 | workload | what is reported |
 |---|---|
-| api | unhandled 500s from `AppExceptionFilter`, tagged with the request id already in the log line and the response body |
-| worker | a job that burned its last retry — the dead-letter transition — tagged with task, attempt and cluster |
+| api | unhandled 500s from `AppExceptionFilter`, tagged with the request id already in the log line and the response body — and a job that burned its last retry (the dead-letter transition), tagged with task, attempt and cluster |
 | web | server-side render failures, and anything the passthrough throws |
 
 Plus the unhandled-rejection and uncaught-exception sinks the SDK installs in

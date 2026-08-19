@@ -33,4 +33,17 @@ describe("createDatabase", () => {
     expect(db.$client.totalCount).toBe(0);
     expect(db.$client.idleCount).toBe(0);
   });
+
+  // Pinned here because the failure these prevent is invisible locally: an idle
+  // client dying emits 'error' on the Pool, and with no listener that is an
+  // uncaught exception — a crash only a flaky network would ever demonstrate.
+  // graphile-worker checks exactly these two listener counts (lib.js
+  // assertPool) and warns into the log when either is zero, which the kind
+  // test's clean-logs rule turns into a CI failure; this keeps the regression a
+  // unit failure instead.
+  it("attaches the pool-level and per-client error listeners", () => {
+    const db = createDatabase(URL, 5);
+    expect(db.$client.listenerCount("error")).toBeGreaterThan(0);
+    expect(db.$client.listenerCount("connect")).toBeGreaterThan(0);
+  });
 });

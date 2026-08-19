@@ -49,6 +49,9 @@ describe("absent is fine, malformed is fatal", () => {
   it("refuses zero and a negative, which are not budgets", () => {
     expect(refusal("api", { ...API, RATE_LIMIT_MAX: "0" })).toContain("RATE_LIMIT_MAX");
     expect(refusal("api", { ...API, WORKER_CONCURRENCY: "-1" })).toContain("WORKER_CONCURRENCY");
+    expect(refusal("api", { ...API, WORKER_CONCURRENCY: "2x" })).toContain(
+      "expected a positive whole number",
+    );
   });
 
   // Truthiness is not a dialect anything in this repo writes: the chart quotes
@@ -65,6 +68,38 @@ describe("absent is fine, malformed is fatal", () => {
   it("refuses a sign-up posture it does not recognise", () => {
     expect(refusal("api", { ...API, SIGNUP_MODE: "invites" })).toContain("SIGNUP_MODE");
     expect(parse("api", { ...API, SIGNUP_MODE: "open" }).SIGNUP_MODE).toBe("open");
+  });
+});
+
+// RUN_CRONJOB=false installs no crontab, so the tick endpoint is the only thing
+// that can start a pass. Booting without its secret would leave the one state
+// where nothing can ever run and nothing says so.
+describe("the external schedule needs a way in", () => {
+  it("refuses RUN_CRONJOB=false with no secret", () => {
+    const message = refusal("api", { ...API, RUN_CRONJOB: "false" });
+    expect(message).toContain("CRON_TRIGGER_SECRET");
+    // The absent-variable path replaces zod's wording with the hint in env.ts,
+    // which is where a reader in a CrashLoopBackOff will actually see it.
+    expect(message).toContain("only thing that can start a pass");
+  });
+
+  // The token authorises the whole pipeline against nothing but the global
+  // per-IP budget, so a short one is refused rather than warned about.
+  it("refuses a secret short enough to guess", () => {
+    expect(
+      refusal("api", { ...API, RUN_CRONJOB: "false", CRON_TRIGGER_SECRET: "short" }),
+    ).toContain("at least 32 characters");
+  });
+
+  it("accepts a long one", () => {
+    const env = parse("api", { ...API, RUN_CRONJOB: "false", CRON_TRIGGER_SECRET: "a".repeat(32) });
+    expect(env.RUN_CRONJOB).toBe(false);
+  });
+
+  // The default is what every install had before the flag existed: whichever
+  // process runs the worker also owns the schedule.
+  it("owns its own schedule by default, and then wants no secret", () => {
+    expect(parse("api", API).RUN_CRONJOB).toBe(true);
   });
 });
 

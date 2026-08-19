@@ -12,6 +12,7 @@ import { MongoConnection } from "./connection";
 import { diagnoseConnection } from "./diagnose";
 import { MongoIndexExecutor } from "./executor";
 import { MemberConnections } from "./members";
+import { connStringUsername, provisionScopedUser } from "./provision";
 
 const SYSTEM_DATABASES = new Set(["admin", "local", "config"]);
 
@@ -56,6 +57,7 @@ class MongoEngineSession implements EngineSession {
 export const mongoAdapter: EngineAdapter = {
   engine: "MONGODB",
   capabilities: { hideIndexes: true, provisionScopedUsers: true },
+  connStringHint: "mongodb:// or mongodb+srv://",
   isConnString: isMongoConnString,
   hostsOf: mongoHosts,
   assertSecureTransport: assertTlsEnforced,
@@ -66,4 +68,6 @@ export const mongoAdapter: EngineAdapter = {
     return new MongoEngineSession(conn, connectionString, overrides);
   },
   diagnose: diagnoseConnection,
+  provisionScopedUser,
+  connStringUsername,
 };

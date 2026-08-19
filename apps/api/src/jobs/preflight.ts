@@ -1,4 +1,4 @@
-import { type IndexSpec, isNeverDrop, isRedundantPrefix } from "../analysis";
+import { coversIncludes, type IndexSpec, isNeverDrop, isRedundantPrefix } from "../analysis";
 import type { IndexCollector } from "../mongo";
 
 export interface PreflightResult {
@@ -46,6 +46,12 @@ export function enforcesTheSame(original: IndexSpec, replacement: IndexSpec): bo
   // the original against one would be correct and useless — and it is also the
   // shape a half-finished rollback leaves behind.
   if (replacement.hidden) return false;
+  // Same argument as the options above, for what the index ANSWERS rather than
+  // what it forbids: a replacement missing the original's covering columns
+  // enforces the identical constraint and quietly stops covering the queries
+  // that made the original worth having. The keys already match exactly here,
+  // so this asks only about the includes.
+  if (!coversIncludes(original, replacement)) return false;
   return true;
 }
 

@@ -16,13 +16,25 @@ const NONE = {
 const checkConnection = vi.hoisted(() => vi.fn());
 const createCluster = vi.hoisted(() => vi.fn());
 const provisionCluster = vi.hoisted(() => vi.fn());
+const listSupportedEngines = vi.hoisted(() => vi.fn());
 const navigate = vi.hoisted(() => vi.fn());
+
+// What the api says this build can connect (#239). Both engines by default,
+// because the question the form has to answer before anything is typed is
+// whether SQL Server is supported at all.
+const ENGINES = [
+  { engine: "MONGODB" as const, connStringHint: "mongodb:// or mongodb+srv://" },
+  {
+    engine: "MSSQL" as const,
+    connStringHint: "mssql://user:password@host:1433 or Server=host;User Id=…;Password=…",
+  },
+];
 
 // The api client, called straight from the mutation hooks — the preflight and
 // both connect paths now answer with the contract's own shapes rather than an
 // { ok, message } envelope a server function built.
 vi.mock("~/lib/api", () => ({
-  api: () => ({ checkConnection, createCluster, provisionCluster }),
+  api: () => ({ checkConnection, createCluster, provisionCluster, listSupportedEngines }),
 }));
 vi.mock("@tanstack/react-router", () => ({ useNavigate: () => navigate }));
 
@@ -58,6 +70,9 @@ function plan(over: Partial<PlanInfo> = {}): PlanInfo {
 
 function diagnosis(over: Partial<ConnectionDiagnosis> = {}): ConnectionDiagnosis {
   return {
+    // The api's verdict about which engine answered, which is what the form shows
+    // once a check has run rather than its own reading of the string.
+    engine: "MONGODB",
     reachable: true,
     message: null,
     username: "appuser",
@@ -80,6 +95,7 @@ async function check(user: ReturnType<typeof userEvent.setup>): Promise<void> {
 
 beforeEach(() => {
   navigate.mockResolvedValue(undefined);
+  listSupportedEngines.mockResolvedValue(ENGINES);
 });
 
 describe("ConnectClusterForm", () => {
@@ -190,7 +206,7 @@ describe("ConnectClusterForm", () => {
   it("shows the provisioned string once, with how to revoke it", async () => {
     checkConnection.mockResolvedValue(diagnosis({ canProvision: true }));
     provisionCluster.mockResolvedValue({
-      cluster: { id: "c9", name: "Production" },
+      cluster: { id: "c9", name: "Production", engine: "MONGODB" },
       username: "idx_abc",
       connectionString: "mongodb://idx_abc:secret@host:27017",
     });
@@ -341,6 +357,196 @@ describe("ConnectClusterForm", () => {
 
     await user.type(screen.getByLabelText("Connection string"), "9");
     expect(screen.queryByRole("button", { name: "Connect" })).not.toBeInTheDocument();
+  });
+});
+
+// Nothing on this screen used to say SQL Server was supported: the placeholder
+// said `mongodb://` and the helper text said "any connection string", so an
+// owner with a SQL Server read the form as a no while the adapter had been
+// shipping since #36 (#239).
+describe("ConnectClusterForm engines", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    navigate.mockResolvedValue(undefined);
+    listSupportedEngines.mockResolvedValue(ENGINES);
+  });
+
+  it("names every engine this build takes, with the api's own hints", async () => {
+    renderInApp(<ConnectClusterForm plan={plan()} />);
+
+    expect(await screen.findByText("SQL Server")).toBeInTheDocument();
+    expect(screen.getByText("MongoDB")).toBeInTheDocument();
+    // The adapter's own sentence, so the form and the refusal a bad string
+    // produces cannot describe different products.
+    expect(screen.getByText("mongodb:// or mongodb+srv://")).toBeInTheDocument();
+    expect(
+      screen.getByText("mssql://user:password@host:1433 or Server=host;User Id=…;Password=…"),
+    ).toBeInTheDocument();
+  });
+
+  // The field itself has to stop implying MongoDB-only, because the placeholder is
+  // what a reader looks at before they read anything else.
+  it("shows both dialects in the placeholder", () => {
+    renderInApp(<ConnectClusterForm plan={plan()} />);
+
+    const field = screen.getByLabelText("Connection string");
+    expect(field).toHaveAttribute("placeholder", expect.stringContaining("mongodb://"));
+    expect(field).toHaveAttribute("placeholder", expect.stringContaining("Server="));
+  });
+
+  it("says which engine it is reading an ADO string as, before any check", async () => {
+    const user = userEvent.setup();
+    renderInApp(<ConnectClusterForm plan={plan()} />);
+
+    await user.type(
+      screen.getByLabelText("Connection string"),
+      "Server=db;User Id=sa;Password=secret",
+    );
+
+    const note = await screen.findByText(/Reading this as/);
+    expect(note.textContent).toContain("SQL Server");
+    // A guess off the scheme until the api answers, and it says so rather than
+    // asserting something it cannot know yet.
+    expect(note.textContent).toContain("confirmed when you check access");
+  });
+
+  // The api's verdict replaces the browser's guess, and the wording that hangs
+  // off it comes with it: `db.dropUser` is the wrong sentence in front of a SQL
+  // Server, and this is the branch that used to show it anyway.
+  it("takes the engine from the diagnosis once there is one", async () => {
+    checkConnection.mockResolvedValue(diagnosis({ engine: "MSSQL", canProvision: true }));
+    const user = userEvent.setup();
+    renderInApp(<ConnectClusterForm plan={plan()} />);
+
+    await check(user);
+
+    expect(await screen.findByText(/no permission to read a single row/)).toBeInTheDocument();
+    expect(screen.getByText(/DROP LOGIN idx_…/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Create a scoped login and connect/ })).toBeTruthy();
+  });
+
+  it("prints the engine's own revoke command with the provisioned login", async () => {
+    checkConnection.mockResolvedValue(diagnosis({ engine: "MSSQL", canProvision: true }));
+    provisionCluster.mockResolvedValue({
+      cluster: { id: "c9", name: "Production", engine: "MSSQL" },
+      username: "idx_abc",
+      connectionString: "mssql://idx_abc:secret@host:1433",
+    });
+    const user = userEvent.setup();
+    renderInApp(<ConnectClusterForm plan={plan()} />);
+
+    await check(user);
+    await user.click(screen.getByRole("button", { name: /Create a scoped login and connect/ }));
+
+    expect(await screen.findByText("mssql://idx_abc:secret@host:1433")).toBeInTheDocument();
+    expect(screen.getByText(/DROP LOGIN idx_abc/)).toBeInTheDocument();
+    expect(screen.queryByText(/dropUser/)).not.toBeInTheDocument();
+  });
+
+  // No override on a string an engine recognises. That is the whole reason this is
+  // not a picker: choosing MongoDB and pasting `Server=…` would make the api
+  // honour the choice and refuse a string it would otherwise have accepted.
+  it("offers no engine choice while the string is recognised", async () => {
+    const user = userEvent.setup();
+    renderInApp(<ConnectClusterForm plan={plan()} />);
+
+    await user.type(screen.getByLabelText("Connection string"), "mongodb://host:27017");
+
+    expect(screen.queryByLabelText("Which engine is this")).not.toBeInTheDocument();
+  });
+
+  it("asks which engine it is only when nothing recognises the string", async () => {
+    const user = userEvent.setup();
+    renderInApp(<ConnectClusterForm plan={plan()} />);
+
+    await user.type(screen.getByLabelText("Connection string"), "db.example.com:1433");
+
+    expect(await screen.findByLabelText("Which engine is this")).toBeInTheDocument();
+    expect(screen.getByText(/No engine recognises this string/)).toBeInTheDocument();
+  });
+
+  it("sends the chosen engine with the check and the connect", async () => {
+    checkConnection.mockResolvedValue(diagnosis({ engine: "MSSQL" }));
+    createCluster.mockResolvedValue({ id: "c9", name: "Production" });
+    const user = userEvent.setup();
+    renderInApp(<ConnectClusterForm plan={plan()} />);
+
+    await user.type(screen.getByLabelText("Name"), "Production");
+    await user.type(screen.getByLabelText("Connection string"), "db.example.com:1433");
+    await user.click(await screen.findByLabelText("Which engine is this"));
+    await user.click(await screen.findByRole("option", { name: "SQL Server" }));
+    await user.click(screen.getByRole("button", { name: "Check access" }));
+
+    expect(checkConnection).toHaveBeenCalledWith({
+      connectionString: "db.example.com:1433",
+      tlsOverrides: NONE,
+      engine: "MSSQL",
+    });
+
+    await user.click(await screen.findByRole("button", { name: "Connect" }));
+    // Into the connect too, and not only the check: the api re-decides per
+    // request, so an override that reached one and not the other would store a
+    // different engine than the one that was diagnosed.
+    expect(createCluster).toHaveBeenCalledWith({
+      name: "Production",
+      connectionString: "db.example.com:1433",
+      tlsOverrides: NONE,
+      engine: "MSSQL",
+    });
+  });
+
+  // Picking an engine is part of what was asked, so it invalidates the answer on
+  // screen exactly as editing the string or a certificate box does.
+  it("drops the diagnosis when the engine choice changes", async () => {
+    checkConnection.mockResolvedValue(diagnosis({ engine: "MSSQL" }));
+    const user = userEvent.setup();
+    renderInApp(<ConnectClusterForm plan={plan()} />);
+
+    await user.type(screen.getByLabelText("Name"), "Production");
+    await user.type(screen.getByLabelText("Connection string"), "db.example.com:1433");
+    await user.click(await screen.findByLabelText("Which engine is this"));
+    await user.click(await screen.findByRole("option", { name: "SQL Server" }));
+    await user.click(screen.getByRole("button", { name: "Check access" }));
+    expect(await screen.findByText("appuser")).toBeInTheDocument();
+
+    await user.click(screen.getByLabelText("Which engine is this"));
+    await user.click(await screen.findByRole("option", { name: "MongoDB" }));
+    expect(screen.queryByText("appuser")).not.toBeInTheDocument();
+  });
+
+  // A pick made while nothing recognised the string must not outlive that state:
+  // the reader fixes the string, and the engine it now names is the api's to
+  // decide again.
+  it("stops sending a stale choice once the string names its own engine", async () => {
+    checkConnection.mockResolvedValue(diagnosis());
+    const user = userEvent.setup();
+    renderInApp(<ConnectClusterForm plan={plan()} />);
+
+    await user.type(screen.getByLabelText("Name"), "Production");
+    const field = screen.getByLabelText("Connection string");
+    await user.type(field, "db.example.com:1433");
+    await user.click(await screen.findByLabelText("Which engine is this"));
+    await user.click(await screen.findByRole("option", { name: "SQL Server" }));
+
+    await user.clear(field);
+    await user.type(field, "mongodb://host:27017");
+    await user.click(screen.getByRole("button", { name: "Check access" }));
+
+    expect(checkConnection).toHaveBeenCalledWith({
+      connectionString: "mongodb://host:27017",
+      tlsOverrides: NONE,
+      engine: undefined,
+    });
+  });
+
+  // The list is read from the api, so a build with one adapter says so rather
+  // than naming an engine it cannot connect.
+  it("names only what the build carries", async () => {
+    listSupportedEngines.mockResolvedValue([ENGINES[0]]);
+    renderInApp(<ConnectClusterForm plan={plan()} />);
+
+    expect(await screen.findByText("MongoDB")).toBeInTheDocument();
+    expect(screen.queryByText("SQL Server")).not.toBeInTheDocument();
   });
 });
 
