@@ -651,9 +651,10 @@ export function ConnectClusterForm({ plan }: { plan: PlanInfo | null }) {
                         name,
                         adminConnectionString: connectionString,
                         tlsOverrides,
-                        // The login this creates is granted per database on SQL
-                        // Server, so the selection narrows what it may touch
-                        // rather than only what we read.
+                        // Stored with the cluster, not applied to the login this
+                        // creates: the provisioned user is granted across the
+                        // databases that exist now, so the selection stays
+                        // editable afterwards (#244).
                         observedDatabases: observed === null ? undefined : [...observed],
                       });
                     }}

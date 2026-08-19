@@ -464,11 +464,12 @@ export class ClustersController {
         await this.guardDial(context.userId, engine, adminValue, errors, overrides);
         let provisioned: ProvisionedUser;
         try {
-          // The selection narrows what the login is GRANTED, not just what we
-          // read: on SQL Server it means no user at all in the databases outside
-          // it (mssql/provision.ts). The mongo provisioner ignores it, and its
-          // comment says why.
-          provisioned = await provision(adminValue, overrides, input.observedDatabases);
+          // No selection passed, on purpose: what the provisioned user may reach is
+          // not what we choose to observe (#244, and the port's own comment). The
+          // selection is stored on the row below and applies to every collect;
+          // narrowing the GRANTS would make it un-editable, because there is no
+          // admin string left afterwards to widen them with.
+          provisioned = await provision(adminValue, overrides);
         } catch (error) {
           if (error instanceof ProvisionDeniedError) {
             throw new ORPCError("PROVISION_DENIED", { status: 422, message: error.message });
@@ -777,18 +778,23 @@ export class ClustersController {
           }
           // Refused at the tick rather than accepted into a blind spot. The credentials
           // stored for this cluster cannot read these databases at all, so observing
-          // them would collect nothing from them forever and say so nowhere — and on a
-          // cluster running as a login Indexterity provisioned there is no admin string
-          // left to widen the grant with, which is why the message names both ways out.
+          // them would collect nothing from them forever and say so nowhere.
+          //
+          // Provisioning is not narrowed to the selection (#244), so this is no longer
+          // about the boxes somebody ticked at connect time — it is the residual gap
+          // that decision leaves: provisioning grants per database and runs once, so a
+          // database CREATED afterwards has no user for the login and no admin string
+          // survives to give it one. Hence the message names both ways out.
           if (unreadable.length > 0) {
             throw errors.BAD_REQUEST({
               message:
                 `these credentials cannot read ${unreadable.join(", ")} on this cluster` +
                 (row.provisionedUsername === null
                   ? ". Grant them access and try again."
-                  : ` — ${row.provisionedUsername} was granted only in the databases selected when ` +
-                    "it was created, and the admin string it was made with is never stored. Grant " +
-                    "it there yourself, or rotate to a connection string that already has access."),
+                  : ` — ${row.provisionedUsername} was granted in the databases that existed when ` +
+                    "it was created, and the admin string it was made with is never stored, so a " +
+                    "database created since then has no user for it. Grant it there yourself, or " +
+                    "rotate to a connection string that already has access."),
             });
           }
         }

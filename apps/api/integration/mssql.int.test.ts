@@ -6,7 +6,7 @@ import {
   rebuildKeys,
   rebuildOptions,
 } from "../src/analysis";
-import { type EngineSession, workloadKey } from "../src/engine/ports";
+import { DatabaseInaccessibleError, type EngineSession, workloadKey } from "../src/engine/ports";
 import { detectEngine } from "../src/engine/registry";
 import { ProvisionDeniedError } from "../src/mongo/provision";
 import { collectSnapshots, serializeSpec } from "../src/mongo/snapshots";
@@ -277,6 +277,70 @@ describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", 
            DROP LOGIN [${scoped.username}]`,
         )
         .catch(() => {});
+    }
+  });
+
+  // #244. Provisioning is deliberately NOT narrowed to the observe selection, and
+  // both halves of that decision are measured here rather than argued.
+  //
+  // The selection says what Indexterity looks at; it must not say what the login
+  // MAY look at, or the setting would be editable in one direction only —
+  // provisioning runs once, from an admin string that is never stored, so a login
+  // granted where the selection pointed could never be given a database ticked
+  // later. What that costs is the second half: a database created AFTER the login
+  // has no user for it either, which is the gap the api refuses at the tick and the
+  // collect steps over.
+  it("grants the scoped login across the databases that exist, and not the ones created later", async () => {
+    const before = `${DB}_before`;
+    const after = `${DB}_after`;
+    await seed.execute(`IF DB_ID('${before}') IS NOT NULL DROP DATABASE [${before}]`);
+    await seed.execute(`IF DB_ID('${after}') IS NOT NULL DROP DATABASE [${after}]`);
+    // Present at provisioning time, with a table so there is something to read.
+    await seed.execute(`CREATE DATABASE [${before}]`);
+    await seed.execute(
+      `CREATE TABLE [${before}].dbo.widgets(id int CONSTRAINT pk_widgets PRIMARY KEY)`,
+    );
+
+    const provision = mssqlAdapter.provisionScopedUser as NonNullable<
+      typeof mssqlAdapter.provisionScopedUser
+    >;
+    const scoped = await provision(MSSQL_URL as string, OVERRIDES);
+    const scopedConn = new MssqlConnection(scoped.connectionString, OVERRIDES);
+    try {
+      await scopedConn.connect();
+      const collector = new MssqlIndexCollector(scopedConn);
+
+      // Granted here even though nothing said to observe it — that is the point of
+      // the revert: ticking this database later is a checkbox, not a grant somebody
+      // has to go and make on the instance.
+      expect(await collector.listCollectionNames(before)).toContain("dbo.widgets");
+      // …and still no access to a row, in any database.
+      await expect(
+        scopedConn.query(`SELECT TOP 1 id FROM [${before}].dbo.widgets`),
+      ).rejects.toThrow(/SELECT permission was denied/i);
+
+      // Created after the grants were made, so the login has no user in it. The
+      // server lists it anyway — VIEW ANY DATABASE is granted to public — which is
+      // why existence is not access and the api probes rather than trusting a name.
+      await seed.execute(`CREATE DATABASE [${after}]`);
+      expect(await scopedConn.listDatabaseNames()).toContain(after);
+      await expect(collector.listCollectionNames(after)).rejects.toBeInstanceOf(
+        DatabaseInaccessibleError,
+      );
+    } finally {
+      await scopedConn.close().catch(() => {});
+      await seed
+        .execute(
+          `EXEC [${before}].sys.sp_executesql N'DROP USER IF EXISTS [${scoped.username}]';
+           EXEC [${DB}].sys.sp_executesql N'DROP USER IF EXISTS [${scoped.username}]';
+           DROP LOGIN [${scoped.username}]`,
+        )
+        .catch(() => {});
+      for (const database of [before, after]) {
+        await seed
+          .execute(`IF DB_ID('${database}') IS NOT NULL DROP DATABASE [${database}]`)
+          .catch(() => {});
+      }
     }
   });
 

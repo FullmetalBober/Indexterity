@@ -132,20 +132,25 @@ export function ObserveSection({
           </p>
         ) : null}
 
-        {/* Only for a cluster running as a login we created. Its grants were made
-            at provisioning time against the databases selected then, and there is
-            no admin string left to widen them with — so ticking a new database can
-            produce a permission gap the reader would otherwise diagnose as a bug in
-            the collect. */}
+        {/* Only for a cluster running as a login we created, and only when the draft
+            WIDENS. Provisioning is deliberately not narrowed to the selection, so
+            most widening just works — what it cannot cover is a database created on
+            the cluster after the login was, since the grants are per database and
+            were made once from an admin string that is never stored. Said before the
+            click because the api refuses that save (it probes each added database
+            with the stored credentials), and a refusal a reader was warned about is a
+            different experience from one arriving as a toast on a button they
+            expected to work. */}
         {cluster.provisionedUsername !== null && widened ? (
           <Alert>
             <AlertTitle>This cluster runs as a user Indexterity created</AlertTitle>
             <AlertDescription>
-              <code>{cluster.provisionedUsername}</code> was granted access only to the databases
-              selected when it was created, and the admin string it was made with is never stored —
-              so adding one here will be refused until that login is granted access on the cluster
-              itself. The alternative is to rotate to a connection string that already has what the
-              engine needs; both keep every measurement.
+              <code>{cluster.provisionedUsername}</code> was granted access to the databases that
+              existed when it was created, so ticking one of those is fine. A database created on
+              the cluster <em>since</em> then has no user for that login, and the admin string it
+              was made with is never stored — adding that one is refused until the login is granted
+              access on the cluster itself, or you rotate to a connection string that already has
+              it. Both keep every measurement.
             </AlertDescription>
           </Alert>
         ) : null}

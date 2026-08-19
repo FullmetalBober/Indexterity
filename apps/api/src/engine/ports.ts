@@ -295,14 +295,17 @@ export interface EngineAdapter {
   // is what callers branch on, and this is what they then call. Throws
   // ProvisionDeniedError when the credentials cannot create the user.
   //
-  // `observedDatabases` narrows what the created user is granted, where the engine
-  // grants per database (#244) — on SQL Server that is a real privilege reduction
-  // rather than a filter, since the login otherwise gets ALTER on every schema of
-  // every database on the instance. Undefined and null mean the whole cluster.
+  // Takes no observe selection, on either engine and by decision (#244): the
+  // selection is what Indexterity LOOKS AT, not what the provisioned user MAY look
+  // at. A user granted only where the selection pointed could never be widened
+  // afterwards — provisioning runs once, from an admin string that is never
+  // stored — so ticking another database would be a dead end. Both adapters grant
+  // across the databases that exist when they run, and the selection stays a row in
+  // postgres that can change any time. See mssql/provision.ts for the footprint
+  // that buys, and what it still withholds.
   provisionScopedUser?(
     adminConnectionString: string,
     overrides?: TlsOverrides,
-    observedDatabases?: readonly string[] | null,
   ): Promise<ProvisionedUser>;
   // The username a string authenticates as, so rotation can tell whether the
   // stored "this is a provisioned user" marker still describes the new one.

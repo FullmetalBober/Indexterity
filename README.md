@@ -294,8 +294,10 @@ later, which a narrowed selection deliberately does *not* pick up until you tick
 them. Narrowing also sharpens the privilege check: a role scoped to the one
 database you care about reads as a gap while the whole cluster is in scope and as
 a grant once it is not, so you no longer have to widen a role over databases
-nobody asked us to read. On SQL Server the selection reaches the provisioned
-login too — it is granted only in the databases you picked.
+nobody asked us to read. What the selection does *not* touch is what a
+provisioned user may reach: it is granted across the databases that exist when
+it is created, on both engines, so changing your mind later is a checkbox rather
+than a grant you have to go and make on the cluster.
 
 ## Auth & tenancy
 

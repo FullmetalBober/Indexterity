@@ -113,20 +113,16 @@ async function upsertEngineRole(admin: Db): Promise<void> {
 // engine will run as, and return that user's connection string. The admin
 // string is never stored; a failed verification drops the user again.
 //
-// Takes no observe selection, unlike the MSSQL provisioner, and that is a
-// decision rather than an omission (#244). The role above is one document with
-// `{db: "", collection: ""}` wildcards, so narrowing it would mean expanding
-// those into one privilege entry per selected database — and a role written at
-// provision time is FROZEN, while the selection is editable forever. Tick a
-// database six months later and the user we created would silently lack
-// listIndexes on it, with no admin string left to re-grant with.
+// Takes no observe selection, and neither does the MSSQL provisioner — same
+// decision on both engines (#244). A role written at provision time is FROZEN
+// while the selection is editable forever, so a user granted only where the
+// selection pointed would silently lack listIndexes on the database somebody ticks
+// six months later, with no admin string left to re-grant with.
 //
-// The privilege that would be given up is also small here in a way it is not on
-// SQL Server: the wildcard grants metadata actions and explicitly withholds
-// `find` on customer collections, so a database outside the selection is one we
-// can list indexes on and still cannot read a document from. On SQL Server the
-// equivalent login gets ALTER on every schema, which is why that provisioner
-// does scope.
+// It would also buy very little here. The role above grants metadata actions
+// through `{db: "", collection: ""}` and explicitly withholds `find` on customer
+// collections, so a database outside the selection is one we can list indexes on
+// and still cannot read a document from.
 export async function provisionScopedUser(
   adminUri: string,
   overrides?: TlsOverrides,

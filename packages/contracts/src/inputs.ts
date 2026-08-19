@@ -110,11 +110,16 @@ export const checkConnectionInput = z.object({
 export const provisionClusterInput = z.object({
   name: clusterName,
   adminConnectionString: connectionString,
-  // Not just stored on the row: the MSSQL provisioner grants on each database it
-  // finds (mssql/provision.ts), so a selection that arrives here makes the login
-  // it creates narrower than the cluster. That is the one place this field
-  // removes a privilege rather than skipping work, which is also why it has to be
-  // chosen BEFORE the button rather than on the settings screen afterwards.
+  // Stored on the row, and that is all it does here — it does NOT narrow what the
+  // provisioned user is granted, on either engine (#244). Provisioning runs once
+  // from an admin string that is never kept, so a user granted only where this
+  // pointed could never be widened; the selection has to stay editable, so it stays
+  // a fact about what we look at.
+  //
+  // It still has to be accepted on THIS route as well as on createCluster, for the
+  // reason #239 found the hard way: the reader who ticks boxes under a diagnosis
+  // presses this button next, and a field the consent path did not take would
+  // silently discard the choice they just made.
   observedDatabases: observedDatabases.optional(),
   // Here as well as on the two above, and it is not symmetry for its own sake:
   // the consent path re-reads the engine off the ADMIN string, so an override
