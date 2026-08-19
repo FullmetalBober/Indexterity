@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { DatabaseInaccessibleError } from "../engine/ports";
 import {
   indexNamesFromForcedPlan,
   indexNamesFromHintText,
@@ -116,6 +117,53 @@ describe("indexNamesFromForcedPlan", () => {
       'Index="[ix_orders_customer]" IndexKind="NonClustered"></Object>' +
       '<Object Index="[ix_odd]]name]"></Object>';
     expect(indexNamesFromForcedPlan(xml)).toEqual(["ix_orders_customer", "ix_odd]name"]);
+  });
+});
+
+// A database the login has no user in (#244). Msg 916 is what the server answers,
+// verified on 2022 against a login provisioned for one database of two — and the
+// number arrives on the driver's nested `originalError` as often as on the error
+// itself, which is why both are walked.
+describe("listCollectionNames on an inaccessible database", () => {
+  function refusing(error: unknown) {
+    return {
+      query: () => Promise.reject(error),
+    } as unknown as MssqlConnection;
+  }
+
+  it("raises DatabaseInaccessibleError for Msg 916 on the error itself", async () => {
+    const failure = Object.assign(new Error("Some wrapper text"), { number: 916 });
+    const collector = new MssqlIndexCollector(refusing(failure));
+    await expect(collector.listCollectionNames("stagingdb")).rejects.toBeInstanceOf(
+      DatabaseInaccessibleError,
+    );
+  });
+
+  it("finds it on a nested originalError too", async () => {
+    const failure = Object.assign(new Error("RequestError"), {
+      originalError: Object.assign(new Error("inner"), { number: 916 }),
+    });
+    const collector = new MssqlIndexCollector(refusing(failure));
+    await expect(collector.listCollectionNames("stagingdb")).rejects.toBeInstanceOf(
+      DatabaseInaccessibleError,
+    );
+  });
+
+  it("falls back to the server's own wording when no number survives", async () => {
+    const failure = new Error(
+      'The server principal "idx_ab12cd" is not able to access the database "stagingdb" under the current security context.',
+    );
+    const collector = new MssqlIndexCollector(refusing(failure));
+    await expect(collector.listCollectionNames("stagingdb")).rejects.toBeInstanceOf(
+      DatabaseInaccessibleError,
+    );
+  });
+
+  // Anything else still aborts the pass. A collector that turned every failure
+  // into "no access" would report a cluster as collected when the driver had died.
+  it("lets every other failure through unchanged", async () => {
+    const collector = new MssqlIndexCollector(refusing(new Error("connection lost")));
+    await expect(collector.listCollectionNames("appdb")).rejects.toThrow("connection lost");
   });
 });
 

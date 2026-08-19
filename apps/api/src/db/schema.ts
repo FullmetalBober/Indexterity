@@ -332,6 +332,22 @@ export const clusters = pgTable(
     sealedDek: bytea("sealed_dek").notNull(),
     sealedData: bytea("sealed_data").notNull(),
     keyVersion: integer("key_version").notNull().default(1),
+    // Which of the cluster's databases the owner asked us to observe (#244).
+    // NULL means every user database, which is what every row created before this
+    // column existed means and what a scripted connect that sends nothing means —
+    // so the default is the behaviour, not a migration.
+    //
+    // An allowlist of NAMES rather than a blocklist, because the question the
+    // owner is answering is "look at these" and a blocklist would silently start
+    // observing every database added to the cluster afterwards. The cost is the
+    // mirror of that: a database added later is NOT observed until somebody says
+    // so, which is why the settings screen counts the ones it is leaving out.
+    //
+    // Names that no longer exist are not an error and are not pruned: the filter
+    // intersects this list with what the cluster reports each collect (see
+    // jobs/cluster-connection.ts), so a dropped database simply stops matching
+    // and a restored one starts again without the owner re-ticking it.
+    observedDatabases: text("observed_databases").array(),
     // The least-privilege user Indexterity created on the cluster during
     // admin-string onboarding; null when the customer pasted a ready-made string.
     provisionedUsername: text("provisioned_username"),

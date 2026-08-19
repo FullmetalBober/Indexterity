@@ -59,10 +59,33 @@ export const password = z
 // only when detection claimed nothing and the reader said which engine it is —
 // an override for the string nobody's guard recognises, never a picker in front
 // of the ones they do.
+// Which databases to observe, on the three routes that dial a cluster (#244).
+//
+// Optional, and absent means EVERY user database: that is what every cluster
+// connected before this field existed does, and what a scripted connect that has
+// never heard of it should keep doing. So the narrow behaviour is the one you ask
+// for, never the one you get by not sending a field.
+//
+// `.min(1)` when present, because an empty array is a cluster nothing is ever
+// collected from — indistinguishable, from every panel afterwards, from one that
+// is broken. Untick the last box and the form refuses; disconnect the cluster if
+// that is what you meant.
+export const observedDatabases = z
+  .array(z.string().min(1, "A database name cannot be empty"))
+  .min(1, "Pick at least one database to observe");
+
+// The edit-path payload, and the one place null is spelled out rather than left
+// off: "observe all of them" has to be re-selectable after narrowing, and an
+// absent field on a PUT is how you say "leave it alone" — a different sentence.
+export const observedDatabasesInput = z.object({
+  databases: observedDatabases.nullable(),
+});
+
 export const createClusterInput = z.object({
   name: clusterName,
   connectionString,
   engine: clusterEngine.optional(),
+  observedDatabases: observedDatabases.optional(),
   // Absent means all three off, which is what an older client and a plain
   // scripted connect both mean.
   tlsOverrides: tlsOverrides.optional(),
@@ -71,6 +94,14 @@ export const createClusterInput = z.object({
 export const checkConnectionInput = z.object({
   connectionString,
   engine: clusterEngine.optional(),
+  // Sent on a SECOND check, not the first: the first has no list to choose from
+  // yet. It changes the verdict rather than only the plan — mongo's anyDb
+  // requirements pass when every database in scope is covered (diagnose.ts,
+  // `grants`), so credentials scoped to the one database somebody wants observed
+  // read as ungranted while the whole cluster is in scope, and as granted once it
+  // is not. Without this field the only way to connect that cluster is to widen a
+  // grant over databases nobody asked us to read.
+  observedDatabases: observedDatabases.optional(),
   // Checked with the same concessions the connect would store, or the preflight
   // would answer for a connection nobody is going to make.
   tlsOverrides: tlsOverrides.optional(),
@@ -79,6 +110,17 @@ export const checkConnectionInput = z.object({
 export const provisionClusterInput = z.object({
   name: clusterName,
   adminConnectionString: connectionString,
+  // Stored on the row, and that is all it does here — it does NOT narrow what the
+  // provisioned user is granted, on either engine (#244). Provisioning runs once
+  // from an admin string that is never kept, so a user granted only where this
+  // pointed could never be widened; the selection has to stay editable, so it stays
+  // a fact about what we look at.
+  //
+  // It still has to be accepted on THIS route as well as on createCluster, for the
+  // reason #239 found the hard way: the reader who ticks boxes under a diagnosis
+  // presses this button next, and a field the consent path did not take would
+  // silently discard the choice they just made.
+  observedDatabases: observedDatabases.optional(),
   // Here as well as on the two above, and it is not symmetry for its own sake:
   // the consent path re-reads the engine off the ADMIN string, so an override
   // that reached `checkConnection` and not this one would be forgotten by the

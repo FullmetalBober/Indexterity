@@ -52,6 +52,10 @@ export interface SecurityEventMetadata {
     // Only on the provisioned path — a user we created, so a name we can revoke.
     provisionedUsername?: string;
     tlsOverrides: TlsOverrides;
+    // Which databases the cluster was connected to observe, or null for all of
+    // them (#244) — the scope the credentials were accepted for, which on SQL
+    // Server is also the scope the provisioned login was granted in.
+    observedDatabases: string[] | null;
   };
   // `clusterId` here rather than in the column: the row it would point at is
   // deleted by the act this records.
@@ -66,6 +70,17 @@ export interface SecurityEventMetadata {
     tlsOverrides: TlsOverrides;
   };
   CLUSTER_MODE_CHANGED: { readOnly: boolean };
+  // Both sides of the change, because the interesting question in an incident is
+  // what STOPPED being observed and when — "now watching app" does not answer it.
+  // null on either side means every database the cluster has.
+  CLUSTER_OBSERVED_DATABASES_CHANGED: {
+    from: string[] | null;
+    to: string[] | null;
+    // Open proposals discarded because their database left the selection. A
+    // number rather than the rows: the rows are gone, and how many were dropped is
+    // the part that explains a recommendation count falling.
+    discardedRecommendations: number;
+  };
   // Which of better-auth's two revoke endpoints answered, since neither may
   // record the session token itself.
   SESSION_REVOKED: { scope: "one" | "others" };

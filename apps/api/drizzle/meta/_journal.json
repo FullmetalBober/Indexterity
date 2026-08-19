@@ -337,6 +337,13 @@
       "when": 1786819961444,
       "tag": "0047_worker_watermarks",
       "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1787134958034,
+      "tag": "0048_observed_databases",
+      "breakpoints": true
     }
   ]
 }

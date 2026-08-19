@@ -1,5 +1,6 @@
 import type { IndexSpec } from "../analysis";
 import type { EngineSession, IndexUsageStat } from "../engine/ports";
+import { DatabaseInaccessibleError } from "../engine/ports";
 
 // One index snapshot, ready to persist or ship to the control plane. Shared by
 // the hosted-direct worker and the customer-side agent.
@@ -67,7 +68,23 @@ export async function collectSnapshots(session: EngineSession): Promise<CollectR
   const snapshots: CollectedSnapshot[] = [];
   const latency: CollectedLatency[] = [];
   for (const database of databases) {
-    for (const collection of await collector.listCollectionNames(database)) {
+    // A database the credentials cannot reach costs this pass that one database
+    // and not the cluster (#244). Before this, a SQL Server login provisioned for
+    // two databases of twelve aborted the whole collect on the first of the other
+    // ten — so an owner who ticked a database the login had no user in lost every
+    // measurement on the cluster, not just the new one's.
+    //
+    // Only this failure is tolerated, and it is the reason it has a type of its
+    // own: any other error still aborts the pass, because a pass that swallows
+    // unknown failures reports a cluster as collected when it was not.
+    let collections: string[];
+    try {
+      collections = await collector.listCollectionNames(database);
+    } catch (error) {
+      if (error instanceof DatabaseInaccessibleError) continue;
+      throw error;
+    }
+    for (const collection of collections) {
       const [specs, usage, sizes, collLatency, hinted] = await Promise.all([
         collector.listIndexes(database, collection),
         collector.collectUsage(database, collection),

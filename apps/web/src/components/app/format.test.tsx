@@ -1,6 +1,14 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import { badgeVariant, DeltaCell, dropsOn, fmtBytes, fmtBytesDelta, fmtMicros } from "./format";
+import {
+  badgeVariant,
+  DeltaCell,
+  DropsOn,
+  dropsOn,
+  fmtBytes,
+  fmtBytesDelta,
+  fmtMicros,
+} from "./format";
 
 describe("badgeVariant", () => {
   // The badge is the only thing distinguishing a drop from a build at a glance,
@@ -98,11 +106,15 @@ describe("DeltaCell", () => {
 describe("dropsOn", () => {
   const hiddenAt = new Date(Date.now() - 2 * 86_400_000).toISOString();
 
-  it("names the day a hidden drop is due", () => {
+  // The INSTANT, not a formatted date: the drawing happens in the reader's zone
+  // behind the hydration gate, so a server that formatted here would write its own
+  // timezone into the HTML (see DropsOn).
+  it("names the instant a hidden drop is due", () => {
     const due = new Date(Date.now() + 5 * 86_400_000);
-    expect(dropsOn({ state: "HIDDEN", hiddenAt, observeDays: 7 })).toBe(
-      due.toLocaleDateString(undefined, { day: "numeric", month: "short" }),
-    );
+    const answer = dropsOn({ state: "HIDDEN", hiddenAt, observeDays: 7 });
+    expect(answer).not.toBeNull();
+    // Same millisecond arithmetic, allowing for the clock moving during the test.
+    expect(Math.abs(new Date(answer as string).getTime() - due.getTime())).toBeLessThan(5_000);
   });
 
   // Only HIDDEN has a due date: a proposal has not started its window, and a
@@ -112,14 +124,41 @@ describe("dropsOn", () => {
     expect(dropsOn({ state: "DROPPED", hiddenAt, observeDays: 7 })).toBeNull();
   });
 
-  // Past the window the drop is waiting on the change window and the
-  // regression gate, so a date would be a guess.
-  it("says nothing once the window has passed", () => {
-    expect(dropsOn({ state: "HIDDEN", hiddenAt, observeDays: 1 })).toBeNull();
+  // Past the window the drop is waiting on the change window and the regression
+  // gate, so a date would be a guess — but that comparison is against the READER's
+  // clock, so it moved into DropsOn below and this function answers on state and
+  // window alone.
+  it("still answers for a window that has already passed", () => {
+    expect(dropsOn({ state: "HIDDEN", hiddenAt, observeDays: 1 })).not.toBeNull();
   });
 
   // Older rows predate the per-index window and carry no observeDays.
   it("says nothing without a recorded window", () => {
     expect(dropsOn({ state: "HIDDEN", hiddenAt, observeDays: null })).toBeNull();
+  });
+});
+
+// The rule that used to live in dropsOn, where it can be applied against the
+// clock it depends on. Nothing is drawn until mounted either, which is what keeps
+// the server's markup and the hydration pass identical.
+describe("DropsOn", () => {
+  const hiddenAt = new Date(Date.now() - 2 * 86_400_000).toISOString();
+
+  it("names the day once mounted", async () => {
+    render(<DropsOn rec={{ state: "HIDDEN", hiddenAt, observeDays: 7 }} />);
+
+    expect(await screen.findByText(/drops/)).toBeInTheDocument();
+  });
+
+  it("says nothing once the window has passed", () => {
+    render(<DropsOn rec={{ state: "HIDDEN", hiddenAt, observeDays: 1 }} />);
+
+    expect(screen.queryByText(/drops/)).not.toBeInTheDocument();
+  });
+
+  it("says nothing for a state that has no window", () => {
+    render(<DropsOn rec={{ state: "PROPOSED", hiddenAt: null, observeDays: null }} />);
+
+    expect(screen.queryByText(/drops/)).not.toBeInTheDocument();
   });
 });

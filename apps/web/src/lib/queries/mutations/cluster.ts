@@ -24,6 +24,7 @@ const MODE_FAILED = "Mode change failed (owner only)";
 const DISCONNECT_FAILED = "Disconnect failed (owner only)";
 const ROTATION_FAILED = "rotation failed";
 const RENAME_FAILED = "Rename failed (owner only)";
+const OBSERVE_FAILED = "Could not change which databases are observed (owner only)";
 
 // A cluster's name, mode and provisioned user all live in the cluster list, so
 // that is the only key those three move. It used to be the `shell` key, which held
@@ -99,6 +100,44 @@ export function useRenameCluster(clusterId: string, { onRenamed }: { onRenamed: 
   });
 }
 
+// Which databases the collect walks (#244).
+//
+// Moves two keys, and the second is the one worth stating: unticking a database
+// discards the open proposals for it, so the recommendation list on the dashboard
+// is stale the moment this returns. The cluster list moves because the selection
+// is read back off the cluster row.
+//
+// `clusterDatabases` is deliberately NOT invalidated — the answer to "what does
+// this cluster have" did not change, and refetching it would dial the customer's
+// cluster again for a list we were just looking at.
+export function useSetObservedDatabases(clusterId: string, { onSaved }: { onSaved: () => void }) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (databases: readonly string[] | null) =>
+      api().setObservedDatabases({
+        clusterId,
+        databases: databases === null ? null : [...databases],
+      }),
+    onSuccess: async (cluster) => {
+      toast.success(
+        cluster.observedDatabases === null
+          ? "Observing every database on this cluster"
+          : `Observing ${cluster.observedDatabases.length} ${
+              cluster.observedDatabases.length === 1 ? "database" : "databases"
+            }`,
+      );
+      onSaved();
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.clusters() }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.recommendations(clusterId) }),
+      ]);
+    },
+    // 400 names a database the cluster does not have, which is the refusal a
+    // reader can act on (reload and pick again).
+    onError: (error) => toast.error(apiMessage(error, OBSERVE_FAILED, [400, 404])),
+  });
+}
+
 // Credential rotation: verified server-side before storing, so a typo can't
 // brick the cluster; history survives (unlike disconnect + reconnect).
 export function useRotateConnection(
@@ -163,7 +202,11 @@ export function useDisconnectCluster(
 // invalidated either — the answer is state for the form, not for the cache.
 export function useCheckConnection(handlers: {
   onStart: () => void;
-  onDiagnosis: (diagnosis: ConnectionDiagnosis) => void;
+  // The answer AND the observe scope it was computed for (#244). A narrowed scope
+  // can turn a privilege gap into a grant, so a diagnosis on screen beside a
+  // selection it was not asked about is stale in a way the reader cannot see —
+  // the form compares the two and offers to ask again.
+  onDiagnosis: (diagnosis: ConnectionDiagnosis, scope: readonly string[] | null) => void;
   onError: (message: string) => void;
 }) {
   return useMutation({
@@ -174,9 +217,11 @@ export function useCheckConnection(handlers: {
       connectionString: string;
       tlsOverrides: TlsOverrides;
       engine?: ClusterEngine;
+      observedDatabases?: string[];
     }) => api().checkConnection(input),
     onMutate: handlers.onStart,
-    onSuccess: handlers.onDiagnosis,
+    onSuccess: (diagnosis, input) =>
+      handlers.onDiagnosis(diagnosis, input.observedDatabases ?? null),
     onError: (error) =>
       handlers.onError(apiMessage(error, "could not check the connection", [400, 403, 502])),
   });
@@ -211,6 +256,7 @@ export function useConnectCluster(handlers: ConnectHandlers) {
       connectionString: string;
       tlsOverrides: TlsOverrides;
       engine?: ClusterEngine;
+      observedDatabases?: string[];
     }) => api().createCluster(credentials),
     onMutate: handlers.onStart,
     onSuccess: async (created) => {
@@ -245,6 +291,7 @@ export function useProvisionCluster(
       adminConnectionString: string;
       tlsOverrides: TlsOverrides;
       engine?: ClusterEngine;
+      observedDatabases?: string[];
     }) => api().provisionCluster(credentials),
     onMutate: handlers.onStart,
     onSuccess: async (created) => {

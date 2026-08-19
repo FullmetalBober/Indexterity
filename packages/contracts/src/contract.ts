@@ -3,6 +3,7 @@ import { z } from "zod";
 import {
   checkConnectionInput,
   createClusterInput,
+  observedDatabasesInput,
   policyKnobsInput,
   provisionClusterInput,
   renameClusterInput,
@@ -13,6 +14,7 @@ import {
   cluster,
   clusterCollections,
   clusterCooldowns,
+  clusterDatabases,
   clusterEvent,
   clusterIndexSizeSeries,
   clusterLatency,
@@ -250,6 +252,41 @@ export const contract = {
     .input(clusterId.extend({ readOnly: z.boolean() }))
     .output(cluster),
 
+  // The observe selection (#244). A GET that DIALS the cluster, which is unusual
+  // enough here to say why: the whole point is to offer a database that appeared
+  // after onboarding, and the only place that fact exists is the cluster itself.
+  // Nothing collected can supply it — `SELECT DISTINCT database FROM
+  // cluster_indexes` lists what has already been observed, so a database excluded
+  // at connect time would never appear on the screen that exists to include it.
+  //
+  // Owner-only, like the routes that change what the engine may do: the list of
+  // database names on a customer's cluster is not something a member needs to read
+  // to use the dashboard.
+  listClusterDatabases: oc
+    .route({
+      method: "GET",
+      path: "/clusters/{clusterId}/databases",
+      summary:
+        "The cluster's user databases as it reports them now, and which of them are observed (owner only)",
+    })
+    .errors({ NOT_FOUND: {}, BAD_REQUEST: {} })
+    .input(clusterId)
+    .output(clusterDatabases),
+
+  // PUT rather than PATCH: the selection is replaced whole, the same way the
+  // policy knobs are. A merge would have no way to express "stop observing this
+  // one" that is not a second verb.
+  setObservedDatabases: oc
+    .route({
+      method: "PUT",
+      path: "/clusters/{clusterId}/databases",
+      summary:
+        "Replace which databases the collect walks (owner only); null observes every database the cluster has",
+    })
+    .errors({ NOT_FOUND: {}, BAD_REQUEST: {} })
+    .input(clusterId.extend(observedDatabasesInput.shape))
+    .output(cluster),
+
   getPolicy: oc
     .route({
       method: "GET",
@@ -288,7 +325,13 @@ export const contract = {
       path: "/recommendations/{id}/approve",
       summary: "Approve a recommendation, moving it into the apply pipeline",
     })
-    .errors({ NOT_FOUND: {} })
+    // CONFLICT since #244: a proposal whose database has left the observe
+    // selection is refused rather than moved into the pipeline. Changing the
+    // selection already discards the open proposals outside it, so this is the
+    // narrow race — an approve in flight while the selection changes — and it is
+    // the one place a stale click could otherwise make the engine touch a database
+    // the owner has said to leave alone.
+    .errors({ NOT_FOUND: {}, CONFLICT: {} })
     .input(z.object({ id: z.uuid() }))
     .output(recommendation),
 

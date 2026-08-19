@@ -109,6 +109,30 @@ function inDatabase(database: string, statement: string): string {
 // Use an admin connection string ONCE to create a least-privilege login the
 // engine will run as, and return that login's connection string. The admin
 // string is never stored; a failed verification drops what was created.
+// Granted across every user database on the instance, deliberately NOT narrowed to
+// the observe selection (#244).
+//
+// The selection decides what Indexterity LOOKS AT; it does not decide what this
+// login MAY look at, and keeping those two separate is what makes the selection
+// editable. Narrowing the grants was tried and reverted: the grants are made once,
+// from an admin string that is never stored, so a login provisioned for two
+// databases of twelve could never be widened afterwards — ticking a third database
+// was a dead end with no way out inside the product. Now every database that
+// exists at provisioning time is readable, and changing the selection is a row in
+// postgres rather than a privilege the customer has to go and grant.
+//
+// The cost, stated rather than buried: the login holds VIEW DATABASE STATE and
+// ALTER on each table-holding schema in databases the owner excluded from
+// observation. What it still cannot do anywhere is read a row — no SELECT is
+// granted at any scope, and the server enforces it (Msg 229 on a plain SELECT,
+// verified) — so the footprint is index metadata and index DDL on databases we do
+// not touch, not access to their data.
+//
+// A database created AFTER provisioning still gets no user, because nothing here
+// runs again — that is the residual gap, and it is handled where it surfaces
+// rather than here: the collect skips a database it cannot reach
+// (DatabaseInaccessibleError) and setObservedDatabases refuses to start observing
+// one, naming the login.
 export async function provisionMssqlScopedUser(
   adminUri: string,
   overrides?: TlsOverrides,

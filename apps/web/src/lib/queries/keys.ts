@@ -77,4 +77,9 @@ export const queryKeys = {
   // writes — a regression parks an index without touching the proposal list.
   cooldowns: (clusterId: string | null) => ["cooldowns", clusterId] as const,
   policy: (clusterId: string | null) => ["policy", clusterId] as const,
+  // Which databases a cluster HAS, for the observe checkboxes (#244). Its own key
+  // and not part of the cluster list: this one is a live dial to the customer's
+  // cluster, so it must not be refetched by every rename and mode flip that
+  // invalidates the list.
+  clusterDatabases: (clusterId: string | null) => ["cluster-databases", clusterId] as const,
 };

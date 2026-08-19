@@ -1,5 +1,6 @@
 import type { Admin } from "mongodb";
 import { z } from "zod";
+import { scopeForDiagnosis } from "../engine/observe";
 import type { ConnectionDiagnosis, PrivilegeCheck, PrivilegeTier } from "../engine/ports";
 import { mongoClient, type TlsOverrides } from "./client";
 import { ENGINE_ROLE } from "./provision";
@@ -288,6 +289,12 @@ function toCheck(required: RequiredPrivilege, granted: boolean): PrivilegeCheck 
     enables: required.enables,
     tier: required.tier,
     granted,
+    // No runnable fix to hand over here (#246). Every gap on this engine is closed
+    // by granting a role on a user whose NAME this diagnosis does not always know —
+    // and `enables` already links the exact role — so a command would be a template
+    // with a blank in it, which is what the SQL Server side of #246 exists to
+    // remove rather than to spread.
+    command: null,
   };
 }
 
@@ -353,6 +360,9 @@ function failure(message: string): ConnectionDiagnosis {
     username: null,
     authEnabled: false,
     canProvision: false,
+    // Nothing was enumerated, so there is nothing to offer boxes for — and an
+    // unreachable cluster must not report the databases a previous answer found.
+    databases: [],
   });
 }
 
@@ -363,6 +373,15 @@ function failure(message: string): ConnectionDiagnosis {
 export async function diagnoseConnection(
   uri: string,
   overrides?: TlsOverrides,
+  // Which databases the answer is about (#244). Undefined and null both mean the
+  // whole cluster, which is what the FIRST check always is — there is no list to
+  // narrow to until this function has returned one.
+  //
+  // It changes the verdict, not just the work: the anyDb requirements below pass
+  // when every database in scope is individually covered, so a role scoped to one
+  // database reads as ungranted against a twelve-database cluster and as granted
+  // against the one database somebody actually asked us to observe.
+  observedDatabases?: readonly string[] | null,
 ): Promise<ConnectionDiagnosis> {
   const client = mongoClient(uri, overrides);
   try {
@@ -398,6 +417,14 @@ export async function diagnoseConnection(
       listWorks = false;
     }
 
+    // Two lists, deliberately. `userDatabases` is what the cluster HAS and is what
+    // the form draws boxes from — narrowing it would hide the databases the reader
+    // has not ticked yet, so a selection could never be widened again. `inScope` is
+    // what the verdict is ABOUT, and the rule that produces it is shared with the
+    // MSSQL adapter (engine/observe.ts) so the two cannot answer the stale-selection
+    // case differently.
+    const inScope = scopeForDiagnosis(userDatabases, observedDatabases);
+
     if (user === undefined) {
       // No authenticated user. Either the deployment has auth disabled (in
       // which case everything is permitted) or the string simply has no
@@ -411,6 +438,7 @@ export async function diagnoseConnection(
           username: null,
           authEnabled: false,
           canProvision: false,
+          databases: userDatabases,
         });
       }
       return failure(
@@ -419,7 +447,7 @@ export async function diagnoseConnection(
       );
     }
 
-    const checks = evaluatePrivileges(privileges, userDatabases);
+    const checks = evaluatePrivileges(privileges, inScope);
     // Reported alongside the engine's own, so whichever answer the form gives
     // about provisioning, the reader can see what it was read from.
     const provisioning = evaluateProvisioning(privileges);
@@ -435,6 +463,7 @@ export async function diagnoseConnection(
       username: user.user,
       authEnabled: true,
       canProvision: provisioning.every((check) => check.granted),
+      databases: userDatabases,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

@@ -38,6 +38,7 @@ export function toDiagnosis(engine: ClusterEngine, diagnosis: EngineConnectionDi
     engine,
     privileges: [...diagnosis.privileges],
     missing: [...diagnosis.missing],
+    databases: [...diagnosis.databases],
   };
 }
 
@@ -54,6 +55,7 @@ export function toCluster(
     provisionedUsername: row.provisionedUsername,
     lastCollectedAt: lastCollectedAt?.toISOString() ?? null,
     tlsOverrides: row.tlsOverrides,
+    observedDatabases: row.observedDatabases,
     createdAt: row.createdAt.toISOString(),
   };
 }

@@ -14,12 +14,19 @@ import {
   inArray,
   indexSnapshots,
   ne,
+  notInArray,
+  recommendations,
   seal,
   sql,
 } from "../db";
 import { DatabaseService } from "../db/database.service";
 import { allowPrivateTargets, assertTargetsAllowed, BlockedTargetError } from "../engine/net-guard";
-import { NO_TLS_OVERRIDES, type ProvisionedUser, type TlsOverrides } from "../engine/ports";
+import {
+  DatabaseInaccessibleError,
+  NO_TLS_OVERRIDES,
+  type ProvisionedUser,
+  type TlsOverrides,
+} from "../engine/ports";
 import {
   adapterFor,
   detectEngine,
@@ -30,6 +37,7 @@ import {
 import { consumeDialBudget } from "../errors/dial-budget";
 import { mapClusterError, toCluster, toDiagnosis } from "../http/mappers";
 import { TenancyService } from "../http/tenancy.service";
+import { ClusterGoneError, openClusterSession } from "../jobs/cluster-connection";
 import { evictCluster } from "../jobs/connection-pool";
 import { InsecureConnectionError, ProvisionDeniedError } from "../mongo";
 import { Implement, route } from "../orpc/implement";
@@ -89,6 +97,10 @@ export class ClustersController {
     connectionString: string,
     provisionedUsername: string | null,
     tlsOverrides: TlsOverrides = NO_TLS_OVERRIDES,
+    // Which databases to observe, or null for every one the cluster has (#244).
+    // Undefined from a caller that has no opinion is stored as null, which is the
+    // same behaviour every cluster had before the column existed.
+    observedDatabases: string[] | null = null,
   ): Promise<typeof clusters.$inferSelect> {
     const keyVersion = currentKeyVersion();
     const sealed = await seal(
@@ -113,6 +125,7 @@ export class ClustersController {
           keyVersion,
           provisionedUsername,
           tlsOverrides,
+          observedDatabases,
         })
         .returning();
     } catch (error) {
@@ -328,7 +341,13 @@ export class ClustersController {
         const overrides = input.tlsOverrides ?? NO_TLS_OVERRIDES;
         const value = adapter.applySecureTransport(input.connectionString, overrides);
         await this.guardDial(context.userId, engine, value, errors, overrides);
-        return toDiagnosis(engine, await adapter.diagnose(value, overrides));
+        // The scope reaches the adapter, so a second check with fewer databases
+        // ticked can turn a privilege gap into a grant (#244) — see the field's
+        // comment in inputs.ts. Absent on the first check, which has no list yet.
+        return toDiagnosis(
+          engine,
+          await adapter.diagnose(value, overrides, input.observedDatabases),
+        );
       },
     );
   }
@@ -354,7 +373,22 @@ export class ClustersController {
         await this.guardDial(context.userId, engine, value, errors, overrides);
         // Verify before storing: an unusable string must fail at connect time
         // with the reason, not silently collect nothing for a day.
-        const diagnosis = await adapter.diagnose(value, overrides);
+        const diagnosis = await adapter.diagnose(value, overrides, input.observedDatabases);
+        // A selection naming a database this cluster does not have is refused here
+        // rather than stored and quietly intersected away by every collect: the
+        // reader picked from a list we gave them, so a name that is not on it means
+        // the cluster changed under them or the caller is scripted and wrong. Both
+        // are worth a sentence at connect time.
+        const absent = (input.observedDatabases ?? []).filter(
+          (name) => !diagnosis.databases.includes(name),
+        );
+        if (diagnosis.reachable && absent.length > 0) {
+          throw errors.BAD_REQUEST({
+            message:
+              `this cluster has no database called ${absent.join(", ")} — ` +
+              `it reports ${diagnosis.databases.join(", ") || "none"}.`,
+          });
+        }
         if (!diagnosis.reachable) {
           throw new ORPCError("CLUSTER_UNREACHABLE", {
             status: 502,
@@ -369,7 +403,15 @@ export class ClustersController {
               "Indexterity provision a scoped one.",
           });
         }
-        const row = await this.storeCluster(orgId, input.name, engine, value, null, overrides);
+        const row = await this.storeCluster(
+          orgId,
+          input.name,
+          engine,
+          value,
+          null,
+          overrides,
+          input.observedDatabases ?? null,
+        );
         await this.record(req, {
           event: "CLUSTER_CONNECTED",
           orgId,
@@ -377,7 +419,12 @@ export class ClustersController {
           target: row.name,
           // Which concessions were made and whether we are holding somebody's own
           // credentials — the two facts an incident asks about a connection.
-          metadata: { engine, provisioned: false, tlsOverrides: overrides },
+          metadata: {
+            engine,
+            provisioned: false,
+            tlsOverrides: overrides,
+            observedDatabases: input.observedDatabases ?? null,
+          },
         });
         return toCluster(row);
       },
@@ -417,6 +464,11 @@ export class ClustersController {
         await this.guardDial(context.userId, engine, adminValue, errors, overrides);
         let provisioned: ProvisionedUser;
         try {
+          // No selection passed, on purpose: what the provisioned user may reach is
+          // not what we choose to observe (#244, and the port's own comment). The
+          // selection is stored on the row below and applies to every collect;
+          // narrowing the GRANTS would make it un-editable, because there is no
+          // admin string left afterwards to widen them with.
           provisioned = await provision(adminValue, overrides);
         } catch (error) {
           if (error instanceof ProvisionDeniedError) {
@@ -431,6 +483,7 @@ export class ClustersController {
           provisioned.connectionString,
           provisioned.username,
           overrides,
+          input.observedDatabases ?? null,
         );
         await this.record(req, {
           event: "CLUSTER_CONNECTED",
@@ -444,6 +497,7 @@ export class ClustersController {
             provisioned: true,
             provisionedUsername: provisioned.username,
             tlsOverrides: overrides,
+            observedDatabases: input.observedDatabases ?? null,
           },
         });
         return {
@@ -633,6 +687,224 @@ export class ClustersController {
         return toCluster(row);
       },
     );
+  }
+
+  // The databases this cluster HAS, for the screen that picks which of them to
+  // observe (#244).
+  //
+  // Dials the cluster on a GET, which is unusual here and is the point: the whole
+  // reason this route exists is to offer a database that appeared after
+  // onboarding, and nothing we have collected can know about one we have never
+  // looked at. The lease is `allDatabases`, so the answer is what the cluster has
+  // rather than what we are already watching.
+  //
+  // No dial budget is spent, unlike the onboarding routes. That budget exists to
+  // stop one account sweeping arbitrary hosts (errors/dial-budget.ts); this dials
+  // a string the org already connected and the guard already vetted, and charging
+  // it would let a settings page a reader opens twice exhaust the allowance that
+  // protects the connect form.
+  @Implement(contract.listClusterDatabases)
+  listClusterDatabases(@Req() req: FastifyRequest) {
+    return route(this.tenancy, contract.listClusterDatabases, req, "owner").handler(
+      async ({ input, errors, context }) => {
+        const orgId = context.member.orgId;
+        await this.tenancy.assertOwnsCluster(input.clusterId, orgId, errors);
+        let lease: Awaited<ReturnType<typeof openClusterSession>>;
+        try {
+          lease = await openClusterSession(this.database.db, input.clusterId, {
+            allDatabases: true,
+          });
+        } catch (error) {
+          if (error instanceof ClusterGoneError) {
+            throw errors.NOT_FOUND({ message: "cluster not found" });
+          }
+          mapClusterError(error);
+        }
+        try {
+          return {
+            available: await lease.session.listDatabaseNames(),
+            observed: lease.observedDatabases === null ? null : [...lease.observedDatabases],
+          };
+        } catch (error) {
+          mapClusterError(error);
+        } finally {
+          lease.release();
+        }
+      },
+    );
+  }
+
+  // Replace which databases the collect walks.
+  //
+  // `owner` rather than `freshOwner`, which is the line rotation, going live and
+  // disconnecting are all on the other side of. Those three change what the
+  // control plane HOLDS or lets the engine WRITE; this changes how much of a
+  // cluster the org already connected we read, with credentials that could already
+  // read all of it. Recorded in the security trail either way, because widening it
+  // is how we start reading a database we were not reading yesterday.
+  @Implement(contract.setObservedDatabases)
+  setObservedDatabases(@Req() req: FastifyRequest) {
+    return route(this.tenancy, contract.setObservedDatabases, req, "owner").handler(
+      async ({ input, errors, context }) => {
+        const orgId = context.member.orgId;
+        const [row] = await this.database.db
+          .select()
+          .from(clusters)
+          .where(and(eq(clusters.id, input.clusterId), eq(clusters.orgId, orgId)))
+          .limit(1);
+        if (row === undefined) throw errors.NOT_FOUND({ message: "cluster not found" });
+        // Checked against the cluster rather than against what we have collected,
+        // for the same reason the GET above dials: a name that is only wrong
+        // because we have never observed it is exactly the name this route exists
+        // to accept.
+        if (input.databases !== null) {
+          // Only what is being ADDED is probed for access, so narrowing a cluster
+          // never waits on a per-database round trip.
+          const added = input.databases.filter(
+            (name) => row.observedDatabases !== null && !row.observedDatabases.includes(name),
+          );
+          const { absent, unreadable } = await this.unusableDatabases(
+            input.clusterId,
+            input.databases,
+            added,
+            errors,
+          );
+          if (absent.length > 0) {
+            throw errors.BAD_REQUEST({
+              message:
+                `this cluster has no database called ${absent.join(", ")} — ` +
+                "reload the list and pick again.",
+            });
+          }
+          // Refused at the tick rather than accepted into a blind spot. The credentials
+          // stored for this cluster cannot read these databases at all, so observing
+          // them would collect nothing from them forever and say so nowhere.
+          //
+          // Provisioning is not narrowed to the selection (#244), so this is no longer
+          // about the boxes somebody ticked at connect time — it is the residual gap
+          // that decision leaves: provisioning grants per database and runs once, so a
+          // database CREATED afterwards has no user for the login and no admin string
+          // survives to give it one. Hence the message names both ways out.
+          if (unreadable.length > 0) {
+            throw errors.BAD_REQUEST({
+              message:
+                `these credentials cannot read ${unreadable.join(", ")} on this cluster` +
+                (row.provisionedUsername === null
+                  ? ". Grant them access and try again."
+                  : ` — ${row.provisionedUsername} was granted in the databases that existed when ` +
+                    "it was created, and the admin string it was made with is never stored, so a " +
+                    "database created since then has no user for it. Grant it there yourself, or " +
+                    "rotate to a connection string that already has access."),
+            });
+          }
+        }
+        // Proposals for a database that just left the selection, discarded before
+        // the column is written: an approval that fires between the two would act
+        // on a database the owner has already said to leave alone.
+        //
+        // Only the states where nothing has happened on the customer's cluster
+        // yet. HIDDEN, OBSERVE and BUILDING are excluded deliberately — the engine
+        // has already changed something there, the row is the only record of it,
+        // and offboard.ts reads exactly those states to put it back. Dropping them
+        // would leave an index hidden on a database nobody is watching, with
+        // nothing left that knows to unhide it.
+        const discarded = await this.discardProposalsOutsideScope(input.clusterId, input.databases);
+        const [updated] = await this.database.db
+          .update(clusters)
+          .set({ observedDatabases: input.databases })
+          .where(and(eq(clusters.id, input.clusterId), eq(clusters.orgId, orgId)))
+          .returning();
+        if (updated === undefined) throw errors.NOT_FOUND({ message: "cluster not found" });
+        await this.record(req, {
+          event: "CLUSTER_OBSERVED_DATABASES_CHANGED",
+          orgId,
+          clusterId: updated.id,
+          target: updated.name,
+          metadata: {
+            from: row.observedDatabases,
+            to: input.databases,
+            discardedRecommendations: discarded,
+          },
+        });
+        return toCluster(updated);
+      },
+    );
+  }
+
+  // Which of these names the cluster does not have. Empty when it has them all,
+  // and empty when the cluster cannot be reached to say — a selection must not be
+  // refused because the cluster was briefly down, and the filter in
+  // jobs/cluster-connection.ts intersects on every collect regardless, so a name
+  // that turns out to be wrong costs nothing but its own absence.
+  private async unusableDatabases(
+    clusterId: string,
+    wanted: readonly string[],
+    added: readonly string[],
+    errors: { NOT_FOUND: (options: { message: string }) => Error },
+  ): Promise<{ absent: string[]; unreadable: string[] }> {
+    const none = { absent: [], unreadable: [] };
+    let lease: Awaited<ReturnType<typeof openClusterSession>>;
+    try {
+      lease = await openClusterSession(this.database.db, clusterId, { allDatabases: true });
+    } catch (error) {
+      if (error instanceof ClusterGoneError) {
+        throw errors.NOT_FOUND({ message: "cluster not found" });
+      }
+      return none;
+    }
+    try {
+      const available = await lease.session.listDatabaseNames();
+      const absent = wanted.filter((name) => !available.includes(name));
+      // Existence is not access, and on SQL Server the two come apart in exactly
+      // the way that matters here: `sys.databases` lists every database to every
+      // login (VIEW ANY DATABASE is granted to public — verified on 2022), while a
+      // scoped login provisioned for two databases of twelve has no user in the
+      // other ten and gets Msg 916 on every read. So a database that passes the
+      // check above can still be one we will never see a table in.
+      //
+      // Probed only for the databases being ADDED. The ones already selected are
+      // either working or already visible as a gap on the dashboard, and probing
+      // them would make every save cost a round trip per database for an answer
+      // nobody asked for.
+      const unreadable: string[] = [];
+      for (const database of added) {
+        if (absent.includes(database)) continue;
+        try {
+          await lease.session.collector.listCollectionNames(database);
+        } catch (error) {
+          if (error instanceof DatabaseInaccessibleError) unreadable.push(database);
+        }
+      }
+      return { absent, unreadable };
+    } catch {
+      // The cluster went away mid-check. Not a refusal: a selection must not be
+      // rejected because the cluster was briefly unreachable, and the collect
+      // intersects with what is really there on every pass regardless.
+      return none;
+    } finally {
+      lease.release();
+    }
+  }
+
+  // Delete the open proposals whose database is no longer observed, and return how
+  // many. Nothing is deleted when the selection is null (every database is in
+  // scope) or when it only grew.
+  private async discardProposalsOutsideScope(
+    clusterId: string,
+    observed: readonly string[] | null,
+  ): Promise<number> {
+    if (observed === null) return 0;
+    const discarded = await this.database.db
+      .delete(recommendations)
+      .where(
+        and(
+          eq(recommendations.clusterId, clusterId),
+          inArray(recommendations.state, ["PROPOSED", "APPROVED", "SCHEDULED"]),
+          notInArray(recommendations.database, [...observed]),
+        ),
+      )
+      .returning({ id: recommendations.id });
+    return discarded.length;
   }
 
   @Implement(contract.triggerCollect)

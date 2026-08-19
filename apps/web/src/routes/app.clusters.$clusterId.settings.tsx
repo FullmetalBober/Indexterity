@@ -8,16 +8,25 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { ClusterConnection } from "~/components/app/cluster-connection";
 import { ClusterName } from "~/components/app/cluster-name";
+import { ObserveSection, ObserveSectionSkeleton } from "~/components/app/observe-section";
 import { PolicySection, PolicySectionSkeleton } from "~/components/app/policy-section";
+import { clusterDatabasesQuery, useClusterDatabases } from "~/lib/queries/cluster-databases";
 import { policyQuery, usePolicy } from "~/lib/queries/policy";
 import { useCluster } from "~/lib/queries/shell";
 
 export const Route = createFileRoute("/app/clusters/$clusterId/settings")({
-  // One read, because this page draws one thing the cache does not already hold.
-  // The cluster's own row — name, mode, provisioned user — came with the layout
-  // above and is not fetched twice.
+  // Two reads now (#244), and only one of them is cheap. The database list dials
+  // the customer's cluster, so it is prefetched in parallel rather than after the
+  // policy — and its failure is swallowed the same way, because a cluster that
+  // cannot be reached must still render a settings page. That is where the
+  // connection string is rotated.
   loader: async ({ params, context }) => {
-    await context.queryClient.ensureQueryData(policyQuery(params.clusterId)).catch(() => null);
+    await Promise.all([
+      context.queryClient.ensureQueryData(policyQuery(params.clusterId)).catch(() => null),
+      context.queryClient
+        .ensureQueryData(clusterDatabasesQuery(params.clusterId))
+        .catch(() => null),
+    ]);
   },
   head: () => ({ meta: [{ title: "Cluster settings — Indexterity" }] }),
   component: ClusterSettings,
@@ -27,6 +36,7 @@ function ClusterSettings() {
   const { clusterId } = Route.useParams();
   const cluster = useCluster(clusterId);
   const policy = usePolicy(clusterId);
+  const databases = useClusterDatabases(clusterId);
 
   return (
     // Capped, unlike the overview beside it. Everything here is a form, and a
@@ -46,6 +56,15 @@ function ClusterSettings() {
         <PolicySection key={policy.data.clusterId} policy={policy.data} />
       ) : policy.pending ? (
         <PolicySectionSkeleton />
+      ) : null}
+      {/* Above the connection, below the policy: it is a question about this
+          cluster's data rather than about its credentials, and unlike the policy
+          it can only be answered by asking the cluster. A failed dial draws
+          nothing at all — the page's job then is the rotation form underneath. */}
+      {cluster === null ? null : databases.data !== null ? (
+        <ObserveSection key={cluster.id} cluster={cluster} databases={databases.data} />
+      ) : databases.pending ? (
+        <ObserveSectionSkeleton />
       ) : null}
       {cluster === null ? null : <ClusterConnection cluster={cluster} />}
     </div>

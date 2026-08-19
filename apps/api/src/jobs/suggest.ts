@@ -20,7 +20,7 @@ import {
 import { entitledAutomation } from "../billing/plans";
 import type { Database } from "../db";
 import { and, eq, indexCooldowns, policies, recommendations } from "../db";
-import { type WorkloadTarget, workloadKey } from "../engine/ports";
+import { DatabaseInaccessibleError, type WorkloadTarget, workloadKey } from "../engine/ports";
 import { openClusterSession } from "./cluster-connection";
 import { activeCooldownKeys, cooldownKey } from "./cooldowns";
 import { applyCreatesForCluster } from "./create";
@@ -107,8 +107,14 @@ export async function suggestForCluster(db: Database, clusterId: string): Promis
     >();
     const namespaces: WorkloadTarget[] = [];
     for (const database of databases) {
-      for (const collection of await collector.listCollectionNames(database)) {
-        namespaces.push({ database, collection });
+      // Same rule as the collect pass (mongo/snapshots.ts): a database these
+      // credentials cannot reach is skipped, and every other failure still aborts.
+      try {
+        for (const collection of await collector.listCollectionNames(database)) {
+          namespaces.push({ database, collection });
+        }
+      } catch (error) {
+        if (!(error instanceof DatabaseInaccessibleError)) throw error;
       }
     }
     for (const { database, collection } of namespaces) {
