@@ -20,6 +20,18 @@ export function supportedEngines(): ClusterEngine[] {
   return (Object.keys(adapters) as ClusterEngine[]).filter(engineSupported);
 }
 
+// The same list, carrying each adapter's own string hint, for the connect form
+// (#239). Read off the adapters rather than written out beside them: the hint a
+// reader is shown before they paste and the hint the refusal quotes afterwards
+// are then the same sentence by construction, and adding an adapter adds a row
+// here without anybody remembering to.
+export function supportedEngineOptions(): { engine: ClusterEngine; connStringHint: string }[] {
+  return supportedEngines().map((engine) => ({
+    engine,
+    connStringHint: adapterFor(engine).connStringHint,
+  }));
+}
+
 export function adapterFor(engine: ClusterEngine): EngineAdapter {
   const adapter = adapters[engine];
   if (adapter === null) {

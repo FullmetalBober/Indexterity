@@ -20,7 +20,13 @@ import {
 import { DatabaseService } from "../db/database.service";
 import { allowPrivateTargets, assertTargetsAllowed, BlockedTargetError } from "../engine/net-guard";
 import { NO_TLS_OVERRIDES, type ProvisionedUser, type TlsOverrides } from "../engine/ports";
-import { adapterFor, detectEngine, engineSupported, supportedEngines } from "../engine/registry";
+import {
+  adapterFor,
+  detectEngine,
+  engineSupported,
+  supportedEngineOptions,
+  supportedEngines,
+} from "../engine/registry";
 import { consumeDialBudget } from "../errors/dial-budget";
 import { mapClusterError, toCluster, toDiagnosis } from "../http/mappers";
 import { TenancyService } from "../http/tenancy.service";
@@ -293,6 +299,18 @@ export class ClustersController {
     );
   }
 
+  // What this build can connect (#239). No tenant data and no org in the answer,
+  // so it is the loosest level any of these routes runs at — a signed-in reader
+  // asking what the product supports. Deliberately not public: it names the
+  // engines an installation carries, and the connect page is behind sign-in
+  // anyway, so there is nothing to gain by answering strangers.
+  @Implement(contract.listSupportedEngines)
+  listSupportedEngines(@Req() req: FastifyRequest) {
+    return route(this.tenancy, contract.listSupportedEngines, req, "session").handler(() =>
+      supportedEngineOptions(),
+    );
+  }
+
   @Implement(contract.checkConnection)
   checkConnection(@Req() req: FastifyRequest) {
     return route(this.tenancy, contract.checkConnection, req, "owner").handler(
@@ -310,7 +328,7 @@ export class ClustersController {
         const overrides = input.tlsOverrides ?? NO_TLS_OVERRIDES;
         const value = adapter.applySecureTransport(input.connectionString, overrides);
         await this.guardDial(context.userId, engine, value, errors, overrides);
-        return toDiagnosis(await adapter.diagnose(value, overrides));
+        return toDiagnosis(engine, await adapter.diagnose(value, overrides));
       },
     );
   }
@@ -380,8 +398,11 @@ export class ClustersController {
         // The string says which engine this is, exactly as createCluster reads
         // it — so an admin SQL Server string provisions a scoped login instead
         // of being dialled as mongo. An engine whose adapter cannot provision
-        // is refused here rather than part way through.
-        const engine = detectEngine(input.adminConnectionString) ?? "MONGODB";
+        // is refused here rather than part way through. An explicit engine wins
+        // for the same reason it does on the other two: the reader who overrode
+        // detection to get a diagnosis presses this button next, and re-deciding
+        // here would provision against a different engine than they were shown.
+        const engine = input.engine ?? detectEngine(input.adminConnectionString) ?? "MONGODB";
         const adapter = adapterFor(engine);
         const provision = adapter.provisionScopedUser;
         if (!adapter.capabilities.provisionScopedUsers || provision === undefined) {

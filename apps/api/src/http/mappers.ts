@@ -1,5 +1,5 @@
 import { ORPCError } from "@orpc/server";
-import type { Cluster, Recommendation } from "@repo/contracts";
+import type { Cluster, ClusterEngine, Recommendation } from "@repo/contracts";
 import { clusters, recommendations } from "../db";
 import type { ConnectionDiagnosis as EngineConnectionDiagnosis } from "../engine/ports";
 import { isUnreachableError } from "../errors/unreachable";
@@ -28,9 +28,14 @@ export function mapClusterError(error: unknown): never {
 
 // The domain type carries readonly arrays; the contract's output schema wants
 // plain ones. Copy at the boundary rather than loosening the domain type.
-export function toDiagnosis(diagnosis: EngineConnectionDiagnosis) {
+// The engine is passed rather than read off the diagnosis: the adapters answer
+// about the CONNECTION, and which adapter was asked is the caller's own decision
+// (an explicit override, or what the string detected as). The form needs it back
+// to say what it will connect as, so the answer carries the question (#239).
+export function toDiagnosis(engine: ClusterEngine, diagnosis: EngineConnectionDiagnosis) {
   return {
     ...diagnosis,
+    engine,
     privileges: [...diagnosis.privileges],
     missing: [...diagnosis.missing],
   };
