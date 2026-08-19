@@ -42,6 +42,7 @@ import { drainPool } from "../src/jobs/connection-pool";
 import { activeCooldownKeys, cooldownKey } from "../src/jobs/cooldowns";
 import { applyCreatesForCluster } from "../src/jobs/create";
 import { finalizeCluster } from "../src/jobs/finalize";
+import { releaseStaleLocks } from "../src/jobs/locks";
 import { planForCluster } from "../src/jobs/plan";
 import { latestBaselines } from "../src/jobs/probe";
 import { pruneDeadLetterJobs, pruneOldSamples } from "../src/jobs/retention";
@@ -2951,6 +2952,85 @@ describe("dead-letter retention", () => {
 
     await db.execute(
       sql`delete from graphile_worker._private_jobs where id::text in (${freshId}, ${liveId})`,
+    );
+  });
+});
+
+describe("a worker that died holding a queue", () => {
+  it("frees the lock once it is old enough, and leaves a live one alone", async () => {
+    const utils = await makeWorkerUtils({ connectionString: databaseUrl() });
+    const stuckQueue = `collect:${clusterId}:stuck`;
+    const liveQueue = `collect:${clusterId}:live`;
+    let stuckId: string;
+    let liveId: string;
+    try {
+      // Named queues, because that is the unit graphile-worker serialises on
+      // and the unit that gets wedged: one per cluster per pass in production.
+      stuckId = (await utils.addJob("collect", { clusterId }, { queueName: stuckQueue })).id;
+      liveId = (await utils.addJob("collect", { clusterId }, { queueName: liveQueue })).id;
+    } finally {
+      await utils.release();
+    }
+
+    // What a SIGKILL leaves behind: the queue and the job still marked as held
+    // by a worker that no longer exists. Back-dated rather than slept on — the
+    // four-hour threshold is the thing under test.
+    const hold = (queue: string, jobId: string, age: string) =>
+      db
+        .execute(
+          sql`update graphile_worker._private_job_queues
+              set locked_at = now() - ${sql.raw(`interval '${age}'`)}, locked_by = 'otpool-gone'
+              where queue_name = ${queue}`,
+        )
+        .then(() =>
+          db.execute(
+            sql`update graphile_worker._private_jobs
+                set locked_at = now() - ${sql.raw(`interval '${age}'`)}, locked_by = 'otpool-gone'
+                where id::text = ${jobId}`,
+          ),
+        );
+    await hold(stuckQueue, stuckId, "6 hours");
+    await hold(liveQueue, liveId, "10 minutes");
+
+    // is_available is `generated always as (locked_at IS NULL)` — there is no
+    // time term in it, which is the whole defect: without a reset both of these
+    // stay false forever and the jobs behind them are never claimed again.
+    const availability = async (): Promise<Record<string, boolean>> => {
+      const rows = await db.execute<{ queue_name: string; is_available: boolean }>(
+        sql`select queue_name, is_available from graphile_worker._private_job_queues
+            where queue_name in (${stuckQueue}, ${liveQueue})`,
+      );
+      return Object.fromEntries(rows.rows.map((row) => [row.queue_name, row.is_available]));
+    };
+    expect(await availability()).toEqual({ [stuckQueue]: false, [liveQueue]: false });
+
+    const freed = await releaseStaleLocks(db);
+    expect(freed).toContain(stuckQueue);
+    // A collect against a large cluster legitimately runs for minutes. Ten
+    // minutes in, the worker is working, and taking its queue away would hand
+    // the same job to a second one.
+    expect(freed).not.toContain(liveQueue);
+    expect(await availability()).toEqual({ [stuckQueue]: true, [liveQueue]: false });
+
+    // The job's own lock has to go with the queue's, or it stays unclaimable on
+    // a queue that is now free — and run_at is pushed to the present so a job
+    // unlocked from six hours ago does not jump ahead of everything since.
+    const jobs = await db.execute<{ id: string; locked_at: Date | null; ahead: boolean }>(
+      sql`select id::text as id, locked_at, run_at < now() - interval '1 minute' as ahead
+          from graphile_worker._private_jobs where id::text in (${stuckId}, ${liveId})`,
+    );
+    const stuck = jobs.rows.find((row) => row.id === stuckId);
+    const live = jobs.rows.find((row) => row.id === liveId);
+    expect(stuck?.locked_at).toBeNull();
+    expect(stuck?.ahead).toBe(false);
+    expect(live?.locked_at).not.toBeNull();
+
+    await db.execute(
+      sql`delete from graphile_worker._private_jobs where id::text in (${stuckId}, ${liveId})`,
+    );
+    await db.execute(
+      sql`delete from graphile_worker._private_job_queues
+          where queue_name in (${stuckQueue}, ${liveQueue})`,
     );
   });
 });
