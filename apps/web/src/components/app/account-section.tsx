@@ -9,6 +9,7 @@ import { FieldGroup } from "~/components/ui/field";
 import { Input } from "~/components/ui/input";
 import { Label } from "~/components/ui/label";
 import { Separator } from "~/components/ui/separator";
+import { LocalTime } from "~/lib/hydration";
 import type { Me, ProviderAccount, SessionEntry } from "~/lib/queries/account";
 import {
   useChangeEmail,
@@ -63,13 +64,11 @@ export function describeAgent(userAgent: string | null | undefined): string {
 
 // With the year, unlike the drop dates elsewhere: a forgotten session is
 // exactly the row that is old enough for "12 Mar" to be ambiguous.
-function fmtDay(date: Date | string): string {
-  return new Date(date).toLocaleDateString(undefined, {
-    day: "numeric",
-    month: "short",
-    year: "numeric",
-  });
-}
+const SIGNED_IN: Intl.DateTimeFormatOptions = {
+  day: "numeric",
+  month: "short",
+  year: "numeric",
+};
 
 function ProfileCard({ me }: { me: Me }) {
   const rename = useUpdateName();
@@ -491,7 +490,16 @@ function SessionsCard({
                 <span className="font-mono text-muted-foreground text-xs">{session.ipAddress}</span>
               ) : null}
               <span className="text-muted-foreground text-xs">
-                signed in {fmtDay(session.createdAt)}
+                signed in{" "}
+                <LocalTime
+                  iso={
+                    session.createdAt instanceof Date
+                      ? session.createdAt.toISOString()
+                      : session.createdAt
+                  }
+                  options={SIGNED_IN}
+                  dateOnly
+                />
               </span>
               {session.token === currentToken ? (
                 <Badge variant="outline">this device</Badge>

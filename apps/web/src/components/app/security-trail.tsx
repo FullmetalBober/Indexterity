@@ -13,6 +13,7 @@ import {
   SelectValue,
 } from "~/components/ui/select";
 import { Skeleton } from "~/components/ui/skeleton";
+import { LocalTime } from "~/lib/hydration";
 
 // The security trail: 23 kinds of act, recorded since #53 and read by nothing
 // until #158.
@@ -27,17 +28,15 @@ import { Skeleton } from "~/components/ui/skeleton";
 // value, and null is not one either.
 const ANY = "__any__";
 
-function fmtWhen(iso: string): string {
-  const at = new Date(iso);
-  if (Number.isNaN(at.getTime())) return "—";
-  return at.toLocaleString(undefined, {
-    day: "numeric",
-    month: "short",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
+// The same shape the roster uses, and the same reason it is a component: a
+// timestamp formatted in the reader's zone cannot be server-rendered as text.
+const WHEN: Intl.DateTimeFormatOptions = {
+  day: "numeric",
+  month: "short",
+  year: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+};
 
 function toneClass(tone: ReturnType<typeof eventLine>["tone"]): string {
   if (tone === "attempt") return "text-amber-700";
@@ -50,7 +49,7 @@ function Row({ event }: { event: SecurityEvent }) {
   return (
     <tr className="border-b last:border-0">
       <td className="py-2 pr-3 align-top whitespace-nowrap text-muted-foreground text-xs tabular-nums">
-        {fmtWhen(event.createdAt)}
+        <LocalTime iso={event.createdAt} options={WHEN} />
       </td>
       <td className="py-2 pr-3 align-top">
         <span className={`text-sm ${toneClass(line.tone)}`}>{line.label}</span>

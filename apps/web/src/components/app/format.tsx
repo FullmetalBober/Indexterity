@@ -1,4 +1,5 @@
 // Presentation helpers shared by the dashboard's sections.
+import { LocalTime, useMounted } from "~/lib/hydration";
 
 export function badgeVariant(type: string): "secondary" | "destructive" | "default" | "outline" {
   if (type === "DROP_REDUNDANT" || type === "ADVISORY_REVIEW") return "secondary";
@@ -53,6 +54,12 @@ export function fmtMicros(value: number | null): string {
 // report waits out a full cycle, an index still serving traffic answers within
 // days. Null once the window has passed: the drop is then waiting on the change
 // window and the regression gate, and naming a date would be a guess.
+// Returns the ISO instant rather than a formatted date, so the DRAWING can happen
+// behind the hydration gate (LocalTime). It used to format here, in the reader's
+// zone, from a function the server also calls — and `Date.now()` below is the
+// second half of the same problem: the server compares against its clock and the
+// browser against a later one, so a window expiring in that gap is a string on one
+// side and null on the other. Both differences are now the client's alone.
 export function dropsOn(rec: {
   state: string;
   hiddenAt: string | null;
@@ -60,8 +67,39 @@ export function dropsOn(rec: {
 }): string | null {
   if (rec.state !== "HIDDEN" || rec.hiddenAt === null || rec.observeDays === null) return null;
   const due = new Date(new Date(rec.hiddenAt).getTime() + rec.observeDays * 86_400_000);
-  if (Number.isNaN(due.getTime()) || due.getTime() <= Date.now()) return null;
-  return due.toLocaleDateString(undefined, { day: "numeric", month: "short" });
+  if (Number.isNaN(due.getTime())) return null;
+  return due.toISOString();
+}
+
+// Day and month: the observe window is weeks, not months, so the year would be
+// noise on every row.
+const DROPS_ON: Intl.DateTimeFormatOptions = { day: "numeric", month: "short" };
+
+// When a hidden index's observe window ends, or nothing.
+//
+// Nothing covers two cases and both belong to the client, which is why this is a
+// component and not a string. The DATE is drawn in the reader's zone, and whether
+// the window has already passed is a comparison against the reader's clock — the
+// server answers both differently, and a cell that disagrees with the server is a
+// hydration error that throws away the page.
+//
+// Past the window the drop is waiting on the change window and the regression
+// gate, so a date there would be a guess. That rule is kept; it now runs where the
+// clock it depends on lives.
+export function DropsOn({
+  rec,
+}: {
+  rec: { state: string; hiddenAt: string | null; observeDays: number | null };
+}) {
+  const mounted = useMounted();
+  const due = dropsOn(rec);
+  if (due === null || !mounted) return null;
+  if (new Date(due).getTime() <= Date.now()) return null;
+  return (
+    <span className="block text-muted-foreground">
+      drops <LocalTime iso={due} options={DROPS_ON} dateOnly />
+    </span>
+  );
 }
 
 export function DeltaCell({ pct }: { pct: number | null }) {
