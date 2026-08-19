@@ -23,6 +23,33 @@ export interface TlsOverrides {
 
 // The strict default, and the value an older client or a scripted connect means
 // by saying nothing.
+// The credentials cannot reach into this database at all — not "no rows", not
+// "no permission on a table", but no access to the database as a whole.
+//
+// A named failure rather than a raw driver error because it is the one
+// per-database failure the passes above a collector must SURVIVE: an
+// inaccessible database contributes nothing and the rest of the cluster is still
+// worth walking. Every other failure keeps aborting the pass, which is what a
+// failure nobody has reasoned about should do.
+//
+// Reached most often on SQL Server, where a scoped login has a user only in the
+// databases it was provisioned for (#244, and mssql/provision.ts): a database
+// created — or ticked — afterwards is listed by `sys.databases` to any login,
+// because VIEW ANY DATABASE is granted to public, and then refuses every read
+// with Msg 916 (verified on 2022: `SELECT … FROM [other].sys.tables` answers
+// "The server principal … is not able to access the database … under the current
+// security context").
+export class DatabaseInaccessibleError extends Error {
+  constructor(
+    readonly database: string,
+    cause?: unknown,
+  ) {
+    super(`no access to database ${database} with these credentials`);
+    this.name = "DatabaseInaccessibleError";
+    this.cause = cause;
+  }
+}
+
 export const NO_TLS_OVERRIDES: TlsOverrides = {
   allowInvalidCertificates: false,
   allowInvalidHostnames: false,

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { ObservedSession, scopeForDiagnosis, unobservedDatabases } from "./observe";
 import type { EngineSession, IndexCollector, IndexExecutor } from "./ports";
+import { DatabaseInaccessibleError } from "./ports";
 
 function session(names: string[]): EngineSession {
   return {
@@ -83,5 +84,37 @@ describe("ObservedSession", () => {
     expect(wrapped.collector).toBe(inner.collector);
     await wrapped.close();
     expect(inner.close).toHaveBeenCalledOnce();
+  });
+});
+
+describe("a database the credentials cannot reach", () => {
+  // The failure the two database-walking passes must survive, rather than abort
+  // on (#244). Proven against SQL Server 2022: a login provisioned for one
+  // database of two is still shown the other by `sys.databases` — VIEW ANY
+  // DATABASE is granted to public — and then answers Msg 916, "The server
+  // principal … is not able to access the database … under the current security
+  // context", to every read of it.
+  it("is one lost database and not a lost collect", async () => {
+    const collector = {
+      listCollectionNames: vi.fn(async (database: string) => {
+        if (database === "stagingdb") throw new DatabaseInaccessibleError(database);
+        return [`${database}.orders`];
+      }),
+    };
+    const walked: string[] = [];
+    for (const database of ["appdb", "stagingdb", "reportdb"]) {
+      try {
+        walked.push(...(await collector.listCollectionNames(database)));
+      } catch (error) {
+        if (!(error instanceof DatabaseInaccessibleError)) throw error;
+      }
+    }
+    expect(walked).toEqual(["appdb.orders", "reportdb.orders"]);
+  });
+
+  it("names the database it could not reach", () => {
+    const error = new DatabaseInaccessibleError("stagingdb");
+    expect(error.database).toBe("stagingdb");
+    expect(error.message).toContain("stagingdb");
   });
 });

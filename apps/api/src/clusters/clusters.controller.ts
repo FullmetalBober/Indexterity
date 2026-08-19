@@ -21,7 +21,12 @@ import {
 } from "../db";
 import { DatabaseService } from "../db/database.service";
 import { allowPrivateTargets, assertTargetsAllowed, BlockedTargetError } from "../engine/net-guard";
-import { NO_TLS_OVERRIDES, type ProvisionedUser, type TlsOverrides } from "../engine/ports";
+import {
+  DatabaseInaccessibleError,
+  NO_TLS_OVERRIDES,
+  type ProvisionedUser,
+  type TlsOverrides,
+} from "../engine/ports";
 import {
   adapterFor,
   detectEngine,
@@ -752,12 +757,38 @@ export class ClustersController {
         // because we have never observed it is exactly the name this route exists
         // to accept.
         if (input.databases !== null) {
-          const absent = await this.absentDatabases(input.clusterId, input.databases, errors);
+          // Only what is being ADDED is probed for access, so narrowing a cluster
+          // never waits on a per-database round trip.
+          const added = input.databases.filter(
+            (name) => row.observedDatabases !== null && !row.observedDatabases.includes(name),
+          );
+          const { absent, unreadable } = await this.unusableDatabases(
+            input.clusterId,
+            input.databases,
+            added,
+            errors,
+          );
           if (absent.length > 0) {
             throw errors.BAD_REQUEST({
               message:
                 `this cluster has no database called ${absent.join(", ")} — ` +
                 "reload the list and pick again.",
+            });
+          }
+          // Refused at the tick rather than accepted into a blind spot. The credentials
+          // stored for this cluster cannot read these databases at all, so observing
+          // them would collect nothing from them forever and say so nowhere — and on a
+          // cluster running as a login Indexterity provisioned there is no admin string
+          // left to widen the grant with, which is why the message names both ways out.
+          if (unreadable.length > 0) {
+            throw errors.BAD_REQUEST({
+              message:
+                `these credentials cannot read ${unreadable.join(", ")} on this cluster` +
+                (row.provisionedUsername === null
+                  ? ". Grant them access and try again."
+                  : ` — ${row.provisionedUsername} was granted only in the databases selected when ` +
+                    "it was created, and the admin string it was made with is never stored. Grant " +
+                    "it there yourself, or rotate to a connection string that already has access."),
             });
           }
         }
@@ -799,11 +830,13 @@ export class ClustersController {
   // refused because the cluster was briefly down, and the filter in
   // jobs/cluster-connection.ts intersects on every collect regardless, so a name
   // that turns out to be wrong costs nothing but its own absence.
-  private async absentDatabases(
+  private async unusableDatabases(
     clusterId: string,
     wanted: readonly string[],
+    added: readonly string[],
     errors: { NOT_FOUND: (options: { message: string }) => Error },
-  ): Promise<string[]> {
+  ): Promise<{ absent: string[]; unreadable: string[] }> {
+    const none = { absent: [], unreadable: [] };
     let lease: Awaited<ReturnType<typeof openClusterSession>>;
     try {
       lease = await openClusterSession(this.database.db, clusterId, { allDatabases: true });
@@ -811,13 +844,37 @@ export class ClustersController {
       if (error instanceof ClusterGoneError) {
         throw errors.NOT_FOUND({ message: "cluster not found" });
       }
-      return [];
+      return none;
     }
     try {
       const available = await lease.session.listDatabaseNames();
-      return wanted.filter((name) => !available.includes(name));
+      const absent = wanted.filter((name) => !available.includes(name));
+      // Existence is not access, and on SQL Server the two come apart in exactly
+      // the way that matters here: `sys.databases` lists every database to every
+      // login (VIEW ANY DATABASE is granted to public — verified on 2022), while a
+      // scoped login provisioned for two databases of twelve has no user in the
+      // other ten and gets Msg 916 on every read. So a database that passes the
+      // check above can still be one we will never see a table in.
+      //
+      // Probed only for the databases being ADDED. The ones already selected are
+      // either working or already visible as a gap on the dashboard, and probing
+      // them would make every save cost a round trip per database for an answer
+      // nobody asked for.
+      const unreadable: string[] = [];
+      for (const database of added) {
+        if (absent.includes(database)) continue;
+        try {
+          await lease.session.collector.listCollectionNames(database);
+        } catch (error) {
+          if (error instanceof DatabaseInaccessibleError) unreadable.push(database);
+        }
+      }
+      return { absent, unreadable };
     } catch {
-      return [];
+      // The cluster went away mid-check. Not a refusal: a selection must not be
+      // rejected because the cluster was briefly unreachable, and the collect
+      // intersects with what is really there on every pass regardless.
+      return none;
     } finally {
       lease.release();
     }

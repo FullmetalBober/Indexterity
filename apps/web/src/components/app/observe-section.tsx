@@ -141,10 +141,11 @@ export function ObserveSection({
           <Alert>
             <AlertTitle>This cluster runs as a user Indexterity created</AlertTitle>
             <AlertDescription>
-              <code>{cluster.provisionedUsername}</code> was granted access to the databases
-              selected when it was created. A database added here may report missing privileges
-              until it is granted on the cluster — or rotate to a connection string that already has
-              what the engine needs.
+              <code>{cluster.provisionedUsername}</code> was granted access only to the databases
+              selected when it was created, and the admin string it was made with is never stored —
+              so adding one here will be refused until that login is granted access on the cluster
+              itself. The alternative is to rotate to a connection string that already has what the
+              engine needs; both keep every measurement.
             </AlertDescription>
           </Alert>
         ) : null}
