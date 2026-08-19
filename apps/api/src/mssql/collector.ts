@@ -9,6 +9,7 @@ import type {
   LatencyPair,
   WorkloadTarget,
 } from "../engine/ports";
+import { DatabaseInaccessibleError } from "../engine/ports";
 import {
   asNumber,
   MssqlConnection,
@@ -169,6 +170,20 @@ export function indexNamesFromForcedPlan(planXml: string): string[] {
   return names;
 }
 
+// Msg 916 — the login exists on the server and has no user in this database.
+// Matched on the number where the driver reports one, and on the wording as the
+// fallback: `execute` runs statements through sp_executesql, which can surface
+// the same refusal as a nested error whose `number` is not on the top object.
+function isInaccessibleDatabase(error: unknown): boolean {
+  for (let current: unknown = error, depth = 0; depth < 5; depth += 1) {
+    if (typeof current !== "object" || current === null) break;
+    if (Reflect.get(current, "number") === 916) return true;
+    current = Reflect.get(current, "cause") ?? Reflect.get(current, "originalError");
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return /is not able to access the database/i.test(message);
+}
+
 export class MssqlIndexCollector implements IndexCollector {
   constructor(
     private readonly conn: MssqlConnection,
@@ -178,15 +193,28 @@ export class MssqlIndexCollector implements IndexCollector {
     private readonly members?: MssqlMemberConnections,
   ) {}
 
+  // Also the accessibility probe for a database, which is why it raises
+  // DatabaseInaccessibleError rather than swallowing Msg 916 into an empty list
+  // (#244). `sys.databases` lists every database to every login — VIEW ANY
+  // DATABASE is granted to public — so "is this one readable at all" has no
+  // cheaper answer than asking it for its tables, and a scoped login provisioned
+  // for two databases of twelve gets 916 on the other ten. An empty list would
+  // make that indistinguishable from a database with no tables, which is a real
+  // and boring state.
   async listCollectionNames(database: string): Promise<string[]> {
-    const rows = await this.conn.query<{ name: string }>(
-      `SELECT s.name + '.' + t.name AS name
-       FROM ${quoteIdent(database)}.sys.tables t
-       JOIN ${quoteIdent(database)}.sys.schemas s ON s.schema_id = t.schema_id
-       WHERE t.is_ms_shipped = 0
-       ORDER BY s.name, t.name`,
-    );
-    return rows.map((row) => row.name);
+    try {
+      const rows = await this.conn.query<{ name: string }>(
+        `SELECT s.name + '.' + t.name AS name
+         FROM ${quoteIdent(database)}.sys.tables t
+         JOIN ${quoteIdent(database)}.sys.schemas s ON s.schema_id = t.schema_id
+         WHERE t.is_ms_shipped = 0
+         ORDER BY s.name, t.name`,
+      );
+      return rows.map((row) => row.name);
+    } catch (error) {
+      if (isInaccessibleDatabase(error)) throw new DatabaseInaccessibleError(database, error);
+      throw error;
+    }
   }
 
   // Key columns AND included columns, in one read: this used to filter

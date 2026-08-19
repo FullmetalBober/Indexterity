@@ -114,7 +114,7 @@ export async function applyCluster(db: Database, clusterId: string): Promise<num
   const watchingSince = watch?.since == null ? null : new Date(watch.since).toISOString();
   const since = await historyWindow(db, clusterId);
 
-  const { session, readOnly, release } = await openClusterSession(db, clusterId);
+  const { session, readOnly, observedDatabases, release } = await openClusterSession(db, clusterId);
   try {
     // Read-only clusters never execute writes.
     if (readOnly) return 0;
@@ -122,6 +122,17 @@ export async function applyCluster(db: Database, clusterId: string): Promise<num
     const executor = session.executor(readOnly);
     let hidden = 0;
     for (const rec of approved) {
+      // The last gate before a write lands on somebody's cluster: never touch a
+      // database that is not being observed (#244).
+      //
+      // Third line of defence, and deliberately so — changing the selection
+      // discards the open proposals outside it, and suggest only ever proposes for
+      // databases in scope. What is left is the race between those two: a suggest
+      // pass that inserted a proposal microseconds before the selection narrowed,
+      // which `promoteByScore` above would then auto-approve on score alone. Here
+      // the check costs an array lookup and covers the auto-approved and the
+      // hand-approved alike.
+      if (observedDatabases !== null && !observedDatabases.includes(rec.database)) continue;
       if (!DROP_TYPES.has(rec.type)) continue;
       const check = await preflightDrop(collector, rec);
       if (!check.safe) {

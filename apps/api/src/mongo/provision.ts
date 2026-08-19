@@ -112,6 +112,17 @@ async function upsertEngineRole(admin: Db): Promise<void> {
 // Use an admin connection string ONCE to create a least-privilege user the
 // engine will run as, and return that user's connection string. The admin
 // string is never stored; a failed verification drops the user again.
+//
+// Takes no observe selection, and neither does the MSSQL provisioner — same
+// decision on both engines (#244). A role written at provision time is FROZEN
+// while the selection is editable forever, so a user granted only where the
+// selection pointed would silently lack listIndexes on the database somebody ticks
+// six months later, with no admin string left to re-grant with.
+//
+// It would also buy very little here. The role above grants metadata actions
+// through `{db: "", collection: ""}` and explicitly withholds `find` on customer
+// collections, so a database outside the selection is one we can list indexes on
+// and still cannot read a document from.
 export async function provisionScopedUser(
   adminUri: string,
   overrides?: TlsOverrides,

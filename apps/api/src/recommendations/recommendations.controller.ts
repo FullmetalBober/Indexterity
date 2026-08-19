@@ -150,14 +150,32 @@ export class RecommendationsController {
     return route(this.tenancy, contract.approveRecommendation, req, "owner").handler(
       async ({ input, errors, context }) => {
         const orgId = context.member.orgId;
+        // The cluster's observe selection comes back with the ownership check, in
+        // the join that is already being made (#244).
         const [owned] = await this.database.db
-          .select({ id: recommendations.id })
+          .select({
+            id: recommendations.id,
+            database: recommendations.database,
+            observedDatabases: clusters.observedDatabases,
+          })
           .from(recommendations)
           .innerJoin(clusters, eq(recommendations.clusterId, clusters.id))
           .where(and(eq(recommendations.id, input.id), eq(clusters.orgId, orgId)))
           .limit(1);
         if (owned === undefined) {
           throw errors.NOT_FOUND({ message: "recommendation not found" });
+        }
+        // Approving is what puts a change into the apply pipeline, so it is the
+        // last point at which "this database is not observed" can still be said in
+        // time. Refused rather than silently dropped: the reader is looking at a
+        // row on their screen, and a click that does nothing is worse than one that
+        // says the list is stale.
+        if (owned.observedDatabases !== null && !owned.observedDatabases.includes(owned.database)) {
+          throw errors.CONFLICT({
+            message:
+              `${owned.database} is not one of the databases this cluster observes — ` +
+              "reload the page, or add it back in the cluster's settings.",
+          });
         }
         const [row] = await this.database.db
           .update(recommendations)

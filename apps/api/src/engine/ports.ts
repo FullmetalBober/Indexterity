@@ -23,6 +23,33 @@ export interface TlsOverrides {
 
 // The strict default, and the value an older client or a scripted connect means
 // by saying nothing.
+// The credentials cannot reach into this database at all — not "no rows", not
+// "no permission on a table", but no access to the database as a whole.
+//
+// A named failure rather than a raw driver error because it is the one
+// per-database failure the passes above a collector must SURVIVE: an
+// inaccessible database contributes nothing and the rest of the cluster is still
+// worth walking. Every other failure keeps aborting the pass, which is what a
+// failure nobody has reasoned about should do.
+//
+// Reached most often on SQL Server, where a scoped login has a user only in the
+// databases it was provisioned for (#244, and mssql/provision.ts): a database
+// created — or ticked — afterwards is listed by `sys.databases` to any login,
+// because VIEW ANY DATABASE is granted to public, and then refuses every read
+// with Msg 916 (verified on 2022: `SELECT … FROM [other].sys.tables` answers
+// "The server principal … is not able to access the database … under the current
+// security context").
+export class DatabaseInaccessibleError extends Error {
+  constructor(
+    readonly database: string,
+    cause?: unknown,
+  ) {
+    super(`no access to database ${database} with these credentials`);
+    this.name = "DatabaseInaccessibleError";
+    this.cause = cause;
+  }
+}
+
 export const NO_TLS_OVERRIDES: TlsOverrides = {
   allowInvalidCertificates: false,
   allowInvalidHostnames: false,
@@ -196,6 +223,11 @@ export interface ConnectionDiagnosis {
   readonly canApply: boolean;
   readonly privileges: readonly PrivilegeCheck[];
   readonly missing: readonly string[];
+  // Every user database the credentials can see — the whole cluster's, never
+  // narrowed by the scope the diagnosis was asked about, because this is the list
+  // the observe checkboxes are drawn from and a database that is not in it can
+  // never be ticked (#244).
+  readonly databases: readonly string[];
 }
 
 // Where engines genuinely differ — checked at the feature gates, not deep in
@@ -242,7 +274,19 @@ export interface EngineAdapter {
   applySecureTransport(value: string, overrides: TlsOverrides): string;
   open(connectionString: string, overrides?: TlsOverrides): Promise<EngineSession>;
   // Report what these credentials may do, without writing anything.
-  diagnose(connectionString: string, overrides?: TlsOverrides): Promise<ConnectionDiagnosis>;
+  //
+  // `observedDatabases` narrows what the answer is ABOUT (#244): both adapters
+  // evaluate their per-database requirements over the databases in scope, so a
+  // role covering only the databases somebody asked us to observe reports as
+  // granted instead of as a gap. Undefined and null both mean the whole cluster,
+  // which is what the first preflight always is. The diagnosis still reports every
+  // database the cluster has, narrowed or not — that list is what the checkboxes
+  // are drawn from.
+  diagnose(
+    connectionString: string,
+    overrides?: TlsOverrides,
+    observedDatabases?: readonly string[] | null,
+  ): Promise<ConnectionDiagnosis>;
   // Use an admin string ONCE to create the least-privilege user this engine
   // would rather run as, and return that user's string. The admin string is
   // never stored, and a failed verification undoes what was created.
@@ -250,6 +294,15 @@ export interface EngineAdapter {
   // Present exactly when `capabilities.provisionScopedUsers` is true — the flag
   // is what callers branch on, and this is what they then call. Throws
   // ProvisionDeniedError when the credentials cannot create the user.
+  //
+  // Takes no observe selection, on either engine and by decision (#244): the
+  // selection is what Indexterity LOOKS AT, not what the provisioned user MAY look
+  // at. A user granted only where the selection pointed could never be widened
+  // afterwards — provisioning runs once, from an admin string that is never
+  // stored — so ticking another database would be a dead end. Both adapters grant
+  // across the databases that exist when they run, and the selection stays a row in
+  // postgres that can change any time. See mssql/provision.ts for the footprint
+  // that buys, and what it still withholds.
   provisionScopedUser?(
     adminConnectionString: string,
     overrides?: TlsOverrides,
