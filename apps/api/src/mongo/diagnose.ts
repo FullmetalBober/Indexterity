@@ -289,6 +289,12 @@ function toCheck(required: RequiredPrivilege, granted: boolean): PrivilegeCheck 
     enables: required.enables,
     tier: required.tier,
     granted,
+    // No runnable fix to hand over here (#246). Every gap on this engine is closed
+    // by granting a role on a user whose NAME this diagnosis does not always know —
+    // and `enables` already links the exact role — so a command would be a template
+    // with a blank in it, which is what the SQL Server side of #246 exists to
+    // remove rather than to spread.
+    command: null,
   };
 }
 

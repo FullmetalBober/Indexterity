@@ -43,7 +43,7 @@ function privilege(
   granted: boolean,
   tier: PrivilegeCheck["tier"] = "CORE",
 ): PrivilegeCheck {
-  return { key, label: key, enables: `${key} does things`, tier, granted };
+  return { key, label: key, enables: `${key} does things`, tier, granted, command: null };
 }
 
 // The three provisioning checks as the api reports them, all in one state.

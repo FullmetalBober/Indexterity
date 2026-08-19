@@ -1,4 +1,47 @@
 import type { PrivilegeCheck } from "@repo/contracts";
+import { useState } from "react";
+import { Button } from "~/components/ui/button";
+
+// The statements that close a gap, ready to run (#246).
+//
+// Rendered rather than described: the Query Store row used to end in an ellipsis the
+// reader had to expand once per database, having first worked out which databases
+// were missing it. Only ever drawn for a check that is NOT granted, because the api
+// only fills `command` for those.
+//
+// `pre` and not a paragraph: this is meant to be selected, and one ALTER DATABASE
+// per line is how it will be pasted into a query window. No syntax colouring — it is
+// three lines at most in practice, and a highlighter is a dependency plus a second
+// way for this to be wrong about somebody's dialect.
+function FixCommand({ command }: { command: string }) {
+  const [copied, setCopied] = useState(false);
+  const lines = command.split("\n").length;
+  return (
+    <div className="mt-1 grid gap-1">
+      <pre className="overflow-x-auto rounded bg-muted/60 p-2 font-mono text-[11px] leading-relaxed">
+        {command}
+      </pre>
+      <div>
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-7 text-xs"
+          onClick={() => {
+            // No error branch. A clipboard write can be refused (an insecure origin,
+            // a denied permission) and the statements are on the screen either way —
+            // "Copied" not appearing is the whole message that needs sending.
+            void navigator.clipboard
+              .writeText(command)
+              .then(() => setCopied(true))
+              .catch(() => undefined);
+          }}
+        >
+          {copied ? "Copied" : lines === 1 ? "Copy" : `Copy all ${lines}`}
+        </Button>
+      </div>
+    </div>
+  );
+}
 
 function Row({ privilege, optional }: { privilege: PrivilegeCheck; optional: boolean }) {
   // An ungranted requirement is a fault in the connection; an ungranted optional
@@ -19,6 +62,7 @@ function Row({ privilege, optional }: { privilege: PrivilegeCheck; optional: boo
         {privilege.granted ? null : (
           <span className="font-normal text-muted-foreground"> — {privilege.enables}</span>
         )}
+        {privilege.command === null ? null : <FixCommand command={privilege.command} />}
       </span>
     </li>
   );
