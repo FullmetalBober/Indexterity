@@ -21,7 +21,10 @@ observe window, a pre-flight check, and a read-latency regression test.
 
 ## How it works
 
-1. **Connect** a cluster with any connection string. Indexterity first reports
+1. **Connect** a cluster with any connection string — the form names the dialects
+   it takes (`mongodb://`, `mongodb+srv://`, `mssql://`, `sqlserver://` and the
+   ADO `Server=…` list), says which engine it read yours as before you press
+   anything, and asks only when nothing recognises it. Indexterity then reports
    what that string can actually do — nothing stored, nothing written. If it can
    create users, it *asks* before provisioning its own least-privilege user
    (`idx_<hex>`, no `find` on your collections, so it **cannot read documents**).

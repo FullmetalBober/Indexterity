@@ -37,7 +37,11 @@ function ConnectCluster() {
           ? // The one moment worth saying what happens next: nothing on this
             // account has ever run, so "read-only" and "six hours" are the two
             // facts that decide whether the next screen looks broken.
-            "Indexterity reads how your indexes are used and proposes what to drop, merge or build. Paste a connection string and it will check what those credentials can do before storing anything — the cluster starts read-only, and the first collect runs within six hours."
+            // "within six hours" until #178 made the pass hourly and #231 gave
+            // it a tick that fires at boot — so the honest answer to "when does
+            // something happen" is now minutes, and a first impression that
+            // promises six hours is a reader who closes the tab.
+            "Indexterity reads how your indexes are used and proposes what to drop, merge or build. Paste a connection string and it will check what those credentials can do before storing anything — the cluster starts read-only, and the first collect is queued as soon as it is connected."
           : "Every cluster is analyzed on its own, with its own policy and its own history."}
       </p>
 
