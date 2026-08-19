@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { workloadKey } from "../engine/ports";
+import { PLAN_PARSE_CHUNK } from "./chunk";
 import { type PlanRow, parseConstValue, parseShowplanShapes, shapesFromPlans } from "./workload";
 
 // Minimal but grammatically real showplan fragments — the element anatomy
@@ -214,13 +215,12 @@ describe("shapesFromPlans yields the event loop while it parses", () => {
   const NOW = new Date("2026-08-14T12:00:00Z");
   const targets = [{ database: "probe", collection: "dbo.orders" }];
 
-  // MAX_PLANS_PER_DATABASE, which is the realistic worst case for one database
-  // and the size #230 measured — a smaller corpus shrinks the gap the assertion
-  // lives in, and 5,000 of these costs about a second. Each row carries its own
-  // literal, so this is 5,000 distinct documents to parse rather than one
-  // document parsed 5,000 times.
+  // Four chunks' worth, which is enough to prove the loop is handed back
+  // repeatedly and cheap enough that this test costs milliseconds. Each row
+  // carries its own literal, so these are distinct documents to parse rather
+  // than one document parsed N times.
   const CORPUS = Array.from(
-    { length: 5000 },
+    { length: PLAN_PARSE_CHUNK * 4 },
     (_unused, index): PlanRow => ({
       planXml: SCAN_SORT_PLAN.replaceAll("'open'", `'open${index}'`),
       execs: 1,
@@ -230,36 +230,47 @@ describe("shapesFromPlans yields the event loop while it parses", () => {
     }),
   );
 
-  const TICK_MS = 10;
-  // Deliberately loose, because CI shares its cores and this is a wall-clock
-  // measurement: the chunked parse comes in at tens of milliseconds and the
-  // synchronous one measured 1652 ms over 5,000 plans, so a threshold anywhere
-  // between the two answers the only question being asked, and the loose end
-  // is the one that does not wake anybody at 3am over a noisy neighbour.
-  const MAX_STALL_MS = 250;
-
-  it(`parses ${CORPUS.length} plans without a stall past ${MAX_STALL_MS} ms`, async () => {
-    let worstMs = 0;
-    let dueAt = performance.now() + TICK_MS;
-    const monitor = setInterval(() => {
-      const firedAt = performance.now();
-      worstMs = Math.max(worstMs, firedAt - dueAt);
-      dueAt = firedAt + TICK_MS;
-    }, TICK_MS);
+  // Loop TURNS given away, not milliseconds of stall.
+  //
+  // This started out as the stall itself: 5,000 plans parsed under a 10 ms timer,
+  // asserting the worst lateness stayed under 250 ms — the shape of #230's
+  // benchmark, where the numbers came from (1652 ms synchronous, 28 ms chunked at
+  // 100, 147 ms at 500). As a benchmark that was right; as a unit test it was
+  // measuring the MACHINE. Under `npm run test` three vitest instances share the
+  // cores, and a 10 ms timer is legitimately hundreds of milliseconds late with
+  // the parse behaving perfectly — it failed on a loaded workstation and passed
+  // on the same commit run alone, which is the profile of a test that gets muted
+  // rather than fixed.
+  //
+  // A self-rescheduling setImmediate counts the turns of the event loop the parse
+  // let through, and that is the property the code is actually claiming. It cannot
+  // be starved into a false pass by a busy host, it needs no threshold, and a
+  // synchronous body — including an `async` one that never awaits — runs to
+  // completion before the loop gets a single turn, so a revert reads zero and
+  // fails on any machine. The stall figures live in ./chunk.ts, where the chunk
+  // size is chosen, rather than being re-measured on every CI runner.
+  it("hands the loop back once per chunk of rows", async () => {
+    let turns = 0;
+    let spinning = true;
+    const spin = (): void => {
+      if (!spinning) return;
+      turns += 1;
+      setImmediate(spin);
+    };
+    setImmediate(spin);
+    let shapes: Awaited<ReturnType<typeof shapesFromPlans>>;
     try {
-      const shapes = await shapesFromPlans(targets, "probe", CORPUS, NOW);
-      // A starved timer cannot report from inside the block that starved it, so
-      // clearing the monitor here would read 0 ms out of even a fully
-      // synchronous parse — that mistake is why #230's first measurement
-      // claimed there was no problem. Waiting out a couple of ticks puts the
-      // loop through a timers phase, where the overdue monitor finally fires
-      // and records how late it was.
-      await new Promise((resolve) => setTimeout(resolve, TICK_MS * 2));
-      // Only worth measuring if the corpus was actually parsed.
-      expect(shapes.get(workloadKey("probe", "dbo.orders"))?.length).toBeGreaterThan(0);
+      shapes = await shapesFromPlans(targets, "probe", CORPUS, NOW);
     } finally {
-      clearInterval(monitor);
+      spinning = false;
     }
-    expect(worstMs).toBeLessThan(MAX_STALL_MS);
+
+    // Only meaningful if the corpus was really parsed.
+    expect(shapes.get(workloadKey("probe", "dbo.orders"))?.length).toBeGreaterThan(0);
+    // One yield per chunk boundary, so three for four chunks. Asserted as a floor
+    // rather than an equality: the counter also ticks on turns the loop takes for
+    // its own reasons, and pinning the exact number would make this a test about
+    // vitest's scheduling.
+    expect(turns).toBeGreaterThanOrEqual(3);
   });
 });
