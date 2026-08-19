@@ -52,10 +52,16 @@ export const password = z
   .min(PASSWORD_MIN_LENGTH, `At least ${PASSWORD_MIN_LENGTH} characters`);
 
 // Clusters.
+// Absent on all three below, and absent is the NORMAL case: the string says
+// which engine it is (mongodb:// and mongodb+srv:// versus mssql://,
+// sqlserver:// and the ADO `Server=…` list are disjoint), so the dashboard sends
+// nothing here and a scripted connect need not know the field exists. It is sent
+// only when detection claimed nothing and the reader said which engine it is —
+// an override for the string nobody's guard recognises, never a picker in front
+// of the ones they do.
 export const createClusterInput = z.object({
   name: clusterName,
   connectionString,
-  // Defaults to MONGODB — the only engine with an adapter today.
   engine: clusterEngine.optional(),
   // Absent means all three off, which is what an older client and a plain
   // scripted connect both mean.
@@ -73,6 +79,12 @@ export const checkConnectionInput = z.object({
 export const provisionClusterInput = z.object({
   name: clusterName,
   adminConnectionString: connectionString,
+  // Here as well as on the two above, and it is not symmetry for its own sake:
+  // the consent path re-reads the engine off the ADMIN string, so an override
+  // that reached `checkConnection` and not this one would be forgotten by the
+  // button the reader presses next — the same string, diagnosed as SQL Server
+  // and then provisioned as mongo.
+  engine: clusterEngine.optional(),
   // The admin string dials the same cluster as the scoped one it creates, so the
   // concession has to be made once and applies to both.
   tlsOverrides: tlsOverrides.optional(),

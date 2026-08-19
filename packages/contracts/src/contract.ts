@@ -29,6 +29,7 @@ import {
   provisionedCluster,
   recommendation,
   securityTrail,
+  supportedEngine,
 } from "./schemas.js";
 
 const clusterId = z.object({ clusterId: z.uuid() });
@@ -156,6 +157,19 @@ export const contract = {
     .errors({ NOT_FOUND: {} })
     .input(clusterId)
     .output(eventIterator(clusterEvent)),
+
+  // What this build can connect, so the connect form can say so instead of
+  // implying MongoDB with a placeholder. A property of the deployed code rather
+  // than of the caller or their org — POSTGRESQL appears here the release its
+  // adapter lands (#35) and not before, which is why the form asks rather than
+  // carrying a sentence that would then be wrong.
+  listSupportedEngines: oc
+    .route({
+      method: "GET",
+      path: "/engines",
+      summary: "Which database engines this build can connect, and the string forms each accepts",
+    })
+    .output(z.array(supportedEngine)),
 
   createCluster: oc
     .route({

@@ -37,11 +37,27 @@ export type RecommendationState = z.infer<typeof recommendationState>;
 export const connectionMode = z.enum(["HOSTED_DIRECT", "AGENT"]);
 export type ConnectionMode = z.infer<typeof connectionMode>;
 
-// The database engine behind a cluster. Only MONGODB connects today; the enum
-// is the forward-compatible surface for the planned PostgreSQL/SQL Server
-// adapters (the wiki's Architecture page, Engine ports).
+// The database engine behind a cluster. MONGODB and MSSQL both connect today;
+// POSTGRESQL is the enum's forward-compatible slot, and the api refuses it with
+// that word rather than pretending it does not exist (#35, and the wiki's
+// Architecture page under Engine ports). Which of the three a BUILD actually
+// carries is `supportedEngines` below rather than this list — the enum is the
+// vocabulary, the endpoint is the inventory.
 export const clusterEngine = z.enum(["MONGODB", "POSTGRESQL", "MSSQL"]);
 export type ClusterEngine = z.infer<typeof clusterEngine>;
+
+// One engine this build can actually connect, with the forms of string it takes.
+//
+// The hint is the adapter's own — the same sentence its refusal quotes — so the
+// connect form's helper text and the error a bad string produces cannot describe
+// different products. Read by the dashboard to say what is accepted and to fill
+// the engine override; nothing tenant-specific, so it is the same answer for
+// every caller of a given build.
+export const supportedEngine = z.object({
+  engine: clusterEngine,
+  connStringHint: z.string(),
+});
+export type SupportedEngine = z.infer<typeof supportedEngine>;
 
 // The three MongoDB options that keep TLS switched on while turning off the part
 // that makes it worth having. Each is a checkbox on the connect form, because a
@@ -115,6 +131,11 @@ export type PrivilegeCheck = z.infer<typeof privilegeCheck>;
 // What a pasted connection string can actually do — computed before anything
 // is stored, so onboarding can name what is missing or offer to provision.
 export const connectionDiagnosis = z.object({
+  // Which engine answered — the api's own verdict, not the browser's guess. The
+  // form draws a scheme-level hint while the reader types (engine-hint.ts) and
+  // replaces it with this the moment a diagnosis lands, because this one is the
+  // engine that will be stored if they press Connect.
+  engine: clusterEngine,
   reachable: z.boolean(),
   message: z.string().nullable(),
   username: z.string().nullable(),
