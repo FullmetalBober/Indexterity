@@ -131,6 +131,23 @@ export const privilegeCheck = z.object({
   enables: z.string(),
   tier: privilegeTier,
   granted: z.boolean(),
+  // The statements that would close this gap, ready to run, or null when there is
+  // nothing to hand over (#246).
+  //
+  // Engine-neutral field, engine-specific content: SQL Server's Query Store check
+  // fills it with one ALTER DATABASE per database that is missing it, and the mongo
+  // checks carry null until somebody wants `db.grantRolesToUser(…)` here too. The
+  // alternative was a Query-Store-shaped field on the diagnosis, which would put one
+  // engine's configuration vocabulary in the shared contract.
+  //
+  // Only ever set on a check that is NOT granted. A command beside a green row is a
+  // suggestion to change something that already works.
+  //
+  // `.default(null)` so a caller parsing a response from an api that predates the
+  // field gets null rather than a validation error or an undefined that reaches a
+  // `.split`. The api always sends it; the tolerance is for the window where one
+  // side of a deploy has moved and the other has not.
+  command: z.string().nullable().default(null),
 });
 export type PrivilegeCheck = z.infer<typeof privilegeCheck>;
 

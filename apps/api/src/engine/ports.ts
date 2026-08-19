@@ -204,6 +204,10 @@ export interface PrivilegeCheck {
   readonly enables: string;
   readonly tier: PrivilegeTier;
   readonly granted: boolean;
+  // Statements that would close this gap, ready to run, or null (#246). See the
+  // contract's own comment for why the field is engine-neutral and the content is
+  // not.
+  readonly command: string | null;
 }
 
 // What a connection string can actually do — computed before anything is

@@ -100,21 +100,72 @@ function toCheck(required: MssqlRequiredPrivilege, granted: boolean): PrivilegeC
     enables: required.enables,
     tier: required.tier,
     granted,
+    // A permission gap is closed by GRANTing to a principal this diagnosis cannot
+    // name — the reader may be about to fix the login they pasted, or to let us
+    // provision a different one — so there is no statement to hand over (#246).
+    command: null,
   };
 }
+
+// 1000 MB, which is what SQL Server 2019 and later create a database with and what
+// 2016 and 2017 do not: measured on real instances, a new 2017 database gets
+// MAX_STORAGE_SIZE_MB = 100 with QUERY_CAPTURE_MODE = ALL, and a new 2022 database
+// gets 1000 with AUTO (#246).
+//
+// So the statement below carries the size deliberately. A bare enable on the older
+// generation turns on ALL capture into a 100 MB budget, and a full store flips to
+// READ_ONLY and stops capturing — silently, which is the outcome this product must
+// not hand somebody. Naming the newer default normalises the old generation onto it
+// and changes nothing on a server that is already there.
+//
+// QUERY_CAPTURE_MODE is deliberately NOT set, even though the integration suite
+// sets ALL: that line is there so the suite's own one-off seeded queries are
+// captured deterministically. A production workload runs repeatedly and AUTO
+// captures it, so pushing the more expensive mode onto a customer's server would be
+// for a test's benefit rather than theirs.
+const QUERY_STORE_MAX_STORAGE_MB = 1000;
 
 // The Query Store check is not a permission but a server configuration: the
 // workload and latency signals exist only where it is on. Reported in the same
 // list so the connect form can show one story about what will and will not work.
-function queryStoreCheck(enabledEverywhere: boolean): PrivilegeCheck {
+//
+// `off` is the databases in scope that have it disabled, and it is what makes this
+// row actionable (#246): the probe reads `actual_state` per database anyway, so the
+// check can hand over the exact statements instead of an ellipsis the reader has to
+// expand once per database, having first worked out which ones they are.
+//
+// Three states, not two, and the third is why this takes a nullable list rather
+// than a boolean plus a list. `[]` means asked, and enabled everywhere. A non-empty
+// list means asked, and these are the ones missing it. `null` means never asked — an
+// unreachable cluster or a version refusal — which has to report NOT granted with
+// nothing to run. Passing `[]` there would draw a tick beside Query Store on a
+// server that never answered.
+// Exported for unit tests: the statements it builds are the ones a reader will
+// paste into a query window on production, so they are worth pinning.
+export function queryStoreCheck(off: readonly string[] | null): PrivilegeCheck {
+  const statements =
+    off === null || off.length === 0
+      ? null
+      : off
+          .map(
+            (database) =>
+              `ALTER DATABASE ${quoteIdent(database)} SET QUERY_STORE = ON ` +
+              `(OPERATION_MODE = READ_WRITE, MAX_STORAGE_SIZE_MB = ${QUERY_STORE_MAX_STORAGE_MB});`,
+          )
+          .join("\n");
   return {
     key: "queryStore",
     label: "Query Store enabled",
     enables:
       "read/write latency per table (the regression gates) and hinted-index detection — " +
-      "enable it per database with ALTER DATABASE … SET QUERY_STORE = ON",
+      (statements === null
+        ? "enable it per database with ALTER DATABASE … SET QUERY_STORE = ON"
+        : `off on ${(off ?? []).join(", ")}. Run this as an owner of the server — the ` +
+          "login Indexterity uses holds ALTER on schemas, not on the database, so it " +
+          "cannot enable this itself"),
     tier: "WORKLOAD",
-    granted: enabledEverywhere,
+    granted: off !== null && off.length === 0,
+    command: statements,
   };
 }
 
@@ -139,7 +190,8 @@ function failure(message: string): ConnectionDiagnosis {
     [
       ...MSSQL_REQUIRED_PRIVILEGES.map((required) => toCheck(required, false)),
       ...MSSQL_PROVISION_PRIVILEGES.map((required) => toCheck(required, false)),
-      queryStoreCheck(false),
+      // null, not []: nothing was asked, so this must not read as enabled.
+      queryStoreCheck(null),
     ],
     {
       reachable: false,
@@ -284,23 +336,30 @@ export async function diagnoseMssqlConnection(
     // database impossible to ever tick.
     const databases = scopeForDiagnosis(available, observedDatabases);
     const perDb = new Map<string, MssqlDatabaseGrants>();
-    let queryStoreEverywhere = databases.length > 0;
+    // WHICH databases are missing it, not just whether any are (#246). The probe
+    // reads actual_state per database either way, so keeping the names is free —
+    // and they are what turns "enable it per database" into statements the reader
+    // can run.
+    const queryStoreOff: string[] = [];
     for (const database of databases) {
       const grants = await databaseGrants(conn, database);
       perDb.set(database, grants.checks);
-      if (!grants.queryStore) queryStoreEverywhere = false;
+      if (!grants.queryStore) queryStoreOff.push(database);
     }
 
     const checks = evaluateMssqlPrivileges(serverGrants, perDb);
-    // "at least one database" means at least one IN SCOPE. Before #244 it meant
-    // at least one on the server, so a twelve-database instance with Query Store
-    // on for the production database still carried the warning — about a database
-    // nobody was going to observe.
-    const advisory = queryStoreEverywhere
-      ? null
-      : "Query Store is off on at least one observed database — latency gates and " +
-        "hinted-index detection are blind there until ALTER DATABASE … SET QUERY_STORE = ON";
-    return summarize([...checks, queryStoreCheck(queryStoreEverywhere)], {
+    // Named rather than counted. "at least one database" also meant at least one IN
+    // SCOPE from #244 — a twelve-database instance with Query Store on for the
+    // production database used to carry this warning about a database nobody was
+    // going to observe — and from #246 it names them, because the reader's next
+    // question was always which.
+    const advisory =
+      queryStoreOff.length === 0
+        ? null
+        : `Query Store is off on ${queryStoreOff.join(", ")} — latency gates and ` +
+          "hinted-index detection are blind there until it is enabled (the statements " +
+          "are under the Query Store row below)";
+    return summarize([...checks, queryStoreCheck(queryStoreOff)], {
       reachable: true,
       message: advisory,
       username,

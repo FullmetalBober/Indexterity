@@ -138,6 +138,26 @@ function hintFor(connectionString: string): EngineHint {
   return engineFromScheme(connectionString) ?? "UNKNOWN";
 }
 
+// Whether re-asking with the databases now ticked could produce a different
+// answer, which is what decides whether the offer to do so is worth making.
+//
+// Not `diagnosis.missing.length > 0`, which is what this used to read: `missing`
+// carries CORE and APPLY only (see the api's `summarize`), so a WORKLOAD gap never
+// appeared in it — and the WORKLOAD gap is Query Store, the one check whose answer
+// is a per-database fact the reader can see being wrong. Untick the one database
+// Query Store is off on and the row went on naming it, with a command to fix a
+// database nobody was going to observe and no way to refresh the answer (#246).
+//
+// PROVISION is excluded, and that is not an oversight: those three are evaluated on
+// the server and on `admin`, so narrowing the databases cannot move them. Offering a
+// re-check that provably changes nothing is how a line like this teaches people to
+// ignore it.
+function scopeCouldChangeVerdict(diagnosis: ConnectionDiagnosis): boolean {
+  return diagnosis.privileges.some(
+    (privilege) => privilege.tier !== "PROVISION" && !privilege.granted,
+  );
+}
+
 // The forms of connection string this build takes, printed before anything is
 // pasted (#239). Nothing on this screen used to say SQL Server was supported at
 // all — the placeholder said `mongodb://` and the helper text said "any
@@ -594,14 +614,15 @@ export function ConnectClusterForm({ plan }: { plan: PlanInfo | null }) {
                     the same thing about one database as about twelve, and asking
                     the reader to check again for an identical answer is a step
                     that teaches them to ignore this line. */}
-                {diagnosis.missing.length > 0 && !scopeMatchesDiagnosis() ? (
+                {scopeCouldChangeVerdict(diagnosis) && !scopeMatchesDiagnosis() ? (
                   <div className="mt-2 flex flex-wrap items-center gap-2">
                     <span className="text-muted-foreground text-xs">
-                      The privileges above were checked against{" "}
+                      The checks above were computed for{" "}
                       {diagnosedScope === null
                         ? "every database"
                         : `${diagnosedScope.length} of them`}
-                      .
+                      , not the {observed === null ? diagnosis.databases.length : observed.length}{" "}
+                      now ticked.
                     </span>
                     <Button size="sm" variant="outline" disabled={busy} onClick={recheck}>
                       {busy ? "Checking…" : "Check these instead"}

@@ -43,7 +43,7 @@ function privilege(
   granted: boolean,
   tier: PrivilegeCheck["tier"] = "CORE",
 ): PrivilegeCheck {
-  return { key, label: key, enables: `${key} does things`, tier, granted };
+  return { key, label: key, enables: `${key} does things`, tier, granted, command: null };
 }
 
 // The three provisioning checks as the api reports them, all in one state.
@@ -269,6 +269,66 @@ describe("ConnectClusterForm", () => {
       tlsOverrides: NONE,
       observedDatabases: ["app"],
     });
+  });
+
+  // The screen the founder caught: Query Store off on one database, that database
+  // unticked, and the row went on naming it with a command to enable it — because
+  // the offer to re-ask was gated on `missing`, which carries CORE and APPLY only.
+  // Query Store is WORKLOAD, so a Query-Store-only gap could never refresh itself.
+  it("offers to re-check when only Query Store is missing and the selection narrows", async () => {
+    checkConnection.mockResolvedValue(
+      diagnosis({
+        databases: ["app", "distribution"],
+        // Ready and appliable: the ONLY gap is the workload signal, so `missing` is
+        // empty and the old condition drew nothing.
+        ready: true,
+        canApply: true,
+        missing: [],
+        privileges: [
+          privilege("viewServerState", true),
+          privilege("queryStore", false, "WORKLOAD"),
+        ],
+      }),
+    );
+    const user = userEvent.setup();
+    renderInApp(<ConnectClusterForm plan={plan()} />);
+
+    await check(user);
+    expect(screen.queryByRole("button", { name: "Check these instead" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("checkbox", { name: "distribution" }));
+    expect(screen.getByRole("button", { name: "Check these instead" })).toBeInTheDocument();
+    // And it says which two sets it is comparing, so the line is readable without
+    // counting checkboxes.
+    expect(
+      screen.getByText(/computed for every database, not the 1 now ticked/),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Check these instead" }));
+    expect(checkConnection).toHaveBeenLastCalledWith({
+      connectionString: "mongodb://host:27017",
+      tlsOverrides: NONE,
+      observedDatabases: ["app"],
+    });
+  });
+
+  // Those three are evaluated on the server and on `admin`, so narrowing the
+  // databases cannot move them. An offer that provably changes nothing is how a
+  // line like this teaches people to ignore it.
+  it("does not offer to re-check when the only gaps are provisioning ones", async () => {
+    checkConnection.mockResolvedValue(
+      diagnosis({
+        databases: ["app", "distribution"],
+        privileges: [privilege("viewServerState", true), ...provisioning(false)],
+      }),
+    );
+    const user = userEvent.setup();
+    renderInApp(<ConnectClusterForm plan={plan()} />);
+
+    await check(user);
+    await user.click(screen.getByRole("checkbox", { name: "distribution" }));
+
+    expect(screen.queryByRole("button", { name: "Check these instead" })).not.toBeInTheDocument();
   });
 
   it("does not offer to re-check when nothing is missing", async () => {
