@@ -28,7 +28,10 @@ export interface ScheduledPass {
 }
 
 // Truncate to a whole number of `minutes` past the hour, in UTC.
-function everyMinutes(minutes: number) {
+// Exported because the stale-lock reset is claimed on the same arithmetic
+// without being a queued pass — it has to run BEFORE a drain rather than
+// inside one (jobs/locks.ts).
+export function everyMinutes(minutes: number) {
   return (now: Date): Date => {
     const at = new Date(now);
     at.setUTCSeconds(0, 0);

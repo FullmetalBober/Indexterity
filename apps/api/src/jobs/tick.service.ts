@@ -6,8 +6,11 @@ import { sql } from "../db";
 import { DatabaseService } from "../db/database.service";
 import { captureError } from "../errors/reporting";
 import { type BurstResult, claimDuePasses } from "./burst";
+import { releaseStaleLocks } from "./locks";
 import { wireRunnerEvents } from "./runner";
+import { everyMinutes } from "./schedule";
 import { createTaskList } from "./tasks";
+import { claimWatermark, passKey } from "./watermark";
 
 // How often the in-process clock ticks, when this process owns the schedule.
 //
@@ -23,6 +26,13 @@ import { createTaskList } from "./tasks";
 // costs one watermark read and one empty getJob — cheap enough to pay 2,880
 // times a day.
 export const TICK_INTERVAL_MS = 30_000;
+
+// The stale-lock reset's own cadence, claimed through worker_watermarks like a
+// pass so replicas do not duplicate it. Five minutes because the reset only
+// forgives locks four hours old — running it oftener buys nothing, and the
+// five-minute grid already exists for scheduleApply and scheduleProbe.
+const RESET_LOCKS_PASS = "resetLocks";
+const RESET_LOCKS_MINUTES = 5;
 
 // One tick, reported honestly: what this call enqueued, what another tick beat
 // it to, and whether the queue was actually drained afterwards — false means
@@ -182,10 +192,40 @@ export class TickService implements BeforeApplicationShutdown {
     return next;
   }
 
+  // Free anything a dead worker is still holding, before the drain tries to
+  // claim it (#253). This is NOT a queued pass: the thing it repairs is the
+  // queue, so putting the repair inside the queue would leave it one drain
+  // behind at best and unreachable at worst. It is claimed on the same
+  // five-minute occurrence arithmetic a pass uses, which is what keeps two
+  // replicas from both running it, and it is deliberately not fatal — a tick
+  // that cannot reset locks must still drain the queues that are not stuck.
+  private async releaseLocks(now: Date): Promise<void> {
+    const claimed = await claimWatermark(
+      this.database.db,
+      passKey(RESET_LOCKS_PASS),
+      everyMinutes(RESET_LOCKS_MINUTES)(now),
+      now,
+    );
+    if (!claimed) return;
+    const freed = await releaseStaleLocks(this.database.db);
+    // One line per freed queue, at warn: reaching here means a worker died
+    // holding it, and the jobs behind it have been unclaimable ever since
+    // without anything else in the system saying so.
+    for (const queue of freed) {
+      this.log.warn(`released a stale lock on ${queue} — a worker died holding it`);
+    }
+  }
+
   // False when the drain was skipped: a tick that lands after shutdown began
   // must not open workers against a pool that is about to close.
   private async drainOnce(): Promise<boolean> {
     if (this.stopping) return false;
+    try {
+      await this.releaseLocks(new Date());
+    } catch (error) {
+      this.log.error(`releasing stale locks failed: ${String(error)}`);
+      captureError(error, { task: "releaseStaleLocks" });
+    }
     try {
       await runOnce({
         // The api's OWN pool. runOnce takes pgPool (interfaces.d.ts:522);
