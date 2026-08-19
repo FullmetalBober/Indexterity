@@ -1,6 +1,6 @@
 import type { ClusterNodes, IndexUsage, Recommendation } from "@repo/contracts";
 import { useMemo } from "react";
-import { badgeVariant, dropsOn } from "~/components/app/format";
+import { badgeVariant, DropsOn } from "~/components/app/format";
 import { type UsageSplit, usageDetail, usageLine, usageSplit } from "~/components/app/index-usage";
 import { ConfirmButton } from "~/components/confirm-button";
 import { type DashboardColumns, DataTable, dashboardColumns } from "~/components/data-table";
@@ -170,7 +170,6 @@ function buildColumns(
       // strongest proposals, and a list of the weakest is nobody's first question.
       sortDescFirst: true,
       cell: (info) => {
-        const due = dropsOn(info.row.original);
         return (
           <span className="text-xs tabular-nums">
             {info.getValue()}
@@ -178,7 +177,7 @@ function buildColumns(
                 start, and the only open question is when this ends. The window is
                 per-index, so it is not something a reader can work out from the
                 policy setting. */}
-            {due === null ? null : <span className="block text-muted-foreground">drops {due}</span>}
+            <DropsOn rec={info.row.original} />
           </span>
         );
       },

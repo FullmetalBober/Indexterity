@@ -3,6 +3,7 @@ import { Truncated } from "~/components/truncated";
 import { Badge } from "~/components/ui/badge";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "~/components/ui/empty";
 import { Skeleton } from "~/components/ui/skeleton";
+import { LocalTime } from "~/lib/hydration";
 
 // Indexes the engine has agreed not to propose again (#159).
 //
@@ -14,15 +15,12 @@ import { Skeleton } from "~/components/ui/skeleton";
 
 // Day and month is enough for a date months out; the year appears when it is not
 // this one, which for a 90-day veto set in November it will not be.
-function fmtDay(iso: string): string {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return "—";
-  const sameYear = date.getUTCFullYear() === new Date().getUTCFullYear();
-  return date.toLocaleDateString(undefined, {
-    day: "numeric",
-    month: "short",
-    ...(sameYear ? {} : { year: "numeric" }),
-  });
+//
+// The year test reads the UTC year on both sides so it cannot be the thing that
+// differs — the DRAWING is what varies by reader, and LocalTime owns that.
+function dayOptions(iso: string): Intl.DateTimeFormatOptions {
+  const sameYear = new Date(iso).getUTCFullYear() === new Date().getUTCFullYear();
+  return { day: "numeric", month: "short", ...(sameYear ? {} : { year: "numeric" }) };
 }
 
 // The number with no other home in the product. One regression is a rejected
@@ -47,7 +45,8 @@ function ParkedRow({ entry }: { entry: ParkedIndex }) {
       {regressionNote(entry.regressionCount)}
       <Truncated className="text-muted-foreground text-xs">{entry.reason}</Truncated>
       <span className="whitespace-nowrap text-muted-foreground text-xs tabular-nums">
-        {entry.active ? `until ${fmtDay(entry.until)}` : `eligible since ${fmtDay(entry.until)}`}
+        {entry.active ? "until " : "eligible since "}
+        <LocalTime iso={entry.until} options={dayOptions(entry.until)} dateOnly />
       </span>
     </li>
   );
@@ -95,7 +94,18 @@ export function ParkedPanel({
         <span className="text-muted-foreground">
           {cooldowns.nextEligibleAt === null
             ? "— these have all come back into scope, and the engine may propose them again."
-            : `— next eligible ${fmtDay(cooldowns.nextEligibleAt)}. The engine will not propose these again until then.`}
+            : null}
+          {cooldowns.nextEligibleAt === null ? null : (
+            <>
+              — next eligible{" "}
+              <LocalTime
+                iso={cooldowns.nextEligibleAt}
+                options={dayOptions(cooldowns.nextEligibleAt)}
+                dateOnly
+              />
+              . The engine will not propose these again until then.
+            </>
+          )}
         </span>
       </p>
       {active.length > 0 ? (

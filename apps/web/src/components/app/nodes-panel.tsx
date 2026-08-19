@@ -1,23 +1,22 @@
 import type { ClusterNodes } from "@repo/contracts";
 import { Badge } from "~/components/ui/badge";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "~/components/ui/empty";
+import { LocalTime } from "~/lib/hydration";
+
+// With the year, same reasoning as the sessions list: a roster stale enough to
+// matter is exactly the one where the day alone is ambiguous.
+const COLLECTED_AT: Intl.DateTimeFormatOptions = {
+  day: "numeric",
+  month: "short",
+  year: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+};
 
 // The node roster (#100): every member the last collect saw, its role, and
 // whether it answered — the panel that makes partial coverage a sentence on
 // screen ("4 of 5 members answered") instead of a code-reading exercise. The
 // facts were always collected; they were summed away before reaching here.
-
-// With the year, same reasoning as the sessions list: a roster stale enough to
-// matter is exactly the one where the day alone is ambiguous.
-function fmtCollectedAt(iso: string): string {
-  return new Date(iso).toLocaleString(undefined, {
-    day: "numeric",
-    month: "short",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
 
 function roleBadge(role: ClusterNodes["nodes"][number]["role"]) {
   // Primary stands out because it is the one whose loss means writes stop;
@@ -64,8 +63,8 @@ export function NodesPanel({ roster, loading }: { roster: ClusterNodes | null; l
           {headline}
         </span>{" "}
         <span className="text-muted-foreground">
-          as of {fmtCollectedAt(roster.collectedAt)}. Hidden members never appear — the engine role
-          cannot see them.
+          as of <LocalTime iso={roster.collectedAt} options={COLLECTED_AT} />. Hidden members never
+          appear — the engine role cannot see them.
         </span>
       </p>
       <ul className="mt-3 space-y-1">

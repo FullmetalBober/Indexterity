@@ -1,5 +1,6 @@
 import type { ClusterNodes } from "@repo/contracts";
 import { render, screen } from "@testing-library/react";
+import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { NodesPanel } from "./nodes-panel";
 
@@ -71,5 +72,19 @@ describe("NodesPanel", () => {
   it("draws nothing while the first read is still out", () => {
     const { container } = render(<NodesPanel roster={null} loading={true} />);
     expect(container).toBeEmptyDOMElement();
+  });
+
+  // The crash this panel caused: it formatted `collectedAt` with
+  // `toLocaleString(undefined, …)`, so the server wrote its own timezone into the
+  // HTML and the browser wrote the reader's — "01:06 PM" against "04:06 PM" — and
+  // React threw the whole page away with a hydration mismatch.
+  //
+  // Asserted through renderToString, and under a non-UTC TZ in CI's shell as well:
+  // the server's markup has to be the same text whatever zone the process runs in,
+  // because it is the text the browser's first render is compared against.
+  it("server-renders the roster timestamp in UTC, not the server's zone", () => {
+    const html = renderToString(<NodesPanel roster={FULL_SET} loading={false} />);
+
+    expect(html).toContain("2026-08-07 12:00 UTC");
   });
 });

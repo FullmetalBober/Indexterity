@@ -90,6 +90,33 @@
   }
 }
 
+/* A skeleton is a resting surface, and `--accent` in this theme is not one.
+
+   Vendored shadcn draws `Skeleton` with `bg-accent`, which is right where shadcn's
+   own palette puts accent: a near-neutral hover tint. Here `--accent` is the brand
+   green at full saturation (hsl 151 100% 46%) — correct for the five other places
+   that use it, all of them momentary (`hover:bg-accent` on ghost buttons and
+   badges, `focus:bg-accent` on select items), and wrong for the one place it sits
+   still. A loading panel rendered as solid green bars reads as a state, not as
+   waiting.
+
+   `--muted` instead: the token this theme already uses for a quiet surface, and the
+   same value as `--secondary`. Note it is deliberately faint (95.5% lightness on a
+   white card) — the pulse is what carries the "still loading", not the contrast.
+
+   Unlayered, not in `@layer base`, and that is the whole trick: `bg-accent` is a
+   utility, and Tailwind's utilities layer beats base regardless of specificity, so
+   a base rule here would lose. Unlayered CSS outranks every layer.
+
+   Why not just edit `components/ui/skeleton.tsx`: that file is vendored, and
+   rewriting it forks something the next `shadcn add` puts back — the same reason
+   the cursor rule above lives here. The cost, unlike that one, is that this is NOT
+   outrankable by a utility class: a call site that wants a different skeleton
+   colour needs `!` or its own data attribute. Nothing wants that today. */
+[data-slot="skeleton"] {
+  background-color: var(--muted);
+}
+
 /* Reader has asked their system for less motion, so give them less of it.
    Nothing here honoured that before, and there is motion to honour: every
    dialog and dropdown enters and leaves on `animate-in`/`animate-out`, the
