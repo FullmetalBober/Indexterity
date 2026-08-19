@@ -112,6 +112,12 @@ function inDatabase(database: string, statement: string): string {
 export async function provisionMssqlScopedUser(
   adminUri: string,
   overrides?: TlsOverrides,
+  // Which databases the login is created and granted in (#244). This is the one
+  // place the observe selection removes a privilege instead of skipping work: the
+  // grants below are per database, so a login provisioned for a narrowed selection
+  // has no user at all in the databases outside it — not ALTER, not VIEW DATABASE
+  // STATE, nothing. Undefined and null grant across the instance, as before.
+  observedDatabases?: readonly string[] | null,
 ): Promise<ProvisionedUser> {
   const username = `idx_${randomBytes(6).toString("hex")}`;
   const password = scopedPassword();
@@ -119,7 +125,22 @@ export async function provisionMssqlScopedUser(
   const created: string[] = [];
   try {
     await admin.connect();
-    const databases = await admin.listDatabaseNames();
+    const available = await admin.listDatabaseNames();
+    // Intersected with what the instance actually has, so a stale name cannot make
+    // provisioning fail on a CREATE USER in a database that is not there. Falling
+    // back to every database when the intersection is empty would be wrong HERE in
+    // a way it is not in diagnose — that would silently grant across the instance
+    // the owner narrowed away from — so an empty intersection is refused instead.
+    const databases =
+      observedDatabases == null
+        ? available
+        : available.filter((name) => observedDatabases.includes(name));
+    if (databases.length === 0) {
+      throw new ProvisionDeniedError(
+        "none of the databases selected to observe exist on this instance — " +
+          "check the selection and try again.",
+      );
+    }
     try {
       // Both in master, explicitly. A server-scoped GRANT is refused anywhere
       // else — "Permissions at the server scope can only be granted when the

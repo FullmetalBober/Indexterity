@@ -4355,3 +4355,247 @@ describe("bounded per-cluster reads", () => {
     expect(foreign.changeBytes).toBeNull();
   });
 });
+
+// Which databases a cluster is observed on (#244). Its own account and its own
+// cluster: this scenario connects a real string, and the outbound-dial budget is
+// per user — borrowing the shared `owner` would show up as a 429 in some later,
+// unrelated test.
+describe("choosing which databases to observe", () => {
+  const SIDE = "inttest_side";
+
+  // A second user database on the suite's mongod, so there is something to choose
+  // between. Dropped afterwards: every test that reads "whatever is on the server"
+  // would otherwise inherit it.
+  beforeAll(async () => {
+    await mongo
+      .db(SIDE)
+      .collection("widgets")
+      .insertMany([{ n: 1 }, { n: 2 }]);
+  });
+
+  afterAll(async () => {
+    await mongo
+      .db(SIDE)
+      .dropDatabase()
+      .catch(() => {});
+  });
+
+  it("connects observing one database of several, and walks only that one", async () => {
+    const session = await signUp("observe");
+    createdEmails.push(session.email);
+    createdOrgIds.push(await giveRoom(session));
+
+    // The preflight reports every user database, narrowed or not — that list is
+    // what the form draws its checkboxes from.
+    const checked = asRecord(
+      await (
+        await api("/clusters/check-connection", session, {
+          method: "POST",
+          body: JSON.stringify({ connectionString: MONGO_URL }),
+        })
+      ).json(),
+    );
+    const offered = Array.isArray(checked.databases) ? checked.databases.map(String) : [];
+    expect(offered).toContain("inttest");
+    expect(offered).toContain(SIDE);
+    // Never the system databases: they are not a choice, and offering them would
+    // put admin and config on the form.
+    expect(offered).not.toContain("admin");
+    expect(offered).not.toContain("config");
+
+    const created = await api("/clusters", session, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "Observed Cluster",
+        connectionString: MONGO_URL,
+        observedDatabases: [SIDE],
+      }),
+    });
+    expect(created.status).toBe(200);
+    const body = asRecord(await created.json());
+    // Read back, not just written — the same rule the TLS concessions follow.
+    expect(body.observedDatabases).toEqual([SIDE]);
+    const observedId = asString(body.id);
+    createdClusterIds.push(observedId);
+
+    // The proof the whole feature is for: the collect walks the selection and
+    // nothing else, on a cluster whose credentials can read every database.
+    expect(await collectCluster(db, observedId)).toBeGreaterThan(0);
+    const walked = await db
+      .selectDistinct({ database: clusterIndexes.database })
+      .from(clusterIndexes)
+      .where(eq(clusterIndexes.clusterId, observedId));
+    expect(walked.map((row) => row.database)).toEqual([SIDE]);
+
+    // The live list, for the settings screen: what the cluster HAS beside what we
+    // are watching. `available` is deliberately not the intersection — a database
+    // that is not drawn could never be ticked.
+    const listed = asRecord(await (await api(`/clusters/${observedId}/databases`, session)).json());
+    expect(listed.available).toContain("inttest");
+    expect(listed.available).toContain(SIDE);
+    expect(listed.observed).toEqual([SIDE]);
+
+    // Widening. null means every database the cluster has, including ones added
+    // later — which is why it is a null and not a list of today's names.
+    const widened = await api(`/clusters/${observedId}/databases`, session, {
+      method: "PUT",
+      body: JSON.stringify({ databases: null }),
+    });
+    expect(widened.status).toBe(200);
+    expect(asRecord(await widened.json()).observedDatabases).toBeNull();
+    await collectCluster(db, observedId);
+    const after = await db
+      .selectDistinct({ database: clusterIndexes.database })
+      .from(clusterIndexes)
+      .where(eq(clusterIndexes.clusterId, observedId));
+    expect(after.map((row) => row.database).sort()).toEqual([SIDE, "inttest"].sort());
+
+    // A name the cluster does not have is refused rather than stored and quietly
+    // intersected away by every collect afterwards.
+    const bogus = await api(`/clusters/${observedId}/databases`, session, {
+      method: "PUT",
+      body: JSON.stringify({ databases: ["not_a_database_here"] }),
+    });
+    expect(bogus.status).toBe(400);
+
+    // Nor may a cluster be left observing nothing: it would be indistinguishable
+    // from a broken one on every panel afterwards.
+    const empty = await api(`/clusters/${observedId}/databases`, session, {
+      method: "PUT",
+      body: JSON.stringify({ databases: [] }),
+    });
+    expect(empty.status).toBe(400);
+
+    // And the act is on the record, like the other three that change what the
+    // control plane may do with somebody's cluster.
+    const events = await db
+      .select({ event: securityEvents.event })
+      .from(securityEvents)
+      .where(eq(securityEvents.clusterId, observedId));
+    expect(events.map((row) => row.event)).toContain("CLUSTER_OBSERVED_DATABASES_CHANGED");
+  });
+
+  // Postgres only — no dial, no budget. `bareCluster` has unusable sealed bytes,
+  // so this also pins the deliberate degradation: a cluster that cannot be reached
+  // to verify the names must not have the change refused.
+  it("discards the open proposals it stops observing, and keeps the in-flight ones", async () => {
+    const id = await bareCluster("Observe Proposals");
+    await db.insert(recommendations).values([
+      {
+        clusterId: id,
+        type: "DROP_UNUSED" as const,
+        state: "PROPOSED" as const,
+        database: "staging",
+        collection: "orders",
+        indexName: "idx_proposed_1",
+        rationale: "unused across the trust window",
+        score: 50,
+        estimatedBytesSaved: 1_000,
+      },
+      {
+        clusterId: id,
+        type: "DROP_UNUSED" as const,
+        state: "APPROVED" as const,
+        database: "staging",
+        collection: "orders",
+        indexName: "idx_approved_1",
+        rationale: "unused across the trust window",
+        score: 50,
+        estimatedBytesSaved: 1_000,
+      },
+      // The engine has already hidden this one on the customer's cluster, and this
+      // row is the only record of that — offboarding reads exactly these states to
+      // put it back. Discarding it would leave an index hidden on a database
+      // nobody is watching, with nothing left that knows to unhide it.
+      {
+        clusterId: id,
+        type: "DROP_UNUSED" as const,
+        state: "HIDDEN" as const,
+        database: "staging",
+        collection: "orders",
+        indexName: "idx_hidden_1",
+        rationale: "unused across the trust window",
+        score: 50,
+        estimatedBytesSaved: 1_000,
+        hiddenAt: new Date(),
+      },
+      // In a database that stays observed: untouched either way.
+      {
+        clusterId: id,
+        type: "DROP_UNUSED" as const,
+        state: "PROPOSED" as const,
+        database: "app",
+        collection: "orders",
+        indexName: "idx_kept_1",
+        rationale: "unused across the trust window",
+        score: 50,
+        estimatedBytesSaved: 1_000,
+      },
+    ]);
+
+    const narrowed = await api(`/clusters/${id}/databases`, owner, {
+      method: "PUT",
+      body: JSON.stringify({ databases: ["app"] }),
+    });
+    expect(narrowed.status).toBe(200);
+
+    const left = await db
+      .select({ name: recommendations.indexName, state: recommendations.state })
+      .from(recommendations)
+      .where(eq(recommendations.clusterId, id));
+    const names = left.map((row) => row.name).sort();
+    expect(names).toEqual(["idx_hidden_1", "idx_kept_1"]);
+
+    // The count reaches the trail, because it is what explains a recommendation
+    // list getting shorter.
+    const [event] = await db
+      .select({ metadata: securityEvents.metadata })
+      .from(securityEvents)
+      .where(
+        and(
+          eq(securityEvents.clusterId, id),
+          eq(securityEvents.event, "CLUSTER_OBSERVED_DATABASES_CHANGED"),
+        ),
+      );
+    expect(asRecord(event?.metadata ?? {}).discardedRecommendations).toBe(2);
+  });
+
+  // The narrow race the discard above cannot close: an approve already on its way
+  // when the selection changed. Refused rather than silently ignored — the reader
+  // is looking at a row on their screen.
+  it("refuses to approve a proposal in a database that is no longer observed", async () => {
+    const id = await bareCluster("Observe Approve");
+    const [rec] = await db
+      .insert(recommendations)
+      .values({
+        clusterId: id,
+        type: "DROP_UNUSED" as const,
+        state: "PROPOSED" as const,
+        database: "staging",
+        collection: "orders",
+        indexName: "idx_race_1",
+        rationale: "unused across the trust window",
+        score: 50,
+        estimatedBytesSaved: 1_000,
+      })
+      .returning();
+    const recId = asString(rec?.id);
+    // Narrow the cluster directly, so the proposal survives the discard above and
+    // only the approve is left to refuse it.
+    await db
+      .update(clusters)
+      .set({ observedDatabases: ["app"] })
+      .where(eq(clusters.id, id));
+
+    const refused = await api(`/recommendations/${recId}/approve`, owner, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    expect(refused.status).toBe(409);
+    const [after] = await db
+      .select({ state: recommendations.state })
+      .from(recommendations)
+      .where(eq(recommendations.id, recId));
+    expect(after?.state).toBe("PROPOSED");
+  });
+});

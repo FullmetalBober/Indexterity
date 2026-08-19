@@ -10,6 +10,11 @@ import {
 } from "@repo/contracts";
 import { useState } from "react";
 import { usage } from "~/components/app/format";
+import {
+  MIN_DATABASES_TO_CHOOSE,
+  ObserveDatabases,
+  observesEverything,
+} from "~/components/app/observe-databases";
 import { PrivilegeList } from "~/components/app/privilege-list";
 import { useAppForm } from "~/components/form";
 import { Alert, AlertDescription, AlertTitle } from "~/components/ui/alert";
@@ -217,6 +222,17 @@ export function ConnectClusterForm({ plan }: { plan: PlanInfo | null }) {
   // which engine the reader said it is.
   const [hint, setHint] = useState<EngineHint>(null);
   const [chosen, setChosen] = useState<ClusterEngine | null>(null);
+  // Which databases to observe (#244), or null for all of them — which is what it
+  // is until somebody unticks a box, and what a one-database cluster stays.
+  //
+  // Outside the form store for the same reason the certificate boxes are: it is
+  // not a validated field, and the buttons under the diagnosis read it at click
+  // time. Reset by onConnected along with everything else, because the next
+  // cluster's databases are not this one's.
+  const [observed, setObserved] = useState<readonly string[] | null>(null);
+  // The scope the diagnosis on screen was computed for, so a selection changed
+  // afterwards can be told apart from one the api already answered about.
+  const [diagnosedScope, setDiagnosedScope] = useState<readonly string[] | null>(null);
   const engines = useEngines();
 
   // Every path starts by clearing what the last one said, so a stale error
@@ -233,6 +249,7 @@ export function ConnectClusterForm({ plan }: { plan: PlanInfo | null }) {
     setTls(NO_TLS_OVERRIDES);
     setHint(null);
     setChosen(null);
+    setObserved(null);
   }
 
   const check = useCheckConnection({
@@ -241,7 +258,10 @@ export function ConnectClusterForm({ plan }: { plan: PlanInfo | null }) {
       setDiagnosis(null);
       setProvisioned(null);
     },
-    onDiagnosis: setDiagnosis,
+    onDiagnosis: (diagnosis, scope) => {
+      setDiagnosis(diagnosis);
+      setDiagnosedScope(scope);
+    },
     onError: setError,
   });
 
@@ -293,7 +313,39 @@ export function ConnectClusterForm({ plan }: { plan: PlanInfo | null }) {
     ...form.state.values,
     tlsOverrides: tls,
     engine: engineOverride(),
+    // Absent when everything is observed, rather than a list of every name: the
+    // api stores null for that, and null is what keeps a database added next month
+    // observed as well.
+    observedDatabases: observed === null ? undefined : [...observed],
   });
+
+  // Whether the answer on screen was computed for the databases now ticked. Both
+  // spellings of "all of them" count as the same scope, or ticking the last box
+  // back would ask the reader to re-check for an answer they already have.
+  function scopeMatchesDiagnosis(): boolean {
+    const asked = diagnosedScope;
+    const now = observed;
+    if (asked === null || now === null) {
+      return (
+        (asked === null ||
+          (diagnosis !== null && observesEverything(diagnosis.databases, asked))) &&
+        (now === null || (diagnosis !== null && observesEverything(diagnosis.databases, now)))
+      );
+    }
+    return asked.length === now.length && asked.every((name) => now.includes(name));
+  }
+
+  // Ask again for the databases now ticked. The one path that re-checks with a
+  // scope: the first check cannot, because the list it would choose from is what
+  // it returns.
+  function recheck() {
+    check.mutate({
+      connectionString: form.state.values.connectionString,
+      tlsOverrides: tls,
+      engine: engineOverride(),
+      observedDatabases: observed === null ? undefined : [...observed],
+    });
+  }
 
   // A diagnosis describes one exact string, and the boxes are part of the string
   // that gets checked — so moving one invalidates the answer above exactly the
@@ -383,6 +435,10 @@ export function ConnectClusterForm({ plan }: { plan: PlanInfo | null }) {
               onChange: ({ value }) => {
                 setDiagnosis(null);
                 setHint(hintFor(value));
+                // The selection was made from a list this string produced. Another
+                // string is another cluster — keeping the names would submit a
+                // choice about databases the new one may not have.
+                setObserved(null);
               },
             }}
           >
@@ -520,6 +576,41 @@ export function ConnectClusterForm({ plan }: { plan: PlanInfo | null }) {
             ) : null}
             <PrivilegeList privileges={diagnosis.privileges} />
 
+            {/* Under the privileges, not beside the connection string (#244).
+                The list can only exist once the cluster has answered, and the
+                choice belongs next to the verdict it changes: a role scoped to
+                one database reads as a gap above while the whole cluster is in
+                scope, and as a grant once it is not. */}
+            {diagnosis.databases.length >= MIN_DATABASES_TO_CHOOSE ? (
+              <div className="mt-3 border-t pt-3">
+                <ObserveDatabases
+                  available={diagnosis.databases}
+                  selected={observed}
+                  onChange={setObserved}
+                  disabled={busy}
+                  context="connect"
+                />
+                {/* Only when the verdict could actually change. A full grant says
+                    the same thing about one database as about twelve, and asking
+                    the reader to check again for an identical answer is a step
+                    that teaches them to ignore this line. */}
+                {diagnosis.missing.length > 0 && !scopeMatchesDiagnosis() ? (
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <span className="text-muted-foreground text-xs">
+                      The privileges above were checked against{" "}
+                      {diagnosedScope === null
+                        ? "every database"
+                        : `${diagnosedScope.length} of them`}
+                      .
+                    </span>
+                    <Button size="sm" variant="outline" disabled={busy} onClick={recheck}>
+                      {busy ? "Checking…" : "Check these instead"}
+                    </Button>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+
             {diagnosis.missing.length > 0 ? (
               <Alert variant="destructive" className="mt-3">
                 <AlertTitle>Missing: {diagnosis.missing.join(", ")}</AlertTitle>
@@ -560,6 +651,10 @@ export function ConnectClusterForm({ plan }: { plan: PlanInfo | null }) {
                         name,
                         adminConnectionString: connectionString,
                         tlsOverrides,
+                        // The login this creates is granted per database on SQL
+                        // Server, so the selection narrows what it may touch
+                        // rather than only what we read.
+                        observedDatabases: observed === null ? undefined : [...observed],
                       });
                     }}
                   >

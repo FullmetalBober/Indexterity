@@ -196,6 +196,11 @@ export interface ConnectionDiagnosis {
   readonly canApply: boolean;
   readonly privileges: readonly PrivilegeCheck[];
   readonly missing: readonly string[];
+  // Every user database the credentials can see — the whole cluster's, never
+  // narrowed by the scope the diagnosis was asked about, because this is the list
+  // the observe checkboxes are drawn from and a database that is not in it can
+  // never be ticked (#244).
+  readonly databases: readonly string[];
 }
 
 // Where engines genuinely differ — checked at the feature gates, not deep in
@@ -242,7 +247,19 @@ export interface EngineAdapter {
   applySecureTransport(value: string, overrides: TlsOverrides): string;
   open(connectionString: string, overrides?: TlsOverrides): Promise<EngineSession>;
   // Report what these credentials may do, without writing anything.
-  diagnose(connectionString: string, overrides?: TlsOverrides): Promise<ConnectionDiagnosis>;
+  //
+  // `observedDatabases` narrows what the answer is ABOUT (#244): both adapters
+  // evaluate their per-database requirements over the databases in scope, so a
+  // role covering only the databases somebody asked us to observe reports as
+  // granted instead of as a gap. Undefined and null both mean the whole cluster,
+  // which is what the first preflight always is. The diagnosis still reports every
+  // database the cluster has, narrowed or not — that list is what the checkboxes
+  // are drawn from.
+  diagnose(
+    connectionString: string,
+    overrides?: TlsOverrides,
+    observedDatabases?: readonly string[] | null,
+  ): Promise<ConnectionDiagnosis>;
   // Use an admin string ONCE to create the least-privilege user this engine
   // would rather run as, and return that user's string. The admin string is
   // never stored, and a failed verification undoes what was created.
@@ -250,9 +267,15 @@ export interface EngineAdapter {
   // Present exactly when `capabilities.provisionScopedUsers` is true — the flag
   // is what callers branch on, and this is what they then call. Throws
   // ProvisionDeniedError when the credentials cannot create the user.
+  //
+  // `observedDatabases` narrows what the created user is granted, where the engine
+  // grants per database (#244) — on SQL Server that is a real privilege reduction
+  // rather than a filter, since the login otherwise gets ALTER on every schema of
+  // every database on the instance. Undefined and null mean the whole cluster.
   provisionScopedUser?(
     adminConnectionString: string,
     overrides?: TlsOverrides,
+    observedDatabases?: readonly string[] | null,
   ): Promise<ProvisionedUser>;
   // The username a string authenticates as, so rotation can tell whether the
   // stored "this is a provisioned user" marker still describes the new one.

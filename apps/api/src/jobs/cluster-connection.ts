@@ -1,5 +1,6 @@
 import { masterKeyBytesFor } from "../config/env";
 import { clusters, type Database, envKeyProvider, eq, open } from "../db";
+import { ObservedSession } from "../engine/observe";
 import type { ClusterEngine, EngineSession } from "../engine/ports";
 import { acquireClusterSession } from "./connection-pool";
 
@@ -35,13 +36,34 @@ export interface ClusterSession {
   readonly session: EngineSession;
   readonly engine: ClusterEngine;
   readonly readOnly: boolean;
+  // Which databases the owner asked us to observe, or null for all of them
+  // (#244). Carried for the callers that need to SAY what was in scope — the
+  // filtering itself is already done by the session above, and no caller has to
+  // remember to apply it.
+  readonly observedDatabases: readonly string[] | null;
   // Return the session to the pool — callers must not close it.
   readonly release: () => void;
 }
 
+export interface OpenClusterOptions {
+  // Lease the session WITHOUT the observe filter, so it reports every database
+  // the cluster has (#244).
+  //
+  // One caller wants this — the screen that offers the checkboxes, whose whole
+  // job is to show a database that is not being observed yet. It is an option
+  // rather than a second function so that every other caller gets the filter
+  // without having to know the filter exists, and so this comment is the only
+  // place that has to argue for an exception.
+  readonly allDatabases?: boolean;
+}
+
 // Load a cluster, unseal its connection string, and lease a pooled session for
 // its engine.
-export async function openClusterSession(db: Database, clusterId: string): Promise<ClusterSession> {
+export async function openClusterSession(
+  db: Database,
+  clusterId: string,
+  options: OpenClusterOptions = {},
+): Promise<ClusterSession> {
   const [cluster] = await db.select().from(clusters).where(eq(clusters.id, clusterId)).limit(1);
   if (cluster === undefined) throw new ClusterGoneError(clusterId);
   let connString: string;
@@ -61,5 +83,18 @@ export async function openClusterSession(db: Database, clusterId: string): Promi
     connString,
     cluster.tlsOverrides,
   );
-  return { session, engine: cluster.engine, readOnly: cluster.readOnly, release };
+  const observed = cluster.observedDatabases;
+  return {
+    // Unwrapped when the cluster observes everything, which is the common case and
+    // every cluster connected before #244 — no wrapper, no per-collect filtering,
+    // nothing to reason about.
+    session:
+      observed === null || options.allDatabases === true
+        ? session
+        : new ObservedSession(session, observed),
+    engine: cluster.engine,
+    readOnly: cluster.readOnly,
+    observedDatabases: observed,
+    release,
+  };
 }

@@ -1,3 +1,4 @@
+import { scopeForDiagnosis } from "../engine/observe";
 import type { ConnectionDiagnosis, PrivilegeCheck, TlsOverrides } from "../engine/ports";
 import { asNumber, MssqlConnection, quoteIdent } from "./connection";
 import { mssqlVersionRefusal } from "./version";
@@ -146,6 +147,8 @@ function failure(message: string): ConnectionDiagnosis {
       username: null,
       authEnabled: false,
       canProvision: false,
+      // Nothing was enumerated, so there is nothing to offer boxes for.
+      databases: [],
     },
   );
 }
@@ -241,6 +244,12 @@ async function databaseGrants(
 export async function diagnoseMssqlConnection(
   connectionString: string,
   overrides?: TlsOverrides,
+  // Which databases the answer is about (#244) — see the mongo adapter's
+  // diagnose for why this changes the verdict and not only the work. Here it
+  // also changes the COST: every database in scope costs one HAS_PERMS_BY_NAME
+  // round trip below, so a twelve-database server narrowed to one is eleven
+  // fewer.
+  observedDatabases?: readonly string[] | null,
 ): Promise<ConnectionDiagnosis> {
   const conn = new MssqlConnection(connectionString, overrides);
   try {
@@ -268,7 +277,12 @@ export async function diagnoseMssqlConnection(
     if (server?.controlServer === 1) serverGrants.add("CONTROL SERVER");
     const username = server?.login ?? null;
 
-    const databases = await conn.listDatabaseNames();
+    const available = await conn.listDatabaseNames();
+    // What the cluster HAS versus what this answer is about — the same split the
+    // mongo adapter makes, through the same shared rule (engine/observe.ts): the
+    // form draws its boxes from `available`, so narrowing that list would make a
+    // database impossible to ever tick.
+    const databases = scopeForDiagnosis(available, observedDatabases);
     const perDb = new Map<string, MssqlDatabaseGrants>();
     let queryStoreEverywhere = databases.length > 0;
     for (const database of databases) {
@@ -278,16 +292,21 @@ export async function diagnoseMssqlConnection(
     }
 
     const checks = evaluateMssqlPrivileges(serverGrants, perDb);
+    // "at least one database" means at least one IN SCOPE. Before #244 it meant
+    // at least one on the server, so a twelve-database instance with Query Store
+    // on for the production database still carried the warning — about a database
+    // nobody was going to observe.
     const advisory = queryStoreEverywhere
       ? null
-      : "Query Store is off on at least one database — latency gates and hinted-index " +
-        "detection are blind there until ALTER DATABASE … SET QUERY_STORE = ON";
+      : "Query Store is off on at least one observed database — latency gates and " +
+        "hinted-index detection are blind there until ALTER DATABASE … SET QUERY_STORE = ON";
     return summarize([...checks, queryStoreCheck(queryStoreEverywhere)], {
       reachable: true,
       message: advisory,
       username,
       // SQL logins are always authenticated; integrated auth is not supported.
       authEnabled: true,
+      databases: available,
       canProvision: checks
         .filter((check) => check.tier === "PROVISION")
         .every((check) => check.granted),

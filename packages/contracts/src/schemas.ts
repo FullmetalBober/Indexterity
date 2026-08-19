@@ -105,6 +105,12 @@ export const cluster = z.object({
   // just written: a security concession the owner cannot see afterwards is one
   // nobody reviews.
   tlsOverrides,
+  // Which databases the collect walks, or null for every one the cluster has
+  // (#244). Read back for the same reason as the line above: a cluster observed
+  // in part looks exactly like one observed whole from every panel that reads it,
+  // and "why is there nothing for staging" has to be answerable from the screen
+  // rather than from the connect form six months ago.
+  observedDatabases: z.array(z.string()).nullable(),
   createdAt: z.string(),
 });
 export type Cluster = z.infer<typeof cluster>;
@@ -145,8 +151,37 @@ export const connectionDiagnosis = z.object({
   canApply: z.boolean(),
   privileges: z.array(privilegeCheck),
   missing: z.array(z.string()),
+  // Every user database the credentials can see, which both engines' probes
+  // already had to enumerate to answer the questions above — mongo evaluates its
+  // anyDb requirements against this list, and MSSQL asks each database for its
+  // own grants. It used to be discarded; the connect form needs it to offer the
+  // observe checkboxes before anything is stored (#244).
+  //
+  // Empty is a real answer rather than a missing one: credentials that cannot run
+  // listDatabases get an empty list and a `listDatabases` privilege gap beside
+  // it, and the form draws the gap instead of an empty checkbox list.
+  databases: z.array(z.string()),
 });
 export type ConnectionDiagnosis = z.infer<typeof connectionDiagnosis>;
+
+// The observe selection, as the settings screen needs it: what the cluster has
+// RIGHT NOW beside what we are walking (#244).
+//
+// Both halves in one read on purpose. The stored selection alone cannot draw the
+// screen — a database added since onboarding has to be offerable, and one that has
+// since been dropped must not be drawn as a live choice — and the live list alone
+// cannot say which boxes are ticked. Two reads would let a collect land between
+// them and produce a screen that never described the cluster.
+//
+// `available` is the cluster's answer, not the intersection: a stored name that is
+// no longer there is simply absent from it, which is how the screen reports a
+// dropped database without the api having to prune the selection behind the
+// owner's back.
+export const clusterDatabases = z.object({
+  available: z.array(z.string()),
+  observed: z.array(z.string()).nullable(),
+});
+export type ClusterDatabases = z.infer<typeof clusterDatabases>;
 
 // Returned once at provisioning — the scoped connection string is also stored
 // sealed, but the admin string it was derived from is never persisted.
@@ -580,6 +615,11 @@ export const SECURITY_EVENTS = [
   "CLUSTER_DISCONNECTED",
   "CLUSTER_CREDENTIALS_ROTATED",
   "CLUSTER_MODE_CHANGED",
+  // Which of a customer's databases the control plane reads (#244). The same class
+  // of act as the three above: it does not change what we hold, it changes how
+  // much of somebody's cluster we look at, and an owner narrowing it wants that
+  // recorded as much as an incident reader wants to see it widened.
+  "CLUSTER_OBSERVED_DATABASES_CHANGED",
 ] as const;
 
 export type SecurityEventName = (typeof SECURITY_EVENTS)[number];

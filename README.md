@@ -284,6 +284,19 @@ has the exact `createRole` snippets, what `serverStatus` exposes, which
 replica-set members get read, and what `mongodb+srv://` carries outside its own
 text.
 
+**You choose which databases are observed.** A cluster holding one production
+database plus staging copies, per-tenant clones and last week's restore does not
+need all of them walked. The connect form lists every database the credentials
+can see and lets you untick the ones to leave alone, and the cluster's
+**Settings** tab edits that afterwards. Observing everything is the default and
+stays the default for a cluster you never narrow — including databases added
+later, which a narrowed selection deliberately does *not* pick up until you tick
+them. Narrowing also sharpens the privilege check: a role scoped to the one
+database you care about reads as a gap while the whole cluster is in scope and as
+a grant once it is not, so you no longer have to widen a role over databases
+nobody asked us to read. On SQL Server the selection reaches the provisioned
+login too — it is granted only in the databases you picked.
+
 ## Auth & tenancy
 
 Every endpoint requires a better-auth session and is scoped to the caller's org.

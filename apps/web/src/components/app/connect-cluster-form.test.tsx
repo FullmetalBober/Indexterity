@@ -82,6 +82,9 @@ function diagnosis(over: Partial<ConnectionDiagnosis> = {}): ConnectionDiagnosis
     canApply: true,
     privileges: [privilege("listIndexes", true)],
     missing: [],
+    // One database by default, so the observe boxes stay out of the tests that are
+    // not about them — a single-database cluster has nothing to choose between.
+    databases: ["app"],
     ...over,
   };
 }
@@ -162,6 +165,143 @@ describe("ConnectClusterForm", () => {
     expect(createCluster).not.toHaveBeenCalled();
     expect(provisionCluster).not.toHaveBeenCalled();
     expect(screen.getByText("appuser")).toBeInTheDocument();
+  });
+
+  // #244. One database is not a choice, and drawing boxes for it would imply the
+  // single box could be unticked — which the api refuses.
+  it("does not ask which databases to observe when there is only one", async () => {
+    checkConnection.mockResolvedValue(diagnosis({ databases: ["app"] }));
+    const user = userEvent.setup();
+    renderInApp(<ConnectClusterForm plan={plan()} />);
+
+    await check(user);
+
+    expect(screen.queryByText(/Databases to observe/)).not.toBeInTheDocument();
+  });
+
+  it("offers every database, ticked, once the cluster reports more than one", async () => {
+    checkConnection.mockResolvedValue(diagnosis({ databases: ["app", "staging"] }));
+    const user = userEvent.setup();
+    renderInApp(<ConnectClusterForm plan={plan()} />);
+
+    await check(user);
+
+    expect(screen.getByText(/Databases to observe/)).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "app" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "staging" })).toBeChecked();
+  });
+
+  it("connects with only the databases left ticked", async () => {
+    checkConnection.mockResolvedValue(diagnosis({ databases: ["app", "staging"] }));
+    createCluster.mockResolvedValue({ id: "c9", name: "Production" });
+    const user = userEvent.setup();
+    renderInApp(<ConnectClusterForm plan={plan()} />);
+
+    await check(user);
+    await user.click(screen.getByRole("checkbox", { name: "staging" }));
+    await user.click(screen.getByRole("button", { name: "Connect" }));
+
+    expect(createCluster).toHaveBeenCalledWith({
+      name: "Production",
+      connectionString: "mongodb://host:27017",
+      tlsOverrides: NONE,
+      observedDatabases: ["app"],
+    });
+  });
+
+  // Ticking the last box back means "all of them" and not "this exact list": the
+  // api stores null for that, and null is what keeps a database added next month
+  // observed too. A complete list would silently stop at today's databases.
+  it("sends nothing at all when every box ends up ticked again", async () => {
+    checkConnection.mockResolvedValue(diagnosis({ databases: ["app", "staging"] }));
+    createCluster.mockResolvedValue({ id: "c9", name: "Production" });
+    const user = userEvent.setup();
+    renderInApp(<ConnectClusterForm plan={plan()} />);
+
+    await check(user);
+    await user.click(screen.getByRole("checkbox", { name: "staging" }));
+    await user.click(screen.getByRole("checkbox", { name: "staging" }));
+    await user.click(screen.getByRole("button", { name: "Connect" }));
+
+    expect(createCluster).toHaveBeenCalledWith({
+      name: "Production",
+      connectionString: "mongodb://host:27017",
+      tlsOverrides: NONE,
+      observedDatabases: undefined,
+    });
+  });
+
+  it("refuses to leave nothing observed, and says what to do instead", async () => {
+    checkConnection.mockResolvedValue(diagnosis({ databases: ["app", "staging"] }));
+    const user = userEvent.setup();
+    renderInApp(<ConnectClusterForm plan={plan()} />);
+
+    await check(user);
+    await user.click(screen.getByRole("checkbox", { name: "app" }));
+    await user.click(screen.getByRole("checkbox", { name: "staging" }));
+
+    expect(screen.getByText(/Pick at least one database/)).toBeInTheDocument();
+  });
+
+  // The verdict depends on the scope, so a narrowed selection beside a diagnosis
+  // that was computed for the whole cluster is stale in a way the reader cannot
+  // see. Offered only when there is a gap the narrowing could close.
+  it("offers to re-check when the selection narrows and privileges are missing", async () => {
+    checkConnection.mockResolvedValue(
+      diagnosis({
+        databases: ["app", "staging"],
+        ready: false,
+        missing: ["indexStats"],
+        privileges: [privilege("indexStats", false)],
+      }),
+    );
+    const user = userEvent.setup();
+    renderInApp(<ConnectClusterForm plan={plan()} />);
+
+    await check(user);
+    expect(screen.queryByRole("button", { name: "Check these instead" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("checkbox", { name: "staging" }));
+    await user.click(screen.getByRole("button", { name: "Check these instead" }));
+
+    expect(checkConnection).toHaveBeenLastCalledWith({
+      connectionString: "mongodb://host:27017",
+      tlsOverrides: NONE,
+      observedDatabases: ["app"],
+    });
+  });
+
+  it("does not offer to re-check when nothing is missing", async () => {
+    checkConnection.mockResolvedValue(diagnosis({ databases: ["app", "staging"] }));
+    const user = userEvent.setup();
+    renderInApp(<ConnectClusterForm plan={plan()} />);
+
+    await check(user);
+    await user.click(screen.getByRole("checkbox", { name: "staging" }));
+
+    expect(screen.queryByRole("button", { name: "Check these instead" })).not.toBeInTheDocument();
+  });
+
+  // Editing the string is editing the cluster: the names were chosen from a list
+  // the previous string produced.
+  it("forgets the selection when the connection string changes", async () => {
+    checkConnection.mockResolvedValue(diagnosis({ databases: ["app", "staging"] }));
+    createCluster.mockResolvedValue({ id: "c9", name: "Production" });
+    const user = userEvent.setup();
+    renderInApp(<ConnectClusterForm plan={plan()} />);
+
+    await check(user);
+    await user.click(screen.getByRole("checkbox", { name: "staging" }));
+    await user.type(screen.getByLabelText("Connection string"), "9");
+    await user.click(screen.getByRole("button", { name: "Check access" }));
+    await user.click(screen.getByRole("button", { name: "Connect" }));
+
+    expect(createCluster).toHaveBeenCalledWith({
+      name: "Production",
+      connectionString: "mongodb://host:270179",
+      tlsOverrides: NONE,
+      observedDatabases: undefined,
+    });
   });
 
   it("connects with the pasted credentials when they are already enough", async () => {

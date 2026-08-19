@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { scopeForDiagnosis } from "../engine/observe";
 import {
   canProvisionWith,
   evaluatePrivileges,
@@ -97,6 +98,27 @@ describe("evaluatePrivileges", () => {
     expect(missing(perDb, ["app", "reporting"])).toContain("indexStats");
     // With no databases discovered, only a wildcard grant would count.
     expect(missing(perDb, [])).toContain("indexStats");
+  });
+
+  // The whole reason the observe selection reaches diagnose (#244). Same role,
+  // same cluster, two verdicts: a role covering one database of three is a gap
+  // while the whole cluster is in scope, and a grant once the selection says which
+  // database we were asked to look at. Without this the only way to connect such a
+  // cluster is to widen the role over databases nobody asked us to read.
+  it("turns a per-database role from a gap into a grant when the selection narrows", () => {
+    const scopedToApp: MongoPrivilege[] = [
+      { resource: { cluster: true }, actions: ["listDatabases"] },
+      {
+        resource: { db: "app", collection: "" },
+        actions: ["listCollections", "listIndexes", "indexStats", "collStats"],
+      },
+    ];
+    const available = ["app", "staging", "restore"];
+    expect(missing(scopedToApp, scopeForDiagnosis(available, null))).toContain("indexStats");
+    expect(granted(scopedToApp, scopeForDiagnosis(available, ["app"]))).toContain("indexStats");
+    // And a selection whose databases have all been dropped reads as the whole
+    // cluster rather than as a role with no privileges anywhere.
+    expect(missing(scopedToApp, scopeForDiagnosis(available, ["gone"]))).toContain("indexStats");
   });
 
   it("requires BOTH queryStats actions (verified live on mongo 8)", () => {

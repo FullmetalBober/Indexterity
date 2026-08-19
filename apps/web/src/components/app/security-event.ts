@@ -48,6 +48,7 @@ const LABELS: Record<string, string> = {
   CLUSTER_DISCONNECTED: "Cluster disconnected",
   CLUSTER_CREDENTIALS_ROTATED: "Credentials rotated",
   CLUSTER_MODE_CHANGED: "Mode changed",
+  CLUSTER_OBSERVED_DATABASES_CHANGED: "Observed databases changed",
 };
 
 // The acts that take something away, or hand something over. Not "bad" — an
@@ -62,6 +63,9 @@ const SEVERE = new Set([
   "CLUSTER_DISCONNECTED",
   "CLUSTER_CREDENTIALS_ROTATED",
   "CLUSTER_MODE_CHANGED",
+  // Severe in the direction that matters: widening it is how the control plane
+  // starts reading a database it was not reading yesterday.
+  "CLUSTER_OBSERVED_DATABASES_CHANGED",
 ]);
 
 export function eventLabel(event: string): string {
@@ -90,6 +94,14 @@ function detailFor(event: SecurityEvent): string | null {
   }
   if (event.event === "CLUSTER_CONNECTED") {
     return metadata.provisioned === true ? "with a provisioned user" : null;
+  }
+  if (event.event === "CLUSTER_OBSERVED_DATABASES_CHANGED") {
+    // The count, not the names. A twelve-database instance would push the rest of
+    // the line off the row, and the names are in the metadata for the reader who
+    // opens it — "to 2 databases" is what makes them decide to.
+    const to = metadata.to;
+    if (to === null) return "to every database";
+    return Array.isArray(to) ? `to ${to.length} of them` : null;
   }
   return null;
 }
