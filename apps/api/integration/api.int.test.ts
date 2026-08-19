@@ -2409,6 +2409,97 @@ describe("an index the engine is still watching", () => {
   });
 });
 
+describe("a drop the customer already approved", () => {
+  it("is not proposed a second time while it is still on its way out", async () => {
+    const org = asRecord(await (await api("/org", owner)).json());
+    const [row] = await db
+      .insert(clusters)
+      .values({
+        orgId: asString(org.id),
+        name: "Approved Drop Cluster",
+        sealedDek: Buffer.alloc(1),
+        sealedData: Buffer.alloc(1),
+        keyVersion: 1,
+      })
+      .returning();
+    if (row === undefined) throw new Error("failed to insert cluster");
+    const dupeId = row.id;
+    createdClusterIds.push(dupeId);
+
+    // A key-prefix pair: userId_1 is covered by userId_1_name_1, which is a
+    // STRUCTURAL finding — it holds on every pass, with no usage history to age
+    // out of and nothing about it that stops being true once somebody approves
+    // the drop. That is exactly what made the duplicate reproducible.
+    const base = Date.now() - 3 * 86_400_000;
+    const specFor = (name: string, keys: string[]) => ({
+      name,
+      keys: keys.map((field) => ({ field, direction: 1 })),
+      unique: false,
+      ttl: false,
+      partial: false,
+      partialFilter: null,
+      sparse: false,
+      hidden: false,
+      isShardKey: false,
+      collation: null,
+    });
+    await insertSnapshots(
+      db,
+      ["userId_1", "userId_1_name_1"].flatMap((indexName) =>
+        Array.from({ length: 3 }, (_, i) => ({
+          clusterId: dupeId,
+          database: "inttest",
+          collection: "complexes",
+          indexName,
+          spec: specFor(indexName, indexName === "userId_1" ? ["userId"] : ["userId", "name"]),
+          sizeBytes: 8192,
+          perMember: [{ member: "m1", ops: 100 }],
+          capturedAt: new Date(base + i * 43_200_000),
+        })),
+      ),
+    );
+
+    expect(await classifyCluster(db, dupeId)).toBe(1);
+    const [proposal] = await db
+      .select()
+      .from(recommendations)
+      .where(eq(recommendations.clusterId, dupeId));
+    expect(proposal?.type).toBe("DROP_REDUNDANT");
+    expect(proposal?.indexName).toBe("userId_1");
+    if (proposal === undefined) throw new Error("no proposal");
+
+    // What a customer clicking Approve does. The index is still on the cluster —
+    // the hide -> observe -> drop path has not run yet — so the engine still sees
+    // it as redundant on the next pass.
+    const dropsFor = async (): Promise<(typeof recommendations.$inferSelect)[]> =>
+      db.select().from(recommendations).where(eq(recommendations.clusterId, dupeId));
+
+    for (const state of ["APPROVED", "HIDDEN"] as const) {
+      await db
+        .update(recommendations)
+        .set({ state, updatedAt: new Date() })
+        .where(eq(recommendations.id, proposal.id));
+      expect(await classifyCluster(db, dupeId)).toBe(0);
+      const rows = await dropsFor();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.id).toBe(proposal.id);
+      expect(rows[0]?.state).toBe(state);
+    }
+
+    // And it releases rather than protecting forever: a cancelled drop is held
+    // off by a cooldown (recordManualVeto), not by the row's own state, so once
+    // the row settles the finding is allowed to come back.
+    await db
+      .update(recommendations)
+      .set({ state: "REJECTED", updatedAt: new Date() })
+      .where(eq(recommendations.id, proposal.id));
+    expect(await classifyCluster(db, dupeId)).toBe(1);
+    const after = await dropsFor();
+    expect(after).toHaveLength(2);
+    expect(after.filter((rec) => rec.state === "PROPOSED")).toHaveLength(1);
+  });
+});
+
 describe("engine-chosen change window", () => {
   it("derives a window from traffic and serves it on a cluster with no policy row", async () => {
     const org = asRecord(await (await api("/org", owner)).json());

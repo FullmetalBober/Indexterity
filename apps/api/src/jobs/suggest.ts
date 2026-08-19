@@ -25,6 +25,7 @@ import { openClusterSession } from "./cluster-connection";
 import { activeCooldownKeys, cooldownKey } from "./cooldowns";
 import { applyCreatesForCluster } from "./create";
 import { planForCluster } from "./plan";
+import { BUILD_TYPES, standingRecommendationKeys, watchKey } from "./watched";
 
 // A shape must recur before it earns a recommendation, measured two ways.
 //
@@ -72,6 +73,12 @@ export async function suggestForCluster(db: Database, clusterId: string): Promis
     .limit(1);
   if (policy?.workloadAnalysis !== true) return 0;
   const cooled = await activeCooldownKeys(db, clusterId);
+  // Builds already on the record in a state the sweep below does not clear —
+  // approved and waiting for the change window, or proposed by another
+  // producer. The index does not exist yet, so `existing` cannot stand in for
+  // this check: without it the same build is proposed a second time beside the
+  // one the customer already approved (see standingRecommendationKeys).
+  const standing = await standingRecommendationKeys(db, clusterId, BUILD_TYPES, "WORKLOAD");
   // Full cooldown history — a previously rolled-back build cuts the score hard.
   const cooldownRows = await db
     .select()
@@ -254,6 +261,7 @@ export async function suggestForCluster(db: Database, clusterId: string): Promis
       for (const candidate of recommendReorder(shapes, existing, WORKLOAD_OPTIONS, hinted)) {
         const indexName = proposedName(candidate.keys);
         if (cooled.has(cooldownKey(database, collection, indexName))) continue;
+        if (standing.has(watchKey(database, collection, indexName))) continue;
         if (existing.some((idx) => idx.name === indexName)) continue;
         if (toInsert.some((row) => row.collection === collection && row.indexName === indexName)) {
           continue;
@@ -340,6 +348,7 @@ export async function suggestForCluster(db: Database, clusterId: string): Promis
         const indexName =
           proposedName(candidate.keys) + (candidate.partialFilter === undefined ? "" : "_partial");
         if (cooled.has(cooldownKey(database, collection, indexName))) continue;
+        if (standing.has(watchKey(database, collection, indexName))) continue;
         const score = createScore({
           collscan: candidate.scanning,
           sortedInMemory: !candidate.scanning,
@@ -398,6 +407,7 @@ export async function suggestForCluster(db: Database, clusterId: string): Promis
       for (const candidate of recommendNarrowing(shapes, existing, WORKLOAD_OPTIONS)) {
         const indexName = proposedName(candidate.keys);
         if (cooled.has(cooldownKey(database, collection, indexName))) continue;
+        if (standing.has(watchKey(database, collection, indexName))) continue;
         // An index on exactly these keys already exists, or another candidate
         // this pass already claimed the name.
         if (existing.some((idx) => idx.name === indexName)) continue;
@@ -458,6 +468,7 @@ export async function suggestForCluster(db: Database, clusterId: string): Promis
       if (foreignDocs * want.perWeek < MIN_WEEKLY_DOCS_EXAMINED) continue;
       const indexName = `${want.foreignField}_1`;
       if (cooled.has(cooldownKey(want.database, want.from, indexName))) continue;
+      if (standing.has(watchKey(want.database, want.from, indexName))) continue;
       if (
         toInsert.some(
           (row) =>
