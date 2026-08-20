@@ -1,4 +1,10 @@
-import { DEFAULT_OBSERVE_DAYS, evaluateRegression, inChangeWindow } from "../analysis";
+import {
+  DEFAULT_OBSERVE_DAYS,
+  evaluateRegression,
+  inChangeWindow,
+  latencyRatio,
+  oldestLiveBaseline,
+} from "../analysis";
 import type { Database } from "../db";
 import { actions, and, eq, inArray, policies, recommendations, roiMetrics } from "../db";
 import { emitClusterEvent } from "../events/emit";
@@ -7,11 +13,24 @@ import { recordDrop, recordRegressionVerdict } from "../metrics";
 import { serializeSpec } from "../mongo";
 import { effectiveChangeWindow } from "./change-window";
 import { openClusterSession } from "./cluster-connection";
-import { recordRegression } from "./cooldowns";
+import { recordRegression, WHOLE_COLLECTION } from "./cooldowns";
 import { preflightDrop } from "./preflight";
 
 const DAY_MS = 86_400_000;
 const REGRESSION_OPTIONS = { factor: 1.5, minWindowOps: 20 };
+// The same measurement asked of the COLLECTION rather than of one index (#282),
+// and it gets its own factor because it is a different question.
+//
+// 1.5x against one index is a strong per-index claim: this index, on its own,
+// made writes half again slower. 1.5x against a run of three is a much weaker
+// per-index claim and a much stronger collection-level one — the collection is
+// half again slower and no single build did it. So the bar is lower, and what
+// licenses lowering it is that the response is not destructive: nothing is rolled
+// back on this verdict, the collection is parked from UNATTENDED builds and the
+// owners are told. 1.3 catches the shape the issue describes — three defensible
+// 15% builds land near 1.52 cumulatively and near 1.15 individually — with
+// margin, where 1.5 would have caught it by two points.
+const CUMULATIVE_REGRESSION_OPTIONS = { factor: 1.3, minWindowOps: 20 };
 // A superseded index is a structural finding backed by a replacement that has
 // already proven itself, so it scores like any other redundancy.
 const SUPERSEDED_SCORE = 55;
@@ -72,6 +91,13 @@ export async function finalizeCluster(db: Database, clusterId: string): Promise<
     let dropped = 0;
     let freedBytes = 0;
 
+    // Collections this pass has already reported a cumulative regression for
+    // (#282). Several builds on one collection can come due in the same pass, and
+    // each would compare against the same oldest baseline and reach the same
+    // conclusion — one event, recorded as two, escalating the cooldown as though
+    // the collection had regressed twice.
+    const reportedCumulative = new Set<string>();
+
     // Post-build watch: a freshly built index that slows the collection's writes
     // gets dropped and cooled down; one that survives the window graduates.
     for (const rec of watched) {
@@ -109,6 +135,12 @@ export async function finalizeCluster(db: Database, clusterId: string): Promise<
       // Graduation is checked only AFTER a real reading, so a window that
       // elapsed while we could not observe does not silently pass.
       if (now - rec.builtAt.getTime() >= observeDays * DAY_MS && verdict === "STABLE") {
+        // Before the baselines are cleared, ask the question this row cannot:
+        // has the whole RUN of builds slowed the collection, even though this one
+        // did not? (#282) The oldest baseline still live for the collection is
+        // "before the run started", and clearing them below is what ends the
+        // chain — so this is the last moment it can be asked.
+        await judgeCumulative(db, clusterId, rec, watched, writes, observeDays, reportedCumulative);
         await db
           .update(recommendations)
           .set({ baselineWriteOps: null, baselineWriteLatency: null, updatedAt: new Date() })
@@ -399,4 +431,117 @@ async function retireSuperseded(
       result: `graduated; proposed retiring ${name}`,
     });
   }
+}
+
+// Did the whole RUN of builds slow this collection, even though the one just
+// graduating did not? (#282)
+//
+// The post-build watch takes each index's baseline at that index's own build
+// time, so build #2 is measured against a collection already carrying #1 and #3
+// against one carrying both. Every comparison is against the immediately
+// preceding state, never against the original — which is the right question for
+// "did THIS index slow writes" and not the question an owner has, which is "did
+// the last month of changes slow my writes". Three builds that each add a
+// defensible 15% are three STABLE verdicts and a collection half again slower.
+//
+// Nothing new is stored to answer it. Every un-graduated build on the collection
+// carries its own `baselineWriteOps`/`baselineWriteLatency` and a `builtAt`, and
+// graduation clears them, so the oldest row still holding one is the reading from
+// before this run of changes and the chain empties itself as the run ends.
+//
+// WHAT IT DOES NOT DO: roll anything back. The newest index is the obvious thing
+// to undo and is not obviously the culprit — it may be the most valuable of the
+// three, and the first may be the one that cost the writes. Attribution needs
+// evidence this does not have, so the conservative version is the one that
+// needed no attribution: say so, and stop building on this collection unattended
+// until someone has looked.
+//
+// WHAT IT CANNOT SEE: an accumulation spread over months. Once every build on a
+// collection graduates, the chain is empty and the next build starts fresh —
+// correct, and it means only a RUN is measured. Catching the slow version needs a
+// collection-level baseline refreshed on a schedule, which is a new thing to
+// store and a separate decision.
+async function judgeCumulative(
+  db: Database,
+  clusterId: string,
+  rec: typeof recommendations.$inferSelect,
+  watched: readonly (typeof recommendations.$inferSelect)[],
+  current: { ops: number; latencyMicros: number },
+  observeDays: number,
+  // Collections already reported in this pass — see the call site.
+  reported: Set<string>,
+): Promise<void> {
+  const namespace = `${rec.database}.${rec.collection}`;
+  if (reported.has(namespace)) return;
+  // From the snapshot `watched` took at the start of the pass, deliberately: a
+  // sibling that graduated earlier in this same loop has had its baselines
+  // cleared in the database by now, and it is still part of the run this one is
+  // being measured against.
+  const chain = watched.flatMap((row) =>
+    row.database === rec.database &&
+    row.collection === rec.collection &&
+    row.builtAt !== null &&
+    row.baselineWriteOps !== null &&
+    row.baselineWriteLatency !== null
+      ? [
+          {
+            builtAt: row.builtAt,
+            baseline: { ops: row.baselineWriteOps, latencyMicros: row.baselineWriteLatency },
+          },
+        ]
+      : [],
+  );
+  const oldest = oldestLiveBaseline(chain);
+  // Nothing to add when this row IS the oldest: the cumulative comparison is
+  // then the individual one, which has already been made and reported.
+  if (oldest === null || oldest.builtAt.getTime() >= (rec.builtAt?.getTime() ?? 0)) return;
+
+  const verdict = evaluateRegression(oldest.baseline, current, CUMULATIVE_REGRESSION_OPTIONS);
+  recordRegressionVerdict("cumulative", verdict);
+  // Marked whatever the verdict: the reading is the collection's, so a second row
+  // graduating in this pass would ask the identical question of the identical
+  // numbers.
+  reported.add(namespace);
+  // UNOBSERVABLE answers the reset question (#282's fourth) without a rule of its
+  // own: a counter below the oldest baseline means the server restarted since it
+  // was taken, so the chain spans a reset and the arithmetic across it is
+  // meaningless. The individual watch re-baselines on the same signal.
+  if (verdict !== "REGRESSED") return;
+
+  const ratio = latencyRatio(oldest.baseline, current, CUMULATIVE_REGRESSION_OPTIONS.minWindowOps);
+  const slower = ratio === null ? "measurably" : `${Math.round((ratio - 1) * 100)}%`;
+  const since = oldest.builtAt.toISOString().slice(0, 10);
+  const reason = `writes ${slower} slower than before the run of builds that began ${since}`;
+  // Parked on the COLLECTION, which is the unit the cost is paid in — see
+  // cooldowns.ts for why the sentinel is the empty index name. It escalates and
+  // fades on the same clock as every other cooldown, so a collection this happens
+  // to twice is parked twice as long.
+  const until = await recordRegression(
+    db,
+    clusterId,
+    { database: rec.database, collection: rec.collection, indexName: WHOLE_COLLECTION },
+    observeDays,
+    reason,
+  );
+  const day = until.toISOString().slice(0, 10);
+  await db.insert(actions).values({
+    recommendationId: rec.id,
+    kind: "CREATE",
+    actor: "system",
+    result: `graduated, but ${reason} — ${rec.database}.${rec.collection} will not be built on unattended until ${day}`,
+  });
+  await notifyClusterOwners(
+    db,
+    clusterId,
+    `${rec.database}.${rec.collection} is slower to write than before`,
+    `Each index built on ${rec.database}.${rec.collection} passed its own post-build check, and ` +
+      `together they have not: the collection's writes are ${slower} slower than before the run ` +
+      `of builds that began ${since}. Every write to a collection updates every index on it, so ` +
+      `several individually reasonable indexes can add up to a cost none of them shows on its ` +
+      `own.\n\nNothing has been rolled back — the newest index is not necessarily the one ` +
+      `costing you, and undoing the wrong one would be worse than telling you. Indexterity will ` +
+      `not build on this collection unattended until ${day}; recommendations for it keep ` +
+      `arriving and you can approve them yourself.`,
+  );
+  await emitClusterEvent(db, { clusterId, kind: "REGRESSION_FIRED", task: null });
 }

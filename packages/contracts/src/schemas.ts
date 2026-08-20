@@ -322,6 +322,12 @@ export const parkedIndex = z.object({
   // clock, not left to the browser's: a laptop an hour behind would draw a
   // parked index as eligible, and this is the field the panel's headline counts.
   active: z.boolean(),
+  // The COLLECTION is parked rather than one of its indexes (#282): several
+  // builds each passed their own post-build check and together slowed its
+  // writes, so nothing was rolled back and nothing more is built on it
+  // unattended. `indexName` is empty on these rows — the storage sentinel —
+  // and this is the flag, so the sentinel does not have to be understood twice.
+  wholeCollection: z.boolean(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });

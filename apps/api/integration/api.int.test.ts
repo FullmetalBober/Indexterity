@@ -38,6 +38,7 @@ import { workloadKey } from "../src/engine/ports";
 import { applyCluster, promoteByScore } from "../src/jobs/apply";
 import { refreshInferredWindow } from "../src/jobs/change-window";
 import { classifyCluster } from "../src/jobs/classify";
+import { openClusterSession } from "../src/jobs/cluster-connection";
 import { collectCluster } from "../src/jobs/collect";
 import { pendingBuildsByCollection } from "../src/jobs/collection-budget";
 import { drainPool } from "../src/jobs/connection-pool";
@@ -2397,6 +2398,145 @@ describe("workload collection is batched", () => {
     // Zero without dialling: the guard is the first thing the pass does, so a
     // cluster switched off costs one row read and no connection.
     expect(await suggestForCluster(db, clusterId)).toBe(0);
+  });
+});
+
+// The post-build watch measures each index against a baseline taken at that
+// index's OWN build time, so build #2 is judged against a collection already
+// carrying #1 (#282). Three builds that each add a defensible 15% are three
+// STABLE verdicts and a collection half again slower than where it started.
+describe("builds that are individually fine and cumulatively are not", () => {
+  it("reports the collection and stops building on it unattended", async () => {
+    // Enough separate write COMMANDS for a judgement: latencyStats counts
+    // operations, so one insertMany of forty documents is one op and forty
+    // inserts are forty. minWindowOps is 20.
+    const orders = mongo.db("inttest").collection("orders");
+    for (let i = 0; i < 60; i++) await orders.insertOne({ cumulative: i });
+
+    // Read the collection's real counters through the same collector the job
+    // uses, so the baselines below sit relative to a live reading rather than to
+    // numbers invented here. They only ever grow, so a fixture placed under this
+    // reading stays under whatever finalize sees a moment later.
+    const probe = await openClusterSession(db, clusterId);
+    const { writes } = await probe.session.collector.collectionLatency("inttest", "orders");
+    await probe.release();
+    expect(writes.ops).toBeGreaterThan(45);
+    const window = 25;
+    // A baseline that makes the window read exactly `ratio` times slower than the
+    // baseline average, over the same window. Solving
+    // (L - X) / window = ratio * X / B for X, where B is the baseline's op count
+    // and L the current cumulative latency — so the fixture states the RATIO it
+    // wants and the arithmetic follows, rather than the other way round.
+    const baselineLatencyFor = (ratio: number): number => {
+      const b = writes.ops - window;
+      return Math.round((b * writes.latencyMicros) / (b + ratio * window));
+    };
+
+    const built = new Date(Date.now() - 60 * 86_400_000);
+    const older = new Date(Date.now() - 90 * 86_400_000);
+    // The run's start: a baseline so far below the current reading that the
+    // collection is unambiguously slower than it was.
+    const [first] = await db
+      .insert(recommendations)
+      .values({
+        clusterId,
+        type: "CREATE",
+        state: "ACTIVE",
+        source: "WORKLOAD",
+        database: "inttest",
+        collection: "orders",
+        indexName: "cumulative_first_1",
+        rationale: "first of a run",
+        score: 70,
+        builtAt: older,
+        // 1.42x, which is the band this change adds and the reason it is a band.
+        // The oldest row's OWN watch reads the same two numbers at 1.5, so
+        // anything above that is already caught — by rolling back the OLDEST
+        // index, which is the attribution the issue warns about. Below 1.3
+        // nothing fires at all. In between, only the collection-level check
+        // speaks, and it reports rather than undoes.
+        baselineWriteOps: writes.ops - window,
+        baselineWriteLatency: baselineLatencyFor(1.42),
+      })
+      .returning();
+    // The one graduating, whose OWN baseline says writes are fine: its window
+    // average lands well under the 1.5x its own gate asks for.
+    const [second] = await db
+      .insert(recommendations)
+      .values({
+        clusterId,
+        type: "CREATE",
+        state: "ACTIVE",
+        source: "WORKLOAD",
+        database: "inttest",
+        collection: "orders",
+        indexName: "cumulative_second_1",
+        rationale: "second of a run",
+        score: 70,
+        builtAt: built,
+        // Its own watch sees 1.05x and is right to: this index did not slow the
+        // collection. It is the run it is part of that did.
+        baselineWriteOps: writes.ops - window,
+        baselineWriteLatency: baselineLatencyFor(1.05),
+      })
+      .returning();
+    if (first === undefined || second === undefined) throw new Error("failed to insert");
+
+    await finalizeCluster(db, clusterId);
+
+    // Its own watch passed — it graduated, baselines cleared.
+    const [graduated] = await db
+      .select()
+      .from(recommendations)
+      .where(eq(recommendations.id, second.id));
+    expect(graduated?.state).toBe("ACTIVE");
+    expect(graduated?.baselineWriteOps).toBeNull();
+
+    // And the collection was reported anyway, parked under the empty index name
+    // that means "the whole collection".
+    const [parked] = await db
+      .select()
+      .from(indexCooldowns)
+      .where(
+        and(
+          eq(indexCooldowns.clusterId, clusterId),
+          eq(indexCooldowns.collection, "orders"),
+          eq(indexCooldowns.indexName, ""),
+        ),
+      );
+    expect(parked?.reason).toContain("slower than before the run of builds");
+    expect(parked?.until.getTime()).toBeGreaterThan(Date.now());
+    // Nothing was rolled back: the newest index is not necessarily the culprit,
+    // and undoing the wrong one is worse than saying so.
+    expect(graduated?.state).not.toBe("ROLLED_BACK");
+    const [firstAfter] = await db
+      .select()
+      .from(recommendations)
+      .where(eq(recommendations.id, first.id));
+    expect(firstAfter?.state).toBe("ACTIVE");
+
+    // The dashboard names it as the collection rather than as an index.
+    const cooldowns = asRecord(await (await api(`/clusters/${clusterId}/cooldowns`, owner)).json());
+    const rows = Array.isArray(cooldowns.parked) ? cooldowns.parked.map(asRecord) : [];
+    const collectionRow = rows.find((row) => row.wholeCollection === true);
+    expect(collectionRow?.collection).toBe("orders");
+
+    // Cleanup: this cluster is the suite's main one and later scenarios read it.
+    await db.delete(recommendations).where(eq(recommendations.id, first.id));
+    await db.delete(recommendations).where(eq(recommendations.id, second.id));
+    await db
+      .delete(indexCooldowns)
+      .where(
+        and(
+          eq(indexCooldowns.clusterId, clusterId),
+          eq(indexCooldowns.collection, "orders"),
+          eq(indexCooldowns.indexName, ""),
+        ),
+      );
+    await mongo
+      .db("inttest")
+      .collection("orders")
+      .deleteMany({ cumulative: { $exists: true } });
   });
 });
 

@@ -26,7 +26,7 @@ import { analysisNotes, and, eq, indexCooldowns, policies, recommendations } fro
 import { DatabaseInaccessibleError, type WorkloadTarget, workloadKey } from "../engine/ports";
 import { openClusterSession } from "./cluster-connection";
 import { collectionIndexesAfterBuild, pendingBuildsByCollection } from "./collection-budget";
-import { activeCooldownKeys, cooldownKey } from "./cooldowns";
+import { activeCooldownKeys, collectionCooldownKey, cooldownKey } from "./cooldowns";
 import { applyCreatesForCluster } from "./create";
 import { planForCluster } from "./plan";
 import { BUILD_TYPES, standingRecommendationKeys, watchKey } from "./watched";
@@ -397,7 +397,11 @@ export async function suggestForCluster(db: Database, clusterId: string): Promis
           existing.length,
           pendingBuilds.get(budgetKey) ?? 0,
         );
-        const crowded = netNew && crowdingPenalty(collectionIndexes) > 0;
+        // The collection's writes are already slower than before the last run of
+        // builds finished (#282). Same conclusion as a crowded collection and a
+        // stronger reason for it: this one is measured rather than counted.
+        const regressed = cooled.has(collectionCooldownKey(database, collection));
+        const crowded = (netNew && crowdingPenalty(collectionIndexes) > 0) || regressed;
         const score = createScore({
           collscan: candidate.scanning,
           sortedInMemory: !candidate.scanning,
@@ -452,11 +456,14 @@ export async function suggestForCluster(db: Database, clusterId: string): Promis
             // that came out lower than a reader expects is the engine looking
             // arbitrary; the sentence is what makes it an argument they can
             // agree or disagree with.
-            (crowded
-              ? ` This would be index ${collectionIndexes} on ${collection}, and every write to ` +
-                `the collection updates all of them — so its score is reduced and it is left for ` +
-                `you to approve rather than built unattended.`
-              : ""),
+            (regressed
+              ? ` ${collection}'s writes are measurably slower than before the last run of builds ` +
+                `on it, so this one is left for you to approve rather than built unattended.`
+              : crowded
+                ? ` This would be index ${collectionIndexes} on ${collection}, and every write to ` +
+                  `the collection updates all of them — so its score is reduced and it is left ` +
+                  `for you to approve rather than built unattended.`
+                : ""),
           score,
           estimatedBytesSaved: 0,
           urgent,
