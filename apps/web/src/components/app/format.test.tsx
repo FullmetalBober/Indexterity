@@ -150,9 +150,13 @@ describe("DropsOn", () => {
     expect(await screen.findByText(/drops/)).toBeInTheDocument();
   });
 
-  it("says nothing once the window has passed", () => {
+  // Not a date, because past the window the timing is the change window's to
+  // decide and any date would be invented — but not nothing either, which read
+  // as "no drop pending" for what is actually a queued one (#268).
+  it("says what an overdue drop is waiting for, rather than nothing", async () => {
     render(<DropsOn rec={{ state: "HIDDEN", hiddenAt, observeDays: 1 }} />);
 
+    expect(await screen.findByText(/waiting on the change window/)).toBeInTheDocument();
     expect(screen.queryByText(/drops/)).not.toBeInTheDocument();
   });
 
@@ -160,5 +164,6 @@ describe("DropsOn", () => {
     render(<DropsOn rec={{ state: "PROPOSED", hiddenAt: null, observeDays: null }} />);
 
     expect(screen.queryByText(/drops/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/waiting/)).not.toBeInTheDocument();
   });
 });
