@@ -19,9 +19,10 @@ import { api } from "../api";
 import { queryKeys } from "./keys";
 import type { Read } from "./read";
 
-// Module-level so the identity is stable: these are what a component renders on
-// an absent or failed read, and a fresh [] each render would re-run every memo
-// downstream of it.
+// Module-level so the identity is stable: these are what a component renders
+// when there is genuinely nothing, and a fresh [] each render would re-run every
+// memo downstream of it. A FAILED read is a separate state since #289 —
+// `Read.failed` — and draws its own panel rather than one of these.
 export const NO_LATENCY: LatencySummary[] = [];
 // The whole payload: totalCollections is the honest denominator for the
 // server-side cap (#64), and folding it away here would silence the cut.
@@ -50,9 +51,10 @@ export const NO_INDEX_SIZE_SERIES: ClusterIndexSizeSeries = {
 //
 // Failures are left to reject. They used to be caught and folded into an empty
 // payload, which put the error where no caller could see it. The read hooks below
-// default to empty on their own, so a dead read still draws an empty panel rather
-// than an error — and `isError` is now available to anything that wants to say
-// more than that.
+// still default to empty so nothing has to null-check, and since #289 they carry
+// `failed` beside it — because defaulting to empty was only half the fix: the
+// error reached the hook and stopped there, and the panel went on drawing the
+// reassuring empty state.
 export function latencyQuery(clusterId: string | null) {
   return queryOptions({
     queryKey: queryKeys.latency(clusterId),
@@ -97,26 +99,36 @@ export function nodesQuery(clusterId: string | null) {
 // Each returns the payload AND whether this is the first fetch — see read.ts for
 // why the bare payload was not enough.
 export function useLatency(clusterId: string | null): Read<LatencySummary[]> {
-  const { data = NO_LATENCY, isPending } = useQuery(latencyQuery(clusterId));
-  return { data, pending: isPending };
+  const { data = NO_LATENCY, isPending, isError, refetch } = useQuery(latencyQuery(clusterId));
+  return { data, pending: isPending, failed: isError, retry: () => void refetch() };
 }
 
 export function useLatencySeries(clusterId: string | null): Read<ClusterLatencySeries> {
-  const { data = NO_SERIES, isPending } = useQuery(latencySeriesQuery(clusterId));
-  return { data, pending: isPending };
+  const { data = NO_SERIES, isPending, isError, refetch } = useQuery(latencySeriesQuery(clusterId));
+  return { data, pending: isPending, failed: isError, retry: () => void refetch() };
 }
 
 export function useCollections(clusterId: string | null): Read<CollectionStat[]> {
-  const { data = NO_COLLECTIONS, isPending } = useQuery(collectionsQuery(clusterId));
-  return { data, pending: isPending };
+  const {
+    data = NO_COLLECTIONS,
+    isPending,
+    isError,
+    refetch,
+  } = useQuery(collectionsQuery(clusterId));
+  return { data, pending: isPending, failed: isError, retry: () => void refetch() };
 }
 
 export function useIndexSizeSeries(clusterId: string | null): Read<ClusterIndexSizeSeries> {
-  const { data = NO_INDEX_SIZE_SERIES, isPending } = useQuery(indexSizeSeriesQuery(clusterId));
-  return { data, pending: isPending };
+  const {
+    data = NO_INDEX_SIZE_SERIES,
+    isPending,
+    isError,
+    refetch,
+  } = useQuery(indexSizeSeriesQuery(clusterId));
+  return { data, pending: isPending, failed: isError, retry: () => void refetch() };
 }
 
 export function useNodes(clusterId: string | null): Read<ClusterNodes | null> {
-  const { data = null, isPending } = useQuery(nodesQuery(clusterId));
-  return { data, pending: isPending };
+  const { data = null, isPending, isError, refetch } = useQuery(nodesQuery(clusterId));
+  return { data, pending: isPending, failed: isError, retry: () => void refetch() };
 }
