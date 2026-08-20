@@ -1,0 +1,76 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "release-type": "node",
+  "include-component-in-tag": false,
+  "separate-pull-requests": false,
+  "packages": {
+    ".": {
+      "extra-files": [
+        {
+          "type": "json",
+          "path": "apps/api/package.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": "apps/web/package.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": "packages/config/package.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": "packages/contracts/package.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": "packages/errors/package.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": "packages/metrics/package.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": "package-lock.json",
+          "jsonpath": "$.packages['apps/api'].version"
+        },
+        {
+          "type": "json",
+          "path": "package-lock.json",
+          "jsonpath": "$.packages['apps/web'].version"
+        },
+        {
+          "type": "json",
+          "path": "package-lock.json",
+          "jsonpath": "$.packages['packages/config'].version"
+        },
+        {
+          "type": "json",
+          "path": "package-lock.json",
+          "jsonpath": "$.packages['packages/contracts'].version"
+        },
+        {
+          "type": "json",
+          "path": "package-lock.json",
+          "jsonpath": "$.packages['packages/errors'].version"
+        },
+        {
+          "type": "json",
+          "path": "package-lock.json",
+          "jsonpath": "$.packages['packages/metrics'].version"
+        },
+        {
+          "type": "generic",
+          "path": "deploy/helm/indexterity/Chart.yaml"
+        }
+      ]
+    }
+  }
+}

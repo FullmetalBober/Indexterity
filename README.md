@@ -471,8 +471,31 @@ several processes in one host-network container.
 npm run build · npm run typecheck · npm run lint · npm run test
 npm run db:generate · npm run db:migrate
 npm run db:deploy -w @repo/api        # production migrations, compiled migrator
-npm run version:set 0.2.0             # workspaces + the chart + the lockfile
+npm run version:set 0.2.0             # by hand; release-please does this normally
+npm run version:check                 # assert every file that states it agrees
 ```
+
+**Releases are cut by release-please, on `main`.** Work integrates on `dev`; a
+`dev` → `main` pull request promotes it; release-please reads the conventional
+commits that promotion carried, opens a `chore: release X.Y.Z` pull request
+bumping every file that states the version, and on merge tags `vX.Y.Z` and
+writes the GitHub Release from the same commits. The tag is what
+`release.yml` waits for, so nothing about publishing changed — a branch still
+publishes nothing. The bump lands on `main` only; back-merge into `dev` if you
+want the two to agree, and nothing is broken while they do not.
+
+`version:set` stays for doing it by hand. `version:check` is load-bearing
+either way: an `extra-files` entry whose jsonpath matches nothing is a **silent
+no-op** in release-please, so the config is not the guarantee — asserting that
+the seven packages, the chart and the lockfile all agree is.
+
+That assertion runs inside `release-please.yml` itself, not in `ci.yml`. A pull
+request opened by `GITHUB_TOKEN` **triggers no workflow run**, by design, so CI
+never sees the release pull request at all; running the check in the workflow a
+human's push to `main` started is the one place it cannot be skipped. `npm ci`
+ahead of it is half the assertion rather than setup — it refuses a lockfile
+whose workspace versions disagree with the manifests, which is the failure a
+silent no-op leaves behind (#186).
 
 `npm run up` is a convenience, not a requirement — `podman-compose up` works
 directly. It recreates containers whose crun state a logout cleared (`cannot
