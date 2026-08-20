@@ -22,7 +22,13 @@ import {
 } from "../db";
 import { activeCooldownKeys, cooldownKey } from "./cooldowns";
 import { historyWindow } from "./plan";
-import { pendingRemovalKeys, watchedIndexKeys, watchKey } from "./watched";
+import {
+  DROP_TYPES,
+  pendingRemovalKeys,
+  standingRecommendationKeys,
+  watchedIndexKeys,
+  watchKey,
+} from "./watched";
 
 // Policy fallback, matching apply/finalize.
 const DEFAULT_OBSERVE_DAYS = 30;
@@ -91,6 +97,11 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
   // Indexes already on their way out. They stay in `inputs` but cannot justify
   // dropping anything else — see pendingRemovalKeys.
   const departing = await pendingRemovalKeys(db, clusterId);
+  // Indexes whose drop is already on the record in a state the sweep below does
+  // not clear — approved, hidden, or proposed by another producer. Saying it
+  // again puts a second copy of the same finding on the dashboard next to the
+  // one the customer already approved (see standingRecommendationKeys).
+  const standing = await standingRecommendationKeys(db, clusterId, DROP_TYPES, "CLASSIFY");
   // Full cooldown history (active or expired): each past regression cuts the
   // confidence score of any future proposal for that index.
   const cooldownRows = await db
@@ -227,6 +238,14 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
     )) {
       if (cooled.has(cooldownKey(entry.database, entry.collection, candidate.indexName))) continue;
       if (watched.has(watchKey(entry.database, entry.collection, candidate.indexName))) continue;
+      // Advisories are not drops and never enter that pipeline, so a standing
+      // drop says nothing about whether one is worth repeating.
+      if (
+        candidate.type !== "ADVISORY_REVIEW" &&
+        standing.has(watchKey(entry.database, entry.collection, candidate.indexName))
+      ) {
+        continue;
+      }
       // Advisories still surface — a human should know a hinted index looks
       // unused. Only the automatic drop is withheld.
       if (

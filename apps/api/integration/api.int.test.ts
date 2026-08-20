@@ -42,6 +42,7 @@ import { drainPool } from "../src/jobs/connection-pool";
 import { activeCooldownKeys, cooldownKey } from "../src/jobs/cooldowns";
 import { applyCreatesForCluster } from "../src/jobs/create";
 import { finalizeCluster } from "../src/jobs/finalize";
+import { releaseStaleLocks } from "../src/jobs/locks";
 import { planForCluster } from "../src/jobs/plan";
 import { latestBaselines } from "../src/jobs/probe";
 import { pruneDeadLetterJobs, pruneOldSamples } from "../src/jobs/retention";
@@ -2409,6 +2410,97 @@ describe("an index the engine is still watching", () => {
   });
 });
 
+describe("a drop the customer already approved", () => {
+  it("is not proposed a second time while it is still on its way out", async () => {
+    const org = asRecord(await (await api("/org", owner)).json());
+    const [row] = await db
+      .insert(clusters)
+      .values({
+        orgId: asString(org.id),
+        name: "Approved Drop Cluster",
+        sealedDek: Buffer.alloc(1),
+        sealedData: Buffer.alloc(1),
+        keyVersion: 1,
+      })
+      .returning();
+    if (row === undefined) throw new Error("failed to insert cluster");
+    const dupeId = row.id;
+    createdClusterIds.push(dupeId);
+
+    // A key-prefix pair: userId_1 is covered by userId_1_name_1, which is a
+    // STRUCTURAL finding — it holds on every pass, with no usage history to age
+    // out of and nothing about it that stops being true once somebody approves
+    // the drop. That is exactly what made the duplicate reproducible.
+    const base = Date.now() - 3 * 86_400_000;
+    const specFor = (name: string, keys: string[]) => ({
+      name,
+      keys: keys.map((field) => ({ field, direction: 1 })),
+      unique: false,
+      ttl: false,
+      partial: false,
+      partialFilter: null,
+      sparse: false,
+      hidden: false,
+      isShardKey: false,
+      collation: null,
+    });
+    await insertSnapshots(
+      db,
+      ["userId_1", "userId_1_name_1"].flatMap((indexName) =>
+        Array.from({ length: 3 }, (_, i) => ({
+          clusterId: dupeId,
+          database: "inttest",
+          collection: "complexes",
+          indexName,
+          spec: specFor(indexName, indexName === "userId_1" ? ["userId"] : ["userId", "name"]),
+          sizeBytes: 8192,
+          perMember: [{ member: "m1", ops: 100 }],
+          capturedAt: new Date(base + i * 43_200_000),
+        })),
+      ),
+    );
+
+    expect(await classifyCluster(db, dupeId)).toBe(1);
+    const [proposal] = await db
+      .select()
+      .from(recommendations)
+      .where(eq(recommendations.clusterId, dupeId));
+    expect(proposal?.type).toBe("DROP_REDUNDANT");
+    expect(proposal?.indexName).toBe("userId_1");
+    if (proposal === undefined) throw new Error("no proposal");
+
+    // What a customer clicking Approve does. The index is still on the cluster —
+    // the hide -> observe -> drop path has not run yet — so the engine still sees
+    // it as redundant on the next pass.
+    const dropsFor = async (): Promise<(typeof recommendations.$inferSelect)[]> =>
+      db.select().from(recommendations).where(eq(recommendations.clusterId, dupeId));
+
+    for (const state of ["APPROVED", "HIDDEN"] as const) {
+      await db
+        .update(recommendations)
+        .set({ state, updatedAt: new Date() })
+        .where(eq(recommendations.id, proposal.id));
+      expect(await classifyCluster(db, dupeId)).toBe(0);
+      const rows = await dropsFor();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.id).toBe(proposal.id);
+      expect(rows[0]?.state).toBe(state);
+    }
+
+    // And it releases rather than protecting forever: a cancelled drop is held
+    // off by a cooldown (recordManualVeto), not by the row's own state, so once
+    // the row settles the finding is allowed to come back.
+    await db
+      .update(recommendations)
+      .set({ state: "REJECTED", updatedAt: new Date() })
+      .where(eq(recommendations.id, proposal.id));
+    expect(await classifyCluster(db, dupeId)).toBe(1);
+    const after = await dropsFor();
+    expect(after).toHaveLength(2);
+    expect(after.filter((rec) => rec.state === "PROPOSED")).toHaveLength(1);
+  });
+});
+
 describe("engine-chosen change window", () => {
   it("derives a window from traffic and serves it on a cluster with no policy row", async () => {
     const org = asRecord(await (await api("/org", owner)).json());
@@ -2860,6 +2952,85 @@ describe("dead-letter retention", () => {
 
     await db.execute(
       sql`delete from graphile_worker._private_jobs where id::text in (${freshId}, ${liveId})`,
+    );
+  });
+});
+
+describe("a worker that died holding a queue", () => {
+  it("frees the lock once it is old enough, and leaves a live one alone", async () => {
+    const utils = await makeWorkerUtils({ connectionString: databaseUrl() });
+    const stuckQueue = `collect:${clusterId}:stuck`;
+    const liveQueue = `collect:${clusterId}:live`;
+    let stuckId: string;
+    let liveId: string;
+    try {
+      // Named queues, because that is the unit graphile-worker serialises on
+      // and the unit that gets wedged: one per cluster per pass in production.
+      stuckId = (await utils.addJob("collect", { clusterId }, { queueName: stuckQueue })).id;
+      liveId = (await utils.addJob("collect", { clusterId }, { queueName: liveQueue })).id;
+    } finally {
+      await utils.release();
+    }
+
+    // What a SIGKILL leaves behind: the queue and the job still marked as held
+    // by a worker that no longer exists. Back-dated rather than slept on — the
+    // four-hour threshold is the thing under test.
+    const hold = (queue: string, jobId: string, age: string) =>
+      db
+        .execute(
+          sql`update graphile_worker._private_job_queues
+              set locked_at = now() - ${sql.raw(`interval '${age}'`)}, locked_by = 'otpool-gone'
+              where queue_name = ${queue}`,
+        )
+        .then(() =>
+          db.execute(
+            sql`update graphile_worker._private_jobs
+                set locked_at = now() - ${sql.raw(`interval '${age}'`)}, locked_by = 'otpool-gone'
+                where id::text = ${jobId}`,
+          ),
+        );
+    await hold(stuckQueue, stuckId, "6 hours");
+    await hold(liveQueue, liveId, "10 minutes");
+
+    // is_available is `generated always as (locked_at IS NULL)` — there is no
+    // time term in it, which is the whole defect: without a reset both of these
+    // stay false forever and the jobs behind them are never claimed again.
+    const availability = async (): Promise<Record<string, boolean>> => {
+      const rows = await db.execute<{ queue_name: string; is_available: boolean }>(
+        sql`select queue_name, is_available from graphile_worker._private_job_queues
+            where queue_name in (${stuckQueue}, ${liveQueue})`,
+      );
+      return Object.fromEntries(rows.rows.map((row) => [row.queue_name, row.is_available]));
+    };
+    expect(await availability()).toEqual({ [stuckQueue]: false, [liveQueue]: false });
+
+    const freed = await releaseStaleLocks(db);
+    expect(freed).toContain(stuckQueue);
+    // A collect against a large cluster legitimately runs for minutes. Ten
+    // minutes in, the worker is working, and taking its queue away would hand
+    // the same job to a second one.
+    expect(freed).not.toContain(liveQueue);
+    expect(await availability()).toEqual({ [stuckQueue]: true, [liveQueue]: false });
+
+    // The job's own lock has to go with the queue's, or it stays unclaimable on
+    // a queue that is now free — and run_at is pushed to the present so a job
+    // unlocked from six hours ago does not jump ahead of everything since.
+    const jobs = await db.execute<{ id: string; locked_at: Date | null; ahead: boolean }>(
+      sql`select id::text as id, locked_at, run_at < now() - interval '1 minute' as ahead
+          from graphile_worker._private_jobs where id::text in (${stuckId}, ${liveId})`,
+    );
+    const stuck = jobs.rows.find((row) => row.id === stuckId);
+    const live = jobs.rows.find((row) => row.id === liveId);
+    expect(stuck?.locked_at).toBeNull();
+    expect(stuck?.ahead).toBe(false);
+    expect(live?.locked_at).not.toBeNull();
+
+    await db.execute(
+      sql`delete from graphile_worker._private_jobs where id::text in (${stuckId}, ${liveId})`,
+    );
+    await db.execute(
+      sql`delete from graphile_worker._private_job_queues
+          where queue_name in (${stuckQueue}, ${liveQueue})`,
     );
   });
 });
