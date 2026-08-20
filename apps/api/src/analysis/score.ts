@@ -40,6 +40,11 @@ export interface CreateSignals {
   // How much the scan is actually costing (analysis/severity.ts). Defaults to
   // ROUTINE so callers without a workload source behave as before.
   readonly severity?: ScanSeverity;
+  // How many indexes this collection would carry once this one is built —
+  // existing, plus builds already in flight, plus this one (#281). Omitted by
+  // callers with no index list, and then the term is skipped rather than
+  // guessed: a missing count is not evidence of an uncrowded collection.
+  readonly collectionIndexes?: number;
 }
 
 const GB = 1024 ** 3;
@@ -51,6 +56,49 @@ const SIGHTINGS_FOR_FULL_CREDIT = 35;
 // One regression is close to disqualifying, two are disqualifying.
 const REGRESSION_PENALTY = 40;
 const DAY_MS = 86_400_000;
+
+// Where an index count stops being ordinary, and what each one past it costs
+// (#281).
+//
+// Every collision guard in the engine is keyed on an INDEX; the cost of an index
+// is paid per COLLECTION, because each write updates every index on it. So five
+// individually-correct creates on one busy collection are five individually
+// defensible proposals that together double its write cost, and nothing in the
+// engine ever formed that thought: `maxCollectionSizeBytes` bounds the cost of
+// BUILDING, not the cost of keeping.
+//
+// This is the score term rather than a cap, which is the choice worth stating.
+// A cap would refuse, and a refusal is a finding the customer never sees — the
+// invisible-suppression problem of #277 in a new place. A score keeps every
+// finding on screen, says why it scored what it did, and lets the threshold the
+// owner already set do the work: what falls below `autoApplyScore` stops being
+// built UNATTENDED and starts being a decision, which is exactly the right
+// outcome for "this collection is getting crowded".
+//
+// Both numbers are judgements calibrated against this scorer's own scale, not
+// measurements — there is no honest way to measure "how many indexes is too
+// many" without the workload in front of you. Four is `_id` plus three
+// purposeful indexes, which is an ordinary collection. Ten points a step means a
+// strong create (85) still auto-applies as the fifth index and needs a human as
+// the seventh, and the cap matches REGRESSION_PENALTY because that is this
+// file's existing word for "close to disqualifying".
+//
+// A COUNT rather than bytes or estimated write amplification, and that is the
+// issue's first design question. A count is crude: a two-key index on a small
+// collection is not the cost of an eight-key one on a large one. It is also the
+// only one of the three an owner can reason about, check against their own
+// cluster, and predict — and a term nobody can predict is a term that reads as
+// the engine being arbitrary.
+const ORDINARY_COLLECTION_INDEXES = 4;
+const CROWDING_STEP = 10;
+const CROWDING_MAX = 40;
+
+// What the count above costs a build, for the collection it would land on.
+export function crowdingPenalty(collectionIndexes: number): number {
+  const over = collectionIndexes - ORDINARY_COLLECTION_INDEXES;
+  if (over <= 0) return 0;
+  return Math.min(CROWDING_MAX, over * CROWDING_STEP);
+}
 
 // How much a past regression still counts, from the cooldown row it wrote.
 //
@@ -132,6 +180,7 @@ export function dropScore(signals: DropSignals): number {
 //   frequency     0-30  35 sightings for full credit
 //   collection    0-20  ≥1M docs 20, ≥10k 14, ≥1k 6
 //   severity      0-10  CRITICAL 10, ELEVATED 5 — the measured cost of the scan
+//   crowding    0 to -40  what the collection would then carry (#281)
 //
 // An in-memory sort scores below a scan because the query is already finding
 // its documents efficiently — the index would remove a sort, not a table walk.
@@ -154,6 +203,14 @@ export function createScore(signals: CreateSignals): number {
   if (signals.severity === "CRITICAL") score += 10;
   else if (signals.severity === "ELEVATED") score += 5;
   score -= signals.regressionWeight * REGRESSION_PENALTY;
+  // Only what a NET-NEW index costs. The caller passes no count for a candidate
+  // that retires what it replaces — an UPDATE widening an index, a MERGE folding
+  // several into one — because those leave the collection carrying the same
+  // number or fewer, and charging a build for a budget it is about to relieve
+  // would be the engine arguing against its own best move.
+  if (signals.collectionIndexes !== undefined) {
+    score -= crowdingPenalty(signals.collectionIndexes);
+  }
   return clamp(score);
 }
 

@@ -28,13 +28,19 @@ export type SuppressionGuard =
   // Already carries a live recommendation this pass will not sweep.
   | "standing"
   // Hinted, so the automatic drop is withheld and only the advisory surfaces.
-  | "hinted";
+  | "hinted"
+  // A build the collection's index count kept from being made unattended
+  // (#281). The odd one out: nothing was withheld from the customer, only from
+  // the engine's own hand — the proposal is on screen with its score reduced and
+  // its reason in its rationale.
+  | "budget";
 
 export const SUPPRESSION_GUARDS: readonly SuppressionGuard[] = [
   "cooldown",
   "watched",
   "standing",
   "hinted",
+  "budget",
 ];
 
 export type RefusalCounts = Partial<Record<UsageTrustRefusal["kind"], number>>;
@@ -181,5 +187,11 @@ export function explainSuppression(guard: SuppressionGuard, findings: number): s
       return `${count} held back: that index already carries a recommendation.`;
     case "hinted":
       return `${count} held back from automatic action: a query pins that index by name.`;
+    case "budget":
+      return (
+        `${count} held back from automatic action: the collection is already absorbing builds, ` +
+        `and every write to it updates every index on it. Still proposed — approve when you are ` +
+        `ready.`
+      );
   }
 }
