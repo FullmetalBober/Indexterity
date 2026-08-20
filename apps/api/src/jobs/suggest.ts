@@ -25,7 +25,11 @@ import type { Database } from "../db";
 import { analysisNotes, and, eq, indexCooldowns, policies, recommendations } from "../db";
 import { DatabaseInaccessibleError, type WorkloadTarget, workloadKey } from "../engine/ports";
 import { openClusterSession } from "./cluster-connection";
-import { collectionIndexesAfterBuild, pendingBuildsByCollection } from "./collection-budget";
+import {
+  collectionIndexesAfterBuild,
+  pendingBuildsByCollection,
+  wouldBuildUnattended,
+} from "./collection-budget";
 import { activeCooldownKeys, collectionCooldownKey, cooldownKey } from "./cooldowns";
 import { applyCreatesForCluster } from "./create";
 import { planForCluster } from "./plan";
@@ -420,16 +424,27 @@ export async function suggestForCluster(db: Database, clusterId: string): Promis
         // scan alone, so the crowding term below would never reach it. A
         // collection already absorbing builds gets its next one PROPOSED — the
         // finding stays, the unattended build does not.
-        const instant =
-          candidate.type === "CREATE" &&
-          candidate.scanning &&
-          severity !== "ROUTINE" &&
-          candidate.count >= INSTANT_MIN_COUNT &&
-          automation.instantCreate &&
-          !readOnly &&
-          !crowded;
+        //
+        // Split from `crowded` so the COUNT below can be honest. `crowded && !instant`
+        // counted every crowded candidate that was not built unattended — including
+        // the ones nothing was going to build anyway, because the cluster is
+        // read-only, or instantCreate is off, or the scan is ROUTINE. Measured on a
+        // read-only cluster the moment it shipped: `{"budget": 24}`, on a cluster
+        // where the budget had decided nothing at all and read-only had decided
+        // everything. A feature whose whole purpose is saying what the engine held
+        // back must not claim credit for what something else held back.
+        const unattended = wouldBuildUnattended({
+          type: candidate.type,
+          scanning: candidate.scanning,
+          severity,
+          count: candidate.count,
+          minCount: INSTANT_MIN_COUNT,
+          instantCreateEnabled: automation.instantCreate,
+          readOnly,
+        });
+        const instant = unattended && !crowded;
         if (instant) instantApproved += 1;
-        if (crowded && !instant) heldFromInstant += 1;
+        if (unattended && crowded) heldFromInstant += 1;
         // Count it before the next candidate is scored: the second create for one
         // collection is charged for the first, which is the whole point.
         if (netNew) pendingBuilds.set(budgetKey, (pendingBuilds.get(budgetKey) ?? 0) + 1);
