@@ -178,6 +178,17 @@ including the parameterised `WHERE created_at < @cutoff` — where the retention
 window is simply not in the plan, and the advisory says so rather than inventing
 a number ([D85](./docs/decisions.md)).
 
+**And a run of builds is measured against where it started.** The post-build
+watch takes each index's baseline at that index's own build time, so the second
+build on a collection is judged against a collection already carrying the first
+— the right answer to *did this index slow writes* and not to *did the last
+month of changes slow my writes*. On graduation the collection is now also
+compared against the oldest baseline still live for it, and a run that has cost
+30% or more is reported: the owners are told and nothing more is built there
+unattended, with **nothing rolled back**. The newest index is the obvious thing
+to undo and is not obviously the culprit, and attribution needs evidence this
+does not have ([D101](./docs/decisions.md), #282).
+
 **Builds on one collection compete rather than accumulate.** Every collision
 guard in the engine is keyed on an *index*; the cost of an index is paid per
 *collection*, because each write updates every index on it. So five

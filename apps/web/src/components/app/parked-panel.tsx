@@ -39,8 +39,13 @@ function regressionNote(count: number) {
 function ParkedRow({ entry }: { entry: ParkedIndex }) {
   return (
     <li className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-sm">
+      {/* A collection-level park names no index, because there is no one index to
+          name: several builds each passed their own check and together slowed the
+          collection's writes (#282). Said in words rather than as a dangling
+          separator after the namespace. */}
       <code className="font-mono text-xs">
-        {entry.database}.{entry.collection} · {entry.indexName}
+        {entry.database}.{entry.collection}
+        {entry.wholeCollection ? " · the whole collection" : ` · ${entry.indexName}`}
       </code>
       {regressionNote(entry.regressionCount)}
       <Truncated className="text-muted-foreground text-xs">{entry.reason}</Truncated>

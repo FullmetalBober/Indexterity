@@ -36,6 +36,7 @@ import {
 } from "../db";
 import { DatabaseService } from "../db/database.service";
 import { TenancyService } from "../http/tenancy.service";
+import { isWholeCollection } from "../jobs/cooldowns";
 import { historyWindow } from "../jobs/plan";
 import { Implement, route } from "../orpc/implement";
 
@@ -434,6 +435,10 @@ export class InsightsController {
           regressionCount: row.regressionCount,
           until: row.until.toISOString(),
           active: row.until.getTime() > now,
+          // Computed here for the same reason `active` is: the empty index name
+          // is a storage sentinel (jobs/cooldowns.ts), and the dashboard should
+          // not have to know that to draw the row.
+          wholeCollection: isWholeCollection(row.indexName),
           createdAt: row.createdAt.toISOString(),
           updatedAt: row.updatedAt.toISOString(),
         }));

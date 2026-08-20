@@ -82,7 +82,10 @@ export function resetUnreachableClusters(): void {
 }
 
 export function recordRegressionVerdict(
-  stage: "observe" | "post_build",
+  // "cumulative" is the collection-level reading (#282): the same measurement
+  // against the oldest baseline still live for the collection, which is a
+  // different question from either per-index stage and worth telling apart.
+  stage: "observe" | "post_build" | "cumulative",
   verdict: "REGRESSED" | "STABLE" | "UNOBSERVABLE",
 ): void {
   regressionGate.add(1, { stage, verdict: verdict.toLowerCase() });
