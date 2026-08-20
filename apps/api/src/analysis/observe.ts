@@ -1,16 +1,5 @@
-import {
-  observationGaps,
-  type Run,
-  sortedRuns,
-  spanEnd,
-  spanStart,
-  totalObservations,
-} from "./types";
-
-export interface ObserveUsagePoint extends Run {
-  // Ops summed across replica-set members for that snapshot.
-  readonly ops: number;
-}
+import { observationGaps, sortedRuns, spanEnd, spanStart, totalObservations } from "./types";
+import type { UsagePoint } from "./usage";
 
 export interface ObserveWindow {
   readonly days: number;
@@ -18,6 +7,12 @@ export interface ObserveWindow {
   // when the policy baseline applies unchanged.
   readonly reason: string | null;
 }
+
+// The observe window when a cluster has no policy row of its own. The column's
+// own default (schema.ts) is the same number; this is the fallback for the read
+// finding no row at all, and it lives here because every caller that needs it is
+// asking a question this module answers.
+export const DEFAULT_OBSERVE_DAYS = 30;
 
 const DAY_MS = 86_400_000;
 // Never shorten below a week (or the policy itself, when it's already tighter).
@@ -60,7 +55,7 @@ export interface ObserveContext {
 // a fortnightly job and buy a month of extra observing for a verdict already in.
 //
 // Takes the sorted series, since the caller has one.
-function largestSightingGapDays(sorted: readonly ObserveUsagePoint[]): number {
+function largestSightingGapDays(sorted: readonly UsagePoint[]): number {
   return observationGaps(sorted).reduce((largest, gap) => Math.max(largest, gap.ms), 0) / DAY_MS;
 }
 
@@ -117,7 +112,7 @@ function largestSightingGapDays(sorted: readonly ObserveUsagePoint[]): number {
 // The result is decided ONCE at hide time and stored on the recommendation,
 // so the pending drop is predictable and auditable.
 export function dynamicObserveDays(
-  history: readonly ObserveUsagePoint[],
+  history: readonly UsagePoint[],
   policyDays: number,
   context: ObserveContext = { watchingSince: null, now: new Date() },
 ): ObserveWindow {

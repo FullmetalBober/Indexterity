@@ -45,8 +45,13 @@ export function createAppQueryClient(): QueryClient {
         // would let an inactive entry be collected while still counted fresh,
         // which is a window that does nothing.
         staleTime: 30_000,
-        // A failed read renders as an empty panel rather than an error, so two
-        // more attempts only delay that.
+        // Two attempts, and the reasoning changed under it (#289). It used to be
+        // "a failed read renders as an empty panel rather than an error, so more
+        // attempts only delay that" — which was true, and was the bug. A failure
+        // is now visible and carries its own Try again, so the number is about
+        // the reader's time rather than about hiding the outcome: one silent
+        // retry covers the blip, and anything past that is better spent telling
+        // them than making them wait.
         retry: 1,
       },
     },

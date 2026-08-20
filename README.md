@@ -145,7 +145,7 @@ mapping did not survive a live server: `Sort Warnings/sec` does not exist on
 Linux SQL Server, and `Range Scans/sec` moves for an ordinary singleton seek
 ([D84](./docs/decisions.md)).
 
-**Adding** (opt-in via `workloadAnalysis`). Query shapes come from `$queryStats`
+**Adding** (on by default; `workloadAnalysis` turns it off). Query shapes come from `$queryStats`
 on **mongo 8.0+**, and from the profiler below it — until 8.0 the store reports
 execution counts only, which is the difference between knowing a query ran and
 knowing it scanned. Either way `$queryStats` records nothing until
@@ -177,6 +177,54 @@ off Query Store's DELETE plans in both the shapes SQL Server writes them,
 including the parameterised `WHERE created_at < @cutoff` — where the retention
 window is simply not in the plan, and the advisory says so rather than inventing
 a number ([D85](./docs/decisions.md)).
+
+**And a run of builds is measured against where it started.** The post-build
+watch takes each index's baseline at that index's own build time, so the second
+build on a collection is judged against a collection already carrying the first
+— the right answer to *did this index slow writes* and not to *did the last
+month of changes slow my writes*. On graduation the collection is now also
+compared against the oldest baseline still live for it, and a run that has cost
+30% or more is reported: the owners are told and nothing more is built there
+unattended, with **nothing rolled back**. The newest index is the obvious thing
+to undo and is not obviously the culprit, and attribution needs evidence this
+does not have ([D101](./docs/decisions.md), #282).
+
+**Builds on one collection compete rather than accumulate.** Every collision
+guard in the engine is keyed on an *index*; the cost of an index is paid per
+*collection*, because each write updates every index on it. So five
+individually-correct creates on one busy collection were five correct findings
+that together doubled its write cost, with nothing forming that thought. A
+crowding term now costs a create ten points for each index past an ordinary four
+that its collection would then carry — counting builds already in flight, not
+only what a collect saw — capped at the forty a past regression costs. Nothing is
+hidden: every finding is still proposed, with the reason in its rationale, and
+what falls below `autoApplyScore` stops being built *unattended* and starts being
+a decision. Exempt where it would be perverse — a MERGE folding three indexes
+into one leaves the collection carrying fewer, so it answers to no budget
+([D100](./docs/decisions.md), #281).
+
+**And when it cannot tell you, it says that instead of reassuring you.** Every
+panel on the dashboard used to draw its empty state for a read that had *failed*
+as well as for one that came back empty — so a 500 rendered as "Nothing to
+review means nothing is obviously wrong" over a cluster with fifty-one live
+proposals. A failed read now says whose problem it is (ours, and the cluster was
+never dialled) and offers a retry, and a stat card withholds its figure rather
+than printing a zero nobody measured
+([D102](./docs/decisions.md), #289).
+
+**And when it decides nothing, it says so.** An empty recommendations list is
+indistinguishable from "your indexes are all fine", and that reading is wrong in
+two directions. Usage findings need a history the engine is willing to trust —
+three collects, seven days, no gap, and counters that did not reset underneath it
+— and a cluster whose counters reset oftener than that window can never receive
+one, with the condition never clearing on its own. Separately, every collision
+guard in the engine works by making a finding *disappear*: an index inside its
+own post-build watch, one already carrying a recommendation, one parked after a
+regression. Both are correct and both were invisible, so the dashboard now names
+the dominant reason usage analysis is paused, in the words of the threshold that
+caused it, and counts what the guards held back
+([D99](./docs/decisions.md), #277). "Cannot tell" is never spelled "all clear"
+— on screen as well as in the pipeline.
 
 Full reasoning for all of it: [Architecture §6](https://github.com/FullmetalBober/Indexterity/wiki/Architecture).
 
@@ -471,8 +519,31 @@ several processes in one host-network container.
 npm run build · npm run typecheck · npm run lint · npm run test
 npm run db:generate · npm run db:migrate
 npm run db:deploy -w @repo/api        # production migrations, compiled migrator
-npm run version:set 0.2.0             # workspaces + the chart + the lockfile
+npm run version:set 0.2.0             # by hand; release-please does this normally
+npm run version:check                 # assert every file that states it agrees
 ```
+
+**Releases are cut by release-please, on `main`.** Work integrates on `dev`; a
+`dev` → `main` pull request promotes it; release-please reads the conventional
+commits that promotion carried, opens a `chore: release X.Y.Z` pull request
+bumping every file that states the version, and on merge tags `vX.Y.Z` and
+writes the GitHub Release from the same commits. The tag is what
+`release.yml` waits for, so nothing about publishing changed — a branch still
+publishes nothing. The bump lands on `main` only; back-merge into `dev` if you
+want the two to agree, and nothing is broken while they do not.
+
+`version:set` stays for doing it by hand. `version:check` is load-bearing
+either way: an `extra-files` entry whose jsonpath matches nothing is a **silent
+no-op** in release-please, so the config is not the guarantee — asserting that
+the seven packages, the chart and the lockfile all agree is.
+
+That assertion runs inside `release-please.yml` itself, not in `ci.yml`. A pull
+request opened by `GITHUB_TOKEN` **triggers no workflow run**, by design, so CI
+never sees the release pull request at all; running the check in the workflow a
+human's push to `main` started is the one place it cannot be skipped. `npm ci`
+ahead of it is half the assertion rather than setup — it refuses a lockfile
+whose workspace versions disagree with the manifests, which is the failure a
+silent no-op leaves behind (#186).
 
 `npm run up` is a convenience, not a requirement — `podman-compose up` works
 directly. It recreates containers whose crun state a logout cleared (`cannot

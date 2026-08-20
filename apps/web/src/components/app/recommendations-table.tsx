@@ -1,6 +1,6 @@
 import type { ClusterNodes, IndexUsage, Recommendation } from "@repo/contracts";
 import { useMemo } from "react";
-import { badgeVariant, DropsOn } from "~/components/app/format";
+import { badgeVariant, DropsOn, dropsOn } from "~/components/app/format";
 import { type UsageSplit, usageDetail, usageLine, usageSplit } from "~/components/app/index-usage";
 import { ConfirmButton } from "~/components/confirm-button";
 import { type DashboardColumns, DataTable, dashboardColumns } from "~/components/data-table";
@@ -10,6 +10,7 @@ import { Button } from "~/components/ui/button";
 import {
   useApproveRecommendation,
   useRollbackRecommendation,
+  useShortenObserveWindow,
   useUnhideRecommendation,
 } from "~/lib/queries/mutations/recommendations";
 
@@ -22,14 +23,29 @@ interface Actions {
   readonly approve: (id: string) => void;
   readonly unhide: (id: string) => void;
   readonly undo: (id: string) => void;
+  readonly shorten: (id: string) => void;
 }
 
 // What each state offers to do about it, which is the column a reader came for.
 // Advisories are the exception: the engine will not touch them at any setting, so
 // the cell says so rather than offering a button that would not be honoured.
-function action(rec: Recommendation, actions: Actions) {
+function action(rec: Recommendation, actions: Actions, readOnly: boolean) {
   if (rec.type === "ADVISORY_REVIEW") {
     return <span className="text-muted-foreground text-xs">review manually</span>;
+  }
+  // Same rule as the advisory above, for the same reason: a read-only cluster
+  // never executes a write, so an approval here would sit at APPROVED forever
+  // (#257). The api refuses it too — this is what stops a reader finding out
+  // that way.
+  if (rec.state === "PROPOSED" && readOnly) {
+    return (
+      <span
+        className="text-muted-foreground text-xs"
+        title="Switch the cluster to live in Settings"
+      >
+        read-only cluster
+      </span>
+    );
   }
   if (rec.state === "PROPOSED") {
     return (
@@ -78,18 +94,40 @@ function action(rec: Recommendation, actions: Actions) {
     );
   }
   if (rec.state === "HIDDEN") {
+    // The window is decided per index and frozen at hide time, so an owner who
+    // already knows the index is dead otherwise has to wait out a cadence the
+    // engine inferred — or cancel the drop, which re-proposes it later and
+    // computes the very same window again (#270). Offered only while there is
+    // something left to wait for: past the window the drop is already due and
+    // ending the observation would do nothing.
+    const waiting = dropsOn(rec);
     return (
-      <ConfirmButton
-        trigger={
-          <Button size="sm" variant="outline">
-            Keep it
-          </Button>
-        }
-        title={`Cancel the pending drop of ${rec.indexName}?`}
-        description="The index becomes visible to the query planner again straight away, and this drop is not proposed again for 90 days."
-        confirmLabel="Un-hide"
-        onConfirm={() => actions.unhide(rec.id)}
-      />
+      <div className="flex gap-1">
+        <ConfirmButton
+          trigger={
+            <Button size="sm" variant="outline">
+              Keep it
+            </Button>
+          }
+          title={`Cancel the pending drop of ${rec.indexName}?`}
+          description="The index becomes visible to the query planner again straight away, and this drop is not proposed again for 90 days."
+          confirmLabel="Un-hide"
+          onConfirm={() => actions.unhide(rec.id)}
+        />
+        {waiting !== null && new Date(waiting).getTime() > Date.now() ? (
+          <ConfirmButton
+            trigger={
+              <Button size="sm" variant="ghost">
+                Drop sooner
+              </Button>
+            }
+            title={`Stop observing ${rec.indexName}?`}
+            description="The window is cut to the time this index has already been hidden, rounded up — so the drop becomes due within a day rather than at the end of its window. It still waits for the change window and still passes the regression gate: if hiding this index has slowed reads, it is un-hidden instead. Only the waiting is skipped."
+            confirmLabel="End observation"
+            onConfirm={() => actions.shorten(rec.id)}
+          />
+        ) : null}
+      </div>
     );
   }
   return <span className="text-muted-foreground text-xs">{rec.state}</span>;
@@ -127,6 +165,7 @@ function UsageSplitLine({ split }: { split: SplitEntry | undefined }) {
 function buildColumns(
   actions: Actions,
   splits: Map<string, SplitEntry>,
+  readOnly: boolean,
 ): DashboardColumns<Recommendation> {
   // column.columns() rather than a bare array: it threads each column's own
   // value type out through a variadic tuple, so a string column and a number
@@ -209,7 +248,7 @@ function buildColumns(
     column.display({
       id: "action",
       header: "Action",
-      cell: (info) => action(info.row.original, actions),
+      cell: (info) => action(info.row.original, actions, readOnly),
     }),
   ]);
 }
@@ -233,6 +272,7 @@ export function RecommendationsTable({
   roster = null,
   total,
   loading,
+  readOnly = false,
 }: {
   clusterId: string | null;
   recommendations: Recommendation[];
@@ -251,10 +291,16 @@ export function RecommendationsTable({
   // becomes a claim about rows that were never sent.
   total: number;
   loading: boolean;
+  // The cluster's mode, so the Approve cell can say why it is not offering a
+  // button. Defaulted rather than required: false is the state in which every
+  // action is honoured, so a caller that forgets it gets the old behaviour and
+  // the api's refusal, not a table that silently withholds approvals (#257).
+  readOnly?: boolean;
 }) {
   const approve = useApproveRecommendation(clusterId);
   const unhide = useUnhideRecommendation(clusterId);
   const undo = useRollbackRecommendation(clusterId);
+  const shorten = useShortenObserveWindow(clusterId);
 
   const splits = useMemo(() => {
     const built = new Map<string, SplitEntry>();
@@ -271,8 +317,17 @@ export function RecommendationsTable({
 
   const columns = useMemo(
     () =>
-      buildColumns({ approve: approve.mutate, unhide: unhide.mutate, undo: undo.mutate }, splits),
-    [approve.mutate, unhide.mutate, undo.mutate, splits],
+      buildColumns(
+        {
+          approve: approve.mutate,
+          unhide: unhide.mutate,
+          undo: undo.mutate,
+          shorten: shorten.mutate,
+        },
+        splits,
+        readOnly,
+      ),
+    [approve.mutate, unhide.mutate, undo.mutate, shorten.mutate, splits, readOnly],
   );
 
   const truncated = total > recommendations.length;
@@ -306,7 +361,14 @@ export function RecommendationsTable({
         // Usage went from 120 to 176 when it gained the per-node line under the
         // class (#161): `40,000 ops · 1 of 3 nodes` does not fit in 120, and a
         // clipped one would hide exactly the half that is new.
-        columnWidths={[132, 200, 200, 104, 176, 280, 132]}
+        //
+        // Action went from 132 to 200 when a hidden drop gained a second control
+        // (#270). Cells at a fixed width are `overflow-hidden`, so the extra
+        // button was not pushed off the table to be scrolled to — it was CUT, mid
+        // word, which reads as a rendering fault rather than as a column that
+        // needs more room. Two `sm` buttons and the gap between them are about
+        // 160; the rest is the cell's own padding.
+        columnWidths={[132, 200, 200, 104, 176, 280, 200]}
         // The rationale takes the slack, and takes all of it: the table fills the
         // page now, and the alternative to a long line is a clipped one. Past the
         // column's width the cell truncates and the tooltip carries the rest, so

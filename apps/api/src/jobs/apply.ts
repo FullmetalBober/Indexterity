@@ -1,4 +1,4 @@
-import { dynamicObserveDays, inChangeWindow } from "../analysis";
+import { DEFAULT_OBSERVE_DAYS, dynamicObserveDays, inChangeWindow, usageSeries } from "../analysis";
 import { runFrom } from "../analysis/types";
 import { entitledAutomation } from "../billing/plans";
 import {
@@ -22,7 +22,6 @@ import { historyWindow, planForCluster } from "./plan";
 import { preflightDrop } from "./preflight";
 
 const DROP_TYPES = new Set(["DROP_UNUSED", "DROP_REDUNDANT", "MERGE"]);
-const DEFAULT_OBSERVE_DAYS = 30;
 
 // Auto-approval, the whole of it. One threshold, no companion switch: null
 // means nothing is promoted and a human clicks, 0 means everything is,
@@ -180,11 +179,11 @@ export async function applyCluster(db: Database, clusterId: string): Promise<num
             gte(indexSnapshots.lastSeenAt, since),
           ),
         );
+      // Through usageSeries, never by summing the counters: `perMember[].ops` is
+      // cumulative, and dynamicObserveDays reads `ops > 0` as "queried during
+      // this span" — a reading only a difference supports (#263).
       const window = dynamicObserveDays(
-        historyRows.map((row) => ({
-          ...runFrom(row),
-          ops: row.perMember.reduce((sum, member) => sum + member.ops, 0),
-        })),
+        usageSeries(historyRows.map((row) => ({ ...runFrom(row), perMember: row.perMember }))),
         policy?.observeWindowDays ?? DEFAULT_OBSERVE_DAYS,
         { watchingSince, now: new Date() },
       );
@@ -194,6 +193,7 @@ export async function applyCluster(db: Database, clusterId: string): Promise<num
           state: "HIDDEN",
           hiddenAt: new Date(),
           observeDays: window.days,
+          observeReason: window.reason,
           baselineReadOps: baseline.ops,
           baselineReadLatency: baseline.latencyMicros,
           updatedAt: new Date(),

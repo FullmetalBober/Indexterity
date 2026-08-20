@@ -1,16 +1,28 @@
 import { Controller, Req } from "@nestjs/common";
-import type { IndexUsage } from "@repo/contracts";
+import type { AnalysisNote, IndexUsage, SuppressionGuard } from "@repo/contracts";
 import { contract, RECOMMENDATIONS_CAP } from "@repo/contracts";
 import type { FastifyRequest } from "fastify";
-import { parseStoredSpec, rebuildKeys, rebuildOptions } from "../analysis";
+import {
+  DEFAULT_OBSERVE_DAYS,
+  dominantRefusal,
+  explainRefusal,
+  explainSuppression,
+  parseStoredSpec,
+  rebuildKeys,
+  rebuildOptions,
+  SUPPRESSION_GUARDS,
+  usageAnalysisPaused,
+} from "../analysis";
 import {
   actions,
+  analysisNotes,
   and,
   clusterIndexes,
   clusters,
   desc,
   eq,
   indexSnapshots,
+  policies,
   recommendations,
   roiMetrics,
   sql,
@@ -19,6 +31,7 @@ import { DatabaseService } from "../db/database.service";
 import type { CreateIndexOptions } from "../engine/ports";
 import { mapClusterError, toRecommendation } from "../http/mappers";
 import { TenancyService } from "../http/tenancy.service";
+import { CLASSIFY_OPTIONS } from "../jobs/classify";
 import { openClusterSession } from "../jobs/cluster-connection";
 import { recordManualVeto } from "../jobs/cooldowns";
 import { Implement, route } from "../orpc/implement";
@@ -50,7 +63,13 @@ export class RecommendationsController {
         // dashboard asks for a cluster it has just been told about, and a refusal
         // there renders as a broken api rather than as an empty panel.
         if (!(await this.tenancy.ownsCluster(input.clusterId, context.member.orgId))) {
-          return { clusterId: input.clusterId, total: 0, recommendations: [], usage: [] };
+          return {
+            clusterId: input.clusterId,
+            total: 0,
+            recommendations: [],
+            usage: [],
+            analysis: null,
+          };
         }
         const [counted] = await this.database.db
           .select({ total: sql<number>`count(*)::int` })
@@ -67,9 +86,77 @@ export class RecommendationsController {
           total: counted?.total ?? rows.length,
           recommendations: rows.map(toRecommendation),
           usage: await this.usageFor(input.clusterId, rows),
+          analysis: await this.analysisFor(input.clusterId),
         };
       },
     );
+  }
+
+  // Why the list above is as short as it is (#277).
+  //
+  // Read from the note the last classify pass wrote rather than recomputed, which
+  // is the trade #277 named: a column written per pass is stale by at most one
+  // classify cadence, while recomputing is exact and costs the whole usage history
+  // on every dashboard load. The stale answer is the right one here — the reasons
+  // are conditions that persist for days, and `decidedAt` ships so the dashboard
+  // can say when rather than implying "now".
+  //
+  // The SENTENCE is built here, not stored: every reason names a threshold from
+  // CLASSIFY_OPTIONS, and copy stored at write time is copy that keeps quoting
+  // "7 days" after the policy moved. Same reason the guard rationales are
+  // composed rather than cached.
+  private async analysisFor(clusterId: string): Promise<AnalysisNote | null> {
+    // Every producer's note, not only classify's. They are stored separately
+    // because they explain unrelated things — the usage gate refusing has nothing
+    // to do with a crowded collection (#281) — and read together because a reader
+    // is asking one question: why is this list as short as it is.
+    const notes = await this.database.db
+      .select()
+      .from(analysisNotes)
+      .where(eq(analysisNotes.clusterId, clusterId));
+    if (notes.length === 0) return null;
+    // The usage columns belong to the pass that has a usage gate. A producer
+    // without one leaves them zero, and summing that in would report every
+    // cluster as considering fewer indexes than it did.
+    const usage = notes.find((row) => row.source === "CLASSIFY");
+    const refusals = usage?.refusals ?? {};
+    const dominant = dominantRefusal(refusals);
+    // Only counted for the reason being reported. Summing every refusal would
+    // read as "37 indexes are unanalysable" when the 37 are short of history for
+    // four unrelated reasons, only one of which the sentence explains.
+    const refusedIndexes = dominant === null ? 0 : (refusals[dominant] ?? 0);
+    // The newest pass to have said anything, so the panel's "as of" is not older
+    // than the reason beside it.
+    const decidedAt = notes.reduce(
+      (latest, row) => (row.decidedAt > latest ? row.decidedAt : latest),
+      notes[0]?.decidedAt ?? new Date(0),
+    );
+    return {
+      decidedAt: decidedAt.toISOString(),
+      consideredIndexes: usage?.consideredIndexes ?? 0,
+      trustedIndexes: usage?.trustedIndexes ?? 0,
+      usagePaused: usageAnalysisPaused({
+        consideredIndexes: usage?.consideredIndexes ?? 0,
+        trustedIndexes: usage?.trustedIndexes ?? 0,
+        refusals,
+        suppressed: {},
+      }),
+      dominantRefusal: dominant,
+      refusedIndexes,
+      explanation: dominant === null ? null : explainRefusal(dominant, CLASSIFY_OPTIONS),
+      // Iterated over the known guards rather than over the stored keys, so a
+      // key an older api wrote and this one no longer understands is dropped
+      // instead of reaching the contract and failing its own validation. Summed
+      // across producers: a guard is a guard whoever tripped it, and two lines
+      // saying "2 findings held back" would raise the question of what the
+      // difference was.
+      suppressed: SUPPRESSION_GUARDS.flatMap((guard: SuppressionGuard) => {
+        const findings = notes.reduce((sum, row) => sum + (row.suppressed[guard] ?? 0), 0);
+        return findings > 0
+          ? [{ guard, findings, explanation: explainSuppression(guard, findings) }]
+          : [];
+      }),
+    };
   }
 
   // Per-member usage for the indexes above (#161), from the last collect.
@@ -157,6 +244,7 @@ export class RecommendationsController {
             id: recommendations.id,
             database: recommendations.database,
             observedDatabases: clusters.observedDatabases,
+            readOnly: clusters.readOnly,
           })
           .from(recommendations)
           .innerJoin(clusters, eq(recommendations.clusterId, clusters.id))
@@ -175,6 +263,18 @@ export class RecommendationsController {
             message:
               `${owned.database} is not one of the databases this cluster observes — ` +
               "reload the page, or add it back in the cluster's settings.",
+          });
+        }
+        // Same reasoning, one step further out: a read-only cluster never
+        // executes a write, so applyCluster returns before pre-flight and the
+        // row stays APPROVED with no action, no event and nothing saying why
+        // (#257). Accepting the click would be worse than the stale-list case
+        // above — that one resolves on a reload, this one never resolves at all.
+        if (owned.readOnly) {
+          throw errors.CONFLICT({
+            message:
+              "this cluster is read-only, so nothing can be applied to it — " +
+              "switch it to live in the cluster's settings first.",
           });
         }
         const [row] = await this.database.db
@@ -358,6 +458,7 @@ export class RecommendationsController {
             state: "REJECTED",
             hiddenAt: null,
             observeDays: null,
+            observeReason: null,
             baselineReadOps: null,
             baselineReadLatency: null,
             rationale: `${rec.rationale} — cancelled by an owner; not re-proposed until ${day}`,
@@ -373,6 +474,86 @@ export class RecommendationsController {
           kind: "HIDE",
           actor: "user",
           result: `un-hidden on request; cooling down until ${day}`,
+        });
+        return toRecommendation(updated);
+      },
+    );
+  }
+
+  // Owner-only: shorten a pending drop's observe window.
+  //
+  // The window is decided once at hide time and frozen deliberately — recomputing
+  // it every pass would make the drop date walk as history rolled out of
+  // retention, and a date nobody can plan around is worse than none. The cost of
+  // that freeze is that an owner who knows an index is dead has no way to say so:
+  // the only exit was to cancel the drop entirely, which re-proposes it later and
+  // recomputes the very same window from the very same history. This is that
+  // missing move, and it is the whole of it — the drop still waits for the change
+  // window and still passes the regression gate, so what this shortens is the
+  // OBSERVATION and never a safety step.
+  @Implement(contract.shortenObserveWindow)
+  shortenObserveWindow(@Req() req: FastifyRequest) {
+    return route(this.tenancy, contract.shortenObserveWindow, req, "owner").handler(
+      async ({ input, errors, context }) => {
+        const [rec] = await this.database.db
+          .select({ rec: recommendations })
+          .from(recommendations)
+          .innerJoin(clusters, eq(recommendations.clusterId, clusters.id))
+          .where(and(eq(recommendations.id, input.id), eq(clusters.orgId, context.member.orgId)))
+          .limit(1)
+          .then((rows) => rows.map((row) => row.rec));
+        if (rec === undefined) {
+          throw errors.NOT_FOUND({ message: "recommendation not found" });
+        }
+        if (rec.state !== "HIDDEN" || rec.hiddenAt === null) {
+          throw errors.CONFLICT({ message: "only a hidden index has an observe window" });
+        }
+        // The window in force, which is the stored one or the policy baseline it
+        // fell back to — the same reading finalize does, so the ceiling below is
+        // the number the drop is actually waiting on rather than a null.
+        const [policy] = await this.database.db
+          .select({ observeWindowDays: policies.observeWindowDays })
+          .from(policies)
+          .where(eq(policies.clusterId, rec.clusterId))
+          .limit(1);
+        const current = rec.observeDays ?? policy?.observeWindowDays ?? DEFAULT_OBSERVE_DAYS;
+        // The floor, and the default. Never into the past: a window shorter than
+        // the time already served is due the moment it is written, so the next
+        // finalize tick would drop the index with no interval in which anyone
+        // could change their mind — "shorten" would quietly be spelled "drop
+        // now", which is a different feature and a more dangerous one.
+        const servedDays = Math.max(
+          1,
+          Math.ceil((Date.now() - rec.hiddenAt.getTime()) / 86_400_000),
+        );
+        const days = input.days ?? servedDays;
+        if (days >= current) {
+          throw errors.BAD_REQUEST({
+            message: `this drop is already observing for ${current} day(s) — a window can be shortened here, never lengthened`,
+          });
+        }
+        if (days < servedDays) {
+          throw errors.BAD_REQUEST({
+            message: `this index has been hidden for ${servedDays} day(s); the window cannot be shortened below what it has already observed`,
+          });
+        }
+        const [updated] = await this.database.db
+          .update(recommendations)
+          .set({
+            observeDays: days,
+            observeReason: `shortened to ${days} day(s) by an owner`,
+            updatedAt: new Date(),
+          })
+          .where(eq(recommendations.id, rec.id))
+          .returning();
+        if (updated === undefined) {
+          throw errors.NOT_FOUND({ message: "recommendation not found" });
+        }
+        await this.database.db.insert(actions).values({
+          recommendationId: rec.id,
+          kind: "HIDE",
+          actor: "user",
+          result: `observe window shortened from ${current} to ${days} day(s) on request`,
         });
         return toRecommendation(updated);
       },

@@ -6,9 +6,9 @@ import { API_PORT, databaseUrl, startApi, stopApi } from "./helpers";
 // The externally-driven schedule, end to end against a real Postgres: what the
 // tick claims, what it stamps into worker_watermarks, and — since #232 made the
 // endpoint drain as well as enqueue — that the queue is actually EMPTY again
-// once the response says so. With no clusters connected the scheduler passes
-// fan out to nothing, so the drain is cheap and the assertions stay about the
-// mechanism rather than about a fleet.
+// once the drain the response reports has settled. With no clusters connected
+// the scheduler passes fan out to nothing, so the drain is cheap and the
+// assertions stay about the mechanism rather than about a fleet.
 const PORT = API_PORT + 6;
 const SECRET = "t".repeat(48);
 const PASSES = [
@@ -37,15 +37,53 @@ async function tick(token: string | null): Promise<{ status: number; body: unkno
 // deliberate, narrow bet: the point of this suite is that a row really lands in
 // the QUEUE, and the only alternative is trusting the endpoint's own report of
 // itself.
-const QUEUED = sql`
-  select t.identifier
+//
+// Sampling this the instant the response lands is what #280 turned out to be,
+// and the reason is inside graphile-worker rather than anywhere in this repo: a
+// worker fires `completeJob(job)` and `failJob(…)` WITHOUT awaiting either
+// (dist/worker.js — the call, then straight into `doNext()`), so it polls, finds
+// nothing, exits, and the pool resolves while the DELETE for the job it just
+// finished is still in flight. Measured against postgres 18 with graphile-worker
+// 0.17.3: `runOnce` resolved with the last one or two rows still present in 24
+// of 25 rounds, `locked_at` set and `attempts = 1` — they RAN — and gone a few
+// milliseconds later. `digest` is the one that shows up, because it is last in
+// BURST_SCHEDULE and so the last claimed.
+//
+// So the queue is read once it has SETTLED instead: a locked row is one a worker
+// is still answering for, and when none is left, every completion and every
+// failure this drain produced has landed. Then "no rows" means what it looks
+// like it means. Both halves were measured — the settled read is 0/25 false
+// failures where the naive one was 24/25, and a dispatcher rigged to throw is
+// still caught, sitting unlocked on `attempts = 1`.
+const DISPATCHER_ROWS = sql`
+  select t.identifier, j.locked_at is not null as locked, j.attempts
   from graphile_worker._private_jobs j
   join graphile_worker._private_tasks t on t.id = j.task_id
-  where t.identifier = any(string_to_array(${PASSES.join(",")}, ','))`;
+  where t.identifier = any(string_to_array(${PASSES.join(",")}, ','))
+  order by t.identifier`;
 
-async function queuedTasks(): Promise<string[]> {
-  const result = await db.execute<{ identifier: string }>(QUEUED);
-  return result.rows.map((row) => row.identifier).sort();
+// A type alias rather than an interface: `db.execute<T>` constrains T to
+// Record<string, unknown>, and only an alias of an object literal gets the
+// implicit index signature that satisfies it.
+type DispatcherRow = {
+  readonly identifier: string;
+  readonly locked: boolean;
+  readonly attempts: number;
+};
+
+// Whatever the drain left behind, read after it stopped moving. The budget is
+// generous against how long these seven actually take — a dispatcher only
+// ENQUEUES per-cluster work (the dialing is in the `collect` jobs, which are not
+// in PASSES), so it is the fan-out tail that can outlive the 25s request, not
+// these. A row still locked when the budget runs out is returned rather than
+// waited on forever, so the assertion fails with the state that caused it.
+async function settledDispatchers(budgetMs = 5_000): Promise<DispatcherRow[]> {
+  const deadline = Date.now() + budgetMs;
+  for (;;) {
+    const { rows } = await db.execute<DispatcherRow>(DISPATCHER_ROWS);
+    if (!rows.some((row) => row.locked) || Date.now() > deadline) return rows;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
 }
 
 async function clearQueue(): Promise<void> {
@@ -79,12 +117,12 @@ afterAll(async () => {
 describe("POST /api/internal/tick", () => {
   it("refuses without a token", async () => {
     expect((await tick(null)).body).toEqual({ error: "unauthorized" });
-    expect(await queuedTasks()).toEqual([]);
+    expect(await settledDispatchers()).toEqual([]);
   });
 
   it("refuses a wrong token", async () => {
     expect((await tick("w".repeat(48))).body).toEqual({ error: "unauthorized" });
-    expect(await queuedTasks()).toEqual([]);
+    expect(await settledDispatchers()).toEqual([]);
   });
 
   // A fresh install has no watermarks, so the first tick owes every pass — which
@@ -92,7 +130,9 @@ describe("POST /api/internal/tick", () => {
   // a worse first impression than a busy minute. Since #232 the request also
   // DRAINS. What is asserted is that the seven dispatcher jobs are gone from the
   // queue because they RAN — they are the first claims of the drain, so they
-  // execute inside the bounded window whatever else is in the database.
+  // execute inside the bounded window whatever else is in the database. Read once
+  // the queue has settled rather than the instant the response lands, which is
+  // the whole of #280; see settledDispatchers.
   //
   // `drained` itself is deliberately not asserted true: this suite shares its
   // postgres with everything run before it, so the dispatchers fan out a collect
@@ -106,7 +146,7 @@ describe("POST /api/internal/tick", () => {
     const outcome = body as { dispatched: string[]; drained: boolean };
     expect(outcome.dispatched.sort()).toEqual([...PASSES].sort());
     expect(typeof outcome.drained).toBe("boolean");
-    expect(await queuedTasks()).toEqual([]);
+    expect(await settledDispatchers()).toEqual([]);
   });
 
   // The property that makes this safe to expose to anything that can POST: a
@@ -125,7 +165,7 @@ describe("POST /api/internal/tick", () => {
     const dispatched = (body as { dispatched: string[] }).dispatched;
     const fiveMinute = ["scheduleApply", "scheduleProbe"];
     expect(dispatched.filter((task) => !fiveMinute.includes(task))).toEqual([]);
-    expect(await queuedTasks()).toEqual([]);
+    expect(await settledDispatchers()).toEqual([]);
   });
 
   it("comes due again once a bucket rolls over", async () => {

@@ -59,7 +59,26 @@ export function useSecurityEvents(filter: TrailFilter): {
   // fallback would tell them the trail is empty — a claim about the
   // organization, made because of a permission they do not have.
   forbidden: boolean;
+  // And any OTHER failure is the same argument again (#289): an empty trail is a
+  // claim that nothing happened, which is exactly what a security log must never
+  // say on our behalf when we simply could not read it. The 403 keeps its own
+  // flag because it has its own sentence — a permission, not a fault.
+  failed: boolean;
+  retry: () => void;
 } {
-  const { data = NO_TRAIL, isPending, error } = useQuery(securityEventsQuery(filter));
-  return { data, pending: isPending, forbidden: isStatus(error, 403) };
+  const {
+    data = NO_TRAIL,
+    isPending,
+    isError,
+    error,
+    refetch,
+  } = useQuery(securityEventsQuery(filter));
+  const forbidden = isStatus(error, 403);
+  return {
+    data,
+    pending: isPending,
+    forbidden,
+    failed: isError && !forbidden,
+    retry: () => void refetch(),
+  };
 }

@@ -6,12 +6,13 @@ import {
   SECURITY_TRAIL_PAGE,
 } from "@repo/contracts";
 import { makeWorkerUtils } from "graphile-worker";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { entitledAutomation } from "../src/billing/plans";
 import { loadEnv } from "../src/config/env";
 import {
   account,
   actions,
+  analysisNotes,
   and,
   clusterIndexes,
   clusters,
@@ -37,7 +38,9 @@ import { workloadKey } from "../src/engine/ports";
 import { applyCluster, promoteByScore } from "../src/jobs/apply";
 import { refreshInferredWindow } from "../src/jobs/change-window";
 import { classifyCluster } from "../src/jobs/classify";
+import { openClusterSession } from "../src/jobs/cluster-connection";
 import { collectCluster } from "../src/jobs/collect";
+import { pendingBuildsByCollection } from "../src/jobs/collection-budget";
 import { drainPool } from "../src/jobs/connection-pool";
 import { activeCooldownKeys, cooldownKey } from "../src/jobs/cooldowns";
 import { applyCreatesForCluster } from "../src/jobs/create";
@@ -1893,6 +1896,30 @@ describe("outage resilience", () => {
       .from(recommendations)
       .where(eq(recommendations.clusterId, restartId));
     expect(proposals).toHaveLength(0);
+
+    // ...and the empty list now says why (#277). This is the exact cluster the
+    // issue is about: the refusal is correct and permanent, and until this note
+    // existed the customer's only signal was a panel indistinguishable from
+    // "your indexes are all fine".
+    const [note] = await db
+      .select()
+      .from(analysisNotes)
+      .where(eq(analysisNotes.clusterId, restartId));
+    expect(note?.consideredIndexes).toBe(1);
+    expect(note?.trustedIndexes).toBe(0);
+    expect(note?.refusals).toEqual({ "counters-reset": 1 });
+
+    // Through the endpoint the dashboard actually reads, with the sentence built
+    // from the thresholds the gate used rather than stored beside them.
+    const payload = asRecord(
+      await (await api(`/clusters/${restartId}/recommendations`, owner)).json(),
+    );
+    const analysis = asRecord(payload.analysis);
+    expect(analysis.usagePaused).toBe(true);
+    expect(analysis.dominantRefusal).toBe("counters-reset");
+    expect(analysis.refusedIndexes).toBe(1);
+    expect(String(analysis.explanation)).toContain("7-day observation window");
+    expect(String(analysis.explanation)).toContain("Redundancy findings are unaffected.");
   });
 
   it("persists the real counter-start time from a live collect", async () => {
@@ -2116,6 +2143,67 @@ describe("cancelling a pending drop", () => {
 
     await coll.drop().catch(() => {});
   });
+
+  // #270. The window is frozen at hide time on purpose, and until now the only
+  // exit for an owner who already knew was to cancel the drop — which
+  // re-proposes it later and recomputes the same window from the same history.
+  it("shortens a pending drop's observe window to the floor, and never past it", async () => {
+    const [rec] = await db
+      .insert(recommendations)
+      .values({
+        clusterId,
+        type: "DROP_UNUSED",
+        state: "HIDDEN",
+        database: "inttest",
+        collection: "expedite",
+        indexName: "expedite_1",
+        rationale: "no recorded usage",
+        score: 61,
+        estimatedBytesSaved: 2048,
+        // Hidden three and a half days ago on a sixty-day window. The half is
+        // deliberate: the floor rounds UP, so a fixture sitting exactly on a day
+        // boundary is 3 or 4 depending on how long the insert took.
+        hiddenAt: new Date(Date.now() - 3.5 * 86_400_000),
+        observeDays: 60,
+      })
+      .returning();
+    if (rec === undefined) throw new Error("failed to insert recommendation");
+
+    // No `days`: the api takes the floor, so the dashboard never computes it.
+    const res = await api(`/recommendations/${rec.id}/observe-window`, owner, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(200);
+    const shortened = asRecord(await res.json());
+    // Four, not three: the floor is the time already served rounded up, so the
+    // drop is due in about half a day rather than the instant this returns.
+    // Rounding the other way would make "shorten" mean "drop at the next tick",
+    // with no interval in which anyone could change their mind.
+    expect(shortened.observeDays).toBe(4);
+    expect(shortened.observeReason).toContain("by an owner");
+    // Still HIDDEN: what ended is the observation, not the pipeline. The change
+    // window and the regression gate are still ahead of it.
+    expect(shortened.state).toBe("HIDDEN");
+
+    // Asking again is a no-op that says so rather than silently succeeding — the
+    // window is already at the floor, and there is nothing left to shorten.
+    const again = await api(`/recommendations/${rec.id}/observe-window`, owner, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    expect(again.status).toBe(400);
+
+    // Lengthening is refused here even though it is a perfectly good number:
+    // that is what the policy baseline is for.
+    const longer = await api(`/recommendations/${rec.id}/observe-window`, owner, {
+      method: "POST",
+      body: JSON.stringify({ days: 90 }),
+    });
+    expect(longer.status).toBe(400);
+
+    await db.delete(recommendations).where(eq(recommendations.id, rec.id));
+  });
 });
 
 describe("auto-approval is one threshold", () => {
@@ -2285,11 +2373,20 @@ describe("workload collection is batched", () => {
     if (orders.length > 0) expect(orders.some((s) => s.equality.includes("status"))).toBe(true);
     if (carts.length > 0) expect(carts.some((s) => s.equality.includes("tier"))).toBe(true);
 
-    // And the restructured suggest run completes against a real cluster.
+    // And the restructured suggest run completes against a real cluster —
+    // WITHOUT switching workload analysis on first, because it is on by default
+    // now (#258). The pass used to need a policy row saying `true`, and a new
+    // cluster has no policy row at all, which is precisely the cluster the
+    // create side had the most to say about and said nothing on.
+    expect(await suggestForCluster(db, clusterId)).toBeGreaterThanOrEqual(0);
+
+    // Off is still off, and now it is a decision the data records rather than
+    // the absence of one. Asserted through the api so the round trip that stores
+    // it is the thing under test.
     await api(`/clusters/${clusterId}/policy`, owner, {
       method: "PUT",
       body: JSON.stringify({
-        workloadAnalysis: true,
+        workloadAnalysis: false,
         instantCreate: false,
         observeWindowDays: 7,
         maxCollectionSizeBytes: null,
@@ -2298,7 +2395,148 @@ describe("workload collection is batched", () => {
         changeWindowEndHour: null,
       }),
     });
-    expect(await suggestForCluster(db, clusterId)).toBeGreaterThanOrEqual(0);
+    // Zero without dialling: the guard is the first thing the pass does, so a
+    // cluster switched off costs one row read and no connection.
+    expect(await suggestForCluster(db, clusterId)).toBe(0);
+  });
+});
+
+// The post-build watch measures each index against a baseline taken at that
+// index's OWN build time, so build #2 is judged against a collection already
+// carrying #1 (#282). Three builds that each add a defensible 15% are three
+// STABLE verdicts and a collection half again slower than where it started.
+describe("builds that are individually fine and cumulatively are not", () => {
+  it("reports the collection and stops building on it unattended", async () => {
+    // Enough separate write COMMANDS for a judgement: latencyStats counts
+    // operations, so one insertMany of forty documents is one op and forty
+    // inserts are forty. minWindowOps is 20.
+    const orders = mongo.db("inttest").collection("orders");
+    for (let i = 0; i < 60; i++) await orders.insertOne({ cumulative: i });
+
+    // Read the collection's real counters through the same collector the job
+    // uses, so the baselines below sit relative to a live reading rather than to
+    // numbers invented here. They only ever grow, so a fixture placed under this
+    // reading stays under whatever finalize sees a moment later.
+    const probe = await openClusterSession(db, clusterId);
+    const { writes } = await probe.session.collector.collectionLatency("inttest", "orders");
+    await probe.release();
+    expect(writes.ops).toBeGreaterThan(45);
+    const window = 25;
+    // A baseline that makes the window read exactly `ratio` times slower than the
+    // baseline average, over the same window. Solving
+    // (L - X) / window = ratio * X / B for X, where B is the baseline's op count
+    // and L the current cumulative latency — so the fixture states the RATIO it
+    // wants and the arithmetic follows, rather than the other way round.
+    const baselineLatencyFor = (ratio: number): number => {
+      const b = writes.ops - window;
+      return Math.round((b * writes.latencyMicros) / (b + ratio * window));
+    };
+
+    const built = new Date(Date.now() - 60 * 86_400_000);
+    const older = new Date(Date.now() - 90 * 86_400_000);
+    // The run's start: a baseline so far below the current reading that the
+    // collection is unambiguously slower than it was.
+    const [first] = await db
+      .insert(recommendations)
+      .values({
+        clusterId,
+        type: "CREATE",
+        state: "ACTIVE",
+        source: "WORKLOAD",
+        database: "inttest",
+        collection: "orders",
+        indexName: "cumulative_first_1",
+        rationale: "first of a run",
+        score: 70,
+        builtAt: older,
+        // 1.42x, which is the band this change adds and the reason it is a band.
+        // The oldest row's OWN watch reads the same two numbers at 1.5, so
+        // anything above that is already caught — by rolling back the OLDEST
+        // index, which is the attribution the issue warns about. Below 1.3
+        // nothing fires at all. In between, only the collection-level check
+        // speaks, and it reports rather than undoes.
+        baselineWriteOps: writes.ops - window,
+        baselineWriteLatency: baselineLatencyFor(1.42),
+      })
+      .returning();
+    // The one graduating, whose OWN baseline says writes are fine: its window
+    // average lands well under the 1.5x its own gate asks for.
+    const [second] = await db
+      .insert(recommendations)
+      .values({
+        clusterId,
+        type: "CREATE",
+        state: "ACTIVE",
+        source: "WORKLOAD",
+        database: "inttest",
+        collection: "orders",
+        indexName: "cumulative_second_1",
+        rationale: "second of a run",
+        score: 70,
+        builtAt: built,
+        // Its own watch sees 1.05x and is right to: this index did not slow the
+        // collection. It is the run it is part of that did.
+        baselineWriteOps: writes.ops - window,
+        baselineWriteLatency: baselineLatencyFor(1.05),
+      })
+      .returning();
+    if (first === undefined || second === undefined) throw new Error("failed to insert");
+
+    await finalizeCluster(db, clusterId);
+
+    // Its own watch passed — it graduated, baselines cleared.
+    const [graduated] = await db
+      .select()
+      .from(recommendations)
+      .where(eq(recommendations.id, second.id));
+    expect(graduated?.state).toBe("ACTIVE");
+    expect(graduated?.baselineWriteOps).toBeNull();
+
+    // And the collection was reported anyway, parked under the empty index name
+    // that means "the whole collection".
+    const [parked] = await db
+      .select()
+      .from(indexCooldowns)
+      .where(
+        and(
+          eq(indexCooldowns.clusterId, clusterId),
+          eq(indexCooldowns.collection, "orders"),
+          eq(indexCooldowns.indexName, ""),
+        ),
+      );
+    expect(parked?.reason).toContain("slower than before the run of builds");
+    expect(parked?.until.getTime()).toBeGreaterThan(Date.now());
+    // Nothing was rolled back: the newest index is not necessarily the culprit,
+    // and undoing the wrong one is worse than saying so.
+    expect(graduated?.state).not.toBe("ROLLED_BACK");
+    const [firstAfter] = await db
+      .select()
+      .from(recommendations)
+      .where(eq(recommendations.id, first.id));
+    expect(firstAfter?.state).toBe("ACTIVE");
+
+    // The dashboard names it as the collection rather than as an index.
+    const cooldowns = asRecord(await (await api(`/clusters/${clusterId}/cooldowns`, owner)).json());
+    const rows = Array.isArray(cooldowns.parked) ? cooldowns.parked.map(asRecord) : [];
+    const collectionRow = rows.find((row) => row.wholeCollection === true);
+    expect(collectionRow?.collection).toBe("orders");
+
+    // Cleanup: this cluster is the suite's main one and later scenarios read it.
+    await db.delete(recommendations).where(eq(recommendations.id, first.id));
+    await db.delete(recommendations).where(eq(recommendations.id, second.id));
+    await db
+      .delete(indexCooldowns)
+      .where(
+        and(
+          eq(indexCooldowns.clusterId, clusterId),
+          eq(indexCooldowns.collection, "orders"),
+          eq(indexCooldowns.indexName, ""),
+        ),
+      );
+    await mongo
+      .db("inttest")
+      .collection("orders")
+      .deleteMany({ cumulative: { $exists: true } });
   });
 });
 
@@ -3096,6 +3334,43 @@ describe("workload source follows the server version", () => {
 // because none is wired. What matters is that the limits are enforced by the
 // api rather than only drawn in the dashboard — a quota the client checks is
 // not a quota.
+// The default has to be the same number in two places or the dashboard renders a
+// state the engine does not act on: the column, for a row that exists, and this
+// read's fallback, for the normal state of a new cluster — no policy row at all,
+// because nothing creates one at onboarding (#258).
+describe("workload analysis is on before anybody configures anything", () => {
+  it("reads as on with no policy row, and stays off once switched off", async () => {
+    const id = await bareCluster("Unconfigured Policy");
+    const rows = await db.select().from(policies).where(eq(policies.clusterId, id));
+    expect(rows).toHaveLength(0);
+
+    const fresh = asRecord(await (await api(`/clusters/${id}/policy`, owner)).json());
+    expect(fresh.workloadAnalysis).toBe(true);
+    // The create side proposes; it never builds without being asked. That is
+    // what makes an on-by-default safe, so it is asserted beside it.
+    expect(fresh.instantCreate).toBe(false);
+    expect(fresh.autoApplyScore).toBe(null);
+
+    const saved = await api(`/clusters/${id}/policy`, owner, {
+      method: "PUT",
+      body: JSON.stringify({
+        workloadAnalysis: false,
+        instantCreate: false,
+        observeWindowDays: 30,
+        maxCollectionSizeBytes: null,
+        autoApplyScore: null,
+        changeWindowStartHour: null,
+        changeWindowEndHour: null,
+      }),
+    });
+    expect(saved.status).toBe(200);
+    // A stored false must survive the read's fallback — otherwise "off" would be
+    // unreachable, which is the mirror image of the bug being fixed.
+    const after = asRecord(await (await api(`/clusters/${id}/policy`, owner)).json());
+    expect(after.workloadAnalysis).toBe(false);
+  });
+});
+
 describe("plan limits", () => {
   async function setPlan(orgId: string, plan: string): Promise<void> {
     await db.update(organizations).set({ plan }).where(eq(organizations.id, orgId));
@@ -3970,6 +4245,239 @@ describe("the control plane's own indexes", () => {
     const unindexed = rows.rows.map((row) => `${String(row.child)}.${String(row.column)}`);
     expect(unindexed).toEqual([]);
   });
+
+  // "One live recommendation per index" was convention until #283 — three guard
+  // functions every producer had to remember to call, over a schema that would
+  // happily store two. These assert the net underneath them, which is the only
+  // part a new producer cannot forget. Written against the constraint rather than
+  // through a pass, because the thing under test is the database's answer.
+  // The per-collection build budget's database half (#281). The arithmetic and the
+  // calibration are unit-tested; what needs a real table is which rows count.
+  describe("pending builds per collection", () => {
+    let budgetClusterId: string;
+
+    const build = (
+      overrides: Partial<typeof recommendations.$inferInsert>,
+    ): typeof recommendations.$inferInsert => ({
+      clusterId: budgetClusterId,
+      type: "CREATE",
+      state: "PROPOSED",
+      source: "WORKLOAD",
+      database: "shop",
+      collection: "orders",
+      indexName: "fixture_1",
+      rationale: "fixture",
+      score: 50,
+      targetSpec: { keys: ["a"], retire: [] },
+      ...overrides,
+    });
+
+    beforeAll(async () => {
+      const org = asRecord(await (await api("/org", owner)).json());
+      const [row] = await db
+        .insert(clusters)
+        .values({
+          orgId: asString(org.id),
+          name: "Build Budget Cluster",
+          sealedDek: Buffer.alloc(1),
+          sealedData: Buffer.alloc(1),
+          keyVersion: 1,
+        })
+        .returning();
+      if (row === undefined) throw new Error("failed to insert cluster");
+      budgetClusterId = row.id;
+      createdClusterIds.push(budgetClusterId);
+    });
+
+    afterEach(async () => {
+      await db.delete(recommendations).where(eq(recommendations.clusterId, budgetClusterId));
+    });
+
+    // Pending is the point. An APPROVED create waits for the change window, which
+    // can be most of a day, and its index does not exist yet — so counting only
+    // what a collect saw makes five builds approved across five passes each look
+    // like the first one.
+    it("counts a build in flight, whatever live state it is in", async () => {
+      await db
+        .insert(recommendations)
+        .values([
+          build({ indexName: "a_1" }),
+          build({ indexName: "b_1", state: "APPROVED" }),
+          build({ indexName: "c_1", state: "BUILDING" }),
+        ]);
+      const counts = await pendingBuildsByCollection(db, budgetClusterId);
+      expect(counts.get("shop orders")).toBe(3);
+    });
+
+    // A build that retires what it replaces leaves the collection carrying the
+    // same number or fewer, so charging it against a budget it is about to
+    // relieve would have the engine arguing against its own best move.
+    it("does not count a build that retires what it replaces", async () => {
+      await db.insert(recommendations).values([
+        build({
+          indexName: "wide_1",
+          type: "UPDATE",
+          targetSpec: { keys: ["a"], retire: ["a_1"] },
+        }),
+        build({
+          indexName: "merged_1",
+          type: "MERGE",
+          targetSpec: { keys: ["a", "b"], retire: ["a_1", "b_1"] },
+        }),
+      ]);
+      expect(
+        (await pendingBuildsByCollection(db, budgetClusterId)).get("shop orders"),
+      ).toBeUndefined();
+    });
+
+    // A settled build is either an index that exists — and so is already in the
+    // collect's own count — or one that never will be. Counting it would charge
+    // the collection twice for the same index.
+    it("does not count a settled build", async () => {
+      await db
+        .insert(recommendations)
+        .values([
+          build({ indexName: "done_1", state: "ACTIVE" }),
+          build({ indexName: "no_1", state: "REJECTED" }),
+        ]);
+      expect(
+        (await pendingBuildsByCollection(db, budgetClusterId)).get("shop orders"),
+      ).toBeUndefined();
+    });
+
+    // The budget is per collection, which is the whole of #281: the guards are
+    // keyed on an index and the cost is paid per collection.
+    it("keeps collections apart", async () => {
+      await db
+        .insert(recommendations)
+        .values([
+          build({ indexName: "a_1" }),
+          build({ indexName: "b_1", collection: "customers" }),
+        ]);
+      const counts = await pendingBuildsByCollection(db, budgetClusterId);
+      expect(counts.get("shop orders")).toBe(1);
+      expect(counts.get("shop customers")).toBe(1);
+    });
+  });
+
+  describe("one live claim per index", () => {
+    let claimClusterId: string;
+
+    // Rows go in by hand: the point is what the schema refuses, and driving a
+    // pass would test the guards that are supposed to keep us away from it.
+    const live = (
+      overrides: Partial<typeof recommendations.$inferInsert>,
+    ): typeof recommendations.$inferInsert => ({
+      clusterId: claimClusterId,
+      type: "DROP_UNUSED",
+      state: "PROPOSED",
+      source: "CLASSIFY",
+      database: "shop",
+      collection: "orders",
+      indexName: "status_1",
+      rationale: "fixture",
+      score: 10,
+      ...overrides,
+    });
+
+    const insert = (values: typeof recommendations.$inferInsert): Promise<unknown> =>
+      db.insert(recommendations).values(values);
+
+    beforeAll(async () => {
+      const org = asRecord(await (await api("/org", owner)).json());
+      const [row] = await db
+        .insert(clusters)
+        .values({
+          orgId: asString(org.id),
+          name: "One Live Claim Cluster",
+          sealedDek: Buffer.alloc(1),
+          sealedData: Buffer.alloc(1),
+          keyVersion: 1,
+        })
+        .returning();
+      if (row === undefined) throw new Error("failed to insert cluster");
+      claimClusterId = row.id;
+      createdClusterIds.push(claimClusterId);
+    });
+
+    afterEach(async () => {
+      await db.delete(recommendations).where(eq(recommendations.clusterId, claimClusterId));
+    });
+
+    // The duplicate the three guards exist to prevent, and the one a fourth
+    // producer that forgets one of them would create.
+    it("refuses a second live row making the same claim", async () => {
+      await insert(live({}));
+      await expect(insert(live({ source: "WORKLOAD" }))).rejects.toThrow();
+    });
+
+    // The part a constraint keyed on `type` would have got wrong: both of these
+    // mean "this index should go", so holding one of each is the same duplicate
+    // arriving by two routes.
+    it("refuses DROP_REDUNDANT beside DROP_UNUSED", async () => {
+      await insert(live({ type: "DROP_UNUSED" }));
+      await expect(insert(live({ type: "DROP_REDUNDANT", source: "RETIRE" }))).rejects.toThrow();
+    });
+
+    // A drop and a build are different claims about one NAME, and both are
+    // legitimate at once: narrowing an index means building the shorter one
+    // while the longer is still on its way out.
+    it("allows a build beside a drop on the same index", async () => {
+      await insert(live({ type: "DROP_UNUSED" }));
+      await insert(
+        live({ type: "CREATE", source: "WORKLOAD", targetSpec: { keys: [], retire: [] } }),
+      );
+      const rows = await db
+        .select({ type: recommendations.type })
+        .from(recommendations)
+        .where(eq(recommendations.clusterId, claimClusterId));
+      expect(rows.map((row) => row.type).sort()).toEqual(["CREATE", "DROP_UNUSED"]);
+    });
+
+    // A settled row is history. classify is supposed to be able to propose
+    // dropping an index a graduated build put there, so the predicate has to let
+    // the next claim through — otherwise this index would freeze the engine out
+    // of every index it ever touched.
+    it("allows a new claim once the previous one settled", async () => {
+      await insert(live({ state: "DROPPED" }));
+      await insert(live({ state: "REJECTED" }));
+      await insert(live({}));
+      const rows = await db
+        .select({ state: recommendations.state })
+        .from(recommendations)
+        .where(eq(recommendations.clusterId, claimClusterId));
+      expect(rows.map((row) => row.state).sort()).toEqual(["DROPPED", "PROPOSED", "REJECTED"]);
+    });
+
+    // Advisories are out on purpose: classify already exempts them from the
+    // standing check by hand, and two different things worth telling a human
+    // about one index are both worth saying.
+    it("does not constrain advisories", async () => {
+      await insert(live({ type: "ADVISORY_REVIEW", rationale: "hinted but unused" }));
+      await insert(live({ type: "ADVISORY_REVIEW", rationale: "a second index on the same keys" }));
+      const rows = await db
+        .select({ rationale: recommendations.rationale })
+        .from(recommendations)
+        .where(eq(recommendations.clusterId, claimClusterId));
+      expect(rows).toHaveLength(2);
+    });
+
+    // What the producers do with the refusal. A losing race must be a no-op
+    // rather than a thrown pass — the other producer said the same thing first,
+    // which is the outcome either way.
+    it("makes a losing insert a no-op for the producers", async () => {
+      await insert(live({}));
+      await db
+        .insert(recommendations)
+        .values(live({ source: "WORKLOAD" }))
+        .onConflictDoNothing();
+      const rows = await db
+        .select({ source: recommendations.source })
+        .from(recommendations)
+        .where(eq(recommendations.clusterId, claimClusterId));
+      expect(rows.map((row) => row.source)).toEqual(["CLASSIFY"]);
+    });
+  });
 });
 
 // The owner second-factor posture (#55) is an env flag, so it gets its own api
@@ -4768,5 +5276,62 @@ describe("choosing which databases to observe", () => {
       .from(recommendations)
       .where(eq(recommendations.id, recId));
     expect(after?.state).toBe("PROPOSED");
+  });
+});
+
+// A read-only cluster is the strongest form of the same problem the observed-
+// database refusal above exists for: applyCluster returns before pre-flight, so
+// an accepted approval sits at APPROVED with no action row and nothing anywhere
+// saying it can never proceed (#257).
+describe("approving on a read-only cluster", () => {
+  it("refuses, naming the mode, rather than parking the row forever", async () => {
+    // Clusters are read-only by default — the column's default, and the whole
+    // onboarding story — so this needs no setup beyond existing.
+    const id = await bareCluster("Read Only Approve");
+    const [rec] = await db
+      .insert(recommendations)
+      .values({
+        clusterId: id,
+        type: "DROP_REDUNDANT" as const,
+        state: "PROPOSED" as const,
+        database: "app",
+        collection: "orders",
+        indexName: "userId_1",
+        rationale: "key-prefix of userId_1_name_1, which already covers it",
+        score: 61,
+        estimatedBytesSaved: 8_192,
+      })
+      .returning();
+    const recId = asString(rec?.id);
+
+    const refused = await api(`/recommendations/${recId}/approve`, owner, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    expect(refused.status).toBe(409);
+    // The message, not just the status: the sibling refusal above answers 409
+    // too, and a reader who cannot act needs to be told which of the two it is.
+    const body = asRecord(await refused.json());
+    expect(String(body.message)).toContain("read-only");
+
+    const [after] = await db
+      .select({ state: recommendations.state })
+      .from(recommendations)
+      .where(eq(recommendations.id, recId));
+    expect(after?.state).toBe("PROPOSED");
+
+    // And it is the MODE that refuses, not the row: the same click lands once
+    // the cluster is live.
+    await db.update(clusters).set({ readOnly: false }).where(eq(clusters.id, id));
+    const accepted = await api(`/recommendations/${recId}/approve`, owner, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    expect(accepted.status).toBe(200);
+    const [live] = await db
+      .select({ state: recommendations.state })
+      .from(recommendations)
+      .where(eq(recommendations.id, recId));
+    expect(live?.state).toBe("APPROVED");
   });
 });

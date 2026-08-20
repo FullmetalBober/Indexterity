@@ -8,9 +8,15 @@ import { RecommendationsTable } from "./recommendations-table";
 const approveRecommendation = vi.hoisted(() => vi.fn());
 const unhideRecommendation = vi.hoisted(() => vi.fn());
 const rollbackRecommendation = vi.hoisted(() => vi.fn());
+const shortenObserveWindow = vi.hoisted(() => vi.fn());
 
 vi.mock("~/lib/api", () => ({
-  api: () => ({ approveRecommendation, unhideRecommendation, rollbackRecommendation }),
+  api: () => ({
+    approveRecommendation,
+    unhideRecommendation,
+    rollbackRecommendation,
+    shortenObserveWindow,
+  }),
 }));
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
@@ -29,6 +35,7 @@ function rec(over: Partial<Recommendation> = {}): Recommendation {
     estimatedBytesSaved: 1024,
     hiddenAt: null,
     observeDays: null,
+    observeReason: null,
     createdAt: "2026-08-01T00:00:00.000Z",
     ...over,
   };
@@ -128,6 +135,40 @@ describe("RecommendationsTable", () => {
     expect(approveRecommendation).toHaveBeenCalledWith({ id: "r9" });
   });
 
+  // #270. A hidden drop with time left on its window offers a second way out:
+  // stop waiting. It is not offered once the window has passed, because there
+  // would be nothing left to shorten.
+  it("offers a hidden drop with time left the option to stop observing", async () => {
+    const hiddenAt = new Date(Date.now() - 86_400_000).toISOString();
+    renderInApp(
+      <RecommendationsTable
+        total={1}
+        clusterId="c1"
+        recommendations={[rec({ id: "r7", state: "HIDDEN", hiddenAt, observeDays: 30 })]}
+        loading={false}
+      />,
+    );
+
+    await userEvent.click(await screen.findByRole("button", { name: "Drop sooner" }));
+    await userEvent.click(screen.getByRole("button", { name: "End observation" }));
+    expect(shortenObserveWindow).toHaveBeenCalledWith({ id: "r7" });
+  });
+
+  it("does not offer it once the window has already passed", async () => {
+    const hiddenAt = new Date(Date.now() - 10 * 86_400_000).toISOString();
+    renderInApp(
+      <RecommendationsTable
+        total={1}
+        clusterId="c1"
+        recommendations={[rec({ state: "HIDDEN", hiddenAt, observeDays: 1 })]}
+        loading={false}
+      />,
+    );
+
+    expect(await screen.findByRole("button", { name: "Keep it" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Drop sooner" })).not.toBeInTheDocument();
+  });
+
   // Each state offers exactly one thing, and an advisory offers none — the engine
   // will not act on those at any setting, so a button would be a lie.
   it.each([
@@ -158,6 +199,32 @@ describe("RecommendationsTable", () => {
 
     expect(screen.getByText("review manually")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
+  });
+
+  it("offers nothing on a read-only cluster, and says which one it is", () => {
+    renderInApp(
+      <RecommendationsTable
+        total={1}
+        clusterId="c1"
+        recommendations={[rec()]}
+        loading={false}
+        readOnly
+      />,
+    );
+
+    // The api refuses this approval too; the point of the cell is that a reader
+    // never gets that far. An APPROVED row on a read-only cluster can never be
+    // acted on, and nothing downstream would have said so.
+    expect(screen.getByText("read-only cluster")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
+  });
+
+  it("still offers approve when the mode is not stated, rather than withholding it", () => {
+    renderInApp(
+      <RecommendationsTable total={1} clusterId="c1" recommendations={[rec()]} loading={false} />,
+    );
+
+    expect(screen.getByRole("button", { name: "Approve" })).toBeInTheDocument();
   });
 
   it("says when a hidden index is due to be dropped, since the score no longer decides", () => {

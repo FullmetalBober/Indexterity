@@ -12,6 +12,7 @@ function entry(overrides: Partial<ParkedIndex> = {}): ParkedIndex {
     regressionCount: 1,
     until: "2026-11-09T00:00:00.000Z",
     active: true,
+    wholeCollection: false,
     createdAt: "2026-08-11T00:00:00.000Z",
     updatedAt: "2026-08-11T00:00:00.000Z",
     ...overrides,
@@ -29,6 +30,27 @@ function payload(parked: ParkedIndex[]): ClusterCooldowns {
 }
 
 describe("ParkedPanel", () => {
+  // A collection-level park names no index because there is no one index to name
+  // (#282): several builds each passed their own post-build check and together
+  // slowed the collection's writes. Without this the row read as
+  // "shop.orders · " with a dangling separator.
+  it("names the collection when the whole collection is parked", () => {
+    render(
+      <ParkedPanel
+        cooldowns={payload([
+          entry({
+            indexName: "",
+            wholeCollection: true,
+            reason: "writes 52% slower than before the run of builds that began 2026-07-30",
+          }),
+        ])}
+        loading={false}
+      />,
+    );
+    expect(screen.getByText(/shop\.orders · the whole collection/)).toBeInTheDocument();
+    expect(screen.getByText(/52% slower/)).toBeInTheDocument();
+  });
+
   // The sentence the panel exists to say (#159). Before it, a cluster with six
   // parked indexes and a clean one rendered identically.
   it("leads with how many are parked and when the next one is eligible", () => {

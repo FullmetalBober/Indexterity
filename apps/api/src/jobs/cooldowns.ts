@@ -12,6 +12,29 @@ export function cooldownKey(database: string, collection: string, indexName: str
   return `${database}\u0000${collection}\u0000${indexName}`;
 }
 
+// A cooldown on the COLLECTION rather than on one of its indexes (#282).
+//
+// The empty index name is a sentinel and it is chosen rather than tolerated: the
+// table's unique key is (cluster, database, collection, index_name), which is
+// already exactly the shape a collection-level park needs, and an index cannot be
+// called "" on either engine — mongo refuses an empty index name and SQL Server's
+// sysname is not nullable or empty — so the sentinel cannot collide with a real
+// index. A separate table would have duplicated the escalation, the fade and the
+// panel that draws them, for one row shape.
+//
+// It parks nothing by itself. `activeCooldownKeys` returns it like any other key
+// and no index matches it; what reads it is suggest.ts, which declines to build
+// UNATTENDED on a collection whose writes the last run of builds slowed.
+export const WHOLE_COLLECTION = "";
+
+export function collectionCooldownKey(database: string, collection: string): string {
+  return cooldownKey(database, collection, WHOLE_COLLECTION);
+}
+
+export function isWholeCollection(indexName: string): boolean {
+  return indexName === WHOLE_COLLECTION;
+}
+
 // The (database, collection, index) keys currently cooling down for a cluster —
 // the engine skips proposing these so a regressed index isn't blindly re-cycled.
 export async function activeCooldownKeys(db: Database, clusterId: string): Promise<Set<string>> {

@@ -21,8 +21,11 @@ export interface DropSignals {
   readonly snapshots: number;
   readonly redundant: boolean;
   readonly sizeBytes: number;
-  // Times this exact index regressed before (from cooldown history).
-  readonly pastRegressions: number;
+  // How much this index's regression history still counts against it — see
+  // regressionWeight, and note it is a WEIGHT and not a count: a regression is
+  // worth its full 1.0 while the cooldown it caused is still running and fades
+  // to nothing over the same span again.
+  readonly regressionWeight: number;
 }
 
 export interface CreateSignals {
@@ -33,10 +36,15 @@ export interface CreateSignals {
   readonly sortedInMemory?: boolean;
   readonly count: number;
   readonly docCount: number;
-  readonly pastRegressions: number;
+  readonly regressionWeight: number;
   // How much the scan is actually costing (analysis/severity.ts). Defaults to
   // ROUTINE so callers without a workload source behave as before.
   readonly severity?: ScanSeverity;
+  // How many indexes this collection would carry once this one is built —
+  // existing, plus builds already in flight, plus this one (#281). Omitted by
+  // callers with no index list, and then the term is skipped rather than
+  // guessed: a missing count is not evidence of an uncrowded collection.
+  readonly collectionIndexes?: number;
 }
 
 const GB = 1024 ** 3;
@@ -47,6 +55,94 @@ const SNAPSHOTS_FOR_FULL_CREDIT = 125;
 const SIGHTINGS_FOR_FULL_CREDIT = 35;
 // One regression is close to disqualifying, two are disqualifying.
 const REGRESSION_PENALTY = 40;
+const DAY_MS = 86_400_000;
+
+// Where an index count stops being ordinary, and what each one past it costs
+// (#281).
+//
+// Every collision guard in the engine is keyed on an INDEX; the cost of an index
+// is paid per COLLECTION, because each write updates every index on it. So five
+// individually-correct creates on one busy collection are five individually
+// defensible proposals that together double its write cost, and nothing in the
+// engine ever formed that thought: `maxCollectionSizeBytes` bounds the cost of
+// BUILDING, not the cost of keeping.
+//
+// This is the score term rather than a cap, which is the choice worth stating.
+// A cap would refuse, and a refusal is a finding the customer never sees — the
+// invisible-suppression problem of #277 in a new place. A score keeps every
+// finding on screen, says why it scored what it did, and lets the threshold the
+// owner already set do the work: what falls below `autoApplyScore` stops being
+// built UNATTENDED and starts being a decision, which is exactly the right
+// outcome for "this collection is getting crowded".
+//
+// Both numbers are judgements calibrated against this scorer's own scale, not
+// measurements — there is no honest way to measure "how many indexes is too
+// many" without the workload in front of you. Four is `_id` plus three
+// purposeful indexes, which is an ordinary collection. Ten points a step means a
+// strong create (85) still auto-applies as the fifth index and needs a human as
+// the seventh, and the cap matches REGRESSION_PENALTY because that is this
+// file's existing word for "close to disqualifying".
+//
+// A COUNT rather than bytes or estimated write amplification, and that is the
+// issue's first design question. A count is crude: a two-key index on a small
+// collection is not the cost of an eight-key one on a large one. It is also the
+// only one of the three an owner can reason about, check against their own
+// cluster, and predict — and a term nobody can predict is a term that reads as
+// the engine being arbitrary.
+const ORDINARY_COLLECTION_INDEXES = 4;
+const CROWDING_STEP = 10;
+const CROWDING_MAX = 40;
+
+// What the count above costs a build, for the collection it would land on.
+export function crowdingPenalty(collectionIndexes: number): number {
+  const over = collectionIndexes - ORDINARY_COLLECTION_INDEXES;
+  if (over <= 0) return 0;
+  return Math.min(CROWDING_MAX, over * CROWDING_STEP);
+}
+
+// How much a past regression still counts, from the cooldown row it wrote.
+//
+// The penalty used to be permanent, and nothing made it so on purpose: the
+// cooldown was built to expire, the count was built to escalate, and the score
+// read that count with no clock at all — `index_cooldowns` rows are never purged
+// either, so an index that regressed once carried -40 for the life of the
+// cluster. With a 95-point ceiling on a drop and 70 the suggested auto-approve
+// threshold, that means ONE failed attempt permanently disqualified an index
+// from ever being cleaned up unattended again, against any future workload.
+//
+// The evidence is real and the best kind this engine has — the experiment ran on
+// production traffic and reads got slower, so something was using the index. It
+// should not be discarded the moment the cooldown lifts, or the same experiment
+// just runs again. But a workload is not the same workload a year later, and
+// evidence from one that no longer exists was being priced as if it were
+// collected this morning.
+//
+// So: full weight while the cooldown it caused is still running, then a straight
+// line to zero over that same span again. The escalation looks after itself —
+// a second regression buys a cooldown twice as long, so it both starts deeper
+// and takes twice as long to fade. `regression_count` is untouched and still
+// carries the audit trail the parked panel draws; only the SCORE forgets.
+export function regressionWeight(
+  cooldown: { readonly regressionCount: number; readonly until: Date | string },
+  observeDays: number,
+  now: Date = new Date(),
+): number {
+  const count = cooldown.regressionCount;
+  if (count <= 0) return 0;
+  const until = new Date(cooldown.until).getTime();
+  if (!Number.isFinite(until)) return count;
+  // The block this regression bought, recomputed rather than stored: it is
+  // `observeDays * 3 * count` at the moment it was written (jobs/cooldowns.ts).
+  // Recomputing from the CURRENT policy is deliberate — an owner who shortens
+  // the observe window is saying they want faster verdicts, and the fade should
+  // follow rather than honour a span that policy no longer stands behind.
+  const span = observeDays * 3 * count * DAY_MS;
+  if (span <= 0) return count;
+  const past = now.getTime() - until;
+  if (past <= 0) return count;
+  if (past >= span) return 0;
+  return count * (1 - past / span);
+}
 
 function clamp(score: number): number {
   return Math.max(0, Math.min(100, Math.round(score)));
@@ -72,7 +168,7 @@ export function dropScore(signals: DropSignals): number {
   if (signals.sizeBytes > 0) {
     score += Math.min(20, Math.round(20 * Math.log10(1 + (9 * signals.sizeBytes) / GB)));
   }
-  score -= signals.pastRegressions * REGRESSION_PENALTY;
+  score -= signals.regressionWeight * REGRESSION_PENALTY;
   return clamp(score);
 }
 
@@ -84,6 +180,7 @@ export function dropScore(signals: DropSignals): number {
 //   frequency     0-30  35 sightings for full credit
 //   collection    0-20  ≥1M docs 20, ≥10k 14, ≥1k 6
 //   severity      0-10  CRITICAL 10, ELEVATED 5 — the measured cost of the scan
+//   crowding    0 to -40  what the collection would then carry (#281)
 //
 // An in-memory sort scores below a scan because the query is already finding
 // its documents efficiently — the index would remove a sort, not a table walk.
@@ -105,7 +202,15 @@ export function createScore(signals: CreateSignals): number {
   else if (signals.docCount >= 1000) score += 6;
   if (signals.severity === "CRITICAL") score += 10;
   else if (signals.severity === "ELEVATED") score += 5;
-  score -= signals.pastRegressions * REGRESSION_PENALTY;
+  score -= signals.regressionWeight * REGRESSION_PENALTY;
+  // Only what a NET-NEW index costs. The caller passes no count for a candidate
+  // that retires what it replaces — an UPDATE widening an index, a MERGE folding
+  // several into one — because those leave the collection carrying the same
+  // number or fewer, and charging a build for a budget it is about to relieve
+  // would be the engine arguing against its own best move.
+  if (signals.collectionIndexes !== undefined) {
+    score -= crowdingPenalty(signals.collectionIndexes);
+  }
   return clamp(score);
 }
 
@@ -117,7 +222,7 @@ export interface NarrowSignals {
   readonly totalKeys: number;
   // Current size of the index, all replica members summed.
   readonly sizeBytes: number;
-  readonly pastRegressions: number;
+  readonly regressionWeight: number;
 }
 
 // Narrowing scores lower than anything else the engine proposes, and cannot
@@ -151,7 +256,7 @@ export function narrowScore(signals: NarrowSignals): number {
   // And what that weight costs. An index worth reclaiming is worth the rebuild.
   if (signals.sizeBytes >= GB) score += 10;
   else if (signals.sizeBytes >= 128 * 1024 * 1024) score += 6;
-  score -= signals.pastRegressions * REGRESSION_PENALTY;
+  score -= signals.regressionWeight * REGRESSION_PENALTY;
   return Math.min(NARROW_MAX_SCORE, clamp(score));
 }
 
@@ -159,7 +264,7 @@ export interface ReorderSignals {
   // Executions of the shapes this index's directions cannot serve.
   readonly count: number;
   readonly sizeBytes: number;
-  readonly pastRegressions: number;
+  readonly regressionWeight: number;
 }
 
 // Re-ordering a PROTECTED index is APPROVAL-ONLY whatever this returns —
@@ -186,7 +291,7 @@ export function reorderScore(signals: ReorderSignals): number {
   // the length of the watch.
   if (signals.sizeBytes >= GB) score -= 15;
   else if (signals.sizeBytes >= 128 * 1024 * 1024) score -= 8;
-  score -= signals.pastRegressions * REGRESSION_PENALTY;
+  score -= signals.regressionWeight * REGRESSION_PENALTY;
   return Math.min(REORDER_MAX_SCORE, clamp(score));
 }
 

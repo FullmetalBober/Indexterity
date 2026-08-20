@@ -1,15 +1,32 @@
 import { describe, expect, it } from "vitest";
-import { classifyUsage, countersRestartedDuring, usageHistoryIsTrustworthy } from "./classify";
+import {
+  classifyUsage,
+  counterResetDuring,
+  countersRestartedDuring,
+  usageHistoryIsTrustworthy,
+  usageTrustRefusal,
+} from "./classify";
 import type { UsageSnapshot } from "./types";
 
 // Snapshots at a given cadence, oldest first — because classifyUsage now reads
 // the clock rather than counting rows, a fixture where every snapshot shares a
 // timestamp cannot express "went quiet".
-function series(opsPerSnapshot: readonly number[], hoursApart = 6): UsageSnapshot[] {
-  return opsPerSnapshot.map((ops, i) => ({
-    capturedAt: new Date(Date.UTC(2026, 0, 1, i * hoursApart)).toISOString(),
-    perMember: [{ member: "m", ops, since: "2026-01-01T00:00:00Z" }],
-  }));
+//
+// Each entry is the ACTIVITY in that interval, which is what every case below
+// is really describing, and the helper accumulates it into the cumulative
+// counter mongod would actually report (#265). Stating the fixtures as
+// activity and storing them as counters is the whole shape of the bug in one
+// function: `[5, 0, 0, 3]` is one burst, a quiet spell and another burst, and
+// it reaches classifyUsage as 5, 5, 5, 8.
+function series(activityPerSnapshot: readonly number[], hoursApart = 6): UsageSnapshot[] {
+  let counter = 0;
+  return activityPerSnapshot.map((activity, i) => {
+    counter += activity;
+    return {
+      capturedAt: new Date(Date.UTC(2026, 0, 1, i * hoursApart)).toISOString(),
+      perMember: [{ member: "m", ops: counter, since: "2026-01-01T00:00:00Z" }],
+    };
+  });
 }
 
 const options = {
@@ -36,12 +53,14 @@ describe("classifyUsage", () => {
   it("PERIODIC_DEAD when it fired once then went quiet", () => {
     expect(classifyUsage(series([5, 0, 0, 0]), options)).toBe("PERIODIC_DEAD");
   });
-  it("sums ops across replica-set members", () => {
-    const split = series([0, 0, 0]).map((snapshot) => ({
+  it("sums activity across replica-set members", () => {
+    // Neither member is busy on its own every interval; between them the index
+    // is served at every look, which is what CONTINUOUS means.
+    const split = series([0, 0, 0]).map((snapshot, i) => ({
       ...snapshot,
       perMember: [
-        { member: "a", ops: 0, since: "" },
-        { member: "b", ops: 4, since: "" },
+        { member: "a", ops: i + 1, since: "" },
+        { member: "b", ops: 4 * (i + 1), since: "" },
       ],
     }));
     expect(classifyUsage(split, options)).toBe("CONTINUOUS");
@@ -72,6 +91,102 @@ describe("classifyUsage", () => {
     // not tell these two apart; hours can.
     const short = series([5, ...Array.from({ length: 39 }, () => 0)], 0.25);
     expect(classifyUsage(short, options)).toBe("PERIODIC_ALIVE");
+  });
+});
+
+// #265. The counters are cumulative and stored raw, so "this snapshot reports
+// ops" was true of every index used even once since the member's `since` — and
+// CONTINUOUS, the one class that means "in constant use", was the verdict on an
+// index that had served nothing for months. CONTINUOUS is not droppable, so the
+// dead index with the clearest evidence was the one that could never be
+// proposed.
+describe("classifyUsage — cumulative counters", () => {
+  const now = Date.UTC(2026, 2, 1);
+  const day = (n: number) => new Date(now - n * 86_400_000).toISOString();
+  const opts = { ...options, recentHours: 72, minHistory: 3 };
+
+  // Run-length storage as collect actually writes it: the counter moved once,
+  // sixty days ago, and every collect since has extended one unchanging row.
+  const frozenAfterOneUse = [
+    {
+      capturedAt: day(60),
+      lastSeenAt: day(60),
+      observations: 1,
+      maxGapMs: 0,
+      perMember: [{ member: "m", ops: 900, since: "s1" }],
+    },
+    {
+      capturedAt: day(59),
+      lastSeenAt: day(0),
+      observations: 1416,
+      maxGapMs: 3_600_000,
+      perMember: [{ member: "m", ops: 900, since: "s1" }],
+    },
+  ];
+
+  it("does not call an index continuous because its counter is merely non-zero", () => {
+    expect(classifyUsage(frozenAfterOneUse, opts)).toBe("PERIODIC_DEAD");
+  });
+
+  it("still calls an index continuous when the counter moves at every look", () => {
+    const moving = Array.from({ length: 10 }, (_, i) => ({
+      capturedAt: day(10 - i),
+      perMember: [{ member: "m", ops: 100 * (i + 1), since: "s1" }],
+    }));
+    expect(classifyUsage(moving, opts)).toBe("CONTINUOUS");
+  });
+
+  it("keeps FLAT_ZERO for a counter that never moved at all", () => {
+    const never = [
+      {
+        capturedAt: day(60),
+        lastSeenAt: day(0),
+        observations: 1440,
+        maxGapMs: 3_600_000,
+        perMember: [{ member: "m", ops: 0, since: "s1" }],
+      },
+    ];
+    expect(classifyUsage(never, opts)).toBe("FLAT_ZERO");
+  });
+
+  it("calls a burst inside the recent window alive, dated to when the counter jumped", () => {
+    const recent = [
+      {
+        capturedAt: day(30),
+        lastSeenAt: day(2),
+        observations: 672,
+        maxGapMs: 3_600_000,
+        perMember: [{ member: "m", ops: 900, since: "s1" }],
+      },
+      {
+        capturedAt: day(1),
+        lastSeenAt: day(0),
+        observations: 24,
+        maxGapMs: 3_600_000,
+        perMember: [{ member: "m", ops: 1500, since: "s1" }],
+      },
+    ];
+    expect(classifyUsage(recent, opts)).toBe("PERIODIC_ALIVE");
+  });
+
+  // A restart resets the counter, so the reading after it is everything that
+  // happened since — never a negative difference, and never silence.
+  it("reads a restarted counter as the activity it reports, not as a decrease", () => {
+    const restarted = [
+      {
+        capturedAt: day(10),
+        perMember: [{ member: "m", ops: 5000, since: "s1" }],
+      },
+      {
+        capturedAt: day(5),
+        perMember: [{ member: "m", ops: 40, since: "s2" }],
+      },
+      {
+        capturedAt: day(1),
+        perMember: [{ member: "m", ops: 80, since: "s2" }],
+      },
+    ];
+    expect(classifyUsage(restarted, opts)).toBe("CONTINUOUS");
   });
 });
 
@@ -486,5 +601,125 @@ describe("an idle index and an unwatched index", () => {
     const twoLooks: UsageSnapshot[] = [{ ...idle[0], observations: 2 } as UsageSnapshot];
     expect(usageHistoryIsTrustworthy(twoLooks, opts, now)).toBe(false);
     expect(usageHistoryIsTrustworthy(idle, opts, now)).toBe(true);
+  });
+});
+
+// #267. The gate refuses for eight different reasons and only ever said no, so
+// "findings are thin on this cluster" could not be turned into "and here is the
+// check doing it". The boolean is now derived from the reason, which is what
+// keeps a refusal reported to metrics and a refusal acted on from diverging.
+describe("usageTrustRefusal", () => {
+  const opts = {
+    recentHours: 12,
+    minHistory: 3,
+    minHistoryDays: 0,
+    minActiveHours: 0,
+    maxGapHours: 48,
+  };
+  const now = new Date("2026-03-04T00:00:00Z");
+  const at = (iso: string, ops = 0, since = ""): UsageSnapshot => ({
+    capturedAt: iso,
+    perMember: [{ member: "m", ops, since }],
+  });
+  const dense = [
+    at("2026-03-01T00:00:00Z"),
+    at("2026-03-02T00:00:00Z"),
+    at("2026-03-03T12:00:00Z"),
+  ];
+
+  it("says nothing refused when the history is trustworthy", () => {
+    expect(usageTrustRefusal(dense, opts, now)).toBeNull();
+  });
+
+  it("names the counter reset, and which of the three noticed it", () => {
+    const restarted = [
+      at("2026-03-01T00:00:00Z", 900, "2026-01-01T00:00:00Z"),
+      at("2026-03-02T00:00:00Z", 5, "2026-02-01T00:00:00Z"),
+      at("2026-03-03T12:00:00Z", 9, "2026-02-01T00:00:00Z"),
+    ];
+    expect(usageTrustRefusal(restarted, opts, now)).toEqual({
+      kind: "counters-reset",
+      trigger: "ops-went-backwards",
+    });
+  });
+
+  it("names too-few-collects", () => {
+    expect(usageTrustRefusal([at("2026-03-03T00:00:00Z")], opts, now)).toEqual({
+      kind: "too-few-collects",
+    });
+  });
+
+  it("names a hole between runs", () => {
+    const holed = [
+      at("2026-02-01T00:00:00Z"),
+      at("2026-02-02T00:00:00Z"),
+      at("2026-03-03T00:00:00Z"),
+    ];
+    expect(usageTrustRefusal(holed, opts, now)).toEqual({ kind: "gap-between-runs" });
+  });
+
+  it("names a hole inside a run, which the between-runs check cannot see", () => {
+    const interior: UsageSnapshot[] = [
+      {
+        capturedAt: "2026-02-01T00:00:00Z",
+        lastSeenAt: "2026-03-03T00:00:00Z",
+        observations: 100,
+        maxGapMs: 21 * 24 * 3_600_000,
+        perMember: [{ member: "m", ops: 0, since: "" }],
+      },
+    ];
+    expect(usageTrustRefusal(interior, opts, now)).toEqual({ kind: "gap-inside-run" });
+  });
+
+  it("names a history that stopped long ago", () => {
+    const stale = [
+      at("2026-01-01T00:00:00Z"),
+      at("2026-01-02T00:00:00Z"),
+      at("2026-01-03T00:00:00Z"),
+    ];
+    expect(usageTrustRefusal(stale, opts, now)).toEqual({ kind: "history-stale" });
+  });
+
+  it("names an idle collection", () => {
+    expect(usageTrustRefusal(dense, { ...opts, minActiveHours: 5 }, now, 1)).toEqual({
+      kind: "collection-idle",
+    });
+  });
+
+  it("names a span shorter than the warm-up", () => {
+    expect(usageTrustRefusal(dense, { ...opts, minHistoryDays: 30 }, now)).toEqual({
+      kind: "span-too-short",
+    });
+  });
+
+  // The boolean is the reason, negated. Nothing may drift between them.
+  it("agrees with usageHistoryIsTrustworthy on every case above", () => {
+    for (const [history, options, activeHours] of [
+      [dense, opts, undefined],
+      [[at("2026-03-03T00:00:00Z")], opts, undefined],
+      [dense, { ...opts, minActiveHours: 5 }, 1],
+    ] as const) {
+      expect(usageHistoryIsTrustworthy(history, options, now, activeHours)).toBe(
+        usageTrustRefusal(history, options, now, activeHours) === null,
+      );
+    }
+  });
+});
+
+// Same relationship on the reset side.
+describe("counterResetDuring", () => {
+  it("agrees with countersRestartedDuring", () => {
+    const clean = [
+      { capturedAt: "2026-03-01T00:00:00Z", perMember: [{ member: "m", ops: 1, since: "s" }] },
+      { capturedAt: "2026-03-02T00:00:00Z", perMember: [{ member: "m", ops: 2, since: "s" }] },
+    ];
+    const reset = [
+      { capturedAt: "2026-03-01T00:00:00Z", perMember: [{ member: "m", ops: 9, since: "s1" }] },
+      { capturedAt: "2026-03-02T00:00:00Z", perMember: [{ member: "m", ops: 1, since: "s2" }] },
+    ];
+    expect(counterResetDuring(clean)).toBeNull();
+    expect(countersRestartedDuring(clean)).toBe(false);
+    expect(counterResetDuring(reset)).toBe("ops-went-backwards");
+    expect(countersRestartedDuring(reset)).toBe(true);
   });
 });

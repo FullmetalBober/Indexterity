@@ -355,6 +355,31 @@ export const contract = {
     .input(z.object({ id: z.uuid() }))
     .output(recommendation),
 
+  // Shorten a pending drop's observe window, never lengthen it. The window is
+  // decided once at hide time and frozen on purpose — a date that walked as
+  // history rolled out of retention would be useless to plan around — and this
+  // is the deliberate exception, for the owner who knows the index is dead and
+  // does not want to wait out a cadence the engine inferred.
+  //
+  // Not a general edit: the floor is the time already served, since a window
+  // shortened into the past would drop on the very next finalize tick with no
+  // notice, and the ceiling is the window already stamped, because lengthening
+  // is what the policy baseline is for.
+  shortenObserveWindow: oc
+    .route({
+      method: "POST",
+      path: "/recommendations/{id}/observe-window",
+      summary: "Shorten a pending drop's observe window (never lengthen it)",
+    })
+    .errors({ NOT_FOUND: {}, CONFLICT: {}, BAD_REQUEST: {} })
+    // `days` omitted means the floor — end the observation, which is the only
+    // thing the dashboard offers and the only one that needs no clock of its
+    // own. Computing "how long has this been hidden" on the client would
+    // duplicate the server's arithmetic and disagree with it across a day
+    // boundary; asking for the floor by name cannot.
+    .input(z.object({ id: z.uuid(), days: z.number().int().positive().optional() }))
+    .output(recommendation),
+
   // The two org reads the dashboard needs and better-auth's organization plugin
   // does not answer.
   //

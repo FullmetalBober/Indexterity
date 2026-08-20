@@ -344,6 +344,34 @@
       "when": 1787134958034,
       "tag": "0048_observed_databases",
       "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1787218425113,
+      "tag": "0049_workload_analysis_default",
+      "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1787226211127,
+      "tag": "0050_observe_reason",
+      "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1787235369932,
+      "tag": "0051_one_live_claim_per_index",
+      "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "7",
+      "when": 1787236966433,
+      "tag": "0052_analysis_notes",
+      "breakpoints": true
     }
   ]
 }

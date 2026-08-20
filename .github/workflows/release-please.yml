@@ -1,0 +1,97 @@
+name: Release Please
+
+# The version bump, the changelog, the tag and the GitHub Release — all derived
+# from the conventional commits that landed on main, so none of the four can
+# disagree with what actually shipped.
+#
+# It owns MAIN rather than dev, because main is what gets released here: work
+# integrates on dev, a dev -> main pull request promotes it, and this reads the
+# commits that promotion carried. On merge of the release pull request it tags
+# `vX.Y.Z`, which is what release.yml waits for — nothing publishes from a
+# branch, so the publish story is unchanged and this only replaces the hand
+# work in front of it.
+#
+# The version bump therefore lands on main and not on dev. Back-merge main into
+# dev after a release if you want the two to agree; nothing is broken while they
+# do not, because version:check asserts agreement WITHIN a tree rather than
+# across branches.
+on:
+  push:
+    branches: [main]
+  # Re-running the release pull request by hand, e.g. after fixing a bad commit
+  # message that gave the wrong bump.
+  workflow_dispatch:
+
+# Deliberately not cancel-in-progress: two pushes to main a minute apart would
+# otherwise leave the release pull request half-updated, and this run is cheap.
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
+permissions:
+  # The release pull request, the tag and the Release.
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      # Everything comes from release-please-config.json, which lists the
+      # thirteen places besides the root package.json that state the version.
+      # An extra-file whose jsonpath matches nothing is a SILENT no-op in
+      # release-please, so the list is not the guarantee — `version:check` is,
+      # and the steps below are where it runs. Not ci.yml: see the comment on
+      # them for why it never sees this pull request.
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          target-branch: main
+
+      # A pull request opened by GITHUB_TOKEN triggers no workflow run, by
+      # design — so ci.yml never sees the release pull request and the
+      # version:check that makes the config above safe would never run. It runs
+      # HERE instead, inside the workflow a human's push to main started, which
+      # is the one place it cannot be skipped.
+      #
+      # Found by reading the action's own README rather than by a release going
+      # wrong: "events triggered by the GITHUB_TOKEN will not create a new
+      # workflow run". The alternative is a personal access token, which does
+      # trigger runs; this keeps the credential surface at zero and asserts the
+      # only thing about a release pull request that is worth asserting — it
+      # changes version strings and the changelog and nothing else.
+      #
+      # By label rather than by branch name: release-please names its branch
+      # `release-please--branches--<target>`, a convention this workflow should
+      # not have to know, while `autorelease: pending` is the label it applies
+      # and the one thing it documents about the pull request.
+      - name: Find the release pull request
+        id: release-pr
+        if: steps.release.outputs.prs_created == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          branch=$(gh pr list --repo "$GITHUB_REPOSITORY" --base main \
+            --label "autorelease: pending" --json headRefName --jq '.[0].headRefName')
+          if [ -z "$branch" ]; then
+            echo "release-please reported a pull request and none carries the label" >&2
+            exit 1
+          fi
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v6
+        if: steps.release.outputs.prs_created == 'true'
+        with:
+          ref: ${{ steps.release-pr.outputs.branch }}
+      - uses: actions/setup-node@v7
+        if: steps.release.outputs.prs_created == 'true'
+        with:
+          node-version: "26"
+          cache: npm
+      # `npm ci` is half the assertion, not setup: it REFUSES a lockfile whose
+      # workspace versions disagree with the manifests, which is the failure an
+      # extra-files jsonpath silently leaves behind (#186).
+      - run: npm ci
+        if: steps.release.outputs.prs_created == 'true'
+      - run: npm run version:check
+        if: steps.release.outputs.prs_created == 'true'

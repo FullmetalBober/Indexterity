@@ -1,5 +1,7 @@
 import {
   createScore,
+  crowdingPenalty,
+  DEFAULT_OBSERVE_DAYS,
   executionsPerWeek,
   type IndexSpec,
   isRecurring,
@@ -10,6 +12,7 @@ import {
   recommendCreates,
   recommendNarrowing,
   recommendReorder,
+  regressionWeight,
   reorderScore,
   type ScanSeverity,
   type SortKey,
@@ -19,10 +22,15 @@ import {
 } from "../analysis";
 import { entitledAutomation } from "../billing/plans";
 import type { Database } from "../db";
-import { and, eq, indexCooldowns, policies, recommendations } from "../db";
+import { analysisNotes, and, eq, indexCooldowns, policies, recommendations } from "../db";
 import { DatabaseInaccessibleError, type WorkloadTarget, workloadKey } from "../engine/ports";
 import { openClusterSession } from "./cluster-connection";
-import { activeCooldownKeys, cooldownKey } from "./cooldowns";
+import {
+  collectionIndexesAfterBuild,
+  pendingBuildsByCollection,
+  wouldBuildUnattended,
+} from "./collection-budget";
+import { activeCooldownKeys, collectionCooldownKey, cooldownKey } from "./cooldowns";
 import { applyCreatesForCluster } from "./create";
 import { planForCluster } from "./plan";
 import { BUILD_TYPES, standingRecommendationKeys, watchKey } from "./watched";
@@ -61,17 +69,23 @@ function encodeKeys(keys: readonly SortKey[]): string[] {
   return keys.map((key) => (key.direction === -1 ? `${key.field}:-1` : key.field));
 }
 
-// Workload analysis (opt-in): read the profiler and propose CREATE/UPDATE/MERGE.
-// A brand-new index on a critical collection, when instantCreate is opted in and
-// the cluster is writable, is auto-approved and built immediately
-// (creates only — never drops; the wiki's Architecture page, Apply pipeline).
+// Workload analysis (on unless turned off): read the profiler and propose
+// CREATE/UPDATE/MERGE. A brand-new index on a critical collection, when
+// instantCreate is opted in and the cluster is writable, is auto-approved and
+// built immediately (creates only — never drops; the wiki's Architecture page,
+// Apply pipeline).
 export async function suggestForCluster(db: Database, clusterId: string): Promise<number> {
   const [policy] = await db
     .select()
     .from(policies)
     .where(eq(policies.clusterId, clusterId))
     .limit(1);
-  if (policy?.workloadAnalysis !== true) return 0;
+  // Off only when a row says so. A MISSING row is not a decision — and it is the
+  // normal state of a new cluster, because nothing creates a policy row at
+  // onboarding: the first collect's inferred window does, or the owner saving
+  // the form. Reading absence as "off" is what kept this silent on exactly the
+  // clusters it had the most to say about (#258).
+  if (policy?.workloadAnalysis === false) return 0;
   const cooled = await activeCooldownKeys(db, clusterId);
   // Builds already on the record in a state the sweep below does not clear —
   // approved and waiting for the change window, or proposed by another
@@ -79,19 +93,42 @@ export async function suggestForCluster(db: Database, clusterId: string): Promis
   // this check: without it the same build is proposed a second time beside the
   // one the customer already approved (see standingRecommendationKeys).
   const standing = await standingRecommendationKeys(db, clusterId, BUILD_TYPES, "WORKLOAD");
+  // How many net-new builds each collection is already absorbing (#281). Read
+  // once for the cluster and then incremented in memory as this pass proposes,
+  // so the second create for one collection is scored against the first rather
+  // than against the state both were derived from.
+  const pendingBuilds = await pendingBuildsByCollection(db, clusterId);
+  // Builds this pass declined to approve UNATTENDED because the collection is
+  // already crowded. Nothing is suppressed — every one of them is proposed and
+  // on screen — but "the engine chose not to do this by itself" is a decision,
+  // and #277 is the surface for saying so.
+  let heldFromInstant = 0;
   // Full cooldown history — a previously rolled-back build cuts the score hard.
   const cooldownRows = await db
     .select()
     .from(indexCooldowns)
     .where(eq(indexCooldowns.clusterId, clusterId));
-  const regressionCounts = new Map<string, number>();
+  // Decayed, not raw — see analysis/score.ts. A regression counts in full while
+  // the cooldown it bought is running and fades over the same span again, so a
+  // build rolled back a year ago against a workload since rewritten no longer
+  // disqualifies the index for the life of the cluster.
+  const observeDays = policy?.observeWindowDays ?? DEFAULT_OBSERVE_DAYS;
+  const regressionWeights = new Map<string, number>();
   for (const row of cooldownRows) {
-    regressionCounts.set(`${row.database} ${row.collection} ${row.indexName}`, row.regressionCount);
+    regressionWeights.set(
+      `${row.database} ${row.collection} ${row.indexName}`,
+      regressionWeight(row, observeDays),
+    );
   }
 
-  // Same as apply: obey the plan, not just the stored policy.
+  // Same as apply: obey the plan, not just the stored policy. Each fallback is
+  // the column's own default, because a cluster with no row is a cluster nobody
+  // has configured — never the one where automation should be assumed.
   const automation = entitledAutomation(
-    { autoApplyScore: policy.autoApplyScore, instantCreate: policy.instantCreate },
+    {
+      autoApplyScore: policy?.autoApplyScore ?? null,
+      instantCreate: policy?.instantCreate ?? false,
+    },
     await planForCluster(db, clusterId),
   );
 
@@ -179,9 +216,8 @@ export async function suggestForCluster(db: Database, clusterId: string): Promis
       if (docCount < TRIVIAL_COLLECTION_DOCS) continue;
       // Policy ceiling: building an index on a huge collection is the one
       // expensive create-side operation — skip collections above the limit.
-      if (policy.maxCollectionSizeBytes !== null && dataSizeBytes > policy.maxCollectionSizeBytes) {
-        continue;
-      }
+      const sizeCeiling = policy?.maxCollectionSizeBytes ?? null;
+      if (sizeCeiling !== null && dataSizeBytes > sizeCeiling) continue;
       eligible.push({ database, collection, docCount });
     }
     const workload = await collector.collectWorkload(eligible);
@@ -280,7 +316,7 @@ export async function suggestForCluster(db: Database, clusterId: string): Promis
           score: reorderScore({
             count: candidate.count,
             sizeBytes: sizes[candidate.indexName] ?? 0,
-            pastRegressions: regressionCounts.get(`${database} ${collection} ${indexName}`) ?? 0,
+            regressionWeight: regressionWeights.get(`${database} ${collection} ${indexName}`) ?? 0,
           }),
           // Claimed at retirement, not now: the original is still there and
           // still costing until it is actually dropped. A re-order reclaims
@@ -342,32 +378,76 @@ export async function suggestForCluster(db: Database, clusterId: string): Promis
         });
       }
 
-      for (const candidate of recommendCreates(shapes, existing, WORKLOAD_OPTIONS)) {
+      // Highest-scoring first, so the crowding term below charges the BEST
+      // candidate the smallest penalty (#281). Left in derivation order, the
+      // staircase would fall on whichever shape the profiler happened to emit
+      // first — a real decision made by an accident of iteration order.
+      const creates = [...recommendCreates(shapes, existing, WORKLOAD_OPTIONS)].sort(
+        (a, b) => b.count - a.count,
+      );
+      const budgetKey = `${database} ${collection}`;
+      for (const candidate of creates) {
         // Partial variants get a suffix so they never collide with the full
         // index of the same keys.
         const indexName =
           proposedName(candidate.keys) + (candidate.partialFilter === undefined ? "" : "_partial");
         if (cooled.has(cooldownKey(database, collection, indexName))) continue;
         if (standing.has(watchKey(database, collection, indexName))) continue;
+        // Net-new only. A candidate that retires what it replaces leaves the
+        // collection carrying the same number of indexes or fewer, so it answers
+        // to no budget — see collection-budget.ts.
+        const netNew = candidate.retireIndexes.length === 0;
+        const collectionIndexes = collectionIndexesAfterBuild(
+          existing.length,
+          pendingBuilds.get(budgetKey) ?? 0,
+        );
+        // The collection's writes are already slower than before the last run of
+        // builds finished (#282). Same conclusion as a crowded collection and a
+        // stronger reason for it: this one is measured rather than counted.
+        const regressed = cooled.has(collectionCooldownKey(database, collection));
+        const crowded = (netNew && crowdingPenalty(collectionIndexes) > 0) || regressed;
         const score = createScore({
           collscan: candidate.scanning,
           sortedInMemory: !candidate.scanning,
           count: candidate.count,
           docCount,
           severity,
-          pastRegressions: regressionCounts.get(`${database} ${collection} ${indexName}`) ?? 0,
+          regressionWeight: regressionWeights.get(`${database} ${collection} ${indexName}`) ?? 0,
+          ...(netNew ? { collectionIndexes } : {}),
         });
         // Severity is the collection's, not this candidate's, so a sort-driven
         // candidate must not inherit a different shape's scan as grounds for
         // building itself without being asked.
-        const instant =
-          candidate.type === "CREATE" &&
-          candidate.scanning &&
-          severity !== "ROUTINE" &&
-          candidate.count >= INSTANT_MIN_COUNT &&
-          automation.instantCreate &&
-          !readOnly;
+        //
+        // `crowded` is a veto here rather than a penalty, because this path does
+        // not read the score at all: instantCreate builds on the strength of the
+        // scan alone, so the crowding term below would never reach it. A
+        // collection already absorbing builds gets its next one PROPOSED — the
+        // finding stays, the unattended build does not.
+        //
+        // Split from `crowded` so the COUNT below can be honest. `crowded && !instant`
+        // counted every crowded candidate that was not built unattended — including
+        // the ones nothing was going to build anyway, because the cluster is
+        // read-only, or instantCreate is off, or the scan is ROUTINE. Measured on a
+        // read-only cluster the moment it shipped: `{"budget": 24}`, on a cluster
+        // where the budget had decided nothing at all and read-only had decided
+        // everything. A feature whose whole purpose is saying what the engine held
+        // back must not claim credit for what something else held back.
+        const unattended = wouldBuildUnattended({
+          type: candidate.type,
+          scanning: candidate.scanning,
+          severity,
+          count: candidate.count,
+          minCount: INSTANT_MIN_COUNT,
+          instantCreateEnabled: automation.instantCreate,
+          readOnly,
+        });
+        const instant = unattended && !crowded;
         if (instant) instantApproved += 1;
+        if (unattended && crowded) heldFromInstant += 1;
+        // Count it before the next candidate is scored: the second create for one
+        // collection is charged for the first, which is the whole point.
+        if (netNew) pendingBuilds.set(budgetKey, (pendingBuilds.get(budgetKey) ?? 0) + 1);
         // A CRITICAL scan is paid on every execution; waiting for the quiet
         // window can mean most of a day of it.
         const urgent = instant && severity === "CRITICAL";
@@ -386,7 +466,19 @@ export async function suggestForCluster(db: Database, clusterId: string): Promis
             // Same reason: the cost figure describes the collection's scans, so
             // quoting it under a sort-driven candidate would misattribute it.
             (worst === undefined || !candidate.scanning ? "" : ` Cost: ${worst.summary}.`) +
-            cost,
+            cost +
+            // Said in the row itself, not only in the score (#281). A number
+            // that came out lower than a reader expects is the engine looking
+            // arbitrary; the sentence is what makes it an argument they can
+            // agree or disagree with.
+            (regressed
+              ? ` ${collection}'s writes are measurably slower than before the last run of builds ` +
+                `on it, so this one is left for you to approve rather than built unattended.`
+              : crowded
+                ? ` This would be index ${collectionIndexes} on ${collection}, and every write to ` +
+                  `the collection updates all of them — so its score is reduced and it is left ` +
+                  `for you to approve rather than built unattended.`
+                : ""),
           score,
           estimatedBytesSaved: 0,
           urgent,
@@ -436,7 +528,7 @@ export async function suggestForCluster(db: Database, clusterId: string): Promis
             droppedKeys: candidate.droppedKeys.length,
             totalKeys,
             sizeBytes: currentBytes,
-            pastRegressions: regressionCounts.get(`${database} ${collection} ${indexName}`) ?? 0,
+            regressionWeight: regressionWeights.get(`${database} ${collection} ${indexName}`) ?? 0,
           }),
           // Claimed at retirement, not now: the long index is still there and
           // still costing until it is actually dropped.
@@ -494,7 +586,8 @@ export async function suggestForCluster(db: Database, clusterId: string): Promis
           collscan: true,
           count: want.count,
           docCount: foreignDocs,
-          pastRegressions: regressionCounts.get(`${want.database} ${want.from} ${indexName}`) ?? 0,
+          regressionWeight:
+            regressionWeights.get(`${want.database} ${want.from} ${indexName}`) ?? 0,
         }),
         estimatedBytesSaved: 0,
         targetSpec: { keys: [want.foreignField], retire: [] },
@@ -511,8 +604,33 @@ export async function suggestForCluster(db: Database, clusterId: string): Promis
           eq(recommendations.source, "WORKLOAD"),
         ),
       );
-    if (toInsert.length > 0) await db.insert(recommendations).values(toInsert);
+    // See classify.ts: the same losing-race-is-a-no-op reading of
+    // recommendations_one_live_claim (#283).
+    if (toInsert.length > 0)
+      await db.insert(recommendations).values(toInsert).onConflictDoNothing();
     created = toInsert.length;
+    // This pass's own account of what it declined to do by itself (#277/#281).
+    // Its own row rather than classify's, which is why analysis_notes is keyed by
+    // producer: the usage gate refusing has nothing to do with a crowded
+    // collection, and one pass must not overwrite the other's explanation.
+    //
+    // No usage columns — this producer has no usage gate, so leaving them zero is
+    // the honest answer rather than a claim that nothing was trusted.
+    await db
+      .insert(analysisNotes)
+      .values({
+        clusterId,
+        source: "WORKLOAD",
+        decidedAt: new Date(),
+        suppressed: heldFromInstant > 0 ? { budget: heldFromInstant } : {},
+      })
+      .onConflictDoUpdate({
+        target: [analysisNotes.clusterId, analysisNotes.source],
+        set: {
+          decidedAt: new Date(),
+          suppressed: heldFromInstant > 0 ? { budget: heldFromInstant } : {},
+        },
+      });
   } finally {
     release();
   }

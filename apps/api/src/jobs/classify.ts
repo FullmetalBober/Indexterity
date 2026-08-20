@@ -1,16 +1,25 @@
 import {
   type ActivityPoint,
   activeHours,
+  DEFAULT_OBSERVE_DAYS,
   type IndexInput,
+  isNeverDrop,
   MAX_GAP_HOURS,
   parseStoredSpec,
+  type RefusalCounts,
   recommendForCollection,
+  regressionWeight,
+  type SuppressionCounts,
+  type SuppressionGuard,
+  usageTrustRefusal,
 } from "../analysis";
 import { runFrom } from "../analysis/types";
 import type { Database } from "../db";
 import {
+  analysisNotes,
   and,
   clusterIndexes,
+  clusters,
   eq,
   gte,
   inArray,
@@ -20,6 +29,7 @@ import {
   policies,
   recommendations,
 } from "../db";
+import { recordUsageTrust } from "../metrics";
 import { activeCooldownKeys, cooldownKey } from "./cooldowns";
 import { historyWindow } from "./plan";
 import {
@@ -31,7 +41,6 @@ import {
 } from "./watched";
 
 // Policy fallback, matching apply/finalize.
-const DEFAULT_OBSERVE_DAYS = 30;
 
 // Enough history to attempt periodic detection; below this, usage reads FLAT_ZERO.
 // A hole larger than this means we stopped watching, so absence of usage
@@ -60,7 +69,7 @@ const DEFAULT_OBSERVE_DAYS = 30;
 // tell a pattern from a flat line, which is a question about samples and not
 // about time. What stops it standing in for a duration is minHistoryDays beside
 // it, which is the durational half of the same gate.
-const CLASSIFY_OPTIONS = {
+export const CLASSIFY_OPTIONS = {
   recentHours: 12,
   minHistory: 3,
   minHistoryDays: 7,
@@ -80,6 +89,14 @@ const CLASSIFY_OPTIONS = {
 // the cluster's PROPOSED recommendations. Returns the number proposed.
 export async function classifyCluster(db: Database, clusterId: string): Promise<number> {
   const cooled = await activeCooldownKeys(db, clusterId);
+  // Only for the metric below, which is labelled by engine because the answer is
+  // expected to differ per engine (#267).
+  const [cluster] = await db
+    .select({ engine: clusters.engine })
+    .from(clusters)
+    .where(eq(clusters.id, clusterId))
+    .limit(1);
+  const engine = cluster?.engine ?? "MONGODB";
   const [policy] = await db
     .select({ observeWindowDays: policies.observeWindowDays })
     .from(policies)
@@ -102,18 +119,34 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
   // again puts a second copy of the same finding on the dashboard next to the
   // one the customer already approved (see standingRecommendationKeys).
   const standing = await standingRecommendationKeys(db, clusterId, DROP_TYPES, "CLASSIFY");
+  // What this pass decided not to say, and why (#277). Counted here rather than
+  // derived later because both halves are free at the point of decision and
+  // unrecoverable afterwards: the gate's verdict is computed per index just below,
+  // and a suppressed candidate leaves nothing behind to count.
+  const refusals: RefusalCounts = {};
+  const suppressed: SuppressionCounts = {};
+  let consideredIndexes = 0;
+  let trustedIndexes = 0;
+  const suppress = (guard: SuppressionGuard): void => {
+    suppressed[guard] = (suppressed[guard] ?? 0) + 1;
+  };
+
   // Full cooldown history (active or expired): each past regression cuts the
   // confidence score of any future proposal for that index.
   const cooldownRows = await db
     .select()
     .from(indexCooldowns)
     .where(eq(indexCooldowns.clusterId, clusterId));
-  const regressionCounts = new Map<string, Record<string, number>>();
+  // Weights rather than counts: a regression fades once the cooldown it bought
+  // has run, so an index is not disqualified for the life of the cluster by one
+  // bad experiment against a workload that has since changed (analysis/score.ts).
+  const observeDays = policy?.observeWindowDays ?? DEFAULT_OBSERVE_DAYS;
+  const regressionWeights = new Map<string, Record<string, number>>();
   for (const row of cooldownRows) {
     const scope = `${row.database} ${row.collection}`;
-    const perIndex = regressionCounts.get(scope) ?? {};
-    perIndex[row.indexName] = row.regressionCount;
-    regressionCounts.set(scope, perIndex);
+    const perIndex = regressionWeights.get(scope) ?? {};
+    perIndex[row.indexName] = regressionWeight(row, observeDays);
+    regressionWeights.set(scope, perIndex);
   }
   // How far back this cluster's plan lets anything look. Rows outlive the window
   // they are visible in, so the entitlement is enforced here rather than by having
@@ -224,26 +257,51 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
         })),
       });
     }
-    const pastRegressions = regressionCounts.get(`${entry.database} ${entry.collection}`) ?? {};
+    const weights = regressionWeights.get(`${entry.database} ${entry.collection}`) ?? {};
     const active = activeHours(
       activityByCollection.get(`${entry.database}\u0000${entry.collection}`) ?? [],
     );
+    // What the usage gate decided, per index, before anything acts on it (#267).
+    // Same eligibility the recommender applies, so the denominator is the set of
+    // indexes a usage finding was actually possible for — a protected index is
+    // excluded for its own reasons and would only dilute the answer.
+    const decidedAt = new Date();
+    for (const index of inputs) {
+      if (isNeverDrop(index.spec)) continue;
+      const refusal = usageTrustRefusal(index.history, CLASSIFY_OPTIONS, decidedAt, active);
+      recordUsageTrust(engine, refusal);
+      consideredIndexes += 1;
+      if (refusal === null) trustedIndexes += 1;
+      else refusals[refusal.kind] = (refusals[refusal.kind] ?? 0) + 1;
+    }
     for (const candidate of recommendForCollection(
       inputs,
       sizes,
       CLASSIFY_OPTIONS,
-      pastRegressions,
+      weights,
       new Date(),
       active,
     )) {
-      if (cooled.has(cooldownKey(entry.database, entry.collection, candidate.indexName))) continue;
-      if (watched.has(watchKey(entry.database, entry.collection, candidate.indexName))) continue;
+      // Every `continue` below is a finding the engine derived and then withheld,
+      // and each is right — they stop it contradicting itself. What was missing is
+      // the trace: "nothing to suggest" and "we suggested it and hid it" rendered
+      // identically, so a guard that had become too broad was indistinguishable
+      // from a quiet cluster (#277).
+      if (cooled.has(cooldownKey(entry.database, entry.collection, candidate.indexName))) {
+        suppress("cooldown");
+        continue;
+      }
+      if (watched.has(watchKey(entry.database, entry.collection, candidate.indexName))) {
+        suppress("watched");
+        continue;
+      }
       // Advisories are not drops and never enter that pipeline, so a standing
       // drop says nothing about whether one is worth repeating.
       if (
         candidate.type !== "ADVISORY_REVIEW" &&
         standing.has(watchKey(entry.database, entry.collection, candidate.indexName))
       ) {
+        suppress("standing");
         continue;
       }
       // Advisories still surface — a human should know a hinted index looks
@@ -252,6 +310,7 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
         candidate.type !== "ADVISORY_REVIEW" &&
         hintedKeys.has(watchKey(entry.database, entry.collection, candidate.indexName))
       ) {
+        suppress("hinted");
         continue;
       }
       toInsert.push({
@@ -284,7 +343,12 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
         eq(recommendations.source, "CLASSIFY"),
       ),
     );
-  if (toInsert.length > 0) await db.insert(recommendations).values(toInsert);
+  // onConflictDoNothing against recommendations_one_live_claim (#283): suggest
+  // runs on its own queue and can be mid-insert for this cluster right now, so
+  // the guard set read at the top of this pass may already be stale. Losing that
+  // race means the other producer said the same thing first, which is the
+  // outcome either way — a duplicate row is the only wrong answer.
+  if (toInsert.length > 0) await db.insert(recommendations).values(toInsert).onConflictDoNothing();
 
   // Retirement rows now outlive the sweep, so something has to retract one when
   // its index goes away — the customer dropping it by hand, or a rename. A
@@ -328,5 +392,32 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
   if (gone.length > 0 && rows.length > 0) {
     await db.delete(recommendations).where(inArray(recommendations.id, gone));
   }
+
+  // This pass's account of its own silence, replaced whole (#277). Written even
+  // when nothing was refused and nothing suppressed: an empty note is the record
+  // that the pass ran and had nothing to explain, and the alternative — leaving
+  // the previous pass's row in place — would keep telling a customer their
+  // counters are resetting for as long as after it stopped being true.
+  await db
+    .insert(analysisNotes)
+    .values({
+      clusterId,
+      source: "CLASSIFY",
+      decidedAt: new Date(),
+      consideredIndexes,
+      trustedIndexes,
+      refusals,
+      suppressed,
+    })
+    .onConflictDoUpdate({
+      target: [analysisNotes.clusterId, analysisNotes.source],
+      set: {
+        decidedAt: new Date(),
+        consideredIndexes,
+        trustedIndexes,
+        refusals,
+        suppressed,
+      },
+    });
   return toInsert.length;
 }

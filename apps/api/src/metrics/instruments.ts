@@ -96,6 +96,21 @@ export const regressionGate = meter.createCounter("indexterity.regression_gate.d
   valueType: ValueType.INT,
 });
 
+// Why usage findings are or are not being made, per index considered.
+//
+// The gate that decides this refuses for eight different reasons and only ever
+// said no (#267). "Recommendations are thin on this cluster" is not actionable
+// without knowing which check is doing it, and the distribution is the input to
+// deciding whether the counter-reset trigger is stricter than it needs to be now
+// that usage is read as a difference (#265). Labelled by ENGINE because the
+// answer is expected to differ: MSSQL's routine index-rebuild jobs trip the
+// reset trigger in a way mongo's do not.
+export const usageTrustDecisions = meter.createCounter("indexterity.usage_trust.decisions", {
+  description:
+    "Per-index usage-trust decisions by engine and outcome — `trusted`, or the check that refused.",
+  valueType: ValueType.INT,
+});
+
 // The irreversible step, and the reversible ways it is refused.
 export const indexDrops = meter.createCounter("indexterity.index.drops", {
   description: "Drop attempts that reached the end of the pipeline (dropped, unhidden, absent).",

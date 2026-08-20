@@ -4,6 +4,14 @@
 //   npm run version:set 0.2.0     # write it
 //   npm run version:check         # assert every file agrees
 //
+// release-please is what normally writes it now (release-please-config.json,
+// and the Releases section of the README). This file keeps both halves anyway,
+// and the CHECK half became load-bearing rather than redundant: release-please
+// updates these same places through `extra-files`, and an entry whose jsonpath
+// matches nothing is a SILENT no-op there. So the config is not the guarantee —
+// `version:check` in CI is, and it is the same assertion it always was. `set`
+// stays for renumbering by hand, which is what an emergency re-cut needs.
+//
 // The root package.json is the source of truth. The workspaces are private and
 // never published to npm, but a version that disagrees with the release is a
 // lie in a file people read, so they follow. The chart carries it twice:
@@ -106,12 +114,23 @@ function readLockfile(): Lockfile {
 
 type ChartVersions = { text: string; version?: string; appVersion?: string };
 
+// Both lines carry a trailing `# x-release-please-version` annotation, which is
+// how release-please renumbers this file without round-tripping it through a YAML
+// parser (that drops every comment in it, and appVersion's quotes with them). So
+// the comment is matched and kept rather than tolerated: read past it here, and
+// preserve it on write below. A regex that swallowed it would report the version
+// as `0.11.0 # x-release-please-version` and a write that dropped it would leave
+// release-please silently updating nothing on the next release.
+const CHART_COMMENT = /(\s+#.*)?$/.source;
+
 function chartVersions(): ChartVersions {
   const text = readFileSync(join(ROOT, CHART), "utf8");
   return {
     text,
-    version: /^version: (.+)$/m.exec(text)?.[1]?.trim(),
-    appVersion: /^appVersion: "?([^"\n]+)"?$/m.exec(text)?.[1]?.trim(),
+    version: new RegExp(`^version: ([^\\s#]+)${CHART_COMMENT}`, "m").exec(text)?.[1]?.trim(),
+    appVersion: new RegExp(`^appVersion: "?([^"\\s#]+)"?${CHART_COMMENT}`, "m")
+      .exec(text)?.[1]
+      ?.trim(),
   };
 }
 
@@ -149,8 +168,14 @@ function set(version: string): void {
   writeFileSync(
     join(ROOT, CHART),
     text
-      .replace(/^version: .+$/m, `version: ${version}`)
-      .replace(/^appVersion: .+$/m, `appVersion: "${version}"`),
+      .replace(
+        new RegExp(`^version: [^\\s#]+${CHART_COMMENT}`, "m"),
+        (_line, comment: string | undefined) => `version: ${version}${comment ?? ""}`,
+      )
+      .replace(
+        new RegExp(`^appVersion: "?[^"\\s#]+"?${CHART_COMMENT}`, "m"),
+        (_line, comment: string | undefined) => `appVersion: "${version}"${comment ?? ""}`,
+      ),
   );
   lock.version = version;
   for (const entry of entries) entry.version = version;

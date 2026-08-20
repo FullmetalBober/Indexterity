@@ -8,6 +8,7 @@ import {
   totalObservations,
   type UsageSnapshot,
 } from "./types";
+import { usageSeries } from "./usage";
 
 export interface ClassifyOptions {
   // How far back "recent" reaches when deciding alive vs dead, in hours.
@@ -85,24 +86,35 @@ function parseTime(value: string | undefined): number | null {
 // skipped by rules 1 and 2: no evidence either way, and the irreversible step
 // downstream is still guarded by the regression gate. Rule 3 needs no `since`
 // at all.
-export function countersRestartedDuring(history: readonly UsageSnapshot[]): boolean {
+//
+// Which of the three noticed it, or null for none. Named rather than counted,
+// because the three are not equally strict and #267 turns on telling them apart:
+// 1 and 3 bracket a reset we can reason around now that usage is a difference
+// (#265), while 2 says the counters cannot speak for the period at all, which no
+// amount of differencing repairs.
+export type CounterResetTrigger =
+  | "since-advanced"
+  | "counters-younger-than-span"
+  | "ops-went-backwards";
+
+export function counterResetDuring(history: readonly UsageSnapshot[]): CounterResetTrigger | null {
   const sorted = sortedRuns(history);
   const first = sorted[0];
   const last = sorted.at(-1);
-  if (first === undefined || last === undefined) return false;
+  if (first === undefined || last === undefined) return null;
 
   const earliestSince = new Map<string, number>();
   const previousOps = new Map<string, number>();
   for (const snapshot of sorted) {
     for (const member of snapshot.perMember) {
       const before = previousOps.get(member.member);
-      if (before !== undefined && member.ops < before) return true;
+      if (before !== undefined && member.ops < before) return "ops-went-backwards";
       previousOps.set(member.member, member.ops);
       const since = parseTime(member.since);
       if (since === null) continue;
       const previous = earliestSince.get(member.member);
       if (previous === undefined) earliestSince.set(member.member, since);
-      else if (since > previous) return true;
+      else if (since > previous) return "since-advanced";
     }
   }
 
@@ -116,9 +128,15 @@ export function countersRestartedDuring(history: readonly UsageSnapshot[]): bool
   for (const member of last.perMember) {
     const since = parseTime(member.since);
     if (since === null) continue;
-    if (lastSeen - since < spanMs) return true;
+    if (lastSeen - since < spanMs) return "counters-younger-than-span";
   }
-  return false;
+  return null;
+}
+
+// The question every existing caller asks, over the answer above. Kept so that
+// "did anything reset" and "which one noticed" can never disagree.
+export function countersRestartedDuring(history: readonly UsageSnapshot[]): boolean {
+  return counterResetDuring(history) !== null;
 }
 
 // Is this history good enough to claim an index is UNUSED? Absence of evidence
@@ -132,7 +150,23 @@ export function countersRestartedDuring(history: readonly UsageSnapshot[]): bool
 // happened to run in those eighteen hours reads as dead — including the weekly
 // batch and the quarterly export. Counting snapshots measures how often we
 // looked; only the span measures how long we watched.
-export function usageHistoryIsTrustworthy(
+//
+// Returns WHICH check refused rather than a bare no (#267). The gate has eight
+// of them and they are not equally strict — one is about the counters resetting,
+// two are about holes we did not watch through, the rest are about there not
+// being enough history yet. "Findings are being suppressed" is not actionable
+// until you know which, and the reason is free here and unrecoverable later.
+export type UsageTrustRefusal =
+  | { kind: "counters-reset"; trigger: CounterResetTrigger }
+  | { kind: "no-history" }
+  | { kind: "too-few-collects" }
+  | { kind: "span-too-short" }
+  | { kind: "collection-idle" }
+  | { kind: "gap-inside-run" }
+  | { kind: "gap-between-runs" }
+  | { kind: "history-stale" };
+
+export function usageTrustRefusal(
   history: readonly UsageSnapshot[],
   options: ClassifyOptions,
   now: Date,
@@ -140,23 +174,26 @@ export function usageHistoryIsTrustworthy(
   // with no latency history; the check is then skipped rather than failing
   // closed, since older data has no way to supply it.
   collectionActiveHours?: number,
-): boolean {
-  if (countersRestartedDuring(history)) return false;
+): UsageTrustRefusal | null {
+  const reset = counterResetDuring(history);
+  if (reset !== null) return { kind: "counters-reset", trigger: reset };
   const runs = sortedRuns(history);
   // Collects, not rows. An index idle for a year is a single run, and counting
   // rows here would refuse the very finding the run-length storage exists to
   // make cheap.
-  if (totalObservations(runs) < options.minHistory) return false;
+  if (totalObservations(runs) < options.minHistory) return { kind: "too-few-collects" };
   const first = runs[0];
   const last = runs.at(-1);
-  if (first === undefined || last === undefined) return false;
+  if (first === undefined || last === undefined) return { kind: "no-history" };
   // The span we actually watched: from the first thing we saw to the last time
   // anything was confirmed.
-  if (spanEnd(last) - spanStart(first) < options.minHistoryDays * 24 * HOUR_MS) return false;
+  if (spanEnd(last) - spanStart(first) < options.minHistoryDays * 24 * HOUR_MS) {
+    return { kind: "span-too-short" };
+  }
   // "This index served none of the reads" is only a claim when there were reads
   // to serve. An idle week proves nothing about any index in it.
   if (collectionActiveHours !== undefined && collectionActiveHours < options.minActiveHours) {
-    return false;
+    return { kind: "collection-idle" };
   }
   const maxGap = options.maxGapHours * HOUR_MS;
   // Two kinds of hole, and both have to be checked.
@@ -175,37 +212,60 @@ export function usageHistoryIsTrustworthy(
   // and is asked rather than believed. Rows written before the column existed
   // report zero and are trusted exactly as they were.
   for (const [i, run] of runs.entries()) {
-    if (interiorGap(run) > maxGap) return false;
+    if (interiorGap(run) > maxGap) return { kind: "gap-inside-run" };
     const next = runs[i + 1];
     if (next === undefined) continue;
-    if (spanStart(next) - spanEnd(run) > maxGap) return false;
+    if (spanStart(next) - spanEnd(run) > maxGap) return { kind: "gap-between-runs" };
   }
   // And the newest confirmation must itself be recent, or we are reasoning about
   // a cluster we have not seen in a while.
-  return now.getTime() - spanEnd(last) <= maxGap;
+  if (now.getTime() - spanEnd(last) > maxGap) return { kind: "history-stale" };
+  return null;
 }
 
-// Sum per-member ops for a snapshot (aggregate across all replica-set members).
-export function totalOps(snapshot: UsageSnapshot): number {
-  return snapshot.perMember.reduce((sum, member) => sum + member.ops, 0);
+// The boolean every finding is gated on, over the answer above — one function,
+// so a refusal reported to metrics and a refusal acted on cannot diverge.
+export function usageHistoryIsTrustworthy(
+  history: readonly UsageSnapshot[],
+  options: ClassifyOptions,
+  now: Date,
+  collectionActiveHours?: number,
+): boolean {
+  return usageTrustRefusal(history, options, now, collectionActiveHours) === null;
 }
 
 // Classify an index from its usage history. Pure; no I/O.
 // PERIODIC_DEAD vs PERIODIC_ALIVE hinges on whether recent expected bursts
 // still appear — a decommissioned monthly job goes dead and becomes droppable.
+//
+// Reads ACTIVITY, through usageSeries, and never the counters it is handed
+// (#265). `$indexStats.accesses.ops` is cumulative, so "this snapshot has ops"
+// is true of every index used even once since the member's `since` — under
+// which `activeCount === observations` held for anything ever used, and
+// CONTINUOUS was the verdict on an index that had served nothing for months.
+// The class that is supposed to say "in constant use" was saying "used, once,
+// at some point", and CONTINUOUS is not droppable, so the clearest dead-index
+// case was the one that could never be proposed.
+//
+// The trust gates above still read the raw counters, and must: `since` moving
+// and a reading going backwards are facts about the counter, not about usage.
 export function classifyUsage(
   history: readonly UsageSnapshot[],
   options: ClassifyOptions,
 ): UsageClass {
-  const observations = totalObservations(history);
+  // Collects, not rows, on both sides of the comparison below — usageSeries
+  // preserves the count across the split it makes, so the two agree by
+  // construction rather than by coincidence.
+  const series = usageSeries(history);
+  const observations = totalObservations(series);
   if (observations < options.minHistory) return "FLAT_ZERO";
 
   // Weighted by observation count, not by row count. A run is one row standing
   // for many identical collects, and "was the counter moving every time we
   // looked" is a question about the looks. Counting rows would make a single
   // quiet run outweigh three hundred busy collects it happens to sit beside.
-  const activeCount = history.reduce(
-    (sum, snapshot) => (totalOps(snapshot) > 0 ? sum + observationsOf(snapshot) : sum),
+  const activeCount = series.reduce(
+    (sum, point) => (point.ops > 0 ? sum + observationsOf(point) : sum),
     0,
   );
   if (activeCount === 0) return "FLAT_ZERO";
@@ -214,11 +274,11 @@ export function classifyUsage(
   // Everything still standing within recentHours of the newest confirmation,
   // however many rows that turns out to be. A run counts as recent when its END
   // falls inside the window: that is when the state was last confirmed, and a
-  // long run reaching into the window was true inside it.
-  const newest = Math.max(...history.map(spanEnd));
+  // long run reaching into the window was true inside it. For an activity
+  // point that end IS the instant the counter jumped, which is the moment the
+  // burst has to be dated to.
+  const newest = Math.max(...series.map(spanEnd));
   const cutoff = newest - options.recentHours * HOUR_MS;
-  const recentlyActive = history.some(
-    (snapshot) => spanEnd(snapshot) >= cutoff && totalOps(snapshot) > 0,
-  );
+  const recentlyActive = series.some((point) => spanEnd(point) >= cutoff && point.ops > 0);
   return recentlyActive ? "PERIODIC_ALIVE" : "PERIODIC_DEAD";
 }
