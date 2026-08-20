@@ -79,7 +79,7 @@ export function useUnhideRecommendation(clusterId: string | null) {
 // where it was in the pipeline and only stops waiting.
 export function useShortenObserveWindow(clusterId: string | null) {
   return usePipelineMutation(clusterId, (id) => api().shortenObserveWindow({ id }), {
-    ok: "Observation ended — the drop goes ahead at the next change window",
+    ok: "Observation cut short — the drop becomes due within a day, then waits for the change window",
     failed: SHORTEN_FAILED,
     parks: false,
   });

@@ -2133,9 +2133,10 @@ describe("cancelling a pending drop", () => {
         rationale: "no recorded usage",
         score: 61,
         estimatedBytesSaved: 2048,
-        // Hidden three days ago on a sixty-day window: the floor is 3, so there
-        // is a real interval between "shortened" and "already served".
-        hiddenAt: new Date(Date.now() - 3 * 86_400_000),
+        // Hidden three and a half days ago on a sixty-day window. The half is
+        // deliberate: the floor rounds UP, so a fixture sitting exactly on a day
+        // boundary is 3 or 4 depending on how long the insert took.
+        hiddenAt: new Date(Date.now() - 3.5 * 86_400_000),
         observeDays: 60,
       })
       .returning();
@@ -2148,7 +2149,11 @@ describe("cancelling a pending drop", () => {
     });
     expect(res.status).toBe(200);
     const shortened = asRecord(await res.json());
-    expect(shortened.observeDays).toBe(3);
+    // Four, not three: the floor is the time already served rounded up, so the
+    // drop is due in about half a day rather than the instant this returns.
+    // Rounding the other way would make "shorten" mean "drop at the next tick",
+    // with no interval in which anyone could change their mind.
+    expect(shortened.observeDays).toBe(4);
     expect(shortened.observeReason).toContain("by an owner");
     // Still HIDDEN: what ended is the observation, not the pipeline. The change
     // window and the regression gate are still ahead of it.

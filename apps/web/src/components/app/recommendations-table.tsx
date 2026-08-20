@@ -122,7 +122,7 @@ function action(rec: Recommendation, actions: Actions, readOnly: boolean) {
               </Button>
             }
             title={`Stop observing ${rec.indexName}?`}
-            description="The observation ends now and the drop goes ahead at the next change window. It still passes the regression gate first — if hiding this index has slowed reads, it is un-hidden instead. Only the waiting is skipped."
+            description="The window is cut to the time this index has already been hidden, rounded up — so the drop becomes due within a day rather than at the end of its window. It still waits for the change window and still passes the regression gate: if hiding this index has slowed reads, it is un-hidden instead. Only the waiting is skipped."
             confirmLabel="End observation"
             onConfirm={() => actions.shorten(rec.id)}
           />
