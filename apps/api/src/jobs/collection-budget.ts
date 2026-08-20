@@ -60,3 +60,45 @@ export function collectionIndexesAfterBuild(
 ): number {
   return existingIndexes + pendingBuilds + 1;
 }
+
+// Would this candidate be built WITHOUT anyone approving it, if the collection
+// were not crowded? (#281)
+//
+// Five conditions, and pulling them out of the middle of suggest.ts is not
+// tidying: combining them wrongly is what shipped. `heldFromInstant` was
+// `crowded && !instant`, which counts a crowded candidate that nothing was going
+// to build anyway — a read-only cluster, `instantCreate` off, a ROUTINE scan.
+// The first real reading of it was `{"budget": 24}` on a read-only cluster,
+// where the budget had decided nothing and read-only had decided everything.
+//
+// A feature whose whole purpose is reporting what the engine held back must not
+// claim credit for what something else held back, so the predicate is named,
+// separate from the crowding veto, and tested.
+export interface UnattendedBuild {
+  // Only a plain CREATE is ever built unattended. An UPDATE or MERGE retires
+  // something, and a REORDER touches a protected index — both are approval-only.
+  readonly type: string;
+  // A scan is the only argument strong enough; an in-memory sort is not.
+  readonly scanning: boolean;
+  // The collection's measured scan cost. ROUTINE is not urgent enough to act on
+  // without being asked.
+  readonly severity: string;
+  // Sightings of the shape, against the instant threshold.
+  readonly count: number;
+  readonly minCount: number;
+  // The owner opted in, and the plan still permits it.
+  readonly instantCreateEnabled: boolean;
+  // A read-only cluster executes nothing at all, so nothing here is unattended.
+  readonly readOnly: boolean;
+}
+
+export function wouldBuildUnattended(build: UnattendedBuild): boolean {
+  return (
+    build.type === "CREATE" &&
+    build.scanning &&
+    build.severity !== "ROUTINE" &&
+    build.count >= build.minCount &&
+    build.instantCreateEnabled &&
+    !build.readOnly
+  );
+}
