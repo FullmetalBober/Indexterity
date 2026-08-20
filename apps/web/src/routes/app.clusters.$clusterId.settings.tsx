@@ -10,6 +10,7 @@ import { ClusterConnection } from "~/components/app/cluster-connection";
 import { ClusterName } from "~/components/app/cluster-name";
 import { ObserveSection, ObserveSectionSkeleton } from "~/components/app/observe-section";
 import { PolicySection, PolicySectionSkeleton } from "~/components/app/policy-section";
+import { Unavailable } from "~/components/app/unavailable";
 import { clusterDatabasesQuery, useClusterDatabases } from "~/lib/queries/cluster-databases";
 import { policyQuery, usePolicy } from "~/lib/queries/policy";
 import { useCluster } from "~/lib/queries/shell";
@@ -49,18 +50,26 @@ function ClusterSettings() {
           previous one's into it. */}
       {cluster === null ? null : <ClusterName key={cluster.id} cluster={cluster} />}
       {/* Null means three different things — no cluster, a failed read, and not
-          yet — and only the last one gets the outline. The first two draw
-          nothing, which is the answer the rest of the app gives for a dead
-          read. */}
+          yet — and each now gets its own answer (#289). The failed one used to
+          draw nothing, so a reader whose policy would not load saw a page with no
+          policy section and no way to tell that from a cluster that has none. */}
       {policy.data !== null ? (
         <PolicySection key={policy.data.clusterId} policy={policy.data} />
       ) : policy.pending ? (
         <PolicySectionSkeleton />
+      ) : policy.failed ? (
+        <div className="mt-6">
+          <Unavailable what="this cluster's policy" onRetry={policy.retry} />
+        </div>
       ) : null}
       {/* Above the connection, below the policy: it is a question about this
           cluster's data rather than about its credentials, and unlike the policy
-          it can only be answered by asking the cluster. A failed dial draws
-          nothing at all — the page's job then is the rotation form underneath. */}
+          it can only be answered by asking the cluster. A failed dial still draws
+          nothing at all, deliberately, and it is the one read on this page #289
+          leaves alone: this failure IS about the cluster, it is the state the
+          rotation form underneath exists to fix, and an error panel over the top
+          of that form would be describing the problem the form is there to
+          solve. */}
       {cluster === null ? null : databases.data !== null ? (
         <ObserveSection key={cluster.id} cluster={cluster} databases={databases.data} />
       ) : databases.pending ? (

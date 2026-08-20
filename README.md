@@ -203,6 +203,15 @@ a decision. Exempt where it would be perverse — a MERGE folding three indexes
 into one leaves the collection carrying fewer, so it answers to no budget
 ([D100](./docs/decisions.md), #281).
 
+**And when it cannot tell you, it says that instead of reassuring you.** Every
+panel on the dashboard used to draw its empty state for a read that had *failed*
+as well as for one that came back empty — so a 500 rendered as "Nothing to
+review means nothing is obviously wrong" over a cluster with fifty-one live
+proposals. A failed read now says whose problem it is (ours, and the cluster was
+never dialled) and offers a retry, and a stat card withholds its figure rather
+than printing a zero nobody measured
+([D102](./docs/decisions.md), #289).
+
 **And when it decides nothing, it says so.** An empty recommendations list is
 indistinguishable from "your indexes are all fine", and that reading is wrong in
 two directions. Usage findings need a history the engine is willing to trust —

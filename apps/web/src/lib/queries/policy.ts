@@ -20,6 +20,6 @@ export function policyQuery(clusterId: string | null) {
 // null that has not arrived yet is not the same null, and the page draws the
 // section's outline for that one instead of nothing. See read.ts.
 export function usePolicy(clusterId: string | null): Read<ClusterPolicyView | null> {
-  const { data = null, isPending } = useQuery(policyQuery(clusterId));
-  return { data, pending: isPending };
+  const { data = null, isPending, isError, refetch } = useQuery(policyQuery(clusterId));
+  return { data, pending: isPending, failed: isError, retry: () => void refetch() };
 }

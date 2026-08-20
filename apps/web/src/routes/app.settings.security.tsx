@@ -13,6 +13,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
 import { SecurityTrailTable } from "~/components/app/security-trail";
+import { Unavailable } from "~/components/app/unavailable";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "~/components/ui/empty";
 import { type TrailFilter, useSecurityEvents } from "~/lib/queries/security";
 import { useOrg } from "~/lib/queries/shell";
@@ -68,6 +69,14 @@ function SecurityPage() {
             </EmptyDescription>
           </EmptyHeader>
         </Empty>
+      ) : trail.failed ? (
+        /* Same argument as the refusal above, for the other way a read ends with
+           nothing (#289). An empty security log is a claim that nothing
+           happened, and this is the one table in the product where that claim
+           being wrong matters most. */
+        <div className="mt-6">
+          <Unavailable what="the security trail" onRetry={trail.retry} />
+        </div>
       ) : (
         <SecurityTrailTable
           trail={trail.data}

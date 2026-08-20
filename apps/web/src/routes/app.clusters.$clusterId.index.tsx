@@ -16,6 +16,7 @@ import { latencyCharts } from "~/components/app/latency-series";
 import { NodesPanel } from "~/components/app/nodes-panel";
 import { ParkedPanel } from "~/components/app/parked-panel";
 import { RecommendationsTable } from "~/components/app/recommendations-table";
+import { Unavailable, UnavailableFigure } from "~/components/app/unavailable";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
 import { Skeleton } from "~/components/ui/skeleton";
 import {
@@ -57,11 +58,15 @@ export const Route = createFileRoute("/app/clusters/$clusterId/")({
   // resolved here against the cluster list AND again in the component, and a key
   // of null meant "no cluster" before one existed and "the first one" after.
   //
-  // Every warm is allowed to fail. The reads no longer fold an error into an
-  // empty payload, so a rejection here would take out the whole route instead of
-  // the one panel it belongs to; allSettled leaves the error on its own query,
-  // where the component reading that query draws an empty panel and the five
-  // beside it are unaffected.
+  // Every warm is allowed to fail. A rejection here would take out the whole
+  // route instead of the one panel it belongs to; allSettled leaves the error on
+  // its own query, where the component reading that query says it could not load
+  // and the eight beside it are unaffected.
+  //
+  // That last clause used to read "draws an empty panel", which was the whole of
+  // #289: the panel it drew was the reassuring one, so a 500 on one read
+  // rendered as a finding about the customer's cluster. Failing per panel is
+  // still right — it is failing SILENTLY that was not.
   loader: async ({ params, context }) => {
     const id = params.clusterId;
     await Promise.allSettled([
@@ -123,6 +128,13 @@ function ClusterOverview() {
   // rewrites itself a moment later.
   const collectionRows = toCollectionRows(collectionStats.data, latency.data);
   const collectionsPending = collectionStats.pending || latency.pending;
+  // Either read failing fails the table, for the same reason it waits for both:
+  // a table drawn from half its inputs is a table making up the other half.
+  const collectionsFailed = collectionStats.failed || latency.failed;
+  const retryCollections = () => {
+    collectionStats.retry();
+    latency.retry();
+  };
 
   return (
     <>
@@ -132,9 +144,14 @@ function ClusterOverview() {
             <CardDescription>Proposed reclaimable</CardDescription>
             {/* A measured zero and an unknown look identical as a figure — "0 KB"
                 reads as "we looked, there is nothing", which is the same lie the
-                empty states were telling (#72). The number waits. */}
+                empty states were telling (#72). The number waits — and since
+                #289 it also declines to appear at all when the read failed,
+                which is the same argument for the third time: a figure is a
+                measurement, and a failed read took none. */}
             {recommendations.pending ? (
               <Skeleton className="h-9 w-32" />
+            ) : recommendations.failed ? (
+              <UnavailableFigure onRetry={recommendations.retry} />
             ) : (
               <CardTitle className="text-3xl tabular-nums">{fmtBytes(totalSaved)}</CardTitle>
             )}
@@ -142,7 +159,7 @@ function ClusterOverview() {
           <CardContent className="text-muted-foreground text-sm">
             {recommendations.pending ? (
               <Skeleton className="h-4 w-52" />
-            ) : (
+            ) : recommendations.failed ? null : (
               <>
                 {proposed.length} recommendation{proposed.length === 1 ? "" : "s"} awaiting review
               </>
@@ -154,6 +171,8 @@ function ClusterOverview() {
             <CardDescription>Reclaimed</CardDescription>
             {roi.pending ? (
               <Skeleton className="h-9 w-32" />
+            ) : roi.failed ? (
+              <UnavailableFigure onRetry={roi.retry} />
             ) : (
               <CardTitle className="text-3xl tabular-nums">
                 {fmtBytes(roi.data.freedBytes)}
@@ -163,7 +182,7 @@ function ClusterOverview() {
           <CardContent className="text-muted-foreground text-sm">
             {roi.pending ? (
               <Skeleton className="h-4 w-52" />
-            ) : (
+            ) : roi.failed ? null : (
               <>
                 {roi.data.indexesDropped} index{roi.data.indexesDropped === 1 ? "" : "es"} dropped ·
                 ${roi.data.estimatedMonthlyUsd.toFixed(2)}/mo
@@ -217,32 +236,47 @@ function ClusterOverview() {
           not a zero.
         </p>
         <div className="mt-3">
-          <FootprintPanel series={footprint.data} loading={footprint.pending} />
+          {footprint.failed ? (
+            <Unavailable what="the index footprint" onRetry={footprint.retry} />
+          ) : (
+            <FootprintPanel series={footprint.data} loading={footprint.pending} />
+          )}
         </div>
       </section>
 
-      {/* Above the proposals rather than under them, because it is how to read
-          them: an empty list means "all fine" unless something says otherwise,
-          and on a cluster whose counters keep resetting nothing ever did (#277). */}
-      <AnalysisNotePanel analysis={recommendations.data.analysis} />
+      {/* Both of these speak for the same read, so a failure replaces both: the
+          #277 note explains why the engine is quiet, and drawing it from an
+          empty fallback would be explaining a silence that never happened. */}
+      {recommendations.failed ? (
+        <section className="mt-8">
+          <Unavailable what="recommendations" onRetry={recommendations.retry} />
+        </section>
+      ) : (
+        <>
+          {/* Above the proposals rather than under them, because it is how to read
+              them: an empty list means "all fine" unless something says otherwise,
+              and on a cluster whose counters keep resetting nothing ever did (#277). */}
+          <AnalysisNotePanel analysis={recommendations.data.analysis} />
 
-      {/* The roster comes from the read the Nodes panel below already makes, not
-          from a second copy in the recommendations payload: the members are a
-          fact about the cluster's last collect, identical for every row, and
-          repeating them 500 times would be the same fact 500 times (#161). */}
-      <RecommendationsTable
-        clusterId={id}
-        recommendations={recommendations.data.recommendations}
-        usage={recommendations.data.usage}
-        roster={nodes.data}
-        total={recommendations.data.total}
-        loading={recommendations.pending}
-        // A read-only cluster cannot act on an approval, so the table says so
-        // instead of offering a button whose click would never be honoured
-        // (#257). Read off the live cluster list, which the layout above is
-        // already drawing the badge from.
-        readOnly={cluster?.readOnly ?? false}
-      />
+          {/* The roster comes from the read the Nodes panel below already makes, not
+              from a second copy in the recommendations payload: the members are a
+              fact about the cluster's last collect, identical for every row, and
+              repeating them 500 times would be the same fact 500 times (#161). */}
+          <RecommendationsTable
+            clusterId={id}
+            recommendations={recommendations.data.recommendations}
+            usage={recommendations.data.usage}
+            roster={nodes.data}
+            total={recommendations.data.total}
+            loading={recommendations.pending}
+            // A read-only cluster cannot act on an approval, so the table says so
+            // instead of offering a button whose click would never be honoured
+            // (#257). Read off the live cluster list, which the layout above is
+            // already drawing the badge from.
+            readOnly={cluster?.readOnly ?? false}
+          />
+        </>
+      )}
 
       {/* Directly under the proposals, because it is the other half of the same
           answer: what the engine is proposing, and what it has decided not to.
@@ -255,7 +289,11 @@ function ClusterOverview() {
           regressed, or because an owner said no.
         </p>
         <div className="mt-3">
-          <ParkedPanel cooldowns={cooldowns.data} loading={cooldowns.pending} />
+          {cooldowns.failed ? (
+            <Unavailable what="the parked list" onRetry={cooldowns.retry} />
+          ) : (
+            <ParkedPanel cooldowns={cooldowns.data} loading={cooldowns.pending} />
+          )}
         </div>
       </section>
 
@@ -267,6 +305,11 @@ function ClusterOverview() {
           boxes and says why: a panel that renders nothing and a panel that cannot
           be measured looked identical from outside, and that is what got #85 filed
           against a chart that was working. */}
+      {latencySeries.failed ? (
+        <section className="mt-8">
+          <Unavailable what="the latency charts" onRetry={latencySeries.retry} />
+        </section>
+      ) : null}
       {latencySeries.pending || chartedCount > 0 || latencySeries.data.collections.length > 0 ? (
         <section className="mt-8 grid gap-6 md:grid-cols-2">
           <LineChart
@@ -298,7 +341,11 @@ function ClusterOverview() {
           answered — a member that did not answer is a blind spot, not a zero.
         </p>
         <div className="mt-3">
-          <NodesPanel roster={nodes.data} loading={nodes.pending} />
+          {nodes.failed ? (
+            <Unavailable what="the node roster" onRetry={nodes.retry} />
+          ) : (
+            <NodesPanel roster={nodes.data} loading={nodes.pending} />
+          )}
         </div>
       </section>
 
@@ -307,14 +354,22 @@ function ClusterOverview() {
         Index footprint from the latest collect; latency is the current windowed average vs the
         first sample (negative Δ = faster).
       </p>
-      <CollectionsTable rows={collectionRows} loading={collectionsPending} />
+      {collectionsFailed ? (
+        <Unavailable what="the collections table" onRetry={retryCollections} />
+      ) : (
+        <CollectionsTable rows={collectionRows} loading={collectionsPending} />
+      )}
 
       <section className="mt-8">
         <h2 className="font-semibold text-lg">Activity</h2>
         <p className="text-muted-foreground text-sm">
           Every executed operation, with its outcome — the immutable audit trail.
         </p>
-        <ActivityTable activity={activity.data} loading={activity.pending} />
+        {activity.failed ? (
+          <Unavailable what="the activity trail" onRetry={activity.retry} />
+        ) : (
+          <ActivityTable activity={activity.data} loading={activity.pending} />
+        )}
       </section>
     </>
   );

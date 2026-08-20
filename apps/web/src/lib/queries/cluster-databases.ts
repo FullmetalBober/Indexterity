@@ -30,6 +30,6 @@ export function clusterDatabasesQuery(clusterId: string | null) {
 // the cluster is unreachable. `pending` is the third state, which gets an outline
 // rather than nothing — see read.ts.
 export function useClusterDatabases(clusterId: string | null): Read<ClusterDatabases | null> {
-  const { data = null, isPending } = useQuery(clusterDatabasesQuery(clusterId));
-  return { data, pending: isPending };
+  const { data = null, isPending, isError, refetch } = useQuery(clusterDatabasesQuery(clusterId));
+  return { data, pending: isPending, failed: isError, retry: () => void refetch() };
 }
