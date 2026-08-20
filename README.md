@@ -471,8 +471,25 @@ several processes in one host-network container.
 npm run build · npm run typecheck · npm run lint · npm run test
 npm run db:generate · npm run db:migrate
 npm run db:deploy -w @repo/api        # production migrations, compiled migrator
-npm run version:set 0.2.0             # workspaces + the chart + the lockfile
+npm run version:set 0.2.0             # by hand; release-please does this normally
+npm run version:check                 # assert every file that states it agrees
 ```
+
+**Releases are cut by release-please, on `main`.** Work integrates on `dev`; a
+`dev` → `main` pull request promotes it; release-please reads the conventional
+commits that promotion carried, opens a `chore: release X.Y.Z` pull request
+bumping every file that states the version, and on merge tags `vX.Y.Z` and
+writes the GitHub Release from the same commits. The tag is what
+`release.yml` waits for, so nothing about publishing changed — a branch still
+publishes nothing. The bump lands on `main` only; back-merge into `dev` if you
+want the two to agree, and nothing is broken while they do not.
+
+`version:set` stays for doing it by hand. `version:check` is load-bearing
+either way: an `extra-files` entry whose jsonpath matches nothing is a **silent
+no-op** in release-please, so the config is not the guarantee — CI asserting
+that the seven packages, the chart and the lockfile all agree is. It runs on the
+release pull request like any other, and `npm ci` ahead of it refuses a lockfile
+that disagrees, which is the second net under the same hole (#186).
 
 `npm run up` is a convenience, not a requirement — `podman-compose up` works
 directly. It recreates containers whose crun state a logout cleared (`cannot

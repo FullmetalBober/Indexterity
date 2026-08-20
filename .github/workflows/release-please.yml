@@ -1,0 +1,49 @@
+name: Release Please
+
+# The version bump, the changelog, the tag and the GitHub Release — all derived
+# from the conventional commits that landed on main, so none of the four can
+# disagree with what actually shipped.
+#
+# It owns MAIN rather than dev, because main is what gets released here: work
+# integrates on dev, a dev -> main pull request promotes it, and this reads the
+# commits that promotion carried. On merge of the release pull request it tags
+# `vX.Y.Z`, which is what release.yml waits for — nothing publishes from a
+# branch, so the publish story is unchanged and this only replaces the hand
+# work in front of it.
+#
+# The version bump therefore lands on main and not on dev. Back-merge main into
+# dev after a release if you want the two to agree; nothing is broken while they
+# do not, because version:check asserts agreement WITHIN a tree rather than
+# across branches.
+on:
+  push:
+    branches: [main]
+  # Re-running the release pull request by hand, e.g. after fixing a bad commit
+  # message that gave the wrong bump.
+  workflow_dispatch:
+
+# Deliberately not cancel-in-progress: two pushes to main a minute apart would
+# otherwise leave the release pull request half-updated, and this run is cheap.
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
+permissions:
+  # The release pull request, the tag and the Release.
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      # Everything comes from release-please-config.json, which lists the
+      # fourteen places besides the root package.json that state the version.
+      # An extra-file whose jsonpath matches nothing is a SILENT no-op in
+      # release-please, so the list is not the guarantee — `npm run
+      # version:check` in ci.yml is, and it runs on this pull request like any
+      # other. That is what turns a stale field into a red check instead of a
+      # release whose lockfile `npm ci` refuses (#186).
+      - uses: googleapis/release-please-action@v4
+        with:
+          target-branch: main
