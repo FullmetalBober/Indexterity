@@ -1,5 +1,6 @@
 import {
   observationGaps,
+  observationsOf,
   type Run,
   sortedRuns,
   spanEnd,
@@ -8,8 +9,118 @@ import {
 } from "./types";
 
 export interface ObserveUsagePoint extends Run {
-  // Ops summed across replica-set members for that snapshot.
+  // ACTIVITY across this span — how many operations used the index while it
+  // held — and emphatically not the value of the `$indexStats` counter. Every
+  // rule below reads `ops > 0` as "was queried during this span", which is only
+  // true of a difference. `usageSeries` is what turns the stored counters into
+  // one, and is the only supported way to build this from a snapshot row.
   readonly ops: number;
+}
+
+// One `index_snapshots` run as stored: a span over which every member's counter
+// reading was byte-identical, and the readings themselves.
+export interface IndexUsageRun extends Run {
+  readonly perMember: readonly {
+    readonly member: string;
+    readonly ops: number;
+    // The member's `$indexStats` counter start. A change means the counter was
+    // reset under us — a restart, a stepdown — so the new reading is not a
+    // continuation of the old one. Absent on rows written before the field
+    // existed (schema.ts), which is handled as an unseen reset.
+    readonly since?: string;
+  }[];
+}
+
+type MemberReading = IndexUsageRun["perMember"][number];
+
+// How much of the index's usage happened BETWEEN two readings.
+//
+// `$indexStats.accesses.ops` is cumulative: it climbs while the index is queried
+// and holds perfectly still while it is not, and it is stored raw. So a single
+// reading says only "used at some point since `since`", and the difference
+// between two says what happened in between — which is the question every rule
+// in this file is actually asking.
+//
+// A member whose `since` moved was restarted and its counter restarted with it,
+// so what it now reports accumulated after that restart and counts in full
+// rather than as a difference. A member that appeared counts in full for the
+// same reason, one that vanished contributes nothing, and `max(0, …)` catches a
+// reset we could not see — an older row that predates the `since` field.
+function activityBetween(
+  previous: ReadonlyMap<string, MemberReading> | null,
+  current: IndexUsageRun["perMember"],
+): number {
+  let total = 0;
+  for (const member of current) {
+    const before = previous?.get(member.member);
+    total +=
+      before === undefined || before.since !== member.since
+        ? Math.max(0, member.ops)
+        : Math.max(0, member.ops - before.ops);
+  }
+  return total;
+}
+
+// Stored counter runs, as the activity series the rules below are written for.
+//
+// The conversion is not just a subtraction, because a run's SPAN is not one
+// event. `collect` extends a run for as long as every counter reading stays
+// byte-identical (jobs/runs.ts), so a run that begins with a jump is one moment
+// of usage followed by however long the counter then sat still — and that tail
+// is idle time. Emitting the run whole would date its activity to the end of
+// the tail, which is exactly how an index queried once a month came to read as
+// one queried continuously: the counter moved on day one and the run reported
+// itself busy for the other twenty-nine.
+//
+// So a run that moved becomes two readings — the activity, at the instant the
+// counter jumped, and the silence that followed it — and a run that did not move
+// stays one idle reading spanning its whole length. Observation counts are
+// preserved across the split, since the thresholds downstream are phrased in
+// collects.
+//
+// The FIRST run has nothing to difference against: its counter covers everything
+// since the member's `since`, which may predate the history entirely. It is read
+// as activity at its own start, which is the latest instant it could have
+// happened — the conservative end, and the only one the data supports.
+export function usageSeries(runs: readonly IndexUsageRun[]): ObserveUsagePoint[] {
+  const series: ObserveUsagePoint[] = [];
+  let previous: ReadonlyMap<string, MemberReading> | null = null;
+  for (const run of sortedRuns(runs)) {
+    const ops = activityBetween(previous, run.perMember);
+    previous = new Map(run.perMember.map((member) => [member.member, member]));
+    const observations = observationsOf(run);
+    const end = spanEnd(run);
+    if (ops === 0) {
+      series.push({
+        capturedAt: run.capturedAt,
+        lastSeenAt: new Date(end).toISOString(),
+        observations,
+        maxGapMs: run.maxGapMs ?? 0,
+        ops: 0,
+      });
+      continue;
+    }
+    series.push({
+      capturedAt: run.capturedAt,
+      lastSeenAt: run.capturedAt,
+      observations: 1,
+      maxGapMs: 0,
+      ops,
+    });
+    // A run one collect long has no tail to split off. Longer, and the rest of
+    // it is the counter holding still — kept inside the run's own span, so the
+    // split can never invent a gap that the collector did not leave.
+    if (observations > 1) {
+      series.push({
+        capturedAt: run.capturedAt,
+        lastSeenAt: new Date(end).toISOString(),
+        observations: observations - 1,
+        maxGapMs: run.maxGapMs ?? 0,
+        ops: 0,
+      });
+    }
+  }
+  return series;
 }
 
 export interface ObserveWindow {
