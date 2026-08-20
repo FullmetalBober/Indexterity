@@ -6,7 +6,7 @@ import {
   SECURITY_TRAIL_PAGE,
 } from "@repo/contracts";
 import { makeWorkerUtils } from "graphile-worker";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { entitledAutomation } from "../src/billing/plans";
 import { loadEnv } from "../src/config/env";
 import {
@@ -4078,6 +4078,130 @@ describe("the control plane's own indexes", () => {
     `);
     const unindexed = rows.rows.map((row) => `${String(row.child)}.${String(row.column)}`);
     expect(unindexed).toEqual([]);
+  });
+
+  // "One live recommendation per index" was convention until #283 — three guard
+  // functions every producer had to remember to call, over a schema that would
+  // happily store two. These assert the net underneath them, which is the only
+  // part a new producer cannot forget. Written against the constraint rather than
+  // through a pass, because the thing under test is the database's answer.
+  describe("one live claim per index", () => {
+    let claimClusterId: string;
+
+    // Rows go in by hand: the point is what the schema refuses, and driving a
+    // pass would test the guards that are supposed to keep us away from it.
+    const live = (
+      overrides: Partial<typeof recommendations.$inferInsert>,
+    ): typeof recommendations.$inferInsert => ({
+      clusterId: claimClusterId,
+      type: "DROP_UNUSED",
+      state: "PROPOSED",
+      source: "CLASSIFY",
+      database: "shop",
+      collection: "orders",
+      indexName: "status_1",
+      rationale: "fixture",
+      score: 10,
+      ...overrides,
+    });
+
+    const insert = (values: typeof recommendations.$inferInsert): Promise<unknown> =>
+      db.insert(recommendations).values(values);
+
+    beforeAll(async () => {
+      const org = asRecord(await (await api("/org", owner)).json());
+      const [row] = await db
+        .insert(clusters)
+        .values({
+          orgId: asString(org.id),
+          name: "One Live Claim Cluster",
+          sealedDek: Buffer.alloc(1),
+          sealedData: Buffer.alloc(1),
+          keyVersion: 1,
+        })
+        .returning();
+      if (row === undefined) throw new Error("failed to insert cluster");
+      claimClusterId = row.id;
+      createdClusterIds.push(claimClusterId);
+    });
+
+    afterEach(async () => {
+      await db.delete(recommendations).where(eq(recommendations.clusterId, claimClusterId));
+    });
+
+    // The duplicate the three guards exist to prevent, and the one a fourth
+    // producer that forgets one of them would create.
+    it("refuses a second live row making the same claim", async () => {
+      await insert(live({}));
+      await expect(insert(live({ source: "WORKLOAD" }))).rejects.toThrow();
+    });
+
+    // The part a constraint keyed on `type` would have got wrong: both of these
+    // mean "this index should go", so holding one of each is the same duplicate
+    // arriving by two routes.
+    it("refuses DROP_REDUNDANT beside DROP_UNUSED", async () => {
+      await insert(live({ type: "DROP_UNUSED" }));
+      await expect(insert(live({ type: "DROP_REDUNDANT", source: "RETIRE" }))).rejects.toThrow();
+    });
+
+    // A drop and a build are different claims about one NAME, and both are
+    // legitimate at once: narrowing an index means building the shorter one
+    // while the longer is still on its way out.
+    it("allows a build beside a drop on the same index", async () => {
+      await insert(live({ type: "DROP_UNUSED" }));
+      await insert(
+        live({ type: "CREATE", source: "WORKLOAD", targetSpec: { keys: [], retire: [] } }),
+      );
+      const rows = await db
+        .select({ type: recommendations.type })
+        .from(recommendations)
+        .where(eq(recommendations.clusterId, claimClusterId));
+      expect(rows.map((row) => row.type).sort()).toEqual(["CREATE", "DROP_UNUSED"]);
+    });
+
+    // A settled row is history. classify is supposed to be able to propose
+    // dropping an index a graduated build put there, so the predicate has to let
+    // the next claim through — otherwise this index would freeze the engine out
+    // of every index it ever touched.
+    it("allows a new claim once the previous one settled", async () => {
+      await insert(live({ state: "DROPPED" }));
+      await insert(live({ state: "REJECTED" }));
+      await insert(live({}));
+      const rows = await db
+        .select({ state: recommendations.state })
+        .from(recommendations)
+        .where(eq(recommendations.clusterId, claimClusterId));
+      expect(rows.map((row) => row.state).sort()).toEqual(["DROPPED", "PROPOSED", "REJECTED"]);
+    });
+
+    // Advisories are out on purpose: classify already exempts them from the
+    // standing check by hand, and two different things worth telling a human
+    // about one index are both worth saying.
+    it("does not constrain advisories", async () => {
+      await insert(live({ type: "ADVISORY_REVIEW", rationale: "hinted but unused" }));
+      await insert(live({ type: "ADVISORY_REVIEW", rationale: "a second index on the same keys" }));
+      const rows = await db
+        .select({ rationale: recommendations.rationale })
+        .from(recommendations)
+        .where(eq(recommendations.clusterId, claimClusterId));
+      expect(rows).toHaveLength(2);
+    });
+
+    // What the producers do with the refusal. A losing race must be a no-op
+    // rather than a thrown pass — the other producer said the same thing first,
+    // which is the outcome either way.
+    it("makes a losing insert a no-op for the producers", async () => {
+      await insert(live({}));
+      await db
+        .insert(recommendations)
+        .values(live({ source: "WORKLOAD" }))
+        .onConflictDoNothing();
+      const rows = await db
+        .select({ source: recommendations.source })
+        .from(recommendations)
+        .where(eq(recommendations.clusterId, claimClusterId));
+      expect(rows.map((row) => row.source)).toEqual(["CLASSIFY"]);
+    });
   });
 });
 

@@ -532,7 +532,10 @@ export async function suggestForCluster(db: Database, clusterId: string): Promis
           eq(recommendations.source, "WORKLOAD"),
         ),
       );
-    if (toInsert.length > 0) await db.insert(recommendations).values(toInsert);
+    // See classify.ts: the same losing-race-is-a-no-op reading of
+    // recommendations_one_live_claim (#283).
+    if (toInsert.length > 0)
+      await db.insert(recommendations).values(toInsert).onConflictDoNothing();
     created = toInsert.length;
   } finally {
     release();
