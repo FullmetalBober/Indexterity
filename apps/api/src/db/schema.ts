@@ -597,6 +597,14 @@ export const recommendations = pgTable(
     // The observe window this drop actually got, decided at hide time from the
     // index's own usage history (analysis/observe.ts). Null = policy baseline.
     observeDays: integer("observe_days"),
+    // Why it got that window, in the words analysis/observe.ts chose. Null when
+    // the policy baseline applied unchanged and there is nothing to explain.
+    //
+    // A column rather than a join to the HIDE action that also records it: the
+    // two are written in one statement and always read together, and recovering
+    // this from `actions.result` would mean parsing it back out of a string
+    // formatted for an audit trail.
+    observeReason: text("observe_reason"),
     baselineReadOps: bigint("baseline_read_ops", { mode: "number" }),
     baselineReadLatency: bigint("baseline_read_latency", { mode: "number" }),
     // Set when a CREATE/UPDATE/MERGE is built: the write-latency baseline for the

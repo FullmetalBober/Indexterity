@@ -194,6 +194,7 @@ export async function applyCluster(db: Database, clusterId: string): Promise<num
           state: "HIDDEN",
           hiddenAt: new Date(),
           observeDays: window.days,
+          observeReason: window.reason,
           baselineReadOps: baseline.ops,
           baselineReadLatency: baseline.latencyMicros,
           updatedAt: new Date(),

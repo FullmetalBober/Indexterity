@@ -1,5 +1,7 @@
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
+import { renderInApp } from "~/test-utils";
 import {
   badgeVariant,
   DeltaCell,
@@ -145,7 +147,7 @@ describe("DropsOn", () => {
   const hiddenAt = new Date(Date.now() - 2 * 86_400_000).toISOString();
 
   it("names the day once mounted", async () => {
-    render(<DropsOn rec={{ state: "HIDDEN", hiddenAt, observeDays: 7 }} />);
+    renderInApp(<DropsOn rec={{ state: "HIDDEN", hiddenAt, observeDays: 7 }} />);
 
     expect(await screen.findByText(/drops/)).toBeInTheDocument();
   });
@@ -154,14 +156,43 @@ describe("DropsOn", () => {
   // decide and any date would be invented — but not nothing either, which read
   // as "no drop pending" for what is actually a queued one (#268).
   it("says what an overdue drop is waiting for, rather than nothing", async () => {
-    render(<DropsOn rec={{ state: "HIDDEN", hiddenAt, observeDays: 1 }} />);
+    renderInApp(<DropsOn rec={{ state: "HIDDEN", hiddenAt, observeDays: 1 }} />);
 
     expect(await screen.findByText(/waiting on the change window/)).toBeInTheDocument();
     expect(screen.queryByText(/drops/)).not.toBeInTheDocument();
   });
 
+  // #269. The window is per-index and the number alone reads as arbitrary next
+  // to a neighbour with a different one; the engine already wrote the sentence
+  // that explains it.
+  it("explains the window when the engine had a reason for it", async () => {
+    renderInApp(
+      <DropsOn
+        rec={{
+          state: "HIDDEN",
+          hiddenAt,
+          observeDays: 60,
+          observeReason: "periodic usage with gaps up to 30 days — window extended",
+        }}
+      />,
+    );
+
+    await userEvent.hover(await screen.findByText(/drops/));
+    expect(await screen.findByText(/periodic usage with gaps up to 30 days/)).toBeInTheDocument();
+  });
+
+  it("adds no explanation when the policy baseline applied unchanged", async () => {
+    renderInApp(
+      <DropsOn rec={{ state: "HIDDEN", hiddenAt, observeDays: 7, observeReason: null }} />,
+    );
+
+    const label = await screen.findByText(/drops/);
+    await userEvent.hover(label);
+    expect(document.querySelector("[data-slot='tooltip-trigger']")).toBeNull();
+  });
+
   it("says nothing for a state that has no window", () => {
-    render(<DropsOn rec={{ state: "PROPOSED", hiddenAt: null, observeDays: null }} />);
+    renderInApp(<DropsOn rec={{ state: "PROPOSED", hiddenAt: null, observeDays: null }} />);
 
     expect(screen.queryByText(/drops/)).not.toBeInTheDocument();
     expect(screen.queryByText(/waiting/)).not.toBeInTheDocument();

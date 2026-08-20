@@ -232,6 +232,10 @@ export const recommendation = z.object({
   // A date does.
   hiddenAt: z.string().nullable(),
   observeDays: z.number().int().positive().nullable(),
+  // And why that window, when it differs from the policy baseline. The number
+  // alone reads as arbitrary next to another row with a different one; this is
+  // the sentence the engine already wrote to explain it.
+  observeReason: z.string().nullable(),
   createdAt: z.string(),
 });
 export type Recommendation = z.infer<typeof recommendation>;

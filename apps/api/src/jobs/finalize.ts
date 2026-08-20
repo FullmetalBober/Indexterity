@@ -171,6 +171,7 @@ export async function finalizeCluster(db: Database, clusterId: string): Promise<
               state: "PROPOSED",
               hiddenAt: null,
               observeDays: null,
+              observeReason: null,
               baselineReadOps: null,
               baselineReadLatency: null,
               updatedAt: new Date(),
