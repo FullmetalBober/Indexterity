@@ -250,7 +250,7 @@ describe("usageSeries", () => {
     expect(series[1]).toMatchObject({ capturedAt: day(30), lastSeenAt: day(0), ops: 0 });
     // Collects are preserved across the split — the thresholds downstream are
     // phrased in them.
-    expect(series[0].observations + series[1].observations).toBe(720);
+    expect(series.reduce((sum, point) => sum + (point.observations ?? 0), 0)).toBe(720);
   });
 
   it("leaves a run that never moved as one idle reading over its whole span", () => {
