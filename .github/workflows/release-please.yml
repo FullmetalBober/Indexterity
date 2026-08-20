@@ -61,30 +61,52 @@ jobs:
       # only thing about a release pull request that is worth asserting — it
       # changes version strings and the changelog and nothing else.
       #
-      # By label rather than by branch name: release-please names its branch
-      # `release-please--branches--<target>`, a convention this workflow should
-      # not have to know, while `autorelease: pending` is the label it applies
-      # and the one thing it documents about the pull request.
-      - name: Find the release pull request
+      # From the action's OWN output rather than by asking the api, which is what
+      # #292's release taught: this step used to `gh pr list --label "autorelease:
+      # pending"`, and on the first real run it queried four seconds after the
+      # pull request was created and found nothing — the label lands a moment
+      # after the pull request does. The step failed, every step below it was
+      # SKIPPED, and the release pull request sat there mergeable with the one
+      # assertion that makes the extra-files config safe never having run. A gate
+      # that fails open on a race is worse than no gate, because the failing run
+      # is easy to read as "the release pull request is fine, that job is noise".
+      #
+      # `steps.release.outputs.pr` is release-please's own PullRequest object
+      # (`headBranchName` in release-please/build/src/pull-request.d.ts), so there
+      # is nothing to race and nothing to poll. It also keeps the property the
+      # label lookup was chosen for — the branch NAME convention
+      # (`release-please--branches--<target>`) stays unknown to this workflow;
+      # the action states its own branch and we read it.
+      #
+      # The condition on every step below moved from `prs_created == 'true'` to
+      # `pr != ''` for the same reason, one step further out. `prs_created` is
+      # about whether a pull request was OPENED, and release-please UPDATES the
+      # open one when main moves again before a release is cut — which is a
+      # release pull request with new version strings in it and no check having
+      # run. `pr != ''` is "there is a release pull request", which is exactly
+      # when this assertion is worth making. It cannot be weaker than what it
+      # replaces: a created pull request is always a reported one. Whether the
+      # update case really does clear `prs_created` is NOT verified here — the
+      # condition is chosen so that it does not matter.
+      - name: The release pull request, as the action reported it
         id: release-pr
-        if: steps.release.outputs.prs_created == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        if: steps.release.outputs.pr != ''
         run: |
-          branch=$(gh pr list --repo "$GITHUB_REPOSITORY" --base main \
-            --label "autorelease: pending" --json headRefName --jq '.[0].headRefName')
+          branch='${{ fromJson(steps.release.outputs.pr).headBranchName }}'
+          # Still loud if the shape ever changes under us: an empty branch would
+          # otherwise check out the default one and assert against the wrong tree.
           if [ -z "$branch" ]; then
-            echo "release-please reported a pull request and none carries the label" >&2
+            echo "release-please reported a pull request with no head branch" >&2
             exit 1
           fi
           echo "branch=$branch" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v6
-        if: steps.release.outputs.prs_created == 'true'
+        if: steps.release.outputs.pr != ''
         with:
           ref: ${{ steps.release-pr.outputs.branch }}
       - uses: actions/setup-node@v7
-        if: steps.release.outputs.prs_created == 'true'
+        if: steps.release.outputs.pr != ''
         with:
           node-version: "26"
           cache: npm
@@ -92,6 +114,6 @@ jobs:
       # workspace versions disagree with the manifests, which is the failure an
       # extra-files jsonpath silently leaves behind (#186).
       - run: npm ci
-        if: steps.release.outputs.prs_created == 'true'
+        if: steps.release.outputs.pr != ''
       - run: npm run version:check
-        if: steps.release.outputs.prs_created == 'true'
+        if: steps.release.outputs.pr != ''
