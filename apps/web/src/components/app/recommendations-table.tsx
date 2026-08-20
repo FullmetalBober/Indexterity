@@ -361,7 +361,14 @@ export function RecommendationsTable({
         // Usage went from 120 to 176 when it gained the per-node line under the
         // class (#161): `40,000 ops · 1 of 3 nodes` does not fit in 120, and a
         // clipped one would hide exactly the half that is new.
-        columnWidths={[132, 200, 200, 104, 176, 280, 132]}
+        //
+        // Action went from 132 to 200 when a hidden drop gained a second control
+        // (#270). Cells at a fixed width are `overflow-hidden`, so the extra
+        // button was not pushed off the table to be scrolled to — it was CUT, mid
+        // word, which reads as a rendering fault rather than as a column that
+        // needs more room. Two `sm` buttons and the gap between them are about
+        // 160; the rest is the cell's own padding.
+        columnWidths={[132, 200, 200, 104, 176, 280, 200]}
         // The rationale takes the slack, and takes all of it: the table fills the
         // page now, and the alternative to a long line is a clipped one. Past the
         // column's width the cell truncates and the tooltip carries the rest, so
