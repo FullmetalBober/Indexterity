@@ -7,6 +7,7 @@ import {
   MAX_GAP_HOURS,
   parseStoredSpec,
   recommendForCollection,
+  regressionWeight,
   usageTrustRefusal,
 } from "../analysis";
 import { runFrom } from "../analysis/types";
@@ -120,12 +121,16 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
     .select()
     .from(indexCooldowns)
     .where(eq(indexCooldowns.clusterId, clusterId));
-  const regressionCounts = new Map<string, Record<string, number>>();
+  // Weights rather than counts: a regression fades once the cooldown it bought
+  // has run, so an index is not disqualified for the life of the cluster by one
+  // bad experiment against a workload that has since changed (analysis/score.ts).
+  const observeDays = policy?.observeWindowDays ?? DEFAULT_OBSERVE_DAYS;
+  const regressionWeights = new Map<string, Record<string, number>>();
   for (const row of cooldownRows) {
     const scope = `${row.database} ${row.collection}`;
-    const perIndex = regressionCounts.get(scope) ?? {};
-    perIndex[row.indexName] = row.regressionCount;
-    regressionCounts.set(scope, perIndex);
+    const perIndex = regressionWeights.get(scope) ?? {};
+    perIndex[row.indexName] = regressionWeight(row, observeDays);
+    regressionWeights.set(scope, perIndex);
   }
   // How far back this cluster's plan lets anything look. Rows outlive the window
   // they are visible in, so the entitlement is enforced here rather than by having
@@ -236,7 +241,7 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
         })),
       });
     }
-    const pastRegressions = regressionCounts.get(`${entry.database} ${entry.collection}`) ?? {};
+    const weights = regressionWeights.get(`${entry.database} ${entry.collection}`) ?? {};
     const active = activeHours(
       activityByCollection.get(`${entry.database}\u0000${entry.collection}`) ?? [],
     );
@@ -256,7 +261,7 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
       inputs,
       sizes,
       CLASSIFY_OPTIONS,
-      pastRegressions,
+      weights,
       new Date(),
       active,
     )) {

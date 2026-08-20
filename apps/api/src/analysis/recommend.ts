@@ -67,8 +67,9 @@ export function recommendForCollection(
   indexes: readonly IndexInput[],
   sizes: Readonly<Record<string, number>>,
   options: ClassifyOptions,
-  // Past regression count per index name (cooldown history) — cuts confidence.
-  pastRegressions: Readonly<Record<string, number>> = {},
+  // How much each index's regression history still counts against it, per index
+  // name — a decayed weight rather than a raw count (analysis/score.ts).
+  regressionWeights: Readonly<Record<string, number>> = {},
   // "Now" for the history-freshness check; injected to keep this pure.
   now: Date = new Date(),
   // Hours in which this collection actually served reads. Usage findings need the
@@ -103,7 +104,7 @@ export function recommendForCollection(
           snapshots: totalObservations(candidate.history),
           redundant: true,
           sizeBytes: sizes[candidate.spec.name] ?? 0,
-          pastRegressions: pastRegressions[candidate.spec.name] ?? 0,
+          regressionWeight: regressionWeights[candidate.spec.name] ?? 0,
         }),
         estimatedBytesSaved: sizes[candidate.spec.name] ?? 0,
       });
@@ -130,7 +131,7 @@ export function recommendForCollection(
         snapshots: totalObservations(index.history),
         redundant: false,
         sizeBytes: sizes[index.spec.name] ?? 0,
-        pastRegressions: pastRegressions[index.spec.name] ?? 0,
+        regressionWeight: regressionWeights[index.spec.name] ?? 0,
       }),
       estimatedBytesSaved: sizes[index.spec.name] ?? 0,
     });
@@ -157,7 +158,7 @@ export function recommendForCollection(
         snapshots: totalObservations(index.history),
         redundant: false,
         sizeBytes: sizes[index.spec.name] ?? 0,
-        pastRegressions: pastRegressions[index.spec.name] ?? 0,
+        regressionWeight: regressionWeights[index.spec.name] ?? 0,
       }),
       estimatedBytesSaved: sizes[index.spec.name] ?? 0,
     });
@@ -197,7 +198,7 @@ export function recommendForCollection(
         snapshots: totalObservations(index.history),
         redundant: true,
         sizeBytes: sizes[index.spec.name] ?? 0,
-        pastRegressions: pastRegressions[index.spec.name] ?? 0,
+        regressionWeight: regressionWeights[index.spec.name] ?? 0,
       }),
       estimatedBytesSaved: sizes[index.spec.name] ?? 0,
     });
