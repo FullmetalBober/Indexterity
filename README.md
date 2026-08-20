@@ -178,6 +178,20 @@ including the parameterised `WHERE created_at < @cutoff` — where the retention
 window is simply not in the plan, and the advisory says so rather than inventing
 a number ([D85](./docs/decisions.md)).
 
+**Builds on one collection compete rather than accumulate.** Every collision
+guard in the engine is keyed on an *index*; the cost of an index is paid per
+*collection*, because each write updates every index on it. So five
+individually-correct creates on one busy collection were five correct findings
+that together doubled its write cost, with nothing forming that thought. A
+crowding term now costs a create ten points for each index past an ordinary four
+that its collection would then carry — counting builds already in flight, not
+only what a collect saw — capped at the forty a past regression costs. Nothing is
+hidden: every finding is still proposed, with the reason in its rationale, and
+what falls below `autoApplyScore` stops being built *unattended* and starts being
+a decision. Exempt where it would be perverse — a MERGE folding three indexes
+into one leaves the collection carrying fewer, so it answers to no budget
+([D100](./docs/decisions.md), #281).
+
 **And when it decides nothing, it says so.** An empty recommendations list is
 indistinguishable from "your indexes are all fine", and that reading is wrong in
 two directions. Usage findings need a history the engine is willing to trust —

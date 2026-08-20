@@ -39,6 +39,7 @@ import { applyCluster, promoteByScore } from "../src/jobs/apply";
 import { refreshInferredWindow } from "../src/jobs/change-window";
 import { classifyCluster } from "../src/jobs/classify";
 import { collectCluster } from "../src/jobs/collect";
+import { pendingBuildsByCollection } from "../src/jobs/collection-budget";
 import { drainPool } from "../src/jobs/connection-pool";
 import { activeCooldownKeys, cooldownKey } from "../src/jobs/cooldowns";
 import { applyCreatesForCluster } from "../src/jobs/create";
@@ -4110,6 +4111,115 @@ describe("the control plane's own indexes", () => {
   // happily store two. These assert the net underneath them, which is the only
   // part a new producer cannot forget. Written against the constraint rather than
   // through a pass, because the thing under test is the database's answer.
+  // The per-collection build budget's database half (#281). The arithmetic and the
+  // calibration are unit-tested; what needs a real table is which rows count.
+  describe("pending builds per collection", () => {
+    let budgetClusterId: string;
+
+    const build = (
+      overrides: Partial<typeof recommendations.$inferInsert>,
+    ): typeof recommendations.$inferInsert => ({
+      clusterId: budgetClusterId,
+      type: "CREATE",
+      state: "PROPOSED",
+      source: "WORKLOAD",
+      database: "shop",
+      collection: "orders",
+      indexName: "fixture_1",
+      rationale: "fixture",
+      score: 50,
+      targetSpec: { keys: ["a"], retire: [] },
+      ...overrides,
+    });
+
+    beforeAll(async () => {
+      const org = asRecord(await (await api("/org", owner)).json());
+      const [row] = await db
+        .insert(clusters)
+        .values({
+          orgId: asString(org.id),
+          name: "Build Budget Cluster",
+          sealedDek: Buffer.alloc(1),
+          sealedData: Buffer.alloc(1),
+          keyVersion: 1,
+        })
+        .returning();
+      if (row === undefined) throw new Error("failed to insert cluster");
+      budgetClusterId = row.id;
+      createdClusterIds.push(budgetClusterId);
+    });
+
+    afterEach(async () => {
+      await db.delete(recommendations).where(eq(recommendations.clusterId, budgetClusterId));
+    });
+
+    // Pending is the point. An APPROVED create waits for the change window, which
+    // can be most of a day, and its index does not exist yet — so counting only
+    // what a collect saw makes five builds approved across five passes each look
+    // like the first one.
+    it("counts a build in flight, whatever live state it is in", async () => {
+      await db
+        .insert(recommendations)
+        .values([
+          build({ indexName: "a_1" }),
+          build({ indexName: "b_1", state: "APPROVED" }),
+          build({ indexName: "c_1", state: "BUILDING" }),
+        ]);
+      const counts = await pendingBuildsByCollection(db, budgetClusterId);
+      expect(counts.get("shop orders")).toBe(3);
+    });
+
+    // A build that retires what it replaces leaves the collection carrying the
+    // same number or fewer, so charging it against a budget it is about to
+    // relieve would have the engine arguing against its own best move.
+    it("does not count a build that retires what it replaces", async () => {
+      await db.insert(recommendations).values([
+        build({
+          indexName: "wide_1",
+          type: "UPDATE",
+          targetSpec: { keys: ["a"], retire: ["a_1"] },
+        }),
+        build({
+          indexName: "merged_1",
+          type: "MERGE",
+          targetSpec: { keys: ["a", "b"], retire: ["a_1", "b_1"] },
+        }),
+      ]);
+      expect(
+        (await pendingBuildsByCollection(db, budgetClusterId)).get("shop orders"),
+      ).toBeUndefined();
+    });
+
+    // A settled build is either an index that exists — and so is already in the
+    // collect's own count — or one that never will be. Counting it would charge
+    // the collection twice for the same index.
+    it("does not count a settled build", async () => {
+      await db
+        .insert(recommendations)
+        .values([
+          build({ indexName: "done_1", state: "ACTIVE" }),
+          build({ indexName: "no_1", state: "REJECTED" }),
+        ]);
+      expect(
+        (await pendingBuildsByCollection(db, budgetClusterId)).get("shop orders"),
+      ).toBeUndefined();
+    });
+
+    // The budget is per collection, which is the whole of #281: the guards are
+    // keyed on an index and the cost is paid per collection.
+    it("keeps collections apart", async () => {
+      await db
+        .insert(recommendations)
+        .values([
+          build({ indexName: "a_1" }),
+          build({ indexName: "b_1", collection: "customers" }),
+        ]);
+      const counts = await pendingBuildsByCollection(db, budgetClusterId);
+      expect(counts.get("shop orders")).toBe(1);
+      expect(counts.get("shop customers")).toBe(1);
+    });
+  });
+
   describe("one live claim per index", () => {
     let claimClusterId: string;
 

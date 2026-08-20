@@ -1,5 +1,6 @@
 import {
   createScore,
+  crowdingPenalty,
   DEFAULT_OBSERVE_DAYS,
   executionsPerWeek,
   type IndexSpec,
@@ -21,9 +22,10 @@ import {
 } from "../analysis";
 import { entitledAutomation } from "../billing/plans";
 import type { Database } from "../db";
-import { and, eq, indexCooldowns, policies, recommendations } from "../db";
+import { analysisNotes, and, eq, indexCooldowns, policies, recommendations } from "../db";
 import { DatabaseInaccessibleError, type WorkloadTarget, workloadKey } from "../engine/ports";
 import { openClusterSession } from "./cluster-connection";
+import { collectionIndexesAfterBuild, pendingBuildsByCollection } from "./collection-budget";
 import { activeCooldownKeys, cooldownKey } from "./cooldowns";
 import { applyCreatesForCluster } from "./create";
 import { planForCluster } from "./plan";
@@ -87,6 +89,16 @@ export async function suggestForCluster(db: Database, clusterId: string): Promis
   // this check: without it the same build is proposed a second time beside the
   // one the customer already approved (see standingRecommendationKeys).
   const standing = await standingRecommendationKeys(db, clusterId, BUILD_TYPES, "WORKLOAD");
+  // How many net-new builds each collection is already absorbing (#281). Read
+  // once for the cluster and then incremented in memory as this pass proposes,
+  // so the second create for one collection is scored against the first rather
+  // than against the state both were derived from.
+  const pendingBuilds = await pendingBuildsByCollection(db, clusterId);
+  // Builds this pass declined to approve UNATTENDED because the collection is
+  // already crowded. Nothing is suppressed — every one of them is proposed and
+  // on screen — but "the engine chose not to do this by itself" is a decision,
+  // and #277 is the surface for saying so.
+  let heldFromInstant = 0;
   // Full cooldown history — a previously rolled-back build cuts the score hard.
   const cooldownRows = await db
     .select()
@@ -362,13 +374,30 @@ export async function suggestForCluster(db: Database, clusterId: string): Promis
         });
       }
 
-      for (const candidate of recommendCreates(shapes, existing, WORKLOAD_OPTIONS)) {
+      // Highest-scoring first, so the crowding term below charges the BEST
+      // candidate the smallest penalty (#281). Left in derivation order, the
+      // staircase would fall on whichever shape the profiler happened to emit
+      // first — a real decision made by an accident of iteration order.
+      const creates = [...recommendCreates(shapes, existing, WORKLOAD_OPTIONS)].sort(
+        (a, b) => b.count - a.count,
+      );
+      const budgetKey = `${database} ${collection}`;
+      for (const candidate of creates) {
         // Partial variants get a suffix so they never collide with the full
         // index of the same keys.
         const indexName =
           proposedName(candidate.keys) + (candidate.partialFilter === undefined ? "" : "_partial");
         if (cooled.has(cooldownKey(database, collection, indexName))) continue;
         if (standing.has(watchKey(database, collection, indexName))) continue;
+        // Net-new only. A candidate that retires what it replaces leaves the
+        // collection carrying the same number of indexes or fewer, so it answers
+        // to no budget — see collection-budget.ts.
+        const netNew = candidate.retireIndexes.length === 0;
+        const collectionIndexes = collectionIndexesAfterBuild(
+          existing.length,
+          pendingBuilds.get(budgetKey) ?? 0,
+        );
+        const crowded = netNew && crowdingPenalty(collectionIndexes) > 0;
         const score = createScore({
           collscan: candidate.scanning,
           sortedInMemory: !candidate.scanning,
@@ -376,18 +405,30 @@ export async function suggestForCluster(db: Database, clusterId: string): Promis
           docCount,
           severity,
           regressionWeight: regressionWeights.get(`${database} ${collection} ${indexName}`) ?? 0,
+          ...(netNew ? { collectionIndexes } : {}),
         });
         // Severity is the collection's, not this candidate's, so a sort-driven
         // candidate must not inherit a different shape's scan as grounds for
         // building itself without being asked.
+        //
+        // `crowded` is a veto here rather than a penalty, because this path does
+        // not read the score at all: instantCreate builds on the strength of the
+        // scan alone, so the crowding term below would never reach it. A
+        // collection already absorbing builds gets its next one PROPOSED — the
+        // finding stays, the unattended build does not.
         const instant =
           candidate.type === "CREATE" &&
           candidate.scanning &&
           severity !== "ROUTINE" &&
           candidate.count >= INSTANT_MIN_COUNT &&
           automation.instantCreate &&
-          !readOnly;
+          !readOnly &&
+          !crowded;
         if (instant) instantApproved += 1;
+        if (crowded && !instant) heldFromInstant += 1;
+        // Count it before the next candidate is scored: the second create for one
+        // collection is charged for the first, which is the whole point.
+        if (netNew) pendingBuilds.set(budgetKey, (pendingBuilds.get(budgetKey) ?? 0) + 1);
         // A CRITICAL scan is paid on every execution; waiting for the quiet
         // window can mean most of a day of it.
         const urgent = instant && severity === "CRITICAL";
@@ -406,7 +447,16 @@ export async function suggestForCluster(db: Database, clusterId: string): Promis
             // Same reason: the cost figure describes the collection's scans, so
             // quoting it under a sort-driven candidate would misattribute it.
             (worst === undefined || !candidate.scanning ? "" : ` Cost: ${worst.summary}.`) +
-            cost,
+            cost +
+            // Said in the row itself, not only in the score (#281). A number
+            // that came out lower than a reader expects is the engine looking
+            // arbitrary; the sentence is what makes it an argument they can
+            // agree or disagree with.
+            (crowded
+              ? ` This would be index ${collectionIndexes} on ${collection}, and every write to ` +
+                `the collection updates all of them — so its score is reduced and it is left for ` +
+                `you to approve rather than built unattended.`
+              : ""),
           score,
           estimatedBytesSaved: 0,
           urgent,
@@ -537,6 +587,28 @@ export async function suggestForCluster(db: Database, clusterId: string): Promis
     if (toInsert.length > 0)
       await db.insert(recommendations).values(toInsert).onConflictDoNothing();
     created = toInsert.length;
+    // This pass's own account of what it declined to do by itself (#277/#281).
+    // Its own row rather than classify's, which is why analysis_notes is keyed by
+    // producer: the usage gate refusing has nothing to do with a crowded
+    // collection, and one pass must not overwrite the other's explanation.
+    //
+    // No usage columns — this producer has no usage gate, so leaving them zero is
+    // the honest answer rather than a claim that nothing was trusted.
+    await db
+      .insert(analysisNotes)
+      .values({
+        clusterId,
+        source: "WORKLOAD",
+        decidedAt: new Date(),
+        suppressed: heldFromInstant > 0 ? { budget: heldFromInstant } : {},
+      })
+      .onConflictDoUpdate({
+        target: [analysisNotes.clusterId, analysisNotes.source],
+        set: {
+          decidedAt: new Date(),
+          suppressed: heldFromInstant > 0 ? { budget: heldFromInstant } : {},
+        },
+      });
   } finally {
     release();
   }

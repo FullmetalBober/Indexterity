@@ -106,36 +106,52 @@ export class RecommendationsController {
   // "7 days" after the policy moved. Same reason the guard rationales are
   // composed rather than cached.
   private async analysisFor(clusterId: string): Promise<AnalysisNote | null> {
-    const [note] = await this.database.db
+    // Every producer's note, not only classify's. They are stored separately
+    // because they explain unrelated things — the usage gate refusing has nothing
+    // to do with a crowded collection (#281) — and read together because a reader
+    // is asking one question: why is this list as short as it is.
+    const notes = await this.database.db
       .select()
       .from(analysisNotes)
-      .where(and(eq(analysisNotes.clusterId, clusterId), eq(analysisNotes.source, "CLASSIFY")))
-      .limit(1);
-    if (note === undefined) return null;
-    const refusals = note.refusals;
+      .where(eq(analysisNotes.clusterId, clusterId));
+    if (notes.length === 0) return null;
+    // The usage columns belong to the pass that has a usage gate. A producer
+    // without one leaves them zero, and summing that in would report every
+    // cluster as considering fewer indexes than it did.
+    const usage = notes.find((row) => row.source === "CLASSIFY");
+    const refusals = usage?.refusals ?? {};
     const dominant = dominantRefusal(refusals);
     // Only counted for the reason being reported. Summing every refusal would
     // read as "37 indexes are unanalysable" when the 37 are short of history for
     // four unrelated reasons, only one of which the sentence explains.
     const refusedIndexes = dominant === null ? 0 : (refusals[dominant] ?? 0);
+    // The newest pass to have said anything, so the panel's "as of" is not older
+    // than the reason beside it.
+    const decidedAt = notes.reduce(
+      (latest, row) => (row.decidedAt > latest ? row.decidedAt : latest),
+      notes[0]?.decidedAt ?? new Date(0),
+    );
     return {
-      decidedAt: note.decidedAt.toISOString(),
-      consideredIndexes: note.consideredIndexes,
-      trustedIndexes: note.trustedIndexes,
+      decidedAt: decidedAt.toISOString(),
+      consideredIndexes: usage?.consideredIndexes ?? 0,
+      trustedIndexes: usage?.trustedIndexes ?? 0,
       usagePaused: usageAnalysisPaused({
-        consideredIndexes: note.consideredIndexes,
-        trustedIndexes: note.trustedIndexes,
+        consideredIndexes: usage?.consideredIndexes ?? 0,
+        trustedIndexes: usage?.trustedIndexes ?? 0,
         refusals,
-        suppressed: note.suppressed,
+        suppressed: {},
       }),
       dominantRefusal: dominant,
       refusedIndexes,
       explanation: dominant === null ? null : explainRefusal(dominant, CLASSIFY_OPTIONS),
       // Iterated over the known guards rather than over the stored keys, so a
       // key an older api wrote and this one no longer understands is dropped
-      // instead of reaching the contract and failing its own validation.
+      // instead of reaching the contract and failing its own validation. Summed
+      // across producers: a guard is a guard whoever tripped it, and two lines
+      // saying "2 findings held back" would raise the question of what the
+      // difference was.
       suppressed: SUPPRESSION_GUARDS.flatMap((guard: SuppressionGuard) => {
-        const findings = note.suppressed[guard] ?? 0;
+        const findings = notes.reduce((sum, row) => sum + (row.suppressed[guard] ?? 0), 0);
         return findings > 0
           ? [{ guard, findings, explanation: explainSuppression(guard, findings) }]
           : [];

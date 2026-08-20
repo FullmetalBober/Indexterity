@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   createScore,
+  crowdingPenalty,
   dropScore,
   narrowScore,
   RECOMMENDED_AUTO_APPLY_SCORE,
@@ -119,7 +120,79 @@ describe("dropScore", () => {
   });
 });
 
+// The per-collection budget (#281). Every collision guard in the engine is keyed
+// on an index; the cost of an index is paid per collection, so five individually
+// correct creates on one collection are five defensible proposals that together
+// double its write cost — and nothing formed that thought.
+describe("crowdingPenalty", () => {
+  it("charges nothing for an ordinary collection", () => {
+    expect(crowdingPenalty(1)).toBe(0);
+    expect(crowdingPenalty(4)).toBe(0);
+  });
+
+  it("charges a step per index past ordinary", () => {
+    expect(crowdingPenalty(5)).toBe(10);
+    expect(crowdingPenalty(6)).toBe(20);
+    expect(crowdingPenalty(7)).toBe(30);
+  });
+
+  // Capped at the same 40 REGRESSION_PENALTY costs, which is this file's word for
+  // "close to disqualifying" — not "disqualified". A CRITICAL scan on a crowded
+  // collection is still a real finding and still gets proposed.
+  it("stops at close-to-disqualifying rather than vetoing", () => {
+    expect(crowdingPenalty(8)).toBe(40);
+    expect(crowdingPenalty(40)).toBe(40);
+  });
+});
+
 describe("createScore", () => {
+  // The issue's own scenario: five individually defensible creates on one
+  // collection, with the recommended threshold set. The first goes unattended and
+  // the tail becomes a decision — rather than all five landing in whatever order
+  // the change windows fall.
+  it("lets the first build through and makes the later ones a decision", () => {
+    const strong = { collscan: true, count: 30, docCount: 50_000, regressionWeight: 0 };
+    const scores = [1, 2, 3, 4, 5].map((nth) =>
+      createScore({ ...strong, collectionIndexes: 3 + nth }),
+    );
+    const [first] = scores;
+    expect(first).toBeGreaterThanOrEqual(RECOMMENDED_AUTO_APPLY_SCORE);
+    expect(scores.at(-1)).toBeLessThan(RECOMMENDED_AUTO_APPLY_SCORE);
+    // The number that matters is how many the engine will build BY ITSELF. Not
+    // pinned to an exact count — that would be pinning the calibration rather
+    // than the property — but it must be a small minority of five.
+    expect(scores.filter((score) => score >= RECOMMENDED_AUTO_APPLY_SCORE).length).toBeLessThan(3);
+    // Monotone: each additional index on the collection costs, so the staircase
+    // reads the way an owner would predict it.
+    expect(scores).toEqual([...scores].sort((a, b) => b - a));
+  });
+
+  it("charges nothing when the collection is not crowded", () => {
+    const base = { collscan: true, count: 30, docCount: 50_000, regressionWeight: 0 };
+    expect(createScore({ ...base, collectionIndexes: 4 })).toBe(createScore(base));
+  });
+
+  // A missing count is not evidence of an uncrowded collection — a caller with no
+  // index list must not be silently credited with one.
+  it("skips the term rather than guessing when no count is given", () => {
+    const base = { collscan: true, count: 30, docCount: 50_000, regressionWeight: 0 };
+    expect(createScore(base)).toBe(createScore({ ...base, collectionIndexes: 1 }));
+  });
+
+  // Never below zero, and never a negative that reads as a different kind of
+  // finding: the clamp is what the score's own contract promises.
+  it("stays inside the scale on a badly crowded collection", () => {
+    const score = createScore({
+      collscan: false,
+      sortedInMemory: true,
+      count: 3,
+      docCount: 500,
+      regressionWeight: 1,
+      collectionIndexes: 30,
+    });
+    expect(score).toBe(0);
+  });
+
   it("scores a hot collscan on a critical collection high", () => {
     expect(
       createScore({ collscan: true, count: 30, docCount: 50_000, regressionWeight: 0 }),
