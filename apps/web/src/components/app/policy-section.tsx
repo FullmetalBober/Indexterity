@@ -243,11 +243,17 @@ export function PolicySection({ policy }: { policy: PolicyView }) {
                 }
               </form.Subscribe>
             </Field>
-
-            <form.AppForm>
-              <form.SubmitButton pending={save.isPending}>Save policy</form.SubmitButton>
-            </form.AppForm>
           </FieldGroup>
+
+          {/* Outside the FieldGroup, which is what every other card form here
+              does (account-section) and what this card's own skeleton has always
+              drawn. Inside it, the button was a fourth item in an `items-end`
+              row of inputs — so it bottom-aligned against the change-window
+              boxes and read as a control belonging to them rather than as the
+              form's action. */}
+          <form.AppForm>
+            <form.SubmitButton pending={save.isPending}>Save policy</form.SubmitButton>
+          </form.AppForm>
         </form>
         <p className="text-muted-foreground text-xs">
           Elective changes (hide, build, drop) run only inside the change window; safety rollbacks
