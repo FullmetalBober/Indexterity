@@ -160,6 +160,32 @@ describe("RecommendationsTable", () => {
     expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
   });
 
+  it("offers nothing on a read-only cluster, and says which one it is", () => {
+    renderInApp(
+      <RecommendationsTable
+        total={1}
+        clusterId="c1"
+        recommendations={[rec()]}
+        loading={false}
+        readOnly
+      />,
+    );
+
+    // The api refuses this approval too; the point of the cell is that a reader
+    // never gets that far. An APPROVED row on a read-only cluster can never be
+    // acted on, and nothing downstream would have said so.
+    expect(screen.getByText("read-only cluster")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
+  });
+
+  it("still offers approve when the mode is not stated, rather than withholding it", () => {
+    renderInApp(
+      <RecommendationsTable total={1} clusterId="c1" recommendations={[rec()]} loading={false} />,
+    );
+
+    expect(screen.getByRole("button", { name: "Approve" })).toBeInTheDocument();
+  });
+
   it("says when a hidden index is due to be dropped, since the score no longer decides", () => {
     const soon = new Date(Date.now() + 5 * 86_400_000).toISOString();
     renderInApp(

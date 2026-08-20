@@ -27,6 +27,7 @@ import {
   useRecommendations,
   useRoi,
 } from "~/lib/queries/pipeline";
+import { useCluster } from "~/lib/queries/shell";
 import {
   collectionsQuery,
   indexSizeSeriesQuery,
@@ -80,6 +81,10 @@ export const Route = createFileRoute("/app/clusters/$clusterId/")({
 
 function ClusterOverview() {
   const { clusterId: id } = Route.useParams();
+  // Off the live cluster list rather than a read of its own: the layout above
+  // already draws the read-only badge from it, and the two must not be able to
+  // disagree about the mode.
+  const cluster = useCluster(id);
 
   // The loader already put each of these in the cache, so they read rather than
   // fetch. useQuery, not useSuspenseQuery: there is nothing to wait for, and
@@ -226,6 +231,11 @@ function ClusterOverview() {
         roster={nodes.data}
         total={recommendations.data.total}
         loading={recommendations.pending}
+        // A read-only cluster cannot act on an approval, so the table says so
+        // instead of offering a button whose click would never be honoured
+        // (#257). Read off the live cluster list, which the layout above is
+        // already drawing the badge from.
+        readOnly={cluster?.readOnly ?? false}
       />
 
       {/* Directly under the proposals, because it is the other half of the same
