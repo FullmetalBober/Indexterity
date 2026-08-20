@@ -84,8 +84,16 @@ const DROPS_ON: Intl.DateTimeFormatOptions = { day: "numeric", month: "short" };
 // hydration error that throws away the page.
 //
 // Past the window the drop is waiting on the change window and the regression
-// gate, so a date there would be a guess. That rule is kept; it now runs where the
+// gate, so a DATE there would be a guess. That rule is kept; it now runs where the
 // clock it depends on lives.
+//
+// What is no longer kept is drawing nothing (#268). Overshoot is the normal path
+// rather than an edge — finalize runs hourly and its elective drop only fires
+// inside the change window, so a narrow window routinely holds a due drop for
+// days — and an empty cell is indistinguishable from a row that never had a
+// window at all. So the state is named where the date used to be: still no
+// promise about when, which is the part we cannot honestly make, but no longer
+// silence about whether anything is pending.
 export function DropsOn({
   rec,
 }: {
@@ -94,7 +102,9 @@ export function DropsOn({
   const mounted = useMounted();
   const due = dropsOn(rec);
   if (due === null || !mounted) return null;
-  if (new Date(due).getTime() <= Date.now()) return null;
+  if (new Date(due).getTime() <= Date.now()) {
+    return <span className="block text-muted-foreground">due — waiting on the change window</span>;
+  }
   return (
     <span className="block text-muted-foreground">
       drops <LocalTime iso={due} options={DROPS_ON} dateOnly />
