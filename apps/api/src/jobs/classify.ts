@@ -6,13 +6,17 @@ import {
   isNeverDrop,
   MAX_GAP_HOURS,
   parseStoredSpec,
+  type RefusalCounts,
   recommendForCollection,
   regressionWeight,
+  type SuppressionCounts,
+  type SuppressionGuard,
   usageTrustRefusal,
 } from "../analysis";
 import { runFrom } from "../analysis/types";
 import type { Database } from "../db";
 import {
+  analysisNotes,
   and,
   clusterIndexes,
   clusters,
@@ -65,7 +69,7 @@ import {
 // tell a pattern from a flat line, which is a question about samples and not
 // about time. What stops it standing in for a duration is minHistoryDays beside
 // it, which is the durational half of the same gate.
-const CLASSIFY_OPTIONS = {
+export const CLASSIFY_OPTIONS = {
   recentHours: 12,
   minHistory: 3,
   minHistoryDays: 7,
@@ -115,6 +119,18 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
   // again puts a second copy of the same finding on the dashboard next to the
   // one the customer already approved (see standingRecommendationKeys).
   const standing = await standingRecommendationKeys(db, clusterId, DROP_TYPES, "CLASSIFY");
+  // What this pass decided not to say, and why (#277). Counted here rather than
+  // derived later because both halves are free at the point of decision and
+  // unrecoverable afterwards: the gate's verdict is computed per index just below,
+  // and a suppressed candidate leaves nothing behind to count.
+  const refusals: RefusalCounts = {};
+  const suppressed: SuppressionCounts = {};
+  let consideredIndexes = 0;
+  let trustedIndexes = 0;
+  const suppress = (guard: SuppressionGuard): void => {
+    suppressed[guard] = (suppressed[guard] ?? 0) + 1;
+  };
+
   // Full cooldown history (active or expired): each past regression cuts the
   // confidence score of any future proposal for that index.
   const cooldownRows = await db
@@ -252,10 +268,11 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
     const decidedAt = new Date();
     for (const index of inputs) {
       if (isNeverDrop(index.spec)) continue;
-      recordUsageTrust(
-        engine,
-        usageTrustRefusal(index.history, CLASSIFY_OPTIONS, decidedAt, active),
-      );
+      const refusal = usageTrustRefusal(index.history, CLASSIFY_OPTIONS, decidedAt, active);
+      recordUsageTrust(engine, refusal);
+      consideredIndexes += 1;
+      if (refusal === null) trustedIndexes += 1;
+      else refusals[refusal.kind] = (refusals[refusal.kind] ?? 0) + 1;
     }
     for (const candidate of recommendForCollection(
       inputs,
@@ -265,14 +282,26 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
       new Date(),
       active,
     )) {
-      if (cooled.has(cooldownKey(entry.database, entry.collection, candidate.indexName))) continue;
-      if (watched.has(watchKey(entry.database, entry.collection, candidate.indexName))) continue;
+      // Every `continue` below is a finding the engine derived and then withheld,
+      // and each is right — they stop it contradicting itself. What was missing is
+      // the trace: "nothing to suggest" and "we suggested it and hid it" rendered
+      // identically, so a guard that had become too broad was indistinguishable
+      // from a quiet cluster (#277).
+      if (cooled.has(cooldownKey(entry.database, entry.collection, candidate.indexName))) {
+        suppress("cooldown");
+        continue;
+      }
+      if (watched.has(watchKey(entry.database, entry.collection, candidate.indexName))) {
+        suppress("watched");
+        continue;
+      }
       // Advisories are not drops and never enter that pipeline, so a standing
       // drop says nothing about whether one is worth repeating.
       if (
         candidate.type !== "ADVISORY_REVIEW" &&
         standing.has(watchKey(entry.database, entry.collection, candidate.indexName))
       ) {
+        suppress("standing");
         continue;
       }
       // Advisories still surface — a human should know a hinted index looks
@@ -281,6 +310,7 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
         candidate.type !== "ADVISORY_REVIEW" &&
         hintedKeys.has(watchKey(entry.database, entry.collection, candidate.indexName))
       ) {
+        suppress("hinted");
         continue;
       }
       toInsert.push({
@@ -362,5 +392,32 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
   if (gone.length > 0 && rows.length > 0) {
     await db.delete(recommendations).where(inArray(recommendations.id, gone));
   }
+
+  // This pass's account of its own silence, replaced whole (#277). Written even
+  // when nothing was refused and nothing suppressed: an empty note is the record
+  // that the pass ran and had nothing to explain, and the alternative — leaving
+  // the previous pass's row in place — would keep telling a customer their
+  // counters are resetting for as long as after it stopped being true.
+  await db
+    .insert(analysisNotes)
+    .values({
+      clusterId,
+      source: "CLASSIFY",
+      decidedAt: new Date(),
+      consideredIndexes,
+      trustedIndexes,
+      refusals,
+      suppressed,
+    })
+    .onConflictDoUpdate({
+      target: [analysisNotes.clusterId, analysisNotes.source],
+      set: {
+        decidedAt: new Date(),
+        consideredIndexes,
+        trustedIndexes,
+        refusals,
+        suppressed,
+      },
+    });
   return toInsert.length;
 }

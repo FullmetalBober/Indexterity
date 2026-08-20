@@ -178,6 +178,20 @@ including the parameterised `WHERE created_at < @cutoff` — where the retention
 window is simply not in the plan, and the advisory says so rather than inventing
 a number ([D85](./docs/decisions.md)).
 
+**And when it decides nothing, it says so.** An empty recommendations list is
+indistinguishable from "your indexes are all fine", and that reading is wrong in
+two directions. Usage findings need a history the engine is willing to trust —
+three collects, seven days, no gap, and counters that did not reset underneath it
+— and a cluster whose counters reset oftener than that window can never receive
+one, with the condition never clearing on its own. Separately, every collision
+guard in the engine works by making a finding *disappear*: an index inside its
+own post-build watch, one already carrying a recommendation, one parked after a
+regression. Both are correct and both were invisible, so the dashboard now names
+the dominant reason usage analysis is paused, in the words of the threshold that
+caused it, and counts what the guards held back
+([D99](./docs/decisions.md), #277). "Cannot tell" is never spelled "all clear"
+— on screen as well as in the pipeline.
+
 Full reasoning for all of it: [Architecture §6](https://github.com/FullmetalBober/Indexterity/wiki/Architecture).
 
 ## The safety pipeline

@@ -25,6 +25,10 @@ export const NO_RECOMMENDATIONS: ClusterRecommendations = {
   total: 0,
   recommendations: [],
   usage: [],
+  // Null, not an empty note: "no classify pass has explained itself yet" and
+  // "the pass ran and had nothing to explain" are different states, and drawing
+  // the second on a failed read would be inventing a reassurance (#277).
+  analysis: null,
 };
 export const NO_ACTIVITY: AuditAction[] = [];
 // A cluster with nothing dropped yet and a cluster whose ROI read failed both
