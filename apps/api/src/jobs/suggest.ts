@@ -1,5 +1,6 @@
 import {
   createScore,
+  DEFAULT_OBSERVE_DAYS,
   executionsPerWeek,
   type IndexSpec,
   isRecurring,
@@ -10,6 +11,7 @@ import {
   recommendCreates,
   recommendNarrowing,
   recommendReorder,
+  regressionWeight,
   reorderScore,
   type ScanSeverity,
   type SortKey,
@@ -90,9 +92,17 @@ export async function suggestForCluster(db: Database, clusterId: string): Promis
     .select()
     .from(indexCooldowns)
     .where(eq(indexCooldowns.clusterId, clusterId));
-  const regressionCounts = new Map<string, number>();
+  // Decayed, not raw — see analysis/score.ts. A regression counts in full while
+  // the cooldown it bought is running and fades over the same span again, so a
+  // build rolled back a year ago against a workload since rewritten no longer
+  // disqualifies the index for the life of the cluster.
+  const observeDays = policy?.observeWindowDays ?? DEFAULT_OBSERVE_DAYS;
+  const regressionWeights = new Map<string, number>();
   for (const row of cooldownRows) {
-    regressionCounts.set(`${row.database} ${row.collection} ${row.indexName}`, row.regressionCount);
+    regressionWeights.set(
+      `${row.database} ${row.collection} ${row.indexName}`,
+      regressionWeight(row, observeDays),
+    );
   }
 
   // Same as apply: obey the plan, not just the stored policy. Each fallback is
@@ -290,7 +300,7 @@ export async function suggestForCluster(db: Database, clusterId: string): Promis
           score: reorderScore({
             count: candidate.count,
             sizeBytes: sizes[candidate.indexName] ?? 0,
-            pastRegressions: regressionCounts.get(`${database} ${collection} ${indexName}`) ?? 0,
+            regressionWeight: regressionWeights.get(`${database} ${collection} ${indexName}`) ?? 0,
           }),
           // Claimed at retirement, not now: the original is still there and
           // still costing until it is actually dropped. A re-order reclaims
@@ -365,7 +375,7 @@ export async function suggestForCluster(db: Database, clusterId: string): Promis
           count: candidate.count,
           docCount,
           severity,
-          pastRegressions: regressionCounts.get(`${database} ${collection} ${indexName}`) ?? 0,
+          regressionWeight: regressionWeights.get(`${database} ${collection} ${indexName}`) ?? 0,
         });
         // Severity is the collection's, not this candidate's, so a sort-driven
         // candidate must not inherit a different shape's scan as grounds for
@@ -446,7 +456,7 @@ export async function suggestForCluster(db: Database, clusterId: string): Promis
             droppedKeys: candidate.droppedKeys.length,
             totalKeys,
             sizeBytes: currentBytes,
-            pastRegressions: regressionCounts.get(`${database} ${collection} ${indexName}`) ?? 0,
+            regressionWeight: regressionWeights.get(`${database} ${collection} ${indexName}`) ?? 0,
           }),
           // Claimed at retirement, not now: the long index is still there and
           // still costing until it is actually dropped.
@@ -504,7 +514,8 @@ export async function suggestForCluster(db: Database, clusterId: string): Promis
           collscan: true,
           count: want.count,
           docCount: foreignDocs,
-          pastRegressions: regressionCounts.get(`${want.database} ${want.from} ${indexName}`) ?? 0,
+          regressionWeight:
+            regressionWeights.get(`${want.database} ${want.from} ${indexName}`) ?? 0,
         }),
         estimatedBytesSaved: 0,
         targetSpec: { keys: [want.foreignField], retire: [] },

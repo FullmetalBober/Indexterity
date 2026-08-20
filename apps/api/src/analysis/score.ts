@@ -21,8 +21,11 @@ export interface DropSignals {
   readonly snapshots: number;
   readonly redundant: boolean;
   readonly sizeBytes: number;
-  // Times this exact index regressed before (from cooldown history).
-  readonly pastRegressions: number;
+  // How much this index's regression history still counts against it — see
+  // regressionWeight, and note it is a WEIGHT and not a count: a regression is
+  // worth its full 1.0 while the cooldown it caused is still running and fades
+  // to nothing over the same span again.
+  readonly regressionWeight: number;
 }
 
 export interface CreateSignals {
@@ -33,7 +36,7 @@ export interface CreateSignals {
   readonly sortedInMemory?: boolean;
   readonly count: number;
   readonly docCount: number;
-  readonly pastRegressions: number;
+  readonly regressionWeight: number;
   // How much the scan is actually costing (analysis/severity.ts). Defaults to
   // ROUTINE so callers without a workload source behave as before.
   readonly severity?: ScanSeverity;
@@ -47,6 +50,51 @@ const SNAPSHOTS_FOR_FULL_CREDIT = 125;
 const SIGHTINGS_FOR_FULL_CREDIT = 35;
 // One regression is close to disqualifying, two are disqualifying.
 const REGRESSION_PENALTY = 40;
+const DAY_MS = 86_400_000;
+
+// How much a past regression still counts, from the cooldown row it wrote.
+//
+// The penalty used to be permanent, and nothing made it so on purpose: the
+// cooldown was built to expire, the count was built to escalate, and the score
+// read that count with no clock at all — `index_cooldowns` rows are never purged
+// either, so an index that regressed once carried -40 for the life of the
+// cluster. With a 95-point ceiling on a drop and 70 the suggested auto-approve
+// threshold, that means ONE failed attempt permanently disqualified an index
+// from ever being cleaned up unattended again, against any future workload.
+//
+// The evidence is real and the best kind this engine has — the experiment ran on
+// production traffic and reads got slower, so something was using the index. It
+// should not be discarded the moment the cooldown lifts, or the same experiment
+// just runs again. But a workload is not the same workload a year later, and
+// evidence from one that no longer exists was being priced as if it were
+// collected this morning.
+//
+// So: full weight while the cooldown it caused is still running, then a straight
+// line to zero over that same span again. The escalation looks after itself —
+// a second regression buys a cooldown twice as long, so it both starts deeper
+// and takes twice as long to fade. `regression_count` is untouched and still
+// carries the audit trail the parked panel draws; only the SCORE forgets.
+export function regressionWeight(
+  cooldown: { readonly regressionCount: number; readonly until: Date | string },
+  observeDays: number,
+  now: Date = new Date(),
+): number {
+  const count = cooldown.regressionCount;
+  if (count <= 0) return 0;
+  const until = new Date(cooldown.until).getTime();
+  if (!Number.isFinite(until)) return count;
+  // The block this regression bought, recomputed rather than stored: it is
+  // `observeDays * 3 * count` at the moment it was written (jobs/cooldowns.ts).
+  // Recomputing from the CURRENT policy is deliberate — an owner who shortens
+  // the observe window is saying they want faster verdicts, and the fade should
+  // follow rather than honour a span that policy no longer stands behind.
+  const span = observeDays * 3 * count * DAY_MS;
+  if (span <= 0) return count;
+  const past = now.getTime() - until;
+  if (past <= 0) return count;
+  if (past >= span) return 0;
+  return count * (1 - past / span);
+}
 
 function clamp(score: number): number {
   return Math.max(0, Math.min(100, Math.round(score)));
@@ -72,7 +120,7 @@ export function dropScore(signals: DropSignals): number {
   if (signals.sizeBytes > 0) {
     score += Math.min(20, Math.round(20 * Math.log10(1 + (9 * signals.sizeBytes) / GB)));
   }
-  score -= signals.pastRegressions * REGRESSION_PENALTY;
+  score -= signals.regressionWeight * REGRESSION_PENALTY;
   return clamp(score);
 }
 
@@ -105,7 +153,7 @@ export function createScore(signals: CreateSignals): number {
   else if (signals.docCount >= 1000) score += 6;
   if (signals.severity === "CRITICAL") score += 10;
   else if (signals.severity === "ELEVATED") score += 5;
-  score -= signals.pastRegressions * REGRESSION_PENALTY;
+  score -= signals.regressionWeight * REGRESSION_PENALTY;
   return clamp(score);
 }
 
@@ -117,7 +165,7 @@ export interface NarrowSignals {
   readonly totalKeys: number;
   // Current size of the index, all replica members summed.
   readonly sizeBytes: number;
-  readonly pastRegressions: number;
+  readonly regressionWeight: number;
 }
 
 // Narrowing scores lower than anything else the engine proposes, and cannot
@@ -151,7 +199,7 @@ export function narrowScore(signals: NarrowSignals): number {
   // And what that weight costs. An index worth reclaiming is worth the rebuild.
   if (signals.sizeBytes >= GB) score += 10;
   else if (signals.sizeBytes >= 128 * 1024 * 1024) score += 6;
-  score -= signals.pastRegressions * REGRESSION_PENALTY;
+  score -= signals.regressionWeight * REGRESSION_PENALTY;
   return Math.min(NARROW_MAX_SCORE, clamp(score));
 }
 
@@ -159,7 +207,7 @@ export interface ReorderSignals {
   // Executions of the shapes this index's directions cannot serve.
   readonly count: number;
   readonly sizeBytes: number;
-  readonly pastRegressions: number;
+  readonly regressionWeight: number;
 }
 
 // Re-ordering a PROTECTED index is APPROVAL-ONLY whatever this returns —
@@ -186,7 +234,7 @@ export function reorderScore(signals: ReorderSignals): number {
   // the length of the watch.
   if (signals.sizeBytes >= GB) score -= 15;
   else if (signals.sizeBytes >= 128 * 1024 * 1024) score -= 8;
-  score -= signals.pastRegressions * REGRESSION_PENALTY;
+  score -= signals.regressionWeight * REGRESSION_PENALTY;
   return Math.min(REORDER_MAX_SCORE, clamp(score));
 }
 
