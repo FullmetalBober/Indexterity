@@ -495,7 +495,7 @@ Migration installs **two** schemas
 api serves, because a request that queues a job would otherwise race a schema
 that is not there yet.
 
-**Four test layers**, currently 870 api unit, 452 web unit, 132 integration and
+**Four test layers**, currently 870 api unit, 452 web unit, 134 integration and
 34 end-to-end.
 
 | layer | what it needs | what only it catches |
