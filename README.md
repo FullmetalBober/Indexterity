@@ -486,10 +486,16 @@ want the two to agree, and nothing is broken while they do not.
 
 `version:set` stays for doing it by hand. `version:check` is load-bearing
 either way: an `extra-files` entry whose jsonpath matches nothing is a **silent
-no-op** in release-please, so the config is not the guarantee — CI asserting
-that the seven packages, the chart and the lockfile all agree is. It runs on the
-release pull request like any other, and `npm ci` ahead of it refuses a lockfile
-that disagrees, which is the second net under the same hole (#186).
+no-op** in release-please, so the config is not the guarantee — asserting that
+the seven packages, the chart and the lockfile all agree is.
+
+That assertion runs inside `release-please.yml` itself, not in `ci.yml`. A pull
+request opened by `GITHUB_TOKEN` **triggers no workflow run**, by design, so CI
+never sees the release pull request at all; running the check in the workflow a
+human's push to `main` started is the one place it cannot be skipped. `npm ci`
+ahead of it is half the assertion rather than setup — it refuses a lockfile
+whose workspace versions disagree with the manifests, which is the failure a
+silent no-op leaves behind (#186).
 
 `npm run up` is a convenience, not a requirement — `podman-compose up` works
 directly. It recreates containers whose crun state a logout cleared (`cannot

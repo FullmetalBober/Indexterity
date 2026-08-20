@@ -38,12 +38,60 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # Everything comes from release-please-config.json, which lists the
-      # fourteen places besides the root package.json that state the version.
+      # thirteen places besides the root package.json that state the version.
       # An extra-file whose jsonpath matches nothing is a SILENT no-op in
-      # release-please, so the list is not the guarantee — `npm run
-      # version:check` in ci.yml is, and it runs on this pull request like any
-      # other. That is what turns a stale field into a red check instead of a
-      # release whose lockfile `npm ci` refuses (#186).
+      # release-please, so the list is not the guarantee — `version:check` is,
+      # and the steps below are where it runs. Not ci.yml: see the comment on
+      # them for why it never sees this pull request.
       - uses: googleapis/release-please-action@v4
+        id: release
         with:
           target-branch: main
+
+      # A pull request opened by GITHUB_TOKEN triggers no workflow run, by
+      # design — so ci.yml never sees the release pull request and the
+      # version:check that makes the config above safe would never run. It runs
+      # HERE instead, inside the workflow a human's push to main started, which
+      # is the one place it cannot be skipped.
+      #
+      # Found by reading the action's own README rather than by a release going
+      # wrong: "events triggered by the GITHUB_TOKEN will not create a new
+      # workflow run". The alternative is a personal access token, which does
+      # trigger runs; this keeps the credential surface at zero and asserts the
+      # only thing about a release pull request that is worth asserting — it
+      # changes version strings and the changelog and nothing else.
+      #
+      # By label rather than by branch name: release-please names its branch
+      # `release-please--branches--<target>`, a convention this workflow should
+      # not have to know, while `autorelease: pending` is the label it applies
+      # and the one thing it documents about the pull request.
+      - name: Find the release pull request
+        id: release-pr
+        if: steps.release.outputs.prs_created == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          branch=$(gh pr list --repo "$GITHUB_REPOSITORY" --base main \
+            --label "autorelease: pending" --json headRefName --jq '.[0].headRefName')
+          if [ -z "$branch" ]; then
+            echo "release-please reported a pull request and none carries the label" >&2
+            exit 1
+          fi
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v6
+        if: steps.release.outputs.prs_created == 'true'
+        with:
+          ref: ${{ steps.release-pr.outputs.branch }}
+      - uses: actions/setup-node@v7
+        if: steps.release.outputs.prs_created == 'true'
+        with:
+          node-version: "26"
+          cache: npm
+      # `npm ci` is half the assertion, not setup: it REFUSES a lockfile whose
+      # workspace versions disagree with the manifests, which is the failure an
+      # extra-files jsonpath silently leaves behind (#186).
+      - run: npm ci
+        if: steps.release.outputs.prs_created == 'true'
+      - run: npm run version:check
+        if: steps.release.outputs.prs_created == 'true'
