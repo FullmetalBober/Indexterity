@@ -8,6 +8,12 @@ export interface ObserveWindow {
   readonly reason: string | null;
 }
 
+// The observe window when a cluster has no policy row of its own. The column's
+// own default (schema.ts) is the same number; this is the fallback for the read
+// finding no row at all, and it lives here because every caller that needs it is
+// asking a question this module answers.
+export const DEFAULT_OBSERVE_DAYS = 30;
+
 const DAY_MS = 86_400_000;
 // Never shorten below a week (or the policy itself, when it's already tighter).
 const SHORTEN_FLOOR_DAYS = 7;

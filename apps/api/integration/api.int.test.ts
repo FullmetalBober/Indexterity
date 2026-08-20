@@ -2116,6 +2116,62 @@ describe("cancelling a pending drop", () => {
 
     await coll.drop().catch(() => {});
   });
+
+  // #270. The window is frozen at hide time on purpose, and until now the only
+  // exit for an owner who already knew was to cancel the drop — which
+  // re-proposes it later and recomputes the same window from the same history.
+  it("shortens a pending drop's observe window to the floor, and never past it", async () => {
+    const [rec] = await db
+      .insert(recommendations)
+      .values({
+        clusterId,
+        type: "DROP_UNUSED",
+        state: "HIDDEN",
+        database: "inttest",
+        collection: "expedite",
+        indexName: "expedite_1",
+        rationale: "no recorded usage",
+        score: 61,
+        estimatedBytesSaved: 2048,
+        // Hidden three days ago on a sixty-day window: the floor is 3, so there
+        // is a real interval between "shortened" and "already served".
+        hiddenAt: new Date(Date.now() - 3 * 86_400_000),
+        observeDays: 60,
+      })
+      .returning();
+    if (rec === undefined) throw new Error("failed to insert recommendation");
+
+    // No `days`: the api takes the floor, so the dashboard never computes it.
+    const res = await api(`/recommendations/${rec.id}/observe-window`, owner, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(200);
+    const shortened = asRecord(await res.json());
+    expect(shortened.observeDays).toBe(3);
+    expect(shortened.observeReason).toContain("by an owner");
+    // Still HIDDEN: what ended is the observation, not the pipeline. The change
+    // window and the regression gate are still ahead of it.
+    expect(shortened.state).toBe("HIDDEN");
+
+    // Asking again is a no-op that says so rather than silently succeeding — the
+    // window is already at the floor, and there is nothing left to shorten.
+    const again = await api(`/recommendations/${rec.id}/observe-window`, owner, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    expect(again.status).toBe(400);
+
+    // Lengthening is refused here even though it is a perfectly good number:
+    // that is what the policy baseline is for.
+    const longer = await api(`/recommendations/${rec.id}/observe-window`, owner, {
+      method: "POST",
+      body: JSON.stringify({ days: 90 }),
+    });
+    expect(longer.status).toBe(400);
+
+    await db.delete(recommendations).where(eq(recommendations.id, rec.id));
+  });
 });
 
 describe("auto-approval is one threshold", () => {

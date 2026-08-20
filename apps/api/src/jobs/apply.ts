@@ -1,4 +1,4 @@
-import { dynamicObserveDays, inChangeWindow, usageSeries } from "../analysis";
+import { DEFAULT_OBSERVE_DAYS, dynamicObserveDays, inChangeWindow, usageSeries } from "../analysis";
 import { runFrom } from "../analysis/types";
 import { entitledAutomation } from "../billing/plans";
 import {
@@ -22,7 +22,6 @@ import { historyWindow, planForCluster } from "./plan";
 import { preflightDrop } from "./preflight";
 
 const DROP_TYPES = new Set(["DROP_UNUSED", "DROP_REDUNDANT", "MERGE"]);
-const DEFAULT_OBSERVE_DAYS = 30;
 
 // Auto-approval, the whole of it. One threshold, no companion switch: null
 // means nothing is promoted and a human clicks, 0 means everything is,

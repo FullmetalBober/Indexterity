@@ -1,6 +1,7 @@
 import {
   type ActivityPoint,
   activeHours,
+  DEFAULT_OBSERVE_DAYS,
   type IndexInput,
   MAX_GAP_HOURS,
   parseStoredSpec,
@@ -31,7 +32,6 @@ import {
 } from "./watched";
 
 // Policy fallback, matching apply/finalize.
-const DEFAULT_OBSERVE_DAYS = 30;
 
 // Enough history to attempt periodic detection; below this, usage reads FLAT_ZERO.
 // A hole larger than this means we stopped watching, so absence of usage

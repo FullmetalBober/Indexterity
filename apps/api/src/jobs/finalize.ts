@@ -1,4 +1,4 @@
-import { evaluateRegression, inChangeWindow } from "../analysis";
+import { DEFAULT_OBSERVE_DAYS, evaluateRegression, inChangeWindow } from "../analysis";
 import type { Database } from "../db";
 import { actions, and, eq, inArray, policies, recommendations, roiMetrics } from "../db";
 import { emitClusterEvent } from "../events/emit";
@@ -10,7 +10,6 @@ import { openClusterSession } from "./cluster-connection";
 import { recordRegression } from "./cooldowns";
 import { preflightDrop } from "./preflight";
 
-const DEFAULT_OBSERVE_DAYS = 30;
 const DAY_MS = 86_400_000;
 const REGRESSION_OPTIONS = { factor: 1.5, minWindowOps: 20 };
 // A superseded index is a structural finding backed by a replacement that has

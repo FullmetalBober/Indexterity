@@ -1,6 +1,6 @@
 import type { ClusterNodes, IndexUsage, Recommendation } from "@repo/contracts";
 import { useMemo } from "react";
-import { badgeVariant, DropsOn } from "~/components/app/format";
+import { badgeVariant, DropsOn, dropsOn } from "~/components/app/format";
 import { type UsageSplit, usageDetail, usageLine, usageSplit } from "~/components/app/index-usage";
 import { ConfirmButton } from "~/components/confirm-button";
 import { type DashboardColumns, DataTable, dashboardColumns } from "~/components/data-table";
@@ -10,6 +10,7 @@ import { Button } from "~/components/ui/button";
 import {
   useApproveRecommendation,
   useRollbackRecommendation,
+  useShortenObserveWindow,
   useUnhideRecommendation,
 } from "~/lib/queries/mutations/recommendations";
 
@@ -22,6 +23,7 @@ interface Actions {
   readonly approve: (id: string) => void;
   readonly unhide: (id: string) => void;
   readonly undo: (id: string) => void;
+  readonly shorten: (id: string) => void;
 }
 
 // What each state offers to do about it, which is the column a reader came for.
@@ -92,18 +94,40 @@ function action(rec: Recommendation, actions: Actions, readOnly: boolean) {
     );
   }
   if (rec.state === "HIDDEN") {
+    // The window is decided per index and frozen at hide time, so an owner who
+    // already knows the index is dead otherwise has to wait out a cadence the
+    // engine inferred — or cancel the drop, which re-proposes it later and
+    // computes the very same window again (#270). Offered only while there is
+    // something left to wait for: past the window the drop is already due and
+    // ending the observation would do nothing.
+    const waiting = dropsOn(rec);
     return (
-      <ConfirmButton
-        trigger={
-          <Button size="sm" variant="outline">
-            Keep it
-          </Button>
-        }
-        title={`Cancel the pending drop of ${rec.indexName}?`}
-        description="The index becomes visible to the query planner again straight away, and this drop is not proposed again for 90 days."
-        confirmLabel="Un-hide"
-        onConfirm={() => actions.unhide(rec.id)}
-      />
+      <div className="flex gap-1">
+        <ConfirmButton
+          trigger={
+            <Button size="sm" variant="outline">
+              Keep it
+            </Button>
+          }
+          title={`Cancel the pending drop of ${rec.indexName}?`}
+          description="The index becomes visible to the query planner again straight away, and this drop is not proposed again for 90 days."
+          confirmLabel="Un-hide"
+          onConfirm={() => actions.unhide(rec.id)}
+        />
+        {waiting !== null && new Date(waiting).getTime() > Date.now() ? (
+          <ConfirmButton
+            trigger={
+              <Button size="sm" variant="ghost">
+                Drop sooner
+              </Button>
+            }
+            title={`Stop observing ${rec.indexName}?`}
+            description="The observation ends now and the drop goes ahead at the next change window. It still passes the regression gate first — if hiding this index has slowed reads, it is un-hidden instead. Only the waiting is skipped."
+            confirmLabel="End observation"
+            onConfirm={() => actions.shorten(rec.id)}
+          />
+        ) : null}
+      </div>
     );
   }
   return <span className="text-muted-foreground text-xs">{rec.state}</span>;
@@ -276,6 +300,7 @@ export function RecommendationsTable({
   const approve = useApproveRecommendation(clusterId);
   const unhide = useUnhideRecommendation(clusterId);
   const undo = useRollbackRecommendation(clusterId);
+  const shorten = useShortenObserveWindow(clusterId);
 
   const splits = useMemo(() => {
     const built = new Map<string, SplitEntry>();
@@ -293,11 +318,16 @@ export function RecommendationsTable({
   const columns = useMemo(
     () =>
       buildColumns(
-        { approve: approve.mutate, unhide: unhide.mutate, undo: undo.mutate },
+        {
+          approve: approve.mutate,
+          unhide: unhide.mutate,
+          undo: undo.mutate,
+          shorten: shorten.mutate,
+        },
         splits,
         readOnly,
       ),
-    [approve.mutate, unhide.mutate, undo.mutate, splits, readOnly],
+    [approve.mutate, unhide.mutate, undo.mutate, shorten.mutate, splits, readOnly],
   );
 
   const truncated = total > recommendations.length;

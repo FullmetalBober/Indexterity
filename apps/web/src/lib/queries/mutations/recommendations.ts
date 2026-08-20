@@ -15,6 +15,7 @@ import { queryKeys } from "../keys";
 const APPROVE_FAILED = "Approve failed — are you an owner, and is the API up?";
 const UNHIDE_FAILED = "Could not un-hide — the cluster may be unreachable or read-only";
 const UNDO_FAILED = "Undo failed — the cluster may be unreachable or read-only";
+const SHORTEN_FAILED = "Could not end the observation — are you an owner, and is the API up?";
 
 // The cluster has to be in the key, so each of these is bound to the cluster the
 // dashboard resolved rather than reaching for a selection of its own.
@@ -66,6 +67,21 @@ export function useUnhideRecommendation(clusterId: string | null) {
     ok: "Index un-hidden — this drop won't be proposed again for 90 days",
     failed: UNHIDE_FAILED,
     parks: true,
+  });
+}
+
+// Ends the observation rather than setting a length: the api takes the floor
+// when no `days` is given, so the dashboard never has to work out how long the
+// index has been hidden — an arithmetic it would do against a different clock
+// and disagree with across a day boundary.
+//
+// parks: false — nothing is rejected or cooled down here. The drop stays exactly
+// where it was in the pipeline and only stops waiting.
+export function useShortenObserveWindow(clusterId: string | null) {
+  return usePipelineMutation(clusterId, (id) => api().shortenObserveWindow({ id }), {
+    ok: "Observation ended — the drop goes ahead at the next change window",
+    failed: SHORTEN_FAILED,
+    parks: false,
   });
 }
 
