@@ -2285,11 +2285,20 @@ describe("workload collection is batched", () => {
     if (orders.length > 0) expect(orders.some((s) => s.equality.includes("status"))).toBe(true);
     if (carts.length > 0) expect(carts.some((s) => s.equality.includes("tier"))).toBe(true);
 
-    // And the restructured suggest run completes against a real cluster.
+    // And the restructured suggest run completes against a real cluster —
+    // WITHOUT switching workload analysis on first, because it is on by default
+    // now (#258). The pass used to need a policy row saying `true`, and a new
+    // cluster has no policy row at all, which is precisely the cluster the
+    // create side had the most to say about and said nothing on.
+    expect(await suggestForCluster(db, clusterId)).toBeGreaterThanOrEqual(0);
+
+    // Off is still off, and now it is a decision the data records rather than
+    // the absence of one. Asserted through the api so the round trip that stores
+    // it is the thing under test.
     await api(`/clusters/${clusterId}/policy`, owner, {
       method: "PUT",
       body: JSON.stringify({
-        workloadAnalysis: true,
+        workloadAnalysis: false,
         instantCreate: false,
         observeWindowDays: 7,
         maxCollectionSizeBytes: null,
@@ -2298,7 +2307,9 @@ describe("workload collection is batched", () => {
         changeWindowEndHour: null,
       }),
     });
-    expect(await suggestForCluster(db, clusterId)).toBeGreaterThanOrEqual(0);
+    // Zero without dialling: the guard is the first thing the pass does, so a
+    // cluster switched off costs one row read and no connection.
+    expect(await suggestForCluster(db, clusterId)).toBe(0);
   });
 });
 
@@ -3096,6 +3107,43 @@ describe("workload source follows the server version", () => {
 // because none is wired. What matters is that the limits are enforced by the
 // api rather than only drawn in the dashboard — a quota the client checks is
 // not a quota.
+// The default has to be the same number in two places or the dashboard renders a
+// state the engine does not act on: the column, for a row that exists, and this
+// read's fallback, for the normal state of a new cluster — no policy row at all,
+// because nothing creates one at onboarding (#258).
+describe("workload analysis is on before anybody configures anything", () => {
+  it("reads as on with no policy row, and stays off once switched off", async () => {
+    const id = await bareCluster("Unconfigured Policy");
+    const rows = await db.select().from(policies).where(eq(policies.clusterId, id));
+    expect(rows).toHaveLength(0);
+
+    const fresh = asRecord(await (await api(`/clusters/${id}/policy`, owner)).json());
+    expect(fresh.workloadAnalysis).toBe(true);
+    // The create side proposes; it never builds without being asked. That is
+    // what makes an on-by-default safe, so it is asserted beside it.
+    expect(fresh.instantCreate).toBe(false);
+    expect(fresh.autoApplyScore).toBe(null);
+
+    const saved = await api(`/clusters/${id}/policy`, owner, {
+      method: "PUT",
+      body: JSON.stringify({
+        workloadAnalysis: false,
+        instantCreate: false,
+        observeWindowDays: 30,
+        maxCollectionSizeBytes: null,
+        autoApplyScore: null,
+        changeWindowStartHour: null,
+        changeWindowEndHour: null,
+      }),
+    });
+    expect(saved.status).toBe(200);
+    // A stored false must survive the read's fallback — otherwise "off" would be
+    // unreachable, which is the mirror image of the bug being fixed.
+    const after = asRecord(await (await api(`/clusters/${id}/policy`, owner)).json());
+    expect(after.workloadAnalysis).toBe(false);
+  });
+});
+
 describe("plan limits", () => {
   async function setPlan(orgId: string, plan: string): Promise<void> {
     await db.update(organizations).set({ plan }).where(eq(organizations.id, orgId));
