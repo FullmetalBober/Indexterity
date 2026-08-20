@@ -8,6 +8,7 @@ import {
   totalObservations,
   type UsageSnapshot,
 } from "./types";
+import { usageSeries } from "./usage";
 
 export interface ClassifyOptions {
   // How far back "recent" reaches when deciding alive vs dead, in hours.
@@ -185,27 +186,38 @@ export function usageHistoryIsTrustworthy(
   return now.getTime() - spanEnd(last) <= maxGap;
 }
 
-// Sum per-member ops for a snapshot (aggregate across all replica-set members).
-export function totalOps(snapshot: UsageSnapshot): number {
-  return snapshot.perMember.reduce((sum, member) => sum + member.ops, 0);
-}
-
 // Classify an index from its usage history. Pure; no I/O.
 // PERIODIC_DEAD vs PERIODIC_ALIVE hinges on whether recent expected bursts
 // still appear — a decommissioned monthly job goes dead and becomes droppable.
+//
+// Reads ACTIVITY, through usageSeries, and never the counters it is handed
+// (#265). `$indexStats.accesses.ops` is cumulative, so "this snapshot has ops"
+// is true of every index used even once since the member's `since` — under
+// which `activeCount === observations` held for anything ever used, and
+// CONTINUOUS was the verdict on an index that had served nothing for months.
+// The class that is supposed to say "in constant use" was saying "used, once,
+// at some point", and CONTINUOUS is not droppable, so the clearest dead-index
+// case was the one that could never be proposed.
+//
+// The trust gates above still read the raw counters, and must: `since` moving
+// and a reading going backwards are facts about the counter, not about usage.
 export function classifyUsage(
   history: readonly UsageSnapshot[],
   options: ClassifyOptions,
 ): UsageClass {
-  const observations = totalObservations(history);
+  // Collects, not rows, on both sides of the comparison below — usageSeries
+  // preserves the count across the split it makes, so the two agree by
+  // construction rather than by coincidence.
+  const series = usageSeries(history);
+  const observations = totalObservations(series);
   if (observations < options.minHistory) return "FLAT_ZERO";
 
   // Weighted by observation count, not by row count. A run is one row standing
   // for many identical collects, and "was the counter moving every time we
   // looked" is a question about the looks. Counting rows would make a single
   // quiet run outweigh three hundred busy collects it happens to sit beside.
-  const activeCount = history.reduce(
-    (sum, snapshot) => (totalOps(snapshot) > 0 ? sum + observationsOf(snapshot) : sum),
+  const activeCount = series.reduce(
+    (sum, point) => (point.ops > 0 ? sum + observationsOf(point) : sum),
     0,
   );
   if (activeCount === 0) return "FLAT_ZERO";
@@ -214,11 +226,11 @@ export function classifyUsage(
   // Everything still standing within recentHours of the newest confirmation,
   // however many rows that turns out to be. A run counts as recent when its END
   // falls inside the window: that is when the state was last confirmed, and a
-  // long run reaching into the window was true inside it.
-  const newest = Math.max(...history.map(spanEnd));
+  // long run reaching into the window was true inside it. For an activity
+  // point that end IS the instant the counter jumped, which is the moment the
+  // burst has to be dated to.
+  const newest = Math.max(...series.map(spanEnd));
   const cutoff = newest - options.recentHours * HOUR_MS;
-  const recentlyActive = history.some(
-    (snapshot) => spanEnd(snapshot) >= cutoff && totalOps(snapshot) > 0,
-  );
+  const recentlyActive = series.some((point) => spanEnd(point) >= cutoff && point.ops > 0);
   return recentlyActive ? "PERIODIC_ALIVE" : "PERIODIC_DEAD";
 }

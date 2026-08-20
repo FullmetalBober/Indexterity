@@ -17,5 +17,6 @@ export * from "./safety";
 export * from "./score";
 export * from "./severity";
 export * from "./types";
+export * from "./usage";
 export * from "./window";
 export * from "./workload";

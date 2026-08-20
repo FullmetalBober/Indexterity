@@ -18,11 +18,18 @@ function spec(name: string, keys: IndexKey[], overrides: Partial<IndexSpec> = {}
   };
 }
 
-function input(indexSpec: IndexSpec, opsPerSnapshot: number[]): IndexInput {
-  const history: UsageSnapshot[] = opsPerSnapshot.map((ops, i) => ({
-    capturedAt: `2026-01-0${i + 1}T00:00:00Z`,
-    perMember: [{ member: "m", ops, since: "" }],
-  }));
+// Each entry is the ACTIVITY in that interval; the helper accumulates it into
+// the cumulative counter mongod reports, which is what the analysis reads and
+// differences back (#265).
+function input(indexSpec: IndexSpec, activityPerSnapshot: number[]): IndexInput {
+  let counter = 0;
+  const history: UsageSnapshot[] = activityPerSnapshot.map((activity, i) => {
+    counter += activity;
+    return {
+      capturedAt: `2026-01-0${i + 1}T00:00:00Z`,
+      perMember: [{ member: "m", ops: counter, since: "" }],
+    };
+  });
   return { spec: indexSpec, history };
 }
 
