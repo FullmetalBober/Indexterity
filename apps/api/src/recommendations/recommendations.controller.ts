@@ -2,7 +2,7 @@ import { Controller, Req } from "@nestjs/common";
 import type { IndexUsage } from "@repo/contracts";
 import { contract, RECOMMENDATIONS_CAP } from "@repo/contracts";
 import type { FastifyRequest } from "fastify";
-import { parseStoredSpec, rebuildKeys, rebuildOptions } from "../analysis";
+import { DEFAULT_OBSERVE_DAYS, parseStoredSpec, rebuildKeys, rebuildOptions } from "../analysis";
 import {
   actions,
   and,
@@ -11,6 +11,7 @@ import {
   desc,
   eq,
   indexSnapshots,
+  policies,
   recommendations,
   roiMetrics,
   sql,
@@ -387,6 +388,86 @@ export class RecommendationsController {
           kind: "HIDE",
           actor: "user",
           result: `un-hidden on request; cooling down until ${day}`,
+        });
+        return toRecommendation(updated);
+      },
+    );
+  }
+
+  // Owner-only: shorten a pending drop's observe window.
+  //
+  // The window is decided once at hide time and frozen deliberately — recomputing
+  // it every pass would make the drop date walk as history rolled out of
+  // retention, and a date nobody can plan around is worse than none. The cost of
+  // that freeze is that an owner who knows an index is dead has no way to say so:
+  // the only exit was to cancel the drop entirely, which re-proposes it later and
+  // recomputes the very same window from the very same history. This is that
+  // missing move, and it is the whole of it — the drop still waits for the change
+  // window and still passes the regression gate, so what this shortens is the
+  // OBSERVATION and never a safety step.
+  @Implement(contract.shortenObserveWindow)
+  shortenObserveWindow(@Req() req: FastifyRequest) {
+    return route(this.tenancy, contract.shortenObserveWindow, req, "owner").handler(
+      async ({ input, errors, context }) => {
+        const [rec] = await this.database.db
+          .select({ rec: recommendations })
+          .from(recommendations)
+          .innerJoin(clusters, eq(recommendations.clusterId, clusters.id))
+          .where(and(eq(recommendations.id, input.id), eq(clusters.orgId, context.member.orgId)))
+          .limit(1)
+          .then((rows) => rows.map((row) => row.rec));
+        if (rec === undefined) {
+          throw errors.NOT_FOUND({ message: "recommendation not found" });
+        }
+        if (rec.state !== "HIDDEN" || rec.hiddenAt === null) {
+          throw errors.CONFLICT({ message: "only a hidden index has an observe window" });
+        }
+        // The window in force, which is the stored one or the policy baseline it
+        // fell back to — the same reading finalize does, so the ceiling below is
+        // the number the drop is actually waiting on rather than a null.
+        const [policy] = await this.database.db
+          .select({ observeWindowDays: policies.observeWindowDays })
+          .from(policies)
+          .where(eq(policies.clusterId, rec.clusterId))
+          .limit(1);
+        const current = rec.observeDays ?? policy?.observeWindowDays ?? DEFAULT_OBSERVE_DAYS;
+        // The floor, and the default. Never into the past: a window shorter than
+        // the time already served is due the moment it is written, so the next
+        // finalize tick would drop the index with no interval in which anyone
+        // could change their mind — "shorten" would quietly be spelled "drop
+        // now", which is a different feature and a more dangerous one.
+        const servedDays = Math.max(
+          1,
+          Math.ceil((Date.now() - rec.hiddenAt.getTime()) / 86_400_000),
+        );
+        const days = input.days ?? servedDays;
+        if (days >= current) {
+          throw errors.BAD_REQUEST({
+            message: `this drop is already observing for ${current} day(s) — a window can be shortened here, never lengthened`,
+          });
+        }
+        if (days < servedDays) {
+          throw errors.BAD_REQUEST({
+            message: `this index has been hidden for ${servedDays} day(s); the window cannot be shortened below what it has already observed`,
+          });
+        }
+        const [updated] = await this.database.db
+          .update(recommendations)
+          .set({
+            observeDays: days,
+            observeReason: `shortened to ${days} day(s) by an owner`,
+            updatedAt: new Date(),
+          })
+          .where(eq(recommendations.id, rec.id))
+          .returning();
+        if (updated === undefined) {
+          throw errors.NOT_FOUND({ message: "recommendation not found" });
+        }
+        await this.database.db.insert(actions).values({
+          recommendationId: rec.id,
+          kind: "HIDE",
+          actor: "user",
+          result: `observe window shortened from ${current} to ${days} day(s) on request`,
         });
         return toRecommendation(updated);
       },
