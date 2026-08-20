@@ -157,6 +157,7 @@ export class RecommendationsController {
             id: recommendations.id,
             database: recommendations.database,
             observedDatabases: clusters.observedDatabases,
+            readOnly: clusters.readOnly,
           })
           .from(recommendations)
           .innerJoin(clusters, eq(recommendations.clusterId, clusters.id))
@@ -175,6 +176,18 @@ export class RecommendationsController {
             message:
               `${owned.database} is not one of the databases this cluster observes — ` +
               "reload the page, or add it back in the cluster's settings.",
+          });
+        }
+        // Same reasoning, one step further out: a read-only cluster never
+        // executes a write, so applyCluster returns before pre-flight and the
+        // row stays APPROVED with no action, no event and nothing saying why
+        // (#257). Accepting the click would be worse than the stale-list case
+        // above — that one resolves on a reload, this one never resolves at all.
+        if (owned.readOnly) {
+          throw errors.CONFLICT({
+            message:
+              "this cluster is read-only, so nothing can be applied to it — " +
+              "switch it to live in the cluster's settings first.",
           });
         }
         const [row] = await this.database.db

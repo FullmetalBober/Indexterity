@@ -27,9 +27,23 @@ interface Actions {
 // What each state offers to do about it, which is the column a reader came for.
 // Advisories are the exception: the engine will not touch them at any setting, so
 // the cell says so rather than offering a button that would not be honoured.
-function action(rec: Recommendation, actions: Actions) {
+function action(rec: Recommendation, actions: Actions, readOnly: boolean) {
   if (rec.type === "ADVISORY_REVIEW") {
     return <span className="text-muted-foreground text-xs">review manually</span>;
+  }
+  // Same rule as the advisory above, for the same reason: a read-only cluster
+  // never executes a write, so an approval here would sit at APPROVED forever
+  // (#257). The api refuses it too — this is what stops a reader finding out
+  // that way.
+  if (rec.state === "PROPOSED" && readOnly) {
+    return (
+      <span
+        className="text-muted-foreground text-xs"
+        title="Switch the cluster to live in Settings"
+      >
+        read-only cluster
+      </span>
+    );
   }
   if (rec.state === "PROPOSED") {
     return (
@@ -127,6 +141,7 @@ function UsageSplitLine({ split }: { split: SplitEntry | undefined }) {
 function buildColumns(
   actions: Actions,
   splits: Map<string, SplitEntry>,
+  readOnly: boolean,
 ): DashboardColumns<Recommendation> {
   // column.columns() rather than a bare array: it threads each column's own
   // value type out through a variadic tuple, so a string column and a number
@@ -209,7 +224,7 @@ function buildColumns(
     column.display({
       id: "action",
       header: "Action",
-      cell: (info) => action(info.row.original, actions),
+      cell: (info) => action(info.row.original, actions, readOnly),
     }),
   ]);
 }
@@ -233,6 +248,7 @@ export function RecommendationsTable({
   roster = null,
   total,
   loading,
+  readOnly = false,
 }: {
   clusterId: string | null;
   recommendations: Recommendation[];
@@ -251,6 +267,11 @@ export function RecommendationsTable({
   // becomes a claim about rows that were never sent.
   total: number;
   loading: boolean;
+  // The cluster's mode, so the Approve cell can say why it is not offering a
+  // button. Defaulted rather than required: false is the state in which every
+  // action is honoured, so a caller that forgets it gets the old behaviour and
+  // the api's refusal, not a table that silently withholds approvals (#257).
+  readOnly?: boolean;
 }) {
   const approve = useApproveRecommendation(clusterId);
   const unhide = useUnhideRecommendation(clusterId);
@@ -271,8 +292,12 @@ export function RecommendationsTable({
 
   const columns = useMemo(
     () =>
-      buildColumns({ approve: approve.mutate, unhide: unhide.mutate, undo: undo.mutate }, splits),
-    [approve.mutate, unhide.mutate, undo.mutate, splits],
+      buildColumns(
+        { approve: approve.mutate, unhide: unhide.mutate, undo: undo.mutate },
+        splits,
+        readOnly,
+      ),
+    [approve.mutate, unhide.mutate, undo.mutate, splits, readOnly],
   );
 
   const truncated = total > recommendations.length;

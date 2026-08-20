@@ -4818,3 +4818,60 @@ describe("choosing which databases to observe", () => {
     expect(after?.state).toBe("PROPOSED");
   });
 });
+
+// A read-only cluster is the strongest form of the same problem the observed-
+// database refusal above exists for: applyCluster returns before pre-flight, so
+// an accepted approval sits at APPROVED with no action row and nothing anywhere
+// saying it can never proceed (#257).
+describe("approving on a read-only cluster", () => {
+  it("refuses, naming the mode, rather than parking the row forever", async () => {
+    // Clusters are read-only by default — the column's default, and the whole
+    // onboarding story — so this needs no setup beyond existing.
+    const id = await bareCluster("Read Only Approve");
+    const [rec] = await db
+      .insert(recommendations)
+      .values({
+        clusterId: id,
+        type: "DROP_REDUNDANT" as const,
+        state: "PROPOSED" as const,
+        database: "app",
+        collection: "orders",
+        indexName: "userId_1",
+        rationale: "key-prefix of userId_1_name_1, which already covers it",
+        score: 61,
+        estimatedBytesSaved: 8_192,
+      })
+      .returning();
+    const recId = asString(rec?.id);
+
+    const refused = await api(`/recommendations/${recId}/approve`, owner, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    expect(refused.status).toBe(409);
+    // The message, not just the status: the sibling refusal above answers 409
+    // too, and a reader who cannot act needs to be told which of the two it is.
+    const body = asRecord(await refused.json());
+    expect(String(body.message)).toContain("read-only");
+
+    const [after] = await db
+      .select({ state: recommendations.state })
+      .from(recommendations)
+      .where(eq(recommendations.id, recId));
+    expect(after?.state).toBe("PROPOSED");
+
+    // And it is the MODE that refuses, not the row: the same click lands once
+    // the cluster is live.
+    await db.update(clusters).set({ readOnly: false }).where(eq(clusters.id, id));
+    const accepted = await api(`/recommendations/${recId}/approve`, owner, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    expect(accepted.status).toBe(200);
+    const [live] = await db
+      .select({ state: recommendations.state })
+      .from(recommendations)
+      .where(eq(recommendations.id, recId));
+    expect(live?.state).toBe("APPROVED");
+  });
+});
