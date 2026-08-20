@@ -371,6 +371,7 @@ export class RecommendationsController {
             state: "REJECTED",
             hiddenAt: null,
             observeDays: null,
+            observeReason: null,
             baselineReadOps: null,
             baselineReadLatency: null,
             rationale: `${rec.rationale} — cancelled by an owner; not re-proposed until ${day}`,

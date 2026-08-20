@@ -1,4 +1,5 @@
 // Presentation helpers shared by the dashboard's sections.
+import { Tooltip, TooltipContent, TooltipTrigger } from "~/components/ui/tooltip";
 import { LocalTime, useMounted } from "~/lib/hydration";
 
 export function badgeVariant(type: string): "secondary" | "destructive" | "default" | "outline" {
@@ -75,6 +76,34 @@ export function dropsOn(rec: {
 // noise on every row.
 const DROPS_ON: Intl.DateTimeFormatOptions = { day: "numeric", month: "short" };
 
+// The reason is the engine's own sentence (analysis/observe.ts, stored at hide
+// time), and it is what makes two neighbouring rows with a 7-day and a 60-day
+// window read as measured rather than as arbitrary (#269). Null whenever the
+// policy baseline applied unchanged — there is nothing to explain then, and a
+// tooltip saying "the default" would be worse than none.
+//
+// A tooltip rather than inline text because this lives in the Score cell, where
+// a full sentence per row would bury the number the column is for.
+function WithObserveReason({
+  reason,
+  children,
+}: {
+  reason: string | null;
+  children: React.ReactNode;
+}) {
+  if (reason === null) return children;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className="block cursor-help underline decoration-dotted underline-offset-2">
+          {children}
+        </span>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-xs">{reason}</TooltipContent>
+    </Tooltip>
+  );
+}
+
 // When a hidden index's observe window ends, or nothing.
 //
 // Nothing covers two cases and both belong to the client, which is why this is a
@@ -97,18 +126,30 @@ const DROPS_ON: Intl.DateTimeFormatOptions = { day: "numeric", month: "short" };
 export function DropsOn({
   rec,
 }: {
-  rec: { state: string; hiddenAt: string | null; observeDays: number | null };
+  rec: {
+    state: string;
+    hiddenAt: string | null;
+    observeDays: number | null;
+    observeReason?: string | null;
+  };
 }) {
   const mounted = useMounted();
   const due = dropsOn(rec);
   if (due === null || !mounted) return null;
+  const reason = rec.observeReason ?? null;
   if (new Date(due).getTime() <= Date.now()) {
-    return <span className="block text-muted-foreground">due — waiting on the change window</span>;
+    return (
+      <WithObserveReason reason={reason}>
+        <span className="block text-muted-foreground">due — waiting on the change window</span>
+      </WithObserveReason>
+    );
   }
   return (
-    <span className="block text-muted-foreground">
-      drops <LocalTime iso={due} options={DROPS_ON} dateOnly />
-    </span>
+    <WithObserveReason reason={reason}>
+      <span className="block text-muted-foreground">
+        drops <LocalTime iso={due} options={DROPS_ON} dateOnly />
+      </span>
+    </WithObserveReason>
   );
 }
 

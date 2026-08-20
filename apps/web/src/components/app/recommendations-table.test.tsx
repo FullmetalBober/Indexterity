@@ -29,6 +29,7 @@ function rec(over: Partial<Recommendation> = {}): Recommendation {
     estimatedBytesSaved: 1024,
     hiddenAt: null,
     observeDays: null,
+    observeReason: null,
     createdAt: "2026-08-01T00:00:00.000Z",
     ...over,
   };
