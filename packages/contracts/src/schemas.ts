@@ -504,6 +504,57 @@ export type ClusterIndexSizeSeries = z.infer<typeof clusterIndexSizeSeries>;
 // be everything.
 export const RECOMMENDATIONS_CAP = 500;
 
+// Why the engine had nothing to say (#277).
+//
+// An empty recommendations list is indistinguishable from "your indexes are all
+// fine", and on a cluster whose usage counters reset oftener than the observation
+// window the usage gate refuses every eligible index, indefinitely, with nothing
+// anywhere saying so. This is that state, made a thing the dashboard can draw.
+export const usageTrustRefusalKind = z.enum([
+  "counters-reset",
+  "no-history",
+  "too-few-collects",
+  "span-too-short",
+  "collection-idle",
+  "gap-inside-run",
+  "gap-between-runs",
+  "history-stale",
+]);
+export type UsageTrustRefusalKind = z.infer<typeof usageTrustRefusalKind>;
+
+// A finding the engine derived and then withheld, by which guard.
+export const suppressionGuard = z.enum(["cooldown", "watched", "standing", "hinted"]);
+export type SuppressionGuard = z.infer<typeof suppressionGuard>;
+
+export const suppressedFindings = z.object({
+  guard: suppressionGuard,
+  findings: z.int().positive(),
+  // The engine's own sentence for it. Written server-side because the counts mean
+  // nothing without the reason, and the reason is a fact about the pipeline.
+  explanation: z.string(),
+});
+export type SuppressedFindings = z.infer<typeof suppressedFindings>;
+
+export const analysisNote = z.object({
+  // When the pass that wrote this ran. Stale by at most one classify cadence,
+  // which is the trade: the alternative is recomputing the whole usage history on
+  // every dashboard load.
+  decidedAt: z.string(),
+  consideredIndexes: z.int().nonnegative(),
+  trustedIndexes: z.int().nonnegative(),
+  // True only when NOTHING cleared the usage gate. One trusted index means the
+  // machinery works and the rest are individually short of history, which is an
+  // ordinary state and must not be drawn as a fault.
+  usagePaused: z.boolean(),
+  // The refusal accounting for the most indexes, and the sentence for it. Null
+  // when nothing was refused.
+  dominantRefusal: usageTrustRefusalKind.nullable(),
+  refusedIndexes: z.int().nonnegative(),
+  explanation: z.string().nullable(),
+  suppressed: z.array(suppressedFindings),
+});
+export type AnalysisNote = z.infer<typeof analysisNote>;
+
 export const clusterRecommendations = z.object({
   clusterId: z.uuid(),
   total: z.int().nonnegative(),
@@ -517,6 +568,10 @@ export const clusterRecommendations = z.object({
   // Absent for an index the last collect did not see — dropped since, or a
   // collect that never reached the member holding it.
   usage: z.array(indexUsage),
+  // Why the list is as short as it is (#277). Null before the first classify
+  // pass has run for this cluster — which is itself the honest answer, and the
+  // dashboard draws nothing rather than guessing.
+  analysis: analysisNote.nullable(),
 });
 export type ClusterRecommendations = z.infer<typeof clusterRecommendations>;
 

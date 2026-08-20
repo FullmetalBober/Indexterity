@@ -8,6 +8,7 @@ import {
   jsonb,
   pgEnum,
   pgTable,
+  primaryKey,
   text,
   timestamp,
   unique,
@@ -896,6 +897,47 @@ export const clusterRosters = pgTable("cluster_rosters", {
   nodes: jsonb("nodes").$type<{ host: string; role: string; state: string }[]>().notNull(),
   collectedAt: timestamp("collected_at", { withTimezone: true }).notNull(),
 });
+
+// Why a pass had nothing to say, one row per cluster per producer (#277).
+//
+// The engine declining to make a finding is a state with no representation
+// anywhere: an empty recommendations panel reads as "your indexes are all fine",
+// and on a cluster whose counters reset oftener than the warm-up the usage gate
+// refuses EVERY eligible index, forever, silently. `usageTrustRefusal` (#267)
+// answers it per index and `indexterity.usage_trust.decisions` (#274) counts it
+// for the operator; this is the customer's half.
+//
+// Replaced whole on every pass rather than appended to, like cluster_rosters: the
+// question is "why is it quiet NOW", and the history of that question is what the
+// metric is for. Keyed by producer as well as cluster because the two engines
+// fall silent for unrelated reasons — the usage gate refusing is nothing to do
+// with a query-shape build being held back — and one row each keeps a pass from
+// overwriting the other's account of itself.
+//
+// Both jsonb maps are keyed by the discriminated unions in analysis/silence.ts,
+// so a new refusal kind or a new guard costs no migration. Explicit columns would
+// have been twelve of them and a migration every time the gate grew a check.
+export const analysisNotes = pgTable(
+  "analysis_notes",
+  {
+    clusterId: uuid("cluster_id")
+      .notNull()
+      .references(() => clusters.id, { onDelete: "cascade" }),
+    source: recommendationSource("source").notNull(),
+    decidedAt: timestamp("decided_at", { withTimezone: true }).notNull(),
+    // Indexes the usage gate was asked about, and how many it trusted. Trusted is
+    // the load-bearing one: usage analysis is PAUSED only when nothing cleared
+    // the gate, and "some indexes are still warming up" is an ordinary state that
+    // must not be reported as a fault.
+    consideredIndexes: integer("considered_indexes").notNull().default(0),
+    trustedIndexes: integer("trusted_indexes").notNull().default(0),
+    // UsageTrustRefusal["kind"] -> how many indexes it refused.
+    refusals: jsonb("refusals").$type<Record<string, number>>().notNull().default({}),
+    // SuppressionGuard -> how many findings it withheld.
+    suppressed: jsonb("suppressed").$type<Record<string, number>>().notNull().default({}),
+  },
+  (table) => [primaryKey({ columns: [table.clusterId, table.source] })],
+);
 
 export const latencySamples = pgTable(
   "latency_samples",

@@ -16,6 +16,7 @@ export * from "./rollback";
 export * from "./safety";
 export * from "./score";
 export * from "./severity";
+export * from "./silence";
 export * from "./types";
 export * from "./usage";
 export * from "./window";

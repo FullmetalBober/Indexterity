@@ -8,6 +8,7 @@
 // (#81), and nothing here is a form.
 import { createFileRoute } from "@tanstack/react-router";
 import { ActivityTable } from "~/components/app/activity-table";
+import { AnalysisNotePanel } from "~/components/app/analysis-note";
 import { CollectionsTable, toCollectionRows } from "~/components/app/collections-table";
 import { FootprintPanel } from "~/components/app/footprint-panel";
 import { fmtBytes } from "~/components/app/format";
@@ -219,6 +220,11 @@ function ClusterOverview() {
           <FootprintPanel series={footprint.data} loading={footprint.pending} />
         </div>
       </section>
+
+      {/* Above the proposals rather than under them, because it is how to read
+          them: an empty list means "all fine" unless something says otherwise,
+          and on a cluster whose counters keep resetting nothing ever did (#277). */}
+      <AnalysisNotePanel analysis={recommendations.data.analysis} />
 
       {/* The roster comes from the read the Nodes panel below already makes, not
           from a second copy in the recommendations payload: the members are a

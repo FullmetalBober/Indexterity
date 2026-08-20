@@ -1,10 +1,21 @@
 import { Controller, Req } from "@nestjs/common";
-import type { IndexUsage } from "@repo/contracts";
+import type { AnalysisNote, IndexUsage, SuppressionGuard } from "@repo/contracts";
 import { contract, RECOMMENDATIONS_CAP } from "@repo/contracts";
 import type { FastifyRequest } from "fastify";
-import { DEFAULT_OBSERVE_DAYS, parseStoredSpec, rebuildKeys, rebuildOptions } from "../analysis";
+import {
+  DEFAULT_OBSERVE_DAYS,
+  dominantRefusal,
+  explainRefusal,
+  explainSuppression,
+  parseStoredSpec,
+  rebuildKeys,
+  rebuildOptions,
+  SUPPRESSION_GUARDS,
+  usageAnalysisPaused,
+} from "../analysis";
 import {
   actions,
+  analysisNotes,
   and,
   clusterIndexes,
   clusters,
@@ -20,6 +31,7 @@ import { DatabaseService } from "../db/database.service";
 import type { CreateIndexOptions } from "../engine/ports";
 import { mapClusterError, toRecommendation } from "../http/mappers";
 import { TenancyService } from "../http/tenancy.service";
+import { CLASSIFY_OPTIONS } from "../jobs/classify";
 import { openClusterSession } from "../jobs/cluster-connection";
 import { recordManualVeto } from "../jobs/cooldowns";
 import { Implement, route } from "../orpc/implement";
@@ -51,7 +63,13 @@ export class RecommendationsController {
         // dashboard asks for a cluster it has just been told about, and a refusal
         // there renders as a broken api rather than as an empty panel.
         if (!(await this.tenancy.ownsCluster(input.clusterId, context.member.orgId))) {
-          return { clusterId: input.clusterId, total: 0, recommendations: [], usage: [] };
+          return {
+            clusterId: input.clusterId,
+            total: 0,
+            recommendations: [],
+            usage: [],
+            analysis: null,
+          };
         }
         const [counted] = await this.database.db
           .select({ total: sql<number>`count(*)::int` })
@@ -68,9 +86,61 @@ export class RecommendationsController {
           total: counted?.total ?? rows.length,
           recommendations: rows.map(toRecommendation),
           usage: await this.usageFor(input.clusterId, rows),
+          analysis: await this.analysisFor(input.clusterId),
         };
       },
     );
+  }
+
+  // Why the list above is as short as it is (#277).
+  //
+  // Read from the note the last classify pass wrote rather than recomputed, which
+  // is the trade #277 named: a column written per pass is stale by at most one
+  // classify cadence, while recomputing is exact and costs the whole usage history
+  // on every dashboard load. The stale answer is the right one here — the reasons
+  // are conditions that persist for days, and `decidedAt` ships so the dashboard
+  // can say when rather than implying "now".
+  //
+  // The SENTENCE is built here, not stored: every reason names a threshold from
+  // CLASSIFY_OPTIONS, and copy stored at write time is copy that keeps quoting
+  // "7 days" after the policy moved. Same reason the guard rationales are
+  // composed rather than cached.
+  private async analysisFor(clusterId: string): Promise<AnalysisNote | null> {
+    const [note] = await this.database.db
+      .select()
+      .from(analysisNotes)
+      .where(and(eq(analysisNotes.clusterId, clusterId), eq(analysisNotes.source, "CLASSIFY")))
+      .limit(1);
+    if (note === undefined) return null;
+    const refusals = note.refusals;
+    const dominant = dominantRefusal(refusals);
+    // Only counted for the reason being reported. Summing every refusal would
+    // read as "37 indexes are unanalysable" when the 37 are short of history for
+    // four unrelated reasons, only one of which the sentence explains.
+    const refusedIndexes = dominant === null ? 0 : (refusals[dominant] ?? 0);
+    return {
+      decidedAt: note.decidedAt.toISOString(),
+      consideredIndexes: note.consideredIndexes,
+      trustedIndexes: note.trustedIndexes,
+      usagePaused: usageAnalysisPaused({
+        consideredIndexes: note.consideredIndexes,
+        trustedIndexes: note.trustedIndexes,
+        refusals,
+        suppressed: note.suppressed,
+      }),
+      dominantRefusal: dominant,
+      refusedIndexes,
+      explanation: dominant === null ? null : explainRefusal(dominant, CLASSIFY_OPTIONS),
+      // Iterated over the known guards rather than over the stored keys, so a
+      // key an older api wrote and this one no longer understands is dropped
+      // instead of reaching the contract and failing its own validation.
+      suppressed: SUPPRESSION_GUARDS.flatMap((guard: SuppressionGuard) => {
+        const findings = note.suppressed[guard] ?? 0;
+        return findings > 0
+          ? [{ guard, findings, explanation: explainSuppression(guard, findings) }]
+          : [];
+      }),
+    };
   }
 
   // Per-member usage for the indexes above (#161), from the last collect.
