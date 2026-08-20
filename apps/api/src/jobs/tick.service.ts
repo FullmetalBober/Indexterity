@@ -38,6 +38,13 @@ const RESET_LOCKS_MINUTES = 5;
 // it to, and whether the queue was actually drained afterwards — false means
 // the caller's deadline expired first (or shutdown intervened) and a re-tick
 // will resume, which the occurrence claims and job keys make free.
+//
+// `drained: true` means the drain ran to completion, and NOT that the jobs table
+// is empty at the instant this returns. graphile-worker's worker fires
+// `completeJob(job)` without awaiting it and goes straight back to polling, so
+// the pool can resolve with the last job's DELETE still in flight — measured at
+// 24 of 25 rounds (#280). The row is locked and its attempt is spent, so nothing
+// claims it twice; it simply disappears a few milliseconds late.
 export interface TickOutcome {
   readonly dispatched: readonly string[];
   readonly alreadyClaimed: readonly string[];
