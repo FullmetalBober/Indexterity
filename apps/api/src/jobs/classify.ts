@@ -313,7 +313,12 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
         eq(recommendations.source, "CLASSIFY"),
       ),
     );
-  if (toInsert.length > 0) await db.insert(recommendations).values(toInsert);
+  // onConflictDoNothing against recommendations_one_live_claim (#283): suggest
+  // runs on its own queue and can be mid-insert for this cluster right now, so
+  // the guard set read at the top of this pass may already be stale. Losing that
+  // race means the other producer said the same thing first, which is the
+  // outcome either way — a duplicate row is the only wrong answer.
+  if (toInsert.length > 0) await db.insert(recommendations).values(toInsert).onConflictDoNothing();
 
   // Retirement rows now outlive the sweep, so something has to retract one when
   // its index goes away — the customer dropping it by hand, or a rename. A

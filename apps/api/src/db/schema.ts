@@ -575,6 +575,40 @@ export const indexSnapshots = pgTable(
   ],
 );
 
+// Types that make the same CLAIM about one index. A DROP_UNUSED and a
+// DROP_REDUNDANT both mean "this index should go", so one standing beside the
+// other is a duplicate however differently they got there — and a constraint
+// keyed on `type` would happily hold one of each. MERGE is a build: its
+// `index_name` is the compound index it would CREATE, and the indexes it retires
+// are in `target_spec.retire`.
+//
+// Here rather than in jobs/watched.ts, which is where they were and where the
+// guards that read them still live, because the partial unique index below is
+// built from the same three lists. Two copies of them would be exactly the kind
+// of split-brain that index exists to remove.
+export const DROP_TYPES = ["DROP_UNUSED", "DROP_REDUNDANT"] as const;
+export const BUILD_TYPES = ["CREATE", "UPDATE", "MERGE", "REORDER"] as const;
+
+// States a recommendation can be in while it is still going somewhere. DROPPED,
+// ACTIVE, REJECTED and ROLLED_BACK are settled: the work happened or it will
+// not, and re-deriving the finding is then correct rather than duplicative —
+// classify is supposed to be able to propose dropping an index a graduated
+// build put there, and a REJECTED drop is held off by a cooldown instead.
+export const LIVE_STATES = [
+  "PROPOSED",
+  "APPROVED",
+  "HIDDEN",
+  "OBSERVE",
+  "SCHEDULED",
+  "BUILDING",
+] as const;
+
+// The enum literals as a SQL list, for the DDL below. `sql.raw` because
+// drizzle-kit renders an index's expression into the migration verbatim, so a
+// bound parameter would land in the file as a placeholder; the values are TS
+// literals from the enums above and nothing here is user input.
+const quoted = (values: readonly string[]): string => values.map((v) => `'${v}'`).join(", ");
+
 export const recommendations = pgTable(
   "recommendations",
   {
@@ -646,7 +680,43 @@ export const recommendations = pgTable(
     createdAt,
     updatedAt,
   },
-  (table) => [index("recommendations_cluster_state").on(table.clusterId, table.state)],
+  (table) => [
+    index("recommendations_cluster_state").on(table.clusterId, table.state),
+    // One live recommendation per index per claim (#283). Enforced only by
+    // convention before this — three guard functions in jobs/watched.ts that
+    // every producer has to remember to call and combine correctly, while the
+    // schema would happily store two. There are three producer tags today and a
+    // fourth that calls three of the four checks gets duplicates, with nothing
+    // failing: the rows simply appear, and the first sign is a customer seeing
+    // the same finding twice.
+    //
+    // It also closes a small race for free. `dispatchToAllClusters` gives each
+    // task its own queue, so classify and suggest can run concurrently for one
+    // cluster; each reads its guard sets and then inserts, and between those two
+    // moments the other one's row can land. Narrow window, nothing structural
+    // preventing it — and with `onConflictDoNothing` on the producers a losing
+    // race is now a no-op rather than a duplicate row.
+    //
+    // The guard functions stay. They do more than deduplicate — they encode WHY
+    // (a newborn index is not dead; an index leaving cannot cover) and that
+    // reasoning is what writes the rationale a customer reads. This is the net
+    // underneath, not a replacement.
+    //
+    // ADVISORY_REVIEW is deliberately OUT. Advisories are not drops and never
+    // enter that pipeline, so classify already exempts them from the standing
+    // check by hand; two different advisories about one index are a legitimate
+    // thing to say, and constraining them here would enforce a rule the engine
+    // never claimed.
+    uniqueIndex("recommendations_one_live_claim")
+      .on(
+        table.clusterId,
+        table.database,
+        table.collection,
+        table.indexName,
+        sql.raw(`(case when "type" in (${quoted(DROP_TYPES)}) then 'DROP' else 'BUILD' end)`),
+      )
+      .where(sql.raw(`"state" in (${quoted(LIVE_STATES)}) and "type" <> 'ADVISORY_REVIEW'`)),
+  ],
 );
 
 // Immutable audit of every executed operation and its rollback token.

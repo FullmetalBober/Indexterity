@@ -1,4 +1,21 @@
-import { and, type Database, eq, inArray, ne, or, recommendations } from "../db";
+import {
+  and,
+  BUILD_TYPES,
+  type Database,
+  DROP_TYPES,
+  eq,
+  inArray,
+  LIVE_STATES,
+  ne,
+  or,
+  recommendations,
+} from "../db";
+
+// DROP_TYPES/BUILD_TYPES/LIVE_STATES moved to db/schema.ts, where the partial
+// unique index that enforces the same rule is declared from them (#283).
+// Re-exported here because this is where the guards that read them live, and a
+// caller asking "which types make the same claim" is asking this module.
+export { BUILD_TYPES, DROP_TYPES } from "../db";
 
 const DAY_MS = 86_400_000;
 
@@ -39,7 +56,7 @@ export async function watchedIndexKeys(
     .where(
       and(
         eq(recommendations.clusterId, clusterId),
-        inArray(recommendations.type, ["CREATE", "UPDATE", "MERGE", "REORDER"]),
+        inArray(recommendations.type, [...BUILD_TYPES]),
         inArray(recommendations.state, ["APPROVED", "ACTIVE"]),
       ),
     );
@@ -74,26 +91,12 @@ export async function pendingRemovalKeys(db: Database, clusterId: string): Promi
     .where(
       and(
         eq(recommendations.clusterId, clusterId),
-        inArray(recommendations.type, ["DROP_UNUSED", "DROP_REDUNDANT"]),
+        inArray(recommendations.type, [...DROP_TYPES]),
         inArray(recommendations.state, ["PROPOSED", "APPROVED", "HIDDEN"]),
       ),
     );
   return new Set(rows.map((row) => watchKey(row.database, row.collection, row.indexName)));
 }
-
-// Types that make the same claim about one index, for the purpose of "is there
-// already a live recommendation saying this?". A DROP_UNUSED and a
-// DROP_REDUNDANT both mean "this index should go", so one standing beside the
-// other is a duplicate however differently they got there.
-export const DROP_TYPES = ["DROP_UNUSED", "DROP_REDUNDANT"] as const;
-export const BUILD_TYPES = ["CREATE", "UPDATE", "MERGE", "REORDER"] as const;
-
-// States a recommendation can be in while it is still going somewhere. DROPPED,
-// ACTIVE, REJECTED and ROLLED_BACK are settled: the work happened or it will
-// not, and re-deriving the finding is then correct rather than duplicative —
-// classify is supposed to be able to propose dropping an index a graduated
-// build put there, and a REJECTED drop is held off by a cooldown instead.
-const LIVE_STATES = ["PROPOSED", "APPROVED", "HIDDEN", "OBSERVE", "SCHEDULED", "BUILDING"] as const;
 
 // Indexes that already carry a live recommendation of one of `types` which this
 // caller's own sweep will NOT delete.

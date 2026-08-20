@@ -358,6 +358,13 @@
       "when": 1787226211127,
       "tag": "0050_observe_reason",
       "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1787235369932,
+      "tag": "0051_one_live_claim_per_index",
+      "breakpoints": true
     }
   ]
 }

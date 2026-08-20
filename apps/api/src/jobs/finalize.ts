@@ -354,32 +354,44 @@ async function retireSuperseded(
       .limit(1);
     if (existing !== undefined) continue;
 
-    await db.insert(recommendations).values({
-      clusterId,
-      type: "DROP_REDUNDANT",
-      state: "PROPOSED",
-      // Nothing re-derives this one. Where a MERGE leaves a strict superset
-      // that classify would rediscover on its own, a narrowing leaves the
-      // opposite: next to {a,b}, the index that looks redundant is {a,b} — so
-      // if a sweep takes this row, the long index stays forever.
-      source: "RETIRE",
-      database: rec.database,
-      collection: rec.collection,
-      indexName: name,
-      rationale:
-        rec.type === "REORDER"
-          ? `Superseded by ${rec.indexName}, which carries the same keys in the same order with ` +
-            `the directions the workload needs, and the same options — including the unique ` +
-            `constraint, which it has been enforcing alongside this one since it was built. It ` +
-            `has now survived its post-build watch, so this one is no longer doing anything the ` +
-            `replacement is not.`
-          : `Superseded by ${rec.indexName}, which has now survived its post-build watch.`,
-      score: SUPERSEDED_SCORE,
-      estimatedBytesSaved: 0,
-      ...(Object.keys(supersededBy).length === 0
-        ? {}
-        : { targetSpec: { keys: [], retire: [], ...supersededBy } }),
-    });
+    // onConflictDoNothing against recommendations_one_live_claim, and the
+    // insert's own answer decides whether there is anything to record (#283).
+    // The select above is this producer's guard and it is broader than the
+    // constraint — a live BUILD on this name holds the retirement back too —
+    // but it is a read followed by a write, and classify runs on its own queue.
+    // Filing an action for a row that never landed would put a retirement in the
+    // audit trail that nothing on the dashboard can show.
+    const [proposed] = await db
+      .insert(recommendations)
+      .values({
+        clusterId,
+        type: "DROP_REDUNDANT",
+        state: "PROPOSED",
+        // Nothing re-derives this one. Where a MERGE leaves a strict superset
+        // that classify would rediscover on its own, a narrowing leaves the
+        // opposite: next to {a,b}, the index that looks redundant is {a,b} — so
+        // if a sweep takes this row, the long index stays forever.
+        source: "RETIRE",
+        database: rec.database,
+        collection: rec.collection,
+        indexName: name,
+        rationale:
+          rec.type === "REORDER"
+            ? `Superseded by ${rec.indexName}, which carries the same keys in the same order with ` +
+              `the directions the workload needs, and the same options — including the unique ` +
+              `constraint, which it has been enforcing alongside this one since it was built. It ` +
+              `has now survived its post-build watch, so this one is no longer doing anything the ` +
+              `replacement is not.`
+            : `Superseded by ${rec.indexName}, which has now survived its post-build watch.`,
+        score: SUPERSEDED_SCORE,
+        estimatedBytesSaved: 0,
+        ...(Object.keys(supersededBy).length === 0
+          ? {}
+          : { targetSpec: { keys: [], retire: [], ...supersededBy } }),
+      })
+      .onConflictDoNothing()
+      .returning({ id: recommendations.id });
+    if (proposed === undefined) continue;
     await db.insert(actions).values({
       recommendationId: rec.id,
       kind: "CREATE",
