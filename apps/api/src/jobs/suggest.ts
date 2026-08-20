@@ -61,17 +61,23 @@ function encodeKeys(keys: readonly SortKey[]): string[] {
   return keys.map((key) => (key.direction === -1 ? `${key.field}:-1` : key.field));
 }
 
-// Workload analysis (opt-in): read the profiler and propose CREATE/UPDATE/MERGE.
-// A brand-new index on a critical collection, when instantCreate is opted in and
-// the cluster is writable, is auto-approved and built immediately
-// (creates only — never drops; the wiki's Architecture page, Apply pipeline).
+// Workload analysis (on unless turned off): read the profiler and propose
+// CREATE/UPDATE/MERGE. A brand-new index on a critical collection, when
+// instantCreate is opted in and the cluster is writable, is auto-approved and
+// built immediately (creates only — never drops; the wiki's Architecture page,
+// Apply pipeline).
 export async function suggestForCluster(db: Database, clusterId: string): Promise<number> {
   const [policy] = await db
     .select()
     .from(policies)
     .where(eq(policies.clusterId, clusterId))
     .limit(1);
-  if (policy?.workloadAnalysis !== true) return 0;
+  // Off only when a row says so. A MISSING row is not a decision — and it is the
+  // normal state of a new cluster, because nothing creates a policy row at
+  // onboarding: the first collect's inferred window does, or the owner saving
+  // the form. Reading absence as "off" is what kept this silent on exactly the
+  // clusters it had the most to say about (#258).
+  if (policy?.workloadAnalysis === false) return 0;
   const cooled = await activeCooldownKeys(db, clusterId);
   // Builds already on the record in a state the sweep below does not clear —
   // approved and waiting for the change window, or proposed by another
@@ -89,9 +95,14 @@ export async function suggestForCluster(db: Database, clusterId: string): Promis
     regressionCounts.set(`${row.database} ${row.collection} ${row.indexName}`, row.regressionCount);
   }
 
-  // Same as apply: obey the plan, not just the stored policy.
+  // Same as apply: obey the plan, not just the stored policy. Each fallback is
+  // the column's own default, because a cluster with no row is a cluster nobody
+  // has configured — never the one where automation should be assumed.
   const automation = entitledAutomation(
-    { autoApplyScore: policy.autoApplyScore, instantCreate: policy.instantCreate },
+    {
+      autoApplyScore: policy?.autoApplyScore ?? null,
+      instantCreate: policy?.instantCreate ?? false,
+    },
     await planForCluster(db, clusterId),
   );
 
@@ -179,9 +190,8 @@ export async function suggestForCluster(db: Database, clusterId: string): Promis
       if (docCount < TRIVIAL_COLLECTION_DOCS) continue;
       // Policy ceiling: building an index on a huge collection is the one
       // expensive create-side operation — skip collections above the limit.
-      if (policy.maxCollectionSizeBytes !== null && dataSizeBytes > policy.maxCollectionSizeBytes) {
-        continue;
-      }
+      const sizeCeiling = policy?.maxCollectionSizeBytes ?? null;
+      if (sizeCeiling !== null && dataSizeBytes > sizeCeiling) continue;
       eligible.push({ database, collection, docCount });
     }
     const workload = await collector.collectWorkload(eligible);

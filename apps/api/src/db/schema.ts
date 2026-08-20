@@ -710,7 +710,13 @@ export const policies = pgTable("policies", {
     .notNull()
     .unique()
     .references(() => clusters.id, { onDelete: "cascade" }),
-  workloadAnalysis: boolean("workload_analysis").notNull().default(false),
+  // On by default (#258). Every plan entitles it — FREE and self-host
+  // included — so the old `false` was never a commercial gate, and it was
+  // never a customer's choice either: the toggle had no state distinguishing
+  // "off" from "never configured". Turning it on proposes CREATE/UPDATE/MERGE
+  // rows and writes nothing to anybody's cluster; building is gated separately
+  // on instantCreate, which stays off.
+  workloadAnalysis: boolean("workload_analysis").notNull().default(true),
   // Auto-approve + build brand-new indexes on critical (large) collections.
   instantCreate: boolean("instant_create").notNull().default(false),
   observeWindowDays: integer("observe_window_days").notNull().default(30),

@@ -344,6 +344,13 @@
       "when": 1787134958034,
       "tag": "0048_observed_databases",
       "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1787218425113,
+      "tag": "0049_workload_analysis_default",
+      "breakpoints": true
     }
   ]
 }

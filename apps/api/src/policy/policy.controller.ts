@@ -27,7 +27,11 @@ export class PolicyController {
           .limit(1);
         return {
           clusterId: input.clusterId,
-          workloadAnalysis: row?.workloadAnalysis ?? false,
+          // No policy row yet means nothing has been configured, not that
+          // this is off — the column's default is what a row would carry, so
+          // the fallback has to agree with it or the toggle renders a state
+          // the engine does not act on (#258).
+          workloadAnalysis: row?.workloadAnalysis ?? true,
           instantCreate: row?.instantCreate ?? false,
           observeWindowDays: row?.observeWindowDays ?? 30,
           maxCollectionSizeBytes: row?.maxCollectionSizeBytes ?? null,

@@ -145,7 +145,7 @@ mapping did not survive a live server: `Sort Warnings/sec` does not exist on
 Linux SQL Server, and `Range Scans/sec` moves for an ordinary singleton seek
 ([D84](./docs/decisions.md)).
 
-**Adding** (opt-in via `workloadAnalysis`). Query shapes come from `$queryStats`
+**Adding** (on by default; `workloadAnalysis` turns it off). Query shapes come from `$queryStats`
 on **mongo 8.0+**, and from the profiler below it — until 8.0 the store reports
 execution counts only, which is the difference between knowing a query ran and
 knowing it scanned. Either way `$queryStats` records nothing until
