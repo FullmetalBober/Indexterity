@@ -3,15 +3,18 @@ import {
   activeHours,
   DEFAULT_OBSERVE_DAYS,
   type IndexInput,
+  isNeverDrop,
   MAX_GAP_HOURS,
   parseStoredSpec,
   recommendForCollection,
+  usageTrustRefusal,
 } from "../analysis";
 import { runFrom } from "../analysis/types";
 import type { Database } from "../db";
 import {
   and,
   clusterIndexes,
+  clusters,
   eq,
   gte,
   inArray,
@@ -21,6 +24,7 @@ import {
   policies,
   recommendations,
 } from "../db";
+import { recordUsageTrust } from "../metrics";
 import { activeCooldownKeys, cooldownKey } from "./cooldowns";
 import { historyWindow } from "./plan";
 import {
@@ -80,6 +84,14 @@ const CLASSIFY_OPTIONS = {
 // the cluster's PROPOSED recommendations. Returns the number proposed.
 export async function classifyCluster(db: Database, clusterId: string): Promise<number> {
   const cooled = await activeCooldownKeys(db, clusterId);
+  // Only for the metric below, which is labelled by engine because the answer is
+  // expected to differ per engine (#267).
+  const [cluster] = await db
+    .select({ engine: clusters.engine })
+    .from(clusters)
+    .where(eq(clusters.id, clusterId))
+    .limit(1);
+  const engine = cluster?.engine ?? "MONGODB";
   const [policy] = await db
     .select({ observeWindowDays: policies.observeWindowDays })
     .from(policies)
@@ -228,6 +240,18 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
     const active = activeHours(
       activityByCollection.get(`${entry.database}\u0000${entry.collection}`) ?? [],
     );
+    // What the usage gate decided, per index, before anything acts on it (#267).
+    // Same eligibility the recommender applies, so the denominator is the set of
+    // indexes a usage finding was actually possible for — a protected index is
+    // excluded for its own reasons and would only dilute the answer.
+    const decidedAt = new Date();
+    for (const index of inputs) {
+      if (isNeverDrop(index.spec)) continue;
+      recordUsageTrust(
+        engine,
+        usageTrustRefusal(index.history, CLASSIFY_OPTIONS, decidedAt, active),
+      );
+    }
     for (const candidate of recommendForCollection(
       inputs,
       sizes,

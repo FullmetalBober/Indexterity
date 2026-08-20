@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { classifyUsage, countersRestartedDuring, usageHistoryIsTrustworthy } from "./classify";
+import {
+  classifyUsage,
+  counterResetDuring,
+  countersRestartedDuring,
+  usageHistoryIsTrustworthy,
+  usageTrustRefusal,
+} from "./classify";
 import type { UsageSnapshot } from "./types";
 
 // Snapshots at a given cadence, oldest first — because classifyUsage now reads
@@ -595,5 +601,125 @@ describe("an idle index and an unwatched index", () => {
     const twoLooks: UsageSnapshot[] = [{ ...idle[0], observations: 2 } as UsageSnapshot];
     expect(usageHistoryIsTrustworthy(twoLooks, opts, now)).toBe(false);
     expect(usageHistoryIsTrustworthy(idle, opts, now)).toBe(true);
+  });
+});
+
+// #267. The gate refuses for eight different reasons and only ever said no, so
+// "findings are thin on this cluster" could not be turned into "and here is the
+// check doing it". The boolean is now derived from the reason, which is what
+// keeps a refusal reported to metrics and a refusal acted on from diverging.
+describe("usageTrustRefusal", () => {
+  const opts = {
+    recentHours: 12,
+    minHistory: 3,
+    minHistoryDays: 0,
+    minActiveHours: 0,
+    maxGapHours: 48,
+  };
+  const now = new Date("2026-03-04T00:00:00Z");
+  const at = (iso: string, ops = 0, since = ""): UsageSnapshot => ({
+    capturedAt: iso,
+    perMember: [{ member: "m", ops, since }],
+  });
+  const dense = [
+    at("2026-03-01T00:00:00Z"),
+    at("2026-03-02T00:00:00Z"),
+    at("2026-03-03T12:00:00Z"),
+  ];
+
+  it("says nothing refused when the history is trustworthy", () => {
+    expect(usageTrustRefusal(dense, opts, now)).toBeNull();
+  });
+
+  it("names the counter reset, and which of the three noticed it", () => {
+    const restarted = [
+      at("2026-03-01T00:00:00Z", 900, "2026-01-01T00:00:00Z"),
+      at("2026-03-02T00:00:00Z", 5, "2026-02-01T00:00:00Z"),
+      at("2026-03-03T12:00:00Z", 9, "2026-02-01T00:00:00Z"),
+    ];
+    expect(usageTrustRefusal(restarted, opts, now)).toEqual({
+      kind: "counters-reset",
+      trigger: "ops-went-backwards",
+    });
+  });
+
+  it("names too-few-collects", () => {
+    expect(usageTrustRefusal([at("2026-03-03T00:00:00Z")], opts, now)).toEqual({
+      kind: "too-few-collects",
+    });
+  });
+
+  it("names a hole between runs", () => {
+    const holed = [
+      at("2026-02-01T00:00:00Z"),
+      at("2026-02-02T00:00:00Z"),
+      at("2026-03-03T00:00:00Z"),
+    ];
+    expect(usageTrustRefusal(holed, opts, now)).toEqual({ kind: "gap-between-runs" });
+  });
+
+  it("names a hole inside a run, which the between-runs check cannot see", () => {
+    const interior: UsageSnapshot[] = [
+      {
+        capturedAt: "2026-02-01T00:00:00Z",
+        lastSeenAt: "2026-03-03T00:00:00Z",
+        observations: 100,
+        maxGapMs: 21 * 24 * 3_600_000,
+        perMember: [{ member: "m", ops: 0, since: "" }],
+      },
+    ];
+    expect(usageTrustRefusal(interior, opts, now)).toEqual({ kind: "gap-inside-run" });
+  });
+
+  it("names a history that stopped long ago", () => {
+    const stale = [
+      at("2026-01-01T00:00:00Z"),
+      at("2026-01-02T00:00:00Z"),
+      at("2026-01-03T00:00:00Z"),
+    ];
+    expect(usageTrustRefusal(stale, opts, now)).toEqual({ kind: "history-stale" });
+  });
+
+  it("names an idle collection", () => {
+    expect(usageTrustRefusal(dense, { ...opts, minActiveHours: 5 }, now, 1)).toEqual({
+      kind: "collection-idle",
+    });
+  });
+
+  it("names a span shorter than the warm-up", () => {
+    expect(usageTrustRefusal(dense, { ...opts, minHistoryDays: 30 }, now)).toEqual({
+      kind: "span-too-short",
+    });
+  });
+
+  // The boolean is the reason, negated. Nothing may drift between them.
+  it("agrees with usageHistoryIsTrustworthy on every case above", () => {
+    for (const [history, options, activeHours] of [
+      [dense, opts, undefined],
+      [[at("2026-03-03T00:00:00Z")], opts, undefined],
+      [dense, { ...opts, minActiveHours: 5 }, 1],
+    ] as const) {
+      expect(usageHistoryIsTrustworthy(history, options, now, activeHours)).toBe(
+        usageTrustRefusal(history, options, now, activeHours) === null,
+      );
+    }
+  });
+});
+
+// Same relationship on the reset side.
+describe("counterResetDuring", () => {
+  it("agrees with countersRestartedDuring", () => {
+    const clean = [
+      { capturedAt: "2026-03-01T00:00:00Z", perMember: [{ member: "m", ops: 1, since: "s" }] },
+      { capturedAt: "2026-03-02T00:00:00Z", perMember: [{ member: "m", ops: 2, since: "s" }] },
+    ];
+    const reset = [
+      { capturedAt: "2026-03-01T00:00:00Z", perMember: [{ member: "m", ops: 9, since: "s1" }] },
+      { capturedAt: "2026-03-02T00:00:00Z", perMember: [{ member: "m", ops: 1, since: "s2" }] },
+    ];
+    expect(counterResetDuring(clean)).toBeNull();
+    expect(countersRestartedDuring(clean)).toBe(false);
+    expect(counterResetDuring(reset)).toBe("ops-went-backwards");
+    expect(countersRestartedDuring(reset)).toBe(true);
   });
 });

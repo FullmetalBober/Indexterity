@@ -1,4 +1,5 @@
 import type { WorkerEvents } from "graphile-worker";
+import type { UsageTrustRefusal } from "../analysis/classify";
 import {
   clustersUnreachable,
   clusterTaskRuns,
@@ -6,6 +7,7 @@ import {
   jobDuration,
   jobRuns,
   regressionGate,
+  usageTrustDecisions,
 } from "./instruments";
 
 // How a per-cluster tick ended. The pipeline already draws these distinctions
@@ -88,6 +90,23 @@ export function recordRegressionVerdict(
 
 export function recordDrop(outcome: "dropped" | "unhidden" | "absent"): void {
   indexDrops.add(1, { outcome });
+}
+
+// One per index the classifier considered. `refusal` null means the history was
+// trusted and a usage finding was possible; otherwise it is the check that said
+// no, with the counter-reset trigger broken out because the three are not
+// equally strict and #267 turns on telling them apart.
+export function recordUsageTrust(
+  engine: string,
+  refusal: UsageTrustRefusal | null,
+  count = 1,
+): void {
+  if (count <= 0) return;
+  usageTrustDecisions.add(count, {
+    engine,
+    outcome: refusal === null ? "trusted" : refusal.kind,
+    ...(refusal !== null && refusal.kind === "counters-reset" ? { trigger: refusal.trigger } : {}),
+  });
 }
 
 // Job-level counters from graphile-worker's own events, so the numbers agree with
