@@ -2,6 +2,7 @@ import { type ClusterEngine, canHideIndexes } from "@repo/contracts";
 import { useState } from "react";
 import { ReauthDialog } from "~/components/app/reauth-dialog";
 import { ConfirmButton } from "~/components/confirm-button";
+import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
 import { Input } from "~/components/ui/input";
@@ -18,7 +19,34 @@ interface ClusterConnectionInfo {
   readonly engine: ClusterEngine;
   readonly readOnly: boolean;
   readonly provisionedUsername: string | null;
+  readonly credentialPosture: "PROVISIONED" | "ADMIN" | "SCOPED" | null;
 }
+
+// What the stored credentials COULD do, as against what read-only mode ALLOWS
+// them to. The two are different questions and the card answers both: a cluster
+// can be read-only and still be held on a string that could drop a table.
+//
+// Null is its own case rather than folded into the narrowest one. Every cluster
+// connected before the column existed reads null, and so does any rotation whose
+// diagnosis failed — "we never asked" is not "scoped", and guessing here is how a
+// reassuring badge gets attached to an admin string.
+const POSTURE = {
+  PROVISIONED: {
+    label: "scoped user",
+    detail:
+      "Indexterity created this user itself, so its ceiling is known exactly: the privileges it needs and nothing more.",
+  },
+  ADMIN: {
+    label: "admin credentials",
+    detail:
+      "These credentials could create users when they were stored, so they can do more than manage indexes. A narrower string can be swapped in by rotating.",
+  },
+  SCOPED: {
+    label: "scoped credentials",
+    detail:
+      "A pasted string that cannot create users. Narrower than admin, though its exact grants are yours rather than ours to state.",
+  },
+} as const;
 
 // The three things you can do TO a cluster: change what the engine is allowed to
 // do, change the credentials it does it with, and stop.
@@ -32,6 +60,7 @@ export function ClusterConnection({ cluster }: { cluster: ClusterConnectionInfo 
   // they are per-engine rather than per-product. From the contract's table, not
   // from a guess here, and the api holds that table to its own adapters.
   const canHide = canHideIndexes(cluster.engine);
+  const posture = cluster.credentialPosture === null ? null : POSTURE[cluster.credentialPosture];
   const [rotateOpen, setRotateOpen] = useState(false);
   const [rotateString, setRotateString] = useState("");
   // Set when the api answered SESSION_NOT_FRESH (#52): the retry the re-auth
@@ -81,6 +110,19 @@ export function ClusterConnection({ cluster }: { cluster: ClusterConnectionInfo 
               : canHide
                 ? "Live: the engine may hide, drop and build indexes here."
                 : "Live: the engine may drop and build indexes here."}
+          </p>
+        </div>
+
+        {/* Beside the mode rather than under the connection string: the two are
+            one question a reader asks together — what is allowed here, and what
+            could these credentials do if something went wrong. */}
+        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+          <Badge variant={cluster.credentialPosture === "ADMIN" ? "secondary" : "outline"}>
+            {posture?.label ?? "posture not recorded"}
+          </Badge>
+          <p className="text-muted-foreground text-sm">
+            {posture?.detail ??
+              "This cluster was connected before Indexterity recorded how privileged its credentials are. Rotating the connection string records it."}
           </p>
         </div>
 

@@ -53,6 +53,7 @@ export function toCluster(
     engine: row.engine,
     readOnly: row.readOnly,
     provisionedUsername: row.provisionedUsername,
+    credentialPosture: row.credentialPosture,
     lastCollectedAt: lastCollectedAt?.toISOString() ?? null,
     tlsOverrides: row.tlsOverrides,
     observedDatabases: row.observedDatabases,

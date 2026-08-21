@@ -96,6 +96,10 @@ export class ClustersController {
     engine: typeof clusters.$inferSelect.engine,
     connectionString: string,
     provisionedUsername: string | null,
+    // What these credentials COULD do, as opposed to what `readOnly` allows.
+    // Recorded at the moment they are stored, because that is the only time we
+    // have a diagnosis in hand — asking again later would mean dialling.
+    credentialPosture: typeof clusters.$inferSelect.credentialPosture,
     tlsOverrides: TlsOverrides = NO_TLS_OVERRIDES,
     // Which databases to observe, or null for every one the cluster has (#244).
     // Undefined from a caller that has no opinion is stored as null, which is the
@@ -124,6 +128,7 @@ export class ClustersController {
           sealedData: Buffer.from(sealed.data),
           keyVersion,
           provisionedUsername,
+          credentialPosture,
           tlsOverrides,
           observedDatabases,
         })
@@ -409,6 +414,9 @@ export class ClustersController {
           engine,
           value,
           null,
+          // Read off the diagnosis rather than the string: whether credentials
+          // can create users is a question only the server can answer.
+          diagnosis.canProvision ? "ADMIN" : "SCOPED",
           overrides,
           input.observedDatabases ?? null,
         );
@@ -482,6 +490,9 @@ export class ClustersController {
           engine,
           provisioned.connectionString,
           provisioned.username,
+          // Known exactly here, unlike either other case: Indexterity created
+          // this user, so its ceiling is the scoped role and nothing more.
+          "PROVISIONED",
           overrides,
           input.observedDatabases ?? null,
         );
@@ -555,6 +566,23 @@ export class ClustersController {
           adapter.connStringUsername(input.connectionString) === row.provisionedUsername
             ? row.provisionedUsername
             : null;
+        // Re-evaluated here because rotating is exactly when it changes: swapping
+        // an admin string for a scoped one is a narrowing somebody should be able
+        // to see happened, and the reverse is a widening they should see too.
+        //
+        // A diagnosis that fails leaves it NULL rather than failing the rotation
+        // or keeping the old value. The rotation itself already succeeded — the
+        // string pinged — and recording "we no longer know" is honest where
+        // carrying forward a posture measured on different credentials is not.
+        const credentialPosture =
+          provisionedUsername !== null
+            ? "PROVISIONED"
+            : await adapter
+                .diagnose(value, overrides)
+                .then((diagnosis) =>
+                  diagnosis.canProvision ? ("ADMIN" as const) : ("SCOPED" as const),
+                )
+                .catch(() => null);
         const [updated] = await this.database.db
           .update(clusters)
           .set({
@@ -562,6 +590,7 @@ export class ClustersController {
             sealedData: Buffer.from(sealed.data),
             keyVersion,
             provisionedUsername,
+            credentialPosture,
           })
           .where(eq(clusters.id, input.clusterId))
           .returning();
