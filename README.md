@@ -15,7 +15,7 @@ observe window, a pre-flight check, and a read-latency regression test.
 | **How it is built** | [Architecture](https://github.com/FullmetalBober/Indexterity/wiki/Architecture) |
 | **What holds it shut** | [Security](https://github.com/FullmetalBober/Indexterity/wiki/Security) |
 | **Knobs, scoring and plans** | [Plans and policy](https://github.com/FullmetalBober/Indexterity/wiki/Plans-and-policy) |
-| **The MongoDB user it needs** | [Connecting a cluster](https://github.com/FullmetalBober/Indexterity/wiki/Connecting-a-cluster) |
+| **The scoped user it needs** | [Connecting a cluster](https://github.com/FullmetalBober/Indexterity/wiki/Connecting-a-cluster) |
 | **Every load-bearing choice** | [`docs/decisions.md`](./docs/decisions.md) |
 | **What is planned** | [project board](https://github.com/users/FullmetalBober/projects/6) |
 
