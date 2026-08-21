@@ -4,14 +4,6 @@
 //   npm run version:set 0.2.0     # write it
 //   npm run version:check         # assert every file agrees
 //
-// release-please is what normally writes it now (release-please-config.json,
-// and the Releases section of the README). This file keeps both halves anyway,
-// and the CHECK half became load-bearing rather than redundant: release-please
-// updates these same places through `extra-files`, and an entry whose jsonpath
-// matches nothing is a SILENT no-op there. So the config is not the guarantee —
-// `version:check` in CI is, and it is the same assertion it always was. `set`
-// stays for renumbering by hand, which is what an emergency re-cut needs.
-//
 // The root package.json is the source of truth. The workspaces are private and
 // never published to npm, but a version that disagrees with the release is a
 // lie in a file people read, so they follow. The chart carries it twice:
@@ -114,13 +106,12 @@ function readLockfile(): Lockfile {
 
 type ChartVersions = { text: string; version?: string; appVersion?: string };
 
-// Both lines carry a trailing `# x-release-please-version` annotation, which is
-// how release-please renumbers this file without round-tripping it through a YAML
-// parser (that drops every comment in it, and appVersion's quotes with them). So
-// the comment is matched and kept rather than tolerated: read past it here, and
-// preserve it on write below. A regex that swallowed it would report the version
-// as `0.11.0 # x-release-please-version` and a write that dropped it would leave
-// release-please silently updating nothing on the next release.
+// A trailing comment on either line is read past here and preserved on write
+// below, rather than tolerated: a regex that swallowed one would report the
+// version as `0.11.0 # note`, and a write that dropped it would quietly edit a
+// line someone had annotated. The alternative to matching lines at all is a YAML
+// parser, which round-trips the document and drops every comment in the file
+// along with appVersion's quotes.
 const CHART_COMMENT = /(\s+#.*)?$/.source;
 
 function chartVersions(): ChartVersions {
