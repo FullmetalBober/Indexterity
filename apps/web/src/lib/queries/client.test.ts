@@ -4,7 +4,7 @@ import { createAppQueryClient } from "./client";
 
 // The retry predicate, read off the client the app actually builds rather than
 // re-stated here — a copy would pass while the real default drifted.
-function retryFor(error: unknown, failureCount = 0): boolean {
+function retryFor(error: Error, failureCount = 0): boolean {
   const retry = createAppQueryClient().getDefaultOptions().queries?.retry;
   if (typeof retry !== "function") throw new Error("expected a retry predicate");
   return retry(failureCount, error) as boolean;
