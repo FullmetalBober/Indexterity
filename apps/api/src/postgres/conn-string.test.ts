@@ -3,12 +3,14 @@ import { NO_TLS_OVERRIDES } from "../engine/ports";
 import {
   applyPgTlsOverrides,
   assertPgTlsEnforced,
+  effectivePgTrust,
   isPgConnString,
   parsePgConnString,
   pgConnStringUsername,
   pgHosts,
   retargetPgConnString,
   sslModeOf,
+  usesLibpqCompat,
   withPgCredentials,
 } from "./conn-string";
 
@@ -141,17 +143,54 @@ describe("isPgConnString disjointness", () => {
 });
 
 describe("sslModeOf", () => {
-  // libpq's own default, and the reason a pasted string cannot simply be
-  // trusted: prefer falls back to plaintext without saying so.
-  it("treats a string with no sslmode as prefer", () => {
+  // NOT libpq's `prefer`. Measured on pg 8.22.0: with no sslmode the driver
+  // connects in plaintext against a server offering TLS, so absence sits on the
+  // floor rather than one rung above it.
+  it("treats a string with no sslmode as disable, which is what the driver does", () => {
     const parsed = parsePgConnString("postgresql://u@h/db");
     expect(parsed).not.toBeNull();
-    if (parsed !== null) expect(sslModeOf(parsed)).toBe("prefer");
+    if (parsed !== null) expect(sslModeOf(parsed)).toBe("disable");
   });
 
   it("ignores a mode it does not recognise", () => {
     const parsed = parsePgConnString("postgresql://u@h/db?sslmode=banana");
-    if (parsed !== null) expect(sslModeOf(parsed)).toBe("prefer");
+    if (parsed !== null) expect(sslModeOf(parsed)).toBe("disable");
+  });
+
+  it("reads the compat opt-in", () => {
+    const off = parsePgConnString("postgresql://u@h/db?sslmode=require");
+    const on = parsePgConnString("postgresql://u@h/db?sslmode=require&uselibpqcompat=true");
+    if (off !== null) expect(usesLibpqCompat(off)).toBe(false);
+    if (on !== null) expect(usesLibpqCompat(on)).toBe(true);
+  });
+});
+
+// The driver's reading of sslmode is not libpq's, and the whole safety of the
+// checkbox mapping rests on which one this file believes. Every row here was
+// measured against a live server with a self-signed certificate.
+describe("effectivePgTrust", () => {
+  it("scores a bare require as verify-full, because the driver aliases it", () => {
+    const bare = parsePgConnString("postgresql://u@h/db?sslmode=require");
+    const strict = parsePgConnString("postgresql://u@h/db?sslmode=verify-full");
+    if (bare !== null && strict !== null) {
+      expect(effectivePgTrust(bare)).toBe(effectivePgTrust(strict));
+    }
+  });
+
+  it("only reaches the unchecked-certificate rung under the compat flag", () => {
+    const compat = parsePgConnString("postgresql://u@h/db?sslmode=require&uselibpqcompat=true");
+    const strict = parsePgConnString("postgresql://u@h/db?sslmode=verify-full");
+    if (compat !== null && strict !== null) {
+      expect(effectivePgTrust(compat)).toBeLessThan(effectivePgTrust(strict));
+    }
+  });
+
+  it("puts plaintext and an absent sslmode on the same floor", () => {
+    const off = parsePgConnString("postgresql://u@h/db?sslmode=disable");
+    const absent = parsePgConnString("postgresql://u@h/db");
+    if (off !== null && absent !== null) {
+      expect(effectivePgTrust(absent)).toBe(effectivePgTrust(off));
+    }
   });
 });
 
@@ -162,28 +201,38 @@ describe("assertPgTlsEnforced", () => {
     ).not.toThrow();
   });
 
-  // Each rung refused with nothing ticked, including the two that read as safe:
-  // `require` encrypts and validates nothing, and a string naming no sslmode at
-  // all is `prefer`, which may end up in plaintext.
-  it("refuses every weaker rung when nothing is ticked", () => {
-    for (const mode of ["disable", "allow", "prefer", "require", "verify-ca"]) {
-      expect(() =>
-        assertPgTlsEnforced(`postgresql://u@h/db?sslmode=${mode}`, NO_TLS_OVERRIDES),
-      ).toThrow(new RegExp(`sslmode=${mode}`));
-    }
-    expect(() => assertPgTlsEnforced("postgresql://u@h/db", NO_TLS_OVERRIDES)).toThrow(/prefer/);
+  // Only the plaintext rungs are weaker on this driver, and a string naming NO
+  // sslmode is one of them — measured, and the reason absence is not treated as
+  // libpq's `prefer`.
+  it("refuses plaintext, including a string that names no sslmode", () => {
+    expect(() =>
+      assertPgTlsEnforced("postgresql://u@h/db?sslmode=disable", NO_TLS_OVERRIDES),
+    ).toThrow(/gives away more/);
+    expect(() => assertPgTlsEnforced("postgresql://u@h/db", NO_TLS_OVERRIDES)).toThrow(
+      /gives away more/,
+    );
   });
 
-  it("accepts exactly the rung each box consents to", () => {
+  // The counter-intuitive half, and the reason effectivePgTrust exists: a bare
+  // `sslmode=require` is silently upgraded to verify-full by this driver, so it
+  // concedes nothing and refusing it would refuse a safe string. It becomes a
+  // concession only once `uselibpqcompat=true` is present.
+  it("accepts a bare require, and refuses the same string under the compat flag", () => {
     expect(() =>
-      assertPgTlsEnforced(
-        "postgresql://u@h/db?sslmode=verify-ca",
-        overrides({ allowInvalidHostnames: true }),
-      ),
+      assertPgTlsEnforced("postgresql://u@h/db?sslmode=require", NO_TLS_OVERRIDES),
     ).not.toThrow();
     expect(() =>
       assertPgTlsEnforced(
-        "postgresql://u@h/db?sslmode=require",
+        "postgresql://u@h/db?sslmode=require&uselibpqcompat=true",
+        NO_TLS_OVERRIDES,
+      ),
+    ).toThrow(/gives away more/);
+  });
+
+  it("accepts the conceded rung once its box is ticked", () => {
+    expect(() =>
+      assertPgTlsEnforced(
+        "postgresql://u@h/db?sslmode=require&uselibpqcompat=true",
         overrides({ allowInvalidCertificates: true }),
       ),
     ).not.toThrow();
@@ -192,8 +241,29 @@ describe("assertPgTlsEnforced", () => {
     ).not.toThrow();
   });
 
-  // Weakening only. A string stronger than the boxes allow is a decision to be
-  // safer than required, and is left alone rather than argued with.
+  // No usable rung exists for this one: the driver's verify-ca demands a CA file
+  // and a connection string has nowhere to carry a PEM. Refused with the wider
+  // box named, rather than quietly granting the wider concession.
+  it("refuses the hostname box on its own, and says what to tick instead", () => {
+    expect(() =>
+      assertPgTlsEnforced(
+        "postgresql://u@h/db?sslmode=verify-full",
+        overrides({ allowInvalidHostnames: true }),
+      ),
+    ).toThrow(/cannot be honoured on PostgreSQL/);
+    // Harmless once the wider box is ticked too — that is a concession already
+    // made, not one inferred on the owner's behalf.
+    expect(() =>
+      assertPgTlsEnforced(
+        "postgresql://u@h/db?sslmode=require&uselibpqcompat=true",
+        overrides({ allowInvalidHostnames: true, allowInvalidCertificates: true }),
+      ),
+    ).not.toThrow();
+  });
+
+  // Weakening direction only. A string stronger than the boxes allow is a
+  // decision to be safer than required, and is left alone rather than argued
+  // with.
   it("does not object to a string stronger than the boxes", () => {
     expect(() =>
       assertPgTlsEnforced(
@@ -203,15 +273,10 @@ describe("assertPgTlsEnforced", () => {
     ).not.toThrow();
   });
 
-  // The fix is a checkbox on the form the reader is already looking at, so the
-  // message has to name it.
-  it("names the box that would allow what it found", () => {
-    expect(() =>
-      assertPgTlsEnforced("postgresql://u@h/db?sslmode=require", NO_TLS_OVERRIDES),
-    ).toThrow(/allow invalid certificates/);
-    expect(() =>
-      assertPgTlsEnforced("postgresql://u@h/db?sslmode=verify-ca", NO_TLS_OVERRIDES),
-    ).toThrow(/allow invalid hostnames/);
+  it("names the box that would allow the plaintext it found", () => {
+    expect(() => assertPgTlsEnforced("postgresql://u@h/db", NO_TLS_OVERRIDES)).toThrow(
+      /connect without TLS/,
+    );
   });
 });
 
@@ -263,12 +328,13 @@ describe("applyPgTlsOverrides", () => {
 
   // What apply writes, assert must accept — otherwise onboarding stores a string
   // the very next dial refuses.
+  // The hostname box is excluded on purpose: it has no representable rung here
+  // and the assert refuses it outright, which the test above pins.
   it("produces a string its own assert accepts", () => {
     for (const box of [
       NO_TLS_OVERRIDES,
       overrides({ insecure: true }),
       overrides({ allowInvalidCertificates: true }),
-      overrides({ allowInvalidHostnames: true }),
     ]) {
       for (const pasted of [
         "postgresql://u:p@h:5432/db?sslmode=prefer",

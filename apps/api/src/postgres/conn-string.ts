@@ -22,11 +22,15 @@ import { NO_TLS_OVERRIDES, type TlsOverrides } from "../engine/ports";
 
 export const DEFAULT_PG_PORT = 5432;
 
-// sslmode, in libpq's own order of increasing strength. The three that matter:
-// `require` encrypts and validates NOTHING (postgres's long-standing footgun —
-// it means "I insist on TLS" and not "I insist on a trustworthy peer"),
-// `verify-ca` validates the chain but not the hostname, and `verify-full`
-// validates both. Everything below `require` may end up in plaintext.
+// sslmode, in libpq's order of increasing strength. In libpq, `require`
+// encrypts and validates NOTHING (its long-standing footgun — it means "I insist
+// on TLS", not "I insist on a trustworthy peer"), `verify-ca` validates the chain
+// but not the hostname, and `verify-full` validates both.
+//
+// The driver does NOT implement those semantics, and this is measured against
+// pg 8.22.0 rather than read from libpq's documentation — see effectivePgTrust
+// below, which is where the difference is handled. Getting this wrong is not a
+// cosmetic bug: it decides whether a checkbox an owner ticked does anything.
 export type PgSslMode = "disable" | "allow" | "prefer" | "require" | "verify-ca" | "verify-full";
 
 const SSL_MODES: readonly PgSslMode[] = [
@@ -262,8 +266,47 @@ export function pgHosts(value: string): { hosts: string[]; isSrv: boolean } {
 // What the string asks of the transport. Absent defaults to `prefer`, which is
 // libpq's own default and the reason this adapter cannot simply trust a pasted
 // string: `prefer` will fall back to plaintext without saying so.
+// What the string asks of the transport, as the DRIVER will read it. Absent is
+// reported as `disable` and not as libpq's `prefer`, because that is what node-pg
+// actually does: with no sslmode at all it connects in plaintext against a server
+// offering TLS (measured — `pg_stat_ssl.ssl` false, and no warning). libpq would
+// have tried TLS first. Treating absence as `prefer` would rank a plaintext
+// string one rung above the floor it actually sits on.
 export function sslModeOf(parsed: ParsedPgConnString): PgSslMode {
-  return explicitSslMode(parsed) ?? "prefer";
+  return explicitSslMode(parsed) ?? "disable";
+}
+
+// `uselibpqcompat=true` — the driver's own opt-in to libpq semantics, and the
+// only way to reach the "encrypted, certificate not validated" rung at all.
+export function usesLibpqCompat(parsed: ParsedPgConnString): boolean {
+  return (parsed.params.get("uselibpqcompat") ?? "").toLowerCase() === "true";
+}
+
+// How much trust a string actually gives away, on THIS driver. Higher is
+// stronger. Measured on pg 8.22.0 against a server with a self-signed
+// certificate, because the driver's reading of sslmode is not libpq's:
+//
+//   sslmode=require            REFUSED  — silently aliased to verify-full
+//   sslmode=verify-ca          REFUSED  — likewise
+//   sslmode=verify-full        REFUSED  — correct
+//   uselibpqcompat + require   CONNECTED, encrypted, certificate unchecked
+//   uselibpqcompat + verify-ca REFUSED  — demands an explicit CA file
+//   sslmode=disable            CONNECTED in plaintext
+//   (no sslmode)              CONNECTED in plaintext
+//
+// The driver warns about the aliasing itself and says it will adopt libpq
+// semantics in pg 9. Writing `uselibpqcompat=true` alongside every relaxation is
+// what makes the stored string mean the same thing before and after that change,
+// rather than silently loosening on a dependency bump.
+export function effectivePgTrust(parsed: ParsedPgConnString): number {
+  const mode = sslModeOf(parsed);
+  if (mode === "disable") return MODE_RANK.disable;
+  if (!usesLibpqCompat(parsed)) {
+    // Every non-disable mode is verify-full here, including `prefer`, which
+    // refuses a server with no TLS at all rather than falling back.
+    return MODE_RANK["verify-full"];
+  }
+  return MODE_RANK[mode];
 }
 
 // The mode the string actually NAMES, or null when it names none — which is a
@@ -302,7 +345,12 @@ export function pgConnStringUsername(value: string): string | null {
 const MODE_FOR_OVERRIDES = (overrides: TlsOverrides): PgSslMode => {
   if (overrides.insecure) return "disable";
   if (overrides.allowInvalidCertificates) return "require";
-  if (overrides.allowInvalidHostnames) return "verify-ca";
+  // allowInvalidHostnames alone has NO usable rung on this driver:
+  // `uselibpqcompat=true&sslmode=verify-ca` refuses outright without an explicit
+  // CA file, and a pasted connection string is not a place to put a PEM. So the
+  // box on its own does not relax anything, and assertPgTlsEnforced refuses it
+  // with the wider box named instead of quietly granting the wider concession —
+  // the same call, for the same reason, as mssql/conn-string.ts.
   return "verify-full";
 };
 
@@ -328,12 +376,24 @@ const MODE_RANK: Readonly<Record<PgSslMode, number>> = {
 export function assertPgTlsEnforced(value: string, overrides?: TlsOverrides): void {
   const parsed = parsePgConnString(value);
   if (parsed === null) return;
+  const boxes = overrides ?? NO_TLS_OVERRIDES;
+  // The one concession this driver cannot express. Refused rather than upgraded
+  // to the certificate box behind the owner's back: consenting to an unchecked
+  // HOSTNAME is not consenting to an unchecked certificate.
+  if (boxes.allowInvalidHostnames && !boxes.allowInvalidCertificates && !boxes.insecure) {
+    throw new Error(
+      "“allow invalid hostnames” on its own cannot be honoured on PostgreSQL: the " +
+        "driver's verify-ca mode requires a CA file, which a connection string has " +
+        "nowhere to carry. Tick “allow invalid certificates” instead if that is the " +
+        "concession you mean, or use a certificate whose name matches the host",
+    );
+  }
+  const allowed = MODE_FOR_OVERRIDES(boxes);
+  if (effectivePgTrust(parsed) >= MODE_RANK[allowed]) return;
   const found = sslModeOf(parsed);
-  const allowed = MODE_FOR_OVERRIDES(overrides ?? NO_TLS_OVERRIDES);
-  if (MODE_RANK[found] >= MODE_RANK[allowed]) return;
   throw new Error(
-    `this connection string sets sslmode=${found}, which gives away more than ` +
-      `was agreed to (sslmode=${allowed}). ${ADVICE[found]}`,
+    `this connection string gives away more than was agreed to: it reaches ` +
+      `sslmode=${found} where sslmode=${allowed} was expected. ${ADVICE[found]}`,
   );
 }
 
@@ -342,7 +402,7 @@ export function assertPgTlsEnforced(value: string, overrides?: TlsOverrides): vo
 // because it is what a string with no sslmode at all means.
 const ADVICE: Readonly<Record<PgSslMode, string>> = {
   disable:
-    "That is plaintext — tick “connect without TLS” to store it anyway, or set sslmode=verify-full",
+    "That is plaintext, and it is also what a string naming no sslmode at all does on this driver — tick “connect without TLS” to store it anyway, or set sslmode=verify-full",
   allow:
     "sslmode=allow lets the server decline TLS, so the connection may end up in plaintext — set sslmode=verify-full",
   prefer:
@@ -367,7 +427,13 @@ export function applyPgTlsOverrides(value: string, overrides: TlsOverrides): str
   // string. One that names nothing gets exactly what the boxes mean.
   const found = explicitSslMode(parsed);
   const mode = found !== null && MODE_RANK[found] > MODE_RANK[wanted] ? found : wanted;
-  return withPgParam(value, "sslmode", mode);
+  // `require` only means "encrypted, certificate unchecked" under the compat
+  // flag; without it the driver silently upgrades it to verify-full and the
+  // ticked box does nothing. Written for that rung and REMOVED otherwise, so a
+  // string that no longer concedes anything does not keep carrying the opt-in
+  // that would loosen it again on the next driver major.
+  const withMode = withPgParam(value, "sslmode", mode);
+  return withPgParam(withMode, "uselibpqcompat", mode === "require" ? "true" : null);
 }
 
 // Rewrite one option in the string, preserving its form and removing any casing
