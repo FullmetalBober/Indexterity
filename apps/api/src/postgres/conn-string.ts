@@ -18,7 +18,7 @@
 // problem. Hand-splitting is the only way to see every host, and seeing every
 // host is the whole job as far as the network guard is concerned.
 
-import { NO_TLS_OVERRIDES, type TlsOverrides } from "../engine/ports";
+import type { TlsOverrides } from "../engine/ports";
 
 export const DEFAULT_PG_PORT = 5432;
 
@@ -342,7 +342,7 @@ export function pgConnStringUsername(value: string): string | null {
 // certificate — which is exactly why the strict default below is verify-full and
 // not require, and why the assert refuses a pasted `require` unless the box for
 // it is ticked.
-const MODE_FOR_OVERRIDES = (overrides: TlsOverrides): PgSslMode => {
+export const modeForOverrides = (overrides: TlsOverrides): PgSslMode => {
   if (overrides.insecure) return "disable";
   if (overrides.allowInvalidCertificates) return "require";
   // allowInvalidHostnames alone has NO usable rung on this driver:
@@ -356,62 +356,13 @@ const MODE_FOR_OVERRIDES = (overrides: TlsOverrides): PgSslMode => {
 
 // How much trust each mode gives away, for comparing a pasted string against
 // what the owner consented to. Higher is stronger.
-const MODE_RANK: Readonly<Record<PgSslMode, number>> = {
+export const MODE_RANK: Readonly<Record<PgSslMode, number>> = {
   disable: 0,
   allow: 1,
   prefer: 1,
   require: 2,
   "verify-ca": 3,
   "verify-full": 4,
-};
-
-// Throws when the string would not connect over TLS, or when it turns off a
-// check the owner did not consent to. Authoritative in the WEAKENING direction
-// only, exactly like the mongo and mssql versions: a string stronger than the
-// ticked boxes is a decision to be safer than required and is left alone.
-//
-// The message names the mode found, the mode allowed, and the box that would
-// permit it — because the fix is a checkbox on a form the reader is already
-// looking at, and "TLS is required" on its own has them editing the string.
-export function assertPgTlsEnforced(value: string, overrides?: TlsOverrides): void {
-  const parsed = parsePgConnString(value);
-  if (parsed === null) return;
-  const boxes = overrides ?? NO_TLS_OVERRIDES;
-  // The one concession this driver cannot express. Refused rather than upgraded
-  // to the certificate box behind the owner's back: consenting to an unchecked
-  // HOSTNAME is not consenting to an unchecked certificate.
-  if (boxes.allowInvalidHostnames && !boxes.allowInvalidCertificates && !boxes.insecure) {
-    throw new Error(
-      "“allow invalid hostnames” on its own cannot be honoured on PostgreSQL: the " +
-        "driver's verify-ca mode requires a CA file, which a connection string has " +
-        "nowhere to carry. Tick “allow invalid certificates” instead if that is the " +
-        "concession you mean, or use a certificate whose name matches the host",
-    );
-  }
-  const allowed = MODE_FOR_OVERRIDES(boxes);
-  if (effectivePgTrust(parsed) >= MODE_RANK[allowed]) return;
-  const found = sslModeOf(parsed);
-  throw new Error(
-    `this connection string gives away more than was agreed to: it reaches ` +
-      `sslmode=${found} where sslmode=${allowed} was expected. ${ADVICE[found]}`,
-  );
-}
-
-// One sentence per rung, naming the box rather than the mode: the reader has the
-// form in front of them, and `prefer` is the one that needs saying at all,
-// because it is what a string with no sslmode at all means.
-const ADVICE: Readonly<Record<PgSslMode, string>> = {
-  disable:
-    "That is plaintext, and it is also what a string naming no sslmode at all does on this driver — tick “connect without TLS” to store it anyway, or set sslmode=verify-full",
-  allow:
-    "sslmode=allow lets the server decline TLS, so the connection may end up in plaintext — set sslmode=verify-full",
-  prefer:
-    "sslmode=prefer is libpq's default and falls back to plaintext without saying so, which is why a string that names no sslmode lands here — set sslmode=verify-full",
-  require:
-    "sslmode=require encrypts but validates no certificate at all — tick “allow invalid certificates” to accept that, or set sslmode=verify-full",
-  "verify-ca":
-    "sslmode=verify-ca checks the chain but not the hostname — tick “allow invalid hostnames” to accept that, or set sslmode=verify-full",
-  "verify-full": "",
 };
 
 // The owner's checkbox choices written into the string, so what is stored and
@@ -421,7 +372,7 @@ const ADVICE: Readonly<Record<PgSslMode, string>> = {
 export function applyPgTlsOverrides(value: string, overrides: TlsOverrides): string {
   const parsed = parsePgConnString(value);
   if (parsed === null) return value;
-  const wanted = MODE_FOR_OVERRIDES(overrides);
+  const wanted = modeForOverrides(overrides);
   // A string that NAMES a mode stronger than the boxes allow is left as it is —
   // the same rule the assert applies, so the two cannot disagree about one
   // string. One that names nothing gets exactly what the boxes mean.
@@ -547,4 +498,33 @@ function replaceUriAuthority(
   const userinfo = credentials ?? (at === -1 ? "" : rest.slice(0, at));
   const prefix = userinfo.length === 0 ? "" : `${userinfo}@`;
   return `${scheme}${prefix}${authority}${tail}`;
+}
+
+// The same server and credentials, pointed at another database. Postgres has no
+// cross-database reference at all — `SELECT … FROM other.public.t` is a parse
+// error, not a permission one (verified on 17.11) — so unlike SQL Server's one
+// pool serving every database through three-part names, each database needs its
+// own dial. This is what the collector retargets with.
+export function withPgDatabase(value: string, database: string): string {
+  const parsed = parsePgConnString(value);
+  if (parsed === null) return value;
+  if (parsed.form === "uri") {
+    const scheme = URI_SCHEME.exec(value)?.[0] ?? "";
+    let rest = value.slice(scheme.length);
+    let query = "";
+    const queryAt = rest.indexOf("?");
+    if (queryAt !== -1) {
+      query = rest.slice(queryAt);
+      rest = rest.slice(0, queryAt);
+    }
+    const pathAt = rest.indexOf("/");
+    const authority = pathAt === -1 ? rest : rest.slice(0, pathAt);
+    return `${scheme}${authority}/${encodeURIComponent(database)}${query}`;
+  }
+  const kept = splitKeywordSegments(value).filter((segment) => {
+    const eq = segment.indexOf("=");
+    if (eq === -1) return true;
+    return KEYWORD_ALIASES[segment.slice(0, eq).trim().toLowerCase()] !== "database";
+  });
+  return [...kept, `dbname=${database}`].map(quoteKeywordSegment).join(" ");
 }
