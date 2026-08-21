@@ -76,6 +76,10 @@ export function parsePostgresVersion(
   return { major, minor, text };
 }
 
+// `allowUntested` is a parameter rather than an env read so this file stays
+// pure and testable, exactly like the floor/ceiling constants above. Every
+// CALLER passes the deployment's own flag — see allowUntestedDatabaseVersions in
+// mongo/version.ts, which is the one place that reads it.
 export function postgresVersionRefusal(
   version: PostgresServerVersion | null,
   allowUntested = false,
@@ -101,7 +105,7 @@ export function postgresVersionRefusal(
       "series this engine has been tested against. Refusing rather than guessing: " +
       "index visibility and the statistics-reset behaviour have both moved between " +
       "releases before, and on this engine a drop cannot be un-hidden — only rebuilt. " +
-      "Set ALLOW_UNTESTED_POSTGRES_VERSION=true to proceed anyway"
+      "Set ALLOW_UNTESTED_DATABASE_VERSION=true to proceed anyway"
     );
   }
   return null;

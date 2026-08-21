@@ -72,7 +72,7 @@ describe("unsupportedVersionMessage", () => {
 // Read from the validated environment, which is parsed once at boot — so a test
 // that wants a different one says when the process read it.
 afterEach(() => {
-  delete process.env.ALLOW_UNTESTED_MONGO_VERSION;
+  delete process.env.ALLOW_UNTESTED_DATABASE_VERSION;
   loadEnv("api");
 });
 
@@ -86,11 +86,11 @@ describe("version ceiling", () => {
   it("refuses a major series newer than anything tested", () => {
     const refusal = versionRefusal(parseServerVersion("9.0.0"));
     expect(refusal).toContain("newer than the 8.x series");
-    expect(refusal).toContain("ALLOW_UNTESTED_MONGO_VERSION");
+    expect(refusal).toContain("ALLOW_UNTESTED_DATABASE_VERSION");
   });
 
   it("lets an operator opt in to an untested release", () => {
-    process.env.ALLOW_UNTESTED_MONGO_VERSION = "true";
+    process.env.ALLOW_UNTESTED_DATABASE_VERSION = "true";
     loadEnv("api");
     expect(versionRefusal(parseServerVersion("9.0.0"))).toBeNull();
     // The floor is NOT overridable — the ceiling escape hatch does not open it.

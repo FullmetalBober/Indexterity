@@ -75,7 +75,7 @@ describe("postgresVersionRefusal", () => {
       text: "19.0",
     });
     expect(refusal).toMatch(/newer than the PostgreSQL 18 series/);
-    expect(refusal).toMatch(/ALLOW_UNTESTED_POSTGRES_VERSION/);
+    expect(refusal).toMatch(/ALLOW_UNTESTED_DATABASE_VERSION/);
   });
 
   it("lets the escape hatch through the ceiling but never the floor", () => {

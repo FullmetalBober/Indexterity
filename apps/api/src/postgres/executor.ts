@@ -1,5 +1,6 @@
 import type { CreateIndexOptions, IndexExecutor } from "../engine/ports";
 import { UnsupportedServerError } from "../mongo/executor";
+import { allowUntestedVersions } from "../mongo/version";
 import { splitTableRef } from "./collector";
 import type { PostgresConnection } from "./connection";
 import { postgresVersionRefusal } from "./version";
@@ -65,7 +66,13 @@ export class PostgresIndexExecutor implements IndexExecutor {
   // write fails on one anyway ("cannot execute … in a read-only transaction"),
   // and a refusal naming recovery is more use than the driver's.
   private async assertSupported(): Promise<void> {
-    const refusal = postgresVersionRefusal(await this.conn.serverVersion());
+    // The escape hatch was declared in the refusal message and read by nothing
+    // until now, so a cluster on an untested major was refused with no way to
+    // override — a message naming a knob that did not work.
+    const refusal = postgresVersionRefusal(
+      await this.conn.serverVersion(),
+      allowUntestedVersions(),
+    );
     if (refusal !== null) throw new UnsupportedServerError(refusal);
     const { inRecovery } = await this.conn.serverIdentity();
     if (inRecovery) {

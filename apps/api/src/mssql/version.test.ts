@@ -5,7 +5,7 @@ import { mssqlVersionRefusal, parseMssqlVersion } from "./version";
 // Read from the validated environment, parsed once at boot — a test that wants
 // a different one says when the process read it (same shape as mongo's).
 afterEach(() => {
-  delete process.env.ALLOW_UNTESTED_MSSQL_VERSION;
+  delete process.env.ALLOW_UNTESTED_DATABASE_VERSION;
   loadEnv("api");
 });
 
@@ -37,12 +37,12 @@ describe("mssqlVersionRefusal", () => {
 
   it("refuses newer than tested, naming the escape hatch", () => {
     expect(mssqlVersionRefusal(parseMssqlVersion("18.0.100.0"))).toContain(
-      "ALLOW_UNTESTED_MSSQL_VERSION",
+      "ALLOW_UNTESTED_DATABASE_VERSION",
     );
   });
 
   it("lets an operator opt in to an untested release — the floor stays shut", () => {
-    process.env.ALLOW_UNTESTED_MSSQL_VERSION = "true";
+    process.env.ALLOW_UNTESTED_DATABASE_VERSION = "true";
     loadEnv("api");
     expect(mssqlVersionRefusal(parseMssqlVersion("18.0.100.0"))).toBeNull();
     expect(mssqlVersionRefusal(parseMssqlVersion("12.0.6024.0"))).toContain("2016");

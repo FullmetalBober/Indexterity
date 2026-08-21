@@ -57,7 +57,7 @@ export function hasQueryStatsPlanMetrics(version: ServerVersion | null): boolean
 // self-hosted escape hatches. The floor is not overridable: below it the
 // pipeline is either impossible (pre-4.4) or unsupported on purpose.
 export function allowUntestedVersions(): boolean {
-  return workerEnv().ALLOW_UNTESTED_MONGO_VERSION;
+  return workerEnv().ALLOW_UNTESTED_DATABASE_VERSION;
 }
 
 export function isTestedVersion(version: ServerVersion | null): boolean {
@@ -71,7 +71,7 @@ export function untestedVersionMessage(version: ServerVersion | null): string {
     `${found} is newer than the ${MAX_VERSION_TEXT} series Indexterity has been tested against. ` +
     `Refusing rather than guessing: this engine hides, drops and builds indexes on a live ` +
     `database, and a major release is where command behaviour moves. Set ` +
-    `ALLOW_UNTESTED_MONGO_VERSION=true to proceed anyway.`
+    `ALLOW_UNTESTED_DATABASE_VERSION=true to proceed anyway.`
   );
 }
 
