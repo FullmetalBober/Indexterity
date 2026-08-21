@@ -17,6 +17,7 @@ const updateMemberRole = vi.hoisted(() => vi.fn());
 const toastSuccess = vi.hoisted(() => vi.fn());
 const toastError = vi.hoisted(() => vi.fn());
 const navigate = vi.hoisted(() => vi.fn());
+const updateOrgPolicy = vi.hoisted(() => vi.fn());
 
 // better-auth's client, called straight from the mutation hooks — these are its
 // endpoints now, not the api's. A refusal arrives as a RESOLVED `{ data, error }`
@@ -40,6 +41,9 @@ vi.mock("~/lib/auth-client", () => ({
 }));
 vi.mock("sonner", () => ({ toast: { success: toastSuccess, error: toastError } }));
 vi.mock("@tanstack/react-router", () => ({ useNavigate: () => navigate }));
+// The credential policy is OURS, not the plugin's (#313), so it goes through the
+// api client while everything else on this card goes through better-auth.
+vi.mock("~/lib/api", () => ({ api: () => ({ updateOrgPolicy }) }));
 
 const org = {
   id: "o1",
@@ -64,6 +68,8 @@ const org = {
     { id: "i1", email: "pending@acme.test", role: "member", expiresAt: "2026-09-01T00:00:00Z" },
   ],
   provisionedUsers: [],
+  // Off and never configured, which is what a fresh org reads (#313).
+  policy: { requireLeastPrivilege: false, updatedAt: null },
 };
 
 function row(email: string): HTMLElement {
@@ -84,6 +90,10 @@ beforeEach(() => {
   cancelInvitation.mockResolvedValue(authOk({ id: "i1" }));
   acceptInvitation.mockResolvedValue(authOk({ invitation: { id: "i9" }, member: { id: "m9" } }));
   rejectInvitation.mockResolvedValue(authOk({ invitation: { id: "i9" } }));
+  updateOrgPolicy.mockResolvedValue({
+    requireLeastPrivilege: true,
+    updatedAt: "2026-08-21T00:00:00Z",
+  });
 });
 
 describe("OrgSection", () => {
@@ -330,5 +340,57 @@ describe("OrgSection", () => {
     );
     expect(screen.getByText(/0 clusters/)).toBeInTheDocument();
     expect(screen.queryByText(/need your approval/)).not.toBeInTheDocument();
+  });
+});
+
+// #313. The setting that turns D15's least-privilege guarantee from a per-connect
+// choice into a property of the install.
+describe("OrgSection credential policy", () => {
+  it("tells never-configured apart from configured-to-off", () => {
+    renderInApp(<OrgSection org={org} />);
+    expect(screen.getByText("any working credentials")).toBeInTheDocument();
+    // The distinction #258 found the per-cluster toggle was missing: an install
+    // that has considered this and declined must not look identical to one that
+    // has never seen it.
+    expect(screen.getByText("Never configured — this is the default.")).toBeInTheDocument();
+  });
+
+  it("switches the rule on in one click", async () => {
+    renderInApp(<OrgSection org={org} />);
+    await userEvent.click(screen.getByRole("button", { name: "Require least privilege" }));
+    expect(updateOrgPolicy).toHaveBeenCalledWith({ requireLeastPrivilege: true });
+  });
+
+  it("makes switching it off a confirmation, and switching it on not", async () => {
+    const strict = {
+      ...org,
+      policy: { requireLeastPrivilege: true, updatedAt: "2026-08-01T00:00:00Z" },
+    };
+    renderInApp(<OrgSection org={strict} />);
+    expect(screen.getByText("least privilege required")).toBeInTheDocument();
+    // The same asymmetry the connection card draws between "Go live" and "Make
+    // read-only": giving a guarantee up is a different act from taking it back.
+    await userEvent.click(screen.getByRole("button", { name: "Allow broader credentials" }));
+    expect(updateOrgPolicy).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: "Allow" }));
+    expect(updateOrgPolicy).toHaveBeenCalledWith({ requireLeastPrivilege: false });
+  });
+
+  it("shows the rule to a member and offers them no way to change it", () => {
+    renderInApp(<OrgSection org={{ ...org, role: "member" }} />);
+    // Visible, because a member refused a connect has to be able to read the rule
+    // that refused them — the same argument the Security tab makes.
+    expect(screen.getByText("any working credentials")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Require least privilege" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("promises the rule does not reach backwards", () => {
+    renderInApp(<OrgSection org={org} />);
+    // The fear that stops people switching it on. Without this sentence, an org
+    // with eight clusters has to guess whether ticking it stops their analysis.
+    expect(screen.getByText(/applies to the next connection, never backwards/)).toBeInTheDocument();
+    expect(screen.getByText(/keep collecting/)).toBeInTheDocument();
   });
 });

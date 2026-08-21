@@ -70,6 +70,14 @@ export interface SecurityEventMetadata {
     tlsOverrides: TlsOverrides;
   };
   CLUSTER_MODE_CHANGED: { readOnly: boolean };
+  // Both sides again, for the same reason the observe change records both: the
+  // question an incident asks is what the rule WAS when a given cluster was
+  // connected, and "requireLeastPrivilege: false" alone does not date the change
+  // that made it false.
+  ORG_POLICY_CHANGED: {
+    from: { requireLeastPrivilege: boolean };
+    to: { requireLeastPrivilege: boolean };
+  };
   // Both sides of the change, because the interesting question in an incident is
   // what STOPPED being observed and when — "now watching app" does not answer it.
   // null on either side means every database the cluster has.

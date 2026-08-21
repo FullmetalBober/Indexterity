@@ -82,4 +82,11 @@ export const queryKeys = {
   // cluster, so it must not be refetched by every rename and mode flip that
   // invalidates the list.
   clusterDatabases: (clusterId: string | null) => ["cluster-databases", clusterId] as const,
+  // What the STORED credentials hold, re-checked against the cluster (#313). Its
+  // own key beside `clusterDatabases` and for the same reason: this one dials the
+  // customer's cluster, so it must not be swept by the rename and mode flips that
+  // invalidate the list — and it must not be swept by a rotation either. A
+  // rotation replaces the credentials this describes, so that one invalidates it
+  // on purpose.
+  clusterPrivileges: (clusterId: string | null) => ["cluster-privileges", clusterId] as const,
 };

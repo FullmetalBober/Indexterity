@@ -4,7 +4,9 @@ import {
   canProvisionWith,
   evaluatePrivileges,
   evaluateProvisioning,
+  evaluateSurplus,
   type MongoPrivilege,
+  type MongoRole,
   queryStatsAdvisory,
 } from "./diagnose";
 import { parseServerVersion } from "./version";
@@ -249,5 +251,106 @@ describe("queryStatsAdvisory", () => {
 
   it("stays quiet when the parameter could not be read", () => {
     expect(queryStatsAdvisory(null, v7)).toBeNull();
+  });
+});
+
+// #313. The list read backwards: what this user holds and the engine never uses.
+describe("evaluateSurplus", () => {
+  const scoped: MongoRole[] = [{ role: "indexterityEngine", db: "admin" }];
+
+  it("finds nothing on the role we provision ourselves", () => {
+    // The reassuring case, and it has to be EMPTY rather than a list of ticks:
+    // the screen says "nothing" in words, and a row per absent grant would bury
+    // the finding when there is one (#289).
+    expect(
+      evaluateSurplus(scoped, enginePrivileges, ["app"], { user: "idx_a91f", db: "admin" }),
+    ).toEqual([]);
+  });
+
+  it("names root and hands over the revoke", () => {
+    const checks = evaluateSurplus(
+      [{ role: "root", db: "admin" }],
+      [{ resource: { anyResource: true }, actions: ["insert", "update", "remove"] }],
+      ["app"],
+      { user: "admin", db: "admin" },
+    );
+    const root = checks.find((check) => check.key === "surplus_root");
+    expect(root?.granted).toBe(true);
+    expect(root?.tier).toBe("SURPLUS");
+    // The command is the REVERSE direction for a surplus row: what removes the
+    // grant, not what adds it.
+    expect(root?.command).toBe(
+      'db.getSiblingDB("admin").revokeRolesFromUser("admin", [{ role: "root", db: "admin" }])',
+    );
+  });
+
+  it("reports a per-database dbOwner once per database it is held on", () => {
+    const checks = evaluateSurplus(
+      [
+        { role: "dbOwner", db: "app" },
+        { role: "dbOwner", db: "reporting" },
+      ],
+      enginePrivileges,
+      ["app"],
+      { user: "appuser", db: "admin" },
+    );
+    const owner = checks.find((check) => check.key === "surplus_dbOwner");
+    expect(owner?.label).toBe("dbOwner on app, reporting");
+    // Both databases in one statement, because a `dbOwner` on two databases is
+    // two memberships and one revoke call takes a list.
+    expect(owner?.command).toContain('{ role: "dbOwner", db: "app" }');
+    expect(owner?.command).toContain('{ role: "dbOwner", db: "reporting" }');
+  });
+
+  it("names write access separately, and does not print the same revoke twice", () => {
+    const checks = evaluateSurplus(
+      [{ role: "readWriteAnyDatabase", db: "admin" }],
+      [{ resource: { db: "", collection: "" }, actions: ["insert", "update", "remove"] }],
+      ["app"],
+      { user: "appuser", db: "admin" },
+    );
+    const write = checks.find((check) => check.key === "surplus_write");
+    expect(write?.label).toBe("insert, update, remove on the databases in scope");
+    // The role above carries it and prints the statement; printing it again here
+    // is how a reader runs one revoke and believes two things are outstanding.
+    expect(write?.command).toBeNull();
+    expect(write?.enables).toContain("which is what the role above carries");
+  });
+
+  it("says a custom role is the source when no built-in role explains the writes", () => {
+    const checks = evaluateSurplus(
+      [{ role: "appWriter", db: "app" }],
+      [{ resource: { db: "app", collection: "" }, actions: ["insert"] }],
+      ["app"],
+      { user: "appuser", db: "admin" },
+    );
+    // No role row — `appWriter` is not one of the built-ins we can name a
+    // replacement for — so the write row has to carry the whole finding, and it
+    // has to say where the reader goes instead of a command we cannot write.
+    expect(checks.map((check) => check.key)).toEqual(["surplus_write"]);
+    expect(checks[0]?.enables).toContain("db.updateRole");
+  });
+
+  it("issues the revoke against the user's own database, not admin", () => {
+    // Measured on 8.0: `revokeRolesFromUser` resolves the user in the database it
+    // is issued against, so `getSiblingDB("admin")` answers UserNotFound for a
+    // user created in `app` — "Could not find user \"owner\" for db \"admin\"".
+    // Very common, because a customer's own application user usually lives beside
+    // its data rather than in admin.
+    const checks = evaluateSurplus([{ role: "dbOwner", db: "app" }], enginePrivileges, ["app"], {
+      user: "owner",
+      db: "app",
+    });
+    expect(checks.find((check) => check.key === "surplus_dbOwner")?.command).toBe(
+      'db.getSiblingDB("app").revokeRolesFromUser("owner", [{ role: "dbOwner", db: "app" }])',
+    );
+  });
+
+  it("has no revoke to offer when nothing is authenticated", () => {
+    // A deployment with auth off holds every role and has no user to revoke them
+    // from. The diagnosis reports no surplus at all in that case; this pins the
+    // helper's own behaviour so a future caller cannot produce an unrunnable row.
+    const checks = evaluateSurplus([{ role: "root", db: "admin" }], [], [], null);
+    expect(checks[0]?.command).toBeNull();
   });
 });

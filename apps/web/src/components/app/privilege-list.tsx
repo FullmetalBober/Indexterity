@@ -13,7 +13,7 @@ import { Button } from "~/components/ui/button";
 // per line is how it will be pasted into a query window. No syntax colouring — it is
 // three lines at most in practice, and a highlighter is a dependency plus a second
 // way for this to be wrong about somebody's dialect.
-function FixCommand({ command }: { command: string }) {
+export function FixCommand({ command }: { command: string }) {
   const [copied, setCopied] = useState(false);
   const lines = command.split("\n").length;
   return (
@@ -43,7 +43,7 @@ function FixCommand({ command }: { command: string }) {
   );
 }
 
-function Row({ privilege, optional }: { privilege: PrivilegeCheck; optional: boolean }) {
+export function Row({ privilege, optional }: { privilege: PrivilegeCheck; optional: boolean }) {
   // An ungranted requirement is a fault in the connection; an ungranted optional
   // action is a path that is not available. Different marks, because red is a
   // claim that something is wrong.

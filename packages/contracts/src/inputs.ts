@@ -13,7 +13,7 @@
 // — zod's defaults ("Too small: expected string to have >=1 characters") are
 // wrong for a label even when they are right about the value.
 import { z } from "zod";
-import { clusterEngine, clusterPolicy, tlsOverrides } from "./schemas.js";
+import { clusterEngine, clusterPolicy, orgPolicyView, tlsOverrides } from "./schemas.js";
 
 // Fields, shared by whichever inputs use them.
 //
@@ -146,6 +146,11 @@ export const renameClusterInput = z.object({ name: clusterName });
 // a path param. Derived from the output schema so a knob cannot be settable and
 // readable under two different rules.
 export const policyKnobsInput = clusterPolicy.omit({ clusterId: true });
+
+// The org's own policy, replaced whole the way the per-cluster knobs are. Derived
+// from the output schema minus the field only the api writes, so a rule cannot be
+// settable and readable under two different shapes (#313).
+export const orgPolicyInput = orgPolicyView.omit({ updatedAt: true });
 
 // Org and team. Not part of the oRPC contract any more — better-auth's
 // organization plugin owns creating, renaming, inviting and the rest — but the

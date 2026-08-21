@@ -1,7 +1,10 @@
-import { Controller, Req } from "@nestjs/common";
+import { Controller, Logger, Req } from "@nestjs/common";
 import { contract, SECURITY_TRAIL_PAGE } from "@repo/contracts";
 import type { FastifyRequest } from "fastify";
+import { actorFromRequest } from "../audit/http-actor";
+import { recordSecurityEvent } from "../audit/security-events";
 import { entitlementsFor, planFrom } from "../billing/plans";
+import { orgPolicyFor } from "../clusters/least-privilege";
 import { provisionedUsersIn } from "../clusters/offboard";
 import {
   and,
@@ -13,6 +16,7 @@ import {
   invites,
   members,
   organizations,
+  orgPolicies,
   securityEvents,
   sql,
   user,
@@ -35,6 +39,8 @@ import { Implement, route } from "../orpc/implement";
 // orgs are made on purpose rather than conjured by the first GET.
 @Controller()
 export class OrgController {
+  private readonly log = new Logger(OrgController.name);
+
   constructor(
     private readonly database: DatabaseService,
     private readonly tenancy: TenancyService,
@@ -61,7 +67,7 @@ export class OrgController {
         .limit(1);
       if (org === undefined) return null;
 
-      const [memberRows, clusterRows, pending, provisionedUsers] = await Promise.all([
+      const [memberRows, clusterRows, pending, provisionedUsers, policy] = await Promise.all([
         this.database.db
           .select({
             memberId: members.id,
@@ -88,6 +94,11 @@ export class OrgController {
             ),
           ),
         provisionedUsersIn(this.database.db, orgId),
+        // On this payload rather than behind its own fetch (#313): the Settings
+        // toggle that owns it and the connection card of every cluster both need
+        // it, and a card that fetched one boolean per cluster would draw itself
+        // before knowing whether the cluster it describes is out of policy.
+        orgPolicyFor(this.database.db, orgId),
       ]);
 
       const plan = planFrom(org.plan);
@@ -116,8 +127,86 @@ export class OrgController {
           expiresAt: invite.expiresAt.toISOString(),
         })),
         provisionedUsers,
+        policy: {
+          requireLeastPrivilege: policy.requireLeastPrivilege,
+          updatedAt: policy.updatedAt?.toISOString() ?? null,
+        },
       };
     });
+  }
+
+  // The org's policy on its own, for a caller that wants it without the member
+  // list. Readable by any member: it is a rule that governs what THEY can do
+  // when they connect a cluster, and a refusal whose reason a reader cannot look
+  // up is a refusal they will read as a bug.
+  @Implement(contract.getOrgPolicy)
+  getOrgPolicy(@Req() req: FastifyRequest) {
+    return route(this.tenancy, contract.getOrgPolicy, req, "member").handler(
+      async ({ context }) => {
+        const policy = await orgPolicyFor(this.database.db, context.member.orgId);
+        return {
+          requireLeastPrivilege: policy.requireLeastPrivilege,
+          updatedAt: policy.updatedAt?.toISOString() ?? null,
+        };
+      },
+    );
+  }
+
+  // Owner-only, and replaced whole the way the per-cluster knobs are.
+  //
+  // `owner` rather than `freshOwner`, which rotating and going live are on the
+  // other side of. Those three change what the control plane HOLDS on somebody's
+  // production database; this one changes what it will agree to hold NEXT time,
+  // and it cannot loosen anything already stored — the clusters sealed under the
+  // old rule keep running and are marked out of policy instead. Recorded in the
+  // security trail either way, because turning it off is what lets the next
+  // connect store an admin string.
+  @Implement(contract.updateOrgPolicy)
+  updateOrgPolicy(@Req() req: FastifyRequest) {
+    return route(this.tenancy, contract.updateOrgPolicy, req, "owner").handler(
+      async ({ input, context }) => {
+        const orgId = context.member.orgId;
+        const before = await orgPolicyFor(this.database.db, orgId);
+        const [saved] = await this.database.db
+          .insert(orgPolicies)
+          .values({
+            orgId,
+            requireLeastPrivilege: input.requireLeastPrivilege,
+            updatedAt: new Date(),
+          })
+          .onConflictDoUpdate({
+            target: orgPolicies.orgId,
+            // `updatedAt` is set explicitly on the update too: the column's
+            // default only fires on insert, and this timestamp is what tells
+            // "off" from "never configured" on the screen that draws it.
+            set: { requireLeastPrivilege: input.requireLeastPrivilege, updatedAt: new Date() },
+          })
+          .returning();
+        // Only when it actually moved. A form saved twice is one decision, and a
+        // trail that records the second save as an act would have an incident
+        // reader hunting for what changed at a timestamp where nothing did.
+        if (before.requireLeastPrivilege !== input.requireLeastPrivilege) {
+          const actor = await actorFromRequest(this.database.db, req);
+          await recordSecurityEvent(
+            this.database.db,
+            {
+              event: "ORG_POLICY_CHANGED",
+              orgId,
+              ...actor,
+              metadata: {
+                from: { requireLeastPrivilege: before.requireLeastPrivilege },
+                to: { requireLeastPrivilege: input.requireLeastPrivilege },
+              },
+            },
+            (message) => this.log.warn(message),
+          );
+        }
+        return {
+          requireLeastPrivilege: saved?.requireLeastPrivilege ?? input.requireLeastPrivilege,
+          updatedAt: (saved?.updatedAt ?? new Date()).toISOString(),
+        };
+      },
+    );
   }
 
   @Implement(contract.listOrgs)
