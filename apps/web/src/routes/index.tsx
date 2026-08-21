@@ -3,13 +3,12 @@ import { ChevronRightIcon, Undo2Icon } from "lucide-react";
 import { Button } from "~/components/ui/button";
 import { Card, CardContent, CardHeader } from "~/components/ui/card";
 import { jsonLd, seoTags, siteOrigin } from "../lib/seo";
-import { REQUEST_ACCESS_HREF } from "../lib/site";
 
-const TITLE = "Indexterity — automatic MongoDB index management";
+const TITLE = "Indexterity — automatic index management for MongoDB and SQL Server";
 // Kept under ~155 characters so search results show it whole.
 const DESCRIPTION =
-  "Find unused, redundant and missing MongoDB indexes and apply the changes through a " +
-  "reversible pipeline that observes before it drops. Read-only by default.";
+  "Find unused, redundant and missing MongoDB and SQL Server indexes. Apply them " +
+  "through a pipeline that observes before it drops. Read-only by default.";
 
 const PIPELINE = ["PROPOSED", "APPROVED", "hidden", "observed", "dropped"];
 
@@ -65,7 +64,7 @@ const FEATURES = [
   },
   {
     title: "Workload-aware index creation",
-    body: "Recurring query shapes from $queryStats or the profiler become compound indexes in Equality, Sort, Range order with correct sort directions, partial indexes for constant filters, and TTL advisories for manual age-based cleanups. Queries that sort in memory count too, not just collection scans.",
+    body: "Recurring query shapes — from $queryStats or the profiler on MongoDB, from Query Store on SQL Server — become compound indexes in Equality, Sort, Range order with correct sort directions, partial indexes for constant filters, and TTL advisories for manual age-based cleanups. Queries that sort in memory count too, not just the ones that scan everything.",
   },
   {
     title: "Proof, not promises",
@@ -102,22 +101,22 @@ const FAQ = [
   {
     question: "How do I get access?",
     answer:
-      "Indexterity is invite-only during early access: ask for an invite and you get a link by email. If you self-host it, the first account you create bootstraps the install and can invite the rest of your team — sign-up mode is a configuration switch, not a hosted-only feature.",
+      "Sign up on the sign-in page. Whether that is open to anyone is a per-deployment switch (SIGNUP_MODE: open, invite or closed) rather than something this page can promise: an install that takes invitations only says so at sign-up and points you at the invite mail. If you self-host, the first account you create bootstraps the install and can invite the rest of your team.",
   },
   {
     question: "Does Indexterity read my data?",
     answer:
-      "No. It connects as a least-privilege user whose role grants index management and statistics only — there is no find privilege on your collections, so the server itself refuses any attempt to read documents. Index usage, sizes and latency all come from $indexStats and $collStats, which never expose document contents.",
+      "No. It connects as a least-privilege user granted index management and statistics only — no read privilege on your collections or tables, so the server itself refuses any attempt to read what is stored. Index usage, sizes and latency all come from the engine's own statistics views — $indexStats and $collStats on MongoDB, sys.dm_db_index_usage_stats and sys.dm_db_partition_stats on SQL Server — none of which expose stored values.",
   },
   {
-    question: "How does it decide a MongoDB index is unused?",
+    question: "How does it decide an index is unused?",
     answer:
-      "From $indexStats operation counters, summed across every replica-set member and shard, over at least three snapshots. An index with no operations in any snapshot is flat-zero; one that used to be busy and then went quiet is treated as periodic-dead. Indexes that are still used periodically are never proposed for removal.",
+      "From the engine's own per-index operation counters, over at least three snapshots: $indexStats on MongoDB, summed across every replica-set member and shard, and sys.dm_db_index_usage_stats on SQL Server, read per replica. An index with no operations in any snapshot is flat-zero; one that used to be busy and then went quiet is treated as periodic-dead. Indexes that are still used periodically are never proposed for removal. A counter that goes backwards — a restart, a rebuild, a statistics reset — is treated as a fact about the counter rather than about usage, and never as an index falling idle.",
   },
   {
     question: "What happens if dropping an index hurts performance?",
     answer:
-      "A drop is never the first action. The index is hidden first — instant and reversible — and the collection's read latency is baselined. If average read latency rises past the baseline during the observe window, the index is un-hidden automatically, the recommendation is rejected, and the index enters a cooldown so it is not proposed again. Even after a real drop, undo rebuilds it from the spec recorded at drop time.",
+      "A drop is never the first action. The index is hidden first and the read latency of its collection or table is baselined. If average read latency rises past the baseline during the observe window, the index is un-hidden automatically, the recommendation is rejected, and the index enters a cooldown so it is not proposed again. What hiding costs depends on the engine, and Indexterity says which before it acts: on MongoDB it is instant and free both ways, while on SQL Server the un-hide is an exact but not instant rebuild. Even after a real drop, undo rebuilds the index from the spec recorded at drop time.",
   },
   {
     question: "How long does an index stay hidden before it is dropped?",
@@ -125,9 +124,9 @@ const FAQ = [
       "Thirty days by default, and the window adapts to the index itself — set by whichever question is still open. Will anything want this again? That runs at the cadence of the workload, so usage with long gaps (a monthly report, a weekly batch) extends the window to cover a full cycle. Did hiding it hurt? That runs at the rate the index is queried, so one still serving traffic when it is hidden answers within days and is watched for a week rather than a month. An index proven idle across a much longer history is shortened too: the history already was the observation. The window chosen for each drop, and why, is recorded in the audit trail.",
   },
   {
-    question: "Does it work with Atlas, self-hosted MongoDB and sharded clusters?",
+    question: "Which deployments does it work with?",
     answer:
-      "Yes. Sharded clusters are handled explicitly: statistics are summed across shards, and shard-key backing indexes are protected from removal. On Atlas, user management belongs to Atlas, so you create the scoped role there and connect with its string; self-hosted and community deployments can have Indexterity create the user for you.",
+      "MongoDB 6.0 to 8.x — Atlas, self-hosted and sharded — and SQL Server 2016 and newer. Sharded clusters are handled explicitly: statistics are summed across shards, and shard-key backing indexes are protected from removal. Replicas are read one node at a time, because a replica-set member and an availability-group secondary each keep their own usage counters, and an index idle on the primary may be the one a reporting replica lives on. On Atlas, user management belongs to Atlas, so you create the scoped role there and connect with its string; self-hosted MongoDB and SQL Server can have Indexterity create the user for you.",
   },
   {
     question: "Which MongoDB privileges does it need?",
@@ -135,9 +134,14 @@ const FAQ = [
       "listDatabases, listCollections, listIndexes, indexStats and collStats to analyze; createIndex, dropIndex and collMod to apply changes; optionally system.profile or $queryStats for workload analysis, and serverStatus for the health probe. serverStatus is the one that reads beyond index metadata — it also exposes connection counts and storage-engine internals — so it is optional and a cluster without it works fine. Before storing anything, Indexterity checks the connection string and tells you exactly which of these are missing and what each one enables.",
   },
   {
+    question: "Which SQL Server permissions does it need?",
+    answer:
+      "VIEW SERVER STATE to read sys.dm_db_index_usage_stats, which is server-scoped; VIEW DATABASE STATE for sizes, row counts and Query Store in each database; and ALTER on the schemas whose indexes it may change. Query Store is the optional one — without it the drop side works as normal and there are simply no create-side recommendations. Letting Indexterity create its own login instead needs ALTER ANY LOGIN, ALTER ANY USER in each database, and CONTROL SERVER to grant VIEW SERVER STATE. Whichever route you take, the preflight names every permission it looked for and what each one enables.",
+  },
+  {
     question: "Can it create missing indexes, not just drop unused ones?",
     answer:
-      "Yes. Recurring collection scans become index recommendations in Equality, Sort, Range order with correct sort directions, folded together when one index can serve several shapes. So do queries that find their documents through an index and then sort them in memory — invisible to any scan test, and the failure mode that ends in an error rather than slowness. A shape must recur before it counts, so a heavy query someone runs once by hand never leaves an index behind.",
+      "Yes. Recurring scans of a whole collection or table become index recommendations in Equality, Sort, Range order with correct sort directions, folded together when one index can serve several shapes. So do queries that find their rows through an index and then sort them in memory — invisible to any scan test, and the failure mode that ends in an error rather than slowness. On SQL Server the server's own missing-index suggestions are folded in behind the same recurrence and cost gates as every other signal. A shape must recur before it counts, so a heavy query someone runs once by hand never leaves an index behind.",
   },
 ];
 
@@ -156,7 +160,7 @@ function Landing() {
       <main className="min-h-screen">
         <section className="mx-auto max-w-3xl px-6 pt-16 pb-20 text-center">
           <h1 className="font-semibold text-5xl leading-tight tracking-tight">
-            Automatic MongoDB index management —{" "}
+            Automatic index management for MongoDB and SQL Server —{" "}
             <span className="text-primary">with a hand brake.</span>
           </h1>
           <p className="mx-auto mt-6 max-w-2xl text-lg text-muted-foreground">
@@ -166,18 +170,14 @@ function Landing() {
           </p>
           <div className="mt-8 flex items-center justify-center gap-3">
             <Button asChild size="lg">
-              <a href={REQUEST_ACCESS_HREF}>Request access</a>
+              <Link to="/app">Get started</Link>
             </Button>
             <Button asChild size="lg" variant="outline">
               <a href="#how">How it works</a>
             </Button>
           </div>
           <p className="mt-4 text-muted-foreground text-sm">
-            Invite-only during early access.{" "}
-            <Link to="/app" className="underline">
-              Already have an account? Sign in
-            </Link>
-            .
+            MongoDB 6.0 to 8.x and SQL Server 2016+. Hosted, or self-host the same image.
           </p>
           {/* The pipeline as a real ordered list rather than a string of
               arrows: a screen reader announces five steps in order, and the
@@ -237,7 +237,7 @@ function Landing() {
           </ol>
           <div className="mt-12 text-center">
             <Button asChild size="lg">
-              <a href={REQUEST_ACCESS_HREF}>Request access</a>
+              <Link to="/app">Get started</Link>
             </Button>
             <p className="mt-3 text-muted-foreground text-sm">
               Clusters start read-only. Your documents are never read, and never touched.
@@ -264,7 +264,7 @@ function Landing() {
 
       <footer className="border-t">
         <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-8 text-muted-foreground text-sm">
-          <span>Indexterity — index dexterity for MongoDB.</span>
+          <span>Indexterity — index dexterity for MongoDB and SQL Server.</span>
           <span className="font-mono text-xs">indexes only · documents never</span>
         </div>
       </footer>
