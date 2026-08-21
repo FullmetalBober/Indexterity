@@ -6,9 +6,9 @@ type: application
 # (`generic` updater): a line-wise replacement, because the `yaml` updater
 # round-trips the document through a parser and drops every comment in the file
 # along with appVersion's quotes.
-version: 0.10.1 # x-release-please-version
+version: 0.11.0 # x-release-please-version
 # Application version — the default image tag.
-appVersion: "0.10.1" # x-release-please-version
+appVersion: "0.11.0" # x-release-please-version
 home: https://github.com/FullmetalBober/Indexterity
 sources:
   - https://github.com/FullmetalBober/Indexterity
