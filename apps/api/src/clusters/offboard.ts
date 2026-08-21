@@ -30,10 +30,14 @@ export async function restoreHiddenIndexes(db: Database, clusterId: string): Pro
   let unhidden = 0;
   if (inFlight.length > 0) {
     try {
-      const { session, release } = await openClusterSession(db, clusterId);
+      const { session, canHide, release } = await openClusterSession(db, clusterId);
       try {
         const executor = session.executor(false);
-        for (const rec of inFlight) {
+        // An engine with no reversible hide left every one of these indexes
+        // serving traffic, so there is nothing to put back — and calling unhide
+        // would ask its executor for a write it refuses. The recommendations are
+        // discarded with the cluster either way.
+        for (const rec of canHide ? inFlight : []) {
           try {
             await executor.unhide(rec.database, rec.collection, rec.indexName);
             unhidden += 1;

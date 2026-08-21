@@ -1,6 +1,6 @@
-import { engineFromScheme } from "@repo/contracts";
+import { canHideIndexes, engineFromScheme } from "@repo/contracts";
 import { describe, expect, it } from "vitest";
-import { detectEngine, supportedEngineOptions, supportedEngines } from "./registry";
+import { adapterFor, detectEngine, supportedEngineOptions, supportedEngines } from "./registry";
 
 // The pair that would otherwise drift silently (#239).
 //
@@ -86,5 +86,27 @@ describe("supportedEngineOptions", () => {
   // reader could choose and then be refused (#35).
   it("omits an engine with no adapter", () => {
     expect(supportedEngineOptions().map((option) => option.engine)).not.toContain("POSTGRESQL");
+  });
+});
+
+// The second pair in this file that would drift silently, for the same reason as
+// the first (#303). The dashboard says "hide, drop and build" on the go-live
+// dialog and promises to restore hidden indexes on disconnect, and it cannot
+// import an adapter to find out whether either is true — so @repo/contracts
+// carries a table and this holds it to the adapters themselves. An engine shipped
+// without a hide would otherwise keep promising one for a release.
+describe("canHideIndexes", () => {
+  it("agrees with every supported adapter's own capability", () => {
+    for (const engine of supportedEngines()) {
+      expect(canHideIndexes(engine)).toBe(adapterFor(engine).capabilities.hideIndexes);
+    }
+  });
+
+  // Asserted rather than left implied: this is the value the whole no-hide path
+  // through apply.ts and finalize.ts exists for, and the one the PostgreSQL
+  // adapter will be built against (#35). Measured on 17.11 and 18.6 — clearing
+  // `pg_index.indisvalid` is the only mechanism and it needs superuser.
+  it("says PostgreSQL cannot hide, before its adapter exists", () => {
+    expect(canHideIndexes("POSTGRESQL")).toBe(false);
   });
 });

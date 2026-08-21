@@ -2,6 +2,7 @@ import { masterKeyBytesFor } from "../config/env";
 import { clusters, type Database, envKeyProvider, eq, open } from "../db";
 import { ObservedSession } from "../engine/observe";
 import type { ClusterEngine, EngineSession } from "../engine/ports";
+import { adapterFor } from "../engine/registry";
 import { acquireClusterSession } from "./connection-pool";
 
 // The stored credentials would not decrypt. Always a control-plane problem —
@@ -36,6 +37,17 @@ export interface ClusterSession {
   readonly session: EngineSession;
   readonly engine: ClusterEngine;
   readonly readOnly: boolean;
+  // Whether this engine has reversible index invisibility
+  // (`EngineCapabilities.hideIndexes`). Read here rather than at each call site
+  // so the pipeline never reaches for the registry itself, and so the six
+  // places that hide or un-hide branch on one fact computed once.
+  //
+  // False means the observe stage is statistics-only: the index keeps serving
+  // every query while the window runs, the read-latency regression gate has
+  // nothing to measure (nothing was hidden, so nothing can have been slowed by
+  // hiding), and the evidence is the usage counters staying flat — which is
+  // what `preflightDrop` already re-checks before the drop.
+  readonly canHide: boolean;
   // Which databases the owner asked us to observe, or null for all of them
   // (#244). Carried for the callers that need to SAY what was in scope — the
   // filtering itself is already done by the session above, and no caller has to
@@ -94,6 +106,7 @@ export async function openClusterSession(
         : new ObservedSession(session, observed),
     engine: cluster.engine,
     readOnly: cluster.readOnly,
+    canHide: adapterFor(cluster.engine).capabilities.hideIndexes,
     observedDatabases: observed,
     release,
   };

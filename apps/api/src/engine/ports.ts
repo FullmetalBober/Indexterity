@@ -238,8 +238,19 @@ export interface ConnectionDiagnosis {
 // the pipeline.
 export interface EngineCapabilities {
   // Reversible index invisibility (mongo collMod hidden, MSSQL DISABLE+REBUILD).
-  // PostgreSQL has no native equivalent: its adapter will need an alternative
-  // observe stage before the pipeline may drop.
+  //
+  // False makes the observe stage statistics-only: apply.ts moves the
+  // recommendation into the window without touching the index, records no
+  // read-latency baseline (hiding is the only thing such a baseline could
+  // measure), and the evidence for the drop is the usage counters staying flat,
+  // which preflightDrop re-checks at the end. Read through
+  // `openClusterSession`'s `canHide` — no pipeline site reaches for the registry
+  // itself — and mirrored for the dashboard's wording by `canHideIndexes` in
+  // @repo/contracts, which registry.test.ts holds to this value.
+  //
+  // PostgreSQL is the engine that will set it false: its only mechanism is
+  // clearing `pg_index.indisvalid`, which needs superuser and cannot be
+  // delegated (measured on 17.11 and 18.6, #35).
   readonly hideIndexes: boolean;
   // Can create a scoped least-privilege user from an admin connection string.
   readonly provisionScopedUsers: boolean;

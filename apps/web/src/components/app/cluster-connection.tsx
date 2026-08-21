@@ -1,3 +1,4 @@
+import { type ClusterEngine, canHideIndexes } from "@repo/contracts";
 import { useState } from "react";
 import { ReauthDialog } from "~/components/app/reauth-dialog";
 import { ConfirmButton } from "~/components/confirm-button";
@@ -14,6 +15,7 @@ import {
 interface ClusterConnectionInfo {
   readonly id: string;
   readonly name: string;
+  readonly engine: ClusterEngine;
   readonly readOnly: boolean;
   readonly provisionedUsername: string | null;
 }
@@ -26,6 +28,10 @@ interface ClusterConnectionInfo {
 // selector, and both are one click. They are a page you have to mean to open
 // now, which is the whole difference between a control and an accident.
 export function ClusterConnection({ cluster }: { cluster: ClusterConnectionInfo }) {
+  // Three sentences on this card promise a hide, and one engine has none — so
+  // they are per-engine rather than per-product. From the contract's table, not
+  // from a guess here, and the api holds that table to its own adapters.
+  const canHide = canHideIndexes(cluster.engine);
   const [rotateOpen, setRotateOpen] = useState(false);
   const [rotateString, setRotateString] = useState("");
   // Set when the api answered SESSION_NOT_FRESH (#52): the retry the re-auth
@@ -58,7 +64,9 @@ export function ClusterConnection({ cluster }: { cluster: ClusterConnectionInfo 
             <ConfirmButton
               trigger={<Button variant="outline">Go live</Button>}
               title="Enable live mode?"
-              description={`The engine will be allowed to modify indexes on "${cluster.name}" — hide, drop and build. Drops still pass the observe window and the regression gate first.`}
+              description={`The engine will be allowed to modify indexes on "${cluster.name}" — ${
+                canHide ? "hide, drop and build" : "drop and build"
+              }. Drops still pass the observe window and the regression gate first.`}
               confirmLabel="Go live"
               onConfirm={() => toggleMode.mutate(false)}
             />
@@ -70,7 +78,9 @@ export function ClusterConnection({ cluster }: { cluster: ClusterConnectionInfo 
           <p className="text-muted-foreground text-sm">
             {cluster.readOnly
               ? "Read-only: recommendations are proposed, nothing is applied."
-              : "Live: the engine may hide, drop and build indexes here."}
+              : canHide
+                ? "Live: the engine may hide, drop and build indexes here."
+                : "Live: the engine may drop and build indexes here."}
           </p>
         </div>
 
@@ -121,7 +131,10 @@ export function ClusterConnection({ cluster }: { cluster: ClusterConnectionInfo 
               <>
                 <p>
                   All collected snapshots, recommendations, ROI history and the audit trail are
-                  deleted. Indexes still hidden in an observe window are restored first.
+                  deleted.{" "}
+                  {canHide
+                    ? "Indexes still hidden in an observe window are restored first."
+                    : "No index is left changed — nothing was hidden to restore."}
                 </p>
                 {cluster.provisionedUsername === null ? null : (
                   <p>

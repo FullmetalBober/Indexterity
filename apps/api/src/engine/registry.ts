@@ -8,7 +8,9 @@ import type { ClusterEngine, EngineAdapter } from "./ports";
 // replaces its null here.
 const adapters: Record<ClusterEngine, EngineAdapter | null> = {
   MONGODB: mongoAdapter,
-  POSTGRESQL: null, // planned: pg_stat_user_indexes / pg_stat_statements (#35)
+  // Planned: pg_stat_user_indexes / pg_stat_statements, and `hideIndexes: false`
+  // — the observe stage is statistics-only there (#35, #303).
+  POSTGRESQL: null,
   MSSQL: mssqlAdapter,
 };
 
