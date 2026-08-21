@@ -69,6 +69,37 @@ export interface OpenClusterOptions {
   readonly allDatabases?: boolean;
 }
 
+// The cluster row and the credentials it was sealed with.
+//
+// Its own function because one caller wants the STRING rather than a session:
+// re-diagnosing an existing cluster (#313) asks the adapter what these
+// credentials may do, and `diagnose` takes a connection string — a pooled session
+// cannot answer it, and a second copy of the unseal would be a second place for
+// the key-version handling and its named error to drift.
+export async function unsealCluster(
+  db: Database,
+  clusterId: string,
+): Promise<{
+  cluster: typeof clusters.$inferSelect;
+  connectionString: string;
+}> {
+  const [cluster] = await db.select().from(clusters).where(eq(clusters.id, clusterId)).limit(1);
+  if (cluster === undefined) throw new ClusterGoneError(clusterId);
+  try {
+    return {
+      cluster,
+      connectionString: new TextDecoder().decode(
+        await open(
+          { dek: cluster.sealedDek, data: cluster.sealedData },
+          envKeyProvider(masterKeyBytesFor(cluster.keyVersion)),
+        ),
+      ),
+    };
+  } catch (error) {
+    throw new ClusterCredentialsError(clusterId, cluster.keyVersion, error);
+  }
+}
+
 // Load a cluster, unseal its connection string, and lease a pooled session for
 // its engine.
 export async function openClusterSession(
@@ -76,19 +107,7 @@ export async function openClusterSession(
   clusterId: string,
   options: OpenClusterOptions = {},
 ): Promise<ClusterSession> {
-  const [cluster] = await db.select().from(clusters).where(eq(clusters.id, clusterId)).limit(1);
-  if (cluster === undefined) throw new ClusterGoneError(clusterId);
-  let connString: string;
-  try {
-    connString = new TextDecoder().decode(
-      await open(
-        { dek: cluster.sealedDek, data: cluster.sealedData },
-        envKeyProvider(masterKeyBytesFor(cluster.keyVersion)),
-      ),
-    );
-  } catch (error) {
-    throw new ClusterCredentialsError(clusterId, cluster.keyVersion, error);
-  }
+  const { cluster, connectionString: connString } = await unsealCluster(db, clusterId);
   const { session, release } = await acquireClusterSession(
     clusterId,
     cluster.engine,

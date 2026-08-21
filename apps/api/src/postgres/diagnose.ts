@@ -21,11 +21,21 @@ interface Probe {
   readonly whoami: string;
   readonly is_super: boolean;
   readonly can_createrole: boolean;
+  readonly can_createdb: boolean;
   readonly can_grant_monitor: boolean;
   readonly in_pg_monitor: boolean;
   readonly pgss: boolean;
   readonly version_num: string | null;
   readonly version_text: string | null;
+}
+
+// One (database, schema) where this role can write rows it does not own (#313).
+// Kept as pairs rather than a count because the REVOKE is per schema and cannot
+// cross databases — a number would give the reader a finding and no statement.
+export interface WritableSchema {
+  readonly database: string;
+  readonly schema: string;
+  readonly tables: number;
 }
 
 export async function diagnosePostgresConnection(
@@ -49,6 +59,7 @@ export async function diagnosePostgresConnection(
 
     const connectable = await connectableDatabases(conn, inScope);
     const ownership = await ownershipAcross(conn, inScope);
+    const writable = await writableSchemas(conn, inScope);
     const refusal = postgresVersionRefusal(
       parseVersion(probe),
       // The escape hatch is a deployment posture and not this function's
@@ -138,6 +149,7 @@ export async function diagnosePostgresConnection(
     const provision = privileges.filter((check) => check.tier === "PROVISION");
     return {
       reachable: true,
+      surplus: surplusPrivileges(probe, writable),
       message: refusal ?? advisory(privileges, ownership),
       username: username ?? probe.whoami,
       // Postgres always authenticates something — there is no anonymous
@@ -163,12 +175,136 @@ export async function diagnosePostgresConnection(
       ready: false,
       canApply: false,
       privileges: [],
+      // Nothing was measured, so nothing can be claimed to be surplus. Empty
+      // here means "we could not ask", which the card labels as an unreachable
+      // cluster rather than as a clean bill of health.
+      surplus: [],
       missing: [],
       databases: [],
     };
   } finally {
     await conn.close();
   }
+}
+
+// What this role holds that the engine never uses (#313).
+//
+// The role attributes are the easy half and were already half-probed for the
+// PROVISION tier: CREATEROLE is a requirement to provision and a surplus grant
+// to hold afterwards, which is not a contradiction — the first is a question
+// about a string being pasted once, the second about one stored for a year.
+//
+// SUPERUSER is listed on its own even though it implies the other two, because
+// `ALTER ROLE … NOSUPERUSER` is the only statement that removes it and NOCREATEDB
+// on a superuser changes nothing at all. Both rows can be held at once and each
+// carries the statement that actually applies to it.
+//
+// What is deliberately NOT here is SELECT on user tables. On this engine applying
+// requires OWNERSHIP — no grantable index privilege exists — and an owner can
+// always read the table, so a cluster in live mode holds read access as a
+// consequence of a requirement rather than as surplus. Calling it surplus would
+// tell a reader to revoke the thing that makes their APPLY row green. Writes are
+// different: nothing in the pipeline inserts, updates or deletes a row, so a
+// write grant on a table this role does not own is pure surplus, and that is the
+// one this reports.
+export function surplusPrivileges(
+  probe: Pick<Probe, "whoami" | "is_super" | "can_createrole" | "can_createdb">,
+  writable: readonly WritableSchema[],
+): PrivilegeCheck[] {
+  const me = quoteIdent(probe.whoami);
+  const checks: PrivilegeCheck[] = [
+    {
+      key: "surplus_superuser",
+      label: "SUPERUSER",
+      enables:
+        "everything on this server, including reading and rewriting every table — the engine uses none of it",
+      tier: "SURPLUS",
+      granted: probe.is_super,
+      command: probe.is_super ? `ALTER ROLE ${me} NOSUPERUSER;` : null,
+    },
+    {
+      key: "surplus_createrole",
+      label: "CREATEROLE",
+      enables:
+        "creating and altering roles, which is how a role grants itself anything it does not have. Needed once to provision a scoped role; never needed by a stored connection",
+      tier: "SURPLUS",
+      granted: probe.can_createrole,
+      command: probe.can_createrole ? `ALTER ROLE ${me} NOCREATEROLE;` : null,
+    },
+    {
+      key: "surplus_createdb",
+      label: "CREATEDB",
+      enables: "creating and dropping databases — nothing in the analysis or the apply path does",
+      tier: "SURPLUS",
+      granted: probe.can_createdb,
+      command: probe.can_createdb ? `ALTER ROLE ${me} NOCREATEDB;` : null,
+    },
+    {
+      key: "surplus_write",
+      label: "INSERT, UPDATE or DELETE on tables it does not own",
+      enables:
+        writable.length === 0
+          ? "changing the rows in your tables. Nothing in the pipeline writes a row — it creates and drops indexes, which is an ownership question on this engine and a separate one"
+          : `changing the rows in your tables — held on ${tableCount(writable)} across ` +
+            `${schemaList(writable)}. Nothing in the pipeline writes a row. Each REVOKE below runs ` +
+            "in its own database, because a privilege on a table cannot be revoked from outside it",
+      tier: "SURPLUS",
+      granted: writable.length > 0,
+      command: writable.length === 0 ? null : revokeWrites(writable, me),
+    },
+  ];
+  // Only what is actually HELD. A surplus list is a list of findings, so a row
+  // saying "you do not have SUPERUSER" would be reassurance dressed as a finding
+  // — and four of them would bury the one that is real. The empty case is said
+  // once, by the screen, rather than four times here (#289).
+  return checks.filter((check) => check.granted);
+}
+
+function tableCount(writable: readonly WritableSchema[]): string {
+  const tables = writable.reduce((total, entry) => total + entry.tables, 0);
+  return `${tables} ${tables === 1 ? "table" : "tables"}`;
+}
+
+function schemaList(writable: readonly WritableSchema[]): string {
+  const names = writable.map((entry) => `${entry.database}.${entry.schema}`);
+  // Bounded on purpose: a hundred-schema server would push the rest of the
+  // sentence off the card, and the statements below name every one of them.
+  if (names.length <= 3) return names.join(", ");
+  return `${names.slice(0, 3).join(", ")} and ${names.length - 3} more`;
+}
+
+// One REVOKE per (database, schema), each under the psql `\\connect` that makes it
+// runnable. ALL TABLES rather than a list of names: the grant was almost
+// certainly made that way, and a script naming four hundred tables is not one
+// anybody pastes.
+//
+// The default privileges line matters as much as the revoke and is the half
+// people forget: `ALTER DEFAULT PRIVILEGES` is what stops the next table created
+// in that schema from arriving with the same grant, so revoking without it fixes
+// today and not tomorrow.
+function revokeWrites(writable: readonly WritableSchema[], me: string): string {
+  const byDatabase = new Map<string, WritableSchema[]>();
+  for (const entry of writable) {
+    const existing = byDatabase.get(entry.database);
+    if (existing === undefined) byDatabase.set(entry.database, [entry]);
+    else existing.push(entry);
+  }
+  const blocks: string[] = [];
+  for (const [database, entries] of byDatabase) {
+    // `\\connect` is a psql meta-command and not SQL, which is the honest answer
+    // here: no SQL statement can cross a database boundary on this engine, so a
+    // block that pretended otherwise would fail on the second database.
+    const lines = [`\\connect ${quoteIdent(database)}`];
+    for (const entry of entries) {
+      const schema = quoteIdent(entry.schema);
+      lines.push(`REVOKE INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA ${schema} FROM ${me};`);
+      lines.push(
+        `ALTER DEFAULT PRIVILEGES IN SCHEMA ${schema} REVOKE INSERT, UPDATE, DELETE ON TABLES FROM ${me};`,
+      );
+    }
+    blocks.push(lines.join("\n"));
+  }
+  return blocks.join("\n");
 }
 
 // The one advisory worth making on an otherwise usable connection: this string
@@ -202,6 +338,8 @@ async function readProbe(conn: PostgresConnection): Promise<Probe> {
               AS is_super,
             COALESCE((SELECT rolcreaterole FROM pg_roles WHERE rolname = current_user), false)
               AS can_createrole,
+            COALESCE((SELECT rolcreatedb FROM pg_roles WHERE rolname = current_user), false)
+              AS can_createdb,
             EXISTS(
               SELECT 1 FROM pg_auth_members m
                 JOIN pg_roles granted ON granted.oid = m.roleid
@@ -246,6 +384,54 @@ async function connectableDatabases(
   const ok = rows.filter((row) => row.allowed).map((row) => row.datname);
   const missing = rows.filter((row) => !row.allowed).map((row) => row.datname);
   return { ok, missing };
+}
+
+// Where this role can write rows it does not own (#313), as (database, schema)
+// pairs with a table count each.
+//
+// `NOT pg_has_role(… relowner …)` is the same ownership test `ownershipAcross`
+// makes, negated: an owner's write access is a consequence of the ownership the
+// APPLY tier requires, so counting it here would report a requirement as surplus.
+// What is left is a grant somebody made on purpose, which is exactly what a
+// REVOKE can take back.
+//
+// Grouped by schema because that is the granularity `REVOKE … ON ALL TABLES IN
+// SCHEMA` works at, and per database because privileges cannot be revoked across
+// one. Costs one round trip per database in scope, alongside the ownership count
+// that already costs one.
+async function writableSchemas(
+  conn: PostgresConnection,
+  databases: readonly string[],
+): Promise<WritableSchema[]> {
+  const found: WritableSchema[] = [];
+  for (const database of databases) {
+    try {
+      const rows = await conn.query<{ nspname: string; tables: string | number }>(
+        `SELECT n.nspname, count(*) AS tables
+           FROM pg_class c
+           JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE c.relkind IN ('r', 'p')
+            AND n.nspname NOT LIKE 'pg\\_%'
+            AND n.nspname <> 'information_schema'
+            AND NOT pg_has_role(current_user, c.relowner, 'USAGE')
+            AND (has_table_privilege(c.oid, 'INSERT')
+                 OR has_table_privilege(c.oid, 'UPDATE')
+                 OR has_table_privilege(c.oid, 'DELETE'))
+          GROUP BY n.nspname
+          ORDER BY n.nspname`,
+        [],
+        database,
+      );
+      for (const row of rows) {
+        found.push({ database, schema: row.nspname, tables: Number(row.tables) });
+      }
+    } catch {
+      // A database this string cannot enter is already reported by the CONNECT
+      // check, exactly as in `ownershipAcross` below — and a database we cannot
+      // open is one we cannot claim holds a surplus grant either way.
+    }
+  }
+  return found;
 }
 
 // How many tables in scope this role owns, and how many it does not.

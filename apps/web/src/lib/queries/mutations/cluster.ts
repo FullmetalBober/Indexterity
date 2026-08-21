@@ -144,21 +144,30 @@ export function useRotateConnection(
   clusterId: string,
   { onRotated, onStale }: { onRotated: () => void; onStale: (retry: () => void) => void },
 ) {
+  const queryClient = useQueryClient();
   const invalidateClusters = useInvalidateClusters();
   const mutation = useMutation({
     mutationFn: (connectionString: string) =>
       api().rotateConnection({ clusterId, connectionString }),
-    onSuccess: () => {
+    onSuccess: async () => {
       toast.success("Connection string rotated — history preserved");
       onRotated();
-      return invalidateClusters();
+      await invalidateClusters();
+      // The privilege panel describes the credentials that were just replaced
+      // (#313), so it is wrong the moment this returns — and unlike the database
+      // list, it is wrong about the exact thing the reader came here to change.
+      // Removed rather than refetched: a refetch would dial the cluster before
+      // anybody asks to look, which is the cost the panel is lazy to avoid.
+      queryClient.removeQueries({ queryKey: queryKeys.clusterPrivileges(clusterId) });
     },
     // 400 names the problem with the string, 404 the cluster, 502 says the
-    // cluster could not be dialled with it — all three are worth reading.
+    // cluster could not be dialled with it, and 422 is the org's own
+    // least-privilege rule refusing to store it (#313) — all four are written for
+    // the reader.
     onError: (error, connectionString) => {
       if (isSessionStale(error)) onStale(() => mutation.mutate(connectionString));
       else if (isTwoFactorRequired(error)) toast.error(apiMessage(error, ROTATION_FAILED));
-      else toast.error(apiMessage(error, ROTATION_FAILED, [400, 404, 502]));
+      else toast.error(apiMessage(error, ROTATION_FAILED, [400, 404, 422, 502]));
     },
   });
   return mutation;
@@ -263,7 +272,12 @@ export function useConnectCluster(handlers: ConnectHandlers) {
       handlers.onConnected();
       await land(created.id);
     },
-    onError: (error) => handlers.onError(apiMessage(error, "failed to connect cluster")),
+    // 422 is the org's least-privilege rule refusing to STORE this string (#313),
+    // and its message names the provisioning path that would work instead — so it
+    // has to reach the reader verbatim, on a form where the alternative is one
+    // button along. The default list already covers 400 and 403.
+    onError: (error) =>
+      handlers.onError(apiMessage(error, "failed to connect cluster", [400, 402, 403, 404, 422])),
   });
 }
 

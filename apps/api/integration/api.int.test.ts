@@ -25,6 +25,7 @@ import {
   latencySamples,
   members,
   organizations,
+  orgPolicies,
   policies,
   recommendations,
   roiMetrics,
@@ -5333,5 +5334,164 @@ describe("approving on a read-only cluster", () => {
       .from(recommendations)
       .where(eq(recommendations.id, recId));
     expect(live?.state).toBe("APPROVED");
+  });
+});
+
+// #313. The org-level rule that credentials broader than the engine needs are
+// never stored, at both doors, plus the re-check that says which privileges the
+// stored string actually holds.
+//
+// Its own org throughout: the rule changes what every connect in an org is
+// allowed to do, and leaving it switched on would refuse the connects every other
+// block above makes.
+describe("least-privilege policy", () => {
+  let strict: Session;
+  let strictOrgId: string;
+
+  beforeAll(async () => {
+    strict = await signUp("leastpriv");
+    createdEmails.push(strict.email);
+    strictOrgId = await giveRoom(strict);
+    createdOrgIds.push(strictOrgId);
+  });
+
+  it("defaults to off, and says it was never configured", async () => {
+    const policy = asRecord(await (await api("/org/policy", strict)).json());
+    expect(policy.requireLeastPrivilege).toBe(false);
+    // Not the same as configured-to-off. An install that has considered this and
+    // declined must be distinguishable from one that has never seen the setting.
+    expect(policy.updatedAt).toBeNull();
+
+    // And it rides on the org payload the dashboard already reads, because the
+    // connection card of every cluster needs it (#313).
+    const org = asRecord(await (await api("/org", strict)).json());
+    expect(asRecord(org.policy).requireLeastPrivilege).toBe(false);
+  });
+
+  it("records who changed it, and only when it moved", async () => {
+    const on = await api("/org/policy", strict, {
+      method: "PUT",
+      body: JSON.stringify({ requireLeastPrivilege: true }),
+    });
+    expect(on.status).toBe(200);
+    const saved = asRecord(await on.json());
+    expect(saved.requireLeastPrivilege).toBe(true);
+    expect(saved.updatedAt).not.toBeNull();
+
+    // Saved a second time with the same value: one decision, so one row. A trail
+    // that recorded the re-save would send an incident reader hunting for a change
+    // at a timestamp where nothing changed.
+    await api("/org/policy", strict, {
+      method: "PUT",
+      body: JSON.stringify({ requireLeastPrivilege: true }),
+    });
+    const trail = await db
+      .select()
+      .from(securityEvents)
+      .where(
+        and(eq(securityEvents.orgId, strictOrgId), eq(securityEvents.event, "ORG_POLICY_CHANGED")),
+      );
+    expect(trail).toHaveLength(1);
+    expect(asRecord(trail[0]?.metadata ?? {}).to).toEqual({ requireLeastPrivilege: true });
+    expect(trail[0]?.actorEmail).toBe(strict.email);
+  });
+
+  it("refuses to connect a deployment that cannot be narrowed at all", async () => {
+    // The suite's mongod runs with authentication off, which is the case the issue
+    // left open: it grants every privilege to anyone who can reach it, and no
+    // grant narrows that. Refused rather than exempted — an exemption would mean
+    // an org with this switched on still stores the broadest credential this
+    // product can hold.
+    const refused = await api("/clusters", strict, {
+      method: "POST",
+      body: JSON.stringify({ name: "Refused", connectionString: MONGO_URL }),
+    });
+    expect(refused.status).toBe(422);
+    const body = asRecord(await refused.json());
+    expect(String(body.message)).toContain("authentication disabled");
+    // And provisioning is NOT offered here, because there would be nothing to
+    // authenticate a scoped user as.
+    expect(String(body.message)).not.toContain("provision");
+
+    // Nothing stored. The gate runs after the dial and before the seal, so a
+    // refusal must leave no row behind.
+    const rows = await db.select().from(clusters).where(eq(clusters.orgId, strictOrgId));
+    expect(rows).toHaveLength(0);
+  });
+
+  it("lets the same string through the moment the rule is off", async () => {
+    await api("/org/policy", strict, {
+      method: "PUT",
+      body: JSON.stringify({ requireLeastPrivilege: false }),
+    });
+    const created = await api("/clusters", strict, {
+      method: "POST",
+      body: JSON.stringify({ name: "Allowed Again", connectionString: MONGO_URL }),
+    });
+    expect(created.status).toBe(200);
+    const id = asString(asRecord(await created.json()).id);
+    createdClusterIds.push(id);
+
+    // Switching the rule back ON does not reach backwards: the cluster stays, and
+    // the dashboard marks it out of policy instead. An org that had to choose
+    // between its policy and its analysis would never switch the policy on.
+    await api("/org/policy", strict, {
+      method: "PUT",
+      body: JSON.stringify({ requireLeastPrivilege: true }),
+    });
+    const still = await db.select().from(clusters).where(eq(clusters.id, id));
+    expect(still).toHaveLength(1);
+
+    // Rotation is the other door, and the only one an existing cluster has.
+    const rotated = await api(`/clusters/${id}/connection`, strict, {
+      method: "PATCH",
+      body: JSON.stringify({ connectionString: MONGO_URL }),
+    });
+    expect(rotated.status).toBe(422);
+    expect(String(asRecord(await rotated.json()).message)).toContain("authentication disabled");
+
+    await api("/org/policy", strict, {
+      method: "PUT",
+      body: JSON.stringify({ requireLeastPrivilege: false }),
+    });
+  });
+
+  it("re-checks the stored credentials and reports required beside redundant", async () => {
+    const privileges = await api(`/clusters/${clusterId}/privileges`, owner);
+    expect(privileges.status).toBe(200);
+    const body = asRecord(await privileges.json());
+    expect(body.reachable).toBe(true);
+    // Stamped by the api, so the card can label how old the figures are rather
+    // than implying they are live — the issue's first constraint.
+    expect(typeof body.checkedAt).toBe("string");
+
+    const required = Array.isArray(body.required) ? body.required.map(asRecord) : [];
+    expect(required.map((check) => check.key)).toContain("indexStats");
+    // PROVISION checks are dropped on this route and only here: on an existing
+    // cluster the offer to make a scoped user is gone, so three rows about
+    // creating users under a heading that says "what the engine needs" would be a
+    // question nobody can act on.
+    expect(required.map((check) => check.tier)).not.toContain("PROVISION");
+
+    // A no-auth deployment reports no surplus, on purpose: it holds every grant
+    // there is and not one of them is revocable, because there is no user to
+    // revoke it from. The message carries that whole finding instead.
+    expect(body.surplus).toEqual([]);
+    expect(body.authEnabled).toBe(false);
+  });
+
+  it("tells another tenant nothing about the cluster id", async () => {
+    // The response enumerates what a credential on somebody's production database
+    // may do, which is half of what an attacker wants before using it — so the
+    // route is owner-only, and a caller standing in a DIFFERENT org gets the same
+    // answer a typo gets. Not found rather than forbidden, which is the rule the
+    // other eight cluster routes follow: whether a cluster id exists is not this
+    // caller's business, and a 403 would confirm it does.
+    const refused = await api(`/clusters/${clusterId}/privileges`, strict);
+    expect(refused.status).toBe(404);
+  });
+
+  afterAll(async () => {
+    await db.delete(orgPolicies).where(eq(orgPolicies.orgId, strictOrgId));
   });
 });

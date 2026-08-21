@@ -45,7 +45,10 @@ function ConnectCluster() {
           : "Every cluster is analyzed on its own, with its own policy and its own history."}
       </p>
 
-      <ConnectClusterForm plan={org?.plan ?? null} />
+      <ConnectClusterForm
+        plan={org?.plan ?? null}
+        requireLeastPrivilege={org?.policy.requireLeastPrivilege ?? false}
+      />
 
       {first ? (
         <p className="mt-6 text-muted-foreground text-sm">

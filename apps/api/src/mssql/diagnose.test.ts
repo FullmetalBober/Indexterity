@@ -1,8 +1,20 @@
 import { describe, expect, it } from "vitest";
-import { evaluateMssqlPrivileges, type MssqlDatabaseGrants, queryStoreCheck } from "./diagnose";
+import {
+  evaluateMssqlPrivileges,
+  evaluateMssqlSurplus,
+  type MssqlDatabaseGrants,
+  queryStoreCheck,
+} from "./diagnose";
 
 function db(overrides: Partial<MssqlDatabaseGrants> = {}): MssqlDatabaseGrants {
-  return { viewState: true, alterEverySchema: true, alterAnyUser: false, ...overrides };
+  return {
+    viewState: true,
+    alterEverySchema: true,
+    alterAnyUser: false,
+    dbOwner: false,
+    userName: "idx_probe",
+    ...overrides,
+  };
 }
 
 const SERVER_ONLY = new Set(["VIEW SERVER STATE"]);
@@ -76,7 +88,18 @@ describe("evaluateMssqlPrivileges", () => {
       ADMIN,
       new Map([
         ["app", db()],
-        ["created_later", { viewState: false, alterEverySchema: false, alterAnyUser: false }],
+        [
+          "created_later",
+          // A database the login has no user in: no name to revoke a membership
+          // from either, which is what `userName: null` says.
+          {
+            viewState: false,
+            alterEverySchema: false,
+            alterAnyUser: false,
+            dbOwner: false,
+            userName: null,
+          },
+        ],
       ]),
     );
     expect(newDatabase.find((check) => check.key === "viewDatabaseState")?.granted).toBe(false);
@@ -132,5 +155,84 @@ describe("queryStoreCheck", () => {
     expect(check.granted).toBe(false);
     expect(check.command).toBeNull();
     expect(check.enables).toContain("ALTER DATABASE …");
+  });
+});
+
+// #313. What the login holds and the engine never uses.
+describe("evaluateMssqlSurplus", () => {
+  it("finds nothing on the login provisioning creates", () => {
+    // VIEW SERVER STATE, VIEW DATABASE STATE and ALTER on the schemas — the
+    // scoped login exactly. The reassuring case must be empty, not a list of
+    // absences (#289).
+    expect(evaluateMssqlSurplus(SERVER_ONLY, new Map([["app", db()]]), "idx_a91f")).toEqual([]);
+  });
+
+  it("names sysadmin as a membership, not a permission", () => {
+    const checks = evaluateMssqlSurplus(
+      new Set(["VIEW SERVER STATE", "sysadmin"]),
+      new Map([["app", db()]]),
+      "sa",
+    );
+    const sysadmin = checks.find((check) => check.key === "surplus_sysadmin");
+    // DROP MEMBER, not REVOKE: revoking permissions from a sysadmin changes
+    // nothing, which is the whole reason this is probed with IS_SRVROLEMEMBER.
+    expect(sysadmin?.command).toBe("ALTER SERVER ROLE [sysadmin] DROP MEMBER [sa];");
+    expect(sysadmin?.enables).toContain("no REVOKE narrows it");
+  });
+
+  it("revokes CONTROL SERVER on its own", () => {
+    const checks = evaluateMssqlSurplus(ADMIN, new Map([["app", db()]]), "admin_login");
+    expect(checks.find((check) => check.key === "surplus_controlServer")?.command).toBe(
+      "REVOKE CONTROL SERVER FROM [admin_login];",
+    );
+  });
+
+  it("collapses a sysadmin to one finding, because the other two cannot be run", () => {
+    // Measured on 2022, and both halves bite. HAS_PERMS_BY_NAME reports CONTROL
+    // SERVER as held for a sysadmin AFTER it has been revoked, so that row's
+    // statement does nothing; and a sysadmin maps to `dbo` in every database, so
+    // the db_owner row would emit `ALTER ROLE db_owner DROP MEMBER [dbo]`, which
+    // the server refuses with Msg 15405, "Cannot use the special principal 'dbo'".
+    // One membership is the cause of all three, and dropping it is the only
+    // change that does anything.
+    const checks = evaluateMssqlSurplus(
+      new Set(["VIEW SERVER STATE", "CONTROL SERVER", "sysadmin"]),
+      new Map([["app", db({ dbOwner: true, userName: "dbo" })]]),
+      "sa",
+    );
+    expect(checks.map((check) => check.key)).toEqual(["surplus_sysadmin"]);
+    expect(checks[0]?.enables).toContain("every permission below implicitly");
+  });
+
+  it("names db_owner per database, with the DATABASE user rather than the login", () => {
+    const checks = evaluateMssqlSurplus(
+      SERVER_ONLY,
+      new Map([
+        ["app", db({ dbOwner: true, userName: "app_user" })],
+        ["reporting", db({ dbOwner: true, userName: "reporting_user" })],
+        ["archive", db()],
+      ]),
+      "idx_a91f",
+    );
+    const owner = checks.find((check) => check.key === "surplus_dbOwner");
+    expect(owner?.label).toBe("membership in db_owner on app, reporting");
+    // A login's user is a different name in every database it has one in, and
+    // ALTER ROLE names the user — so a command built from SUSER_SNAME() would
+    // fail on at least one of these.
+    expect(owner?.command).toBe(
+      "USE [app];\nALTER ROLE [db_owner] DROP MEMBER [app_user];\n" +
+        "USE [reporting];\nALTER ROLE [db_owner] DROP MEMBER [reporting_user];",
+    );
+  });
+
+  it("reports the finding with no command when there is no user to drop", () => {
+    const checks = evaluateMssqlSurplus(
+      SERVER_ONLY,
+      new Map([["app", db({ dbOwner: true, userName: null })]]),
+      "idx_a91f",
+    );
+    // Still a finding — the membership is real — and honestly commandless rather
+    // than a statement naming an empty principal.
+    expect(checks.find((check) => check.key === "surplus_dbOwner")?.command).toBeNull();
   });
 });

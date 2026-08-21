@@ -37,6 +37,7 @@ export function toDiagnosis(engine: ClusterEngine, diagnosis: EngineConnectionDi
     ...diagnosis,
     engine,
     privileges: [...diagnosis.privileges],
+    surplus: [...diagnosis.surplus],
     missing: [...diagnosis.missing],
     databases: [...diagnosis.databases],
   };

@@ -42,7 +42,13 @@ credentials you connect deliberately.
    owns tables — per schema rather than per database, because database-wide
    `ALTER` would also permit dropping tables, and **no `SELECT` at all**.
    The admin string is used once and never persisted; only the scoped one is
-   stored, sealed with envelope encryption.
+   stored, sealed with envelope encryption. An organization can make that the
+   only path: **Settings → Organization → Credential policy** turns
+   *require least privilege* on, and connecting or rotating with a string that
+   can create users or roles is then refused with a 422 pointing at the
+   provisioning path. It applies to the next connection and never backwards —
+   clusters already stored on an admin string keep collecting and are marked out
+   of policy on their own settings page, with a rotation as the fix.
 2. **Collect** hourly via `$indexStats` / `$collStats` — usage, sizes,
    per-collection read/write latency, from **every replica-set member** the
    cluster admits to (secondary-only traffic is invisible from the primary).
@@ -386,15 +392,41 @@ un-hidden first — and the confirmation dialog makes you type the org's name an
 names every least-privilege user Indexterity created on your clusters, with the
 command to drop it.
 
+**An org-level rule can forbid storing credentials broader than the engine
+needs.** Off by default, and the default is a decision rather than a fallback:
+an install that has said nothing has not asked us to refuse anybody's string.
+Switching it on refuses both doors — connect and rotate — when the diagnosis says
+the credentials can create users or roles, and refuses a deployment running with
+authentication disabled outright, because that one grants every privilege to
+anyone who can reach it and no grant narrows it. Turning it on or off is in the
+security trail with both sides of the change.
+
 **Everything owner-level leaves a row, and owners can read them.** Sign-ins and
 failed sign-ins, every two-factor event, role changes, invitations, and the four
-things that can be done to a cluster's access — 23 kinds of act, at **Settings →
+things that can be done to a cluster's access — 25 kinds of act, at **Settings →
 Security**, filterable by kind and by actor and paged back to the day the trail
 shipped. It never ages out on a billing clock: the incident that needs a row is
 usually older than the day it is noticed. Owner-only, because every row carries
 the address and client a colleague acted from. A failed sign-in is shown with no
 actor and the typed address worded as an attempt — nobody proved they were that
 person, and the account holder is who it was done to.
+
+**Every connection card says which of its privileges are needed and which are
+surplus.** The posture badge says how privileged the stored credentials are;
+under it, *Check what these credentials hold* dials the cluster and splits the
+answer into **provided**, **required** and **redundant** — the last with the
+statement that removes each grant, which is the reverse of the grant-the-gap
+commands the connect form shows. What counts as surplus is per engine and
+measured against a real server: `SUPERUSER` / `CREATEROLE` / `CREATEDB` plus
+write privileges on tables the role does not own on PostgreSQL (read access is
+*not* surplus there — applying needs ownership, and an owner can read);
+`root`, `userAdminAnyDatabase`, `readWriteAnyDatabase`, `dbOwner`,
+`dbAdminAnyDatabase` and document writes on MongoDB; `sysadmin`,
+`CONTROL SERVER` and `db_owner` on SQL Server. A cluster running on a user
+Indexterity provisioned reports an empty redundant group that **says** it is
+empty — "nothing surplus" is the reassuring answer and blank space does not
+deliver it. The read is lazy and dial-budgeted: nothing is asked until somebody
+opens the panel, and the answer is stamped with when it was taken.
 
 **The three acts that reach your database ask for a fresh sign-in.** Going
 live, rotating credentials and disconnecting refuse an owner session signed in

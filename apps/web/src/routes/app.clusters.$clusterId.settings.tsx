@@ -13,7 +13,7 @@ import { PolicySection, PolicySectionSkeleton } from "~/components/app/policy-se
 import { Unavailable } from "~/components/app/unavailable";
 import { clusterDatabasesQuery, useClusterDatabases } from "~/lib/queries/cluster-databases";
 import { policyQuery, usePolicy } from "~/lib/queries/policy";
-import { useCluster } from "~/lib/queries/shell";
+import { useCluster, useOrg } from "~/lib/queries/shell";
 
 export const Route = createFileRoute("/app/clusters/$clusterId/settings")({
   // Two reads now (#244), and only one of them is cheap. The database list dials
@@ -38,6 +38,11 @@ function ClusterSettings() {
   const cluster = useCluster(clusterId);
   const policy = usePolicy(clusterId);
   const databases = useClusterDatabases(clusterId);
+  // Read from the org the /app layout already warmed, not fetched here (#313):
+  // the connection card needs one boolean to say whether this cluster is out of
+  // policy, and a second endpoint per cluster page for one boolean is worse than
+  // a field on a payload the shell holds anyway.
+  const org = useOrg();
 
   return (
     // Capped, unlike the overview beside it. Everything here is a form, and a
@@ -75,7 +80,15 @@ function ClusterSettings() {
       ) : databases.pending ? (
         <ObserveSectionSkeleton />
       ) : null}
-      {cluster === null ? null : <ClusterConnection cluster={cluster} />}
+      {cluster === null ? null : (
+        <ClusterConnection
+          cluster={cluster}
+          // False while the org read is in flight or failed, deliberately: the
+          // only wrong direction here is telling a reader their cluster breaks a
+          // rule we have not confirmed is switched on.
+          requireLeastPrivilege={org?.policy.requireLeastPrivilege ?? false}
+        />
+      )}
     </div>
   );
 }

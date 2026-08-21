@@ -225,12 +225,65 @@ const privilegeDoc = z.object({
 });
 export type MongoPrivilege = z.infer<typeof privilegeDoc>;
 
+// The roles a user holds by NAME, which `connectionStatus` returns whether or
+// not privileges were asked for. Read alongside the resolved privilege list
+// because the two answer different questions: the privileges say what is
+// permitted, the role names say what a `revokeRolesFromUser` can take away
+// (#313). A resolved action cannot be revoked — only the grant that produced it
+// can — so a surplus finding without the role name is a finding with no remedy.
+const roleDoc = z.object({ role: z.string(), db: z.string() });
+export type MongoRole = z.infer<typeof roleDoc>;
+
 const connectionStatusDoc = z.object({
   authInfo: z.object({
     authenticatedUsers: z.array(z.object({ user: z.string(), db: z.string() })),
+    authenticatedUserRoles: z.array(roleDoc).optional(),
     authenticatedUserPrivileges: z.array(privilegeDoc).optional(),
   }),
 });
+
+// The built-in roles that hold more than the engine ever uses, and what each of
+// them is (#313).
+//
+// Every one is a role somebody grants on purpose, so every one can be revoked by
+// name — which is what makes this list worth having rather than reporting the
+// resolved actions. `dbAdminAnyDatabase` is here for the same reason as the rest
+// even though the issue's list stops at four: it carries collMod and dropIndex
+// across every database plus `dropDatabase`, and a reader shown three of their
+// four broad roles would reasonably conclude the fourth is required.
+//
+// Ordered widest first, so a `root` grant is the first thing on the card.
+const SURPLUS_ROLES: readonly { readonly role: string; readonly holds: string }[] = [
+  {
+    role: "root",
+    holds:
+      "everything on the deployment — reading and rewriting every document, and creating users",
+  },
+  {
+    role: "userAdminAnyDatabase",
+    holds:
+      "creating and altering users and roles on every database, which is how any grant is made",
+  },
+  {
+    role: "readWriteAnyDatabase",
+    holds: "reading and writing every document on every database",
+  },
+  {
+    role: "dbOwner",
+    holds: "reading, writing and administering everything in that database",
+  },
+  {
+    role: "dbAdminAnyDatabase",
+    holds:
+      "administering every database — including dropping one — on top of the index actions the engine does use",
+  },
+];
+
+// The three actions that change customer data. Nothing in the pipeline performs
+// one: it lists, reads statistics, hides, drops and creates indexes. So holding
+// any of them is surplus by definition on this engine, unlike on PostgreSQL where
+// the apply path needs ownership and ownership carries reads.
+const WRITE_ACTIONS = ["insert", "update", "remove"] as const;
 
 function grantsCluster(privileges: readonly MongoPrivilege[], action: string): boolean {
   return privileges.some(
@@ -316,6 +369,117 @@ export function evaluateProvisioning(privileges: readonly MongoPrivilege[]): Pri
   );
 }
 
+// What this user holds and the engine never uses (#313).
+//
+// Two kinds of finding, and they are reported as separate rows because they have
+// separate remedies:
+//
+//  - a built-in role held by name, which `revokeRolesFromUser` removes outright;
+//  - write access to documents, which is what those roles MEAN and can also come
+//    from a custom role this function cannot narrow for you.
+//
+// The write row's command is null whenever a role above already explains it. That
+// is the "one problem named twice" rule the CONNECT check applies next door in
+// PostgreSQL: the reader gets both facts — you can rewrite our documents, and
+// here is the grant that lets you — with one statement between them, rather than
+// the same revoke printed under two headings.
+//
+// `user` is the authenticated user AND the database it was created in, which is
+// the one thing a revoke cannot be written without — and the database is not
+// optional. `revokeRolesFromUser` resolves the user in the database it is issued
+// against, so a user created in `app` is UserNotFound from `admin` (measured on
+// 8.0: `Could not find user "owner" for db "admin"`). The common case is `admin`
+// and every provisioned user is there; a customer's own application user very
+// often is not.
+//
+// Null means the deployment has authentication disabled, and then nothing here is
+// revocable at all — the surplus is the deployment, and the diagnosis's own
+// message says so.
+export function evaluateSurplus(
+  roles: readonly MongoRole[],
+  privileges: readonly MongoPrivilege[],
+  userDatabases: readonly string[],
+  user: { readonly user: string; readonly db: string } | null,
+): PrivilegeCheck[] {
+  const held = SURPLUS_ROLES.map((entry) => ({
+    entry,
+    // Every database it is held ON. `dbOwner` is per database and the other four
+    // are admin-scoped, so this is what turns one name into the statement that
+    // removes it — a `dbOwner` on two databases takes two revokes.
+    on: roles.filter((role) => role.role === entry.role).map((role) => role.db),
+  })).filter((candidate) => candidate.on.length > 0);
+
+  const checks: PrivilegeCheck[] = held.map(({ entry, on }) => ({
+    key: `surplus_${entry.role}`,
+    label: on.length === 1 && on[0] === "admin" ? entry.role : `${entry.role} on ${on.join(", ")}`,
+    enables: entry.holds,
+    tier: "SURPLUS",
+    granted: true,
+    command: revokeRoles(user, [{ role: entry.role, on }]),
+  }));
+
+  // Asked against the databases in scope, like every anyDb requirement above: a
+  // write grant on a database nobody asked us to observe is still surplus, but it
+  // is not surplus we can name from a scope we were not given.
+  const writeActions = WRITE_ACTIONS.filter((action) =>
+    grants(
+      {
+        key: action,
+        label: action,
+        enables: action,
+        tier: "SURPLUS",
+        actions: [action],
+        scope: { kind: "anyDb" },
+      },
+      privileges,
+      userDatabases,
+    ),
+  );
+  if (writeActions.length > 0) {
+    checks.push({
+      key: "surplus_write",
+      label: `${writeActions.join(", ")} on the databases in scope`,
+      enables:
+        held.length > 0
+          ? "changing the documents in your collections — which is what the role above carries. " +
+            "Nothing in the pipeline writes a document: it lists, reads statistics, hides, drops " +
+            "and creates indexes"
+          : "changing the documents in your collections. Nothing in the pipeline writes a " +
+            "document — it lists, reads statistics, hides, drops and creates indexes — so this " +
+            "comes from a custom role, which only db.updateRole on that role can narrow",
+      tier: "SURPLUS",
+      granted: true,
+      // Null when a role above carries it: the revoke is printed there, and
+      // printing it twice under two headings is how a reader runs it once and
+      // believes they have two things left to do.
+      command: null,
+    });
+  }
+  return checks;
+}
+
+// `db.revokeRolesFromUser`, ready to run, or null when there is nobody to run it
+// against.
+//
+// Issued against the user's OWN database rather than `admin`, for the reason in
+// the comment above `evaluateSurplus`. The roles keep their own `db` inside the
+// call, which is a different question and is what makes a per-database `dbOwner`
+// revocable at all: the user lives in one database, the role is held on another.
+function revokeRoles(
+  user: { readonly user: string; readonly db: string } | null,
+  held: readonly { readonly role: string; readonly on: readonly string[] }[],
+): string | null {
+  if (user === null) return null;
+  const roles = held.flatMap(({ role, on }) =>
+    on.map((db) => `{ role: ${JSON.stringify(role)}, db: ${JSON.stringify(db)} }`),
+  );
+  if (roles.length === 0) return null;
+  return (
+    `db.getSiblingDB(${JSON.stringify(user.db)}).revokeRolesFromUser(` +
+    `${JSON.stringify(user.user)}, [${roles.join(", ")}])`
+  );
+}
+
 // Derived from the checks rather than computed a second way, so the offer the
 // form makes and the reasons it shows can never disagree.
 export function canProvisionWith(privileges: readonly MongoPrivilege[]): boolean {
@@ -360,6 +524,9 @@ function failure(message: string): ConnectionDiagnosis {
     username: null,
     authEnabled: false,
     canProvision: false,
+    // Nothing was enumerated, so nothing can be CLAIMED surplus either — empty
+    // here means "we could not ask", not "there is none".
+    surplus: [],
     // Nothing was enumerated, so there is nothing to offer boxes for — and an
     // unreachable cluster must not report the databases a previous answer found.
     databases: [],
@@ -404,6 +571,7 @@ export async function diagnoseConnection(
       await admin.command({ connectionStatus: 1, showPrivileges: true }),
     );
     const privileges = status.authInfo.authenticatedUserPrivileges ?? [];
+    const roles = status.authInfo.authenticatedUserRoles ?? [];
     const user = status.authInfo.authenticatedUsers[0];
 
     let userDatabases: string[] = [];
@@ -438,6 +606,13 @@ export async function diagnoseConnection(
           username: null,
           authEnabled: false,
           canProvision: false,
+          // Every surplus grant there is, and not one of them revocable: there is
+          // no user to revoke it FROM. Reported as empty with the message above
+          // carrying the whole finding, because a list of rows whose commands are
+          // all null would read as a to-do list nobody can act on. The surplus
+          // here is the deployment, and `authEnabled: false` is how every screen
+          // and the connect gate name it (#313).
+          surplus: [],
           databases: userDatabases,
         });
       }
@@ -463,6 +638,10 @@ export async function diagnoseConnection(
       username: user.user,
       authEnabled: true,
       canProvision: provisioning.every((check) => check.granted),
+      // Against the same scope the requirements were evaluated over: a write
+      // grant is surplus on the databases we are asked to observe, and a scope we
+      // were not given is one we cannot make a claim about.
+      surplus: evaluateSurplus(roles, privileges, inScope, user),
       databases: userDatabases,
     });
   } catch (error) {

@@ -253,7 +253,20 @@ function ProvisioningUnavailable({ diagnosis }: { diagnosis: ConnectionDiagnosis
 // The plan the clusters are counted against, or null while the org read has not
 // arrived — in which case the quota simply is not drawn. It is a warning, not a
 // gate: the api is the one that refuses, and it refuses on the same numbers.
-export function ConnectClusterForm({ plan }: { plan: PlanInfo | null }) {
+export function ConnectClusterForm({
+  plan,
+  requireLeastPrivilege = false,
+}: {
+  plan: PlanInfo | null;
+  // The org's rule that credentials broader than the engine needs are not stored
+  // (#313). The api enforces it — this only stops the form from offering a button
+  // whose only outcome is a 422, and says why in its place. False while the org
+  // read is in flight: the api is the enforcement, so a form that guesses wrong
+  // for a moment offers a button that is then refused with the reason, which is
+  // strictly better than hiding the working path from somebody whose org has no
+  // such rule.
+  requireLeastPrivilege?: boolean;
+}) {
   const [error, setError] = useState<string | null>(null);
   const [diagnosis, setDiagnosis] = useState<ConnectionDiagnosis | null>(null);
   // The engine travels with the credentials, and it has to: this alert survives
@@ -741,7 +754,14 @@ export function ConnectClusterForm({ plan }: { plan: PlanInfo | null }) {
                       ? "Creating…"
                       : `Create a scoped ${scopedUserCopy(diagnosis.engine).subject} and connect`}
                   </Button>
-                  {diagnosis.ready ? (
+                  {/* The button #313 exists to be able to remove. It is not
+                      merely disabled when the org forbids it: a greyed-out
+                      control is still an offer, and the reader's next move is to
+                      hunt for what unlocks it rather than to press the button
+                      beside it that works. The sentence underneath replaces it
+                      instead, and names the rule so nobody reads its absence as
+                      a missing feature. */}
+                  {diagnosis.ready && !requireLeastPrivilege ? (
                     <Button
                       variant="outline"
                       disabled={busy}
@@ -751,6 +771,13 @@ export function ConnectClusterForm({ plan }: { plan: PlanInfo | null }) {
                     </Button>
                   ) : null}
                 </div>
+                {diagnosis.ready && requireLeastPrivilege ? (
+                  <p className="mt-2 text-muted-foreground text-xs">
+                    Storing these as they are is not offered: this organization requires credentials
+                    no broader than the engine needs, and these can create users. An owner can
+                    change that under Settings → Organization.
+                  </p>
+                ) : null}
               </div>
             ) : diagnosis.ready ? (
               <>

@@ -4,6 +4,7 @@ import {
   checkConnectionInput,
   createClusterInput,
   observedDatabasesInput,
+  orgPolicyInput,
   policyKnobsInput,
   provisionClusterInput,
   renameClusterInput,
@@ -21,12 +22,14 @@ import {
   clusterLatencySeries,
   clusterNodes,
   clusterPolicyView,
+  clusterPrivileges,
   clusterRecommendations,
   clusterRoi,
   connectionDiagnosis,
   myInvite,
   offboardResult,
   orgInfo,
+  orgPolicyView,
   orgSummary,
   provisionedCluster,
   recommendation,
@@ -179,7 +182,11 @@ export const contract = {
       path: "/clusters",
       summary: "Connect a cluster; stores its connection string envelope-encrypted",
     })
-    .errors({ BAD_REQUEST: {} })
+    // LEAST_PRIVILEGE is #313's refusal: this org has said it will not hold
+    // credentials that can create users, and these can. 422 rather than 400 — the
+    // request is well formed and the string works, and what is wrong with it is a
+    // policy this org set rather than a mistake in what was typed.
+    .errors({ BAD_REQUEST: {}, LEAST_PRIVILEGE: { status: 422 } })
     .input(createClusterInput)
     .output(cluster),
 
@@ -223,7 +230,9 @@ export const contract = {
       summary:
         "Replace the cluster's connection string (owner only) — verified against the cluster before it is stored, so history survives credential rotation",
     })
-    .errors({ NOT_FOUND: {}, BAD_REQUEST: {} })
+    // Refused on the same rule as connecting, because rotation is the other door
+    // and the only one an already-connected cluster has (#313).
+    .errors({ NOT_FOUND: {}, BAD_REQUEST: {}, LEAST_PRIVILEGE: { status: 422 } })
     .input(clusterId.extend(rotateConnectionInput.shape))
     .output(cluster),
 
@@ -306,6 +315,34 @@ export const contract = {
     .errors({ NOT_FOUND: {} })
     .input(clusterId.extend(policyKnobsInput.shape))
     .output(clusterPolicyView),
+
+  // What the STORED credentials hold, re-checked now (#313).
+  //
+  // A GET that dials the customer's cluster, like listClusterDatabases above and
+  // for a related reason: the only place the answer exists is the cluster itself,
+  // and nothing we have collected can supply it — a snapshot records indexes, not
+  // grants. `credentialPosture` on the cluster row is the closest thing, and it is
+  // one enum stamped at connect time.
+  //
+  // Owner-only, and this one is not a judgement call: the response enumerates what
+  // a credential on somebody's production database is permitted to do, which is
+  // half of what an attacker would want to know before using it.
+  //
+  // Not prefetched by the settings route's loader, unlike the database list beside
+  // it. Both dial, and this one has no second purpose — the reader opens the card
+  // and asks. Costing every settings page view a round trip to a production
+  // cluster for a panel most visits never expand is the trade the observe list
+  // already makes once; making it twice is how a settings page becomes slow.
+  getClusterPrivileges: oc
+    .route({
+      method: "GET",
+      path: "/clusters/{clusterId}/privileges",
+      summary:
+        "Re-check the stored credentials against the cluster (owner only): what the engine needs, and what they hold and never use",
+    })
+    .errors({ NOT_FOUND: {}, BAD_REQUEST: {} })
+    .input(clusterId)
+    .output(clusterPrivileges),
 
   triggerCollect: oc
     .route({
@@ -398,6 +435,30 @@ export const contract = {
         "The caller's active org: plan, usage, members, pending invites — null when they are in none",
     })
     .output(orgInfo.nullable()),
+
+  // The org's own policy, read by anyone in it and written by owners (#313).
+  //
+  // Split from `getOrg` for the write, not for the read — the read is folded into
+  // the org payload, because the connection card of every cluster needs it and a
+  // per-card fetch of one boolean is worse than a field. This pair exists so the
+  // write has a route, and the GET exists beside it so a client that only cares
+  // about the policy is not made to fetch the member list to see it.
+  getOrgPolicy: oc
+    .route({
+      method: "GET",
+      path: "/org/policy",
+      summary: "The org's policy: whether credentials broader than the engine needs are refused",
+    })
+    .output(orgPolicyView),
+
+  updateOrgPolicy: oc
+    .route({
+      method: "PUT",
+      path: "/org/policy",
+      summary: "Replace the org's policy (owner only)",
+    })
+    .input(orgPolicyInput)
+    .output(orgPolicyView),
 
   listOrgs: oc
     .route({

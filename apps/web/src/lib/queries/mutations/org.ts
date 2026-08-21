@@ -21,6 +21,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
+import { api } from "../../api";
 import { authClient } from "../../auth-client";
 import { invalidateSession } from "../client";
 import { AuthApiError, apiMessage, unwrap } from "../errors";
@@ -249,5 +250,34 @@ export function useSwitchOrg() {
     },
     // Nothing moved, so nothing is refetched and the selection stays.
     onError: () => toast.error("Org switch failed"),
+  });
+}
+
+// The org's own policy (#313). An api call rather than a plugin one — this is
+// ours, not better-auth's — so it lands here beside the plugin hooks for the
+// reason the header gives: what this file is about is which cached answers a
+// change makes wrong.
+//
+// Two keys, and the second is the one worth stating: the connection card of every
+// cluster reads this policy off the org payload to say whether its cluster is out
+// of policy, so turning the rule on has to redraw the org and nothing else. The
+// clusters themselves did not move — the setting is deliberately not
+// retroactive — so their list is left alone.
+export function useSaveOrgPolicy() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (requireLeastPrivilege: boolean) =>
+      api().updateOrgPolicy({ requireLeastPrivilege }),
+    onSuccess: (saved) => {
+      toast.success(
+        saved.requireLeastPrivilege
+          ? "New connections must use least-privilege credentials"
+          : "Credentials broader than the engine needs are allowed again",
+      );
+      return queryClient.invalidateQueries({ queryKey: queryKeys.org() });
+    },
+    // 403 is "owner only", which is a refusal the reader can act on by asking
+    // one.
+    onError: (error) => toast.error(apiMessage(error, "policy not saved")),
   });
 }

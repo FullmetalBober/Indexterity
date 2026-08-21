@@ -278,6 +278,40 @@ export const organizations = pgTable("organizations", {
   createdAt,
 });
 
+// Org-level policy, as against the per-cluster knobs in `policies` further
+// down. The distinction is WHEN each is read: a policy row is created after its
+// cluster exists, so it cannot decide anything about connecting one, and the one
+// rule here has to be in force before there is a cluster to hang it on (#313).
+//
+// A table rather than columns on `organizations`, which is better-auth's model
+// (auth/organization.ts maps it): a column there is invisible to the plugin
+// until it is declared as an `additionalFields` entry, and an org's security
+// posture is not the plugin's business in the way its plan and its billing ids
+// are. One row per org, keyed by the org, cascading with it — and absent until
+// somebody saves, so "never configured" is a real state rather than a value.
+//
+// The DDL default is deliberate and is the opposite decision from #132's. There
+// the default was standing in for a write nobody made, so `FREE` silently became
+// the plan of every self-hosted install; here off IS the decision — an install
+// that has said nothing about credential breadth has not asked us to refuse
+// anybody's string, and turning that on for them retroactively would break every
+// connect form in flight.
+export const orgPolicies = pgTable("org_policies", {
+  orgId: uuid("org_id")
+    .primaryKey()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  // Refuse to STORE credentials that can create users or roles — the connect
+  // and rotate doors both check it (clusters/least-privilege.ts). Off by
+  // default; see above.
+  //
+  // It does not reach backwards. Clusters already sealed on an admin string keep
+  // collecting and are marked out of policy on their connection card instead,
+  // because a setting that stopped analysis on eight clusters the moment it was
+  // ticked is a setting nobody dares tick.
+  requireLeastPrivilege: boolean("require_least_privilege").notNull().default(false),
+  updatedAt,
+});
+
 export const members = pgTable(
   "members",
   {

@@ -81,6 +81,10 @@ function diagnosis(over: Partial<ConnectionDiagnosis> = {}): ConnectionDiagnosis
     ready: true,
     canApply: true,
     privileges: [privilege("listIndexes", true)],
+    // Nothing surplus by default (#313). The connect form does not draw this
+    // list — it is the settings card's — so every test here wants it empty and
+    // out of the way.
+    surplus: [],
     missing: [],
     // One database by default, so the observe boxes stay out of the tests that are
     // not about them — a single-database cluster has nothing to choose between.
@@ -891,5 +895,56 @@ describe("ConnectClusterForm — PostgreSQL", () => {
       expect(screen.queryByText(/Applying on PostgreSQL needs the table owner/)).toBeNull();
       unmount();
     }
+  });
+});
+
+// #313. An org that has decided least privilege is mandatory: the button that
+// stores an admin string as-is stops being offered at all.
+describe("ConnectClusterForm with least privilege required", () => {
+  it("withdraws the as-is button and says which rule withdrew it", async () => {
+    checkConnection.mockResolvedValue(diagnosis({ canProvision: true }));
+    const user = userEvent.setup();
+    renderInApp(<ConnectClusterForm plan={plan()} requireLeastPrivilege={true} />);
+
+    await check(user);
+
+    // Removed, not disabled. A greyed-out control is still an offer, and the
+    // reader's next move is to hunt for what unlocks it rather than to press the
+    // button beside it that works.
+    expect(
+      screen.queryByRole("button", { name: "Use these credentials as-is" }),
+    ).not.toBeInTheDocument();
+    // The provisioning path is still there and is now the only one.
+    expect(
+      screen.getByRole("button", { name: "Create a scoped user and connect" }),
+    ).toBeInTheDocument();
+    // And its absence is explained, so nobody reads it as a missing feature.
+    expect(screen.getByText(/Storing these as they are is not offered/)).toBeInTheDocument();
+    expect(screen.getByText(/Settings → Organization/)).toBeInTheDocument();
+  });
+
+  it("leaves the plain Connect button alone for credentials that are already scoped", async () => {
+    // The rule is about credentials broader than the engine needs. A string that
+    // cannot create users is exactly what it asks for, so this path must not be
+    // narrowed by it — refusing here would leave an org with the rule on unable
+    // to connect anything at all.
+    checkConnection.mockResolvedValue(diagnosis({ canProvision: false }));
+    const user = userEvent.setup();
+    renderInApp(<ConnectClusterForm plan={plan()} requireLeastPrivilege={true} />);
+
+    await check(user);
+
+    expect(screen.getByRole("button", { name: "Connect" })).toBeInTheDocument();
+    expect(screen.queryByText(/Storing these as they are is not offered/)).not.toBeInTheDocument();
+  });
+
+  it("still offers the as-is button when no such rule is set", async () => {
+    checkConnection.mockResolvedValue(diagnosis({ canProvision: true }));
+    const user = userEvent.setup();
+    renderInApp(<ConnectClusterForm plan={plan()} />);
+
+    await check(user);
+
+    expect(screen.getByRole("button", { name: "Use these credentials as-is" })).toBeInTheDocument();
   });
 });
