@@ -519,31 +519,25 @@ several processes in one host-network container.
 npm run build · npm run typecheck · npm run lint · npm run test
 npm run db:generate · npm run db:migrate
 npm run db:deploy -w @repo/api        # production migrations, compiled migrator
-npm run version:set 0.2.0             # by hand; release-please does this normally
+npm run version:set 0.2.0             # workspaces + the chart + the lockfile
 npm run version:check                 # assert every file that states it agrees
 ```
 
-**Releases are cut by release-please, on `main`.** Work integrates on `dev`; a
-`dev` → `main` pull request promotes it; release-please reads the conventional
-commits that promotion carried, opens a `chore: release X.Y.Z` pull request
-bumping every file that states the version, and on merge tags `vX.Y.Z` and
-writes the GitHub Release from the same commits. The tag is what
-`release.yml` waits for, so nothing about publishing changed — a branch still
-publishes nothing. The bump lands on `main` only; back-merge into `dev` if you
-want the two to agree, and nothing is broken while they do not.
+**Releases are cut by hand, and the tag is the only trigger.** Work integrates
+on `dev`: `npm run version:set X.Y.Z` in a `chore: release X.Y.Z` commit writes
+the version to the seven manifests, both chart fields and the eight places
+`package-lock.json` states it. A `dev` → `main` pull request promotes that, the
+merge is tagged `vX.Y.Z`, and the GitHub Release is written from the commits it
+carried. `release.yml` waits on the tag and nothing publishes from a branch, so
+what a cluster pulls cannot move because something merged.
 
-`version:set` stays for doing it by hand. `version:check` is load-bearing
-either way: an `extra-files` entry whose jsonpath matches nothing is a **silent
-no-op** in release-please, so the config is not the guarantee — asserting that
-the seven packages, the chart and the lockfile all agree is.
-
-That assertion runs inside `release-please.yml` itself, not in `ci.yml`. A pull
-request opened by `GITHUB_TOKEN` **triggers no workflow run**, by design, so CI
-never sees the release pull request at all; running the check in the workflow a
-human's push to `main` started is the one place it cannot be skipped. `npm ci`
-ahead of it is half the assertion rather than setup — it refuses a lockfile
-whose workspace versions disagree with the manifests, which is the failure a
-silent no-op leaves behind (#186).
+`version:check` is what makes it safe rather than careful. One version lives in
+seventeen places, and `release.yml` runs the check against the **tag** before it
+builds or installs anything — so a tag cannot claim a version the tree does not
+carry. It earned that: 0.3.0, 0.4.0 and 0.5.0 each shipped with a stale
+`package-lock.json`, a tree `npm ci` refuses, while the one command whose whole
+job is reporting version drift said everything agreed ([#186](https://github.com/FullmetalBober/Indexterity/issues/186),
+[D78](./docs/decisions.md)).
 
 `npm run up` is a convenience, not a requirement — `podman-compose up` works
 directly. It recreates containers whose crun state a logout cleared (`cannot
