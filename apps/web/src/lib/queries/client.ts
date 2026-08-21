@@ -1,4 +1,5 @@
 import { QueryClient } from "@tanstack/react-query";
+import { isStatus } from "./errors";
 
 // Created once per router. On the server that means once per request, which is
 // the point: a module-level singleton would carry one tenant's cache into the
@@ -52,7 +53,18 @@ export function createAppQueryClient(): QueryClient {
         // the reader's time rather than about hiding the outcome: one silent
         // retry covers the blip, and anything past that is better spent telling
         // them than making them wait.
-        retry: 1,
+        //
+        // Except a 401, which is not a blip: it is the api answering the
+        // question. Asking it a second time sends the same absent cookie and
+        // gets the same answer, so the retry bought nothing and DOUBLED it —
+        // the /app shell reads four org-level keys, so one signed-out visit was
+        // eight 401s where four would do, and every reload paid it again
+        // (measured in the hosted deployment's logs).
+        //
+        // Written as a predicate rather than `retry: 0` for 401 alone, because
+        // the reason is specific to a definitive answer. A 500 or a dropped
+        // connection still gets its second attempt.
+        retry: (failureCount, error) => !isStatus(error, 401) && failureCount < 1,
       },
     },
   });
