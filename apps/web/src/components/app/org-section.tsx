@@ -16,6 +16,7 @@ import {
   useLeaveOrg,
   useRemoveMember,
   useRenameOrg,
+  useSaveOrgPolicy,
   useSetMemberRole,
 } from "~/lib/queries/mutations/org";
 
@@ -50,6 +51,85 @@ interface OrgDetail {
     username: string;
     revokeCommand: string;
   }[];
+  readonly policy: {
+    readonly requireLeastPrivilege: boolean;
+    readonly updatedAt: string | null;
+  };
+}
+
+// The org's credential policy (#313).
+//
+// Two buttons rather than a checkbox and a Save, which is the same asymmetry the
+// connection card draws between "Go live" and "Make read-only": one direction
+// gives something up and the other takes it back, so they are different acts and
+// only one of them needs confirming. A checkbox would make revoking a
+// server-enforced guarantee the same gesture as switching it on.
+//
+// Its own card, not a row in the org card above. That card is what the
+// organization IS and what it is paying for; this is a rule about what the control
+// plane will agree to HOLD, and it wants the room to say what it does and does
+// not do — most importantly that switching it on stops nothing that is already
+// running.
+function CredentialPolicyCard({ org, isOwner }: { org: OrgDetail; isOwner: boolean }) {
+  const save = useSaveOrgPolicy();
+  const required = org.policy.requireLeastPrivilege;
+  return (
+    <Card className="mt-4">
+      <CardHeader>
+        <CardTitle className="text-base">Credential policy</CardTitle>
+        <CardDescription>
+          Whether this organization will store credentials broader than the engine needs.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <Badge variant={required ? "outline" : "secondary"}>
+            {required ? "least privilege required" : "any working credentials"}
+          </Badge>
+          {isOwner ? (
+            required ? (
+              <ConfirmButton
+                trigger={<Button variant="outline">Allow broader credentials</Button>}
+                title="Stop requiring least privilege?"
+                description={`Anyone who can connect a cluster in ${org.name} will again be able to store a string that can create users and roles on their own database. Clusters already connected are unaffected either way.`}
+                confirmLabel="Allow"
+                onConfirm={() => save.mutate(false)}
+              />
+            ) : (
+              <Button variant="outline" onClick={() => save.mutate(true)}>
+                Require least privilege
+              </Button>
+            )
+          ) : null}
+        </div>
+        <p className="text-muted-foreground text-sm">
+          {required
+            ? "Connecting or rotating with credentials that can create users or roles is refused. The refusal points at the provisioning path instead, where the admin string is used once to create a scoped user and is never stored."
+            : "Credentials are stored as pasted, however broad. Provisioning a scoped user is offered whenever it is possible and is nobody's obligation."}
+        </p>
+        {/* Said out loud because it is the fear that stops people switching it
+            on: a rule that could halt analysis on eight clusters the moment it
+            is ticked is a rule nobody dares tick. */}
+        <p className="text-muted-foreground text-sm">
+          It applies to the next connection, never backwards. Clusters already stored on an admin
+          string keep collecting and are marked out of policy on their own settings page, with a
+          rotation as the fix.
+        </p>
+        {org.policy.updatedAt === null ? (
+          // "Never configured" and "configured to off" are not the same state,
+          // and this is the line that tells them apart. Without it an install
+          // that has considered this and declined looks identical to one that has
+          // never seen the setting.
+          <p className="text-muted-foreground text-xs">Never configured — this is the default.</p>
+        ) : (
+          <p className="text-muted-foreground text-xs">
+            Last changed {new Date(org.policy.updatedAt).toLocaleDateString()}. Every change is in
+            the security trail.
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  );
 }
 
 // The organization you are currently in: what it is called, what it is paying
@@ -209,6 +289,14 @@ export function OrgSection({ org }: { org: OrgDetail }) {
           ) : null}
         </CardContent>
       </Card>
+
+      {/* Between the org and its members: it is a property of the organization
+          rather than of a person, and it belongs above the list of people it
+          governs. Shown to members too, and answered for owners only — a member
+          refused a connect needs to be able to read the rule that refused them,
+          which is the same argument the Security tab makes for being visible to
+          everybody. */}
+      <CredentialPolicyCard org={org} isOwner={isOwner} />
 
       <Card className="mt-4">
         <CardHeader>

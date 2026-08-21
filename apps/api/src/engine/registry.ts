@@ -1,14 +1,18 @@
 import { mongoAdapter } from "../mongo/adapter";
 import { mssqlAdapter } from "../mssql/adapter";
+import { postgresAdapter } from "../postgres/adapter";
 import type { ClusterEngine, EngineAdapter } from "./ports";
 
 // The single place a new engine plugs in. A future adapter implements
-// EngineAdapter (see ../mongo/adapter.ts for the reference implementation and
-// the wiki's Architecture page, Engine ports, for the PostgreSQL mapping) and
-// replaces its null here.
+// EngineAdapter (see ../mongo/adapter.ts for the reference implementation) and
+// takes a line here.
+//
+// All three shipped engines are present now, and they do NOT all answer the
+// capability questions the same way — PostgreSQL reports hideIndexes: false, so
+// callers branch on `capabilities` rather than assuming (#303).
 const adapters: Record<ClusterEngine, EngineAdapter | null> = {
   MONGODB: mongoAdapter,
-  POSTGRESQL: null, // planned: pg_stat_user_indexes / pg_stat_statements (#35)
+  POSTGRESQL: postgresAdapter,
   MSSQL: mssqlAdapter,
 };
 

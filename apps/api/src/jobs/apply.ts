@@ -57,9 +57,26 @@ export async function promoteByScore(
     );
 }
 
+// What the audit trail records for the transition into the observe window. The
+// distinction is load-bearing rather than cosmetic: on an engine that cannot
+// hide, nothing about the index changed, so a line reading "ok; observing 30
+// days" beside an audit kind of HIDE would claim a write that never happened.
+function applyResult(canHide: boolean, window: { days: number; reason: string | null }): string {
+  const what = canHide
+    ? `ok; observing ${window.days} days`
+    : `ok; not hidden (this engine has no reversible hide) — observing usage for ${window.days} days`;
+  return window.reason === null ? what : `${what} — ${window.reason}`;
+}
+
 // APPROVED drops -> pre-flight -> hide (collMod hidden:true) -> HIDDEN. Hiding is
 // instant and reversible; it starts the observe window. Records an audit action
 // with a rollback token. A failed pre-flight re-proposes instead of hiding.
+//
+// On an engine with no reversible hide (`canHide` false — see cluster-connection.ts)
+// the same transition happens WITHOUT touching the index: it keeps serving every
+// query while the window runs, no read-latency baseline is taken because hiding is
+// the only thing such a baseline could ever measure, and the evidence for the drop
+// is the usage counters staying flat, which preflightDrop re-checks at the end.
 // Anything the threshold above promotes goes through the same gates as a drop
 // a human approved by hand.
 export async function applyCluster(db: Database, clusterId: string): Promise<number> {
@@ -113,7 +130,10 @@ export async function applyCluster(db: Database, clusterId: string): Promise<num
   const watchingSince = watch?.since == null ? null : new Date(watch.since).toISOString();
   const since = await historyWindow(db, clusterId);
 
-  const { session, readOnly, observedDatabases, release } = await openClusterSession(db, clusterId);
+  const { session, readOnly, observedDatabases, canHide, release } = await openClusterSession(
+    db,
+    clusterId,
+  );
   try {
     // Read-only clusters never execute writes.
     if (readOnly) return 0;
@@ -147,9 +167,16 @@ export async function applyCluster(db: Database, clusterId: string): Promise<num
         });
         continue;
       }
-      await executor.hide(rec.database, rec.collection, rec.indexName);
+      if (canHide) await executor.hide(rec.database, rec.collection, rec.indexName);
       // Baseline read latency at hide time — the reference for regression checks.
-      const baseline = await collector.readLatency(rec.database, rec.collection);
+      // Null where nothing was hidden: the gate asks "did hiding this index slow
+      // reads?", and an index still serving every query cannot answer it. Left
+      // null rather than measured-and-ignored, because that is what makes the
+      // gate in finalize.ts skip itself instead of comparing two readings of an
+      // unchanged cluster and calling the noise a regression.
+      const baseline = canHide
+        ? await collector.readLatency(rec.database, rec.collection)
+        : { ops: null, latencyMicros: null };
       // The observe window this index actually deserves, from its own usage
       // history: periodic usage extends it (a monthly job must get a chance to
       // run inside the window), long-proven idleness shortens it.
@@ -203,10 +230,7 @@ export async function applyCluster(db: Database, clusterId: string): Promise<num
         recommendationId: rec.id,
         kind: "HIDE",
         actor: "system",
-        result:
-          window.reason === null
-            ? `ok; observing ${window.days} days`
-            : `ok; observing ${window.days} days — ${window.reason}`,
+        result: applyResult(canHide, window),
         rollbackToken: check.spec === null ? null : { spec: serializeSpec(check.spec) },
       });
       // At the transition, not at the end of the pass: a pass hiding several

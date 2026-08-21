@@ -169,6 +169,91 @@ export function queryStoreCheck(off: readonly string[] | null): PrivilegeCheck {
   };
 }
 
+// What this login holds and the engine never uses (#313).
+//
+// Three findings, each with the one statement that removes it. `sysadmin` is
+// listed separately from CONTROL SERVER even though it implies it, because
+// `REVOKE CONTROL SERVER` on a sysadmin changes nothing — the membership is what
+// carries the permission, so it is the membership that has to be dropped.
+//
+// `db_owner` is per database and reported per database, with the DATABASE USER
+// name rather than the login: `ALTER ROLE … DROP MEMBER` names the user, and a
+// login's user is a different name in every database it has one in. That is why
+// the probe reads USER_NAME() inside each database rather than reusing
+// SUSER_SNAME() from the server-scoped query.
+//
+// Only what is HELD is returned. A row saying "you are not a sysadmin" is
+// reassurance dressed as a finding, and three of them would bury the one that is
+// real — the empty case is said once by the screen (#289).
+export function evaluateMssqlSurplus(
+  serverGrants: ReadonlySet<string>,
+  perDb: ReadonlyMap<string, MssqlDatabaseGrants>,
+  login: string | null,
+): PrivilegeCheck[] {
+  const checks: PrivilegeCheck[] = [];
+  const principal = login === null ? null : quoteIdent(login);
+  // A sysadmin is ONE finding, not three. Everything below is implied by the
+  // membership and cannot be revoked while it stands: `HAS_PERMS_BY_NAME` reports
+  // CONTROL SERVER as held after it has been revoked, and the login maps to `dbo`
+  // in every database, so both of the rows below would carry a statement that
+  // either does nothing or is refused outright (verified on 2022 — Msg 15405,
+  // "Cannot use the special principal 'dbo'"). Naming the membership names the
+  // cause; the reader runs one statement and the rest follow.
+  const sysadmin = serverGrants.has("sysadmin");
+  if (sysadmin) {
+    checks.push({
+      key: "surplus_sysadmin",
+      label: "membership in sysadmin",
+      enables:
+        "everything on the instance — reading and rewriting every table, creating logins, and " +
+        "every permission below implicitly. The engine uses none of it, and no REVOKE narrows " +
+        "it: the membership is what carries the permissions, so dropping it is the only change " +
+        "that does anything",
+      tier: "SURPLUS",
+      granted: true,
+      command: principal === null ? null : `ALTER SERVER ROLE [sysadmin] DROP MEMBER ${principal};`,
+    });
+  }
+  if (!sysadmin && serverGrants.has("CONTROL SERVER")) {
+    checks.push({
+      key: "surplus_controlServer",
+      label: "CONTROL SERVER",
+      enables:
+        "every permission on the instance, including granting them onward. Needed once to " +
+        "provision a scoped login; never needed by a stored connection",
+      tier: "SURPLUS",
+      granted: true,
+      command: principal === null ? null : `REVOKE CONTROL SERVER FROM ${principal};`,
+    });
+  }
+  const owned = sysadmin ? [] : [...perDb.entries()].filter(([, grants]) => grants.dbOwner);
+  if (owned.length > 0) {
+    checks.push({
+      key: "surplus_dbOwner",
+      label: `membership in db_owner on ${owned.map(([database]) => database).join(", ")}`,
+      enables:
+        "reading and rewriting every table in those databases. The engine needs ALTER on the " +
+        "schemas that hold tables and nothing else — see the Alter indexes row above for what " +
+        "is actually used",
+      tier: "SURPLUS",
+      granted: true,
+      // One statement per database, and the USE is not optional: a database role
+      // membership can only be changed from inside the database that holds it.
+      command: owned.every(([, grants]) => grants.userName === null)
+        ? null
+        : owned
+            .filter(([, grants]) => grants.userName !== null)
+            .map(
+              ([database, grants]) =>
+                `USE ${quoteIdent(database)};\n` +
+                `ALTER ROLE [db_owner] DROP MEMBER ${quoteIdent(grants.userName ?? "")};`,
+            )
+            .join("\n"),
+    });
+  }
+  return checks;
+}
+
 function summarize(
   privileges: PrivilegeCheck[],
   base: Omit<ConnectionDiagnosis, "privileges" | "ready" | "canApply" | "missing">,
@@ -199,6 +284,9 @@ function failure(message: string): ConnectionDiagnosis {
       username: null,
       authEnabled: false,
       canProvision: false,
+      // Nothing was enumerated, so nothing can be claimed surplus either: empty
+      // here means "we could not ask", not "there is none".
+      surplus: [],
       // Nothing was enumerated, so there is nothing to offer boxes for.
       databases: [],
     },
@@ -212,6 +300,14 @@ export interface MssqlDatabaseGrants {
   // no user tables has nothing to alter and nothing to fail.
   readonly alterEverySchema: boolean;
   readonly alterAnyUser: boolean;
+  // Membership in that database's `db_owner` (#313) — surplus, not a
+  // requirement, so it is reported through `surplus` and never through the
+  // tiers.
+  readonly dbOwner: boolean;
+  // What this login is CALLED inside that database, which is not the login name:
+  // `ALTER ROLE db_owner DROP MEMBER` names the database user. Null when the
+  // login has no user there, in which case it is not a member of anything either.
+  readonly userName: string | null;
 }
 
 // Pure evaluation over the probe rows, exported for unit tests. `perDb` maps
@@ -248,7 +344,13 @@ async function databaseGrants(
   database: string,
 ): Promise<{ checks: MssqlDatabaseGrants; queryStore: boolean }> {
   const denied = {
-    checks: { viewState: false, alterEverySchema: false, alterAnyUser: false },
+    checks: {
+      viewState: false,
+      alterEverySchema: false,
+      alterAnyUser: false,
+      dbOwner: false,
+      userName: null,
+    },
     queryStore: false,
   };
   try {
@@ -263,6 +365,14 @@ async function databaseGrants(
          (SELECT TOP 1 CASE WHEN actual_state > 0 THEN 1 ELSE 0 END
             FROM ${quoteIdent(database)}.sys.database_query_store_options) AS queryStore`,
       { db: database },
+    );
+    // Asked INSIDE the database, for the same reason the schema probe below is:
+    // `IS_ROLEMEMBER` resolves against the current database and answers NULL for
+    // a role that does not exist in the one it is asked from, and `USER_NAME()`
+    // is a different name in every database a login has a user in (#313).
+    const ownerRows = await conn.query<{ dbOwner: number | null; userName: string | null }>(
+      `EXEC ${quoteIdent(database)}.sys.sp_executesql N'SELECT
+           IS_ROLEMEMBER(''db_owner'') AS dbOwner, USER_NAME() AS userName'`,
     );
     const row = rows[0];
     if (row === undefined) return denied;
@@ -285,6 +395,8 @@ async function databaseGrants(
         // nothing in it to alter.
         alterEverySchema: asNumber(schemaRows[0]?.missing) === 0,
         alterAnyUser: row.alterAnyUser === 1,
+        dbOwner: ownerRows[0]?.dbOwner === 1,
+        userName: ownerRows[0]?.userName ?? null,
       },
       queryStore: row.queryStore === 1,
     };
@@ -315,11 +427,17 @@ export async function diagnoseMssqlConnection(
       viewServerState: number | null;
       alterAnyLogin: number | null;
       controlServer: number | null;
+      sysadmin: number | null;
       login: string | null;
     }>(
+      // `IS_SRVROLEMEMBER` rather than another HAS_PERMS_BY_NAME: sysadmin is a
+      // MEMBERSHIP and not a permission, which is exactly why revoking permissions
+      // from a sysadmin does nothing (#313). It answers NULL for a role name the
+      // server does not know, which the comparison below treats as "no".
       `SELECT HAS_PERMS_BY_NAME(NULL, NULL, 'VIEW SERVER STATE') AS viewServerState,
               HAS_PERMS_BY_NAME(NULL, NULL, 'ALTER ANY LOGIN') AS alterAnyLogin,
               HAS_PERMS_BY_NAME(NULL, NULL, 'CONTROL SERVER') AS controlServer,
+              IS_SRVROLEMEMBER('sysadmin') AS sysadmin,
               SUSER_SNAME() AS login`,
     );
     const serverGrants = new Set<string>();
@@ -327,6 +445,10 @@ export async function diagnoseMssqlConnection(
     if (server?.viewServerState === 1) serverGrants.add("VIEW SERVER STATE");
     if (server?.alterAnyLogin === 1) serverGrants.add("ALTER ANY LOGIN");
     if (server?.controlServer === 1) serverGrants.add("CONTROL SERVER");
+    // In the same set as the permissions, and named so it cannot collide with
+    // one: `evaluateMssqlPrivileges` only ever asks about the three above, so the
+    // extra key is invisible to the tiers and visible to the surplus pass.
+    if (server?.sysadmin === 1) serverGrants.add("sysadmin");
     const username = server?.login ?? null;
 
     const available = await conn.listDatabaseNames();
@@ -362,6 +484,7 @@ export async function diagnoseMssqlConnection(
     return summarize([...checks, queryStoreCheck(queryStoreOff)], {
       reachable: true,
       message: advisory,
+      surplus: evaluateMssqlSurplus(serverGrants, perDb, username),
       username,
       // SQL logins are always authenticated; integrated auth is not supported.
       authEnabled: true,

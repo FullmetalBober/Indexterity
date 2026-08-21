@@ -37,10 +37,11 @@ import {
 import { consumeDialBudget } from "../errors/dial-budget";
 import { mapClusterError, toCluster, toDiagnosis } from "../http/mappers";
 import { TenancyService } from "../http/tenancy.service";
-import { ClusterGoneError, openClusterSession } from "../jobs/cluster-connection";
+import { ClusterGoneError, openClusterSession, unsealCluster } from "../jobs/cluster-connection";
 import { evictCluster } from "../jobs/connection-pool";
 import { InsecureConnectionError, ProvisionDeniedError } from "../mongo";
 import { Implement, route } from "../orpc/implement";
+import { assertLeastPrivilege } from "./least-privilege";
 import { restoreHiddenIndexes, revokeCommandFor } from "./offboard";
 
 const CLUSTER_NAME_CONSTRAINT = "clusters_org_name";
@@ -96,6 +97,10 @@ export class ClustersController {
     engine: typeof clusters.$inferSelect.engine,
     connectionString: string,
     provisionedUsername: string | null,
+    // What these credentials COULD do, as opposed to what `readOnly` allows.
+    // Recorded at the moment they are stored, because that is the only time we
+    // have a diagnosis in hand — asking again later would mean dialling.
+    credentialPosture: typeof clusters.$inferSelect.credentialPosture,
     tlsOverrides: TlsOverrides = NO_TLS_OVERRIDES,
     // Which databases to observe, or null for every one the cluster has (#244).
     // Undefined from a caller that has no opinion is stored as null, which is the
@@ -124,6 +129,7 @@ export class ClustersController {
           sealedData: Buffer.from(sealed.data),
           keyVersion,
           provisionedUsername,
+          credentialPosture,
           tlsOverrides,
           observedDatabases,
         })
@@ -403,12 +409,22 @@ export class ClustersController {
               "Indexterity provision a scoped one.",
           });
         }
+        // After the dial and before the seal (#313). It has to be after, because
+        // whether a string can create users is a question only the cluster can
+        // answer — the policy is enforced against the diagnosis, never against
+        // the shape of what was typed. `provisionCluster` next door is
+        // deliberately NOT gated: it is the path this refusal sends people to,
+        // and the admin string it takes is never stored.
+        await assertLeastPrivilege(this.database.db, orgId, diagnosis);
         const row = await this.storeCluster(
           orgId,
           input.name,
           engine,
           value,
           null,
+          // Read off the diagnosis rather than the string: whether credentials
+          // can create users is a question only the server can answer.
+          diagnosis.canProvision ? "ADMIN" : "SCOPED",
           overrides,
           input.observedDatabases ?? null,
         );
@@ -482,6 +498,9 @@ export class ClustersController {
           engine,
           provisioned.connectionString,
           provisioned.username,
+          // Known exactly here, unlike either other case: Indexterity created
+          // this user, so its ceiling is the scoped role and nothing more.
+          "PROVISIONED",
           overrides,
           input.observedDatabases ?? null,
         );
@@ -543,11 +562,6 @@ export class ClustersController {
         } catch (error) {
           mapClusterError(error);
         }
-        const keyVersion = currentKeyVersion();
-        const sealed = await seal(
-          new TextEncoder().encode(input.connectionString),
-          envKeyProvider(masterKeyBytesFor(keyVersion)),
-        );
         // The scoped-user marker only survives if the new string still
         // authenticates as that user; anything else is a user we didn't create.
         const provisionedUsername =
@@ -555,6 +569,50 @@ export class ClustersController {
           adapter.connStringUsername(input.connectionString) === row.provisionedUsername
             ? row.provisionedUsername
             : null;
+        // Re-evaluated here because rotating is exactly when it changes: swapping
+        // an admin string for a scoped one is a narrowing somebody should be able
+        // to see happened, and the reverse is a widening they should see too.
+        //
+        // A diagnosis that fails leaves it NULL rather than failing the rotation
+        // or keeping the old value. The rotation itself already succeeded — the
+        // string pinged — and recording "we no longer know" is honest where
+        // carrying forward a posture measured on different credentials is not.
+        //
+        // Kept as the diagnosis rather than collapsed straight to the enum,
+        // because the policy gate below reads two of its fields (#313) and asking
+        // the cluster twice for the same answer would double a rotation's cost.
+        const diagnosis =
+          provisionedUsername !== null
+            ? null
+            : await adapter.diagnose(value, overrides).catch(() => null);
+        const credentialPosture =
+          provisionedUsername !== null
+            ? "PROVISIONED"
+            : diagnosis === null
+              ? null
+              : diagnosis.canProvision
+                ? ("ADMIN" as const)
+                : ("SCOPED" as const);
+        // The other door (#313). A cluster already connected is rotated rather
+        // than re-connected, so a policy checked only at createCluster would be
+        // one PATCH away from being bypassed — and rotating is precisely when
+        // breadth changes, which is why the posture column exists at all.
+        //
+        // A diagnosis that could not be taken is NOT refused. The string pinged,
+        // so the credentials work; what failed is our ability to describe them,
+        // and refusing on that would mean a cluster whose diagnosis is flaky
+        // cannot have its password changed — the one operation an incident needs
+        // most. The unknown posture is recorded as null instead, and the
+        // connection card draws "posture not recorded", which is the state that
+        // asks a human to look.
+        if (diagnosis !== null) {
+          await assertLeastPrivilege(this.database.db, orgId, diagnosis);
+        }
+        const keyVersion = currentKeyVersion();
+        const sealed = await seal(
+          new TextEncoder().encode(input.connectionString),
+          envKeyProvider(masterKeyBytesFor(keyVersion)),
+        );
         const [updated] = await this.database.db
           .update(clusters)
           .set({
@@ -562,6 +620,7 @@ export class ClustersController {
             sealedData: Buffer.from(sealed.data),
             keyVersion,
             provisionedUsername,
+            credentialPosture,
           })
           .where(eq(clusters.id, input.clusterId))
           .returning();
@@ -730,6 +789,102 @@ export class ClustersController {
         } finally {
           lease.release();
         }
+      },
+    );
+  }
+
+  // Re-check the STORED credentials against the cluster (#313).
+  //
+  // Everything on the connection card until now was recorded at connect time and
+  // never asked again: `credentialPosture` is one enum stamped when the string was
+  // sealed, so a card drawn from it says what was true on the day somebody pasted
+  // it and cannot say what is true now. This dials.
+  //
+  // Same dial guard as every other endpoint that opens a customer connection, and
+  // the same per-user budget: the stored string is not exempt from the SSRF checks
+  // just because it was accepted once — the host it names could have been
+  // re-pointed since, and the budget is what stops this route from being a way to
+  // sweep hosts one refresh at a time.
+  //
+  // A cluster that cannot be dialled answers 200 with `reachable: false` rather
+  // than a 502, unlike a rotation. The card is where an unreachable cluster's
+  // credentials get fixed, and a panel that refuses to render on the one screen
+  // that can fix it is the failure #289 is about — the message says what happened
+  // and the rotate form underneath still works.
+  @Implement(contract.getClusterPrivileges)
+  getClusterPrivileges(@Req() req: FastifyRequest) {
+    return route(this.tenancy, contract.getClusterPrivileges, req, "owner").handler(
+      async ({ input, errors, context }) => {
+        const orgId = context.member.orgId;
+        await this.tenancy.assertOwnsCluster(input.clusterId, orgId, errors);
+        let cluster: typeof clusters.$inferSelect;
+        let connectionString: string;
+        try {
+          const unsealed = await unsealCluster(this.database.db, input.clusterId);
+          cluster = unsealed.cluster;
+          connectionString = unsealed.connectionString;
+        } catch (error) {
+          if (error instanceof ClusterGoneError) {
+            throw errors.NOT_FOUND({ message: "cluster not found" });
+          }
+          throw error;
+        }
+        const adapter = adapterFor(cluster.engine);
+        await this.guardDial(
+          context.userId,
+          cluster.engine,
+          connectionString,
+          errors,
+          cluster.tlsOverrides,
+        );
+        // Stamped before the dial rather than after, so a slow probe cannot label
+        // its own answer as newer than it is.
+        const checkedAt = new Date().toISOString();
+        let diagnosis: Awaited<ReturnType<typeof adapter.diagnose>>;
+        try {
+          // Asked about the databases this cluster actually observes (#244), not
+          // about the whole server: a role scoped to the one database somebody
+          // ticked is not missing anything, and a surplus write grant on a
+          // database nobody observes is not what this card is about.
+          diagnosis = await adapter.diagnose(
+            connectionString,
+            cluster.tlsOverrides,
+            cluster.observedDatabases,
+          );
+        } catch (error) {
+          // The adapters return `reachable: false` for the failures they
+          // recognise; this is the rest. Reported in the same shape rather than
+          // as a 500, for the reason in the comment above the route.
+          return {
+            clusterId: input.clusterId,
+            engine: cluster.engine,
+            checkedAt,
+            reachable: false,
+            message: error instanceof Error ? error.message : String(error),
+            username: null,
+            authEnabled: false,
+            required: [],
+            surplus: [],
+          };
+        }
+        return {
+          clusterId: input.clusterId,
+          engine: cluster.engine,
+          checkedAt,
+          reachable: diagnosis.reachable,
+          message: diagnosis.message,
+          username: diagnosis.username,
+          authEnabled: diagnosis.authEnabled,
+          // PROVISION checks are dropped here and only here. On the connect form
+          // they answer "could we make a scoped user out of this"; on a cluster
+          // that already exists that offer is gone — provisioning runs from an
+          // admin string that was never stored — so the three rows would be a
+          // question nobody can act on, sitting in a group headed "what the engine
+          // needs". Whether the string is over-broad is the posture badge's job
+          // and the surplus list's, both of which are on the same card.
+          required: diagnosis.privileges.filter((check) => check.tier !== "PROVISION"),
+          surplus: [...diagnosis.surplus],
+        };
       },
     );
   }

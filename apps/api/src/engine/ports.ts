@@ -196,7 +196,13 @@ export interface IndexExecutor {
 // checks and not only as `canProvision` below, because a bare `false` renders as
 // nothing and leaves "your user cannot create users" and "we could not tell what
 // your user can do" looking identical (#86).
-export type PrivilegeTier = "CORE" | "APPLY" | "WORKLOAD" | "PROVISION";
+//
+// SURPLUS is the list read backwards (#313): a grant these credentials HOLD and
+// the engine never uses. On one of those `granted: true` is the finding rather
+// than the reassurance, and `command` is what REVOKES it rather than what adds
+// it — which is why they travel in `ConnectionDiagnosis.surplus` and not in
+// `privileges`, where every reader treats a tick as good news.
+export type PrivilegeTier = "CORE" | "APPLY" | "WORKLOAD" | "PROVISION" | "SURPLUS";
 
 export interface PrivilegeCheck {
   readonly key: string;
@@ -226,6 +232,18 @@ export interface ConnectionDiagnosis {
   readonly ready: boolean;
   readonly canApply: boolean;
   readonly privileges: readonly PrivilegeCheck[];
+  // What these credentials hold and the engine never uses, each with the
+  // statement that removes it (#313). Every entry is tier SURPLUS.
+  //
+  // Empty is the reassuring answer and a real one — a provisioned user holds
+  // nothing surplus by construction — so the screen that draws it says so rather
+  // than drawing nothing (#289).
+  //
+  // Segregated from `privileges` above because three of the fields on this
+  // interface are computed from "is every check in its tier granted": a held
+  // surplus grant would satisfy `ready`, and revoking it would break it. The
+  // polarity is genuinely opposite, so the arrays are too.
+  readonly surplus: readonly PrivilegeCheck[];
   readonly missing: readonly string[];
   // Every user database the credentials can see — the whole cluster's, never
   // narrowed by the scope the diagnosis was asked about, because this is the list
@@ -238,8 +256,19 @@ export interface ConnectionDiagnosis {
 // the pipeline.
 export interface EngineCapabilities {
   // Reversible index invisibility (mongo collMod hidden, MSSQL DISABLE+REBUILD).
-  // PostgreSQL has no native equivalent: its adapter will need an alternative
-  // observe stage before the pipeline may drop.
+  //
+  // False makes the observe stage statistics-only: apply.ts moves the
+  // recommendation into the window without touching the index, records no
+  // read-latency baseline (hiding is the only thing such a baseline could
+  // measure), and the evidence for the drop is the usage counters staying flat,
+  // which preflightDrop re-checks at the end. Read through
+  // `openClusterSession`'s `canHide` — no pipeline site reaches for the registry
+  // itself — and mirrored for the dashboard's wording by `canHideIndexes` in
+  // @repo/contracts, which registry.test.ts holds to this value.
+  //
+  // PostgreSQL is the engine that will set it false: its only mechanism is
+  // clearing `pg_index.indisvalid`, which needs superuser and cannot be
+  // delegated (measured on 17.11 and 18.6, #35).
   readonly hideIndexes: boolean;
   // Can create a scoped least-privilege user from an admin connection string.
   readonly provisionScopedUsers: boolean;

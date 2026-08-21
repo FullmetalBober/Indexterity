@@ -37,6 +37,7 @@ export function toDiagnosis(engine: ClusterEngine, diagnosis: EngineConnectionDi
     ...diagnosis,
     engine,
     privileges: [...diagnosis.privileges],
+    surplus: [...diagnosis.surplus],
     missing: [...diagnosis.missing],
     databases: [...diagnosis.databases],
   };
@@ -53,6 +54,7 @@ export function toCluster(
     engine: row.engine,
     readOnly: row.readOnly,
     provisionedUsername: row.provisionedUsername,
+    credentialPosture: row.credentialPosture,
     lastCollectedAt: lastCollectedAt?.toISOString() ?? null,
     tlsOverrides: row.tlsOverrides,
     observedDatabases: row.observedDatabases,

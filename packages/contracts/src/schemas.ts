@@ -98,6 +98,14 @@ export const cluster = z.object({
   // Set when Indexterity provisioned its own least-privilege user on the
   // cluster (admin-string onboarding); null for pasted-string clusters.
   provisionedUsername: z.string().nullable(),
+  // What the stored credentials COULD do, as against what `readOnly` allows
+  // them to. Recorded when they were stored and re-evaluated on rotation.
+  //
+  // Null means we never asked — every cluster connected before the column
+  // existed, and any rotation whose diagnosis failed. Rendered as "not
+  // recorded" rather than as a guess, for the same reason a failed read is not
+  // an empty state (#289).
+  credentialPosture: z.enum(["PROVISIONED", "ADMIN", "SCOPED"]).nullable(),
   // Newest index snapshot, or null before the first collect. The dashboard
   // flags stale data so numbers from before an outage cannot read as current.
   lastCollectedAt: z.string().nullable(),
@@ -122,7 +130,13 @@ export type Cluster = z.infer<typeof cluster>;
 // question — whether these credentials could create the scoped user for us — and
 // is reported as checks rather than only as the `canProvision` boolean below, so
 // a refused offer can name the action that would unlock it (#86).
-export const privilegeTier = z.enum(["CORE", "APPLY", "WORKLOAD", "PROVISION"]);
+//
+// SURPLUS is the same list read backwards (#313): a grant these credentials HOLD
+// that the engine never uses. `granted: true` on one of those is the finding, not
+// the reassurance — which is why they arrive in their own array rather than mixed
+// into `privileges`, where every existing consumer reads a tick as good news and
+// `ready`/`canApply`/`missing` are all derived from "is every check granted".
+export const privilegeTier = z.enum(["CORE", "APPLY", "WORKLOAD", "PROVISION", "SURPLUS"]);
 export type PrivilegeTier = z.infer<typeof privilegeTier>;
 
 export const privilegeCheck = z.object({
@@ -140,8 +154,11 @@ export const privilegeCheck = z.object({
   // alternative was a Query-Store-shaped field on the diagnosis, which would put one
   // engine's configuration vocabulary in the shared contract.
   //
-  // Only ever set on a check that is NOT granted. A command beside a green row is a
-  // suggestion to change something that already works.
+  // Only ever set on a check that is NOT granted — except on a SURPLUS check,
+  // where the whole polarity is reversed: there `granted: true` is the finding and
+  // the command is what REVOKES the grant rather than what adds it (#313). The
+  // direction is unambiguous from which array the check arrived in, which is why
+  // segregating them was worth more than a second field would have been.
   //
   // `.default(null)` so a caller parsing a response from an api that predates the
   // field gets null rather than a validation error or an undefined that reaches a
@@ -167,6 +184,23 @@ export const connectionDiagnosis = z.object({
   ready: z.boolean(),
   canApply: z.boolean(),
   privileges: z.array(privilegeCheck),
+  // What these credentials hold and the engine never uses (#313). Every entry is
+  // tier SURPLUS, so `granted: true` means "held, and removable" — the reverse of
+  // every other check here — and `command` carries the statement that removes it.
+  //
+  // Its own array and not part of `privileges` above for two reasons that both
+  // bite: `ready`, `canApply` and `missing` are computed from "is every check in
+  // its tier granted", which a held surplus grant would satisfy and a revoked one
+  // would break; and the connect form's PrivilegeList draws any non-PROVISION
+  // check as something the engine needs, so `root` would render as a requirement.
+  //
+  // Empty is a real answer and the reassuring one — a provisioned user holds
+  // nothing surplus by construction — so the screen that draws it has to SAY
+  // empty rather than draw nothing (#289, and #313's second constraint).
+  //
+  // `.default([])` for the deploy window where the web has moved and the api has
+  // not, the same tolerance `command` above carries.
+  surplus: z.array(privilegeCheck).default([]),
   missing: z.array(z.string()),
   // Every user database the credentials can see, which both engines' probes
   // already had to enumerate to answer the questions above — mongo evaluates its
@@ -180,6 +214,48 @@ export const connectionDiagnosis = z.object({
   databases: z.array(z.string()),
 });
 export type ConnectionDiagnosis = z.infer<typeof connectionDiagnosis>;
+
+// The stored credentials re-checked against the cluster, for the connection card
+// (#313).
+//
+// A separate route and a separate shape from `connectionDiagnosis` because it
+// answers a different question about a different string. The diagnosis is a
+// preflight on something the reader just pasted and nothing holds yet; this is a
+// dial with the sealed credentials a cluster has been running on for months, and
+// the reader's question about those is not "will this connect" but "what is this
+// allowed to do that it does not need".
+//
+// `checkedAt` is on the payload rather than left to the cache, and it is the
+// whole answer to the issue's first constraint: nothing else re-checks an
+// existing cluster, so without a timestamp these numbers are indistinguishable
+// from the ones taken at connect time — which may be a year old and taken on
+// credentials that have since been rotated.
+export const clusterPrivileges = z.object({
+  clusterId: z.uuid(),
+  engine: clusterEngine,
+  // When the dial below happened. Always now for a fresh read; carried so the
+  // card can label the figures rather than implying they are live.
+  checkedAt: z.string(),
+  // False when the cluster could not be dialled at all, with `message` saying
+  // why. Not an error response: a cluster that is down still has a connection
+  // card, and that card is where its credentials are rotated.
+  reachable: z.boolean(),
+  message: z.string().nullable(),
+  // Who the stored string authenticates as, which is the one fact on this card a
+  // reader can take to their own database and act on.
+  username: z.string().nullable(),
+  authEnabled: z.boolean(),
+  // The engine's own requirements — CORE, APPLY and WORKLOAD — as they stand
+  // against the stored credentials. PROVISION checks are deliberately absent:
+  // whether the string could create a user is what `credentialPosture` on the
+  // cluster already says, and re-listing the three actions behind it here would
+  // put "cannot create users" on a card whose subject is what the credentials do
+  // hold.
+  required: z.array(privilegeCheck),
+  // Held and never used, each with the statement that removes it.
+  surplus: z.array(privilegeCheck),
+});
+export type ClusterPrivileges = z.infer<typeof clusterPrivileges>;
 
 // The observe selection, as the settings screen needs it: what the cluster has
 // RIGHT NOW beside what we are walking (#244).
@@ -692,6 +768,11 @@ export const SECURITY_EVENTS = [
   "INVITE_ACCEPTED",
   "ORG_CREATED",
   "ORG_DELETED",
+  // The org's security posture (#313). Not membership and not a cluster, so it
+  // sits with the org acts: turning "refuse credentials broader than the engine
+  // needs" OFF is a decision an incident wants dated and attributed, because
+  // every connect after it is one this install would previously have refused.
+  "ORG_POLICY_CHANGED",
   // A cluster's access, which is what the control plane holds of a customer's.
   "CLUSTER_CONNECTED",
   "CLUSTER_DISCONNECTED",
@@ -829,6 +910,23 @@ export const myInvite = z.object({
 });
 export type MyInvite = z.infer<typeof myInvite>;
 
+// The org's own policy — the rules that apply before a cluster exists (#313).
+//
+// One field today and a shape rather than a bare boolean, because the thing it
+// is: `policies` next door started as three knobs and the route that replaces
+// them whole has not changed shape since. An org-level rule that has to be read
+// on the connect path wants the same room.
+export const orgPolicyView = z.object({
+  // Refuse to store credentials broader than the engine needs, at connect and at
+  // rotate. Off unless an owner turned it on — an install that has said nothing
+  // has not asked us to refuse anybody's string.
+  requireLeastPrivilege: z.boolean(),
+  // Null until somebody saves one, which is what distinguishes "off" from "never
+  // configured" — the distinction #258 found the per-cluster toggle was missing.
+  updatedAt: z.string().nullable(),
+});
+export type OrgPolicyView = z.infer<typeof orgPolicyView>;
+
 export const orgInfo = z.object({
   id: z.uuid(),
   name: z.string(),
@@ -842,5 +940,11 @@ export const orgInfo = z.object({
     z.object({ id: z.uuid(), email: z.string(), role: z.string(), expiresAt: z.string() }),
   ),
   provisionedUsers: z.array(provisionedUser),
+  // The org's policy, on the payload the whole dashboard already reads. It is
+  // needed in two places at once — the Settings toggle that owns it, and every
+  // connection card that has to say whether its cluster is out of policy — and a
+  // second endpoint for one boolean would mean the card either fetches it per
+  // cluster or renders before knowing.
+  policy: orgPolicyView,
 });
 export type OrgInfo = z.infer<typeof orgInfo>;

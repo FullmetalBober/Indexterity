@@ -8,7 +8,7 @@ import {
   type SupportedEngine,
   type TlsOverrides,
 } from "@repo/contracts";
-import { useState } from "react";
+import { type ReactNode, useState } from "react";
 import { usage } from "~/components/app/format";
 import {
   MIN_DATABASES_TO_CHOOSE,
@@ -84,7 +84,22 @@ const PLACEHOLDER = "mongodb://user:pass@host:27017   or   Server=host;User Id=s
 // What the scoped user IS, per engine — the offer is engine-neutral (it hangs
 // off `canProvision`), the words cannot be: "no read access to your documents"
 // and `db.dropUser` are the wrong sentence entirely in front of a SQL Server.
-const SCOPED_USER_COPY = {
+//
+// Typed as a full Record<ClusterEngine, …> on purpose. It used to be a partial
+// object with a `engine === "MSSQL" ? … : mongo` fallback, and PostgreSQL's
+// adapter shipping turned that fallback into a lie: a Postgres cluster was
+// offered the `indexterityEngine` role, told it withheld read access to its
+// "documents", and pointed at `db.dropUser`. The compiler refuses a missing
+// engine now, so the next adapter cannot inherit somebody else's sentence.
+const SCOPED_USER_COPY: Record<
+  ClusterEngine,
+  {
+    subject: string;
+    grant: ReactNode;
+    withheld: ReactNode;
+    revoke: ReactNode;
+  }
+> = {
   MONGODB: {
     subject: "user",
     grant: (
@@ -106,7 +121,28 @@ const SCOPED_USER_COPY = {
     withheld: "no permission to read a single row of your data",
     revoke: <code>DROP LOGIN idx_…</code>,
   },
-} as const;
+  // PostgreSQL withholds MORE than the other two, and saying so is the point:
+  // the role cannot read the data AND cannot change an index either, because
+  // only a table's owner may do that and ownership cannot be granted piecemeal.
+  // Somebody who reads "exactly the privileges above and nothing else" here has
+  // to understand that applying is not among them.
+  POSTGRESQL: {
+    subject: "role",
+    grant: (
+      <>
+        granted <code>pg_monitor</code>, <code>CONNECT</code> on each database and{" "}
+        <code>USAGE</code> on each schema
+      </>
+    ),
+    withheld: (
+      <>
+        no permission to read a single row of your data — and none to change an index either, so
+        this role analyses only
+      </>
+    ),
+    revoke: <code>DROP ROLE idx_…</code>,
+  },
+};
 
 // Takes the RESOLVED engine rather than the string it came from. It used to read
 // the string through a second copy of the scheme rules, which is the pair that
@@ -114,12 +150,8 @@ const SCOPED_USER_COPY = {
 // function decides (engineFromScheme in @repo/contracts), the api's diagnosis
 // overrules it the moment there is one, and both arrive here as an engine.
 //
-// PostgreSQL has no entry because it has no adapter and so can never be
-// provisioned; falling back to the MongoDB paragraph would be a promise about a
-// shell command that does not apply, so the caller is expected to have a
-// supported engine by the time it asks.
 function scopedUserCopy(engine: ClusterEngine) {
-  return engine === "MSSQL" ? SCOPED_USER_COPY.MSSQL : SCOPED_USER_COPY.MONGODB;
+  return SCOPED_USER_COPY[engine];
 }
 
 // What the typed string looks like, as one primitive so the component re-renders
@@ -221,7 +253,20 @@ function ProvisioningUnavailable({ diagnosis }: { diagnosis: ConnectionDiagnosis
 // The plan the clusters are counted against, or null while the org read has not
 // arrived — in which case the quota simply is not drawn. It is a warning, not a
 // gate: the api is the one that refuses, and it refuses on the same numbers.
-export function ConnectClusterForm({ plan }: { plan: PlanInfo | null }) {
+export function ConnectClusterForm({
+  plan,
+  requireLeastPrivilege = false,
+}: {
+  plan: PlanInfo | null;
+  // The org's rule that credentials broader than the engine needs are not stored
+  // (#313). The api enforces it — this only stops the form from offering a button
+  // whose only outcome is a 422, and says why in its place. False while the org
+  // read is in flight: the api is the enforcement, so a form that guesses wrong
+  // for a moment offers a button that is then refused with the reason, which is
+  // strictly better than hiding the working path from somebody whose org has no
+  // such rule.
+  requireLeastPrivilege?: boolean;
+}) {
   const [error, setError] = useState<string | null>(null);
   const [diagnosis, setDiagnosis] = useState<ConnectionDiagnosis | null>(null);
   // The engine travels with the credentials, and it has to: this alert survives
@@ -643,6 +688,28 @@ export function ConnectClusterForm({ plan }: { plan: PlanInfo | null }) {
               </Alert>
             ) : null}
 
+            {/* The one engine where "index management without read access" does
+                not hold, said BEFORE anything is stored rather than discovered
+                when an apply is refused. It is a property of PostgreSQL and not
+                of these credentials, so it shows whether or not they happen to
+                own the tables — somebody connecting a read-only cluster needs to
+                know what going live would later cost. */}
+            {diagnosis.engine === "POSTGRESQL" ? (
+              <Alert className="mt-3">
+                <AlertTitle>Applying on PostgreSQL needs the table owner</AlertTitle>
+                <AlertDescription>
+                  PostgreSQL has no grantable index privilege: only a table's owner may create or
+                  drop its indexes, and <code>GRANT ALL</code> does not cover it. Because an owner
+                  can also read the table, credentials that can apply here can also read your data —
+                  unlike MongoDB and SQL Server, where the user Indexterity runs as is refused both.
+                  So analysis and applying are separate decisions on this engine:{" "}
+                  {diagnosis.canApply
+                    ? "the string you pasted owns the tables in scope, so it can do both — and can read them."
+                    : "these credentials analyse only, which is the safer default and not a fault. Connect as the owner when you want to apply."}
+                </AlertDescription>
+              </Alert>
+            ) : null}
+
             {diagnosis.canProvision ? (
               <div className="mt-3 rounded-md bg-muted/40 p-3">
                 <p className="font-medium">
@@ -687,7 +754,14 @@ export function ConnectClusterForm({ plan }: { plan: PlanInfo | null }) {
                       ? "Creating…"
                       : `Create a scoped ${scopedUserCopy(diagnosis.engine).subject} and connect`}
                   </Button>
-                  {diagnosis.ready ? (
+                  {/* The button #313 exists to be able to remove. It is not
+                      merely disabled when the org forbids it: a greyed-out
+                      control is still an offer, and the reader's next move is to
+                      hunt for what unlocks it rather than to press the button
+                      beside it that works. The sentence underneath replaces it
+                      instead, and names the rule so nobody reads its absence as
+                      a missing feature. */}
+                  {diagnosis.ready && !requireLeastPrivilege ? (
                     <Button
                       variant="outline"
                       disabled={busy}
@@ -697,6 +771,13 @@ export function ConnectClusterForm({ plan }: { plan: PlanInfo | null }) {
                     </Button>
                   ) : null}
                 </div>
+                {diagnosis.ready && requireLeastPrivilege ? (
+                  <p className="mt-2 text-muted-foreground text-xs">
+                    Storing these as they are is not offered: this organization requires credentials
+                    no broader than the engine needs, and these can create users. An owner can
+                    change that under Settings → Organization.
+                  </p>
+                ) : null}
               </div>
             ) : diagnosis.ready ? (
               <>

@@ -49,6 +49,7 @@ const LABELS: Record<string, string> = {
   CLUSTER_CREDENTIALS_ROTATED: "Credentials rotated",
   CLUSTER_MODE_CHANGED: "Mode changed",
   CLUSTER_OBSERVED_DATABASES_CHANGED: "Observed databases changed",
+  ORG_POLICY_CHANGED: "Organization policy changed",
 };
 
 // The acts that take something away, or hand something over. Not "bad" — an
@@ -66,6 +67,10 @@ const SEVERE = new Set([
   // Severe in the direction that matters: widening it is how the control plane
   // starts reading a database it was not reading yesterday.
   "CLUSTER_OBSERVED_DATABASES_CHANGED",
+  // Same asymmetry, and the same decision to mark both directions (#313):
+  // switching least privilege OFF is what lets the next connect store an admin
+  // string, and the row is worth finding whichever way it went.
+  "ORG_POLICY_CHANGED",
 ]);
 
 export function eventLabel(event: string): string {
@@ -94,6 +99,16 @@ function detailFor(event: SecurityEvent): string | null {
   }
   if (event.event === "CLUSTER_CONNECTED") {
     return metadata.provisioned === true ? "with a provisioned user" : null;
+  }
+  if (event.event === "ORG_POLICY_CHANGED") {
+    // Which way it went, which is the whole content of this row — the label
+    // already says a policy changed, and "changed" without a direction is the
+    // thing #86 keeps arguing about in a different place.
+    const to = metadata.to;
+    if (typeof to !== "object" || to === null) return null;
+    const required = Reflect.get(to, "requireLeastPrivilege");
+    if (typeof required !== "boolean") return null;
+    return required ? "least privilege now required" : "least privilege no longer required";
   }
   if (event.event === "CLUSTER_OBSERVED_DATABASES_CHANGED") {
     // The count, not the names. A twelve-database instance would push the rest of

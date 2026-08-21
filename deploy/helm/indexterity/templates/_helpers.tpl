@@ -211,12 +211,8 @@ test and the port-forward in NOTES.txt all read the same number they did before.
   value: {{ .Values.config.pgPoolMax | quote }}
 - name: ALLOW_INSECURE_CLUSTER_TLS
   value: {{ .Values.config.allowInsecureClusterTls | quote }}
-{{- if .Values.config.allowUntestedMongoVersion }}
-- name: ALLOW_UNTESTED_MONGO_VERSION
-  value: "true"
-{{- end }}
-{{- if .Values.config.allowUntestedMssqlVersion }}
-- name: ALLOW_UNTESTED_MSSQL_VERSION
+{{- if .Values.config.allowUntestedDatabaseVersion }}
+- name: ALLOW_UNTESTED_DATABASE_VERSION
   value: "true"
 {{- end }}
 {{- if .Values.config.retentionDays }}

@@ -198,6 +198,67 @@ jobs:
         if: steps.modules.outputs.cache-hit != 'true'
       - run: npm run test:int -w @repo/api -- integration/mssql.int.test.ts
 
+  # PostgreSQL is the third engine (#35), and this job is what makes its claims
+  # checkable rather than remembered: the catalog reads for DESC/INCLUDE/partial
+  # indexes, the invalid index a failed CREATE INDEX CONCURRENTLY leaves behind,
+  # and the two refusals the scoped role must produce — no data, no index DDL.
+  #
+  # 17 and 18 because those are the two the adapter was probed against and the two
+  # version.ts names as its tested ceiling. 14 is the floor and is covered by the
+  # unit tests, which is where the version rules live.
+  #
+  # `docker run` rather than a `services:` container, and the reason is specific:
+  # pg_stat_statements has to be in shared_preload_libraries, which can only be
+  # set at startup — a service container takes no command override, so it would
+  # need an ALTER SYSTEM plus a restart of a container this job does not own. The
+  # WORKLOAD-tier reads would silently return nothing without it, so the setup is
+  # explicit instead of clever.
+  integration-postgres:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ["17", "18"]
+    env:
+      DATABASE_URL: postgres://unused:unused@localhost:5432/unused
+      POSTGRES_URL: "postgresql://postgres:Int3gration@localhost:5433/postgres?sslmode=disable"
+      BETTER_AUTH_SECRET: integration-secret
+      MASTER_KEY: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "26"
+          cache: npm
+      - uses: actions/cache@v6
+        id: modules
+        with:
+          path: |
+            node_modules
+            apps/*/node_modules
+            packages/*/node_modules
+          key: modules-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+      - run: npm ci
+        if: steps.modules.outputs.cache-hit != 'true'
+      - name: Start PostgreSQL ${{ matrix.postgres }}
+        run: |
+          docker run -d --name pgint -p 5433:5432 \
+            -e POSTGRES_PASSWORD=Int3gration \
+            postgres:${{ matrix.postgres }} \
+            -c shared_preload_libraries=pg_stat_statements \
+            -c pg_stat_statements.track=all
+          for _ in $(seq 1 30); do
+            docker exec pgint pg_isready -U postgres && exit 0
+            sleep 2
+          done
+          echo "postgres did not become ready"
+          docker logs pgint
+          exit 1
+      - run: npm run test:int -w @repo/api -- integration/postgres.int.test.ts
+      - name: Server log on failure
+        if: failure()
+        run: docker logs pgint
+
   # The only layer that exercises browser -> web server -> api -> postgres/mongo.
   # It caught the session-cookie relay double-encoding every request after
   # sign-in, which no unit or api test could see: each side was correct on its

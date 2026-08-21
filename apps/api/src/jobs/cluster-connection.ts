@@ -2,6 +2,7 @@ import { masterKeyBytesFor } from "../config/env";
 import { clusters, type Database, envKeyProvider, eq, open } from "../db";
 import { ObservedSession } from "../engine/observe";
 import type { ClusterEngine, EngineSession } from "../engine/ports";
+import { adapterFor } from "../engine/registry";
 import { acquireClusterSession } from "./connection-pool";
 
 // The stored credentials would not decrypt. Always a control-plane problem —
@@ -36,6 +37,17 @@ export interface ClusterSession {
   readonly session: EngineSession;
   readonly engine: ClusterEngine;
   readonly readOnly: boolean;
+  // Whether this engine has reversible index invisibility
+  // (`EngineCapabilities.hideIndexes`). Read here rather than at each call site
+  // so the pipeline never reaches for the registry itself, and so the six
+  // places that hide or un-hide branch on one fact computed once.
+  //
+  // False means the observe stage is statistics-only: the index keeps serving
+  // every query while the window runs, the read-latency regression gate has
+  // nothing to measure (nothing was hidden, so nothing can have been slowed by
+  // hiding), and the evidence is the usage counters staying flat — which is
+  // what `preflightDrop` already re-checks before the drop.
+  readonly canHide: boolean;
   // Which databases the owner asked us to observe, or null for all of them
   // (#244). Carried for the callers that need to SAY what was in scope — the
   // filtering itself is already done by the session above, and no caller has to
@@ -57,6 +69,37 @@ export interface OpenClusterOptions {
   readonly allDatabases?: boolean;
 }
 
+// The cluster row and the credentials it was sealed with.
+//
+// Its own function because one caller wants the STRING rather than a session:
+// re-diagnosing an existing cluster (#313) asks the adapter what these
+// credentials may do, and `diagnose` takes a connection string — a pooled session
+// cannot answer it, and a second copy of the unseal would be a second place for
+// the key-version handling and its named error to drift.
+export async function unsealCluster(
+  db: Database,
+  clusterId: string,
+): Promise<{
+  cluster: typeof clusters.$inferSelect;
+  connectionString: string;
+}> {
+  const [cluster] = await db.select().from(clusters).where(eq(clusters.id, clusterId)).limit(1);
+  if (cluster === undefined) throw new ClusterGoneError(clusterId);
+  try {
+    return {
+      cluster,
+      connectionString: new TextDecoder().decode(
+        await open(
+          { dek: cluster.sealedDek, data: cluster.sealedData },
+          envKeyProvider(masterKeyBytesFor(cluster.keyVersion)),
+        ),
+      ),
+    };
+  } catch (error) {
+    throw new ClusterCredentialsError(clusterId, cluster.keyVersion, error);
+  }
+}
+
 // Load a cluster, unseal its connection string, and lease a pooled session for
 // its engine.
 export async function openClusterSession(
@@ -64,19 +107,7 @@ export async function openClusterSession(
   clusterId: string,
   options: OpenClusterOptions = {},
 ): Promise<ClusterSession> {
-  const [cluster] = await db.select().from(clusters).where(eq(clusters.id, clusterId)).limit(1);
-  if (cluster === undefined) throw new ClusterGoneError(clusterId);
-  let connString: string;
-  try {
-    connString = new TextDecoder().decode(
-      await open(
-        { dek: cluster.sealedDek, data: cluster.sealedData },
-        envKeyProvider(masterKeyBytesFor(cluster.keyVersion)),
-      ),
-    );
-  } catch (error) {
-    throw new ClusterCredentialsError(clusterId, cluster.keyVersion, error);
-  }
+  const { cluster, connectionString: connString } = await unsealCluster(db, clusterId);
   const { session, release } = await acquireClusterSession(
     clusterId,
     cluster.engine,
@@ -94,6 +125,7 @@ export async function openClusterSession(
         : new ObservedSession(session, observed),
     engine: cluster.engine,
     readOnly: cluster.readOnly,
+    canHide: adapterFor(cluster.engine).capabilities.hideIndexes,
     observedDatabases: observed,
     release,
   };

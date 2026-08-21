@@ -6,6 +6,7 @@ import { apiError, authOk, renderInApp } from "~/test-utils";
 import { ClusterConnection } from "./cluster-connection";
 
 const setClusterMode = vi.hoisted(() => vi.fn());
+const getClusterPrivileges = vi.hoisted(() => vi.fn());
 const rotateConnection = vi.hoisted(() => vi.fn());
 const deleteCluster = vi.hoisted(() => vi.fn());
 const navigate = vi.hoisted(() => vi.fn());
@@ -18,7 +19,7 @@ const setActiveOrg = vi.hoisted(() => vi.fn());
 // The api client, called straight from the mutation hooks. A refusal is a throw
 // with a status on it, not an { ok: false } a server function handed back.
 vi.mock("~/lib/api", () => ({
-  api: () => ({ setClusterMode, rotateConnection, deleteCluster }),
+  api: () => ({ setClusterMode, rotateConnection, deleteCluster, getClusterPrivileges }),
 }));
 vi.mock("@tanstack/react-router", () => ({ useNavigate: () => navigate }));
 vi.mock("sonner", () => ({ toast: { success: toastSuccess, error: toastError } }));
@@ -35,9 +36,37 @@ vi.mock("~/lib/auth-client", () => ({
 const cluster = {
   id: "c1",
   name: "Production",
+  engine: "MONGODB",
   readOnly: true,
   provisionedUsername: null,
-};
+  credentialPosture: "SCOPED",
+} as const;
+
+// One re-check of the stored credentials (#313). Reachable and clean by default,
+// so the tests that are not about this panel never have to say so.
+function privileges(over: Record<string, unknown> = {}) {
+  return {
+    clusterId: "c1",
+    engine: "MONGODB",
+    checkedAt: new Date().toISOString(),
+    reachable: true,
+    message: null,
+    username: "idx_a91f",
+    authEnabled: true,
+    required: [
+      {
+        key: "listIndexes",
+        label: "List indexes",
+        enables: "reading index specs",
+        tier: "CORE",
+        granted: true,
+        command: null,
+      },
+    ],
+    surplus: [],
+    ...over,
+  };
+}
 
 // The api's refusal to act on a session older than the fresh window — the one
 // failure the hooks turn into a password prompt instead of a toast.
@@ -50,6 +79,7 @@ beforeEach(() => {
   setClusterMode.mockResolvedValue(cluster);
   rotateConnection.mockResolvedValue(cluster);
   deleteCluster.mockResolvedValue({ unhidden: 0, revokeCommand: null });
+  getClusterPrivileges.mockResolvedValue(privileges());
   getSession.mockResolvedValue(
     authOk({ user: { email: "owner@example.com" }, session: { activeOrganizationId: null } }),
   );
@@ -287,5 +317,157 @@ describe("ClusterConnection", () => {
 
     expect(signInEmail).not.toHaveBeenCalled();
     expect(setClusterMode).toHaveBeenCalledTimes(1);
+  });
+});
+
+// What the credentials COULD do, which is a different question from what
+// read-only ALLOWS them to — a cluster can be read-only and still be held on a
+// string that could drop a table.
+describe("ClusterConnection — credential posture", () => {
+  it("names an admin string as one that can do more than manage indexes", () => {
+    renderInApp(<ClusterConnection cluster={{ ...cluster, credentialPosture: "ADMIN" }} />);
+    expect(screen.getByText("admin credentials")).toBeInTheDocument();
+    expect(screen.getByText(/more than manage indexes/)).toBeInTheDocument();
+  });
+
+  // The only case whose ceiling is known exactly, because we set it.
+  it("says a provisioned user's ceiling is known", () => {
+    renderInApp(<ClusterConnection cluster={{ ...cluster, credentialPosture: "PROVISIONED" }} />);
+    expect(screen.getByText("scoped user")).toBeInTheDocument();
+    expect(screen.getByText(/known exactly/)).toBeInTheDocument();
+  });
+
+  it("does not claim to know the exact grants of a pasted scoped string", () => {
+    renderInApp(<ClusterConnection cluster={{ ...cluster, credentialPosture: "SCOPED" }} />);
+    expect(screen.getByText("scoped credentials")).toBeInTheDocument();
+    expect(screen.getByText(/yours rather than ours to state/)).toBeInTheDocument();
+  });
+
+  // Null is its own case, not the narrowest one. Folding "we never asked" into
+  // "scoped" is how a reassuring badge gets attached to an admin string.
+  it("says it was never recorded rather than guessing the narrowest", () => {
+    renderInApp(<ClusterConnection cluster={{ ...cluster, credentialPosture: null }} />);
+    expect(screen.getByText("posture not recorded")).toBeInTheDocument();
+    expect(screen.queryByText("scoped credentials")).not.toBeInTheDocument();
+    expect(screen.getByText(/Rotating the connection string records it/)).toBeInTheDocument();
+  });
+});
+
+// #313. The panel behind the posture badge: which privileges, not just how many.
+describe("ClusterConnection privileges panel", () => {
+  it("does not dial the cluster until the reader asks", async () => {
+    renderInApp(<ClusterConnection cluster={cluster} />);
+    // The read costs a connection to somebody's production database, so a
+    // settings page view must not spend one for a panel most visits never open.
+    expect(getClusterPrivileges).not.toHaveBeenCalled();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Check what these credentials hold" }),
+    );
+    expect(getClusterPrivileges).toHaveBeenCalledWith({ clusterId: "c1" });
+  });
+
+  it("says the redundant group is empty rather than drawing nothing", async () => {
+    renderInApp(<ClusterConnection cluster={cluster} />);
+    await userEvent.click(
+      screen.getByRole("button", { name: "Check what these credentials hold" }),
+    );
+    // The issue's second constraint, and #289's rule: nothing surplus is the
+    // REASSURING answer, and blank space under a heading does not deliver
+    // reassurance — it reads as a panel that failed to load.
+    expect(
+      await screen.findByText(/hold no privilege the engine does not use/),
+    ).toBeInTheDocument();
+  });
+
+  it("names each surplus grant and the statement that removes it", async () => {
+    getClusterPrivileges.mockResolvedValue(
+      privileges({
+        surplus: [
+          {
+            key: "surplus_root",
+            label: "root",
+            enables: "everything on the deployment",
+            tier: "SURPLUS",
+            granted: true,
+            command: 'db.getSiblingDB("admin").revokeRolesFromUser("admin", [])',
+          },
+        ],
+      }),
+    );
+    renderInApp(<ClusterConnection cluster={cluster} />);
+    await userEvent.click(
+      screen.getByRole("button", { name: "Check what these credentials hold" }),
+    );
+    // Twice on purpose, and that is the three-group shape rather than a bug: a
+    // surplus grant IS something these credentials provide, and it is also the
+    // one thing on the card a reader can act on. The badge says "can do more than
+    // manage indexes" and gives them no target; this is the target.
+    expect(await screen.findAllByText("root")).toHaveLength(2);
+    expect(screen.getByText(/revokeRolesFromUser/)).toBeInTheDocument();
+    expect(screen.getByText(/Held and never used/)).toBeInTheDocument();
+  });
+
+  it("says a failed re-check failed instead of showing an empty redundant group", async () => {
+    getClusterPrivileges.mockResolvedValue(
+      privileges({ reachable: false, message: "cluster unreachable", required: [], surplus: [] }),
+    );
+    renderInApp(<ClusterConnection cluster={cluster} />);
+    await userEvent.click(
+      screen.getByRole("button", { name: "Check what these credentials hold" }),
+    );
+    // "We could not ask" and "there is nothing surplus" are the two answers that
+    // must never render alike, and the second is the one that reassures (#289).
+    expect(await screen.findByText("Could not re-check these credentials")).toBeInTheDocument();
+    expect(screen.queryByText(/hold no privilege the engine does not use/)).not.toBeInTheDocument();
+  });
+});
+
+// #313, part one's other half: a cluster sealed before the org turned the rule on.
+describe("ClusterConnection least-privilege policy", () => {
+  it("says nothing about policy when the org has not asked for it", () => {
+    renderInApp(<ClusterConnection cluster={{ ...cluster, credentialPosture: "ADMIN" }} />);
+    expect(screen.queryByText("Out of policy for this organization")).not.toBeInTheDocument();
+  });
+
+  it("marks an admin-string cluster out of policy, and promises analysis continues", () => {
+    renderInApp(
+      <ClusterConnection
+        cluster={{ ...cluster, credentialPosture: "ADMIN" }}
+        requireLeastPrivilege={true}
+      />,
+    );
+    expect(screen.getByText("Out of policy for this organization")).toBeInTheDocument();
+    // The fear that stops people switching the setting on. Saying it here is what
+    // makes the marker safe to show at all.
+    expect(screen.getByText(/Analysis keeps running/)).toBeInTheDocument();
+  });
+
+  it("leaves a provisioned or scoped cluster alone", () => {
+    for (const posture of ["PROVISIONED", "SCOPED"] as const) {
+      const { unmount } = renderInApp(
+        <ClusterConnection
+          cluster={{ ...cluster, credentialPosture: posture }}
+          requireLeastPrivilege={true}
+        />,
+      );
+      expect(screen.queryByText("Out of policy for this organization")).not.toBeInTheDocument();
+      unmount();
+    }
+  });
+
+  it("treats an unrecorded posture as its own case, not as compliant", () => {
+    renderInApp(
+      <ClusterConnection
+        cluster={{ ...cluster, credentialPosture: null }}
+        requireLeastPrivilege={true}
+      />,
+    );
+    // "We never asked" is not "scoped". The remedy differs too — rotating RECORDS
+    // the posture, and may record that it was fine all along — so it gets its own
+    // sentence rather than the violation's.
+    expect(
+      screen.getByText("Posture unknown, and this organization requires least privilege"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Out of policy for this organization")).not.toBeInTheDocument();
   });
 });

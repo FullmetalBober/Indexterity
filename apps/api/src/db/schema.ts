@@ -39,6 +39,28 @@ const updatedAt = timestamp("updated_at", { withTimezone: true }).notNull().defa
 export const connectionMode = pgEnum("connection_mode", ["HOSTED_DIRECT", "AGENT"]);
 // Must match ClusterEngine in src/engine/ports.ts (the adapter registry keys).
 export const clusterEngine = pgEnum("cluster_engine", ["MONGODB", "POSTGRESQL", "MSSQL"]);
+
+// How privileged the credentials this cluster is held on actually are, recorded
+// when they are stored rather than guessed from them later.
+//
+// The question it answers is one a reader could not otherwise ask: `readOnly`
+// says what Indexterity is ALLOWED to do, and this says what it COULD do. A
+// cluster held on an admin string is one where a mistake reaches further than
+// indexes, and on PostgreSQL it is also the only shape that can apply at all —
+// so it is worth showing rather than inferring from the absence of a provisioned
+// username.
+//
+//   PROVISIONED  Indexterity created this user itself, so its ceiling is known
+//                exactly: the scoped role and nothing more.
+//   ADMIN        the stored string could create users or roles when it was
+//                stored. It can do more than manage indexes.
+//   SCOPED       pasted, and cannot create users. Narrower than ADMIN, and
+//                unlike PROVISIONED its exact grants are the operator's business.
+//
+// Null for every cluster connected before this column existed: we never asked,
+// and "we do not know" is not one of the three. Rendered as such rather than
+// backfilled to a guess.
+export const credentialPosture = pgEnum("credential_posture", ["PROVISIONED", "ADMIN", "SCOPED"]);
 export const recommendationType = pgEnum("recommendation_type", [
   "DROP_UNUSED",
   "DROP_REDUNDANT",
@@ -256,6 +278,40 @@ export const organizations = pgTable("organizations", {
   createdAt,
 });
 
+// Org-level policy, as against the per-cluster knobs in `policies` further
+// down. The distinction is WHEN each is read: a policy row is created after its
+// cluster exists, so it cannot decide anything about connecting one, and the one
+// rule here has to be in force before there is a cluster to hang it on (#313).
+//
+// A table rather than columns on `organizations`, which is better-auth's model
+// (auth/organization.ts maps it): a column there is invisible to the plugin
+// until it is declared as an `additionalFields` entry, and an org's security
+// posture is not the plugin's business in the way its plan and its billing ids
+// are. One row per org, keyed by the org, cascading with it — and absent until
+// somebody saves, so "never configured" is a real state rather than a value.
+//
+// The DDL default is deliberate and is the opposite decision from #132's. There
+// the default was standing in for a write nobody made, so `FREE` silently became
+// the plan of every self-hosted install; here off IS the decision — an install
+// that has said nothing about credential breadth has not asked us to refuse
+// anybody's string, and turning that on for them retroactively would break every
+// connect form in flight.
+export const orgPolicies = pgTable("org_policies", {
+  orgId: uuid("org_id")
+    .primaryKey()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  // Refuse to STORE credentials that can create users or roles — the connect
+  // and rotate doors both check it (clusters/least-privilege.ts). Off by
+  // default; see above.
+  //
+  // It does not reach backwards. Clusters already sealed on an admin string keep
+  // collecting and are marked out of policy on their connection card instead,
+  // because a setting that stopped analysis on eight clusters the moment it was
+  // ticked is a setting nobody dares tick.
+  requireLeastPrivilege: boolean("require_least_privilege").notNull().default(false),
+  updatedAt,
+});
+
 export const members = pgTable(
   "members",
   {
@@ -352,6 +408,10 @@ export const clusters = pgTable(
     // The least-privilege user Indexterity created on the cluster during
     // admin-string onboarding; null when the customer pasted a ready-made string.
     provisionedUsername: text("provisioned_username"),
+    // Set at connect and re-evaluated on every rotation, because rotating is
+    // exactly when it changes: swapping an admin string for a scoped one is a
+    // narrowing somebody should be able to see happened.
+    credentialPosture: credentialPosture("credential_posture"),
     // Which TLS checks the owner turned off when connecting, as checkboxes on the
     // connect form. Held HERE and not inferred from the sealed string, for two
     // reasons: every dial is then verified against a recorded decision rather

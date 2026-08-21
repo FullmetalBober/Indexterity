@@ -1,6 +1,6 @@
-import { engineFromScheme } from "@repo/contracts";
+import { canHideIndexes, engineFromScheme } from "@repo/contracts";
 import { describe, expect, it } from "vitest";
-import { detectEngine, supportedEngineOptions, supportedEngines } from "./registry";
+import { adapterFor, detectEngine, supportedEngineOptions, supportedEngines } from "./registry";
 
 // The pair that would otherwise drift silently (#239).
 //
@@ -40,13 +40,29 @@ describe("the engine hint the dashboard draws", () => {
   // What the override exists for: neither side recognises it, so the form asks
   // rather than guessing, and the api's fallback would otherwise dial it as
   // mongo and refuse with the wrong hint.
-  it.each(["postgres://user:pass@host:5432/db", "host:1433", "", "   ", "not a connection string"])(
+  //
+  // `postgres://` used to be in this list and is not any more — its adapter
+  // shipped with #35, so both sides claim it now, which is the case below.
+  it.each(["host:1433", "", "   ", "not a connection string"])(
     "claims nothing for %s, which is what makes the override appear",
     (value) => {
       expect(engineFromScheme(value)).toBeNull();
       expect(detectEngine(value)).toBeNull();
     },
   );
+
+  // Both spellings of the URI form, and libpq's keyword form, which has no
+  // scheme at all — the same shape as SQL Server's ADO string and anchored the
+  // same way so the two cannot claim each other.
+  it.each([
+    "postgresql://user:pass@host:5432/db",
+    "postgres://user:pass@host:5432/db",
+    "postgresql://u:p@primary:5432,standby:5433/app",
+    "host=db.corp port=5432 dbname=app user=u",
+  ])("agrees on %s now that the adapter has shipped", (value) => {
+    expect(engineFromScheme(value)).toBe("POSTGRESQL");
+    expect(detectEngine(value)).toBe("POSTGRESQL");
+  });
 
   // The one place the two deliberately disagree, and the disagreement is the
   // better product: the mongo driver's own parser is case-SENSITIVE on the
@@ -82,9 +98,41 @@ describe("supportedEngineOptions", () => {
     for (const option of options) expect(option.connStringHint.length).toBeGreaterThan(0);
   });
 
-  // The planned slot stays out of the list rather than appearing as something a
-  // reader could choose and then be refused (#35).
-  it("omits an engine with no adapter", () => {
-    expect(supportedEngineOptions().map((option) => option.engine)).not.toContain("POSTGRESQL");
+  // All three engines ship now (#35). The property that mattered when one did
+  // not still holds and is worth keeping: the list is derived from the adapters,
+  // so an engine without one cannot appear as something a reader could choose and
+  // then be refused.
+  it("carries all three shipped engines", () => {
+    expect(
+      supportedEngineOptions()
+        .map((option) => option.engine)
+        .sort(),
+    ).toEqual(["MONGODB", "MSSQL", "POSTGRESQL"]);
+  });
+
+  it("derives the list from the adapters rather than a written-out set", () => {
+    expect(supportedEngineOptions().map((option) => option.engine)).toEqual(supportedEngines());
+  });
+});
+
+// The second pair in this file that would drift silently, for the same reason as
+// the first (#303). The dashboard says "hide, drop and build" on the go-live
+// dialog and promises to restore hidden indexes on disconnect, and it cannot
+// import an adapter to find out whether either is true — so @repo/contracts
+// carries a table and this holds it to the adapters themselves. An engine shipped
+// without a hide would otherwise keep promising one for a release.
+describe("canHideIndexes", () => {
+  it("agrees with every supported adapter's own capability", () => {
+    for (const engine of supportedEngines()) {
+      expect(canHideIndexes(engine)).toBe(adapterFor(engine).capabilities.hideIndexes);
+    }
+  });
+
+  // Asserted rather than left implied: this is the value the whole no-hide path
+  // through apply.ts and finalize.ts exists for, and the one the PostgreSQL
+  // adapter will be built against (#35). Measured on 17.11 and 18.6 — clearing
+  // `pg_index.indisvalid` is the only mechanism and it needs superuser.
+  it("says PostgreSQL cannot hide, before its adapter exists", () => {
+    expect(canHideIndexes("POSTGRESQL")).toBe(false);
   });
 });

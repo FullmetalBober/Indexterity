@@ -339,6 +339,64 @@ test.describe("cluster lifecycle", () => {
     });
   });
 
+  // #313, both halves, through the real stack: the org rule at the connect door,
+  // and the panel that says which of a stored string's privileges are surplus.
+  //
+  // This mongod runs with authentication disabled, which is the case the rule
+  // refuses outright — it grants every privilege to anyone who can reach it and
+  // no grant narrows that, so the refusal here is the strongest one the feature
+  // makes and the suite can reach it without a second server.
+  test.describe("least-privilege policy", () => {
+    test("refuses a connect once an owner turns the rule on, and says why", async ({ page }) => {
+      await signUpAndLandOnDashboard(page, uniqueEmail("leastpriv"));
+
+      // Off, and distinguishable from configured-to-off.
+      await page.getByRole("link", { name: "Settings", exact: true }).click();
+      await expect(page.getByText("any working credentials")).toBeVisible();
+      await expect(page.getByText("Never configured — this is the default.")).toBeVisible();
+
+      await page.getByRole("button", { name: "Require least privilege" }).click();
+      await expect(page.getByText("least privilege required")).toBeVisible();
+
+      await openConnectForm(page);
+      await page.getByLabel("Name", { exact: true }).fill("E2E Refused");
+      await page.getByLabel("Connection string").fill(MONGO_URL);
+      await page.getByRole("button", { name: "Check access" }).click();
+      await page.getByRole("button", { name: "Connect", exact: true }).click();
+
+      // The api's own words, not "failed to connect cluster": the remedy is the
+      // whole content of this refusal, and it is a 422 the form has to pass
+      // through verbatim.
+      await expect(page.getByText(/authentication disabled/)).toBeVisible();
+      // And nothing was stored — the gate runs after the dial and before the seal.
+      await expect(page.getByRole("heading", { name: "E2E Refused", exact: true })).toHaveCount(0);
+    });
+
+    test("splits the stored credentials into provided, required and redundant", async ({
+      page,
+    }) => {
+      await signUpAndLandOnDashboard(page, uniqueEmail("privpanel"));
+      await connectCluster(page, "E2E Privileges");
+      await openClusterSettings(page);
+
+      // Nothing is dialled until the reader asks: the panel's whole point is that
+      // it costs a connection to a production database.
+      await expect(page.getByText("Provided")).toHaveCount(0);
+      await page.getByRole("button", { name: "Check what these credentials hold" }).click();
+
+      await expect(page.getByText("Provided")).toBeVisible();
+      await expect(page.getByText("Required")).toBeVisible();
+      await expect(page.getByText("Redundant")).toBeVisible();
+      // The empty redundant group SAYS it is empty. Nothing surplus is the
+      // reassuring answer, and blank space under a heading reads as a panel that
+      // failed to load (#289).
+      await expect(page.getByText(/hold no privilege the engine does not use/)).toBeVisible();
+      // And the figures are dated, because nothing else in the product re-checks
+      // an existing cluster.
+      await expect(page.getByText(/Asked of the cluster just now/)).toBeVisible();
+    });
+  });
+
   test("disconnecting asks first, then removes the cluster", async ({ page }) => {
     await signUpAndLandOnDashboard(page, uniqueEmail("disconnect"));
     await connectCluster(page, "E2E Doomed");

@@ -57,7 +57,11 @@ export function seoTags(page: PageSeo): {
       { property: "og:image", content: image },
       { property: "og:image:width", content: "1200" },
       { property: "og:image:height", content: "630" },
-      { property: "og:image:alt", content: "Indexterity — automatic MongoDB index management" },
+      // Describes the words rendered into og-card.png, so the two move together.
+      {
+        property: "og:image:alt",
+        content: "Indexterity — automatic index management for MongoDB, PostgreSQL and SQL Server",
+      },
       { name: "twitter:card", content: "summary_large_image" },
       { name: "twitter:title", content: page.title },
       { name: "twitter:description", content: page.description },

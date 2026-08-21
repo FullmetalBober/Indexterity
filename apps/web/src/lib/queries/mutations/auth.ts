@@ -20,7 +20,11 @@ interface Answer {
   // and the twoFactorClient's `twoFactorRedirect` marker is not on any of
   // them — it is a runtime answer, so it is read by a guard rather than a type.
   readonly data?: unknown;
-  readonly error: { readonly message?: string } | null;
+  readonly error: {
+    readonly message?: string;
+    readonly code?: string;
+    readonly status?: number;
+  } | null;
 }
 
 // A sign-in that answered "now the code" instead of a session (#55).
@@ -32,6 +36,28 @@ function wantsSecondFactor(data: unknown): boolean {
   );
 }
 
+// Did this answer actually carry a session? better-auth returns a token with one
+// and omits it without, which is what a sign-up on an install requiring email
+// verification does — it creates the account and deliberately mints nothing
+// (#306). Read as a guard for the same reason wantsSecondFactor is: the shape is
+// a runtime answer, not a per-endpoint type.
+function hasSession(data: unknown): boolean {
+  return (
+    typeof data === "object" &&
+    data !== null &&
+    typeof (data as { token?: unknown }).token === "string"
+  );
+}
+
+// better-auth's refusal for an unverified address, which rides on 403. Matched by
+// code first because the status is shared — 403 is also what a signup-gate
+// refusal and the owner-2FA gate answer, and neither is fixed by a resend.
+function needsEmailVerification(error: Answer["error"]): boolean {
+  if (error === null) return false;
+  if (error.code === "EMAIL_NOT_VERIFIED") return true;
+  return error.status === 403 && /verif/i.test(error.message ?? "");
+}
+
 interface CredentialHandlers {
   readonly onStart: () => void;
   readonly onSignedIn: () => void;
@@ -40,6 +66,11 @@ interface CredentialHandlers {
   // exists yet, and the caller owes a TOTP or backup code (#55). Only sign-in
   // can answer this way, so sign-up does not pass it.
   readonly onTwoFactor?: () => void;
+  // The account exists and its address has not been confirmed: a sign-up that
+  // minted no session, or a sign-in refused for the same reason (#306). Without
+  // this, both were reported as signed in or as a bare failure, and the reader
+  // had nowhere to go — there was no resend and nothing naming the inbox.
+  readonly onVerificationRequired?: () => void;
 }
 
 function credentialCallbacks(handlers: CredentialHandlers) {
@@ -47,11 +78,24 @@ function credentialCallbacks(handlers: CredentialHandlers) {
     onMutate: handlers.onStart,
     onSuccess: (result: Answer) => {
       if (result.error !== null) {
+        if (needsEmailVerification(result.error) && handlers.onVerificationRequired) {
+          handlers.onVerificationRequired();
+          return;
+        }
         handlers.onError(result.error.message ?? "authentication failed");
       } else if (wantsSecondFactor(result.data)) {
         // Without a handler this would be reported as signed in — and every
         // query would answer 401 behind that lie.
         (handlers.onTwoFactor ?? (() => handlers.onError("two-factor code required")))();
+      } else if (!hasSession(result.data)) {
+        // The same lie, one endpoint over. A sign-up on an install that requires
+        // a verified address answers 200 with no session, and this branch used to
+        // fall through to onSignedIn — so the shell mounted, fetched four
+        // org-level keys, and every one answered 401 (seen in production, #306).
+        (
+          handlers.onVerificationRequired ??
+          (() => handlers.onError("confirm your email address to continue"))
+        )();
       } else {
         handlers.onSignedIn();
       }
@@ -110,6 +154,33 @@ export function useSignIn(h: CredentialHandlers) {
     mutationFn: (credentials: { email: string; password: string }) =>
       authClient.signIn.email(credentials),
     ...credentialCallbacks(h),
+  });
+}
+
+// Re-send the verification link. The api route existed and was rate-limited from
+// the day it shipped (better-auth's own 3-per-minute mail rule, kept deliberately
+// in auth/rate-limit.ts); nothing ever called it, so the only resend this product
+// had was pressing "sign in" again and not being told that is what happened
+// (#306).
+//
+// This is also the one path on which a failed send is VISIBLE. `sendMail`
+// swallows its own failures and returns a boolean nobody reads, but the api's
+// hooks.before refuses here with EMAIL_NOT_CONFIGURED when the deployment cannot
+// send at all — so a reader pressing this gets the real answer instead of a
+// second silent nothing.
+export function useResendVerification(h: {
+  readonly onStart: () => void;
+  readonly onSent: () => void;
+  readonly onError: (message: string) => void;
+}) {
+  return useMutation({
+    mutationFn: (email: string) => authClient.sendVerificationEmail({ email }),
+    onMutate: h.onStart,
+    onSuccess: (result: Answer) => {
+      if (result.error !== null) h.onError(result.error.message ?? "could not send the email");
+      else h.onSent();
+    },
+    onError: () => h.onError("could not send the email"),
   });
 }
 
