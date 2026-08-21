@@ -315,6 +315,37 @@ describe("SMTP", () => {
     expect(env.SMTP_PORT).toBe(465);
   });
 
+  // The combination that has no way out, and which locked the hosted
+  // deployment's own owner out of it (#306): verification required, mail
+  // impossible. Sign-up succeeds, the send is a logged no-op, and sign-in is
+  // refused forever — for every account on the install, not just the first.
+  it("refuses verification-required with no way to send the verification", () => {
+    const message = refusal("api", { ...API, REQUIRE_EMAIL_VERIFICATION: "true" });
+    // Named against the flag, not the absent SMTP_HOST: config/env.ts prints a
+    // bare "required" for a path with no value and would drop the explanation.
+    expect(message).toContain("REQUIRE_EMAIL_VERIFICATION");
+    expect(message).toContain("SMTP_HOST");
+    expect(message).toContain("locked out");
+  });
+
+  it("takes verification-required once mail is configured", () => {
+    const env = parse("api", {
+      ...API,
+      REQUIRE_EMAIL_VERIFICATION: "true",
+      SMTP_HOST: "smtp.example.com",
+      SMTP_USER: "u",
+      SMTP_PASS: "p",
+    });
+    expect(env.REQUIRE_EMAIL_VERIFICATION).toBe(true);
+  });
+
+  // The default is off, so an install with no mail at all still boots — which is
+  // the self-hosted default and must keep working.
+  it("leaves an install with no mail and no verification alone", () => {
+    expect(() => parse("api", API)).not.toThrow();
+    expect(parse("api", API).REQUIRE_EMAIL_VERIFICATION).toBe(false);
+  });
+
   it("refuses a from-address that is not one", () => {
     expect(
       refusal("worker", {

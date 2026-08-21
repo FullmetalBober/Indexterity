@@ -11,6 +11,7 @@ const verifyTotp = vi.hoisted(() => vi.fn());
 const verifyBackupCode = vi.hoisted(() => vi.fn());
 const verifyOtp = vi.hoisted(() => vi.fn());
 const sendOtp = vi.hoisted(() => vi.fn());
+const sendVerificationEmail = vi.hoisted(() => vi.fn());
 
 // better-auth's own client, which is what the form now talks to — no relay in
 // between. It answers with { data, error } rather than throwing, so a refusal
@@ -21,10 +22,21 @@ vi.mock("~/lib/auth-client", () => ({
     signUp: { email: signUp },
     requestPasswordReset,
     twoFactor: { verifyTotp, verifyBackupCode, verifyOtp, sendOtp },
+    sendVerificationEmail,
   },
 }));
 
-const OK = { data: {}, error: null };
+// A token, because that is what a real success carries — and its ABSENCE is
+// better-auth's answer for an account that must confirm its address first, which
+// the form now reads (#306). Left as `{}` this fixture asserted the old bug.
+const OK = { data: { token: "session-token" }, error: null };
+// A sign-up on an install requiring verification: created, deliberately no
+// session.
+const NO_SESSION = { data: { user: { id: "u1" }, token: null }, error: null };
+const UNVERIFIED = {
+  data: null,
+  error: { message: "Email not verified", code: "EMAIL_NOT_VERIFIED", status: 403 },
+};
 
 beforeEach(() => {
   signIn.mockResolvedValue(OK);
@@ -34,6 +46,7 @@ beforeEach(() => {
   verifyBackupCode.mockResolvedValue(OK);
   verifyOtp.mockResolvedValue(OK);
   sendOtp.mockResolvedValue(OK);
+  sendVerificationEmail.mockResolvedValue(OK);
 });
 
 describe("AuthForm", () => {
@@ -310,5 +323,108 @@ describe("AuthForm", () => {
     expect(await screen.findByText(/cannot send email/)).toBeInTheDocument();
     // Still on the authenticator field: nothing was sent, so nothing changed.
     expect(screen.getByLabelText("Authenticator code")).toBeInTheDocument();
+  });
+});
+
+// The four defects of #306, each pinned. All were reachable in production: the
+// hosted deployment answered 200 to a sign-up, reported it as signed in, fanned
+// out four org-level reads that every one 401'd, and left the owner with no way
+// to ask for the mail again.
+describe("AuthForm — an address that has not been confirmed", () => {
+  it("does not report a session-less sign-up as signed in", async () => {
+    const user = userEvent.setup();
+    const onSignedIn = vi.fn();
+    signUp.mockResolvedValue(NO_SESSION);
+    renderInApp(<AuthForm onSignedIn={onSignedIn} />);
+
+    await user.click(screen.getByRole("button", { name: "Need an account? Sign up" }));
+    await user.type(screen.getByLabelText("Name"), "Ada");
+    await user.type(screen.getByLabelText("Email"), "ada@b.test");
+    await user.type(screen.getByLabelText("Password"), "hunter2-ok");
+    await user.click(screen.getByRole("button", { name: "Sign up" }));
+
+    expect(onSignedIn).not.toHaveBeenCalled();
+    expect(await screen.findByText("Confirm your email")).toBeInTheDocument();
+  });
+
+  // Naming it is the point: the commonest cause of "it never arrived" is that it
+  // went somewhere else, and the reader cannot check an address nobody showed
+  // them.
+  it("names the address it mailed", async () => {
+    const user = userEvent.setup();
+    signUp.mockResolvedValue(NO_SESSION);
+    renderInApp(<AuthForm onSignedIn={vi.fn()} />);
+
+    await user.click(screen.getByRole("button", { name: "Need an account? Sign up" }));
+    await user.type(screen.getByLabelText("Name"), "Ada");
+    await user.type(screen.getByLabelText("Email"), "ada@b.test");
+    await user.type(screen.getByLabelText("Password"), "hunter2-ok");
+    await user.click(screen.getByRole("button", { name: "Sign up" }));
+
+    expect(await screen.findByText("ada@b.test")).toBeInTheDocument();
+  });
+
+  // The 403 half. Same destination, because the reader's next move is identical.
+  it("sends a refused sign-in to the same place instead of a bare failure", async () => {
+    const user = userEvent.setup();
+    signIn.mockResolvedValue(UNVERIFIED);
+    renderInApp(<AuthForm onSignedIn={vi.fn()} />);
+
+    await user.type(screen.getByLabelText("Email"), "ada@b.test");
+    await user.type(screen.getByLabelText("Password"), "hunter2-ok");
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+
+    expect(await screen.findByText("Confirm your email")).toBeInTheDocument();
+    expect(screen.getByText("ada@b.test")).toBeInTheDocument();
+  });
+
+  it("resends to the address it named", async () => {
+    const user = userEvent.setup();
+    signIn.mockResolvedValue(UNVERIFIED);
+    renderInApp(<AuthForm onSignedIn={vi.fn()} />);
+
+    await user.type(screen.getByLabelText("Email"), "ada@b.test");
+    await user.type(screen.getByLabelText("Password"), "hunter2-ok");
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+    await user.click(await screen.findByRole("button", { name: "Send it again" }));
+
+    expect(sendVerificationEmail).toHaveBeenCalledWith({ email: "ada@b.test" });
+    expect(await screen.findByText(/Sent again/)).toBeInTheDocument();
+  });
+
+  // The whole point of defect 4: this is the one path where a send that failed
+  // can be reported to the person waiting for it. An install with no SMTP is
+  // refused here by name.
+  it("shows the api's refusal when the deployment cannot send mail", async () => {
+    const user = userEvent.setup();
+    signIn.mockResolvedValue(UNVERIFIED);
+    sendVerificationEmail.mockResolvedValue({
+      data: null,
+      error: { message: "this deployment cannot send email", code: "EMAIL_NOT_CONFIGURED" },
+    });
+    renderInApp(<AuthForm onSignedIn={vi.fn()} />);
+
+    await user.type(screen.getByLabelText("Email"), "ada@b.test");
+    await user.type(screen.getByLabelText("Password"), "hunter2-ok");
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+    await user.click(await screen.findByRole("button", { name: "Send it again" }));
+
+    expect(await screen.findByText(/cannot send email/)).toBeInTheDocument();
+  });
+
+  it("offers a way back when the address was wrong", async () => {
+    const user = userEvent.setup();
+    signUp.mockResolvedValue(NO_SESSION);
+    renderInApp(<AuthForm onSignedIn={vi.fn()} />);
+
+    await user.click(screen.getByRole("button", { name: "Need an account? Sign up" }));
+    await user.type(screen.getByLabelText("Name"), "Ada");
+    await user.type(screen.getByLabelText("Email"), "typo@b.test");
+    await user.type(screen.getByLabelText("Password"), "hunter2-ok");
+    await user.click(screen.getByRole("button", { name: "Sign up" }));
+    await user.click(await screen.findByRole("button", { name: "Use a different address" }));
+
+    expect(screen.getByLabelText("Name")).toBeInTheDocument();
+    expect(screen.queryByText("Confirm your email")).not.toBeInTheDocument();
   });
 });
