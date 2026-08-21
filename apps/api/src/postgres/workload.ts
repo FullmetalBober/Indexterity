@@ -56,7 +56,7 @@ const COMPLEX = /\b(JOIN|UNION|INTERSECT|EXCEPT|WITH)\b|\(\s*SELECT\b/i;
 // `col = $1`, `t.col = $1`, `"Col" = $1`. Deliberately anchored on a bare
 // identifier: a function call or an arithmetic expression on the left is skipped
 // by the negative lookbehind on `(`.
-const IDENT = String.raw`(?:"[^"]+"|[A-Za-z_][A-Za-z0-9_$]*)`;
+const IDENT = '(?:"[^"]+"|[A-Za-z_][A-Za-z0-9_$]*)';
 const COLUMN = String.raw`(?:${IDENT}\.)?(${IDENT})`;
 const EQUALITY_RE = new RegExp(String.raw`(?<![\w.(])${COLUMN}\s*=\s*\$\d+`, "gi");
 const RANGE_RE = new RegExp(String.raw`(?<![\w.(])${COLUMN}\s*(?:>=|<=|>|<|BETWEEN\b)`, "gi");
@@ -65,22 +65,26 @@ function unquote(name: string): string {
   return name.startsWith('"') ? name.slice(1, -1) : name;
 }
 
-// The WHERE clause's text, or "" — bounded by the first clause that ends it.
-function whereClause(query: string): string {
-  const start = query.search(WHERE_RE);
-  if (start === -1) return "";
-  const rest = query.slice(start + query.slice(start).match(WHERE_RE)![0].length);
-  const end = rest.search(TAIL_RE);
+// The text between one clause keyword and whichever of `until` comes first, or
+// "" when the opening keyword is absent. One helper for both clauses: the only
+// difference is where each one legally ends, and duplicating the slicing is how
+// the two drift apart.
+function clauseBetween(query: string, opens: RegExp, until: RegExp): string {
+  const open = opens.exec(query);
+  if (open === null) return "";
+  const rest = query.slice(open.index + open[0].length);
+  const end = rest.search(until);
   return end === -1 ? rest : rest.slice(0, end);
 }
 
+// The WHERE clause's text, bounded by the first clause that ends it.
+function whereClause(query: string): string {
+  return clauseBetween(query, WHERE_RE, TAIL_RE);
+}
+
+// ORDER BY is followed only by LIMIT/OFFSET/FOR, never by another predicate.
 function orderByClause(query: string): string {
-  const start = query.search(ORDER_BY_RE);
-  if (start === -1) return "";
-  const rest = query.slice(start + query.slice(start).match(ORDER_BY_RE)![0].length);
-  // ORDER BY is followed only by LIMIT/OFFSET/FOR, never by another predicate.
-  const end = rest.search(/\b(LIMIT|OFFSET|FOR\s+(UPDATE|SHARE|NO\s+KEY))\b/i);
-  return end === -1 ? rest : rest.slice(0, end);
+  return clauseBetween(query, ORDER_BY_RE, /\b(LIMIT|OFFSET|FOR\s+(UPDATE|SHARE|NO\s+KEY))\b/i);
 }
 
 function matchAll(re: RegExp, text: string): string[] {
