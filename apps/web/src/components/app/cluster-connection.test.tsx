@@ -38,6 +38,7 @@ const cluster = {
   engine: "MONGODB",
   readOnly: true,
   provisionedUsername: null,
+  credentialPosture: "SCOPED",
 } as const;
 
 // The api's refusal to act on a session older than the fresh window — the one
@@ -288,5 +289,38 @@ describe("ClusterConnection", () => {
 
     expect(signInEmail).not.toHaveBeenCalled();
     expect(setClusterMode).toHaveBeenCalledTimes(1);
+  });
+});
+
+// What the credentials COULD do, which is a different question from what
+// read-only ALLOWS them to — a cluster can be read-only and still be held on a
+// string that could drop a table.
+describe("ClusterConnection — credential posture", () => {
+  it("names an admin string as one that can do more than manage indexes", () => {
+    renderInApp(<ClusterConnection cluster={{ ...cluster, credentialPosture: "ADMIN" }} />);
+    expect(screen.getByText("admin credentials")).toBeInTheDocument();
+    expect(screen.getByText(/more than manage indexes/)).toBeInTheDocument();
+  });
+
+  // The only case whose ceiling is known exactly, because we set it.
+  it("says a provisioned user's ceiling is known", () => {
+    renderInApp(<ClusterConnection cluster={{ ...cluster, credentialPosture: "PROVISIONED" }} />);
+    expect(screen.getByText("scoped user")).toBeInTheDocument();
+    expect(screen.getByText(/known exactly/)).toBeInTheDocument();
+  });
+
+  it("does not claim to know the exact grants of a pasted scoped string", () => {
+    renderInApp(<ClusterConnection cluster={{ ...cluster, credentialPosture: "SCOPED" }} />);
+    expect(screen.getByText("scoped credentials")).toBeInTheDocument();
+    expect(screen.getByText(/yours rather than ours to state/)).toBeInTheDocument();
+  });
+
+  // Null is its own case, not the narrowest one. Folding "we never asked" into
+  // "scoped" is how a reassuring badge gets attached to an admin string.
+  it("says it was never recorded rather than guessing the narrowest", () => {
+    renderInApp(<ClusterConnection cluster={{ ...cluster, credentialPosture: null }} />);
+    expect(screen.getByText("posture not recorded")).toBeInTheDocument();
+    expect(screen.queryByText("scoped credentials")).not.toBeInTheDocument();
+    expect(screen.getByText(/Rotating the connection string records it/)).toBeInTheDocument();
   });
 });

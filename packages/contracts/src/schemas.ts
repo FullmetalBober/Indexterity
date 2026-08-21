@@ -98,6 +98,14 @@ export const cluster = z.object({
   // Set when Indexterity provisioned its own least-privilege user on the
   // cluster (admin-string onboarding); null for pasted-string clusters.
   provisionedUsername: z.string().nullable(),
+  // What the stored credentials COULD do, as against what `readOnly` allows
+  // them to. Recorded when they were stored and re-evaluated on rotation.
+  //
+  // Null means we never asked — every cluster connected before the column
+  // existed, and any rotation whose diagnosis failed. Rendered as "not
+  // recorded" rather than as a guess, for the same reason a failed read is not
+  // an empty state (#289).
+  credentialPosture: z.enum(["PROVISIONED", "ADMIN", "SCOPED"]).nullable(),
   // Newest index snapshot, or null before the first collect. The dashboard
   // flags stale data so numbers from before an outage cannot read as current.
   lastCollectedAt: z.string().nullable(),

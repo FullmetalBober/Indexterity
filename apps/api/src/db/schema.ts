@@ -39,6 +39,28 @@ const updatedAt = timestamp("updated_at", { withTimezone: true }).notNull().defa
 export const connectionMode = pgEnum("connection_mode", ["HOSTED_DIRECT", "AGENT"]);
 // Must match ClusterEngine in src/engine/ports.ts (the adapter registry keys).
 export const clusterEngine = pgEnum("cluster_engine", ["MONGODB", "POSTGRESQL", "MSSQL"]);
+
+// How privileged the credentials this cluster is held on actually are, recorded
+// when they are stored rather than guessed from them later.
+//
+// The question it answers is one a reader could not otherwise ask: `readOnly`
+// says what Indexterity is ALLOWED to do, and this says what it COULD do. A
+// cluster held on an admin string is one where a mistake reaches further than
+// indexes, and on PostgreSQL it is also the only shape that can apply at all —
+// so it is worth showing rather than inferring from the absence of a provisioned
+// username.
+//
+//   PROVISIONED  Indexterity created this user itself, so its ceiling is known
+//                exactly: the scoped role and nothing more.
+//   ADMIN        the stored string could create users or roles when it was
+//                stored. It can do more than manage indexes.
+//   SCOPED       pasted, and cannot create users. Narrower than ADMIN, and
+//                unlike PROVISIONED its exact grants are the operator's business.
+//
+// Null for every cluster connected before this column existed: we never asked,
+// and "we do not know" is not one of the three. Rendered as such rather than
+// backfilled to a guess.
+export const credentialPosture = pgEnum("credential_posture", ["PROVISIONED", "ADMIN", "SCOPED"]);
 export const recommendationType = pgEnum("recommendation_type", [
   "DROP_UNUSED",
   "DROP_REDUNDANT",
@@ -352,6 +374,10 @@ export const clusters = pgTable(
     // The least-privilege user Indexterity created on the cluster during
     // admin-string onboarding; null when the customer pasted a ready-made string.
     provisionedUsername: text("provisioned_username"),
+    // Set at connect and re-evaluated on every rotation, because rotating is
+    // exactly when it changes: swapping an admin string for a scoped one is a
+    // narrowing somebody should be able to see happened.
+    credentialPosture: credentialPosture("credential_posture"),
     // Which TLS checks the owner turned off when connecting, as checkboxes on the
     // connect form. Held HERE and not inferred from the sealed string, for two
     // reasons: every dial is then verified against a recorded decision rather
