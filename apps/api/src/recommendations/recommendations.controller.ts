@@ -427,13 +427,19 @@ export class RecommendationsController {
         }
 
         try {
-          const { session, readOnly, release } = await openClusterSession(
+          const { session, readOnly, canHide, release } = await openClusterSession(
             this.database.db,
             rec.clusterId,
           );
           try {
             if (readOnly) throw errors.CONFLICT({ message: "cluster is read-only" });
-            await session.executor(readOnly).unhide(rec.database, rec.collection, rec.indexName);
+            // On an engine with no reversible hide the index was never hidden, so
+            // there is nothing to restore — but the rest of this route is the
+            // valuable half and still applies: the pending drop is cancelled and
+            // the index vetoed, which is what the owner pressed the button for.
+            if (canHide) {
+              await session.executor(readOnly).unhide(rec.database, rec.collection, rec.indexName);
+            }
           } finally {
             release();
           }

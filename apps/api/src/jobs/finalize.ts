@@ -82,7 +82,7 @@ export async function finalizeCluster(db: Database, clusterId: string): Promise<
     );
   if (due.length === 0 && watched.length === 0) return 0;
 
-  const { session, readOnly, release } = await openClusterSession(db, clusterId);
+  const { session, readOnly, canHide, release } = await openClusterSession(db, clusterId);
   try {
     // Read-only clusters never execute writes.
     if (readOnly) return 0;
@@ -195,7 +195,7 @@ export async function finalizeCluster(db: Database, clusterId: string): Promise<
         // it does not get taken on evidence we no longer have. This also ends
         // the case where an index sat hidden through a long outage.
         if (verdict === "UNOBSERVABLE") {
-          await executor.unhide(rec.database, rec.collection, rec.indexName);
+          if (canHide) await executor.unhide(rec.database, rec.collection, rec.indexName);
           await db
             .update(recommendations)
             .set({
@@ -218,7 +218,7 @@ export async function finalizeCluster(db: Database, clusterId: string): Promise<
           continue;
         }
         if (verdict === "REGRESSED") {
-          await executor.unhide(rec.database, rec.collection, rec.indexName);
+          if (canHide) await executor.unhide(rec.database, rec.collection, rec.indexName);
           const until = await recordRegression(
             db,
             clusterId,
@@ -246,7 +246,9 @@ export async function finalizeCluster(db: Database, clusterId: string): Promise<
             db,
             clusterId,
             `kept ${rec.indexName} (regression)`,
-            `Hiding ${rec.indexName} on ${rec.database}.${rec.collection} slowed reads during the observe window, so the drop was aborted and the index un-hidden. It is cooling down until ${day}.`,
+            canHide
+              ? `Hiding ${rec.indexName} on ${rec.database}.${rec.collection} slowed reads during the observe window, so the drop was aborted and the index un-hidden. It is cooling down until ${day}.`
+              : `Reads on ${rec.database}.${rec.collection} slowed during ${rec.indexName}'s observe window, so the drop was aborted. The index was never hidden, so nothing had to be restored. It is cooling down until ${day}.`,
           );
           await emitClusterEvent(db, { clusterId, kind: "REGRESSION_FIRED", task: null });
           continue;
@@ -258,7 +260,10 @@ export async function finalizeCluster(db: Database, clusterId: string): Promise<
       const check = await preflightDrop(collector, rec);
       if (!check.safe) {
         if (check.spec !== null) {
-          await executor.unhide(rec.database, rec.collection, rec.indexName);
+          // The one un-hide on this path that a no-hide engine actually reaches:
+          // the two above sit behind a read-latency baseline, which apply.ts only
+          // records when the index was really hidden.
+          if (canHide) await executor.unhide(rec.database, rec.collection, rec.indexName);
           recordDrop("unhidden");
           await db
             .update(recommendations)

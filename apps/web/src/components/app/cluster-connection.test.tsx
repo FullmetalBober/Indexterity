@@ -35,9 +35,10 @@ vi.mock("~/lib/auth-client", () => ({
 const cluster = {
   id: "c1",
   name: "Production",
+  engine: "MONGODB",
   readOnly: true,
   provisionedUsername: null,
-};
+} as const;
 
 // The api's refusal to act on a session older than the fresh window — the one
 // failure the hooks turn into a password prompt instead of a toast.
