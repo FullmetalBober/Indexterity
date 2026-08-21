@@ -5,6 +5,7 @@
   "separate-pull-requests": false,
   "packages": {
     ".": {
+      "package-name": "",
       "extra-files": [
         {
           "type": "json",
