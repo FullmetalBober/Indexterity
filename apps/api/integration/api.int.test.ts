@@ -5347,6 +5347,12 @@ describe("approving on a read-only cluster", () => {
 describe("least-privilege policy", () => {
   let strict: Session;
   let strictOrgId: string;
+  // The cluster this block connects for itself, and the reason it does: the
+  // privilege re-check DIALS, so it spends a dial from the budget of whoever
+  // asks. Borrowing the shared `owner` session for it answered 429 in CI — that
+  // session has spent its ten by this point in the file, and the symptom lands
+  // on the new test rather than on the scenario that spent them.
+  let strictClusterId: string;
 
   beforeAll(async () => {
     strict = await signUp("leastpriv");
@@ -5429,7 +5435,8 @@ describe("least-privilege policy", () => {
       body: JSON.stringify({ name: "Allowed Again", connectionString: MONGO_URL }),
     });
     expect(created.status).toBe(200);
-    const id = asString(asRecord(await created.json()).id);
+    strictClusterId = asString(asRecord(await created.json()).id);
+    const id = strictClusterId;
     createdClusterIds.push(id);
 
     // Switching the rule back ON does not reach backwards: the cluster stays, and
@@ -5457,7 +5464,7 @@ describe("least-privilege policy", () => {
   });
 
   it("re-checks the stored credentials and reports required beside redundant", async () => {
-    const privileges = await api(`/clusters/${clusterId}/privileges`, owner);
+    const privileges = await api(`/clusters/${strictClusterId}/privileges`, strict);
     expect(privileges.status).toBe(200);
     const body = asRecord(await privileges.json());
     expect(body.reachable).toBe(true);
@@ -5487,7 +5494,11 @@ describe("least-privilege policy", () => {
     // answer a typo gets. Not found rather than forbidden, which is the rule the
     // other eight cluster routes follow: whether a cluster id exists is not this
     // caller's business, and a 403 would confirm it does.
-    const refused = await api(`/clusters/${clusterId}/privileges`, strict);
+    //
+    // Free of the dial budget, and that is not incidental: ownership is checked
+    // before anything is unsealed or dialled, so a caller probing ids cannot
+    // spend somebody's budget — or reach a customer's host — by guessing.
+    const refused = await api(`/clusters/${strictClusterId}/privileges`, owner);
     expect(refused.status).toBe(404);
   });
 
