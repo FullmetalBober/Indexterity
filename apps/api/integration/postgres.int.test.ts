@@ -3,6 +3,7 @@ import { type EngineSession, workloadKey } from "../src/engine/ports";
 import { detectEngine } from "../src/engine/registry";
 import { ProvisionDeniedError } from "../src/mongo/provision";
 import { postgresAdapter } from "../src/postgres/adapter";
+import { withPgCredentials } from "../src/postgres/conn-string";
 import { PostgresConnection } from "../src/postgres/connection";
 import { HideUnsupportedError } from "../src/postgres/executor";
 import { provisionPostgresScopedUser } from "../src/postgres/provision";
@@ -271,9 +272,13 @@ describe.skipIf(POSTGRES_URL === undefined)("postgres adapter against a live ser
       expect(diagnosis.databases).toContain("postgres");
     });
 
+    // The wrong password is built with the adapter's own credential writer rather
+    // than by editing the string: the first version substituted the literal this
+    // suite uses locally, which is not the one CI sets, so the "bad" string was
+    // the good one and the assertion failed on a connection that worked.
     it("reports an unreachable string as unreachable rather than throwing", async () => {
       const diagnosis = await postgresAdapter.diagnose(
-        (POSTGRES_URL as string).replace(/:probe@/, ":wrong@"),
+        withPgCredentials(POSTGRES_URL as string, "postgres", "definitely-not-the-password"),
         OVERRIDES,
       );
       expect(diagnosis.reachable).toBe(false);
