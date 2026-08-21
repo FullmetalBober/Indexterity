@@ -118,3 +118,26 @@ describe("deletePatternOf", () => {
     expect(deletePatternOf(stmt("SELECT * FROM t WHERE ts < now()"))).toBeNull();
   });
 });
+
+// node-pg hands a bigint column back as a STRING, so `calls` arrives as "3"
+// unless the collector coerces it at the boundary — which it does. This asserts
+// the shape stays arithmetic-safe if that ever regresses: a count that is a
+// string survives every comparison and breaks the first addition.
+describe("counts are numbers", () => {
+  it("keeps count and docsExamined arithmetic-safe", () => {
+    const shape = shapeOf({ query: "SELECT * FROM t WHERE a = $1", calls: 3, rows: 12 });
+    expect(typeof shape?.count).toBe("number");
+    expect(typeof shape?.docsExamined).toBe("number");
+    expect((shape?.count ?? 0) + 1).toBe(4);
+  });
+
+  it("keeps a delete pattern's count arithmetic-safe", () => {
+    const pattern = deletePatternOf({
+      query: "DELETE FROM t WHERE ts < now() - interval $1",
+      calls: 2,
+      rows: 100,
+    });
+    expect(typeof pattern?.count).toBe("number");
+    expect((pattern?.count ?? 0) + 1).toBe(3);
+  });
+});

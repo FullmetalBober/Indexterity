@@ -1,7 +1,19 @@
-import type { IndexKey, IndexSpec } from "../analysis";
-import { DatabaseInaccessibleError, type IndexUsageStat, type LatencyPair } from "../engine/ports";
+import type { IndexKey, IndexSpec, QueryShape, ServerHealth } from "../analysis";
+import {
+  type ClusterNode,
+  DatabaseInaccessibleError,
+  type DeletePattern,
+  type IndexCollector,
+  type IndexUsageStat,
+  type LatencyPair,
+  type WorkloadTarget,
+  workloadKey,
+} from "../engine/ports";
 import type { PostgresConnection } from "./connection";
+import { collectPostgresHealth } from "./health";
+import { collectPostgresNodes } from "./members";
 import { postgresHasLastIdxScan } from "./version";
+import { deletePatternOf, type NormalizedStatement, shapeOf } from "./workload";
 
 // The read side of the PostgreSQL collector. Everything here is a catalog or a
 // statistics view — nothing in this file can read a stored value, which is the
@@ -37,7 +49,7 @@ export function joinTableRef(ref: PostgresTableRef): string {
 // pipeline cannot see is one it cannot protect either.
 const SYSTEM_SCHEMAS = ["pg_catalog", "information_schema", "pg_toast"];
 
-export class PostgresIndexCollector {
+export class PostgresIndexCollector implements IndexCollector {
   constructor(private readonly conn: PostgresConnection) {}
 
   // Ordinary and partitioned tables. A partitioned parent is included because
@@ -316,6 +328,96 @@ export class PostgresIndexCollector {
     return [];
   }
 
+  // Every namespace at once, which is why the port batches this: the workload
+  // source is one cluster-wide store filtered per table, so a per-table
+  // signature would read the whole of pg_stat_statements once per table.
+  //
+  // Grouped by database, because pg_stat_statements is per-database — a
+  // statement run against `app` is not visible from `postgres`, which is the
+  // same per-database boundary the pools exist for.
+  async collectWorkload(
+    targets: readonly WorkloadTarget[],
+  ): Promise<Map<string, readonly QueryShape[]>> {
+    const byDatabase = new Map<string, WorkloadTarget[]>();
+    for (const target of targets) {
+      const list = byDatabase.get(target.database) ?? [];
+      list.push(target);
+      byDatabase.set(target.database, list);
+    }
+    const shapes = new Map<string, readonly QueryShape[]>();
+    for (const [database, group] of byDatabase) {
+      const statements = await this.statementsFor(database);
+      for (const target of group) {
+        const ref = splitTableRef(target.collection);
+        const found: QueryShape[] = [];
+        for (const statement of statements) {
+          if (!attributesTo(statement.query, ref)) continue;
+          const shape = shapeOf(statement);
+          if (shape !== null) found.push(shape);
+        }
+        if (found.length > 0) shapes.set(workloadKey(target.database, target.collection), found);
+      }
+    }
+    return shapes;
+  }
+
+  // Recurring age-based purges, read out of the same store.
+  async collectDeletePatterns(database: string, collection: string): Promise<DeletePattern[]> {
+    const ref = splitTableRef(collection);
+    const patterns: DeletePattern[] = [];
+    for (const statement of await this.statementsFor(database)) {
+      if (!attributesTo(statement.query, ref)) continue;
+      const pattern = deletePatternOf(statement);
+      if (pattern !== null) patterns.push(pattern);
+    }
+    return patterns;
+  }
+
+  // MongoDB's profiler reports individual slow operations; pg_stat_statements
+  // aggregates and keeps no per-execution rows at all, so there is nothing here
+  // that "slow query" means. The create side reads collectWorkload instead,
+  // which is the same information without the pretence of individual samples.
+  async collectSlowQueries(): Promise<QueryShape[]> {
+    return [];
+  }
+
+  collectServerHealth(): Promise<ServerHealth | null> {
+    return collectPostgresHealth(this.conn);
+  }
+
+  collectNodes(): Promise<readonly ClusterNode[] | null> {
+    return collectPostgresNodes(this.conn);
+  }
+
+  // Read once per database per pass. Bounded to the statements this pass could
+  // act on: anything with no calls has nothing to say, and the store is capped
+  // by pg_stat_statements.max anyway.
+  private async statementsFor(database: string): Promise<NormalizedStatement[]> {
+    try {
+      const rows = await this.conn.query<{
+        query: unknown;
+        calls: unknown;
+        rows: unknown;
+      }>(`SELECT query, calls, rows FROM pg_stat_statements WHERE calls > 0`, [], database);
+      // Coerced HERE, at the boundary, because `calls` and `rows` are bigint
+      // columns and node-pg hands bigint back as a STRING — it will not narrow
+      // one to a JS number on its own, since a bigint can exceed Number's exact
+      // range. Left alone they travel as strings that look like numbers all the
+      // way into `count`, where `count + 1` concatenates instead of adding. Found
+      // by reading a real answer, not by a fixture that already held numbers.
+      return rows.map((row) => ({
+        query: typeof row.query === "string" ? row.query : "",
+        calls: Number(row.calls ?? 0),
+        rows: Number(row.rows ?? 0),
+      }));
+    } catch {
+      // The extension is optional (WORKLOAD tier in diagnose.ts): without it the
+      // drop side works as normal and there are simply no create-side
+      // recommendations.
+      return [];
+    }
+  }
+
   // Run against one database, turning the driver's "cannot connect" into the one
   // per-database failure the passes above must survive: an inaccessible database
   // contributes nothing and the rest of the cluster is still worth walking.
@@ -352,4 +454,22 @@ const INACCESSIBLE_CODES = new Set(["3D000", "28000", "28P01", "42501"]);
 function isDatabaseInaccessible(error: unknown): boolean {
   const code = (error as { code?: unknown } | null)?.code;
   return typeof code === "string" && INACCESSIBLE_CODES.has(code);
+}
+
+// Does this normalized statement name that table? Word-bounded so `sales.orders`
+// does not also claim `sales.orders_archive`, and schema-qualified because two
+// tables of the same name in different schemas are different tables.
+//
+// A bare table name is accepted too: a statement written against the search path
+// says `FROM orders`, which is by far the common case, and refusing it would
+// leave most workloads invisible. The cost is that an unqualified `orders` in a
+// database with two schemas containing one is attributed to both — over-counting
+// rather than missing, which is the safer direction for a signal that must recur
+// before it becomes a recommendation.
+export function attributesTo(query: string, ref: PostgresTableRef): boolean {
+  const table = escapeRegex(ref.table);
+  // `\b`, not `\m`/`\M`. Those are PostgreSQL's word-boundary escapes and mean
+  // nothing in JavaScript — as literals they made this never match, which showed
+  // up as an empty workload rather than as an error.
+  return new RegExp(`\\b(?:${escapeRegex(ref.schema)}\\.)?${table}\\b`, "i").test(query);
 }

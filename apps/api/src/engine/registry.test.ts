@@ -40,13 +40,29 @@ describe("the engine hint the dashboard draws", () => {
   // What the override exists for: neither side recognises it, so the form asks
   // rather than guessing, and the api's fallback would otherwise dial it as
   // mongo and refuse with the wrong hint.
-  it.each(["postgres://user:pass@host:5432/db", "host:1433", "", "   ", "not a connection string"])(
+  //
+  // `postgres://` used to be in this list and is not any more — its adapter
+  // shipped with #35, so both sides claim it now, which is the case below.
+  it.each(["host:1433", "", "   ", "not a connection string"])(
     "claims nothing for %s, which is what makes the override appear",
     (value) => {
       expect(engineFromScheme(value)).toBeNull();
       expect(detectEngine(value)).toBeNull();
     },
   );
+
+  // Both spellings of the URI form, and libpq's keyword form, which has no
+  // scheme at all — the same shape as SQL Server's ADO string and anchored the
+  // same way so the two cannot claim each other.
+  it.each([
+    "postgresql://user:pass@host:5432/db",
+    "postgres://user:pass@host:5432/db",
+    "postgresql://u:p@primary:5432,standby:5433/app",
+    "host=db.corp port=5432 dbname=app user=u",
+  ])("agrees on %s now that the adapter has shipped", (value) => {
+    expect(engineFromScheme(value)).toBe("POSTGRESQL");
+    expect(detectEngine(value)).toBe("POSTGRESQL");
+  });
 
   // The one place the two deliberately disagree, and the disagreement is the
   // better product: the mongo driver's own parser is case-SENSITIVE on the
@@ -82,10 +98,20 @@ describe("supportedEngineOptions", () => {
     for (const option of options) expect(option.connStringHint.length).toBeGreaterThan(0);
   });
 
-  // The planned slot stays out of the list rather than appearing as something a
-  // reader could choose and then be refused (#35).
-  it("omits an engine with no adapter", () => {
-    expect(supportedEngineOptions().map((option) => option.engine)).not.toContain("POSTGRESQL");
+  // All three engines ship now (#35). The property that mattered when one did
+  // not still holds and is worth keeping: the list is derived from the adapters,
+  // so an engine without one cannot appear as something a reader could choose and
+  // then be refused.
+  it("carries all three shipped engines", () => {
+    expect(
+      supportedEngineOptions()
+        .map((option) => option.engine)
+        .sort(),
+    ).toEqual(["MONGODB", "MSSQL", "POSTGRESQL"]);
+  });
+
+  it("derives the list from the adapters rather than a written-out set", () => {
+    expect(supportedEngineOptions().map((option) => option.engine)).toEqual(supportedEngines());
   });
 });
 
