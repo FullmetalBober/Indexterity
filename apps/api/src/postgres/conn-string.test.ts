@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { NO_TLS_OVERRIDES } from "../engine/ports";
+import { assertPgTlsEnforced } from "./client";
 import {
   applyPgTlsOverrides,
-  assertPgTlsEnforced,
   effectivePgTrust,
   isPgConnString,
   parsePgConnString,
@@ -12,6 +12,7 @@ import {
   sslModeOf,
   usesLibpqCompat,
   withPgCredentials,
+  withPgDatabase,
 } from "./conn-string";
 
 const overrides = (partial: Partial<typeof NO_TLS_OVERRIDES>) => ({
@@ -207,9 +208,9 @@ describe("assertPgTlsEnforced", () => {
   it("refuses plaintext, including a string that names no sslmode", () => {
     expect(() =>
       assertPgTlsEnforced("postgresql://u@h/db?sslmode=disable", NO_TLS_OVERRIDES),
-    ).toThrow(/gives away more/);
+    ).toThrow(/refusing to connect/);
     expect(() => assertPgTlsEnforced("postgresql://u@h/db", NO_TLS_OVERRIDES)).toThrow(
-      /gives away more/,
+      /refusing to connect/,
     );
   });
 
@@ -226,7 +227,7 @@ describe("assertPgTlsEnforced", () => {
         "postgresql://u@h/db?sslmode=require&uselibpqcompat=true",
         NO_TLS_OVERRIDES,
       ),
-    ).toThrow(/gives away more/);
+    ).toThrow(/refusing to connect/);
   });
 
   it("accepts the conceded rung once its box is ticked", () => {
@@ -420,5 +421,46 @@ describe("pgConnStringUsername", () => {
     // libpq falls back to the OS user, which is not something we can name.
     expect(pgConnStringUsername("postgresql://h/db")).toBeNull();
     expect(pgConnStringUsername("not a connection string")).toBeNull();
+  });
+});
+
+describe("withPgDatabase", () => {
+  // The whole reason PostgresConnection holds a pool per database: postgres has
+  // no cross-database reference at all, so each one is its own dial.
+  it("retargets the database and keeps everything else, URI form", () => {
+    const swapped = withPgDatabase(
+      "postgresql://u:p@db.corp:5433/postgres?sslmode=verify-full",
+      "app",
+    );
+    const parsed = parsePgConnString(swapped);
+    expect(parsed?.database).toBe("app");
+    expect(parsed?.hosts).toEqual([{ host: "db.corp", port: 5433 }]);
+    expect(parsed?.user).toBe("u");
+    expect(parsed?.params.get("sslmode")).toBe("verify-full");
+  });
+
+  it("adds a database to a string that named none", () => {
+    expect(parsePgConnString(withPgDatabase("postgresql://u@h:5432", "app"))?.database).toBe("app");
+  });
+
+  it("keeps a multi-host string multi-host", () => {
+    const swapped = withPgDatabase("postgresql://u:p@h1:5432,h2:5433/postgres", "app");
+    expect(pgHosts(swapped).hosts).toEqual(["h1:5432", "h2:5433"]);
+    expect(parsePgConnString(swapped)?.database).toBe("app");
+  });
+
+  it("stays in the keyword form, replacing dbname rather than repeating it", () => {
+    const swapped = withPgDatabase("host=h dbname=postgres user=u sslmode=verify-full", "app");
+    expect(parsePgConnString(swapped)?.form).toBe("keyword");
+    expect(parsePgConnString(swapped)?.database).toBe("app");
+    expect(swapped.match(/dbname=/g)).toHaveLength(1);
+  });
+
+  // A database name may contain almost anything, and the URI form has to encode
+  // it or the path stops being one segment.
+  it("encodes a database name that needs it", () => {
+    expect(parsePgConnString(withPgDatabase("postgresql://u@h/x", "a b/c"))?.database).toBe(
+      "a b/c",
+    );
   });
 });

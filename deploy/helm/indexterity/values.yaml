@@ -363,10 +363,10 @@ config:
   # ceiling. Refusing rather than guessing is the default because the engine
   # hides, drops and builds indexes on a live database, and a major release is
   # where command behaviour moves.
-  allowUntestedMongoVersion: false
-  # Same ceiling, for SQL Server: releases newer than the 2025 series this
-  # release was probed against are refused unless this is set.
-  allowUntestedMssqlVersion: false
+  # One flag for every engine: MongoDB past 8.x, SQL Server past the 2025 series,
+  # PostgreSQL past 18. An operator running two engines should not have to set two
+  # variables to say one thing.
+  allowUntestedDatabaseVersion: false
   # The operator's retention ceiling, in days. Storage is your bill, so this caps
   # what any plan keeps AND what any plan may see. Empty means no ceiling — each
   # plan's own window decides.

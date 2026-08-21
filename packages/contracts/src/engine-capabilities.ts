@@ -23,7 +23,9 @@ const HIDE_INDEXES: Readonly<Record<ClusterEngine, boolean>> = {
   // No native equivalent, and the one mechanism that works (clearing
   // `pg_index.indisvalid`) needs superuser and cannot be delegated — measured on
   // 17.11 and 18.6 for #35. The observe stage is statistics-only here: the index
-  // keeps serving every query while the window runs.
+  // keeps serving every query while the window runs. Its adapter has shipped, so
+  // registry.test.ts now holds this value against the adapter itself rather than
+  // asserting it ahead of one.
   POSTGRESQL: false,
 };
 

@@ -27,6 +27,12 @@ const SCHEMES: readonly { readonly engine: ClusterEngine; readonly test: RegExp 
   // a query parameter cannot claim it.
   { engine: "MSSQL", test: /^\s*(mssql|sqlserver):\/\//i },
   { engine: "MSSQL", test: /^\s*(server|data source)\s*=/i },
+  { engine: "POSTGRESQL", test: /^\s*postgres(ql)?:\/\//i },
+  // libpq's keyword form, which like the ADO one has no scheme. Anchored to a
+  // leading `host=`/`hostaddr=` so it cannot claim SQL Server's `Server=…` (that
+  // rule is anchored on `server`, which this never accepts) nor a mongo string
+  // carrying `host=` inside a query parameter.
+  { engine: "POSTGRESQL", test: /^\s*(host|hostaddr)\s*=/i },
 ];
 
 export function engineFromScheme(connectionString: string): ClusterEngine | null {

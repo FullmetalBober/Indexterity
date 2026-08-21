@@ -20,7 +20,7 @@ export function useSecureCookies(baseURL: string, nodeEnv: string | undefined): 
 // Overridable for a cluster with no TLS at all — a Kind or minikube smoke test,
 // where the images still say NODE_ENV=production and there is no ingress to
 // misconfigure. Same shape as the other "unsafe, and sometimes what you meant"
-// switches (ALLOW_PRIVATE_CLUSTER_TARGETS, ALLOW_UNTESTED_MONGO_VERSION):
+// switches (ALLOW_PRIVATE_CLUSTER_TARGETS, ALLOW_UNTESTED_DATABASE_VERSION):
 // opt-in, named for what it gives up, and never the default.
 //
 // Taken as an argument rather than read here: config/schema.ts owns what the

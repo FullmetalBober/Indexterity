@@ -9,7 +9,11 @@
 // on sys.dm_exec_query_stats, which the plan cache silently evicts, and the
 // product would be guessing. 2014 and older are also long past end-of-life.
 
-import { workerEnv } from "../config/env";
+// The ceiling flag is one variable for every engine now, so it has one reader
+// too — kept beside mongo's version rules for the same reason allowInsecureTls
+// and TlsOverrides live in mongo/client.ts: the first engine's module is where
+// the shared piece already was.
+import { allowUntestedVersions } from "../mongo/version";
 
 export interface MssqlServerVersion {
   readonly major: number;
@@ -39,10 +43,6 @@ export const MSSQL_MIN_MAJOR = 13; // 2016
 // invisible to the pipeline by design (#209).
 export const MSSQL_MAX_TESTED_MAJOR = 17;
 
-export function allowUntestedMssqlVersions(): boolean {
-  return workerEnv().ALLOW_UNTESTED_MSSQL_VERSION;
-}
-
 // SERVERPROPERTY('ProductVersion') reports "16.0.4250.1". Unreadable is
 // unsupported, never "probably fine".
 export function parseMssqlVersion(value: unknown): MssqlServerVersion | null {
@@ -70,12 +70,12 @@ export function mssqlVersionRefusal(version: MssqlServerVersion | null): string 
       "server, or point Indexterity at a 2016+ instance"
     );
   }
-  if (version.major > MSSQL_MAX_TESTED_MAJOR && !allowUntestedMssqlVersions()) {
+  if (version.major > MSSQL_MAX_TESTED_MAJOR && !allowUntestedVersions()) {
     return (
       `${mssqlProductName(version)} is newer than the SQL Server 2025 series this ` +
       "engine has been tested against. Refusing rather than guessing: DISABLE/REBUILD " +
       "semantics and the usage-stats reset behaviour have moved between releases " +
-      "before. Set ALLOW_UNTESTED_MSSQL_VERSION=true to proceed anyway"
+      "before. Set ALLOW_UNTESTED_DATABASE_VERSION=true to proceed anyway"
     );
   }
   return null;

@@ -4,13 +4,18 @@ import { Button } from "~/components/ui/button";
 import { Card, CardContent, CardHeader } from "~/components/ui/card";
 import { jsonLd, seoTags, siteOrigin } from "../lib/seo";
 
-const TITLE = "Indexterity — automatic index management for MongoDB and SQL Server";
+const TITLE = "Indexterity — automatic index management for MongoDB, PostgreSQL and SQL Server";
 // Kept under ~155 characters so search results show it whole.
 const DESCRIPTION =
-  "Find unused, redundant and missing MongoDB and SQL Server indexes. Apply them " +
-  "through a pipeline that observes before it drops. Read-only by default.";
+  "Find unused, redundant and missing indexes in MongoDB, PostgreSQL and SQL " +
+  "Server. Apply them through a pipeline that observes first. Read-only by default.";
 
-const PIPELINE = ["PROPOSED", "APPROVED", "hidden", "observed", "dropped"];
+// The stages every engine goes through. "hidden" is deliberately NOT here even
+// though MongoDB and SQL Server do hide during the observe window: PostgreSQL has
+// no reversible hide at all (#35), and one static diagram cannot be true of three
+// engines while asserting it. The per-engine difference is a FAQ answer, where
+// there is room to say what hiding costs on each.
+const PIPELINE = ["PROPOSED", "APPROVED", "observed", "dropped"];
 
 // Marketing landing at / — fully static (no loader, no api calls), so it
 // renders even when the control plane is down. The dashboard lives at /app.
@@ -64,7 +69,7 @@ const FEATURES = [
   },
   {
     title: "Workload-aware index creation",
-    body: "Recurring query shapes — from $queryStats or the profiler on MongoDB, from Query Store on SQL Server — become compound indexes in Equality, Sort, Range order with correct sort directions, partial indexes for constant filters, and TTL advisories for manual age-based cleanups. Queries that sort in memory count too, not just the ones that scan everything.",
+    body: "Recurring query shapes — from $queryStats or the profiler on MongoDB, pg_stat_statements on PostgreSQL, Query Store on SQL Server — become compound indexes in Equality, Sort, Range order with correct sort directions, partial indexes for constant filters, and TTL advisories for manual age-based cleanups. Queries that sort in memory count too, not just the ones that scan everything.",
   },
   {
     title: "Proof, not promises",
@@ -106,17 +111,17 @@ const FAQ = [
   {
     question: "Does Indexterity read my data?",
     answer:
-      "No. It connects as a least-privilege user granted index management and statistics only — no read privilege on your collections or tables, so the server itself refuses any attempt to read what is stored. Index usage, sizes and latency all come from the engine's own statistics views — $indexStats and $collStats on MongoDB, sys.dm_db_index_usage_stats and sys.dm_db_partition_stats on SQL Server — none of which expose stored values.",
+      "Analysis never reads your data on any engine: usage, sizes and latency come from the engine's own statistics views — $indexStats and $collStats on MongoDB, pg_stat_user_indexes and pg_stat_statements on PostgreSQL, sys.dm_db_index_usage_stats and sys.dm_db_partition_stats on SQL Server — and none of them expose stored values. On MongoDB and SQL Server the user Indexterity runs as has no read privilege at all, so the server itself refuses any attempt to read a document or a row, applying included. PostgreSQL cannot offer that, and we would rather say so than imply it: only a table's owner may alter its indexes there and an owner can always read the table, so the least-privilege user we provision is analysis-only and applying takes credentials you connect deliberately.",
   },
   {
     question: "How does it decide an index is unused?",
     answer:
-      "From the engine's own per-index operation counters, over at least three snapshots: $indexStats on MongoDB, summed across every replica-set member and shard, and sys.dm_db_index_usage_stats on SQL Server, read per replica. An index with no operations in any snapshot is flat-zero; one that used to be busy and then went quiet is treated as periodic-dead. Indexes that are still used periodically are never proposed for removal. A counter that goes backwards — a restart, a rebuild, a statistics reset — is treated as a fact about the counter rather than about usage, and never as an index falling idle.",
+      "From the engine's own per-index operation counters, over at least three snapshots: $indexStats on MongoDB, summed across every replica-set member and shard; pg_stat_user_indexes on PostgreSQL, which from version 16 also records when each index was last used; and sys.dm_db_index_usage_stats on SQL Server, read per replica. An index with no operations in any snapshot is flat-zero; one that used to be busy and then went quiet is treated as periodic-dead. Indexes that are still used periodically are never proposed for removal. A counter that goes backwards — a restart, a rebuild, a statistics reset — is treated as a fact about the counter rather than about usage, and never as an index falling idle.",
   },
   {
     question: "What happens if dropping an index hurts performance?",
     answer:
-      "A drop is never the first action. The index is hidden first and the read latency of its collection or table is baselined. If average read latency rises past the baseline during the observe window, the index is un-hidden automatically, the recommendation is rejected, and the index enters a cooldown so it is not proposed again. What hiding costs depends on the engine, and Indexterity says which before it acts: on MongoDB it is instant and free both ways, while on SQL Server the un-hide is an exact but not instant rebuild. Even after a real drop, undo rebuilds the index from the spec recorded at drop time.",
+      "A drop is never the first action. The index is hidden first and the read latency of its collection or table is baselined. If average read latency rises past the baseline during the observe window, the index is un-hidden automatically, the recommendation is rejected, and the index enters a cooldown so it is not proposed again. What hiding costs depends on the engine, and Indexterity says which before it acts: on MongoDB it is instant and free both ways, on SQL Server the un-hide is an exact but not instant rebuild, and PostgreSQL has no reversible hide at all — there the index keeps serving every query while its usage is watched, and the drop is the first thing that changes anything. Even after a real drop, undo rebuilds the index from the spec recorded at drop time.",
   },
   {
     question: "How long does an index stay hidden before it is dropped?",
@@ -126,7 +131,12 @@ const FAQ = [
   {
     question: "Which deployments does it work with?",
     answer:
-      "MongoDB 6.0 to 8.x — Atlas, self-hosted and sharded — and SQL Server 2016 and newer. Sharded clusters are handled explicitly: statistics are summed across shards, and shard-key backing indexes are protected from removal. Replicas are read one node at a time, because a replica-set member and an availability-group secondary each keep their own usage counters, and an index idle on the primary may be the one a reporting replica lives on. On Atlas, user management belongs to Atlas, so you create the scoped role there and connect with its string; self-hosted MongoDB and SQL Server can have Indexterity create the user for you.",
+      "MongoDB 6.0 to 8.x — Atlas, self-hosted and sharded — PostgreSQL 14 and newer, and SQL Server 2016 and newer. Sharded clusters are handled explicitly: statistics are summed across shards, and shard-key backing indexes are protected from removal. Replicas are read one node at a time, because a replica-set member and an availability-group secondary each keep their own usage counters, and an index idle on the primary may be the one a reporting replica lives on. On Atlas, user management belongs to Atlas, so you create the scoped role there and connect with its string; self-hosted MongoDB and SQL Server can have Indexterity create the user for you.",
+  },
+  {
+    question: "Which PostgreSQL privileges does it need?",
+    answer:
+      "Membership in pg_monitor, CONNECT on each database and USAGE on each schema — that is the whole of the analysis side, and it is what the scoped role Indexterity offers to create is granted. pg_stat_statements is the optional one: without it the drop side works as normal and there are simply no create-side recommendations. Applying is different here and worth knowing before you start: PostgreSQL has no grantable index privilege, so only a table's owner can create or drop its indexes — GRANT ALL does not cover it and neither does the MAINTAIN privilege added in 17. A cluster stays analysis-only until you connect as the owner, and the preflight says exactly that rather than reporting it as a fault.",
   },
   {
     question: "Which MongoDB privileges does it need?",
@@ -160,7 +170,7 @@ function Landing() {
       <main className="min-h-screen">
         <section className="mx-auto max-w-3xl px-6 pt-16 pb-20 text-center">
           <h1 className="font-semibold text-5xl leading-tight tracking-tight">
-            Automatic index management for MongoDB and SQL Server —{" "}
+            Automatic index management for MongoDB, PostgreSQL and SQL Server —{" "}
             <span className="text-primary">with a hand brake.</span>
           </h1>
           <p className="mx-auto mt-6 max-w-2xl text-lg text-muted-foreground">
@@ -177,7 +187,8 @@ function Landing() {
             </Button>
           </div>
           <p className="mt-4 text-muted-foreground text-sm">
-            MongoDB 6.0 to 8.x and SQL Server 2016+. Hosted, or self-host the same image.
+            MongoDB 6.0 to 8.x, PostgreSQL 14+ and SQL Server 2016+. Hosted, or self-host the same
+            image.
           </p>
           {/* The pipeline as a real ordered list rather than a string of
               arrows: a screen reader announces five steps in order, and the
@@ -264,7 +275,7 @@ function Landing() {
 
       <footer className="border-t">
         <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-8 text-muted-foreground text-sm">
-          <span>Indexterity — index dexterity for MongoDB and SQL Server.</span>
+          <span>Indexterity — index dexterity for MongoDB, PostgreSQL and SQL Server.</span>
           <span className="font-mono text-xs">indexes only · documents never</span>
         </div>
       </footer>

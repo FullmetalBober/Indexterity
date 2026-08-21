@@ -1,6 +1,6 @@
 # Indexterity
 
-Index dexterity for MongoDB and SQL Server. A SaaS that watches your indexes
+Index dexterity for MongoDB, PostgreSQL and SQL Server. A SaaS that watches your indexes
 and manages them safely — drop the unused and redundant, merge overlapping,
 extend prefixes, create the missing — and proves the result in freed bytes and
 latency. On SQL Server the workload signal comes from Query Store plans, with
@@ -9,6 +9,14 @@ recurrence and cost gates every other signal passes (Architecture §9.3).
 
 Read-only by default. The one irreversible step, a drop, is gated behind an
 observe window, a pre-flight check, and a read-latency regression test.
+
+PostgreSQL is the third engine and the one that differs most, in two ways worth
+knowing before you connect one. It has **no reversible hide** — the observe
+window watches usage while the index keeps serving every query, because the only
+mechanism Postgres offers needs superuser and cannot be delegated. And it has
+**no grantable index privilege**: only a table's owner may alter its indexes, so
+the scoped role Indexterity provisions is analysis-only and applying takes
+credentials you connect deliberately.
 
 | | |
 |---|---|
@@ -22,7 +30,8 @@ observe window, a pre-flight check, and a read-latency regression test.
 ## How it works
 
 1. **Connect** a cluster with any connection string — the form names the dialects
-   it takes (`mongodb://`, `mongodb+srv://`, `mssql://`, `sqlserver://` and the
+   it takes (`mongodb://`, `mongodb+srv://`, `postgresql://`, `postgres://`,
+   libpq's `host=… dbname=…` form, `mssql://`, `sqlserver://` and the
    ADO `Server=…` list), says which engine it read yours as before you press
    anything, and asks only when nothing recognises it. Indexterity then reports
    what that string can actually do — nothing stored, nothing written. If it can
@@ -317,6 +326,13 @@ Each knob, how the observe window scales to the index, and the entitlement
 reasoning: [Plans and policy](https://github.com/FullmetalBober/Indexterity/wiki/Plans-and-policy).
 
 ## Connecting a cluster
+
+**PostgreSQL 14 and newer.** 13 reached end of life in November 2025. The floor
+is a lifecycle decision rather than a capability one — nothing the pipeline needs
+is missing on 14 — and the one newer signal degrades rather than refusing:
+`last_idx_scan` arrived in 16, and below it classify falls back to the same
+snapshot-delta inference it uses on the other two engines. Probed against 17 and
+18; anything newer is refused unless `ALLOW_UNTESTED_DATABASE_VERSION` is set.
 
 **MongoDB 6.0 to 8.x.** 4.4 and 5.0 are past end-of-life and have no
 `$queryStats`, so they are refused rather than supported half-well. Every write

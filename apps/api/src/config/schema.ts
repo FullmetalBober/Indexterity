@@ -208,8 +208,12 @@ const workerShape = {
   STORAGE_USD_PER_GB_MONTH: optionalPositive(),
   ALLOW_PRIVATE_CLUSTER_TARGETS: flag(false),
   ALLOW_INSECURE_CLUSTER_TLS: flag(false),
-  ALLOW_UNTESTED_MONGO_VERSION: flag(false),
-  ALLOW_UNTESTED_MSSQL_VERSION: flag(false),
+  // One flag for every engine rather than one per engine. The knob answers a
+  // single question — "may a cluster on a major series this release has not been
+  // probed against connect at all?" — and an operator running two engines had to
+  // find and set two variables to say one thing. The floor is never overridable
+  // on any engine; this is only ever the ceiling.
+  ALLOW_UNTESTED_DATABASE_VERSION: flag(false),
   // One job at a time. Each concurrent job holds its own working set — a collect
   // pass keeps a cluster's index and collection statistics in memory while it
   // runs — so this multiplies the process's memory rather than sharing it, and
