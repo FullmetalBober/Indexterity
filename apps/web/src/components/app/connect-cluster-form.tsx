@@ -8,7 +8,7 @@ import {
   type SupportedEngine,
   type TlsOverrides,
 } from "@repo/contracts";
-import { useState } from "react";
+import { type ReactNode, useState } from "react";
 import { usage } from "~/components/app/format";
 import {
   MIN_DATABASES_TO_CHOOSE,
@@ -84,7 +84,22 @@ const PLACEHOLDER = "mongodb://user:pass@host:27017   or   Server=host;User Id=s
 // What the scoped user IS, per engine — the offer is engine-neutral (it hangs
 // off `canProvision`), the words cannot be: "no read access to your documents"
 // and `db.dropUser` are the wrong sentence entirely in front of a SQL Server.
-const SCOPED_USER_COPY = {
+//
+// Typed as a full Record<ClusterEngine, …> on purpose. It used to be a partial
+// object with a `engine === "MSSQL" ? … : mongo` fallback, and PostgreSQL's
+// adapter shipping turned that fallback into a lie: a Postgres cluster was
+// offered the `indexterityEngine` role, told it withheld read access to its
+// "documents", and pointed at `db.dropUser`. The compiler refuses a missing
+// engine now, so the next adapter cannot inherit somebody else's sentence.
+const SCOPED_USER_COPY: Record<
+  ClusterEngine,
+  {
+    subject: string;
+    grant: ReactNode;
+    withheld: ReactNode;
+    revoke: ReactNode;
+  }
+> = {
   MONGODB: {
     subject: "user",
     grant: (
@@ -106,7 +121,28 @@ const SCOPED_USER_COPY = {
     withheld: "no permission to read a single row of your data",
     revoke: <code>DROP LOGIN idx_…</code>,
   },
-} as const;
+  // PostgreSQL withholds MORE than the other two, and saying so is the point:
+  // the role cannot read the data AND cannot change an index either, because
+  // only a table's owner may do that and ownership cannot be granted piecemeal.
+  // Somebody who reads "exactly the privileges above and nothing else" here has
+  // to understand that applying is not among them.
+  POSTGRESQL: {
+    subject: "role",
+    grant: (
+      <>
+        granted <code>pg_monitor</code>, <code>CONNECT</code> on each database and{" "}
+        <code>USAGE</code> on each schema
+      </>
+    ),
+    withheld: (
+      <>
+        no permission to read a single row of your data — and none to change an index either, so
+        this role analyses only
+      </>
+    ),
+    revoke: <code>DROP ROLE idx_…</code>,
+  },
+};
 
 // Takes the RESOLVED engine rather than the string it came from. It used to read
 // the string through a second copy of the scheme rules, which is the pair that
@@ -114,12 +150,8 @@ const SCOPED_USER_COPY = {
 // function decides (engineFromScheme in @repo/contracts), the api's diagnosis
 // overrules it the moment there is one, and both arrive here as an engine.
 //
-// PostgreSQL has no entry because it has no adapter and so can never be
-// provisioned; falling back to the MongoDB paragraph would be a promise about a
-// shell command that does not apply, so the caller is expected to have a
-// supported engine by the time it asks.
 function scopedUserCopy(engine: ClusterEngine) {
-  return engine === "MSSQL" ? SCOPED_USER_COPY.MSSQL : SCOPED_USER_COPY.MONGODB;
+  return SCOPED_USER_COPY[engine];
 }
 
 // What the typed string looks like, as one primitive so the component re-renders
@@ -639,6 +671,28 @@ export function ConnectClusterForm({ plan }: { plan: PlanInfo | null }) {
                   {diagnosis.ready
                     ? "The cluster can still be analyzed, but no change can be applied."
                     : "Analysis is not possible without these."}
+                </AlertDescription>
+              </Alert>
+            ) : null}
+
+            {/* The one engine where "index management without read access" does
+                not hold, said BEFORE anything is stored rather than discovered
+                when an apply is refused. It is a property of PostgreSQL and not
+                of these credentials, so it shows whether or not they happen to
+                own the tables — somebody connecting a read-only cluster needs to
+                know what going live would later cost. */}
+            {diagnosis.engine === "POSTGRESQL" ? (
+              <Alert className="mt-3">
+                <AlertTitle>Applying on PostgreSQL needs the table owner</AlertTitle>
+                <AlertDescription>
+                  PostgreSQL has no grantable index privilege: only a table's owner may create or
+                  drop its indexes, and <code>GRANT ALL</code> does not cover it. Because an owner
+                  can also read the table, credentials that can apply here can also read your data —
+                  unlike MongoDB and SQL Server, where the user Indexterity runs as is refused both.
+                  So analysis and applying are separate decisions on this engine:{" "}
+                  {diagnosis.canApply
+                    ? "the string you pasted owns the tables in scope, so it can do both — and can read them."
+                    : "these credentials analyse only, which is the safer default and not a fault. Connect as the owner when you want to apply."}
                 </AlertDescription>
               </Alert>
             ) : null}
