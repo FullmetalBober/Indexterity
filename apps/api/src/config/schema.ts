@@ -347,6 +347,33 @@ function checkRotationKeys(value: Record<string, unknown>, ctx: z.RefinementCtx)
 // report success. Naming the missing half at boot is the whole point of this
 // file; sending is still entirely optional, and leaving SMTP_HOST unset is how
 // a deployment says so.
+// Requiring a verified address on a deployment that cannot send mail is a state
+// with no way out: sign-up succeeds, the mail is a logged no-op, and sign-in is
+// refused forever with no address able to verify itself. Every account created on
+// such an install is unreachable, including the first owner's — which is exactly
+// how the hosted deployment locked its own owner out (#306).
+//
+// Refused at boot rather than handled downstream, for the same reason
+// checkMailGroup is: the operator can fix it in one line, and no page can.
+function checkVerificationNeedsMail(value: Record<string, unknown>, ctx: z.RefinementCtx): void {
+  if (value.REQUIRE_EMAIL_VERIFICATION !== true) return;
+  if (typeof value.SMTP_HOST === "string") return;
+  // Reported against REQUIRE_EMAIL_VERIFICATION rather than the absent
+  // SMTP_HOST, and that is not cosmetic: config/env.ts prints a bare "required"
+  // for any path with no value and drops the refinement's message with it, so
+  // aimed at SMTP_HOST this explanation would never reach the operator. Aimed at
+  // the flag — which is present, and is the setting to reconsider — the sentence
+  // survives and names both halves.
+  ctx.addIssue({
+    code: "custom",
+    path: ["REQUIRE_EMAIL_VERIFICATION"],
+    message:
+      "cannot be on without mail: an address cannot verify itself, so every " +
+      "account created here would be locked out. Configure SMTP_HOST, SMTP_USER " +
+      "and SMTP_PASS, or turn REQUIRE_EMAIL_VERIFICATION off",
+  });
+}
+
 function checkMailGroup(value: Record<string, unknown>, ctx: z.RefinementCtx): void {
   if (typeof value.SMTP_HOST !== "string") return;
   for (const name of ["SMTP_USER", "SMTP_PASS"]) {
@@ -403,6 +430,7 @@ export const apiEnvSchema = z
   .looseObject(apiShape)
   .superRefine(checkRotationKeys)
   .superRefine(checkMailGroup)
+  .superRefine(checkVerificationNeedsMail)
   .superRefine(checkCronTrigger);
 
 export const PROCESS_SCHEMAS = {

@@ -231,7 +231,7 @@ stays off by default — the dashboard does not need it.
 | `web.publicUrl` | The dashboard's public origin. Defaults to the ingress host; the api trusts it for auth and session cookies are bound to it |
 | `migrations.enabled` | The pre-install/pre-upgrade Job runs `node dist/migrate.js` before new pods start. Disable only if you migrate out of band |
 | `smtp.*` | Without a host, invites, alerts, verification and reset mails are logged and dropped |
-| `config.requireEmailVerification` | Production posture — needs working SMTP, or nobody can sign in |
+| `config.requireEmailVerification` | Production posture. **The api refuses to boot with this on and no `secrets.smtp.host`** — an address cannot verify itself without mail, so every account on such an install is locked out, the first owner included. Turn it on in the same change as SMTP |
 | `config.storageUsdPerGbMonth` | Your storage price, for the $/month ROI headline |
 | `config.retentionDays` | Your ceiling on history, in days. Storage is your bill, so it caps both what is kept and what any plan may see. Empty means each plan's own window decides |
 | `config.mongoMaxPoolSize` | Sockets the driver may open against **one** connected cluster — 10, against the driver's own default of 100. A session is held per cluster, so the worst case multiplies by the fleet, and the sockets are spent on the customer's mongod rather than ours. Surplus sockets are returned after 60s idle |

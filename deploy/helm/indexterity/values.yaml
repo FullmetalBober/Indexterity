@@ -322,7 +322,11 @@ migrations:
 
 config:
   logLevel: info
-  # Reject sign-ins from unverified addresses (needs working SMTP).
+  # Reject sign-ins from unverified addresses. The api REFUSES TO BOOT with this
+  # on and `secrets.smtp.host` empty, rather than accepting a configuration in
+  # which no account can ever sign in: sign-up succeeds, the send is a logged
+  # no-op, and the address has no way to verify itself. Turn this on in the same
+  # change as SMTP, not before it.
   requireEmailVerification: false
   # Demand a second factor of owners before any owner-only mutation. False by
   # default so a fresh install can bootstrap its first account, but a hosted

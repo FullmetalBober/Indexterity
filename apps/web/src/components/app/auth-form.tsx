@@ -1,5 +1,6 @@
 import { signInInput, signUpInput } from "@repo/contracts";
-import { useState } from "react";
+import { useRef, useState } from "react";
+import { VerifyEmailNotice } from "~/components/app/verify-email-notice";
 import { useAppForm } from "~/components/form";
 import { Alert, AlertDescription } from "~/components/ui/alert";
 import { Button } from "~/components/ui/button";
@@ -58,6 +59,12 @@ const CODE_HINTS: Record<SecondFactorKind, string> = {
 };
 
 export function AuthForm({ onSignedIn }: { onSignedIn: () => void }) {
+  // The address an unconfirmed account belongs to, or null. Set from either
+  // endpoint that can answer "confirm first" — sign-up minting no session, or
+  // sign-in refused for the same reason — and it replaces the form entirely
+  // rather than becoming a fifth mode, because there is nothing left to fill in
+  // (#306).
+  const [pendingEmail, setPendingEmail] = useState<string | null>(null);
   // Not a form value: it decides which fields exist, and the reader picks it
   // from a link rather than typing it.
   const [mode, setMode] = useState<Mode>("in");
@@ -65,6 +72,10 @@ export function AuthForm({ onSignedIn }: { onSignedIn: () => void }) {
   // every check on this page is still the wrong one.
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+
+  // The address of the request in flight. A ref rather than state: nothing
+  // renders from it until an answer arrives, so writing it must not re-render.
+  const submitted = useRef("");
 
   // Which kind of second-factor code the reader is about to type. Not a form
   // value — it picks the endpoint, and switching must not clear the field.
@@ -83,6 +94,10 @@ export function AuthForm({ onSignedIn }: { onSignedIn: () => void }) {
     // The password was right and the account has a second factor: no session
     // yet, the code is the rest of the sign-in (#55).
     onTwoFactor: () => setMode("code"),
+    // The account exists and its address has not been confirmed. Both endpoints
+    // can answer this way, so both get it: sign-up by minting no session,
+    // sign-in by refusing outright (#306).
+    onVerificationRequired: () => setPendingEmail(submitted.current),
   };
 
   const signIn = useSignIn(credentials);
@@ -108,6 +123,10 @@ export function AuthForm({ onSignedIn }: { onSignedIn: () => void }) {
   const form = useAppForm({
     defaultValues: { email: "", password: "", name: "", code: "", trustDevice: false },
     onSubmit: ({ value }) => {
+      // Remembered before the request, because the answer that needs it does not
+      // carry it: better-auth's refusal names no address, and the field may have
+      // been reset by the time it lands.
+      submitted.current = value.email;
       if (mode === "forgot") forgot.mutate(value.email);
       else if (mode === "in") signIn.mutate({ email: value.email, password: value.password });
       else if (mode === "code")
@@ -127,6 +146,21 @@ export function AuthForm({ onSignedIn }: { onSignedIn: () => void }) {
     setMode(next);
     onStart();
     form.reset();
+  }
+
+  // Nothing on the form applies any more: the account is made and the next move
+  // is in an inbox. Rendered in its place rather than above it, so there is no
+  // password field inviting another attempt that would be refused the same way.
+  if (pendingEmail !== null) {
+    return (
+      <VerifyEmailNotice
+        email={pendingEmail}
+        onStartOver={() => {
+          setPendingEmail(null);
+          switchTo("up");
+        }}
+      />
+    );
   }
 
   return (

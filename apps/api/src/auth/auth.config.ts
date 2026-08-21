@@ -346,6 +346,19 @@ export function createAuth(config: AuthConfig) {
         // endpoint answers 200 and the reader waits for a code that was never
         // sent — the one outcome worse than not offering it. Said plainly,
         // because the fix is the operator's and the reader cannot guess it.
+        // Same rule for the verification resend (#306). apiEnvSchema refuses to
+        // boot with REQUIRE_EMAIL_VERIFICATION on and no SMTP, so this is only
+        // reachable on an install where verification is optional — where a
+        // reader can still press resend and deserves the real answer rather
+        // than a 200 and an empty inbox.
+        if (ctx.path === "/send-verification-email" && !mailEnabled()) {
+          throw new APIError("BAD_REQUEST", {
+            message:
+              "this deployment cannot send email, so no verification link can be sent — " +
+              "ask whoever runs it to configure SMTP",
+            code: "EMAIL_NOT_CONFIGURED",
+          });
+        }
         if (ctx.path === "/two-factor/send-otp" && !mailEnabled()) {
           throw new APIError("BAD_REQUEST", {
             message:
@@ -528,6 +541,12 @@ export function createAuth(config: AuthConfig) {
     },
     emailVerification: {
       sendOnSignUp: true,
+      // Stated rather than inherited. `requireEmailVerification` re-triggers the
+      // mail on a refused sign-in in better-auth's own docs, which made "try
+      // signing in again" an undiscoverable resend — the only one this product
+      // had (#306). It is now a real button, and this option is what keeps the
+      // implicit path working on purpose instead of by accident.
+      sendOnSignIn: true,
       sendVerificationEmail: async ({ user, url }) => {
         await sendMail(
           user.email,
