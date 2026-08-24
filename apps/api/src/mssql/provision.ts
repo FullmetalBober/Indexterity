@@ -4,7 +4,7 @@ import {
   alreadyProvisionedMessage,
   ProvisionDeniedError,
   SCOPED_USERNAME,
-} from "../mongo/provision";
+} from "../engine/provision";
 import { parseMssqlConnString, withMssqlCredentials } from "./conn-string";
 import { MssqlConnection, quoteIdent, quoteString } from "./connection";
 

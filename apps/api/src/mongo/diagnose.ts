@@ -1,8 +1,13 @@
 import type { Admin } from "mongodb";
 import { z } from "zod";
 import { scopeForDiagnosis } from "../engine/observe";
-import type { ConnectionDiagnosis, PrivilegeCheck, PrivilegeTier } from "../engine/ports";
-import { mongoClient, type TlsOverrides } from "./client";
+import type {
+  ConnectionDiagnosis,
+  PrivilegeCheck,
+  PrivilegeTier,
+  TlsOverrides,
+} from "../engine/ports";
+import { mongoClient } from "./client";
 import { ENGINE_ROLE } from "./provision";
 import {
   hasQueryStatsPlanMetrics,

@@ -1,5 +1,6 @@
 import type { Db, MongoClient } from "mongodb";
-import { mongoClient, type TlsOverrides } from "./client";
+import type { TlsOverrides } from "../engine/ports";
+import { mongoClient } from "./client";
 import type { ResolvedConnection } from "./conn-string";
 import { parseServerVersion, type ServerVersion } from "./version";
 

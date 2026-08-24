@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { type EngineSession, workloadKey } from "../src/engine/ports";
+import { ProvisionDeniedError, SCOPED_USERNAME } from "../src/engine/provision";
 import { detectEngine } from "../src/engine/registry";
-import { ProvisionDeniedError, SCOPED_USERNAME } from "../src/mongo/provision";
 import { postgresAdapter } from "../src/postgres/adapter";
 import { withPgCredentials } from "../src/postgres/conn-string";
 import { PostgresConnection } from "../src/postgres/connection";

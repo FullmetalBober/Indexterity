@@ -16,7 +16,7 @@
 // produced and approved, and then every apply tick fails with a message about
 // a field nobody mentioned. Nothing drops and nothing explains why.
 
-import { workerEnv } from "../config/env";
+import { allowUntestedVersions } from "../engine/version";
 
 export interface ServerVersion {
   readonly major: number;
@@ -50,14 +50,6 @@ export const QUERY_STATS_PLAN_METRICS_MAJOR = 8;
 export function hasQueryStatsPlanMetrics(version: ServerVersion | null): boolean {
   if (version === null) return false;
   return version.major >= QUERY_STATS_PLAN_METRICS_MAJOR;
-}
-
-// Blocking every customer on a brand-new release until we ship is its own kind
-// of failure, so the ceiling is overridable — same shape as the other
-// self-hosted escape hatches. The floor is not overridable: below it the
-// pipeline is either impossible (pre-4.4) or unsupported on purpose.
-export function allowUntestedVersions(): boolean {
-  return workerEnv().ALLOW_UNTESTED_DATABASE_VERSION;
 }
 
 export function isTestedVersion(version: ServerVersion | null): boolean {

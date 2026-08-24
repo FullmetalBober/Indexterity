@@ -78,8 +78,8 @@ export function parsePostgresVersion(
 
 // `allowUntested` is a parameter rather than an env read so this file stays
 // pure and testable, exactly like the floor/ceiling constants above. Every
-// CALLER passes the deployment's own flag — see allowUntestedDatabaseVersions in
-// mongo/version.ts, which is the one place that reads it.
+// CALLER passes the deployment's own flag — see allowUntestedVersions in
+// engine/version.ts, which is the one place that reads it.
 export function postgresVersionRefusal(
   version: PostgresServerVersion | null,
   allowUntested = false,

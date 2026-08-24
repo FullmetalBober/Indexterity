@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { InsecureConnectionError } from "../mongo/client";
-import { UnsupportedServerError } from "../mongo/executor";
+import { InsecureConnectionError } from "../engine/tls";
+import { UnsupportedServerError } from "../engine/version";
 import { ClusterCredentialsError, ClusterGoneError } from "./cluster-connection";
 import { type ClusterTaskDeps, runClusterTask } from "./tasks";
 

@@ -1,6 +1,5 @@
 import type { CreateIndexOptions, IndexExecutor } from "../engine/ports";
-import { UnsupportedServerError } from "../mongo/executor";
-import { allowUntestedVersions } from "../mongo/version";
+import { allowUntestedVersions, UnsupportedServerError } from "../engine/version";
 import { splitTableRef } from "./collector";
 import type { PostgresConnection } from "./connection";
 import { postgresVersionRefusal } from "./version";

@@ -2,30 +2,15 @@ import { randomBytes } from "node:crypto";
 import { type Db, MongoServerError } from "mongodb";
 import ConnectionString from "mongodb-connection-string-url";
 import { z } from "zod";
-import type { ProvisionedUser } from "../engine/ports";
-import { mongoClient, type TlsOverrides } from "./client";
+import type { ProvisionedUser, TlsOverrides } from "../engine/ports";
+import {
+  alreadyProvisionedMessage,
+  ProvisionDeniedError,
+  SCOPED_USERNAME,
+} from "../engine/provision";
+import { mongoClient } from "./client";
 
 export const ENGINE_ROLE = "indexterityEngine";
-
-// The scoped user's name — one fixed string on every engine, not a random
-// `idx_<hex>` per provision. Two things follow from that, and the second is the
-// reason it changed.
-//
-// It stops the cluster accumulating users. Provisioning creates a user with
-// admin credentials we then throw away, so nothing here can ever drop one:
-// connect, disconnect, connect again, and a random name left three logins behind
-// for an operator to find months later and be unable to attribute.
-//
-// And it makes the cluster itself the guard against connecting the same database
-// twice. The second provision asks to create a user that is already there and is
-// refused BY THE SERVER — no uniqueness rule invented over connection strings
-// that can spell one server a dozen ways (srv vs seed list, alias vs IP, with or
-// without a database, any ordering of options). The name is the identity.
-//
-// Only the password is generated. Re-provisioning after a real offboard is
-// therefore drop-then-provision, which is the command the disconnect screen
-// already hands over.
-export const SCOPED_USERNAME = "indexterity";
 
 interface RolePrivilege {
   readonly resource:
@@ -62,10 +47,6 @@ export const ENGINE_PRIVILEGES: readonly RolePrivilege[] = [
   { resource: { db: "config", collection: "collections" }, actions: ["find"] },
 ];
 
-// The admin credentials lack createRole/createUser on this cluster (Atlas, for
-// one, only manages users through its own UI/API). Surfaced as a 422.
-export class ProvisionDeniedError extends Error {}
-
 function isAuthorizationError(error: unknown): boolean {
   return (
     error instanceof MongoServerError &&
@@ -88,21 +69,6 @@ function isDuplicateUserError(error: unknown): boolean {
 // credentials this product deliberately does not keep.
 export function dropUserStatement(username: string): string {
   return `db.getSiblingDB("admin").dropUser("${username}")`;
-}
-
-// What a second provision against the same server is told, shared by all three
-// engines. It states both readings because the server cannot tell them apart:
-// either this database is already connected to Indexterity, or an earlier
-// connection was removed and the user outlived it. Naming the drop statement is
-// what keeps the second case from being a dead end — provisioning is otherwise
-// unreachable forever on a cluster carrying an orphan.
-export function alreadyProvisionedMessage(dropCommand: string): string {
-  return (
-    `this cluster already has an Indexterity user called "${SCOPED_USERNAME}", so it is ` +
-    "already connected here — open that cluster instead of adding the same one twice. " +
-    "If it was disconnected and the user was left behind, remove it with " +
-    `${dropCommand} and provision again.`
-  );
 }
 
 // The username a connection string authenticates as, or null (no credentials /

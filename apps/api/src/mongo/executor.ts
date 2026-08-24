@@ -1,20 +1,7 @@
 import type { CreateIndexOptions, IndexExecutor } from "../engine/ports";
+import { UnsupportedServerError } from "../engine/version";
 import type { MongoConnection } from "./connection";
 import { versionRefusal } from "./version";
-
-// The server cannot do what the pipeline requires. Distinct from a network
-// failure and from a permission failure: retrying will never fix it, so the
-// jobs treat it as a condition to report rather than an error to retry.
-export class UnsupportedServerError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "UnsupportedServerError";
-  }
-}
-
-// The executor CONTRACT lives in the engine-neutral ports (../engine/ports);
-// this file is the MongoDB implementation. Types re-exported for convenience.
-export type { CreateIndexOptions, IndexExecutor } from "../engine/ports";
 
 // Enforces read-only mode structurally: every write throws unless the cluster
 // was explicitly switched to live mode (docs/decisions.md, D11).

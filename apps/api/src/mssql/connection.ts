@@ -1,5 +1,5 @@
 import type mssql from "mssql";
-import type { TlsOverrides } from "../mongo/client";
+import type { TlsOverrides } from "../engine/ports";
 import { type MssqlDialOptions, mssqlPool } from "./client";
 import { type MssqlServerVersion, parseMssqlVersion } from "./version";
 

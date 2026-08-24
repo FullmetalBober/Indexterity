@@ -62,18 +62,6 @@ export function lookupJoins(pipeline: readonly Record<string, unknown>[]): Looku
   return joins;
 }
 
-// The collector CONTRACT lives in the engine-neutral ports (../engine/ports);
-// this file is the MongoDB implementation. Types re-exported for convenience.
-export type {
-  CollectionLatency,
-  CollectionStorage,
-  DeletePattern,
-  IndexCollector,
-  IndexUsageStat,
-  LatencyPair,
-  WorkloadTarget,
-} from "../engine/ports";
-
 // Parse driver output at the boundary so nothing downstream sees `any`.
 const indexDescription = z.object({
   name: z.string(),
