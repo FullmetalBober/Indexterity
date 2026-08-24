@@ -1,6 +1,7 @@
 import { and, clusters, type Database, eq, inArray, recommendations } from "../db";
 import { openClusterSession } from "../jobs/cluster-connection";
 import { evictCluster } from "../jobs/connection-pool";
+import { dropUserStatement } from "../mongo/provision";
 
 // Leaving a customer's cluster as we found it.
 //
@@ -64,9 +65,7 @@ export async function restoreHiddenIndexes(db: Database, clusterId: string): Pro
 // deliberately did not keep, and guessing that the analysis credentials will do
 // it would fail at exactly the moment nobody is watching.
 export function revokeCommandFor(provisionedUsername: string | null): string | null {
-  return provisionedUsername === null
-    ? null
-    : `db.getSiblingDB("admin").dropUser("${provisionedUsername}")`;
+  return provisionedUsername === null ? null : dropUserStatement(provisionedUsername);
 }
 
 // Every provisioned user an org would leave behind on someone else's cluster.
