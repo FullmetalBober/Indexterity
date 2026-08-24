@@ -628,6 +628,24 @@ jobs:
           # the SAME tree the pull request just filtered, that was the one place
           # it was guaranteed to be redundant. Two Kind clusters, ~9 minutes, on
           # every merge whether or not a chart file had been touched.
+          # A release pull request charts unconditionally (#322). Not because the
+          # diff has ever been seen to miss the chart on one — #300, #311, #318
+          # and #321 all computed true and ran both legs, and the range is right:
+          # `origin/main...HEAD` against the PR's merge commit has main's tip as
+          # its merge base, so the diff is everything dev brings, chart included.
+          #
+          # It is that this is the LAST gate before a tag publishes the chart, and
+          # a path filter is the wrong thing to be depending on there. A filter is
+          # an optimisation everywhere else in this file; here it would be load
+          # bearing. Release PRs are rare, so the ~9 minutes buy the guarantee
+          # outright instead of buying it back every time somebody edits the
+          # pattern.
+          if [ "${{ github.event_name }}" = "pull_request" ] &&
+             [ "${{ github.base_ref }}" = "main" ]; then
+            echo "chart=true (release pull request into main — filter not consulted)"
+            echo "chart=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           case "${{ github.event_name }}" in
             pull_request) range="origin/${{ github.base_ref }}...HEAD" ;;
             push)         range="${{ github.event.before }}...HEAD" ;;
@@ -644,9 +662,20 @@ jobs:
             exit 0
           fi
           changed=$(git diff --name-only "$range")
-          if echo "$changed" | grep -qE '^(deploy/|apps/[a-z]+/Dockerfile|\.github/workflows/ci\.yml)|^apps/api/src/(jobs/|main\.ts)'; then
+          # `|| true` because bash runs this with -e and grep exits 1 on no match,
+          # which is an answer here rather than a failure.
+          matched=$(echo "$changed" | grep -E '^(deploy/|apps/[a-z]+/Dockerfile|\.github/workflows/ci\.yml)|^apps/api/src/(jobs/|main\.ts)' || true)
+          # Say which files decided it, either way. The skip used to be silent,
+          # and #322 is what that costs: answering "did the chart run, and why?"
+          # meant replaying the range by hand months later, on a release nobody
+          # could reconstruct from the log it left.
+          if [ -n "$matched" ]; then
+            echo "chart=true — $range touched:"
+            echo "$matched" | sed 's/^/  /'
             echo "chart=true" >> "$GITHUB_OUTPUT"
           else
+            echo "chart=false — nothing in $range touched the chart's inputs"
+            if [ -n "$changed" ]; then echo "$changed" | sed 's/^/  /'; fi
             echo "chart=false" >> "$GITHUB_OUTPUT"
           fi
 
