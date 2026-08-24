@@ -10,6 +10,7 @@ import { NestFactory } from "@nestjs/core";
 import { FastifyAdapter, type NestFastifyApplication } from "@nestjs/platform-fastify";
 import { AppModule } from "./app.module";
 import { auth } from "./auth";
+import { authRequestHeaders } from "./auth/http";
 import { sessionCookiesFor } from "./auth/session";
 import { apiEnv, trustProxySetting } from "./config/env";
 import { DatabaseService } from "./db/database.service";
@@ -102,11 +103,10 @@ async function bootstrap(): Promise<void> {
     },
     async (request, reply) => {
       const url = new URL(request.url, `http://${request.headers.host ?? "localhost"}`);
-      const headers = new Headers();
-      for (const [key, value] of Object.entries(request.headers)) {
-        if (typeof value === "string") headers.set(key, value);
-        else if (Array.isArray(value)) for (const item of value) headers.append(key, item);
-      }
+      // Fastify's headers plus the client address it already resolved, because a
+      // synthetic Request has no socket for better-auth to fall back to and its
+      // rate limiter is per-address (auth/http.ts).
+      const headers = authRequestHeaders(request.headers, request.ip);
       const hasBody =
         request.method !== "GET" && request.method !== "HEAD" && request.body !== undefined;
       const response = await auth.handler(
