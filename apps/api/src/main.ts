@@ -167,7 +167,7 @@ async function bootstrap(): Promise<void> {
   fastify.log.info(
     ownsSchedule
       ? "jobs drain in-process; a 30s tick owns the schedule (no resident runner, no LISTEN)"
-      : "RUN_CRONJOB=false — jobs drain in-process; the clock is external, and POST /api/internal/tick claims AND drains",
+      : "RUN_CRONJOB=false — jobs drain in-process; the clock is external, and GET /api/internal/tick claims AND drains",
   );
 
   const port = apiEnv().API_PORT;

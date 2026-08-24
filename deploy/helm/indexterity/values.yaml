@@ -126,7 +126,7 @@ api:
   #
   # true (default): a 30-second in-process tick per replica — occurrence claims
   # keep concurrent replicas from double-dispatching.
-  # false: nothing fires on its own; POST /api/internal/tick is the clock, for
+  # false: nothing fires on its own; GET /api/internal/tick is the clock, for
   # an external scheduler. The request claims AND drains, bounded at 25 s so it
   # answers inside platform proxy timeouts; "drained": false means ping again,
   # and repeats are free. Requires secrets.cronTriggerSecret.
@@ -472,7 +472,7 @@ secrets:
   databaseUrl: ""
   # Session signing key: openssl rand -base64 32
   betterAuthSecret: ""
-  # The bearer token POST /api/internal/tick demands. Required when
+  # The bearer token GET /api/internal/tick demands. Required when
   # api.runCronjob=false and ignored otherwise. It authorises the whole pipeline
   # and there is no user session behind it, so make it long:
   #   openssl rand -hex 32

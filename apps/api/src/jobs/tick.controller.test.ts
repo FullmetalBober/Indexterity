@@ -37,7 +37,7 @@ function makeController(drained = false) {
   return { controller: new TickController(service as unknown as TickService), service };
 }
 
-describe("POST /api/internal/tick", () => {
+describe("GET /api/internal/tick", () => {
   // Two clocks may not coexist: while the in-process interval owns the
   // schedule, an external caller must be told so rather than obeyed.
   it("refuses while this deployment owns its own schedule", async () => {

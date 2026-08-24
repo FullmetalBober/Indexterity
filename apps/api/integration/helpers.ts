@@ -63,7 +63,7 @@ export async function startApi(
       // collecting the clusters a scenario just created, racing assertions that
       // read the queue, and spending the mongod's dial budget mid-narrative.
       // The suites drive the pipeline explicitly (collectCluster in-process, or
-      // POST /api/internal/tick in tick.int.test.ts), so the clock stays off
+      // GET /api/internal/tick in tick.int.test.ts), so the clock stays off
       // unless a test opts back in through extraEnv. The secret is required the
       // moment the clock is external, so a default rides along with it.
       RUN_CRONJOB: "false",
