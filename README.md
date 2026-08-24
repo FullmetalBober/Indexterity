@@ -844,15 +844,15 @@ deployment with no interval and no way in is a pipeline that is silently dead.
 **Hosts that sleep are a supported topology, with caveats named.** On a host
 that sleeps when idle, or a database that suspends its compute, a resident
 schedule does not slow down, it **stops** — which is why the external clock
-exists. Any scheduler that can POST with a bearer header drives the pipeline in
-request-sized bites: the work happens *inside* the request window, which is
-exactly what a platform that freezes the container after the response needs.
-The one loss on such a platform is the post-deadline tail of a long drain — a
-frozen mid-flight job waits out graphile-worker's lock before retrying — so keep
-the ping cadence at a few minutes and the tail stays short. Ticked every
-fifteen minutes, a five-minute pass *is* a fifteen-minute pass; that is a
-latency question, not a safety one — the observe windows the drop pipeline runs
-on are measured in days.
+exists. Any scheduler that can fetch a URL with a bearer header drives the
+pipeline in request-sized bites: the work happens *inside* the request window,
+which is exactly what a platform that freezes the container after the response
+needs. The one loss on such a platform is the post-deadline tail of a long
+drain — a frozen mid-flight job waits out graphile-worker's lock before
+retrying — so keep the ping cadence at a few minutes and the tail stays short.
+Ticked every fifteen minutes, a five-minute pass *is* a fifteen-minute pass;
+that is a latency question, not a safety one — the observe windows the drop
+pipeline runs on are measured in days.
 
 **On-demand actions ride the same tick**: the dashboard's collect button and an
 approval enqueue, and the next drain — at most 30 seconds away with the
