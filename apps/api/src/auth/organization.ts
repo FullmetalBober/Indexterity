@@ -6,7 +6,7 @@ import { seatsUsed } from "../billing/usage";
 import { restoreHiddenIndexes } from "../clusters/offboard";
 import { defaultOrgPlan } from "../config/env";
 import { clusters, type Database, eq, organizations } from "../db";
-import { sendMail } from "../mail/mailer";
+import { sendMailDetached } from "../mail/mailer";
 
 // better-auth's organization plugin, wired onto the tables tenancy already had.
 //
@@ -133,7 +133,7 @@ export function organizationPlugin(db: Database, config: OrganizationPluginConfi
     cancelPendingInvitationsOnReInvite: true,
     sendInvitationEmail: async ({ email, organization: org, inviter, invitation }) => {
       const who = inviter.user.name === "" ? inviter.user.email : inviter.user.name;
-      await sendMail(
+      sendMailDetached(
         email,
         `${who} invited you to ${org.name} on Indexterity`,
         `${who} invited you to join "${org.name}" as ${invitation.role}.\n\n` +
