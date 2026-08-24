@@ -42,7 +42,7 @@ const MISSING_HINTS: Record<string, string> = {
     "the key that unseals stored cluster credentials. Generate one with `openssl rand -base64 32` and back it up — losing it makes every stored connection string unreadable",
   BETTER_AUTH_SECRET: "the session signing key. Generate one with `openssl rand -base64 32`",
   CRON_TRIGGER_SECRET:
-    "the bearer token POST /api/internal/tick demands. RUN_CRONJOB=false installs no schedule, so that endpoint is the only thing that can start a pass. Generate one with `openssl rand -hex 32`",
+    "the bearer token GET /api/internal/tick demands. RUN_CRONJOB=false installs no schedule, so that endpoint is the only thing that can start a pass. Generate one with `openssl rand -hex 32`",
 };
 
 // One line per bad variable: what it is, what was expected, and — unless it

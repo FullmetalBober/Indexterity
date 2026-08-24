@@ -100,8 +100,8 @@ spec:
             summary: "a job has been waiting {{ $t.queueAgeSeconds }}s to be claimed"
             description: >-
               Jobs are queued and nothing is claiming them. Either no tick is
-              draining (the api is down, or RUN_CRONJOB=false and nothing posts
-              the tick) or WORKER_CONCURRENCY is too low for the number of
+              draining (the api is down, or RUN_CRONJOB=false and nothing is
+              fetching the tick) or WORKER_CONCURRENCY is too low for the number of
               clusters.
 
         - alert: IndexterityJobsDeadLettering

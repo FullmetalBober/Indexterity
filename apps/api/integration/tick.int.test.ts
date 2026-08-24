@@ -24,12 +24,20 @@ const PASSES = [
 let server: ChildProcess;
 let db: ReturnType<typeof createDatabase>;
 
-async function tick(token: string | null): Promise<{ status: number; body: unknown }> {
-  const res = await fetch(`http://localhost:${PORT}/api/internal/tick`, {
-    method: "POST",
+const TICK_URL = `http://localhost:${PORT}/api/internal/tick`;
+
+async function tick(
+  token: string | null,
+): Promise<{ status: number; body: unknown; cacheControl: string | null }> {
+  const res = await fetch(TICK_URL, {
+    method: "GET",
     headers: token === null ? {} : { authorization: `Bearer ${token}` },
   });
-  return { status: res.status, body: await res.json() };
+  return {
+    status: res.status,
+    body: await res.json(),
+    cacheControl: res.headers.get("cache-control"),
+  };
 }
 
 // Read through graphile-worker's own tables, which are `_private_` by name and
@@ -114,9 +122,33 @@ afterAll(async () => {
   await db.$client.end();
 });
 
-describe("POST /api/internal/tick", () => {
-  it("refuses without a token", async () => {
-    expect((await tick(null)).body).toEqual({ error: "unauthorized" });
+describe("GET /api/internal/tick", () => {
+  // The method IS the contract here, so it is asserted rather than assumed: a
+  // POST-based scheduler left over from before must fail loudly instead of
+  // silently doing nothing. Unauthenticated on purpose — an unrouted verb is
+  // refused before any handler of ours runs, which is the whole point.
+  it("does not answer POST at all", async () => {
+    const res = await fetch(TICK_URL, {
+      method: "POST",
+      headers: { authorization: `Bearer ${SECRET}` },
+    });
+    expect(res.status).toBe(404);
+    expect(await settledDispatchers()).toEqual([]);
+  });
+
+  // A cacheable GET is the one failure a state-changing GET can have that a POST
+  // could not: an intermediary hands the scheduler the previous answer and the
+  // pipeline stops without anything reporting a problem. The header comes from
+  // http/security-headers.ts, which applies it to every response — asserted HERE
+  // because this is the endpoint where losing it would be silent.
+  //
+  // Read off the unauthorised answer deliberately: the hook is global, so any
+  // response proves it, and an authorised call here would spend the first tick
+  // that the dispatch test below is written against.
+  it("refuses without a token, and forbids any intermediary from reusing it", async () => {
+    const { body, cacheControl } = await tick(null);
+    expect(body).toEqual({ error: "unauthorized" });
+    expect(cacheControl).toBe("no-store, max-age=0");
     expect(await settledDispatchers()).toEqual([]);
   });
 
@@ -149,9 +181,10 @@ describe("POST /api/internal/tick", () => {
     expect(await settledDispatchers()).toEqual([]);
   });
 
-  // The property that makes this safe to expose to anything that can POST: a
-  // second call inside the same buckets claims nothing, so hammering it cannot
-  // run the fleet twice. Asserted per bucket rather than as a flat empty list,
+  // The property that makes this safe to expose to anything that can fetch a
+  // URL: a second call inside the same buckets claims nothing, so hammering it
+  // cannot run the fleet twice. Asserted per bucket rather than as a flat empty
+  // list,
   // because the first tick above may legitimately hold its request for the full
   // 25 s deadline (its drain walks whatever fleet this database carries), and a
   // wall clock that crosses a five-minute boundary in that window makes

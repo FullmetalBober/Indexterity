@@ -264,7 +264,7 @@ const apiShape = {
   //
   // True means a 30-second in-process interval runs the tick
   // (jobs/tick.service.ts) — no crontab, no resident runner since #231. False
-  // opens POST /api/internal/tick instead, where something external says "now":
+  // opens GET /api/internal/tick instead, where something external says "now":
   // that request claims AND drains, bounded so it answers inside platform proxy
   // timeouts, and a drained:false response means ping again — the occurrence
   // claims make repeats free.
@@ -405,7 +405,7 @@ function checkCronTrigger(value: Record<string, unknown>, ctx: z.RefinementCtx):
       code: "custom",
       path: ["CRON_TRIGGER_SECRET"],
       message:
-        "required: RUN_CRONJOB=false installs no schedule, so POST /api/internal/tick is the " +
+        "required: RUN_CRONJOB=false installs no schedule, so GET /api/internal/tick is the " +
         "only thing that can start a pass — generate one with `openssl rand -hex 32`",
     });
     return;

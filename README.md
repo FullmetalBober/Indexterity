@@ -801,10 +801,10 @@ database that suspends on idle wants the external clock below instead.
 
 **The clock outside (`RUN_CRONJOB=false`).** The api always executes jobs; this
 flag hands over the decision of *when* passes become due. Nothing then fires on
-its own — an external scheduler you own posts the tick:
+its own — an external scheduler you own fetches the tick:
 
 ```
-POST /api/internal/tick     Authorization: Bearer $CRON_TRIGGER_SECRET
+GET /api/internal/tick     Authorization: Bearer $CRON_TRIGGER_SECRET
   → {"dispatched":["scheduleApply","scheduleProbe"],"alreadyClaimed":[],"drained":true}
 ```
 
@@ -815,11 +815,25 @@ the response says `"drained": false` while the drain carries on in-process, and
 pinging again resumes a partially drained queue rather than duplicating it —
 which is what makes even a dumb every-five-minutes ping a working scheduler.
 
+**`GET`, and only `GET`** — `POST` is not routed and answers 404. The endpoint
+changes state, so by the letter of HTTP it wants `POST`, and that is what it
+was; the method turned out to be the thing standing between an operator and a
+working schedule. The audience for an external clock is the host that sleeps,
+and what such a host comes with is a URL pinger — an uptime monitor, a platform
+cron field that takes a URL, a status-page checker — most of which send `GET`
+and nothing else. What a safe method actually promises an intermediary is that
+it may repeat the request or reuse the answer, and both are already true here:
+repeating is free by construction (below), and reuse is refused outright,
+because every response this api sends carries `Cache-Control: no-store`. A
+cached `200` would otherwise be this endpoint's worst failure — a scheduler
+being told the pipeline ran while nothing runs at all.
+
 **Safe to call as often as you like**, and that is a property rather than a
-promise: passes are claimed against their *occurrence* in `worker_watermarks`,
-so a hundred calls inside one five-minute bucket enqueue at most one
-`scheduleApply`. Two crons firing a minute apart compute the same occurrence and
-only one claim wins — no lock. A host that slept through eleven buckets owes
+promise — it is also what makes serving this over `GET` unremarkable: passes are
+claimed against their *occurrence* in `worker_watermarks`, so a hundred calls
+inside one five-minute bucket enqueue at most one `scheduleApply`. Two crons
+firing a minute apart compute the same occurrence and only one claim wins — no
+lock. A host that slept through eleven buckets owes
 **one** run per pass, not eleven, so catching up never dials the fleet eleven
 times over; `retention` stays on 03:00 and the weekly digest on Monday 09:00,
 which an interval reading would have drifted. `CRON_TRIGGER_SECRET` is required
@@ -830,15 +844,15 @@ deployment with no interval and no way in is a pipeline that is silently dead.
 **Hosts that sleep are a supported topology, with caveats named.** On a host
 that sleeps when idle, or a database that suspends its compute, a resident
 schedule does not slow down, it **stops** — which is why the external clock
-exists. Any scheduler that can POST with a bearer header drives the pipeline in
-request-sized bites: the work happens *inside* the request window, which is
-exactly what a platform that freezes the container after the response needs.
-The one loss on such a platform is the post-deadline tail of a long drain — a
-frozen mid-flight job waits out graphile-worker's lock before retrying — so keep
-the ping cadence at a few minutes and the tail stays short. Ticked every
-fifteen minutes, a five-minute pass *is* a fifteen-minute pass; that is a
-latency question, not a safety one — the observe windows the drop pipeline runs
-on are measured in days.
+exists. Any scheduler that can fetch a URL with a bearer header drives the
+pipeline in request-sized bites: the work happens *inside* the request window,
+which is exactly what a platform that freezes the container after the response
+needs. The one loss on such a platform is the post-deadline tail of a long
+drain — a frozen mid-flight job waits out graphile-worker's lock before
+retrying — so keep the ping cadence at a few minutes and the tail stays short.
+Ticked every fifteen minutes, a five-minute pass *is* a fifteen-minute pass;
+that is a latency question, not a safety one — the observe windows the drop
+pipeline runs on are measured in days.
 
 **On-demand actions ride the same tick**: the dashboard's collect button and an
 approval enqueue, and the next drain — at most 30 seconds away with the
