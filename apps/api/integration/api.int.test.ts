@@ -36,6 +36,7 @@ import {
   verification,
 } from "../src/db";
 import { workloadKey } from "../src/engine/ports";
+import { SCOPED_USERNAME } from "../src/engine/provision";
 import { applyCluster, promoteByScore } from "../src/jobs/apply";
 import { refreshInferredWindow } from "../src/jobs/change-window";
 import { classifyCluster } from "../src/jobs/classify";
@@ -52,7 +53,6 @@ import { latestBaselines } from "../src/jobs/probe";
 import { pruneDeadLetterJobs, pruneOldSamples } from "../src/jobs/retention";
 import { suggestForCluster } from "../src/jobs/suggest";
 import { MongoConnection, MongoIndexCollector } from "../src/mongo";
-import { SCOPED_USERNAME } from "../src/mongo/provision";
 import { hasQueryStatsPlanMetrics, parseServerVersion } from "../src/mongo/version";
 import {
   API_BASE,
