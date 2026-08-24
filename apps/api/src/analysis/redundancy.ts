@@ -1,4 +1,4 @@
-import type { IndexDirection, IndexSpec } from "./types";
+import type { IndexDirection, IndexSpec } from "../engine/types";
 
 // A unique/partial/sparse/TTL index does more than accelerate reads, so it can
 // never be folded away as "covered by a superset".

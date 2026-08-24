@@ -1,10 +1,16 @@
-import type { IndexSpec, QueryShape, ServerHealth } from "../analysis";
+import type { IndexSpec, QueryShape, ServerHealth } from "./types";
 
 // The engine-neutral boundary. Everything above this file — the analysis core,
 // the job pipeline, the API — speaks these ports; everything below implements
-// them per database engine. Today MongoDB is the only adapter; the PostgreSQL
-// and SQL Server mappings are documented on the wiki's Architecture page under
-// Engine ports (pg_stat_user_indexes / sys.dm_db_index_usage_stats etc.).
+// them per database engine. Three adapters implement them today (mongo/,
+// postgres/, mssql/); what each maps onto is documented on the wiki's
+// Architecture page under Engine ports (pg_stat_user_indexes /
+// sys.dm_db_index_usage_stats etc.).
+//
+// The SHAPES these signatures are written in — IndexSpec, QueryShape,
+// ServerHealth — are in ./types, and this file may not import from analysis/:
+// depending on the layer above would describe the boundary in terms of its own
+// consumer, and did, as a cycle (#330).
 //
 // Vocabulary is MongoDB-flavored on purpose ("collection", "database") — a
 // relational adapter maps them (table, schema/database) rather than the whole

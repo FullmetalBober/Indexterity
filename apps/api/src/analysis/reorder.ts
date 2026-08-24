@@ -1,12 +1,6 @@
+import type { IndexSpec, QueryShape, SortKey } from "../engine/types";
 import { isNeverDrop } from "./safety";
-import type { IndexSpec } from "./types";
-import {
-  esrKeys,
-  isRecurring,
-  type QueryShape,
-  type SortKey,
-  type WorkloadOptions,
-} from "./workload";
+import { esrKeys, isRecurring, type WorkloadOptions } from "./workload";
 
 // Re-ordering a PROTECTED index's keys, where only the direction changes.
 //

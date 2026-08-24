@@ -1,4 +1,3 @@
-import type { IndexKey, IndexSpec, QueryShape, ServerHealth } from "../analysis";
 import type {
   ClusterNode,
   CollectionLatency,
@@ -10,6 +9,7 @@ import type {
   WorkloadTarget,
 } from "../engine/ports";
 import { DatabaseInaccessibleError } from "../engine/ports";
+import type { IndexKey, IndexSpec, QueryShape, ServerHealth } from "../engine/types";
 import {
   asNumber,
   MssqlConnection,

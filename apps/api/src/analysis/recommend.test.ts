@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
+import type { IndexKey, IndexSpec } from "../engine/types";
 import { type IndexInput, parseStoredSpec, recommendForCollection } from "./recommend";
-import type { IndexKey, IndexSpec, UsageSnapshot } from "./types";
+import type { UsageSnapshot } from "./types";
 
 function spec(name: string, keys: IndexKey[], overrides: Partial<IndexSpec> = {}): IndexSpec {
   return {

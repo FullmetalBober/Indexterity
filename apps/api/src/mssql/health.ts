@@ -1,4 +1,4 @@
-import type { ServerHealth } from "../analysis";
+import type { ServerHealth } from "../engine/types";
 import { asNumber, type MssqlConnection } from "./connection";
 
 // The ServerHealth port, mapped onto SQL Server (#205).

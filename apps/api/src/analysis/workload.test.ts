@@ -1,12 +1,10 @@
 import { describe, expect, it } from "vitest";
-import type { IndexSpec } from "./types";
+import type { IndexSpec, QueryShape, SortKey } from "../engine/types";
 import {
   esrKeys,
   isRecurring,
-  type QueryShape,
   recommendCreates,
   recommendNarrowing,
-  type SortKey,
   sortOrderAdvisories,
 } from "./workload";
 

@@ -1,4 +1,3 @@
-import type { IndexKey, IndexSpec, QueryShape, ServerHealth } from "../analysis";
 import {
   type ClusterNode,
   DatabaseInaccessibleError,
@@ -9,6 +8,7 @@ import {
   type WorkloadTarget,
   workloadKey,
 } from "../engine/ports";
+import type { IndexKey, IndexSpec, QueryShape, ServerHealth } from "../engine/types";
 import type { PostgresConnection } from "./connection";
 import { collectPostgresHealth } from "./health";
 import { collectPostgresNodes } from "./members";

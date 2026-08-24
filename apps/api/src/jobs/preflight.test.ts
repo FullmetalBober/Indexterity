@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { IndexKey, IndexSpec } from "../analysis";
+import type { IndexKey, IndexSpec } from "../engine/types";
 import type { IndexCollector } from "../mongo";
 import { enforcesTheSame, preflightDrop } from "./preflight";
 

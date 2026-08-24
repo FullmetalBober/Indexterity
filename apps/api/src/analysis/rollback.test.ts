@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
+import type { IndexKey, IndexSpec } from "../engine/types";
 import { rebuildKeys, rebuildOptions } from "./rollback";
-import type { IndexKey, IndexSpec } from "./types";
 
 function spec(keys: IndexKey[], overrides: Partial<IndexSpec> = {}): IndexSpec {
   return {

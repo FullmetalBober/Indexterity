@@ -1,58 +1,7 @@
 import type { RecommendationType } from "@repo/contracts";
-import { isWorthIndexing, type QueryClient } from "./client";
+import type { ConstantValue, IndexSpec, QueryShape, SortKey } from "../engine/types";
+import { isWorthIndexing } from "./client";
 import { isNeverDrop } from "./safety";
-import type { IndexSpec } from "./types";
-
-export interface SortKey {
-  readonly field: string;
-  readonly direction: 1 | -1;
-}
-
-// A primitive an equality predicate compared against in EVERY sample of a
-// shape — the signal for a partial index. Only the profiler carries real
-// values ($queryStats shapifies them away), so this is often empty.
-export type ConstantValue = string | number | boolean;
-
-// A $lookup join observed in an aggregation: the foreign collection and the
-// field it is joined on — the signal for a foreign-side index.
-export interface LookupJoin {
-  readonly from: string;
-  readonly foreignField: string;
-}
-
-// A distinct query pattern from $queryStats/the profiler, split for the ESR
-// rule: equality predicates, then sort keys (with directions), then ranges.
-export interface QueryShape {
-  readonly equality: readonly string[];
-  readonly sort: readonly SortKey[];
-  readonly range: readonly string[];
-  readonly collscan: boolean;
-  // The plan found its documents through an index but could not order them, so
-  // the server buffered the result and sorted it in memory. A missing index in
-  // its own right, and one `collscan` can never show: keys WERE examined, so by
-  // every scan test the query looks healthy. It is also the failure mode that
-  // ends in an error rather than slowness — a blocking sort dies at 100 MB.
-  readonly sortedInMemory?: boolean;
-  readonly count: number;
-  // Documents the server actually walked for this shape. The measure of what a
-  // missing index is costing — see analysis/severity.ts. Reported by the
-  // profiler, and by `$queryStats` from mongo 8.0 (earlier stores carry
-  // execution counts only).
-  readonly docsExamined?: number;
-  // How long this shape has been watchable, in hours — the denominator that
-  // turns `count` into a rate. $queryStats reports when it first saw each shape;
-  // the profiler's capped ring reports how far back it still holds entries.
-  // Absent when the source cannot say, which is not the same as zero.
-  readonly observedForHours?: number;
-  // Who issued this shape. $queryStats groups by client as well as by shape,
-  // so a query run from a shell and the same query from an app arrive as
-  // separate entries; merged shapes accumulate every client seen. The profiler
-  // reports `appName`, which lands here the same way.
-  readonly clients?: readonly QueryClient[];
-  readonly constants?: Readonly<Record<string, ConstantValue>>;
-  // $lookup joins anywhere in the pipeline (indexed on the FOREIGN collection).
-  readonly lookups?: readonly LookupJoin[];
-}
 
 const HOURS_PER_WEEK = 168;
 

@@ -1,16 +1,5 @@
 import { z } from "zod";
-import {
-  type ConstantValue,
-  classifyClient,
-  type IndexDirection,
-  type IndexKey,
-  type IndexSpec,
-  type LookupJoin,
-  type QueryClient,
-  type QueryShape,
-  type ServerHealth,
-  type SortKey,
-} from "../analysis";
+import { classifyClient } from "../analysis";
 import {
   type ClusterNode,
   type CollectionLatency,
@@ -22,6 +11,17 @@ import {
   type WorkloadTarget,
   workloadKey,
 } from "../engine/ports";
+import type {
+  ConstantValue,
+  IndexDirection,
+  IndexKey,
+  IndexSpec,
+  LookupJoin,
+  QueryClient,
+  QueryShape,
+  ServerHealth,
+  SortKey,
+} from "../engine/types";
 import type { MongoConnection } from "./connection";
 import type { MemberConnections } from "./members";
 

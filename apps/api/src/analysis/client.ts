@@ -1,3 +1,5 @@
+import type { QueryClient } from "../engine/types";
+
 // Who ran the query?
 //
 // `$queryStats` groups by client as well as by shape, so the same `find` issued
@@ -33,13 +35,6 @@ const INTERACTIVE = [
 function looksInteractive(name: string): boolean {
   const lower = name.toLowerCase();
   return INTERACTIVE.some((tool) => lower.includes(tool));
-}
-
-// One client as the workload source describes it.
-export interface QueryClient {
-  // From the connection string's appName, or the driver's default.
-  readonly application?: string;
-  readonly driver?: string;
 }
 
 export type ClientKind = "INTERACTIVE" | "APPLICATION" | "UNKNOWN";

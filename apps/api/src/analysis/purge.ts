@@ -1,4 +1,4 @@
-import type { IndexSpec } from "./types";
+import type { IndexSpec } from "../engine/types";
 
 // What to SAY about a recurring age-based purge.
 //
