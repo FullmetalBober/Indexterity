@@ -8,7 +8,7 @@ import { twoFactor } from "better-auth/plugins/two-factor";
 import { authTrailEntry, sessionEndedEntry, type TrailActor } from "../audit/auth-trail";
 import { authEventFor, recordSecurityEvent } from "../audit/security-events";
 import { and, type Database, eq, members, schema, user as userTable } from "../db";
-import { mailEnabled, sendMailDetached } from "../mail/mailer";
+import { mailEnabled, sendMail, sendMailDetached } from "../mail/mailer";
 import { organizationPlugin } from "./organization";
 import { authRateLimit } from "./rate-limit";
 import { evaluateSignup } from "./signup-gate";
@@ -56,6 +56,25 @@ export interface AuthConfig {
 // sent and a code sitting in an inbox is a credential: long enough to switch
 // to a mail client and back, not long enough to matter tomorrow.
 const OTP_PERIOD_MINUTES = 5;
+
+// Whether this verification mail was ASKED for, rather than sent alongside
+// something else. better-auth hands the callback the request that caused it, and
+// only the resend button arrives on /send-verification-email — sign-up and a
+// refused sign-in arrive on their own paths.
+//
+// Matched on the pathname's end rather than the whole URL, because the base is
+// the deployment's (BETTER_AUTH_URL) and the api is mounted under /api/auth. An
+// absent request means better-auth called this outside a request, which nothing
+// does today; false is the safe answer either way, since it only means the send
+// is detached and the caller is told nothing it could act on.
+export function isResendRequest(request: Request | undefined): boolean {
+  if (request === undefined) return false;
+  try {
+    return new URL(request.url).pathname.endsWith("/send-verification-email");
+  } catch {
+    return false;
+  }
+}
 
 const OWNER_2FA_PATHS = new Set([
   "/organization/invite-member",
@@ -541,13 +560,49 @@ export function createAuth(config: AuthConfig) {
       // had (#306). It is now a real button, and this option is what keeps the
       // implicit path working on purpose instead of by accident.
       sendOnSignIn: true,
-      sendVerificationEmail: async ({ user, url }) => {
-        sendMailDetached(
-          user.email,
-          "Verify your email for Indexterity",
+      // The one sender that waits, and only on the one path where waiting buys
+      // the reader something.
+      //
+      // Three requests reach this callback and they are not the same act. A
+      // sign-up and a refused sign-in send the mail INCIDENTALLY — the reader
+      // asked for an account or a session, the mail rides along, and making
+      // them wait on SMTP is what cost a sign-up 122.5 seconds. The resend
+      // button is the opposite: sending the mail is the entire thing it does,
+      // so its answer is worthless if it cannot say whether that happened.
+      //
+      // D105 claims "the one path a reader can press is the one path on which a
+      // failure is visible to them", and it was true of a deployment that
+      // cannot send at all (`hooks.before` refuses with EMAIL_NOT_CONFIGURED).
+      // It was never true of one configured and broken — a blocked port, a
+      // revoked key, a provider refusing an unverified From — where the resend
+      // answered 200 into a void. Detaching every send made that structural
+      // rather than merely unexercised, so this is the other half of that
+      // change and not a separate idea.
+      //
+      // The throw is what the reader sees: `sendVerificationEmailFn` awaits
+      // this callback without catching, so an APIError becomes the endpoint's
+      // answer, and `useResendVerification` already puts `error.message`
+      // straight into the notice's alert. Nothing on the web side changes.
+      sendVerificationEmail: async ({ user, url }, request) => {
+        const subject = "Verify your email for Indexterity";
+        const body =
           `Welcome to Indexterity!\n\nConfirm this address:\n${url}\n\n` +
-            `If you didn't create an account, ignore this email.`,
-        );
+          `If you didn't create an account, ignore this email.`;
+        if (!isResendRequest(request)) {
+          sendMailDetached(user.email, subject, body);
+          return;
+        }
+        if (await sendMail(user.email, subject, body)) return;
+        // Deliberately blunt about whose problem it is. The reader cannot fix a
+        // transport and should not be left rereading their own address for a
+        // typo — the operator's log has the actual error (mail/mailer.ts logs
+        // it), and this is the sentence that tells them to go and ask.
+        throw new APIError("INTERNAL_SERVER_ERROR", {
+          message:
+            "the email could not be sent — this is a fault in this install's mail setup, " +
+            "not in your address. Whoever runs it will find the reason in the logs",
+          code: "EMAIL_SEND_FAILED",
+        });
       },
     },
     // Registered only when configured. better-auth warns on every boot about a
