@@ -27,19 +27,29 @@ on:
 #
 # `dev` is exempt on purpose rather than by omission. Its runs are the record of
 # whether the integration branch is sound, and a cancelled one leaves a commit
-# with no verdict — so pushes there run to completion and only the pull_request
-# runs collapse. Grouping by `github.ref` keeps the two kinds apart on their
-# own: a push is `refs/heads/dev`, a pull request is `refs/pull/<n>/merge`, so
-# neither can cancel the other. (`main` was exempt here too until it stopped
-# running this workflow at all.)
+# with no verdict.
+#
+# That exemption is expressed in the GROUP, not in `cancel-in-progress`. It used
+# to be `cancel-in-progress: ${{ github.ref != 'refs/heads/dev' }}`, and that did
+# not work: four pull requests merged inside 34 seconds and two of the resulting
+# `dev` runs were cancelled, leaving exactly the commits-with-no-verdict the
+# paragraph above exists to prevent (#334). An `${{ }}` expression reaches
+# `cancel-in-progress` as the string "false", which is not empty and therefore
+# truthy. Appending the SHA instead makes every push to `dev` its own group, so
+# there is never a run for it to supersede and the boolean's value stops
+# mattering. Pull requests keep a stable group — `CI-refs/pull/<n>/merge`, since
+# the `&&`/`||` arm yields the empty string off `dev` — so a superseded pull
+# request run is still cancelled. A push is `refs/heads/dev` and a pull request
+# is `refs/pull/<n>/merge`, so neither kind can cancel the other either way.
+# (`main` was exempt here too until it stopped running this workflow at all.)
 #
 # release.yml deliberately has none of this. It is tag-driven and publishes
 # images and the chart to ghcr.io; cancelling a publish half way is how a chart
 # ends up naming an image tag that was never pushed, which is the exact failure
 # the RELEASE mode of kind-test.sh exists to catch.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/dev' }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/dev' && github.sha || '' }}
+  cancel-in-progress: true
 
 # Three caches carry the work between runs, and they answer different questions.
 #
