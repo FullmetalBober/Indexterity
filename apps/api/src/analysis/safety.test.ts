@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
+import type { IndexSpec } from "../engine/types";
 import { isNeverDrop } from "./safety";
-import type { IndexSpec } from "./types";
 
 function spec(overrides: Partial<IndexSpec> = {}): IndexSpec {
   return {

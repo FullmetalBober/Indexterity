@@ -1,4 +1,5 @@
-import { coversIncludes, type IndexSpec, isNeverDrop, isRedundantPrefix } from "../analysis";
+import { coversIncludes, isNeverDrop, isRedundantPrefix } from "../analysis";
+import type { IndexSpec } from "../engine/types";
 import type { IndexCollector } from "../mongo";
 
 export interface PreflightResult {

@@ -1,4 +1,5 @@
-import { executionsPerWeek, type QueryShape } from "./workload";
+import type { QueryShape } from "../engine/types";
+import { executionsPerWeek } from "./workload";
 
 // How much a missing index is actually costing.
 //

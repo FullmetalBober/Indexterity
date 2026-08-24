@@ -1,6 +1,6 @@
-import type { IndexSpec } from "../analysis";
 import type { EngineSession, IndexUsageStat } from "../engine/ports";
 import { DatabaseInaccessibleError } from "../engine/ports";
+import type { IndexSpec } from "../engine/types";
 
 // One index snapshot, ready to persist or ship to the control plane. Shared by
 // the hosted-direct worker and the customer-side agent.

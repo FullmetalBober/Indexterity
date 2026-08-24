@@ -1,5 +1,5 @@
 import type { CreateIndexOptions } from "../engine/ports";
-import type { IndexSpec } from "./types";
+import type { IndexSpec } from "../engine/types";
 
 // createIndex key document for rebuilding a dropped index from its stored spec.
 // Null when the spec can't be rebuilt automatically (special key types — never

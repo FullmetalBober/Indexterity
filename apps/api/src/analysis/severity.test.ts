@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
+import type { QueryShape } from "../engine/types";
 import {
   bypassesChangeWindow,
   MIN_WEEKLY_DOCS_EXAMINED,
   scanCost,
   weeklyScanCost,
 } from "./severity";
-import type { QueryShape } from "./workload";
 
 function scan(count: number, docsExamined?: number): QueryShape {
   return { equality: ["a"], sort: [], range: [], collscan: true, count, docsExamined };

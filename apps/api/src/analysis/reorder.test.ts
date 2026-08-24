@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
+import type { IndexKey, IndexSpec, QueryShape, SortKey } from "../engine/types";
 import { isReorderable, orderingPositions, recommendReorder, servesShapeOrder } from "./reorder";
-import type { IndexKey, IndexSpec } from "./types";
-import type { QueryShape, SortKey } from "./workload";
 
 const OPTIONS = { minCount: 3, minPerWeek: 0.5 };
 

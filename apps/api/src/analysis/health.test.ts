@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { assessHealth, type ServerHealth } from "./health";
+import type { ServerHealth } from "../engine/types";
+import { assessHealth } from "./health";
 
 const base: ServerHealth = {
   collectionScans: 1000,

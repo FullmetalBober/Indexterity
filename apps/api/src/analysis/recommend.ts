@@ -1,10 +1,11 @@
 import type { RecommendationType, UsageClass } from "@repo/contracts";
 import { z } from "zod";
+import type { IndexSpec } from "../engine/types";
 import { type ClassifyOptions, classifyUsage, usageHistoryIsTrustworthy } from "./classify";
 import { coversIncludes, isKeyPrefix, isRedundantPrefix, servedByBackwardWalk } from "./redundancy";
 import { isNeverDrop } from "./safety";
 import { dropScore } from "./score";
-import { type IndexSpec, totalObservations, type UsageSnapshot } from "./types";
+import { totalObservations, type UsageSnapshot } from "./types";
 
 const directionSchema = z.union([
   z.literal(1),

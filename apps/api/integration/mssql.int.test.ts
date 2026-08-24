@@ -1,13 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import {
-  type IndexSpec,
-  isRedundantPrefix,
-  parseStoredSpec,
-  rebuildKeys,
-  rebuildOptions,
-} from "../src/analysis";
+import { isRedundantPrefix, parseStoredSpec, rebuildKeys, rebuildOptions } from "../src/analysis";
 import { DatabaseInaccessibleError, type EngineSession, workloadKey } from "../src/engine/ports";
 import { detectEngine } from "../src/engine/registry";
+import type { IndexSpec } from "../src/engine/types";
 import { ProvisionDeniedError, SCOPED_USERNAME } from "../src/mongo/provision";
 import { collectSnapshots, serializeSpec } from "../src/mongo/snapshots";
 import { mssqlAdapter } from "../src/mssql/adapter";

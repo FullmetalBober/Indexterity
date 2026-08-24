@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
+import type { IndexKey, IndexSpec } from "../engine/types";
 import { coversIncludes, isRedundantPrefix, servedByBackwardWalk } from "./redundancy";
-import type { IndexKey, IndexSpec } from "./types";
 
 function spec(name: string, keys: IndexKey[], overrides: Partial<IndexSpec> = {}): IndexSpec {
   return {

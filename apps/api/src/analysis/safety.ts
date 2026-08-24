@@ -1,4 +1,4 @@
-import type { IndexSpec } from "./types";
+import type { IndexSpec } from "../engine/types";
 
 // Indexes that must never be auto-dropped regardless of usage, because
 // dropping one does something no latency gate can detect:

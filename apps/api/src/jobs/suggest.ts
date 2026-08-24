@@ -3,7 +3,6 @@ import {
   crowdingPenalty,
   DEFAULT_OBSERVE_DAYS,
   executionsPerWeek,
-  type IndexSpec,
   isRecurring,
   isReorderable,
   MIN_WEEKLY_DOCS_EXAMINED,
@@ -15,7 +14,6 @@ import {
   regressionWeight,
   reorderScore,
   type ScanSeverity,
-  type SortKey,
   scanCost,
   sortOrderAdvisories,
   weeklyScanCost,
@@ -24,6 +22,7 @@ import { entitledAutomation } from "../billing/plans";
 import type { Database } from "../db";
 import { analysisNotes, and, eq, indexCooldowns, policies, recommendations } from "../db";
 import { DatabaseInaccessibleError, type WorkloadTarget, workloadKey } from "../engine/ports";
+import type { IndexSpec, SortKey } from "../engine/types";
 import { openClusterSession } from "./cluster-connection";
 import {
   collectionIndexesAfterBuild,
