@@ -14,7 +14,7 @@ import { TickController } from "./jobs/tick.controller";
 import { TickService } from "./jobs/tick.service";
 import { OrgModule } from "./org/org.module";
 import { PolicyModule } from "./policy/policy.module";
-import { RecommendationsController } from "./recommendations/recommendations.controller";
+import { RecommendationsModule } from "./recommendations/recommendations.module";
 
 // SentryModule is the SDK's Nest wiring only — NOT its SentryGlobalFilter, which
 // is deliberately absent: AppExceptionFilter is this app's catch-all and decides
@@ -51,16 +51,11 @@ function sentryImports() {
     InsightsModule,
     OrgModule,
     PolicyModule,
+    RecommendationsModule,
   ],
   // One controller per area of the contract. They share TenancyService for the
   // session/ownership rules and http/mappers.ts for the boundary conversions.
-  controllers: [
-    HealthController,
-    ClustersController,
-    RecommendationsController,
-    EventsController,
-    TickController,
-  ],
+  controllers: [HealthController, ClustersController, EventsController, TickController],
   providers: [ClusterEventsService, TickService],
 })
 export class AppModule {}
