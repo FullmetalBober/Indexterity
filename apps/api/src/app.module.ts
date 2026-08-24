@@ -12,7 +12,7 @@ import { TenancyModule } from "./http/tenancy.module";
 import { InsightsController } from "./insights/insights.controller";
 import { TickController } from "./jobs/tick.controller";
 import { TickService } from "./jobs/tick.service";
-import { OrgController } from "./org/org.controller";
+import { OrgModule } from "./org/org.module";
 import { PolicyModule } from "./policy/policy.module";
 import { RecommendationsController } from "./recommendations/recommendations.controller";
 
@@ -48,6 +48,7 @@ function sentryImports() {
     ORPCModule.forRoot({}),
     DatabaseModule,
     TenancyModule,
+    OrgModule,
     PolicyModule,
   ],
   // One controller per area of the contract. They share TenancyService for the
@@ -57,7 +58,6 @@ function sentryImports() {
     ClustersController,
     RecommendationsController,
     InsightsController,
-    OrgController,
     EventsController,
     TickController,
   ],
