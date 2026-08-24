@@ -1,9 +1,22 @@
 name: CI
 
 on:
+  # `dev` only. main used to run this too, and the run was pure duplication: main
+  # receives nothing except a dev merge that dev's own run has already answered
+  # for, and what a release additionally needs — that the published chart and
+  # images install from scratch, anonymously — is release.yml's smoke job, which
+  # a CI run on main cannot make and never made.
   push:
-    branches: [main, dev]
+    branches: [dev]
   pull_request:
+  # zap only (see its `if`). A baseline scan is a posture check, not a
+  # regression test: it reports on the surface as it stands rather than on what
+  # a diff changed, so a nightly answers the same question a per-PR run did.
+  schedule:
+    - cron: "0 3 * * *"
+  # Any job, by hand, on any ref — the escape hatch for "was that flake real?"
+  # and for a zap run without waiting for 03:00.
+  workflow_dispatch:
 
 # A push that supersedes another one leaves the first run answering a question
 # about a commit nobody is looking at any more, while holding the runner the new
@@ -12,12 +25,13 @@ on:
 # each bring up Postgres and Mongo, so a rapid succession of pushes to one pull
 # request multiplies all of it for an answer no one reads.
 #
-# `main` and `dev` are exempt on purpose rather than by omission. Those runs are
-# the record of whether an integration branch is sound, and a cancelled one
-# leaves a commit with no verdict — so pushes there run to completion and only
-# the pull_request runs collapse. Grouping by `github.ref` keeps the two kinds
-# apart on their own: a push is `refs/heads/dev`, a pull request is
-# `refs/pull/<n>/merge`, so neither can cancel the other.
+# `dev` is exempt on purpose rather than by omission. Its runs are the record of
+# whether the integration branch is sound, and a cancelled one leaves a commit
+# with no verdict — so pushes there run to completion and only the pull_request
+# runs collapse. Grouping by `github.ref` keeps the two kinds apart on their
+# own: a push is `refs/heads/dev`, a pull request is `refs/pull/<n>/merge`, so
+# neither can cancel the other. (`main` was exempt here too until it stopped
+# running this workflow at all.)
 #
 # release.yml deliberately has none of this. It is tag-driven and publishes
 # images and the chart to ghcr.io; cancelling a publish half way is how a chart
@@ -25,7 +39,7 @@ on:
 # the RELEASE mode of kind-test.sh exists to catch.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/dev' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/dev' }}
 
 # Three caches carry the work between runs, and they answer different questions.
 #
@@ -44,6 +58,7 @@ env:
 
 jobs:
   check:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -90,6 +105,7 @@ jobs:
   # other two can break silently — a cluster that quietly produces no
   # recommendations looks exactly like a cluster with nothing to recommend.
   integration:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -156,6 +172,7 @@ jobs:
   # between releases before. Adapter-level: no api is spawned, so postgres is
   # not needed; DATABASE_URL only satisfies the env schema.
   integration-mssql:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -214,6 +231,7 @@ jobs:
   # WORKLOAD-tier reads would silently return nothing without it, so the setup is
   # explicit instead of clever.
   integration-postgres:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -264,6 +282,10 @@ jobs:
   # sign-in, which no unit or api test could see: each side was correct on its
   # own and the defect lived in the hand-off.
   e2e:
+    # Pull requests only. A push to dev carries the tree the pull request run
+    # just exercised end to end, and this is the most expensive way to learn
+    # that twice; `workflow_dispatch` is the way to demand one on a branch.
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -362,6 +384,15 @@ jobs:
   # No mongo service. The scan signs in to nothing and connects no cluster, so
   # the only backing store either process opens is postgres.
   zap:
+    # Nightly, or on demand — not per change. A baseline scan reports on the
+    # surface as it stands rather than on what a diff changed, so running it on
+    # every pull request re-answered a question about the whole dashboard for a
+    # commit that had usually touched none of it. The rules file (.zap/rules.tsv)
+    # is what keeps a finding from being noise, and it is no less effective at
+    # 03:00. A change that deliberately moves the security surface — headers,
+    # auth routes, the passthrough — should ask for a run with workflow_dispatch
+    # rather than wait for one.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -581,6 +612,7 @@ jobs:
   # jobs. Both run on every path that reaches this job, so the matrix below is a
   # literal rather than something this job has to decide.
   scope:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     outputs:
       chart: ${{ steps.diff.outputs.chart }}
@@ -590,11 +622,28 @@ jobs:
           fetch-depth: 0
       - id: diff
         run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
+          # One pattern, applied to whatever range the event gives us. A push
+          # used to skip the diff and answer `true` outright, which quietly made
+          # the filter a pull-request-only feature — and since a push to dev is
+          # the SAME tree the pull request just filtered, that was the one place
+          # it was guaranteed to be redundant. Two Kind clusters, ~9 minutes, on
+          # every merge whether or not a chart file had been touched.
+          case "${{ github.event_name }}" in
+            pull_request) range="origin/${{ github.base_ref }}...HEAD" ;;
+            push)         range="${{ github.event.before }}...HEAD" ;;
+            # Asked for by hand, so assume the asker wants the expensive leg.
+            *)            echo "chart=true" >> "$GITHUB_OUTPUT"; exit 0 ;;
+          esac
+          # A first push to a branch, or a force push, reports a `before` that is
+          # all zeroes or no longer reachable. Neither is a diff, and guessing
+          # `false` there would skip the chart on exactly the pushes that most
+          # deserve it, so an unusable range falls back to running.
+          if ! git rev-parse --verify --quiet "${range%%...*}^{commit}" >/dev/null; then
+            echo "chart=true (no usable base: ${range%%...*})"
             echo "chart=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          changed=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD")
+          changed=$(git diff --name-only "$range")
           if echo "$changed" | grep -qE '^(deploy/|apps/[a-z]+/Dockerfile|\.github/workflows/ci\.yml)|^apps/api/src/(jobs/|main\.ts)'; then
             echo "chart=true" >> "$GITHUB_OUTPUT"
           else
