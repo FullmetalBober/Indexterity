@@ -53,7 +53,7 @@ export interface TickOutcome {
 
 // The tick function of #229/#231: work out what became due, enqueue it, drain
 // the queue with runOnce, all inside the api process. Two triggers share it —
-// the in-process interval (startInterval, when RUN_CRONJOB is true) and POST
+// the in-process interval (startInterval, when RUN_CRONJOB is true) and GET
 // /api/internal/tick (tick.controller.ts, when the clock is external). Since
 // #232 this is the pipeline's ONLY host: runOnce never opens `LISTEN
 // "jobs:insert"` (that lives in graphile-worker's run() path, verified in
@@ -100,7 +100,7 @@ export class TickService implements BeforeApplicationShutdown {
   }
 
   // Trigger 1: the in-process clock, on when this process owns the schedule
-  // (RUN_CRONJOB=false hands the clock to POST /api/internal/tick instead).
+  // (RUN_CRONJOB=false hands the clock to GET /api/internal/tick instead).
   // Deliberately a plain setInterval and not @nestjs/schedule — what that
   // dependency adds is cron EXPRESSIONS, which is exactly the work duePasses
   // already replaced with occurrence arithmetic (#229). Returns whether it
