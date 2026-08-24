@@ -895,9 +895,14 @@ Those limits are worth reading precisely, because two limiters answer for them.
 replica** and a rolling deploy resets it. `AUTH_RATE_LIMIT_MAX` (20/min) is read
 twice: the same per-replica way for `/api/auth/*`, and by better-auth for the
 credential endpoints, which counts in Postgres — so that half is one budget for the
-whole deployment. Set `TRUST_PROXY` to the CIDR ranges of whatever sits in front,
-not to `true`: better-auth resolves a client address only from a forwarded header
-it can attribute, and without ranges every caller shares one bucket. The chart
+whole deployment. Both count per client address, and `TRUST_PROXY` is what decides
+what that address is — for both, since the api resolves it once and hands
+better-auth the answer rather than letting it read the header itself. Set it to the
+CIDR ranges of whatever sits in front; on a managed host that does not publish
+ranges, set it to the number of appending proxies instead (`1` for the platform,
+`2` with a CDN in front of it). `true` is the one to avoid: it takes the first
+entry in `X-Forwarded-For`, which a caller can write, so anywhere the platform
+appends rather than replaces it lets each attempt choose the bucket it spends. The chart
 **requires** it whenever its ingress is on and infers nothing — it derived the
 value from `ingress.enabled` once, which chose `true` with an ingress and `false`
 without one, and a proxy routed to the Services from outside the chart is

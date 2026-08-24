@@ -1,4 +1,4 @@
-import { apiEnv, requireOwnerTwoFactor, trustedProxyCidrs, trustsProxy } from "../config/env";
+import { apiEnv, requireOwnerTwoFactor, trustsProxy } from "../config/env";
 import { createDatabase } from "../db";
 import { createAuth } from "./auth.config";
 import { assertProductionUrl, useSecureCookies } from "./cookies";
@@ -28,7 +28,6 @@ export const auth = createAuth({
   githubClientSecret: env.GITHUB_CLIENT_SECRET ?? "",
   requireEmailVerification: env.REQUIRE_EMAIL_VERIFICATION,
   trustProxy: trustsProxy(),
-  trustedProxies: trustedProxyCidrs(),
   // The same variable main.ts hands @fastify/rate-limit, and the same unit
   // (attempts a minute). One knob, two limiters, and now the tighter of the two
   // reads it too — see auth/rate-limit.ts.

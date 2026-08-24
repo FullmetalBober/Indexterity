@@ -2,7 +2,6 @@ import type { z } from "zod";
 import type { Plan } from "../billing/plans";
 import {
   type ApiEnv,
-  cidrEntries,
   decodeKey,
   isSecretVar,
   type MigrateEnv,
@@ -190,23 +189,20 @@ export function currentKeyVersion(): number {
   return workerEnv().MASTER_KEY_VERSION;
 }
 
-// Fastify's trustProxy. Behind an ingress or a Service every request arrives
-// from the proxy, so `request.ip` is the proxy's address and both rate limiters
-// — Fastify's and better-auth's — collapse from per-client budgets into one
-// global bucket.
+// Fastify's trustProxy, and through it every client address this api resolves.
+// Behind an ingress or a Service every request arrives from the proxy, so
+// `request.ip` is the proxy's address and both rate limiters — Fastify's and
+// better-auth's — collapse from per-client budgets into one global bucket.
+//
+// One setting for both: better-auth is handed the address Fastify resolved from
+// this rather than resolving its own (auth/http.ts), so `true`, a hop count and a
+// range list each mean the same thing to both limiters.
 export function trustProxySetting(): TrustProxy {
   return apiEnv().TRUST_PROXY;
 }
 
 export function trustsProxy(): boolean {
   return trustProxySetting() !== false;
-}
-
-// The CIDR entries of TRUST_PROXY, for better-auth, which needs to know WHICH
-// hops to distrust rather than only that a proxy exists.
-export function trustedProxyCidrs(): string[] {
-  const value = apiEnv().TRUST_PROXY;
-  return typeof value === "string" ? cidrEntries(value) : [];
 }
 
 // Whether owners must have a second factor before any owner-only mutation (#55).

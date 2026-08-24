@@ -65,11 +65,18 @@ export function VerifyEmailNotice({
               </AlertDescription>
             </Alert>
           ) : null}
-          <div className="flex items-center gap-2">
+          {/* One action and one way out, stacked — the shape AuthForm uses in
+              this same card, and the reason is the card: `max-w-sm` is 24rem at
+              every screen size, and two buttons of these labels do not fit on one
+              row inside it. Side by side, "Use a different address" ran past the
+              border and was cut off. A row that only fits the labels it has today
+              is a layout waiting to break on the next word, so the secondary drops
+              to a link under the button rather than beside it. */}
+          <div className="flex flex-col items-start gap-3">
             <Button onClick={() => resend.mutate(email)} disabled={resend.isPending}>
               {resend.isPending ? "Sending…" : "Send it again"}
             </Button>
-            <Button variant="ghost" onClick={onStartOver}>
+            <Button variant="link" size="sm" className="h-auto p-0" onClick={onStartOver}>
               Use a different address
             </Button>
           </div>
