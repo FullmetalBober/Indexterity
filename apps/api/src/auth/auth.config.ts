@@ -8,7 +8,7 @@ import { twoFactor } from "better-auth/plugins/two-factor";
 import { authTrailEntry, sessionEndedEntry, type TrailActor } from "../audit/auth-trail";
 import { authEventFor, recordSecurityEvent } from "../audit/security-events";
 import { and, type Database, eq, members, schema, user as userTable } from "../db";
-import { mailEnabled, sendMail } from "../mail/mailer";
+import { mailEnabled, sendMailDetached } from "../mail/mailer";
 import { organizationPlugin } from "./organization";
 import { authRateLimit } from "./rate-limit";
 import { evaluateSignup } from "./signup-gate";
@@ -33,13 +33,10 @@ export interface AuthConfig {
   // When true, unverified accounts cannot sign in (production posture). Off by
   // default so dev/test environments work without SMTP.
   readonly requireEmailVerification: boolean;
-  // A trusted proxy sits in front, so forwarded client addresses are real.
+  // A trusted proxy sits in front, so forwarded client addresses are real. Read
+  // by the security trail alone now — the rate limiter is handed an address
+  // Fastify already resolved under this same setting (auth/http.ts).
   readonly trustProxy: boolean;
-  // Which forwarded hops to distrust, as IPs or CIDR ranges. Empty means a
-  // forwarded header is only believed when it carries exactly one address —
-  // better-auth's rule, and the reason a multi-hop ingress collapses every client
-  // into one rate-limit bucket (see env.ts, and auth/rate-limit.ts).
-  readonly trustedProxies: readonly string[];
   // Attempts a minute allowed on the credential endpoints, per client address.
   // The same AUTH_RATE_LIMIT_MAX the Fastify limiter reads, so tuning it moves the
   // limit that actually applies rather than only the one that does not (#54).
@@ -193,25 +190,22 @@ export function createAuth(config: AuthConfig) {
       // and `user`, `session`, `account` and `verification` have text keys with
       // no default to generate one.
       database: { generateId: () => randomUUID() },
-      // Only when the deployment says a proxy is in front. Reading a forwarded
-      // header otherwise lets a client pick its own address and never reach a
-      // rate limit.
+      // Where the client address comes from, and it is not the wire: main.ts
+      // resolves it with Fastify and hands it over as a one-entry
+      // X-Forwarded-For, having overwritten whatever arrived under that name
+      // (auth/http.ts says why at length).
       //
-      // `trustedProxies` is what makes the header usable behind a real ingress:
-      // without it better-auth believes X-Forwarded-For only when it holds a
-      // single address, and an ingress adds itself as a second hop — so every
-      // client resolved to "no trusted ip" and shared one bucket. With the list it
-      // walks the chain from the right and stops at the first hop we did not name.
-      ...(config.trustProxy
-        ? {
-            ipAddress: {
-              ipAddressHeaders: ["x-forwarded-for"],
-              ...(config.trustedProxies.length > 0
-                ? { trustedProxies: [...config.trustedProxies] }
-                : {}),
-            },
-          }
-        : {}),
+      // Stated unconditionally, even though this is also better-auth's default,
+      // because the default is the header read RAW and that is wrong in both
+      // postures — behind a multi-hop ingress it resolves nothing and every
+      // caller shares one rate-limit bucket, directly exposed it believes an
+      // address the caller chose. Naming it here is what makes the two files a
+      // pair rather than one relying on the other's default.
+      //
+      // No `trustedProxies`: the chain is already one hop long by the time it
+      // gets here, and the list wants CIDR ranges that a managed host does not
+      // publish. Which hops to believe is TRUST_PROXY's answer, in one place.
+      ipAddress: { ipAddressHeaders: ["x-forwarded-for"] },
     },
     // Counted in Postgres, so the limit is the deployment's rather than each
     // pod's, and the configured number is the one that applies to a sign-in.
@@ -251,7 +245,7 @@ export function createAuth(config: AuthConfig) {
         // arrive.
         updateEmailWithoutVerification: true,
         sendChangeEmailConfirmation: async ({ user, newEmail, url }) => {
-          await sendMail(
+          sendMailDetached(
             user.email,
             "Approve changing your Indexterity email",
             `Someone signed in to your account asked to change its email from ` +
@@ -283,7 +277,7 @@ export function createAuth(config: AuthConfig) {
         // it is also the ceiling on what 2FA is worth here.
         otpOptions: {
           sendOTP: async ({ user, otp }) => {
-            await sendMail(
+            sendMailDetached(
               user.email,
               "Your Indexterity sign-in code",
               `Your sign-in code is ${otp}\n\n` +
@@ -385,7 +379,7 @@ export function createAuth(config: AuthConfig) {
           // the notice, and it arrives with an approve link rather than a
           // fait accompli. Worded as a request: the flip can still fail.
           if (resolved.user.emailVerified !== true) {
-            await sendMail(
+            sendMailDetached(
               resolved.user.email,
               "Your Indexterity email is being changed",
               `A change of your account email from ${resolved.user.email} to ` +
@@ -530,7 +524,7 @@ export function createAuth(config: AuthConfig) {
       // shorter than the alternative by seven days.
       revokeSessionsOnPasswordReset: true,
       sendResetPassword: async ({ user, url }) => {
-        await sendMail(
+        sendMailDetached(
           user.email,
           "Reset your Indexterity password",
           `Someone (hopefully you) asked to reset the password for ${user.email}.\n\n` +
@@ -548,7 +542,7 @@ export function createAuth(config: AuthConfig) {
       // implicit path working on purpose instead of by accident.
       sendOnSignIn: true,
       sendVerificationEmail: async ({ user, url }) => {
-        await sendMail(
+        sendMailDetached(
           user.email,
           "Verify your email for Indexterity",
           `Welcome to Indexterity!\n\nConfirm this address:\n${url}\n\n` +
