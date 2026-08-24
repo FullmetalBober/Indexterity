@@ -9,7 +9,7 @@ import { ClusterEventsService } from "./events/cluster-events.service";
 import { EventsController } from "./events/events.controller";
 import { HealthController } from "./health/health.controller";
 import { TenancyModule } from "./http/tenancy.module";
-import { InsightsController } from "./insights/insights.controller";
+import { InsightsModule } from "./insights/insights.module";
 import { TickController } from "./jobs/tick.controller";
 import { TickService } from "./jobs/tick.service";
 import { OrgModule } from "./org/org.module";
@@ -48,6 +48,7 @@ function sentryImports() {
     ORPCModule.forRoot({}),
     DatabaseModule,
     TenancyModule,
+    InsightsModule,
     OrgModule,
     PolicyModule,
   ],
@@ -57,7 +58,6 @@ function sentryImports() {
     HealthController,
     ClustersController,
     RecommendationsController,
-    InsightsController,
     EventsController,
     TickController,
   ],
