@@ -9,11 +9,10 @@
 // on sys.dm_exec_query_stats, which the plan cache silently evicts, and the
 // product would be guessing. 2014 and older are also long past end-of-life.
 
-// The ceiling flag is one variable for every engine now, so it has one reader
-// too — kept beside mongo's version rules for the same reason allowInsecureTls
-// and TlsOverrides live in mongo/client.ts: the first engine's module is where
-// the shared piece already was.
-import { allowUntestedVersions } from "../mongo/version";
+// The ceiling flag is one variable for every engine, so it has one reader too,
+// and that reader is engine-neutral (engine/version.ts). What stays here is
+// this engine's own floor, ceiling and wording.
+import { allowUntestedVersions } from "../engine/version";
 
 export interface MssqlServerVersion {
   readonly major: number;

@@ -1,6 +1,6 @@
 import { coversIncludes, isNeverDrop, isRedundantPrefix } from "../analysis";
+import type { IndexCollector } from "../engine/ports";
 import type { IndexSpec } from "../engine/types";
-import type { IndexCollector } from "../mongo";
 
 export interface PreflightResult {
   readonly safe: boolean;

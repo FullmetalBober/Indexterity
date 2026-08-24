@@ -1,11 +1,6 @@
 import { describe, expect, it } from "vitest";
-import {
-  alreadyProvisionedMessage,
-  dropUserStatement,
-  ENGINE_PRIVILEGES,
-  SCOPED_USERNAME,
-  scopedConnString,
-} from "./provision";
+import { alreadyProvisionedMessage, SCOPED_USERNAME } from "../engine/provision";
+import { dropUserStatement, ENGINE_PRIVILEGES, scopedConnString } from "./provision";
 
 describe("scopedConnString", () => {
   it("swaps credentials and forces authSource=admin, preserving topology", () => {

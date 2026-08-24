@@ -1,11 +1,11 @@
 import type { JobHelpers } from "graphile-worker";
 import type { Database } from "../db";
+import { InsecureConnectionError } from "../engine/tls";
+import { UnsupportedServerError } from "../engine/version";
 import { isUnreachableError } from "../errors/unreachable";
 import { emitPassFinished } from "../events/emit";
 import { ALERT_COOLDOWN_MS, alertAllowed, notifyClusterOwners } from "../mail/notify";
 import { recordClusterTask } from "../metrics";
-import { InsecureConnectionError } from "../mongo/client";
-import { UnsupportedServerError } from "../mongo/executor";
 import { applyCluster } from "./apply";
 import { refreshInferredWindow } from "./change-window";
 import { classifyCluster } from "./classify";

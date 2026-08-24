@@ -5,20 +5,14 @@
 // clusters keep dialling plaintext forever.
 
 import mssql from "mssql";
-import {
-  allowInsecureTls,
-  InsecureConnectionError,
-  NO_TLS_OVERRIDES,
-  type TlsOverrides,
-} from "../mongo/client";
+import { NO_TLS_OVERRIDES, type TlsOverrides } from "../engine/ports";
+import { allowInsecureTls, InsecureConnectionError } from "../engine/tls";
 import {
   encryptModeOf,
   type ParsedMssqlConnString,
   parseMssqlConnString,
   trustsServerCertificate,
 } from "./conn-string";
-
-export { InsecureConnectionError, NO_TLS_OVERRIDES, type TlsOverrides } from "../mongo/client";
 
 // Fail fast on unreachable servers, same budget as the mongo client's 5s
 // server-selection timeout.

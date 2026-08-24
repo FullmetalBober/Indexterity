@@ -1,6 +1,8 @@
 import { MongoClient } from "mongodb";
 import ConnectionString from "mongodb-connection-string-url";
 import { workerEnv } from "../config/env";
+import { NO_TLS_OVERRIDES, type TlsOverrides } from "../engine/ports";
+import { allowInsecureTls, InsecureConnectionError } from "../engine/tls";
 
 // Fail fast on unreachable clusters: 5s server selection instead of the driver's
 // 30s default, so requests surface a 502 quickly.
@@ -32,35 +34,8 @@ const VALIDATION_DISABLED: readonly [string, keyof TlsOverrides][] = [
   ["tlsinsecure", "insecure"],
 ];
 
-export class InsecureConnectionError extends Error {}
-
-// Which TLS checks this particular cluster's owner chose to turn off. Recorded
-// on the cluster row, so the dial is verified against a decision rather than
-// against whatever the string it was handed happens to contain.
-export interface TlsOverrides {
-  readonly allowInvalidCertificates: boolean;
-  readonly allowInvalidHostnames: boolean;
-  readonly insecure: boolean;
-}
-
-export const NO_TLS_OVERRIDES: TlsOverrides = {
-  allowInvalidCertificates: false,
-  allowInvalidHostnames: false,
-  insecure: false,
-};
-
-// Self-hosted installs and the dev stack point at a local mongod with no
-// certificate. Deliberately its OWN switch rather than riding on
-// ALLOW_PRIVATE_CLUSTER_TARGETS: a VPC-peered or PrivateLink Atlas cluster is a
-// private address that must still be forced to TLS, so coupling a transport rule
-// to an addressing rule would quietly weaken real deployments.
-export function allowInsecureTls(): boolean {
-  return workerEnv().ALLOW_INSECURE_CLUSTER_TLS;
-}
-
-// Read per call rather than captured at module load, for the same reason the flag
-// above is: the schema is validated at boot, and reading through it keeps one
-// answer for what the environment says.
+// Read per call rather than captured at module load: the schema is validated at
+// boot, and reading through it keeps one answer for what the environment says.
 export function maxPoolSize(): number {
   return workerEnv().MONGO_MAX_POOL_SIZE;
 }

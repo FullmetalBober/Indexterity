@@ -27,6 +27,7 @@ import {
   type ProvisionedUser,
   type TlsOverrides,
 } from "../engine/ports";
+import { ProvisionDeniedError } from "../engine/provision";
 import {
   adapterFor,
   detectEngine,
@@ -34,12 +35,12 @@ import {
   supportedEngineOptions,
   supportedEngines,
 } from "../engine/registry";
+import { InsecureConnectionError } from "../engine/tls";
 import { consumeDialBudget } from "../errors/dial-budget";
 import { mapClusterError, toCluster, toDiagnosis } from "../http/mappers";
 import { TenancyService } from "../http/tenancy.service";
 import { ClusterGoneError, openClusterSession, unsealCluster } from "../jobs/cluster-connection";
 import { evictCluster } from "../jobs/connection-pool";
-import { InsecureConnectionError, ProvisionDeniedError } from "../mongo";
 import { Implement, route } from "../orpc/implement";
 import { assertLeastPrivilege } from "./least-privilege";
 import { restoreHiddenIndexes, revokeCommandFor } from "./offboard";
@@ -254,8 +255,9 @@ export class ClustersController {
     // pointing at 10.0.0.5 would name the wrong problem — and quietly weaken the
     // SSRF message that is the more severe of the two.
     //
-    // The enforcement itself lives in mongo/client.ts, because the worker never
-    // comes through here: jobs/connection-pool.ts opens the STORED string. This
+    // The enforcement itself lives in each adapter's client module, because the
+    // worker never comes through here: jobs/connection-pool.ts opens the STORED
+    // string. This
     // is only so onboarding refuses with the reason instead of surfacing the same
     // refusal as a 502 out of diagnose.
     try {

@@ -4,12 +4,11 @@ import {
   alreadyProvisionedMessage,
   ProvisionDeniedError,
   SCOPED_USERNAME,
-} from "../mongo/provision";
+} from "../engine/provision";
 import { pgConnStringUsername, withPgCredentials } from "./conn-string";
 import { PostgresConnection } from "./connection";
 import { quoteIdent } from "./executor";
 
-export { ProvisionDeniedError, SCOPED_USERNAME } from "../mongo/provision";
 export { pgConnStringUsername } from "./conn-string";
 
 // The scoped role this adapter creates, and the one place PostgreSQL cannot

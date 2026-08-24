@@ -9,12 +9,8 @@
 // deployment posture, and a pure string reader has no business reading env.
 
 import { Pool } from "pg";
-import {
-  allowInsecureTls,
-  InsecureConnectionError,
-  NO_TLS_OVERRIDES,
-  type TlsOverrides,
-} from "../mongo/client";
+import { NO_TLS_OVERRIDES, type TlsOverrides } from "../engine/ports";
+import { allowInsecureTls, InsecureConnectionError } from "../engine/tls";
 import {
   effectivePgTrust,
   MODE_RANK,
@@ -23,8 +19,6 @@ import {
   parsePgConnString,
   sslModeOf,
 } from "./conn-string";
-
-export { InsecureConnectionError, NO_TLS_OVERRIDES, type TlsOverrides } from "../mongo/client";
 
 // Fail fast on unreachable servers, the same budget as the mongo client's
 // server-selection timeout and the mssql connect timeout.

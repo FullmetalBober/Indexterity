@@ -1,5 +1,5 @@
 import type { CreateIndexOptions, IndexExecutor } from "../engine/ports";
-import { UnsupportedServerError } from "../mongo/executor";
+import { UnsupportedServerError } from "../engine/version";
 import { MssqlConnection, qualifiedTable, quoteIdent } from "./connection";
 import { mssqlVersionRefusal } from "./version";
 
