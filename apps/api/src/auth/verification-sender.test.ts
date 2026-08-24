@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isResendRequest } from "./auth.config";
+import { isResendRequest, verificationLandingUrl } from "./auth.config";
 
 // Which of the three requests that reach `sendVerificationEmail` is the one the
 // reader ASKED for. Only that one waits on SMTP and reports a failure; the other
@@ -57,5 +57,50 @@ describe("isResendRequest", () => {
   // detached, which is the answer that cannot make anything worse.
   it("says no when there is no request", () => {
     expect(isResendRequest(undefined)).toBe(false);
+  });
+});
+
+// Where the emailed link puts the reader afterwards (#324). Rewritten in the
+// sender rather than at the callers, so this is where the rule is pinned: it has
+// to fix the default WITHOUT touching a destination somebody chose, and the two
+// callers that choose one (change-email) and cannot choose one (the send that
+// rides along with a refused sign-in) both depend on that distinction.
+describe("verificationLandingUrl", () => {
+  const LINK = "https://api.example.com/api/auth/verify-email?token=abc";
+
+  it("sends the default landing to /verified on the dashboard's origin", () => {
+    const out = new URL(
+      verificationLandingUrl(`${LINK}&callbackURL=%2F`, "https://app.example.com"),
+    );
+    expect(out.searchParams.get("callbackURL")).toBe("https://app.example.com/verified");
+    // Everything else about the link is better-auth's and must survive.
+    expect(out.searchParams.get("token")).toBe("abc");
+    expect(out.pathname).toBe("/api/auth/verify-email");
+  });
+
+  // better-auth omits the parameter entirely on some paths; that is the same
+  // "nobody said" as the "/" it writes on the rest.
+  it("treats an absent callbackURL as the default too", () => {
+    const out = new URL(verificationLandingUrl(LINK, "https://app.example.com"));
+    expect(out.searchParams.get("callbackURL")).toBe("https://app.example.com/verified");
+  });
+
+  // The change-email link, which is opened by somebody already signed in and
+  // belongs back on their account page. Rewriting it would be a regression in a
+  // flow that was already correct.
+  it("leaves a destination the caller chose alone", () => {
+    const chosen = `${LINK}&callbackURL=${encodeURIComponent("/app/account")}`;
+    expect(verificationLandingUrl(chosen, "https://app.example.com")).toBe(chosen);
+  });
+
+  it("does not double the slash on an origin that carries one", () => {
+    const out = new URL(verificationLandingUrl(LINK, "https://app.example.com/"));
+    expect(out.searchParams.get("callbackURL")).toBe("https://app.example.com/verified");
+  });
+
+  // A link this cannot parse is still a link somebody is waiting for, so it goes
+  // out unchanged rather than not at all.
+  it("hands back anything it cannot parse", () => {
+    expect(verificationLandingUrl("not a url", "https://app.example.com")).toBe("not a url");
   });
 });
