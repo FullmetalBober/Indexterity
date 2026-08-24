@@ -1,18 +1,21 @@
 import { Controller, Req } from "@nestjs/common";
 import { contract } from "@repo/contracts";
 import type { FastifyRequest } from "fastify";
-import { eq, policies } from "../db";
-import { DatabaseService } from "../db/database.service";
 import { TenancyService } from "../http/tenancy.service";
 import { Implement, route } from "../orpc/implement";
+import { PolicyService } from "./policy.service";
 
 // The per-cluster engine knobs. Reads are open to members; writes are
 // owner-only and replace the whole policy.
+//
+// Ownership is checked here rather than in the service because it is the one
+// refusal phrased in the CONTRACT's errors — `errors.NOT_FOUND`, so a cluster in
+// another organization is indistinguishable from one that does not exist.
 @Controller()
 export class PolicyController {
   constructor(
-    private readonly database: DatabaseService,
     private readonly tenancy: TenancyService,
+    private readonly policy: PolicyService,
   ) {}
 
   @Implement(contract.getPolicy)
@@ -20,28 +23,7 @@ export class PolicyController {
     return route(this.tenancy, contract.getPolicy, req, "member").handler(
       async ({ input, errors, context }) => {
         await this.tenancy.assertOwnsCluster(input.clusterId, context.member.orgId, errors);
-        const [row] = await this.database.db
-          .select()
-          .from(policies)
-          .where(eq(policies.clusterId, input.clusterId))
-          .limit(1);
-        return {
-          clusterId: input.clusterId,
-          // No policy row yet means nothing has been configured, not that
-          // this is off — the column's default is what a row would carry, so
-          // the fallback has to agree with it or the toggle renders a state
-          // the engine does not act on (#258).
-          workloadAnalysis: row?.workloadAnalysis ?? true,
-          instantCreate: row?.instantCreate ?? false,
-          observeWindowDays: row?.observeWindowDays ?? 30,
-          maxCollectionSizeBytes: row?.maxCollectionSizeBytes ?? null,
-          autoApplyScore: row?.autoApplyScore ?? null,
-          changeWindowStartHour: row?.changeWindowStartHour ?? null,
-          changeWindowEndHour: row?.changeWindowEndHour ?? null,
-          inferredWindowStartHour: row?.inferredWindowStartHour ?? null,
-          inferredWindowEndHour: row?.inferredWindowEndHour ?? null,
-          inferredWindowReason: row?.inferredWindowReason ?? null,
-        };
+        return this.policy.read(input.clusterId);
       },
     );
   }
@@ -52,30 +34,9 @@ export class PolicyController {
     return route(this.tenancy, contract.updatePolicy, req, "owner").handler(
       async ({ input, errors, context }) => {
         const orgId = context.member.orgId;
-        // Only when switching it ON — an org whose plan changed under it must
-        // still be able to save the rest of its policy, and to turn this off.
-        if (input.workloadAnalysis) await this.tenancy.requireWorkloadAnalysis(orgId);
-        // Only when switching automation ON. Turning it off, or saving anything
-        // else, must stay possible after a downgrade.
-        if (input.autoApplyScore !== null || input.instantCreate) {
-          await this.tenancy.requireAutoApply(orgId);
-        }
         const { clusterId, ...knobs } = input;
         await this.tenancy.assertOwnsCluster(clusterId, orgId, errors);
-        const [saved] = await this.database.db
-          .insert(policies)
-          .values({ clusterId, ...knobs })
-          .onConflictDoUpdate({ target: policies.clusterId, set: knobs })
-          .returning();
-        // Echo the engine's window back too — clearing the explicit one hands
-        // the choice back to the engine, and the UI needs to say so immediately.
-        return {
-          clusterId,
-          ...knobs,
-          inferredWindowStartHour: saved?.inferredWindowStartHour ?? null,
-          inferredWindowEndHour: saved?.inferredWindowEndHour ?? null,
-          inferredWindowReason: saved?.inferredWindowReason ?? null,
-        };
+        return this.policy.save(orgId, clusterId, knobs);
       },
     );
   }

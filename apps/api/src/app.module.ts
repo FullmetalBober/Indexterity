@@ -4,16 +4,16 @@ import { ORPCModule } from "@orpc/nest";
 import { errorReportingEnabled } from "@repo/errors";
 import { SentryModule } from "@sentry/nestjs/setup";
 import { ClustersController } from "./clusters/clusters.controller";
-import { DatabaseService } from "./db/database.service";
+import { DatabaseModule } from "./db/database.module";
 import { ClusterEventsService } from "./events/cluster-events.service";
 import { EventsController } from "./events/events.controller";
 import { HealthController } from "./health/health.controller";
-import { TenancyService } from "./http/tenancy.service";
+import { TenancyModule } from "./http/tenancy.module";
 import { InsightsController } from "./insights/insights.controller";
 import { TickController } from "./jobs/tick.controller";
 import { TickService } from "./jobs/tick.service";
 import { OrgController } from "./org/org.controller";
-import { PolicyController } from "./policy/policy.controller";
+import { PolicyModule } from "./policy/policy.module";
 import { RecommendationsController } from "./recommendations/recommendations.controller";
 
 // SentryModule is the SDK's Nest wiring only — NOT its SentryGlobalFilter, which
@@ -34,7 +34,22 @@ function sentryImports() {
 
 @Module({
   // ORPCModule provides the interceptor that @Implement handlers run through.
-  imports: [...sentryImports(), ConfigModule.forRoot({ isGlobal: true }), ORPCModule.forRoot({})],
+  //
+  // DatabaseModule and TenancyModule are imported rather than provided so that
+  // the pool and the tenancy rules are ONE instance shared with the feature
+  // modules below — listing the services here as well would give this module its
+  // own second copy of each.
+  //
+  // Feature modules are the direction (#333): a controller still listed here is
+  // one that has not moved yet, and this array shrinks to `imports` as they do.
+  imports: [
+    ...sentryImports(),
+    ConfigModule.forRoot({ isGlobal: true }),
+    ORPCModule.forRoot({}),
+    DatabaseModule,
+    TenancyModule,
+    PolicyModule,
+  ],
   // One controller per area of the contract. They share TenancyService for the
   // session/ownership rules and http/mappers.ts for the boundary conversions.
   controllers: [
@@ -42,11 +57,10 @@ function sentryImports() {
     ClustersController,
     RecommendationsController,
     InsightsController,
-    PolicyController,
     OrgController,
     EventsController,
     TickController,
   ],
-  providers: [DatabaseService, TenancyService, ClusterEventsService, TickService],
+  providers: [ClusterEventsService, TickService],
 })
 export class AppModule {}
