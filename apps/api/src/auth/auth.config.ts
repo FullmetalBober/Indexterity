@@ -76,6 +76,45 @@ export function isResendRequest(request: Request | undefined): boolean {
   }
 }
 
+// The page the verification link puts the reader on once better-auth has
+// consumed the token (#324).
+//
+// better-auth builds the link with whatever `callbackURL` the caller passed and
+// falls back to "/" — and "/" is the marketing landing page, which is
+// deliberately static: no loader, no api call, nothing that could report an
+// outcome. Somebody whose address was confirmed and somebody whose link had
+// expired landed on the same page and were told the same nothing, and the second
+// one goes on clicking the dead link because nothing suggested otherwise.
+//
+// Rewritten HERE rather than at the callers, because there are three of them and
+// one cannot do it: sign-up and the resend button could each pass a callbackURL,
+// but the send that rides along with a sign-in refused for an unverified address
+// cannot — signIn.email uses that same field for where a SUCCESSFUL sign-in
+// lands, so setting it would send verified readers to the wrong page.
+//
+// Only the fallback is replaced. A caller that named a destination keeps it,
+// which is what leaves the change-email link on "/app/account" (the web's
+// mutations/account.ts): that one is opened by somebody already signed in and
+// belongs back on their account page, not here.
+//
+// Absolute, off webOrigin, for the reason the org invite mail is (organization.ts):
+// the api can answer on an origin of its own, and a relative redirect would then
+// land on the api rather than on the dashboard. webOrigin is a trusted origin, so
+// better-auth's own check on callbackURL accepts it.
+export function verificationLandingUrl(url: string, webOrigin: string): string {
+  try {
+    const parsed = new URL(url);
+    const callback = parsed.searchParams.get("callbackURL");
+    if (callback !== null && callback !== "/") return url;
+    parsed.searchParams.set("callbackURL", `${webOrigin.replace(/\/+$/, "")}/verified`);
+    return parsed.toString();
+  } catch {
+    // A link this cannot parse is still a link somebody is waiting for. Sending
+    // it unchanged is the pre-#324 behaviour, which is bad but not broken.
+    return url;
+  }
+}
+
 const OWNER_2FA_PATHS = new Set([
   "/organization/invite-member",
   "/organization/remove-member",
@@ -585,8 +624,9 @@ export function createAuth(config: AuthConfig) {
       // straight into the notice's alert. Nothing on the web side changes.
       sendVerificationEmail: async ({ user, url }, request) => {
         const subject = "Verify your email for Indexterity";
+        const link = verificationLandingUrl(url, config.webOrigin);
         const body =
-          `Welcome to Indexterity!\n\nConfirm this address:\n${url}\n\n` +
+          `Welcome to Indexterity!\n\nConfirm this address:\n${link}\n\n` +
           `If you didn't create an account, ignore this email.`;
         if (!isResendRequest(request)) {
           sendMailDetached(user.email, subject, body);

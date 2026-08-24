@@ -54,4 +54,24 @@ test.describe("authentication", () => {
     await page.goto("/");
     await expect(page).toHaveTitle(/Indexterity/);
   });
+
+  // Where the verification email's link lands (#324). It used to land on `/`,
+  // which is static and said nothing — so a confirmed reader and one whose link
+  // had expired were shown the identical page.
+  //
+  // The token flow itself cannot run here (this deployment does not require
+  // verification, so no mail is sent), and it does not need to: what better-auth
+  // hands this page is a redirect carrying at most `?error=`, which is exactly
+  // what these two navigations are. What they prove is the half the component
+  // test cannot — that the route exists in the built server and renders from a
+  // cold navigation rather than only under a test renderer.
+  test("the verification landing reports both outcomes", async ({ page }) => {
+    await page.goto("/verified");
+    await expect(page.getByText("Email confirmed")).toBeVisible();
+    await expect(page.getByText(/does not sign you in here/)).toBeVisible();
+
+    await page.goto("/verified?error=TOKEN_EXPIRED");
+    await expect(page.getByText("That link has expired")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send a new link" })).toBeVisible();
+  });
 });
