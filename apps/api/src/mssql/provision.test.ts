@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { withMssqlCredentials } from "./conn-string";
-import { mssqlConnStringUsername } from "./provision";
+import { dropLoginStatements, mssqlConnStringUsername } from "./provision";
 
 // Provisioning itself needs a server and is proven in the integration suite;
 // what is pinned here is the string handling around it, which is where a
@@ -52,5 +52,24 @@ describe("mssqlConnStringUsername", () => {
   it("is null when there is no login to read", () => {
     expect(mssqlConnStringUsername("mssql://host/db")).toBeNull();
     expect(mssqlConnStringUsername("nonsense")).toBeNull();
+  });
+});
+
+describe("dropLoginStatements", () => {
+  // The users go first, in every database provisioning created one in: SQL
+  // Server refuses to drop a login while any database user still maps to it, so
+  // the order is the difference between a script that works and one that stops
+  // half way with the login still there.
+  it("drops each database's user before the login itself", () => {
+    const lines = dropLoginStatements("indexterity", ["shop", "billing"]).split("\n");
+    expect(lines).toHaveLength(3);
+    expect(lines[0]).toContain("[shop]");
+    expect(lines[0]).toContain("DROP USER IF EXISTS [indexterity]");
+    expect(lines[1]).toContain("[billing]");
+    expect(lines[2]).toBe("DROP LOGIN [indexterity];");
+  });
+
+  it("is just the login when the instance has no databases to clear", () => {
+    expect(dropLoginStatements("indexterity", [])).toBe("DROP LOGIN [indexterity];");
   });
 });

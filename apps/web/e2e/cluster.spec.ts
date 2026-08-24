@@ -1,10 +1,12 @@
 import { expect, type Page } from "@playwright/test";
+import { MongoClient } from "mongodb";
 import {
   connectCluster,
   MONGO_ADMIN_URL,
   MONGO_URL,
   openClusterSettings,
   openConnectForm,
+  SCOPED_USERNAME,
   signUpAndLandOnDashboard,
   test,
   uniqueEmail,
@@ -306,6 +308,24 @@ test.describe("cluster lifecycle", () => {
       "needs MONGO_ADMIN_URL: an auth-enabled mongod whose user can create users",
     );
 
+    // The scoped user has ONE fixed name, so the server refuses to create a
+    // second — which is the safeguard under test everywhere else and a trap
+    // here. Nothing in the product drops it (the admin credentials that could
+    // are thrown away by design), so without this the test passes exactly once
+    // per mongod: a Playwright retry, a second local run, or a CI service that
+    // outlived a job would all meet the refusal instead of the offer.
+    test.beforeEach(async () => {
+      const client = new MongoClient(MONGO_ADMIN_URL);
+      try {
+        await client.db("admin").command({ dropUser: SCOPED_USERNAME });
+      } catch {
+        // Not there is the normal case, and the only one that matters is the
+        // opposite one.
+      } finally {
+        await client.close();
+      }
+    });
+
     test("offers a scoped user for credentials that can create one, and creates it", async ({
       page,
     }) => {
@@ -324,11 +344,16 @@ test.describe("cluster lifecycle", () => {
       await page.getByRole("button", { name: "Create a scoped user and connect" }).click();
 
       // A user was created on the cluster and it is the one the cluster now runs
-      // as: the heading is the cluster's own page, and the `idx_…` marker beside
-      // the mode badge is read from the stored row, so the admin string is not
-      // what got kept.
+      // as: the heading is the cluster's own page, and the `indexterity` marker
+      // beside the mode badge is read from the stored row, so the admin string is
+      // not what got kept.
       await expect(page.getByRole("heading", { name: "E2E Provisioned" })).toBeVisible();
-      await expect(page.getByText(/idx_[0-9a-f]{12}/)).toBeVisible();
+      // `exact` matters more than it looks: the scoped user is now named after
+      // the product, and a substring match also finds the wordmark in the nav —
+      // two elements, and a strict-mode failure rather than an assertion. Exact
+      // is case-sensitive, so the lowercase badge and the capitalised brand are
+      // told apart.
+      await expect(page.getByText(SCOPED_USERNAME, { exact: true })).toBeVisible();
       // NOT asserted here: the "shown once" alert carrying the scoped user's
       // connection string. It renders in the connect form, and the same success
       // navigates to the cluster page — which unmounts the form and the only copy

@@ -52,6 +52,7 @@ import { latestBaselines } from "../src/jobs/probe";
 import { pruneDeadLetterJobs, pruneOldSamples } from "../src/jobs/retention";
 import { suggestForCluster } from "../src/jobs/suggest";
 import { MongoConnection, MongoIndexCollector } from "../src/mongo";
+import { SCOPED_USERNAME } from "../src/mongo/provision";
 import { hasQueryStatsPlanMetrics, parseServerVersion } from "../src/mongo/version";
 import {
   API_BASE,
@@ -1155,7 +1156,7 @@ describe("least-privilege provisioning", () => {
     const provisionedId = asString(clusterRecord.id);
     createdClusterIds.push(provisionedId);
     const username = asString(body.username);
-    expect(username).toMatch(/^idx_[0-9a-f]{12}$/);
+    expect(username).toBe(SCOPED_USERNAME);
     // Returned-once scoped string: our user, forced admin authSource.
     const connectionString = asString(body.connectionString);
     expect(connectionString).toContain(`${username}:`);
@@ -1175,6 +1176,53 @@ describe("least-privilege provisioning", () => {
     expect(await collectCluster(db, provisionedId)).toBeGreaterThan(0);
 
     await mongo.db("admin").command({ dropUser: username });
+  });
+});
+
+// The safeguard the fixed scoped-user name buys, through the API rather than the
+// adapter: the same cluster cannot be added twice under two display names,
+// because the second provision asks the server for a user it already has.
+//
+// Its own account, for the reason the observe-selection block states: both
+// provisions DIAL, and spending two of the shared `owner`'s ten shows up as a
+// 429 in some later, unrelated test rather than here.
+describe("provisioning the same cluster twice", () => {
+  let twice: Session;
+
+  beforeAll(async () => {
+    twice = await signUp("provtwice");
+    createdEmails.push(twice.email);
+    createdOrgIds.push(await giveRoom(twice));
+  });
+
+  it("refuses the second one with the reason, and leaves the first user alone", async () => {
+    const first = await api("/clusters/provision", twice, {
+      method: "POST",
+      body: JSON.stringify({ name: "Provisioned Once", adminConnectionString: MONGO_URL }),
+    });
+    expect(first.status).toBe(200);
+    const firstBody = asRecord(await first.json());
+    const username = asString(firstBody.username);
+    try {
+      const again = await api("/clusters/provision", twice, {
+        method: "POST",
+        body: JSON.stringify({ name: "Provisioned Twice", adminConnectionString: MONGO_URL }),
+      });
+      // 422 with the reason, not a 500: the caller has something to do about it.
+      expect(again.status).toBe(422);
+      expect(asString(asRecord(await again.json()).message)).toMatch(/already has an Indexterity/i);
+
+      // And the refusal did not take the working user down with it — rolling
+      // back a provision that never happened would revoke the credentials the
+      // first cluster is running on.
+      const info = asRecord(await mongo.db("admin").command({ usersInfo: username }));
+      expect(Array.isArray(info.users) && info.users.length === 1).toBe(true);
+    } finally {
+      await mongo
+        .db("admin")
+        .command({ dropUser: username })
+        .catch(() => {});
+    }
   });
 });
 

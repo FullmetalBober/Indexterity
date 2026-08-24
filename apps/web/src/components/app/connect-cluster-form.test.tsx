@@ -625,7 +625,7 @@ describe("ConnectClusterForm engines", () => {
     await check(user);
 
     expect(await screen.findByText(/no permission to read a single row/)).toBeInTheDocument();
-    expect(screen.getByText(/DROP LOGIN idx_…/)).toBeInTheDocument();
+    expect(screen.getByText(/DROP LOGIN indexterity/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Create a scoped login and connect/ })).toBeTruthy();
   });
 
@@ -848,7 +848,10 @@ describe("ConnectClusterForm — PostgreSQL", () => {
     await check(user);
 
     expect(await screen.findByText(/pg_monitor/)).toBeInTheDocument();
-    expect(screen.getByText(/DROP ROLE idx_…/)).toBeInTheDocument();
+    // Both halves: a bare DROP ROLE is refused while the grants above still
+    // point at the role, so the sentence has to name DROP OWNED BY too.
+    expect(screen.getByText(/DROP OWNED BY indexterity/)).toBeInTheDocument();
+    expect(screen.getByText(/DROP ROLE indexterity/)).toBeInTheDocument();
     // None of MongoDB's sentence survives.
     expect(screen.queryByText(/indexterityEngine/)).not.toBeInTheDocument();
     expect(screen.queryByText(/dropUser/)).not.toBeInTheDocument();

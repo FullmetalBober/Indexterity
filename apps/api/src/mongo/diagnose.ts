@@ -154,7 +154,7 @@ export const PROVISION_PRIVILEGES: readonly RequiredPrivilege[] = [
   {
     key: "createUser",
     label: "Create a user (createUser)",
-    enables: "creating the idx_… user Indexterity would run as",
+    enables: "creating the `indexterity` user Indexterity would run as",
     tier: "PROVISION",
     actions: ["createUser"],
     scope: { kind: "exact", db: "admin", collection: "" },

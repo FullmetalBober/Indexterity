@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { type EngineSession, workloadKey } from "../src/engine/ports";
 import { detectEngine } from "../src/engine/registry";
-import { ProvisionDeniedError } from "../src/mongo/provision";
+import { ProvisionDeniedError, SCOPED_USERNAME } from "../src/mongo/provision";
 import { postgresAdapter } from "../src/postgres/adapter";
 import { withPgCredentials } from "../src/postgres/conn-string";
 import { PostgresConnection } from "../src/postgres/connection";
@@ -292,7 +292,7 @@ describe.skipIf(POSTGRES_URL === undefined)("postgres adapter against a live ser
     // promise unverified.
     it("provisions a role that analyses and cannot read or apply", async () => {
       const provisioned = await provisionPostgresScopedUser(POSTGRES_URL as string, OVERRIDES);
-      expect(provisioned.username).toMatch(/^idx_/);
+      expect(provisioned.username).toBe(SCOPED_USERNAME);
       const scoped = new PostgresConnection(provisioned.connectionString, OVERRIDES);
       try {
         await scoped.connect();
@@ -321,9 +321,46 @@ describe.skipIf(POSTGRES_URL === undefined)("postgres adapter against a live ser
         expect(diagnosis.missing).toContain("table_owner");
       } finally {
         await scoped.close();
-        await seed.execute(`DROP ROLE IF EXISTS ${provisioned.username}`).catch(() => {});
+        await removeScopedRole();
       }
     }, 120_000);
+
+    // The guard the fixed name buys. The same server cannot be provisioned
+    // twice, so a database cannot be connected twice under two display names —
+    // and it is the CLUSTER that refuses, rather than a uniqueness rule invented
+    // over connection strings that can spell one server a dozen ways.
+    it("refuses a second provision against a server it already provisioned", async () => {
+      const first = await provisionPostgresScopedUser(POSTGRES_URL as string, OVERRIDES);
+      try {
+        await expect(
+          provisionPostgresScopedUser(POSTGRES_URL as string, OVERRIDES),
+        ).rejects.toThrow(/already has an Indexterity user/i);
+
+        // And the refusal did not take the working role down with it: rolling
+        // back a provision that never happened would revoke the credentials the
+        // first connection is running on.
+        const still = new PostgresConnection(first.connectionString, OVERRIDES);
+        try {
+          await still.connect();
+          expect((await still.query<{ ok: number }>("SELECT 1 AS ok")).length).toBe(1);
+        } finally {
+          await still.close();
+        }
+      } finally {
+        await removeScopedRole();
+      }
+    }, 120_000);
+
+    // The cleanup the other two tests share, and it is the product's own script
+    // rather than a `DROP ROLE` of its own: postgres refuses to drop a role the
+    // CONNECT and USAGE grants still point at, and DROP OWNED BY clears only the
+    // database it runs in. A leak here would refuse every later provision.
+    async function removeScopedRole(): Promise<void> {
+      for (const database of await seed.listDatabaseNames()) {
+        await seed.execute(`DROP OWNED BY "${SCOPED_USERNAME}"`, database).catch(() => {});
+      }
+      await seed.execute(`DROP ROLE IF EXISTS "${SCOPED_USERNAME}"`).catch(() => {});
+    }
 
     it("refuses to provision from a string that cannot create a role", async () => {
       const limited = `nolimit_${Date.now().toString(36)}`;

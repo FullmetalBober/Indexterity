@@ -75,6 +75,15 @@ export const MONGO_URL = process.env.MONGO_URL ?? "mongodb://127.0.0.1:27017";
 //   export MONGO_ADMIN_URL=mongodb://root:secret@127.0.0.1:27018
 export const MONGO_ADMIN_URL = process.env.MONGO_ADMIN_URL ?? "";
 
+// The name the api gives the user it provisions — one fixed name on every
+// engine, not a random one per provision, which is what makes a second provision
+// against the same server a refusal rather than a second user
+// (`SCOPED_USERNAME` in apps/api/src/mongo/provision.ts). Repeated as a literal
+// here for the same reason the connect form repeats it: the e2e suite is a
+// consumer of the api like any other, and importing across the workspace
+// boundary would pull the driver and the whole module in behind it.
+export const SCOPED_USERNAME = "indexterity";
+
 let counter = 0;
 
 // Unique per test AND per run: postgres keeps rows between runs, and a second

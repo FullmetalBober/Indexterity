@@ -119,7 +119,11 @@ const SCOPED_USER_COPY: Record<
       </>
     ),
     withheld: "no permission to read a single row of your data",
-    revoke: <code>DROP LOGIN idx_…</code>,
+    revoke: (
+      <>
+        <code>DROP USER</code> in each database, then <code>DROP LOGIN indexterity</code>
+      </>
+    ),
   },
   // PostgreSQL withholds MORE than the other two, and saying so is the point:
   // the role cannot read the data AND cannot change an index either, because
@@ -140,7 +144,14 @@ const SCOPED_USER_COPY: Record<
         this role analyses only
       </>
     ),
-    revoke: <code>DROP ROLE idx_…</code>,
+    // Not a bare DROP ROLE: the CONNECT and USAGE grants above hold the role
+    // down until DROP OWNED BY has cleared them, and that runs per database.
+    revoke: (
+      <>
+        <code>DROP OWNED BY indexterity</code> in each database, then{" "}
+        <code>DROP ROLE indexterity</code>
+      </>
+    ),
   },
 };
 
@@ -721,11 +732,14 @@ export function ConnectClusterForm({
                     const copy = scopedUserCopy(diagnosis.engine);
                     return (
                       <>
-                        A dedicated {copy.subject} <code>idx_…</code> is created on your cluster{" "}
-                        {copy.grant}: exactly the privileges listed above and nothing else — notably{" "}
-                        <strong>{copy.withheld}</strong>. The admin string you pasted is used once
-                        and never stored; only the new {copy.subject}'s string is kept (encrypted).
-                        Revoke it any time with {copy.revoke}.
+                        A dedicated {copy.subject} <code>indexterity</code> is created on your
+                        cluster {copy.grant}: exactly the privileges listed above and nothing else —
+                        notably <strong>{copy.withheld}</strong>. The admin string you pasted is
+                        used once and never stored; only the new {copy.subject}'s string is kept
+                        (encrypted). Revoke it any time with {copy.revoke}. The name is fixed, so a
+                        cluster already carrying it is refused rather than given a second{" "}
+                        {copy.subject} — which is also what stops the same cluster being connected
+                        twice.
                       </>
                     );
                   })()}

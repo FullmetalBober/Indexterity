@@ -8,12 +8,13 @@ import {
 } from "../src/analysis";
 import { DatabaseInaccessibleError, type EngineSession, workloadKey } from "../src/engine/ports";
 import { detectEngine } from "../src/engine/registry";
-import { ProvisionDeniedError } from "../src/mongo/provision";
+import { ProvisionDeniedError, SCOPED_USERNAME } from "../src/mongo/provision";
 import { collectSnapshots, serializeSpec } from "../src/mongo/snapshots";
 import { mssqlAdapter } from "../src/mssql/adapter";
 import { MssqlIndexCollector } from "../src/mssql/collector";
 import { withMssqlCredentials } from "../src/mssql/conn-string";
 import { asNumber, MssqlConnection } from "../src/mssql/connection";
+import { dropLoginStatements } from "../src/mssql/provision";
 
 // Adapter-level integration against a real SQL Server (2022 in CI). Everything
 // the drop pipeline needs from the engine, proven end to end: diagnose,
@@ -243,7 +244,7 @@ describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", 
       OVERRIDES,
     );
     try {
-      expect(scoped.username).toMatch(/^idx_[0-9a-f]{12}$/);
+      expect(scoped.username).toBe(SCOPED_USERNAME);
 
       const diagnosis = await mssqlAdapter.diagnose(scoped.connectionString, OVERRIDES);
       expect(diagnosis.username, JSON.stringify(diagnosis)).toBe(scoped.username);
@@ -271,12 +272,46 @@ describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", 
         await scopedConn.close().catch(() => {});
       }
     } finally {
-      await seed
-        .execute(
-          `EXEC [${DB}].sys.sp_executesql N'DROP USER IF EXISTS [${scoped.username}]';
-           DROP LOGIN [${scoped.username}]`,
-        )
-        .catch(() => {});
+      await removeScopedLogin();
+    }
+  });
+
+  // The cleanup every provisioning test here shares, and it walks the instance
+  // rather than naming this suite's database: provisioning creates a user in
+  // EVERY user database, SQL Server refuses to drop a login while any of them
+  // remain, and the fixed name turns one missed user into a suite that refuses
+  // every later provision as a duplicate.
+  async function removeScopedLogin(): Promise<void> {
+    await seed
+      .execute(dropLoginStatements(SCOPED_USERNAME, await seed.listDatabaseNames()))
+      .catch(() => {});
+  }
+
+  // The guard the fixed name buys. Provisioning the same instance twice is
+  // refused BY THE SERVER, which is what stops one database being connected
+  // twice under two display names.
+  it("refuses a second provision against an instance it already provisioned", async () => {
+    const provision = mssqlAdapter.provisionScopedUser as NonNullable<
+      typeof mssqlAdapter.provisionScopedUser
+    >;
+    const first = await provision(MSSQL_URL as string, OVERRIDES);
+    try {
+      await expect(provision(MSSQL_URL as string, OVERRIDES)).rejects.toThrow(
+        /already has an Indexterity user/i,
+      );
+      // And the refusal left the first login alone. This is the half that would
+      // break silently: the rollback on the way out of a failed provision drops
+      // the login by name, so a duplicate that fell into it would revoke the
+      // credentials the existing connection is running on.
+      const still = new MssqlConnection(first.connectionString, OVERRIDES);
+      try {
+        await still.connect();
+        await still.ping();
+      } finally {
+        await still.close().catch(() => {});
+      }
+    } finally {
+      await removeScopedLogin();
     }
   });
 
@@ -329,13 +364,9 @@ describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", 
       );
     } finally {
       await scopedConn.close().catch(() => {});
-      await seed
-        .execute(
-          `EXEC [${before}].sys.sp_executesql N'DROP USER IF EXISTS [${scoped.username}]';
-           EXEC [${DB}].sys.sp_executesql N'DROP USER IF EXISTS [${scoped.username}]';
-           DROP LOGIN [${scoped.username}]`,
-        )
-        .catch(() => {});
+      // Before the databases go: the users mapped into them have to be dropped
+      // while the databases still exist, or the login outlives both.
+      await removeScopedLogin();
       for (const database of [before, after]) {
         await seed
           .execute(`IF DB_ID('${database}') IS NOT NULL DROP DATABASE [${database}]`)
@@ -374,10 +405,12 @@ describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", 
         ),
       ).rejects.toBeInstanceOf(ProvisionDeniedError);
       // …and it left nothing behind: the half-created login is dropped on the
-      // way out, or the next attempt would collide with it.
+      // way out. Load-bearing now that the name is fixed — a leftover would not
+      // merely be untidy, it would refuse every later provision on this server
+      // as a duplicate.
       const leftovers = await seed.query<{ n: number }>(
-        `SELECT COUNT(*) AS n FROM sys.server_principals WHERE name LIKE 'idx_%' AND name <> @weak`,
-        { weak },
+        `SELECT COUNT(*) AS n FROM sys.server_principals WHERE name = @scoped`,
+        { scoped: SCOPED_USERNAME },
       );
       expect(asNumber(leftovers[0]?.n)).toBe(0);
     } finally {

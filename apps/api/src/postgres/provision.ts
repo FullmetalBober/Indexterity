@@ -1,11 +1,15 @@
 import { randomBytes } from "node:crypto";
 import type { ProvisionedUser, TlsOverrides } from "../engine/ports";
-import { ProvisionDeniedError } from "../mongo/provision";
+import {
+  alreadyProvisionedMessage,
+  ProvisionDeniedError,
+  SCOPED_USERNAME,
+} from "../mongo/provision";
 import { pgConnStringUsername, withPgCredentials } from "./conn-string";
 import { PostgresConnection } from "./connection";
 import { quoteIdent } from "./executor";
 
-export { ProvisionDeniedError } from "../mongo/provision";
+export { ProvisionDeniedError, SCOPED_USERNAME } from "../mongo/provision";
 export { pgConnStringUsername } from "./conn-string";
 
 // The scoped role this adapter creates, and the one place PostgreSQL cannot
@@ -55,6 +59,12 @@ function isAuthorizationError(error: unknown): boolean {
   );
 }
 
+// 42710 duplicate_object — the role name is taken. The backstop behind the
+// pg_roles lookup below, for the window between asking and creating.
+function isDuplicateRoleError(error: unknown): boolean {
+  return (error as { code?: unknown } | null)?.code === "42710";
+}
+
 export const PROVISION_REFUSAL =
   "creating the scoped role needs CREATEROLE, and granting pg_monitor needs " +
   "membership in it (or superuser). Grant those, or create a role yourself with " +
@@ -68,13 +78,25 @@ export async function provisionPostgresScopedUser(
   adminConnectionString: string,
   overrides?: TlsOverrides,
 ): Promise<ProvisionedUser> {
-  const username = `idx_${randomBytes(6).toString("hex")}`;
+  const username = SCOPED_USERNAME;
   const password = scopedPassword();
   const admin = new PostgresConnection(adminConnectionString, overrides);
   let roleCreated = false;
   try {
     await admin.connect();
     const databases = await admin.listDatabaseNames();
+    // Before the first CREATE, so a server that is already connected is refused
+    // without a half-granted role behind it. pg_roles is world-readable, so this
+    // needs nothing the caller does not already have.
+    const existing = await admin.query<{ rolname: string }>(
+      "SELECT rolname FROM pg_roles WHERE rolname = $1",
+      [username],
+    );
+    if (existing.length > 0) {
+      throw new ProvisionDeniedError(
+        alreadyProvisionedMessage(dropRoleStatements(username, databases)),
+      );
+    }
     try {
       // NOINHERIT is deliberately NOT set: the role is meant to use pg_monitor's
       // rights directly, and a role that has to SET ROLE first would need every
@@ -111,6 +133,11 @@ export async function provisionPostgresScopedUser(
         }
       }
     } catch (error) {
+      if (isDuplicateRoleError(error)) {
+        throw new ProvisionDeniedError(
+          alreadyProvisionedMessage(dropRoleStatements(username, databases)),
+        );
+      }
       if (isAuthorizationError(error)) throw new ProvisionDeniedError(PROVISION_REFUSAL);
       throw error;
     }
@@ -159,11 +186,31 @@ async function verify(connectionString: string, overrides?: TlsOverrides): Promi
   }
 }
 
-// The statement that removes the provisioned role, for the disconnect screen to
-// show. Not run by Indexterity: dropping a role is the operator's decision, and
-// a role still owning nothing is harmless to leave.
-export function dropRoleStatement(username: string): string {
-  return `DROP ROLE ${quoteIdent(username)};`;
+// The statements that remove the provisioned role, for the disconnect screen and
+// the already-provisioned refusal to show. Not run by Indexterity: dropping a
+// role is the operator's decision, and dropping it needs the admin credentials
+// this product deliberately did not keep.
+//
+// A bare `DROP ROLE` is NOT enough, and the difference is the whole reason this
+// returns a script instead of one line. Provisioning grants CONNECT on every
+// database and USAGE on every schema in each, and postgres refuses to drop a
+// role those grants still point at — measured on 18.4:
+//
+//   DROP ROLE "indexterity";
+//   ERROR:  role "indexterity" cannot be dropped because some objects depend on it
+//   DETAIL:  1 object in database postgres
+//
+// `DROP OWNED BY` clears them, and it clears them PER DATABASE: run in one, the
+// DROP ROLE still fails naming the next (also measured). Shared-object grants —
+// CONNECT on the databases themselves — go with the first one, so only the
+// per-database schema privileges need the walk. Hence \c per database, which
+// also makes the block paste straight into psql.
+export function dropRoleStatements(username: string, databases: readonly string[]): string {
+  const role = quoteIdent(username);
+  return [
+    ...databases.flatMap((database) => [`\\c ${quoteIdent(database)}`, `DROP OWNED BY ${role};`]),
+    `DROP ROLE ${role};`,
+  ].join("\n");
 }
 
 // Re-exported so the adapter can name one import site for both.

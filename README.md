@@ -36,8 +36,11 @@ credentials you connect deliberately.
    anything, and asks only when nothing recognises it. Indexterity then reports
    what that string can actually do — nothing stored, nothing written. If it can
    create users, it *asks* before provisioning its own least-privilege user
-   (`idx_<hex>`, no `find` on your collections, so it **cannot read documents**).
-   On SQL Server the same offer creates an `idx_<hex>` login holding exactly
+   (`indexterity`, no `find` on your collections, so it **cannot read
+   documents**). The name is fixed rather than random, so a cluster never
+   accumulates one leftover user per connection — and a server that already
+   carries it is refused, which is what stops the same database being connected
+   twice. On SQL Server the same offer creates an `indexterity` login holding exactly
    `VIEW SERVER STATE`, `VIEW DATABASE STATE` and `ALTER` on each schema that
    owns tables — per schema rather than per database, because database-wide
    `ALTER` would also permit dropping tables, and **no `SELECT` at all**.
