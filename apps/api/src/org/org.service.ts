@@ -1,8 +1,8 @@
 import { Injectable, Logger } from "@nestjs/common";
 import type { MyInvite, OrgInfo, OrgPolicyView, OrgSummary, SecurityTrail } from "@repo/contracts";
 import { SECURITY_TRAIL_PAGE } from "@repo/contracts";
+import { AuditService } from "../audit/audit.service";
 import type { RequestActor } from "../audit/http-actor";
-import { recordSecurityEvent } from "../audit/security-events";
 import type { Membership } from "../auth/tenancy";
 import { entitlementsFor, planFrom } from "../billing/plans";
 import { orgPolicyFor } from "../clusters/least-privilege";
@@ -46,7 +46,10 @@ export interface SecurityTrailQuery {
 export class OrgService {
   private readonly log = new Logger(OrgService.name);
 
-  constructor(private readonly database: DatabaseService) {}
+  constructor(
+    private readonly database: DatabaseService,
+    private readonly audit: AuditService,
+  ) {}
 
   // Infinity does not survive JSON, so an absent limit is null.
   private static cap(value: number): number | null {
@@ -170,8 +173,7 @@ export class OrgService {
     // trail that records the second save as an act would have an incident reader
     // hunting for what changed at a timestamp where nothing did.
     if (before.requireLeastPrivilege !== requireLeastPrivilege) {
-      await recordSecurityEvent(
-        this.database.db,
+      await this.audit.record(
         {
           event: "ORG_POLICY_CHANGED",
           orgId,
