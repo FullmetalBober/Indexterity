@@ -4,27 +4,17 @@ import { contract } from "@repo/contracts";
 import type { FastifyRequest } from "fastify";
 import { actorFromRequest } from "../audit/http-actor";
 import { recordSecurityEvent, type SecurityEventDetails } from "../audit/security-events";
-import { currentKeyVersion, masterKeyBytesFor } from "../config/env";
-import { and, clusters, envKeyProvider, eq, seal, sql } from "../db";
+import { clusters } from "../db";
 import { DatabaseService } from "../db/database.service";
-import { allowPrivateTargets, assertTargetsAllowed, BlockedTargetError } from "../engine/net-guard";
-import { NO_TLS_OVERRIDES, type ProvisionedUser, type TlsOverrides } from "../engine/ports";
+import { NO_TLS_OVERRIDES, type ProvisionedUser } from "../engine/ports";
 import { ProvisionDeniedError } from "../engine/provision";
-import {
-  adapterFor,
-  detectEngine,
-  engineSupported,
-  supportedEngineOptions,
-  supportedEngines,
-} from "../engine/registry";
-import { InsecureConnectionError } from "../engine/tls";
-import { consumeDialBudget } from "../errors/dial-budget";
+import { adapterFor, detectEngine, supportedEngineOptions } from "../engine/registry";
 import { mapClusterError, toCluster, toDiagnosis } from "../http/mappers";
 import { TenancyService } from "../http/tenancy.service";
 import { ClusterGoneError, unsealCluster } from "../jobs/cluster-connection";
 import { evictCluster } from "../jobs/connection-pool";
 import { Implement, route } from "../orpc/implement";
-import { ClustersService, duplicateNameMessage, isDuplicateClusterName } from "./clusters.service";
+import { ClustersService } from "./clusters.service";
 import { assertLeastPrivilege } from "./least-privilege";
 
 // Connecting, diagnosing, rotating and disconnecting customer clusters — the
@@ -38,91 +28,6 @@ export class ClustersController {
     private readonly tenancy: TenancyService,
     private readonly clusters: ClustersService,
   ) {}
-
-  private async storeCluster(
-    orgId: string,
-    name: string,
-    engine: typeof clusters.$inferSelect.engine,
-    connectionString: string,
-    // Username and databases together, because neither is meaningful alone: the
-    // databases say where THIS user was created, and a row with no provisioned
-    // user has nothing to say about databases at all (#338).
-    provisioned: { username: string; databases: readonly string[] } | null,
-    // What these credentials COULD do, as opposed to what `readOnly` allows.
-    // Recorded at the moment they are stored, because that is the only time we
-    // have a diagnosis in hand — asking again later would mean dialling.
-    credentialPosture: typeof clusters.$inferSelect.credentialPosture,
-    tlsOverrides: TlsOverrides = NO_TLS_OVERRIDES,
-    // Which databases to observe, or null for every one the cluster has (#244).
-    // Undefined from a caller that has no opinion is stored as null, which is the
-    // same behaviour every cluster had before the column existed.
-    observedDatabases: string[] | null = null,
-  ): Promise<typeof clusters.$inferSelect> {
-    const keyVersion = currentKeyVersion();
-    const sealed = await seal(
-      new TextEncoder().encode(connectionString),
-      envKeyProvider(masterKeyBytesFor(keyVersion)),
-    );
-    // The name was checked before the dial (assertNameFree); this is the same
-    // refusal for the case that check cannot see, which is another connect
-    // committing the same name in between.
-    let row: typeof clusters.$inferSelect | undefined;
-    try {
-      [row] = await this.database.db
-        .insert(clusters)
-        .values({
-          orgId,
-          name,
-          connectionMode: "HOSTED_DIRECT",
-          engine,
-          readOnly: true,
-          sealedDek: Buffer.from(sealed.dek),
-          sealedData: Buffer.from(sealed.data),
-          keyVersion,
-          provisionedUsername: provisioned?.username ?? null,
-          provisionedDatabases: provisioned === null ? null : [...provisioned.databases],
-          credentialPosture,
-          tlsOverrides,
-          observedDatabases,
-        })
-        .returning();
-    } catch (error) {
-      if (isDuplicateClusterName(error)) {
-        throw new ORPCError("BAD_REQUEST", { message: duplicateNameMessage(name) });
-      }
-      throw error;
-    }
-    if (row === undefined) throw new Error("failed to create cluster");
-    // Collect once, now, rather than at the next scheduled pass. Connecting a
-    // cluster and then waiting up to six hours for the dashboard to say anything
-    // is the complaint that reads as "the cadence is too long" — and it is a
-    // different problem with a different fix. Shortening the cadence for everyone
-    // would buy this one moment at the cost of every hour afterwards; one job on
-    // connect buys it outright and changes the steady-state load by nothing.
-    //
-    // Queued rather than awaited: a collect walks every collection and can take
-    // minutes on a large cluster, and the caller is waiting on a POST.
-    //
-    // Best-effort on purpose. The insert above has already committed, so a failed
-    // enqueue must not turn a connect that worked into an error the reader cannot
-    // act on — they would see "failed to connect" next to a cluster that is
-    // there. Losing it costs the first collect its head start and nothing else:
-    // the scheduled pass is still behind it, which is exactly where this used to
-    // happen. Logged rather than swallowed, because a queue that cannot be
-    // written to is worth knowing about (§16).
-    try {
-      await this.database.db.execute(
-        sql`select graphile_worker.add_job('collect', json_build_object('clusterId', ${row.id}::text), max_attempts => 3)`,
-      );
-    } catch (error) {
-      this.log.warn(
-        `could not queue the first collect for cluster ${row.id}: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
-    }
-    return row;
-  }
 
   // Refuse a name the org is already using, BEFORE anything is dialed.
   //
@@ -153,60 +58,6 @@ export class ClustersController {
     await recordSecurityEvent(this.database.db, { ...entry, ...actor }, (message) =>
       this.log.warn(message),
     );
-  }
-
-  // Everything that must be true before the control plane dials a customer
-  // host: a supported engine, a mongodb scheme, a per-user budget, and a
-  // target that is not somewhere on our own network (the wiki's Architecture
-  // page, Security). Every endpoint that opens a connection goes through here.
-  private async guardDial(
-    userId: string,
-    engine: typeof clusters.$inferSelect.engine,
-    value: string,
-    errors: { BAD_REQUEST: (options: { message: string }) => Error },
-    overrides: TlsOverrides = NO_TLS_OVERRIDES,
-  ): Promise<void> {
-    if (!engineSupported(engine)) {
-      throw errors.BAD_REQUEST({
-        message:
-          `${engine} support is planned — ` +
-          `${supportedEngines().join(" and ")} clusters can connect today`,
-      });
-    }
-    const adapter = adapterFor(engine);
-    if (!adapter.isConnString(value)) {
-      throw errors.BAD_REQUEST({
-        message: `connection string must be ${adapter.connStringHint}`,
-      });
-    }
-    await consumeDialBudget(this.database.db, userId);
-    const { hosts, isSrv } = adapter.hostsOf(value);
-    try {
-      await assertTargetsAllowed(hosts, isSrv, { allowPrivate: allowPrivateTargets() });
-    } catch (error) {
-      if (error instanceof BlockedTargetError) {
-        throw errors.BAD_REQUEST({ message: error.message });
-      }
-      throw error;
-    }
-    // AFTER the address guard, deliberately. A private or loopback target is
-    // refused whatever its transport, and answering "you need TLS" to someone
-    // pointing at 10.0.0.5 would name the wrong problem — and quietly weaken the
-    // SSRF message that is the more severe of the two.
-    //
-    // The enforcement itself lives in each adapter's client module, because the
-    // worker never comes through here: jobs/connection-pool.ts opens the STORED
-    // string. This
-    // is only so onboarding refuses with the reason instead of surfacing the same
-    // refusal as a 502 out of diagnose.
-    try {
-      adapter.assertSecureTransport(value, overrides);
-    } catch (error) {
-      if (error instanceof InsecureConnectionError) {
-        throw errors.BAD_REQUEST({ message: error.message });
-      }
-      throw error;
-    }
   }
 
   // Onboarding preflight: what can these credentials actually do? Nothing is
@@ -257,7 +108,7 @@ export class ClustersController {
         // rather than for the one that was typed.
         const overrides = input.tlsOverrides ?? NO_TLS_OVERRIDES;
         const value = adapter.applySecureTransport(input.connectionString, overrides);
-        await this.guardDial(context.userId, engine, value, errors, overrides);
+        await this.clusters.guardDial(context.userId, engine, value, errors, overrides);
         // The scope reaches the adapter, so a second check with fewer databases
         // ticked can turn a privilege gap into a grant (#244) — see the field's
         // comment in inputs.ts. Absent on the first check, which has no list yet.
@@ -287,7 +138,7 @@ export class ClustersController {
         const adapter = adapterFor(engine);
         const overrides = input.tlsOverrides ?? NO_TLS_OVERRIDES;
         const value = adapter.applySecureTransport(input.connectionString, overrides);
-        await this.guardDial(context.userId, engine, value, errors, overrides);
+        await this.clusters.guardDial(context.userId, engine, value, errors, overrides);
         // Verify before storing: an unusable string must fail at connect time
         // with the reason, not silently collect nothing for a day.
         const diagnosis = await adapter.diagnose(value, overrides, input.observedDatabases);
@@ -327,7 +178,7 @@ export class ClustersController {
         // deliberately NOT gated: it is the path this refusal sends people to,
         // and the admin string it takes is never stored.
         await assertLeastPrivilege(this.database.db, orgId, diagnosis);
-        const row = await this.storeCluster(
+        const row = await this.clusters.storeCluster(
           orgId,
           input.name,
           engine,
@@ -388,7 +239,7 @@ export class ClustersController {
         }
         const overrides = input.tlsOverrides ?? NO_TLS_OVERRIDES;
         const adminValue = adapter.applySecureTransport(input.adminConnectionString, overrides);
-        await this.guardDial(context.userId, engine, adminValue, errors, overrides);
+        await this.clusters.guardDial(context.userId, engine, adminValue, errors, overrides);
         let provisioned: ProvisionedUser;
         try {
           // No selection passed, on purpose: what the provisioned user may reach is
@@ -403,7 +254,7 @@ export class ClustersController {
           }
           mapClusterError(error);
         }
-        const row = await this.storeCluster(
+        const row = await this.clusters.storeCluster(
           orgId,
           input.name,
           engine,
@@ -451,18 +302,13 @@ export class ClustersController {
         // `freshOwner`, not merely owner: this replaces the credentials the
         // engine dials the customer's cluster with (#52).
         const orgId = context.member.orgId;
-        const [row] = await this.database.db
-          .select()
-          .from(clusters)
-          .where(and(eq(clusters.id, input.clusterId), eq(clusters.orgId, orgId)))
-          .limit(1);
-        if (row === undefined) throw errors.NOT_FOUND({ message: "cluster not found" });
+        const row = await this.clusters.ownedById(input.clusterId, orgId, errors);
         const adapter = adapterFor(row.engine);
         // Unstated on a rotation means "as before": rotating a password should not
         // silently withdraw a concession the cluster still needs to connect at all.
         const overrides = input.tlsOverrides ?? row.tlsOverrides;
         const value = adapter.applySecureTransport(input.connectionString, overrides);
-        await this.guardDial(context.userId, row.engine, value, errors, overrides);
+        await this.clusters.guardDial(context.userId, row.engine, value, errors, overrides);
         try {
           const probe = await adapter.open(value, overrides);
           try {
@@ -519,17 +365,10 @@ export class ClustersController {
         if (diagnosis !== null) {
           await assertLeastPrivilege(this.database.db, orgId, diagnosis);
         }
-        const keyVersion = currentKeyVersion();
-        const sealed = await seal(
-          new TextEncoder().encode(input.connectionString),
-          envKeyProvider(masterKeyBytesFor(keyVersion)),
-        );
-        const [updated] = await this.database.db
-          .update(clusters)
-          .set({
-            sealedDek: Buffer.from(sealed.dek),
-            sealedData: Buffer.from(sealed.data),
-            keyVersion,
+        const updated = await this.clusters.reseal(
+          input.clusterId,
+          input.connectionString,
+          {
             provisionedUsername,
             // Travels with the marker above, both ways. Rotating onto a string
             // that is not the scoped user drops the username, and the databases
@@ -538,10 +377,9 @@ export class ClustersController {
             // user this cluster no longer runs as (#338).
             provisionedDatabases: provisionedUsername === null ? null : row.provisionedDatabases,
             credentialPosture,
-          })
-          .where(eq(clusters.id, input.clusterId))
-          .returning();
-        if (updated === undefined) throw errors.NOT_FOUND({ message: "cluster not found" });
+          },
+          errors,
+        );
         await evictCluster(input.clusterId);
         await this.record(req, {
           event: "CLUSTER_CREDENTIALS_ROTATED",
@@ -685,7 +523,7 @@ export class ClustersController {
           throw error;
         }
         const adapter = adapterFor(cluster.engine);
-        await this.guardDial(
+        await this.clusters.guardDial(
           context.userId,
           cluster.engine,
           connectionString,
