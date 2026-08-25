@@ -28,9 +28,15 @@ export { pgConnStringUsername } from "./conn-string";
 // The decision, therefore: **this provisions the read-only role and nothing
 // more.** It is a genuine least-privilege user — verified refused on table data
 // (`permission denied for table orders`) while reading every statistic the
-// pipeline needs. Applying on PostgreSQL takes the owner's own connection
-// string, pasted deliberately, so the trust cost is paid in the open by somebody
-// who was told about it rather than granted quietly here.
+// pipeline needs.
+//
+// Applying is a separate decision the operator makes afterwards, and there are
+// two ways to make it (#332). The owner's own connection string, pasted
+// deliberately, pays the trust cost in the open. Or the pg_cron apply function,
+// which does not: a SECURITY DEFINER function owned by the table owner schedules
+// the build and pg_cron runs it as that owner, so THIS role keeps every refusal
+// above and can still apply. See cron-apply.ts for what that costs instead —
+// a shared library, and therefore a restart.
 const ROLE_GRANTS = {
   // Statistics across every user's objects — pg_stat_user_indexes,
   // pg_stat_statements, pg_stat_user_tables, pg_stat_database. This is what
