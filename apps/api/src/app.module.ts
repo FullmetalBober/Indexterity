@@ -4,6 +4,7 @@ import { ORPCModule } from "@orpc/nest";
 import { errorReportingEnabled } from "@repo/errors";
 import { SentryModule } from "@sentry/nestjs/setup";
 import { AnalysisModule } from "./analysis/analysis.module";
+import { AuthModule } from "./auth/auth.module";
 import { ClustersModule } from "./clusters/clusters.module";
 import { ConfigEnvModule } from "./config/config.module";
 import { DatabaseModule } from "./db/database.module";
@@ -57,6 +58,7 @@ function sentryImports() {
     ORPCModule.forRoot({}),
     DatabaseModule,
     TenancyModule,
+    AuthModule,
     ClustersModule,
     ErrorsModule,
     EventsModule,

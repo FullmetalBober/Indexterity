@@ -2,9 +2,9 @@ import { Injectable } from "@nestjs/common";
 import { ORPCError } from "@orpc/server";
 import { SESSION_FRESH_AGE_SECONDS } from "@repo/contracts";
 import type { FastifyRequest } from "fastify";
+import { GatesService } from "../auth/gates.service";
 import { requireSession, requireUserId } from "../auth/session";
 import { type Membership, resolveMembership } from "../auth/tenancy";
-import { hasCredentialAccount } from "../auth/two-factor-gate";
 import {
   allowsAutoApply,
   allowsWorkloadAnalysis,
@@ -31,6 +31,7 @@ export class TenancyService {
   constructor(
     private readonly database: DatabaseService,
     private readonly usage: UsageService,
+    private readonly gates: GatesService,
   ) {}
 
   // 401 without a valid session, else who is asking.
@@ -92,7 +93,7 @@ export class TenancyService {
     if (!requireOwnerTwoFactor()) return;
     const session = await requireSession(req);
     if (session.twoFactorEnabled) return;
-    if (!(await hasCredentialAccount(this.database.db, session.userId))) return;
+    if (!(await this.gates.hasCredentialAccount(session.userId))) return;
     throw new ORPCError("TWO_FACTOR_REQUIRED", {
       status: 403,
       message: "owners must add a second factor before changing anything — Account → Two-factor",
