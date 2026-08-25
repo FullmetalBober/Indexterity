@@ -45,6 +45,16 @@ export interface TlsOverrides {
 // with Msg 916 (verified on 2022: `SELECT … FROM [other].sys.tables` answers
 // "The server principal … is not able to access the database … under the current
 // security context").
+//
+// All three adapters raise it, from the signal their own engine answers with, so
+// the passes above need no engine in them (#345):
+//
+//   MongoDB     code 13 / Unauthorized on a per-database read, once the string
+//               holds the cluster `listDatabases` action without matching
+//               per-database grants (measured on 7.0)
+//   PostgreSQL  42501 (no CONNECT), 3D000 (gone), 28000/28P01 (auth) at the dial
+//               `poolFor(database)` makes for that database (measured on 18.6)
+//   SQL Server  Msg 916, as above
 export class DatabaseInaccessibleError extends Error {
   constructor(
     readonly database: string,
