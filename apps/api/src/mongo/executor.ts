@@ -1,4 +1,4 @@
-import type { CreateIndexOptions, IndexExecutor } from "../engine/ports";
+import type { CreateIndexOptions, IndexBuildOutcome, IndexExecutor } from "../engine/ports";
 import { UnsupportedServerError } from "../engine/version";
 import type { MongoConnection } from "./connection";
 import { versionRefusal } from "./version";
@@ -61,7 +61,7 @@ export class MongoIndexExecutor implements IndexExecutor {
     collection: string,
     keys: Record<string, 1 | -1>,
     options: CreateIndexOptions,
-  ): Promise<void> {
+  ): Promise<IndexBuildOutcome> {
     this.assertWritable("create index");
     await this.assertSupported();
     // `include` is a covering-column list, which MongoDB has no concept of —
@@ -70,5 +70,8 @@ export class MongoIndexExecutor implements IndexExecutor {
     // spec ever carries one.
     const { include: _include, ...mongoOptions } = options;
     await this.conn.db(database).collection(collection).createIndex(keys, mongoOptions);
+    // createIndexes does not return until the index is usable, so there is
+    // nothing for a later tick to finish.
+    return "BUILT";
   }
 }

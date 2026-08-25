@@ -190,8 +190,21 @@ export interface IndexExecutor {
     collection: string,
     keys: Record<string, 1 | -1>,
     options: CreateIndexOptions,
-  ): Promise<void>;
+  ): Promise<IndexBuildOutcome>;
 }
+
+// Whether the index EXISTS when create() returns, or has only been asked for.
+//
+// BUILT on every engine that builds synchronously, which is both other adapters
+// and PostgreSQL whenever the connected role owns the table. SCHEDULED is the
+// PostgreSQL pg_cron route (#332): the build runs in a background worker some
+// time after this returns, so the caller must not record it as done — it lands
+// in BUILDING and a later tick reads `indisvalid` to find out how it went.
+//
+// A return value rather than a capability flag, because it is a fact about THIS
+// build rather than about the adapter: the same PostgreSQL cluster builds
+// synchronously for a table its role owns and asynchronously for one it does not.
+export type IndexBuildOutcome = "BUILT" | "SCHEDULED";
 
 // One privilege the engine needs, and whether these credentials have it.
 // CORE = analysis is impossible without it; APPLY = the cluster can still be

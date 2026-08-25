@@ -1,6 +1,15 @@
 import type { ConnectionDiagnosis, PrivilegeCheck, TlsOverrides } from "../engine/ports";
 import { pgConnStringUsername } from "./conn-string";
 import { PostgresConnection } from "./connection";
+import {
+  CRON_APPLY_PROBE_PARAMS,
+  CRON_APPLY_PROBE_SQL,
+  CRON_DATABASE_GUC,
+  type CronApplyRoute,
+  cronApplySetup,
+  isUnrecognizedGuc,
+  readCronApplyProbe,
+} from "./cron-apply";
 import { quoteIdent } from "./executor";
 import { postgresVersionRefusal } from "./version";
 
@@ -59,6 +68,7 @@ export async function diagnosePostgresConnection(
 
     const connectable = await connectableDatabases(conn, inScope);
     const ownership = await ownershipAcross(conn, inScope);
+    const cron = await cronApplyRoute(conn);
     const writable = await writableSchemas(conn, inScope);
     const refusal = postgresVersionRefusal(
       parseVersion(probe),
@@ -121,6 +131,16 @@ export async function diagnosePostgresConnection(
             : `-- connect as the owner instead, or make this role a member of the owning role:\nGRANT <owning_role> TO ${quoteIdent(probe.whoami)};`,
       },
       {
+        key: "cron_apply",
+        label: "the pg_cron apply function",
+        enables:
+          "creating and dropping indexes WITHOUT owning the tables or holding an owner connection string. A SECURITY DEFINER function owned by the table owner schedules the build through pg_cron, which runs it as that owner — so this role keeps its read refusal and can still apply. An alternative to owning the tables, not an addition to it",
+        tier: "APPLY",
+        granted: cron.installed && cron.executable,
+        command:
+          cron.installed && cron.executable ? null : cronApplySetup("<table_owner>", probe.whoami),
+      },
+      {
         key: "createrole",
         label: "CREATEROLE",
         enables: "creating the read-only role Indexterity would rather run as",
@@ -157,10 +177,20 @@ export async function diagnosePostgresConnection(
       authEnabled: true,
       canProvision: provision.every((check) => check.granted),
       ready: refusal === null && core.every((check) => check.granted),
+      // The APPLY tier is ALTERNATIVE ROUTES, not a conjunction (#332). There
+      // are two ways to change an index on this engine and either is enough:
+      // connect as a role that owns the tables, or install the pg_cron apply
+      // function and let the build run as its definer.
+      //
+      // `some` over a NAMED list rather than over the tier, deliberately. Read
+      // off the tier, a future APPLY check that is a genuine REQUIREMENT would
+      // be silently satisfied by the other route — the failure mode of `some`
+      // is a false green on a security screen, so what counts as a route is
+      // written down instead of inferred.
       canApply:
         refusal === null &&
         core.every((check) => check.granted) &&
-        privileges.every((check) => check.tier !== "APPLY" || check.granted),
+        privileges.some((check) => APPLY_ROUTES.includes(check.key) && check.granted),
       privileges,
       missing,
       databases,
@@ -310,18 +340,25 @@ function revokeWrites(writable: readonly WritableSchema[], me: string): string {
 // The one advisory worth making on an otherwise usable connection: this string
 // analyses fine and cannot apply, which on this engine is the NORMAL state for a
 // least-privilege role rather than a misconfiguration to fix.
+// The two ways to apply on this engine. Named rather than derived from the
+// APPLY tier — see the comment on canApply for why.
+const APPLY_ROUTES: readonly string[] = ["table_owner", "cron_apply"];
+
 function advisory(
   privileges: readonly PrivilegeCheck[],
   ownership: { owned: number; unowned: number },
 ): string | null {
-  const apply = privileges.find((check) => check.tier === "APPLY");
-  if (apply === undefined || apply.granted) return null;
+  // Any route being open means applying works, so there is nothing to advise.
+  const routes = privileges.filter((check) => APPLY_ROUTES.includes(check.key));
+  if (routes.length === 0 || routes.some((check) => check.granted)) return null;
   if (ownership.owned === 0) {
     return (
       "These credentials can analyse every table in scope and change none of them, " +
       "which is the intended shape for a read-only PostgreSQL cluster: only a " +
-      "table's owner may alter its indexes, and an owner can also read it. Connect " +
-      "as the owner when you want to apply."
+      "table's owner may alter its indexes, and an owner can also read it. To apply " +
+      "without giving up that read refusal, install the pg_cron apply function — " +
+      "the APPLY row above carries the statements. Connecting as the owner instead " +
+      "also works, at the cost of holding a string that can read every table."
     );
   }
   return (
@@ -329,6 +366,54 @@ function advisory(
     `(${ownership.unowned} of ${ownership.owned + ownership.unowned} are owned by ` +
     "somebody else), so recommendations for the rest can be made and not applied."
   );
+}
+
+// Which database pg_cron keeps its jobs in, and whether the apply function is
+// installed there and callable by this role (#332).
+//
+// Three separate answers, because a half-done setup is the interesting failure:
+// pg_cron absent entirely, present with no function, or a function nobody
+// granted. `cron.database_name` is a GUC the shared library defines, so a server
+// without pg_cron in shared_preload_libraries answers `unrecognized
+// configuration parameter` rather than a missing row — and reading it needs no
+// privilege from any database.
+//
+// Never throws. Every failure here means "this route is not available", which is
+// the normal state for a cluster whose operator has not set it up, and a
+// diagnosis that refused because of it would fail the connect form over an
+// optional capability.
+async function cronApplyRoute(
+  conn: PostgresConnection,
+): Promise<CronApplyRoute & { cronDatabase: string | null }> {
+  const absent = { installed: false, executable: false, owner: null, cronDatabase: null };
+  let cronDatabase: string;
+  try {
+    const rows = await conn.query<Record<string, string>>(`SHOW ${CRON_DATABASE_GUC}`);
+    // One row, one column, whose NAME depends on the GUC — so read the only
+    // value rather than guessing what postgres called it.
+    const value = Object.values(rows[0] ?? {})[0];
+    if (typeof value !== "string" || value.length === 0) return absent;
+    cronDatabase = value;
+  } catch (error) {
+    // The expected answer on a server without pg_cron. Anything else is also
+    // "not available" as far as this is concerned.
+    if (!isUnrecognizedGuc(error)) return absent;
+    return absent;
+  }
+  try {
+    // In the CRON database, not the connected one: CREATE EXTENSION pg_cron
+    // installs schema cron in exactly one database and the function lives beside
+    // it. A role without CONNECT there simply has no route, which this reports
+    // as absent rather than as an error.
+    const rows = await conn.query<{
+      security_definer: boolean;
+      executable: boolean;
+      owner: string;
+    }>(CRON_APPLY_PROBE_SQL, CRON_APPLY_PROBE_PARAMS, cronDatabase);
+    return { ...readCronApplyProbe(rows), cronDatabase };
+  } catch {
+    return { ...absent, cronDatabase };
+  }
 }
 
 async function readProbe(conn: PostgresConnection): Promise<Probe> {
