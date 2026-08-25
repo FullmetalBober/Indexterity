@@ -1,8 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { type EngineSession, workloadKey } from "../src/engine/ports";
+import { DatabaseInaccessibleError, type EngineSession, workloadKey } from "../src/engine/ports";
 import { ProvisionDeniedError, SCOPED_USERNAME } from "../src/engine/provision";
 import { detectEngine } from "../src/engine/registry";
 import { postgresAdapter } from "../src/postgres/adapter";
+import { PostgresIndexCollector } from "../src/postgres/collector";
 import { withPgCredentials, withPgDatabase } from "../src/postgres/conn-string";
 import { PostgresConnection, SYSTEM_SCHEMAS } from "../src/postgres/connection";
 import { HideUnsupportedError } from "../src/postgres/executor";
@@ -34,6 +35,9 @@ const SCHEMA = "indexterity_int";
 // dies mid-test would otherwise leave one behind and change what the cluster
 // reports to every later run.
 const VIEWS_ONLY = "indexterity_int_views_only";
+// Same reason: the unreadable-database test creates it, and a leftover would
+// change what every later run sees this cluster reporting.
+const LOCKED = "indexterity_int_locked";
 
 describe.skipIf(POSTGRES_URL === undefined)("postgres adapter against a live server", () => {
   let seed: PostgresConnection;
@@ -44,6 +48,7 @@ describe.skipIf(POSTGRES_URL === undefined)("postgres adapter against a live ser
     await seed.connect();
     await seed.execute(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`);
     await seed.execute(`DROP DATABASE IF EXISTS ${VIEWS_ONLY}`);
+    await seed.execute(`DROP DATABASE IF EXISTS ${LOCKED}`);
     await seed.execute(`CREATE SCHEMA ${SCHEMA}`);
     await seed.execute(`CREATE EXTENSION IF NOT EXISTS pg_stat_statements`);
     await seed.execute(
@@ -208,6 +213,58 @@ describe.skipIf(POSTGRES_URL === undefined)("postgres adapter against a live ser
     expect(patterns.every((pattern) => pattern.medianRetentionSeconds === null)).toBe(true);
     expect(patterns.every((pattern) => typeof pattern.count === "number")).toBe(true);
   });
+
+  // #345. A role that can reach some of a cluster's databases and not others is
+  // the ordinary shape of a customer's own scoped user, and the pass above the
+  // collector survives it by branching on DatabaseInaccessibleError alone — so
+  // what has to be real here is the server's answer, not our mapping of it.
+  //
+  // PUBLIC holds CONNECT on every new database, which is why this has to revoke
+  // it: without the revoke there is no such thing as an unreadable database for
+  // an ordinary role on this engine.
+  it("classifies a database the role cannot connect to, and keeps walking the rest", async () => {
+    const role = `int_partial_${Date.now().toString(36)}`;
+    await seed.execute(`CREATE DATABASE ${LOCKED}`);
+    await seed.execute(`CREATE ROLE ${role} LOGIN PASSWORD 'p'`);
+    // pg_monitor because that is what provisioning grants (postgres/provision.ts),
+    // and it is what makes the statement text readable: without it a role sees
+    // `<insufficient privilege>` for every statement another user ran, so the
+    // reachable half of this test would pass for the wrong reason.
+    await seed.execute(`GRANT pg_monitor TO ${role}`);
+    await seed.execute(`REVOKE CONNECT ON DATABASE ${LOCKED} FROM PUBLIC`);
+    const partial = new PostgresConnection(
+      withPgCredentials(POSTGRES_URL as string, role, "p"),
+      OVERRIDES,
+    );
+    try {
+      await partial.connect();
+      const collector = new PostgresIndexCollector(partial);
+      // Listed and unreadable, which is the whole point: pg_database is a shared
+      // catalog every role can read, so existence says nothing about access.
+      expect(await partial.listDatabaseNames()).toContain(LOCKED);
+      await expect(collector.listCollectionNames(LOCKED)).rejects.toBeInstanceOf(
+        DatabaseInaccessibleError,
+      );
+      // The workload store, which is the read that used to report this as an empty
+      // store and let the pass carry on. It is also the read that opens the pool,
+      // so on the create side it is the first one to touch the database at all.
+      await expect(
+        collector.collectDeletePatterns(LOCKED, `${SCHEMA}.orders`),
+      ).rejects.toBeInstanceOf(DatabaseInaccessibleError);
+      // And the batched read keeps the database it CAN reach.
+      await seed.query(`SELECT count(*) FROM ${SCHEMA}.orders WHERE status = $1`, ["paid"]);
+      const shapes = await collector.collectWorkload([
+        { database: LOCKED, collection: `${SCHEMA}.orders` },
+        { database: "postgres", collection: `${SCHEMA}.orders` },
+      ]);
+      expect(shapes.has(workloadKey(LOCKED, `${SCHEMA}.orders`))).toBe(false);
+      expect(shapes.has(workloadKey("postgres", `${SCHEMA}.orders`))).toBe(true);
+    } finally {
+      await partial.close().catch(() => {});
+      await seed.execute(`DROP DATABASE IF EXISTS ${LOCKED}`).catch(() => {});
+      await seed.execute(`DROP ROLE IF EXISTS ${role}`).catch(() => {});
+    }
+  }, 60_000);
 
   it("answers the health probe and a node roster", async () => {
     const health = await session.collector.collectServerHealth();

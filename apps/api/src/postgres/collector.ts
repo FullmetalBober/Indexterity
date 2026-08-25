@@ -340,7 +340,19 @@ export class PostgresIndexCollector implements IndexCollector {
     }
     const shapes = new Map<string, readonly QueryShape[]>();
     for (const [database, group] of byDatabase) {
-      const statements = await this.statementsFor(database);
+      // One database of many, so an unreachable one costs this answer that
+      // database and not the others (#345). The single-database reads on this
+      // collector let the failure through instead — there is no partial answer to
+      // give about one database, so the decision belongs to the caller — but a
+      // batched read across a cluster has to keep walking, the same way the
+      // collect and suggest passes do.
+      let statements: NormalizedStatement[];
+      try {
+        statements = await this.statementsFor(database);
+      } catch (error) {
+        if (error instanceof DatabaseInaccessibleError) continue;
+        throw error;
+      }
       for (const target of group) {
         const ref = splitTableRef(target.collection);
         const found: QueryShape[] = [];
@@ -388,11 +400,11 @@ export class PostgresIndexCollector implements IndexCollector {
   // by pg_stat_statements.max anyway.
   private async statementsFor(database: string): Promise<NormalizedStatement[]> {
     try {
-      const rows = await this.conn.query<{
+      const rows = await this.query<{
         query: unknown;
         calls: unknown;
         rows: unknown;
-      }>(`SELECT query, calls, rows FROM pg_stat_statements WHERE calls > 0`, [], database);
+      }>(database, `SELECT query, calls, rows FROM pg_stat_statements WHERE calls > 0`);
       // Coerced HERE, at the boundary, because `calls` and `rows` are bigint
       // columns and node-pg hands bigint back as a STRING — it will not narrow
       // one to a JS number on its own, since a bigint can exceed Number's exact
@@ -404,10 +416,22 @@ export class PostgresIndexCollector implements IndexCollector {
         calls: Number(row.calls ?? 0),
         rows: Number(row.rows ?? 0),
       }));
-    } catch {
+    } catch (error) {
+      // An unreachable database is not a missing extension, and this read used to
+      // report it as one (#345). It went straight at `this.conn.query` while every
+      // other per-database read here goes through the classifier below — and the
+      // lazy `poolFor(database)` dial happens inside it, so on the create side
+      // this is the FIRST read to touch a database, not the last. A role without
+      // CONNECT (42501) or a database dropped mid-pass (3D000) therefore read as
+      // "no statements" and the pass carried on measuring a cluster it could not
+      // see.
+      if (error instanceof DatabaseInaccessibleError) throw error;
       // The extension is optional (WORKLOAD tier in diagnose.ts): without it the
       // drop side works as normal and there are simply no create-side
-      // recommendations.
+      // recommendations. `pg_stat_statements` missing answers 42P01, and its view
+      // is SELECT-able by PUBLIC where the extension IS installed (`=r/postgres`
+      // in its relacl, verified on 18.6), so this catch is not swallowing a
+      // permission problem that should have dropped the database instead.
       return [];
     }
   }

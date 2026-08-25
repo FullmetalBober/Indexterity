@@ -139,9 +139,21 @@ jobs:
         image: mongo:${{ matrix.mongo }}
         ports:
           - "27017:27017"
+      # A second mongod with authentication ON, the way the e2e job runs one. The
+      # server above has auth disabled, and that is the single state in which a
+      # database these credentials cannot read cannot exist — so the per-database
+      # refusal #345 is about had nowhere to be measured.
+      mongo-auth:
+        image: mongo:${{ matrix.mongo }}
+        env:
+          MONGO_INITDB_ROOT_USERNAME: root
+          MONGO_INITDB_ROOT_PASSWORD: int-root
+        ports:
+          - "27018:27017"
     env:
       DATABASE_URL: postgres://mongo_optimizer:mongo_optimizer@localhost:5432/mongo_optimizer
       MONGO_URL: mongodb://localhost:27017
+      MONGO_ADMIN_URL: mongodb://root:int-root@localhost:27018
       BETTER_AUTH_SECRET: integration-secret
       MASTER_KEY: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
     steps:

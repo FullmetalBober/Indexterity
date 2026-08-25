@@ -443,7 +443,8 @@ export class ClustersService {
         try {
           await lease.session.collector.listCollectionNames(database);
         } catch (error) {
-          if (error instanceof DatabaseInaccessibleError) unreadable.push(database);
+          if (!(error instanceof DatabaseInaccessibleError)) throw error;
+          unreadable.push(database);
         }
       }
       return { absent, unreadable };
@@ -451,6 +452,13 @@ export class ClustersService {
       // The cluster went away mid-check. Not a refusal: a selection must not be
       // rejected because the cluster was briefly unreachable, and the collect
       // intersects with what is really there on every pass regardless.
+      //
+      // Where an unclassified per-database failure lands too, deliberately (#345).
+      // `unreadable` REFUSES the save, so only a failure we have actually
+      // recognised as "no access" may go in it — anything else would reject a
+      // legitimate selection over a blip. It used to be dropped on the floor
+      // instead, which reported the database as neither absent nor unreadable and
+      // saved clean into a blind spot.
       return none;
     } finally {
       lease.release();
