@@ -3,7 +3,8 @@ import { ORPCError } from "@orpc/server";
 import { contract } from "@repo/contracts";
 import type { FastifyRequest } from "fastify";
 import { AuditService } from "../audit/audit.service";
-import type { SecurityEventDetails } from "../audit/security-events";
+import type { SecurityEventDetails } from "../audit/audit.types";
+import { RequestActorService } from "../audit/request-actor.service";
 import { clusters } from "../db";
 import { DatabaseService } from "../db/database.service";
 import { NO_TLS_OVERRIDES, type ProvisionedUser } from "../engine/ports";
@@ -28,6 +29,7 @@ export class ClustersController {
     private readonly tenancy: TenancyService,
     private readonly clusters: ClustersService,
     private readonly audit: AuditService,
+    private readonly actors: RequestActorService,
   ) {}
 
   // Refuse a name the org is already using, BEFORE anything is dialed.
@@ -55,7 +57,7 @@ export class ClustersController {
   // After the act, never in front of it, and it cannot fail the request:
   // recordSecurityEvent logs a lost row instead of throwing (see its comment).
   private async record(req: FastifyRequest, entry: SecurityEventDetails): Promise<void> {
-    const actor = await this.audit.actorFromRequest(req);
+    const actor = await this.actors.actorFromRequest(req);
     await this.audit.record({ ...entry, ...actor }, (message) => this.log.warn(message));
   }
 
@@ -413,7 +415,7 @@ export class ClustersController {
           context.member.orgId,
           input.clusterId,
           errors,
-          () => this.audit.actorFromRequest(req),
+          () => this.actors.actorFromRequest(req),
           (message) => this.log.warn(message),
         );
       },
@@ -454,7 +456,7 @@ export class ClustersController {
           input.clusterId,
           input.readOnly,
           errors,
-          () => this.audit.actorFromRequest(req),
+          () => this.actors.actorFromRequest(req),
           (message) => this.log.warn(message),
         );
       },

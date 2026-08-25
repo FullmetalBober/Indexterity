@@ -5,8 +5,9 @@ import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { APIError, createAuthMiddleware, getSessionFromCtx } from "better-auth/api";
 import { expireCookie } from "better-auth/cookies";
 import { twoFactor } from "better-auth/plugins/two-factor";
-import { authTrailEntry, sessionEndedEntry, type TrailActor } from "../audit/auth-trail";
-import { authEventFor, recordSecurityEvent } from "../audit/security-events";
+import { AuditService } from "../audit/audit.service";
+import type { TrailActor } from "../audit/audit.types";
+import { AuditUtils } from "../audit/audit.utils";
 import { and, type Database, eq, members, schema, user as userTable } from "../db";
 import { mailEnabled, sendMail, sendMailDetached } from "../mail/mailer";
 import { organizationPlugin } from "./organization";
@@ -180,6 +181,13 @@ export function createAuth(config: AuthConfig) {
   // The email is stored alongside the id on every row (`actor_email`), because
   // `actor_user_id` is `set null` on user deletion and a trail whose actor column
   // empties when the account goes answers none of the questions it exists for.
+  // The trail's two providers, built here rather than injected: this function runs
+  // at import time (auth/index.ts), before any container exists, and over a pool of
+  // its own. AuditUtils holds no state and AuditService asks only for a Database,
+  // so both are ordinary classes — the Nest side injects the same two (#354).
+  const auditUtils = new AuditUtils();
+  const audit = new AuditService(db);
+
   const emailOf = async (userId: string): Promise<string | null> => {
     const [row] = await db
       .select({ email: userTable.email })
@@ -468,7 +476,7 @@ export function createAuth(config: AuthConfig) {
         });
       }),
       after: createAuthMiddleware(async (ctx) => {
-        // The security trail (audit/auth-trail.ts). First, and never allowed to
+        // The security trail (audit/audit.utils.ts). First, and never allowed to
         // throw: whether the act is recorded must not decide whether it happened,
         // and a lost row is logged rather than escalated.
         //
@@ -482,10 +490,10 @@ export function createAuth(config: AuthConfig) {
         // is the point: resolving one costs a session lookup, and most traffic
         // through here is `/get-session` on ordinary navigation, which records
         // nothing. Only the dozen-odd acts pay for it.
-        if (authEventFor(ctx.path, !(ctx.context.returned instanceof Error)) !== null) {
-          const entry = authTrailEntry(ctx, await trailActor(ctx), config.trustProxy);
+        if (auditUtils.authEventFor(ctx.path, !(ctx.context.returned instanceof Error)) !== null) {
+          const entry = auditUtils.authTrailEntry(ctx, await trailActor(ctx), config.trustProxy);
           if (entry !== null) {
-            await recordSecurityEvent(db, entry, (message) => ctx.context.logger.warn(message));
+            await audit.record(entry, (message: string) => ctx.context.logger.warn(message));
           }
         }
         // /two-factor/ is in the same boat for the same reason: verify-totp
@@ -520,7 +528,7 @@ export function createAuth(config: AuthConfig) {
           // an act and gets nothing.
           after: async (endedSession, context) => {
             const userId = endedSession.userId;
-            const entry = sessionEndedEntry({
+            const entry = auditUtils.sessionEndedEntry({
               path: context?.path ?? null,
               actor:
                 typeof userId === "string"
@@ -537,9 +545,7 @@ export function createAuth(config: AuthConfig) {
               trustProxy: config.trustProxy,
             });
             if (entry === null) return;
-            await recordSecurityEvent(db, entry, (message) =>
-              context?.context.logger.warn(message),
-            );
+            await audit.record(entry, (message: string) => context?.context.logger.warn(message));
           },
         },
       },

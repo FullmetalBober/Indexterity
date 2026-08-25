@@ -2,7 +2,7 @@ import { Injectable, Logger } from "@nestjs/common";
 import type { MyInvite, OrgInfo, OrgPolicyView, OrgSummary, SecurityTrail } from "@repo/contracts";
 import { SECURITY_TRAIL_PAGE } from "@repo/contracts";
 import { AuditService } from "../audit/audit.service";
-import type { RequestActor } from "../audit/http-actor";
+import type { RequestActor } from "../audit/audit.types";
 import type { Membership } from "../auth/tenancy";
 import { entitlementsFor, planFrom } from "../billing/plans";
 import { orgPolicyFor } from "../clusters/least-privilege";

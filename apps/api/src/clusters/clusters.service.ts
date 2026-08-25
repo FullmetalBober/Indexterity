@@ -1,8 +1,8 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { ORPCError } from "@orpc/server";
 import type { Cluster } from "@repo/contracts";
-import type { RequestActor } from "../audit/http-actor";
-import { recordSecurityEvent } from "../audit/security-events";
+import { AuditService } from "../audit/audit.service";
+import type { RequestActor } from "../audit/audit.types";
 import { currentKeyVersion, masterKeyBytesFor } from "../config/env";
 import { clusters, envKeyProvider, eq, seal, sql } from "../db";
 import { DatabaseService } from "../db/database.service";
@@ -77,6 +77,7 @@ export class ClustersService {
   constructor(
     private readonly database: DatabaseService,
     private readonly repository: ClustersRepository,
+    private readonly audit: AuditService,
   ) {}
 
   // The actor arrives as a THUNK. Who is asking is a fact about the REQUEST, so
@@ -84,10 +85,10 @@ export class ClustersService {
   // actually happened, which is why it is not resolved eagerly.
   private async record(
     actor: () => Promise<RequestActor>,
-    entry: Parameters<typeof recordSecurityEvent>[1],
+    entry: Parameters<AuditService["record"]>[0],
     warn: (message: string) => void,
   ): Promise<void> {
-    await recordSecurityEvent(this.database.db, { ...entry, ...(await actor()) }, warn);
+    await this.audit.record({ ...entry, ...(await actor()) }, warn);
   }
 
   // The row, or the refusal. Every handler that needs the cluster before acting
