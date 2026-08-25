@@ -1,5 +1,6 @@
 import { Module } from "@nestjs/common";
 import { DatabaseModule } from "../db/database.module";
+import { ClusterTasksService } from "./cluster-tasks.service";
 import { TickController } from "./tick.controller";
 import { TickService } from "./tick.service";
 
@@ -13,7 +14,10 @@ import { TickService } from "./tick.service";
 @Module({
   imports: [DatabaseModule],
   controllers: [TickController],
-  providers: [TickService],
+  // ClusterTasksService is the per-cluster half of the queue's task registry
+  // (#354). Not exported: the queue reaches it through TickService, which is the
+  // only thing that composes a task list.
+  providers: [ClusterTasksService, TickService],
   exports: [TickService],
 })
 export class JobsModule {}

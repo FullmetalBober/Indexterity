@@ -3,24 +3,12 @@ import type { Database } from "../db";
 import { InsecureConnectionError } from "../engine/tls";
 import { UnsupportedServerError } from "../engine/version";
 import { isUnreachableError } from "../errors/unreachable";
-import { emitPassFinished } from "../events/emit";
-import { ALERT_COOLDOWN_MS, alertAllowed, notifyClusterOwners } from "../mail/notify";
 import { recordClusterTask } from "../metrics";
-import { applyCluster } from "./apply";
-import { settleBuildsForCluster } from "./building";
-import { refreshInferredWindow } from "./change-window";
-import { classifyCluster } from "./classify";
 import { ClusterCredentialsError, ClusterGoneError } from "./cluster-connection";
-import { collectCluster } from "./collect";
-import { applyCreatesForCluster } from "./create";
+import type { ClusterTasksService } from "./cluster-tasks.service";
 import { runDigest } from "./digest";
 import { dispatchToAllClusters } from "./dispatch";
-import { finalizeCluster } from "./finalize";
-import { clusterIdFromPayload } from "./payload";
-import { probeCluster } from "./probe";
 import { pruneOldSamples } from "./retention";
-import { suggestForCluster } from "./suggest";
-import { alertClaims } from "./watermark";
 
 // What a cluster task needs from the outside world, narrowed to three
 // functions so the decision below is testable without a queue or a database.
@@ -123,101 +111,33 @@ export async function runClusterTask(
   }
 }
 
-// Takes the database to CLOSE OVER, not to expose: the two functions below need
-// it, and runClusterTask does not. Keeping it out of ClusterTaskDeps is what keeps
-// that interface three functions wide and testable with no database at all.
-function depsFor(db: Database, helpers: JobHelpers): ClusterTaskDeps {
-  return {
-    logger: helpers.logger,
-    // Best-effort: a mail failure must not turn a skipped tick into a hard one.
-    alertOwners: async (clusterId, subject, body) => {
-      try {
-        await notifyClusterOwners(db, clusterId, subject, body);
-      } catch (error) {
-        helpers.logger.error(`alert for cluster ${clusterId} failed: ${String(error)}`);
-      }
-    },
-    alertAllowed: (scope) => alertAllowed(alertClaims(db), scope, ALERT_COOLDOWN_MS),
-    emitPassFinished: (clusterId, task) => emitPassFinished(db, clusterId, task),
-  };
-}
-
-function onCluster(
-  db: Database,
-  task: string,
-  payload: unknown,
-  helpers: JobHelpers,
-  run: (clusterId: string) => Promise<unknown>,
-): Promise<void> {
-  return runClusterTask(task, clusterIdFromPayload(payload), depsFor(db, helpers), run);
-}
-
-// graphile-worker task registry. Per-cluster tasks (collect/classify/suggest/
-// apply/finalize) plus cron dispatchers that fan those out to every cluster.
+// graphile-worker task registry: the names the queue knows, and nothing else.
 //
-// A function of the database rather than a constant, because the database is the
-// one thing every task here needs and the process that starts the runner is the
-// thing that owns it (jobs/runner.ts). Before this, each task reached for a
-// module-level singleton instead — which worked, and meant the pool's lifetime
-// belonged to whichever module was imported first rather than to whoever composed
-// the worker.
-export function createTaskList(db: Database) {
+// Per-cluster passes are methods on ClusterTasksService now (#354) and this maps
+// the queue's names onto them — so what a pass can inject is a question for the
+// container, and what the queue can dispatch stays one readable list. The cron
+// dispatchers and the two maintenance tasks are still functions of the database;
+// they move next.
+//
+// A function rather than a constant, because the database is the one thing every
+// task here needs and the process that starts the runner is the thing that owns
+// it (jobs/runner.ts). Before this, each task reached for a module-level singleton
+// instead — which worked, and meant the pool's lifetime belonged to whichever
+// module was imported first rather than to whoever composed the worker.
+export function createTaskList(db: Database, cluster: ClusterTasksService) {
   return {
-    collect: async (payload: unknown, helpers: JobHelpers): Promise<void> => {
-      await onCluster(db, "collect", payload, helpers, async (clusterId) => {
-        await collectCluster(db, clusterId);
-        // Only chase a collect that actually landed — re-analysing an unchanged
-        // history just re-derives yesterday's answer.
-        await helpers.addJob("classify", { clusterId });
-        await helpers.addJob("suggest", { clusterId });
-      });
-    },
-    classify: async (payload: unknown, helpers: JobHelpers): Promise<void> => {
-      await onCluster(db, "classify", payload, helpers, async (clusterId) => {
-        await classifyCluster(db, clusterId);
-        // Same trigger, same evidence: re-derive the change window from the
-        // traffic the collect just recorded.
-        await refreshInferredWindow(db, clusterId);
-      });
-    },
-    suggest: async (payload: unknown, helpers: JobHelpers): Promise<void> => {
-      // suggest builds its own auto-approved creates inline rather than waiting
-      // for the next apply tick; create.ts decides which may run outside the
-      // change window.
-      await onCluster(db, "suggest", payload, helpers, (clusterId) =>
-        suggestForCluster(db, clusterId),
-      );
-    },
-    apply: async (payload: unknown, helpers: JobHelpers): Promise<void> => {
-      await onCluster(db, "apply", payload, helpers, async (clusterId) => {
-        // Ahead of both, so a build asked for on an earlier tick is finished
-        // before this pass decides anything new (#332).
-        await settleBuildsForCluster(db, clusterId);
-        await applyCluster(db, clusterId);
-        await applyCreatesForCluster(db, clusterId);
-      });
-    },
-    finalize: async (payload: unknown, helpers: JobHelpers): Promise<void> => {
-      await onCluster(db, "finalize", payload, helpers, (clusterId) =>
-        finalizeCluster(db, clusterId),
-      );
-    },
-    // Every 5 minutes: is anything suddenly much slower to read than usual? If so,
-    // look for the missing index now rather than at the next hourly pass.
-    probe: async (payload: unknown, helpers: JobHelpers): Promise<void> => {
-      await onCluster(db, "probe", payload, helpers, async (clusterId) => {
-        const findings = await probeCluster(db, clusterId);
-        if (findings.length === 0) return;
-        for (const finding of findings) {
-          helpers.logger.info(
-            finding.database === null
-              ? `probe: cluster under index-related pressure — ${finding.reason}`
-              : `probe: ${finding.database}.${finding.collection} under read pressure — ${finding.reason}`,
-          );
-        }
-        await helpers.addJob("suggest", { clusterId });
-      });
-    },
+    collect: (payload: unknown, helpers: JobHelpers): Promise<void> =>
+      cluster.collect(payload, helpers),
+    classify: (payload: unknown, helpers: JobHelpers): Promise<void> =>
+      cluster.classify(payload, helpers),
+    suggest: (payload: unknown, helpers: JobHelpers): Promise<void> =>
+      cluster.suggest(payload, helpers),
+    apply: (payload: unknown, helpers: JobHelpers): Promise<void> =>
+      cluster.apply(payload, helpers),
+    finalize: (payload: unknown, helpers: JobHelpers): Promise<void> =>
+      cluster.finalize(payload, helpers),
+    probe: (payload: unknown, helpers: JobHelpers): Promise<void> =>
+      cluster.probe(payload, helpers),
     scheduleProbe: async (_payload: unknown, helpers: JobHelpers): Promise<void> => {
       await dispatchToAllClusters(db, "probe", helpers);
     },

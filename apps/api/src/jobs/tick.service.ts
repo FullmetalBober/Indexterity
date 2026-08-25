@@ -6,6 +6,7 @@ import { sql } from "../db";
 import { DatabaseService } from "../db/database.service";
 import { captureError } from "../errors/reporting";
 import { type BurstResult, claimDuePasses } from "./burst";
+import { ClusterTasksService } from "./cluster-tasks.service";
 import { releaseStaleLocks } from "./locks";
 import { wireRunnerEvents } from "./runner";
 import { everyMinutes } from "./schedule";
@@ -88,8 +89,11 @@ export class TickService implements BeforeApplicationShutdown {
   private interval: NodeJS.Timeout | null = null;
   private stopping = false;
 
-  constructor(private readonly database: DatabaseService) {
-    this.taskList = createTaskList(database.db);
+  constructor(
+    private readonly database: DatabaseService,
+    clusterTasks: ClusterTasksService,
+  ) {
+    this.taskList = createTaskList(database.db, clusterTasks);
     this.events.on("pool:create", ({ workerPool }) => {
       this.activePool = workerPool;
     });
