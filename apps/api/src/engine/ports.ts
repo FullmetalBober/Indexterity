@@ -328,7 +328,23 @@ export interface EngineCapabilities {
 export interface EngineSession {
   readonly collector: IndexCollector;
   executor(readOnly: boolean): IndexExecutor;
-  // User databases only — each adapter excludes its own system namespaces.
+  // User databases only. The rule, which "its own system namespaces" was too
+  // vague to keep the three adapters honest about (#347):
+  //
+  //   BY NAME. Each adapter excludes the databases its ENGINE owns and uses —
+  //   mongo's admin/local/config, SQL Server's master/tempdb/model/msdb — and
+  //   nothing else. A reader can predict the list from the engine's own
+  //   documentation, which is the property being bought.
+  //
+  // One exception, and it is not a system database: PostgreSQL's `postgres` is an
+  // ordinary database initdb creates so a client has somewhere to connect, empty
+  // on almost every install. It is reported only when it holds a user table.
+  //
+  // The count is load-bearing, which is why the difference was worth settling:
+  // the observe checkboxes are drawn at MIN_DATABASES_TO_CHOOSE (2) and up, so an
+  // adapter that reports one extra database offers a choice its peers do not, and
+  // the default selection — null, meaning all of them — walks whatever is in the
+  // list on every pass.
   listDatabaseNames(): Promise<string[]>;
   // Cheap liveness round-trip (rotation verifies new credentials with this).
   ping(): Promise<void>;

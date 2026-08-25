@@ -9,7 +9,7 @@ import {
   workloadKey,
 } from "../engine/ports";
 import type { IndexKey, IndexSpec, QueryShape, ServerHealth } from "../engine/types";
-import type { PostgresConnection } from "./connection";
+import { type PostgresConnection, SYSTEM_SCHEMAS } from "./connection";
 import { collectPostgresHealth } from "./health";
 import { collectPostgresNodes } from "./members";
 import { postgresHasLastIdxScan } from "./version";
@@ -42,12 +42,6 @@ export function splitTableRef(collection: string): PostgresTableRef {
 export function joinTableRef(ref: PostgresTableRef): string {
   return `${ref.schema}.${ref.table}`;
 }
-
-// Schemas that belong to the server rather than to anybody's application. Left
-// as a list rather than a `nspname NOT LIKE 'pg_%'` test because that pattern
-// would also hide a customer schema called `pg_archive`, and an index this
-// pipeline cannot see is one it cannot protect either.
-const SYSTEM_SCHEMAS = ["pg_catalog", "information_schema", "pg_toast"];
 
 export class PostgresIndexCollector implements IndexCollector {
   constructor(private readonly conn: PostgresConnection) {}

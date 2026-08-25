@@ -163,8 +163,15 @@ export class MssqlConnection {
     return ONLINE_REBUILD_EDITIONS.has((await this.serverIdentity()).engineEdition);
   }
 
-  // User databases: ONLINE only — an OFFLINE or RESTORING database cannot even
-  // be listed into, and the four system databases are never analyzed.
+  // User databases only, the contract every adapter answers (engine/ports.ts):
+  // the four the ENGINE owns, excluded by name.
+  //
+  // ONLINE only on top of that — an OFFLINE or RESTORING database cannot be
+  // listed into at all. `model` and `msdb` are excluded even though a real
+  // installation can be found with tables in them, unlike PostgreSQL's
+  // `postgres`, and the difference is what each database IS: these four are
+  // SQL Server's own working state, and putting application tables in one is an
+  // anti-pattern Microsoft documents against rather than a shape to support.
   async listDatabaseNames(): Promise<string[]> {
     const rows = await this.query<{ name: string }>(
       `SELECT name FROM sys.databases

@@ -4,8 +4,8 @@ import { ProvisionDeniedError, SCOPED_USERNAME } from "../src/engine/provision";
 import { detectEngine } from "../src/engine/registry";
 import { postgresAdapter } from "../src/postgres/adapter";
 import { PostgresIndexCollector } from "../src/postgres/collector";
-import { withPgCredentials } from "../src/postgres/conn-string";
-import { PostgresConnection } from "../src/postgres/connection";
+import { withPgCredentials, withPgDatabase } from "../src/postgres/conn-string";
+import { PostgresConnection, SYSTEM_SCHEMAS } from "../src/postgres/connection";
 import { HideUnsupportedError } from "../src/postgres/executor";
 import { provisionPostgresScopedUser } from "../src/postgres/provision";
 
@@ -31,6 +31,13 @@ const POSTGRES_URL = process.env.POSTGRES_URL;
 // would say verify-full; this asserts the guard can be satisfied, not bypassed.
 const OVERRIDES = { allowInvalidCertificates: false, allowInvalidHostnames: false, insecure: true };
 const SCHEMA = "indexterity_int";
+// A database rather than a schema, so it is dropped by name at setup: a run that
+// dies mid-test would otherwise leave one behind and change what the cluster
+// reports to every later run.
+const VIEWS_ONLY = "indexterity_int_views_only";
+// Same reason: the unreadable-database test creates it, and a leftover would
+// change what every later run sees this cluster reporting.
+const LOCKED = "indexterity_int_locked";
 
 describe.skipIf(POSTGRES_URL === undefined)("postgres adapter against a live server", () => {
   let seed: PostgresConnection;
@@ -40,6 +47,8 @@ describe.skipIf(POSTGRES_URL === undefined)("postgres adapter against a live ser
     seed = new PostgresConnection(POSTGRES_URL as string, OVERRIDES);
     await seed.connect();
     await seed.execute(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`);
+    await seed.execute(`DROP DATABASE IF EXISTS ${VIEWS_ONLY}`);
+    await seed.execute(`DROP DATABASE IF EXISTS ${LOCKED}`);
     await seed.execute(`CREATE SCHEMA ${SCHEMA}`);
     await seed.execute(`CREATE EXTENSION IF NOT EXISTS pg_stat_statements`);
     await seed.execute(
@@ -86,6 +95,42 @@ describe.skipIf(POSTGRES_URL === undefined)("postgres adapter against a live ser
       provisionScopedUsers: true,
     });
   });
+
+  // #347. `postgres` is reported only while it is empty of user tables, and the
+  // half a unit test cannot prove is the catalog read that decides it — this
+  // suite's own server is an install that keeps real tables there, because the
+  // fixtures are created in it.
+  it("keeps a postgres database that holds user tables", async () => {
+    expect(await session.listDatabaseNames()).toEqual(["postgres"]);
+    // Empty of the tables this product manages is what the probe asks, so a
+    // database holding only a view is not a database to observe. Asserted here
+    // rather than mocked: `relkind IN ('r', 'p')` is a claim about the catalog.
+    await seed.execute(`CREATE DATABASE ${VIEWS_ONLY}`);
+    // Its own connection, closed before the drop: `seed` holds a pool per
+    // database for its life, and postgres refuses to drop a database anything is
+    // still connected to.
+    const inside = new PostgresConnection(
+      withPgDatabase(POSTGRES_URL as string, VIEWS_ONLY),
+      OVERRIDES,
+    );
+    try {
+      await inside.connect();
+      await inside.execute(`CREATE VIEW v AS SELECT 1 AS one`);
+      const rows = await inside.query<{ present: boolean }>(
+        `SELECT EXISTS (
+           SELECT 1 FROM pg_class c
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE c.relkind IN ('r', 'p')
+              AND n.nspname <> ALL($1::text[])
+         ) AS present`,
+        [SYSTEM_SCHEMAS],
+      );
+      expect(rows[0]?.present).toBe(false);
+    } finally {
+      await inside.close().catch(() => {});
+      await seed.execute(`DROP DATABASE IF EXISTS ${VIEWS_ONLY}`).catch(() => {});
+    }
+  }, 60_000);
 
   // Every one of these is what the catalog says, not what we hoped it says.
   it("reads each index shape out of the catalog exactly", async () => {
@@ -178,17 +223,15 @@ describe.skipIf(POSTGRES_URL === undefined)("postgres adapter against a live ser
   // it: without the revoke there is no such thing as an unreadable database for
   // an ordinary role on this engine.
   it("classifies a database the role cannot connect to, and keeps walking the rest", async () => {
-    const locked = `${SCHEMA}_locked`;
     const role = `int_partial_${Date.now().toString(36)}`;
-    await seed.execute(`DROP DATABASE IF EXISTS ${locked}`);
-    await seed.execute(`CREATE DATABASE ${locked}`);
+    await seed.execute(`CREATE DATABASE ${LOCKED}`);
     await seed.execute(`CREATE ROLE ${role} LOGIN PASSWORD 'p'`);
     // pg_monitor because that is what provisioning grants (postgres/provision.ts),
     // and it is what makes the statement text readable: without it a role sees
     // `<insufficient privilege>` for every statement another user ran, so the
     // reachable half of this test would pass for the wrong reason.
     await seed.execute(`GRANT pg_monitor TO ${role}`);
-    await seed.execute(`REVOKE CONNECT ON DATABASE ${locked} FROM PUBLIC`);
+    await seed.execute(`REVOKE CONNECT ON DATABASE ${LOCKED} FROM PUBLIC`);
     const partial = new PostgresConnection(
       withPgCredentials(POSTGRES_URL as string, role, "p"),
       OVERRIDES,
@@ -198,27 +241,27 @@ describe.skipIf(POSTGRES_URL === undefined)("postgres adapter against a live ser
       const collector = new PostgresIndexCollector(partial);
       // Listed and unreadable, which is the whole point: pg_database is a shared
       // catalog every role can read, so existence says nothing about access.
-      expect(await partial.listDatabaseNames()).toContain(locked);
-      await expect(collector.listCollectionNames(locked)).rejects.toBeInstanceOf(
+      expect(await partial.listDatabaseNames()).toContain(LOCKED);
+      await expect(collector.listCollectionNames(LOCKED)).rejects.toBeInstanceOf(
         DatabaseInaccessibleError,
       );
       // The workload store, which is the read that used to report this as an empty
       // store and let the pass carry on. It is also the read that opens the pool,
       // so on the create side it is the first one to touch the database at all.
       await expect(
-        collector.collectDeletePatterns(locked, `${SCHEMA}.orders`),
+        collector.collectDeletePatterns(LOCKED, `${SCHEMA}.orders`),
       ).rejects.toBeInstanceOf(DatabaseInaccessibleError);
       // And the batched read keeps the database it CAN reach.
       await seed.query(`SELECT count(*) FROM ${SCHEMA}.orders WHERE status = $1`, ["paid"]);
       const shapes = await collector.collectWorkload([
-        { database: locked, collection: `${SCHEMA}.orders` },
+        { database: LOCKED, collection: `${SCHEMA}.orders` },
         { database: "postgres", collection: `${SCHEMA}.orders` },
       ]);
-      expect(shapes.has(workloadKey(locked, `${SCHEMA}.orders`))).toBe(false);
+      expect(shapes.has(workloadKey(LOCKED, `${SCHEMA}.orders`))).toBe(false);
       expect(shapes.has(workloadKey("postgres", `${SCHEMA}.orders`))).toBe(true);
     } finally {
       await partial.close().catch(() => {});
-      await seed.execute(`DROP DATABASE IF EXISTS ${locked}`).catch(() => {});
+      await seed.execute(`DROP DATABASE IF EXISTS ${LOCKED}`).catch(() => {});
       await seed.execute(`DROP ROLE IF EXISTS ${role}`).catch(() => {});
     }
   }, 60_000);

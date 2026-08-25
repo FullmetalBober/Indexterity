@@ -8,6 +8,7 @@ import type {
   TlsOverrides,
 } from "../engine/ports";
 import { mongoClient } from "./client";
+import { withoutSystemDatabases } from "./connection";
 import { ENGINE_ROLE } from "./provision";
 import {
   hasQueryStatsPlanMetrics,
@@ -583,9 +584,7 @@ export async function diagnoseConnection(
     let listWorks = true;
     try {
       const result = await admin.admin().listDatabases();
-      userDatabases = result.databases
-        .map((entry) => entry.name)
-        .filter((name) => name !== "admin" && name !== "local" && name !== "config");
+      userDatabases = withoutSystemDatabases(result.databases.map((entry) => entry.name));
     } catch {
       listWorks = false;
     }
