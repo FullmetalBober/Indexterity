@@ -3,8 +3,8 @@ import { type EngineSession, workloadKey } from "../src/engine/ports";
 import { ProvisionDeniedError, SCOPED_USERNAME } from "../src/engine/provision";
 import { detectEngine } from "../src/engine/registry";
 import { postgresAdapter } from "../src/postgres/adapter";
-import { withPgCredentials } from "../src/postgres/conn-string";
-import { PostgresConnection } from "../src/postgres/connection";
+import { withPgCredentials, withPgDatabase } from "../src/postgres/conn-string";
+import { PostgresConnection, SYSTEM_SCHEMAS } from "../src/postgres/connection";
 import { HideUnsupportedError } from "../src/postgres/executor";
 import { provisionPostgresScopedUser } from "../src/postgres/provision";
 
@@ -30,6 +30,10 @@ const POSTGRES_URL = process.env.POSTGRES_URL;
 // would say verify-full; this asserts the guard can be satisfied, not bypassed.
 const OVERRIDES = { allowInvalidCertificates: false, allowInvalidHostnames: false, insecure: true };
 const SCHEMA = "indexterity_int";
+// A database rather than a schema, so it is dropped by name at setup: a run that
+// dies mid-test would otherwise leave one behind and change what the cluster
+// reports to every later run.
+const VIEWS_ONLY = "indexterity_int_views_only";
 
 describe.skipIf(POSTGRES_URL === undefined)("postgres adapter against a live server", () => {
   let seed: PostgresConnection;
@@ -39,6 +43,7 @@ describe.skipIf(POSTGRES_URL === undefined)("postgres adapter against a live ser
     seed = new PostgresConnection(POSTGRES_URL as string, OVERRIDES);
     await seed.connect();
     await seed.execute(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`);
+    await seed.execute(`DROP DATABASE IF EXISTS ${VIEWS_ONLY}`);
     await seed.execute(`CREATE SCHEMA ${SCHEMA}`);
     await seed.execute(`CREATE EXTENSION IF NOT EXISTS pg_stat_statements`);
     await seed.execute(
@@ -85,6 +90,42 @@ describe.skipIf(POSTGRES_URL === undefined)("postgres adapter against a live ser
       provisionScopedUsers: true,
     });
   });
+
+  // #347. `postgres` is reported only while it is empty of user tables, and the
+  // half a unit test cannot prove is the catalog read that decides it — this
+  // suite's own server is an install that keeps real tables there, because the
+  // fixtures are created in it.
+  it("keeps a postgres database that holds user tables", async () => {
+    expect(await session.listDatabaseNames()).toEqual(["postgres"]);
+    // Empty of the tables this product manages is what the probe asks, so a
+    // database holding only a view is not a database to observe. Asserted here
+    // rather than mocked: `relkind IN ('r', 'p')` is a claim about the catalog.
+    await seed.execute(`CREATE DATABASE ${VIEWS_ONLY}`);
+    // Its own connection, closed before the drop: `seed` holds a pool per
+    // database for its life, and postgres refuses to drop a database anything is
+    // still connected to.
+    const inside = new PostgresConnection(
+      withPgDatabase(POSTGRES_URL as string, VIEWS_ONLY),
+      OVERRIDES,
+    );
+    try {
+      await inside.connect();
+      await inside.execute(`CREATE VIEW v AS SELECT 1 AS one`);
+      const rows = await inside.query<{ present: boolean }>(
+        `SELECT EXISTS (
+           SELECT 1 FROM pg_class c
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE c.relkind IN ('r', 'p')
+              AND n.nspname <> ALL($1::text[])
+         ) AS present`,
+        [SYSTEM_SCHEMAS],
+      );
+      expect(rows[0]?.present).toBe(false);
+    } finally {
+      await inside.close().catch(() => {});
+      await seed.execute(`DROP DATABASE IF EXISTS ${VIEWS_ONLY}`).catch(() => {});
+    }
+  }, 60_000);
 
   // Every one of these is what the catalog says, not what we hoped it says.
   it("reads each index shape out of the catalog exactly", async () => {

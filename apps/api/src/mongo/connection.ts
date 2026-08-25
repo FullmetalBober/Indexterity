@@ -38,6 +38,27 @@ export function membersFromHello(hello: unknown): string[] {
   return [...new Set([...stringsAt(hello, "hosts"), ...stringsAt(hello, "passives")])];
 }
 
+// MongoDB's own three, excluded by name. `admin` holds the users and roles,
+// `config` the sharding catalog, `local` the oplog — none of them is a database
+// anybody puts an application in, and none has an index this product should have
+// an opinion about.
+//
+// By name rather than by capability, which is the rule all three adapters follow
+// (#347). A privileged credential is shown them: `listDatabases` names all three
+// to a user holding the cluster action (measured on 7.0), so this filter is what
+// keeps them off the observe checkboxes — and a scoped user without that action is
+// shown only what it can read, so the same filter has nothing left to do.
+const SYSTEM_DATABASES = new Set(["admin", "local", "config"]);
+
+// One spelling of the rule, because there are two callers and they draw two
+// different screens from it: `listDatabaseNames` below feeds the settings page and
+// the collect's scope, and mongo/diagnose.ts feeds the connect form's checkboxes.
+// Two spellings drifting apart means the form offers a database the collect will
+// never walk, or hides one it does.
+export function withoutSystemDatabases(names: readonly string[]): string[] {
+  return names.filter((name) => !SYSTEM_DATABASES.has(name));
+}
+
 // What one node's own `hello` says about itself — the roster's row (#100).
 // `me` only exists on replica-set members; a standalone or a mongos identifies
 // itself by the address it was dialled on instead.
@@ -153,9 +174,10 @@ export class MongoConnection {
     };
   }
 
+  // User databases only, the contract every adapter answers (engine/ports.ts).
   async listDatabaseNames(): Promise<string[]> {
     const result = await this.client.db("admin").admin().listDatabases();
-    return result.databases.map((entry) => entry.name);
+    return withoutSystemDatabases(result.databases.map((entry) => entry.name));
   }
 
   async close(): Promise<void> {

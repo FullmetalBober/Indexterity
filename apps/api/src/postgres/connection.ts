@@ -1,7 +1,7 @@
 import type { Pool, PoolClient } from "pg";
 import type { TlsOverrides } from "../engine/ports";
 import { pgPool } from "./client";
-import { pgHosts, withPgDatabase } from "./conn-string";
+import { parsePgConnString, pgHosts, withPgDatabase } from "./conn-string";
 import { type PostgresServerVersion, parsePostgresVersion } from "./version";
 
 // What the server said about itself at connect, read once per session.
@@ -26,6 +26,18 @@ export interface PostgresServerIdentity {
   readonly inRecovery: boolean;
   readonly version: PostgresServerVersion | null;
 }
+
+// Schemas that belong to the server rather than to anybody's application. Left
+// as a list rather than a `nspname NOT LIKE 'pg_%'` test because that pattern
+// would also hide a customer schema called `pg_archive`, and an index this
+// pipeline cannot see is one it cannot protect either.
+export const SYSTEM_SCHEMAS = ["pg_catalog", "information_schema", "pg_toast"];
+
+// The database initdb creates so that a client has somewhere to connect before
+// anything else exists. Named here because two things need it for opposite
+// reasons: it is the usual target of a pasted connection string, and it is the
+// one database this adapter reports only when it is not empty.
+const DEFAULT_DATABASE = "postgres";
 
 // Owns one pool PER DATABASE — the postgres twin of MssqlConnection, and the
 // place the two engines genuinely diverge.
@@ -142,17 +154,71 @@ export class PostgresConnection {
     return hosts[0] ?? "unknown";
   }
 
-  // User databases only. Templates and anything with connections disabled are
-  // excluded because they cannot be dialled at all; `postgres` is KEPT, unlike
-  // SQL Server's four system databases, because it is an ordinary database that
-  // installs routinely put real tables in.
+  // User databases only, the contract every adapter answers (engine/ports.ts).
+  // Templates and anything with connections disabled are excluded because they
+  // cannot be dialled at all.
+  //
+  // `postgres` is the awkward one, and it is excluded only WHILE IT IS EMPTY
+  // (#347). It is not a system database — the server neither owns it nor uses it,
+  // it exists because initdb creates one so there is somewhere to connect to —
+  // but on almost every install it holds nothing, and reporting it made a
+  // one-application cluster look like a two-database one. That is not cosmetic:
+  // the observe checkboxes are drawn at two databases and up, so the same shape
+  // that offers no choice on SQL Server offered a choice between an application
+  // and an empty database here, and the default selection then dialled it and
+  // read its statistics once per pass, forever.
+  //
+  // Excluding it by name outright was the alternative and it is worse: there is
+  // no "show system databases" toggle, so an install that really does keep tables
+  // in `postgres` would lose them with nothing on any screen to say why. The
+  // probe is one catalog read on the database in question, against a pool this
+  // session would otherwise have opened to walk it anyway.
   async listDatabaseNames(): Promise<string[]> {
     const rows = await this.query<{ datname: string }>(
       `SELECT datname FROM pg_database
         WHERE datallowconn AND NOT datistemplate
         ORDER BY datname`,
     );
-    return rows.map((row) => row.datname);
+    const names = rows.map((row) => row.datname);
+    if (!names.includes(DEFAULT_DATABASE)) return names;
+    if (await this.holdsUserTables(this.keyFor(DEFAULT_DATABASE))) return names;
+    return names.filter((name) => name !== DEFAULT_DATABASE);
+  }
+
+  // Which pool to ask a database's own question through. "" when the string
+  // already names it, because the pools are keyed by the name they were asked
+  // for: `poolFor("postgres")` against a string that says `/postgres` would hold a
+  // SECOND pool to the same database for the session's life, and naming `postgres`
+  // is the most common shape a pasted string has.
+  private keyFor(database: string): string {
+    const parsed = parsePgConnString(this.connectionString);
+    return parsed?.database === database ? "" : database;
+  }
+
+  // Is there anything of anybody's in there? Ordinary and partitioned tables
+  // only, which is the same relkind pair the collector walks — a database whose
+  // sole contents are views or sequences has no index for this product to have an
+  // opinion about.
+  //
+  // Unreachable reads as empty rather than as an error: a database we cannot
+  // enter cannot be walked either, so offering it would only produce a tick that
+  // collects nothing.
+  private async holdsUserTables(database: string): Promise<boolean> {
+    try {
+      const rows = await this.query<{ present: boolean }>(
+        `SELECT EXISTS (
+           SELECT 1 FROM pg_class c
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE c.relkind IN ('r', 'p')
+              AND n.nspname <> ALL($1::text[])
+         ) AS present`,
+        [SYSTEM_SCHEMAS],
+        database,
+      );
+      return rows[0]?.present === true;
+    } catch {
+      return false;
+    }
   }
 
   async ping(): Promise<void> {

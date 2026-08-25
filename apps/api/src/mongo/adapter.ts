@@ -14,8 +14,6 @@ import { MongoIndexExecutor } from "./executor";
 import { MemberConnections } from "./members";
 import { connStringUsername, dropUserStatement, provisionScopedUser } from "./provision";
 
-const SYSTEM_DATABASES = new Set(["admin", "local", "config"]);
-
 class MongoEngineSession implements EngineSession {
   readonly collector: IndexCollector;
   private readonly members: MemberConnections;
@@ -38,9 +36,10 @@ class MongoEngineSession implements EngineSession {
     return new MongoIndexExecutor(this.conn, readOnly);
   }
 
-  async listDatabaseNames(): Promise<string[]> {
-    const names = await this.conn.listDatabaseNames();
-    return names.filter((name) => !SYSTEM_DATABASES.has(name));
+  // System databases are excluded inside listDatabaseNames itself, the way the
+  // other two adapters do it.
+  listDatabaseNames(): Promise<string[]> {
+    return this.conn.listDatabaseNames();
   }
 
   async ping(): Promise<void> {
