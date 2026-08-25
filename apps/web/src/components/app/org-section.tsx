@@ -275,8 +275,10 @@ export function OrgSection({ org }: { org: OrgDetail }) {
                       <ul className="space-y-1">
                         {org.provisionedUsers.map((entry) => (
                           <li key={`${entry.cluster}:${entry.username}`}>
-                            <span className="font-medium">{entry.cluster}</span> —{" "}
-                            <code className="font-mono text-xs">{entry.revokeCommand}</code>
+                            <span className="font-medium">{entry.cluster}</span>
+                            <code className="mt-1 block whitespace-pre-wrap font-mono text-xs">
+                              {entry.revokeCommand}
+                            </code>
                           </li>
                         ))}
                       </ul>

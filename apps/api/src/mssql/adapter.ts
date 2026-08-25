@@ -12,7 +12,11 @@ import { MssqlConnection } from "./connection";
 import { diagnoseMssqlConnection } from "./diagnose";
 import { MssqlIndexExecutor } from "./executor";
 import { MssqlMemberConnections } from "./members";
-import { mssqlConnStringUsername, provisionMssqlScopedUser } from "./provision";
+import {
+  dropLoginStatements,
+  mssqlConnStringUsername,
+  provisionMssqlScopedUser,
+} from "./provision";
 
 class MssqlEngineSession implements EngineSession {
   readonly collector: IndexCollector;
@@ -70,5 +74,6 @@ export const mssqlAdapter: EngineAdapter = {
   },
   diagnose: diagnoseMssqlConnection,
   provisionScopedUser: provisionMssqlScopedUser,
+  revokeStatements: dropLoginStatements,
   connStringUsername: mssqlConnStringUsername,
 };

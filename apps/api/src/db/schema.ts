@@ -408,6 +408,18 @@ export const clusters = pgTable(
     // The least-privilege user Indexterity created on the cluster during
     // admin-string onboarding; null when the customer pasted a ready-made string.
     provisionedUsername: text("provisioned_username"),
+    // Where that user was actually created, so the disconnect screen can name
+    // the databases its removal has to visit (#338). PostgreSQL and SQL Server
+    // both grant per database and both refuse a bare drop while those grants
+    // remain; MongoDB's user is server-scoped, so this is empty for it.
+    //
+    // Written once, at provisioning, and never refreshed — deliberately. It
+    // records what was DONE, not what exists now: provisioning runs from an
+    // admin string that is never stored, so a database created afterwards has
+    // no user of ours in it and needs no statement (the same gap the observe
+    // selection's unreadable-database refusal already explains). Null on every
+    // row that predates this column, and on rows with no provisioned user.
+    provisionedDatabases: text("provisioned_databases").array(),
     // Set at connect and re-evaluated on every rotation, because rotating is
     // exactly when it changes: swapping an admin string for a scoped one is a
     // narrowing somebody should be able to see happened.

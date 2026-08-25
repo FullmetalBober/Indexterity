@@ -67,7 +67,12 @@ function isDuplicateUserError(error: unknown): boolean {
 // The mongo shell command that removes the scoped user. Handed over rather than
 // run, here and on the disconnect screen, because dropping a user needs admin
 // credentials this product deliberately does not keep.
-export function dropUserStatement(username: string): string {
+//
+// One statement and no database list: the user is created in `admin` with a role
+// that spans the cluster, so there is nothing per-database to undo. It takes the
+// port's second parameter and ignores it so the three adapters answer one
+// signature (#338).
+export function dropUserStatement(username: string, _databases: readonly string[] = []): string {
   return `db.getSiblingDB("admin").dropUser("${username}")`;
 }
 
@@ -201,7 +206,7 @@ export async function provisionScopedUser(
     } finally {
       await probe.close();
     }
-    return { connectionString, username };
+    return { connectionString, username, databases: [] };
   } finally {
     await adminClient.close();
   }

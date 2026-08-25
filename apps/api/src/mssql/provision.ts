@@ -240,7 +240,7 @@ export async function provisionMssqlScopedUser(
     } finally {
       await probe.close().catch(() => {});
     }
-    return { connectionString, username };
+    return { connectionString, username, databases: created };
   } finally {
     await admin.close().catch(() => {});
   }
