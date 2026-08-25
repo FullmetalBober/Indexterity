@@ -2,7 +2,8 @@ import { Injectable } from "@nestjs/common";
 import type { JobHelpers } from "graphile-worker";
 import { DatabaseService } from "../db/database.service";
 import { emitPassFinished } from "../events/emit";
-import { ALERT_COOLDOWN_MS, alertAllowed, notifyClusterOwners } from "../mail/notify";
+import { ALERT_COOLDOWN_MS, alertAllowed } from "../mail/notify";
+import { NotifyService } from "../mail/notify.service";
 import { applyCluster } from "./apply";
 import { settleBuildsForCluster } from "./building";
 import { refreshInferredWindow } from "./change-window";
@@ -32,7 +33,10 @@ import { alertClaims } from "./watermark";
 // WHICH database and WHICH pass, and nothing else.
 @Injectable()
 export class ClusterTasksService {
-  constructor(private readonly database: DatabaseService) {}
+  constructor(
+    private readonly database: DatabaseService,
+    private readonly notify: NotifyService,
+  ) {}
 
   async collect(payload: unknown, helpers: JobHelpers): Promise<void> {
     await this.onCluster("collect", payload, helpers, async (clusterId) => {
@@ -114,7 +118,7 @@ export class ClusterTasksService {
       // Best-effort: a mail failure must not turn a skipped tick into a hard one.
       alertOwners: async (clusterId, subject, body) => {
         try {
-          await notifyClusterOwners(db, clusterId, subject, body);
+          await this.notify.notifyClusterOwners(clusterId, subject, body);
         } catch (error) {
           helpers.logger.error(`alert for cluster ${clusterId} failed: ${String(error)}`);
         }

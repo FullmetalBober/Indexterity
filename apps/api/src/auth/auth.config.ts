@@ -10,10 +10,9 @@ import type { TrailActor } from "../audit/audit.types";
 import { AuditUtils } from "../audit/audit.utils";
 import { and, type Database, eq, members, schema, user as userTable } from "../db";
 import { mailEnabled, sendMail, sendMailDetached } from "../mail/mailer";
+import { GatesService } from "./gates.service";
 import { organizationPlugin } from "./organization";
 import { authRateLimit } from "./rate-limit";
-import { evaluateSignup } from "./signup-gate";
-import { hasCredentialAccount } from "./two-factor-gate";
 
 export interface AuthConfig {
   // The control-plane database this instance reads and writes through, handed in
@@ -187,6 +186,7 @@ export function createAuth(config: AuthConfig) {
   // so both are ordinary classes — the Nest side injects the same two (#354).
   const auditUtils = new AuditUtils();
   const audit = new AuditService(db);
+  const gates = new GatesService(db);
 
   const emailOf = async (userId: string): Promise<string | null> => {
     const [row] = await db
@@ -435,7 +435,7 @@ export function createAuth(config: AuthConfig) {
           const resolved = await getSessionFromCtx(ctx);
           const newEmail = (ctx.body as { newEmail?: unknown } | undefined)?.newEmail;
           if (resolved === null || typeof newEmail !== "string") return; // its own checks answer
-          const decision = await evaluateSignup(db, newEmail);
+          const decision = await gates.evaluateSignup(newEmail);
           if (!decision.allowed) {
             throw new APIError("FORBIDDEN", { message: decision.reason });
           }
@@ -468,7 +468,7 @@ export function createAuth(config: AuthConfig) {
           .where(and(eq(members.userId, resolved.user.id), eq(members.role, "owner")))
           .limit(1);
         if (owns === undefined) return;
-        if (!(await hasCredentialAccount(db, resolved.user.id))) return;
+        if (!(await gates.hasCredentialAccount(resolved.user.id))) return;
         throw new APIError("FORBIDDEN", {
           message:
             "owners must add a second factor before changing who has access — Account → Two-factor",
@@ -555,7 +555,7 @@ export function createAuth(config: AuthConfig) {
           // control plane dials customer networks, so an open front door is
           // not a neutral default (SIGNUP_MODE, see auth/signup-gate.ts).
           before: async (newUser) => {
-            const decision = await evaluateSignup(db, newUser.email);
+            const decision = await gates.evaluateSignup(newUser.email);
             if (!decision.allowed) {
               throw new APIError("FORBIDDEN", { message: decision.reason });
             }

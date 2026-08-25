@@ -2,7 +2,7 @@ import { APIError } from "better-auth/api";
 import { organization } from "better-auth/plugins";
 import type { Plan } from "../billing/plans";
 import { planFrom, withinLimit } from "../billing/plans";
-import { seatsUsed } from "../billing/usage";
+import { UsageService } from "../billing/usage.service";
 import { restoreHiddenIndexes } from "../clusters/offboard";
 import { defaultOrgPlan } from "../config/env";
 import { clusters, type Database, eq, organizations } from "../db";
@@ -173,7 +173,7 @@ export function organizationPlugin(db: Database, config: OrganizationPluginConfi
         assertRole(invitation.role);
         const orgId = invitation.organizationId;
         const plan = await planOf(db, orgId);
-        const verdict = withinLimit(plan, "members", await seatsUsed(db, orgId));
+        const verdict = withinLimit(plan, "members", await new UsageService(db).seatsUsed(orgId));
         if (!verdict.allowed) throw planLimit(verdict.reason ?? "plan limit");
       },
 
@@ -184,7 +184,7 @@ export function organizationPlugin(db: Database, config: OrganizationPluginConfi
         const verdict = withinLimit(
           planFrom(org.plan as string | null | undefined),
           "members",
-          await seatsUsed(db, org.id, invitation.id),
+          await new UsageService(db).seatsUsed(org.id, invitation.id),
         );
         if (!verdict.allowed) throw planLimit(verdict.reason ?? "plan limit");
       },
@@ -195,7 +195,7 @@ export function organizationPlugin(db: Database, config: OrganizationPluginConfi
         const verdict = withinLimit(
           planFrom(org.plan as string | null | undefined),
           "members",
-          await seatsUsed(db, org.id),
+          await new UsageService(db).seatsUsed(org.id),
         );
         if (!verdict.allowed) throw planLimit(verdict.reason ?? "plan limit");
       },

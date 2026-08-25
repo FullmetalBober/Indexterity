@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DatabaseService } from "../db/database.service";
+import type { NotifyService } from "../mail/notify.service";
 import { applyCluster } from "./apply";
 import { settleBuildsForCluster } from "./building";
 import { refreshInferredWindow } from "./change-window";
@@ -26,14 +27,16 @@ vi.mock("../events/emit", () => ({ emitPassFinished: vi.fn() }));
 vi.mock("../mail/notify", () => ({
   ALERT_COOLDOWN_MS: 1,
   alertAllowed: vi.fn(async () => false),
-  notifyClusterOwners: vi.fn(),
 }));
 
 const CLUSTER = "11111111-1111-1111-1111-111111111111";
 
 function service() {
   const db = {} as DatabaseService["db"];
-  return new ClusterTasksService({ db } as unknown as DatabaseService);
+  return new ClusterTasksService(
+    { db } as unknown as DatabaseService,
+    { notifyClusterOwners: vi.fn() } as unknown as NotifyService,
+  );
 }
 
 function helpers() {

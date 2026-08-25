@@ -323,8 +323,15 @@ for c in $COMPONENTS; do
   # --all-containers: no pod carries two containers today, but the flag is a
   # no-op on a one-container pod and it is what keeps this honest if one ever
   # does — kubectl otherwise refuses a selector matching a multi-container pod.
+  #
+  # Case-SENSITIVE on purpose. With -i, `ERROR` also matched the class name in
+  # `[InstanceLoader] ErrorsModule dependencies initialized` — an ordinary LOG
+  # line — so the house rule failed on a module being named after the directory
+  # it lives in. Nest prints its level as an uppercase token and pino as a
+  # number, and neither needs -i; what -i added was every message that happens
+  # to contain the word.
   n=$(kubectl -n "$NS" logs -l "app.kubernetes.io/component=$c" --all-containers --tail=500 2>/dev/null \
-      | grep -icE '"level":(40|50|60)|ERROR|WARN' || true)
+      | grep -cE '"level":(40|50|60)|ERROR|WARN|FATAL' || true)
   printf '  %-7s %s\n' "$c" "$n"
   [ "$n" = "0" ] || noisy=1
 done

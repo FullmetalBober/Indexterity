@@ -75,6 +75,16 @@ export function mailEnabled(): boolean {
   return getTransporter() !== null;
 }
 
+// Release the transport, and forget that it was ever built so a later send makes
+// a fresh one. Nodemailer holds the socket open between sends, and nothing closed
+// it — the process exiting took it with it, which works and leaves the server
+// waiting out its own idle timeout on every deploy. MailModule calls this on
+// shutdown; there is deliberately no other caller.
+export function closeMailTransport(): void {
+  if (transporter !== undefined && transporter !== null) transporter.close();
+  transporter = undefined;
+}
+
 // Best-effort send: alerts and invite mails must never fail the caller.
 export async function sendMail(to: string, subject: string, text: string): Promise<boolean> {
   const transport = getTransporter();
