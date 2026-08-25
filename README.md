@@ -47,6 +47,16 @@ apply without ever being able to read your
 data. [Connecting a cluster](https://github.com/FullmetalBober/Indexterity/wiki/Connecting-a-cluster)
 has the detail.
 
+A cluster has to be reachable from wherever Indexterity runs, and a database
+with no public endpoint is not. Self-hosted, that is a values change rather than
+a feature: run a WireGuard client as a sidecar beside the api and set
+`config.allowPrivateClusterTargets=true`, and a VPC-only or on-prem cluster
+becomes connectable with nothing in the app changed — the chart README's
+[Reaching a database over a VPN](./deploy/helm/indexterity/README.md#reaching-a-database-over-a-vpn)
+has the recipe. The tunnel changes which addresses are reachable and nothing
+else: TLS is still required, cloud metadata is still refused, and the connection
+string is still stored and opened here.
+
 ## Licence
 
 [BUSL-1.1](./LICENSE.md) — **source-available, not open source**, and the
