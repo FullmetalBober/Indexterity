@@ -1,8 +1,7 @@
 import { Controller, Req } from "@nestjs/common";
 import { contract } from "@repo/contracts";
 import type { FastifyRequest } from "fastify";
-import { actorFromRequest } from "../audit/http-actor";
-import { DatabaseService } from "../db/database.service";
+import { RequestActorService } from "../audit/request-actor.service";
 import { TenancyService } from "../http/tenancy.service";
 import { Implement, route } from "../orpc/implement";
 import { OrgService } from "./org.service";
@@ -25,10 +24,13 @@ import { OrgService } from "./org.service";
 // address and user agent, and who-signed-in-from-where is not team-wide reading.
 @Controller()
 export class OrgController {
+  // No DatabaseService: every query this controller used to reach for is behind
+  // OrgService, and the last direct use was resolving the actor for the trail,
+  // which is AuditService's now (#354).
   constructor(
-    private readonly database: DatabaseService,
     private readonly tenancy: TenancyService,
     private readonly org: OrgService,
+    private readonly actors: RequestActorService,
   ) {}
 
   @Implement(contract.getOrg)
@@ -64,7 +66,7 @@ export class OrgController {
     return route(this.tenancy, contract.updateOrgPolicy, req, "owner").handler(
       ({ input, context }) =>
         this.org.savePolicy(context.member.orgId, input.requireLeastPrivilege, () =>
-          actorFromRequest(this.database.db, req),
+          this.actors.actorFromRequest(req),
         ),
     );
   }

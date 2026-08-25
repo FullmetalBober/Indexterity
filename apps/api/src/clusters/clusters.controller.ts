@@ -2,8 +2,9 @@ import { Controller, Logger, Req } from "@nestjs/common";
 import { ORPCError } from "@orpc/server";
 import { contract } from "@repo/contracts";
 import type { FastifyRequest } from "fastify";
-import { actorFromRequest } from "../audit/http-actor";
-import { recordSecurityEvent, type SecurityEventDetails } from "../audit/security-events";
+import { AuditService } from "../audit/audit.service";
+import type { SecurityEventDetails } from "../audit/audit.types";
+import { RequestActorService } from "../audit/request-actor.service";
 import { clusters } from "../db";
 import { DatabaseService } from "../db/database.service";
 import { NO_TLS_OVERRIDES, type ProvisionedUser } from "../engine/ports";
@@ -27,6 +28,8 @@ export class ClustersController {
     private readonly database: DatabaseService,
     private readonly tenancy: TenancyService,
     private readonly clusters: ClustersService,
+    private readonly audit: AuditService,
+    private readonly actors: RequestActorService,
   ) {}
 
   // Refuse a name the org is already using, BEFORE anything is dialed.
@@ -54,10 +57,8 @@ export class ClustersController {
   // After the act, never in front of it, and it cannot fail the request:
   // recordSecurityEvent logs a lost row instead of throwing (see its comment).
   private async record(req: FastifyRequest, entry: SecurityEventDetails): Promise<void> {
-    const actor = await actorFromRequest(this.database.db, req);
-    await recordSecurityEvent(this.database.db, { ...entry, ...actor }, (message) =>
-      this.log.warn(message),
-    );
+    const actor = await this.actors.actorFromRequest(req);
+    await this.audit.record({ ...entry, ...actor }, (message) => this.log.warn(message));
   }
 
   // Onboarding preflight: what can these credentials actually do? Nothing is
@@ -414,7 +415,7 @@ export class ClustersController {
           context.member.orgId,
           input.clusterId,
           errors,
-          () => actorFromRequest(this.database.db, req),
+          () => this.actors.actorFromRequest(req),
           (message) => this.log.warn(message),
         );
       },
@@ -455,7 +456,7 @@ export class ClustersController {
           input.clusterId,
           input.readOnly,
           errors,
-          () => actorFromRequest(this.database.db, req),
+          () => this.actors.actorFromRequest(req),
           (message) => this.log.warn(message),
         );
       },
