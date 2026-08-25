@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadEnv } from "../config/env";
 import type { DatabaseService } from "../db/database.service";
+import type { ClusterTasksService } from "./cluster-tasks.service";
 import { TICK_INTERVAL_MS, TickService } from "./tick.service";
 
 // The drain, as something the tests can hold open. Each runOnce call parks
@@ -63,7 +64,11 @@ function load(flags: { runCronjob: boolean }, extra: Record<string, string> = {}
 function makeService() {
   const pool = { label: "the api pool" };
   const database = { db: { execute: vi.fn() }, pool } as unknown as DatabaseService;
-  return { service: new TickService(database), pool };
+  // The per-cluster passes are a provider now (#354) and this suite mocks the
+  // registry that reaches them, so what it hands over only has to satisfy the
+  // constructor.
+  const clusterTasks = {} as unknown as ClusterTasksService;
+  return { service: new TickService(database, clusterTasks), pool };
 }
 
 // Everything queued — microtasks and immediates — settled, without advancing
