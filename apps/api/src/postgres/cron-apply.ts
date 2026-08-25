@@ -50,12 +50,70 @@ import { quoteIdent } from "./executor";
 // installing into public actually answers.
 export const CRON_APPLY_SCHEMA = "indexterity";
 export const CRON_APPLY_FUNCTION = "apply_index";
+// Settling a build needs two more things the scoped role cannot do itself: read
+// what the job did, and remove it. Both are SECURITY DEFINER for the same reason
+// apply_index is — granting the scoped role cron access directly would undo the
+// `permission denied for schema cron` refusal this whole route depends on.
+export const CRON_STATUS_FUNCTION = "build_status";
+export const CRON_FINISH_FUNCTION = "build_finish";
 
 // The argument types, in order, as the signature a GRANT/REVOKE has to name.
 const CRON_APPLY_SIGNATURE = "text,text,text,text,text[],text[],boolean,text[]";
 
+function qualified(name: string): string {
+  return `${quoteIdent(CRON_APPLY_SCHEMA)}.${quoteIdent(name)}`;
+}
+
 export function cronApplyQualifiedName(): string {
-  return `${quoteIdent(CRON_APPLY_SCHEMA)}.${quoteIdent(CRON_APPLY_FUNCTION)}`;
+  return qualified(CRON_APPLY_FUNCTION);
+}
+
+// What the job last did, or no row when it has not run yet.
+//
+// A pg_cron job RECURS — it has no one-shot form — so a build that fails keeps
+// failing on the schedule until something unschedules it, and a build that
+// succeeds keeps re-running a no-op CREATE INDEX … IF NOT EXISTS forever. Both
+// are why the tick has to settle the row rather than leaving the job in place.
+export const CRON_STATUS_CALL_SQL = `SELECT status, return_message FROM ${qualified(CRON_STATUS_FUNCTION)}($1)`;
+export const CRON_FINISH_CALL_SQL = `SELECT ${qualified(CRON_FINISH_FUNCTION)}($1) AS removed`;
+
+// The last run of one job, by name. Takes a job NAME and nothing else, so there
+// is no argument that could widen what it reads: a caller can ask about a job it
+// already knows the name of, which is a name Indexterity chose.
+function statusFunctionBody(): string {
+  return `CREATE OR REPLACE FUNCTION ${qualified(CRON_STATUS_FUNCTION)}(job_name text)
+RETURNS TABLE (status text, return_message text)
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $indexterity$
+  SELECT d.status, d.return_message
+    FROM cron.job_run_details d
+    JOIN cron.job j ON j.jobid = d.jobid
+   WHERE j.jobname = job_name
+   ORDER BY d.start_time DESC
+   LIMIT 1;
+$indexterity$;`;
+}
+
+// Remove a job once its outcome has been recorded. Returns whether there was one
+// to remove, so a second call is not an error — the tick may settle the same row
+// twice if a write fails between unscheduling and updating it.
+function finishFunctionBody(): string {
+  return `CREATE OR REPLACE FUNCTION ${qualified(CRON_FINISH_FUNCTION)}(job_name text)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $indexterity$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM cron.job WHERE jobname = job_name) THEN
+    RETURN false;
+  END IF;
+  PERFORM cron.unschedule(job_name);
+  RETURN true;
+END
+$indexterity$;`;
 }
 
 // How often a scheduled build is attempted until a tick unschedules it.
@@ -173,6 +231,8 @@ export function cronApplySetup(owner: string, scopedRole: string): string {
     "--    this design asks for. Running it as the owner already is a no-op.",
     `SET ROLE ${ownerIdent};`,
     functionBody(),
+    statusFunctionBody(),
+    finishFunctionBody(),
     "RESET ROLE;",
     "",
     "-- 4. EXECUTE to the scoped role and nobody else. It needs no cron access of",
@@ -180,6 +240,10 @@ export function cronApplySetup(owner: string, scopedRole: string): string {
     "--    directly, and cannot schedule anything.",
     `REVOKE ALL ON FUNCTION ${cronApplyQualifiedName()}(${CRON_APPLY_SIGNATURE}) FROM PUBLIC;`,
     `GRANT EXECUTE ON FUNCTION ${cronApplyQualifiedName()}(${CRON_APPLY_SIGNATURE}) TO ${roleIdent};`,
+    `REVOKE ALL ON FUNCTION ${qualified(CRON_STATUS_FUNCTION)}(text) FROM PUBLIC;`,
+    `GRANT EXECUTE ON FUNCTION ${qualified(CRON_STATUS_FUNCTION)}(text) TO ${roleIdent};`,
+    `REVOKE ALL ON FUNCTION ${qualified(CRON_FINISH_FUNCTION)}(text) FROM PUBLIC;`,
+    `GRANT EXECUTE ON FUNCTION ${qualified(CRON_FINISH_FUNCTION)}(text) TO ${roleIdent};`,
   ].join("\n");
 }
 

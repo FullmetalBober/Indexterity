@@ -40,8 +40,11 @@ you what your connection string can actually do before anything is stored.
 
 One thing worth knowing before you connect a PostgreSQL cluster: it has no
 reversible hide and no grantable index privilege, so the observe window watches
-usage while the index keeps serving, and applying takes credentials you connect
-deliberately. [Connecting a cluster](https://github.com/FullmetalBober/Indexterity/wiki/Connecting-a-cluster)
+usage while the index keeps serving. Applying therefore takes either credentials
+you connect deliberately, or a one-time `pg_cron` setup that lets the
+least-privilege role ask for a build which runs as the table owner — so it can
+apply without ever being able to read your
+data. [Connecting a cluster](https://github.com/FullmetalBober/Indexterity/wiki/Connecting-a-cluster)
 has the detail.
 
 ## Licence

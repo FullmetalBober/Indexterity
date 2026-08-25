@@ -861,14 +861,18 @@ describe("ConnectClusterForm — PostgreSQL", () => {
   // The role withholds MORE here than on the other two engines, and that is the
   // half somebody reading "exactly the privileges above and nothing else" has to
   // understand.
-  it("says the provisioned role cannot apply either", async () => {
+  it("says the provisioned role cannot apply, and names the way it could", async () => {
     checkConnection.mockResolvedValue(diagnosis({ engine: "POSTGRESQL", canProvision: true }));
     const user = userEvent.setup();
     renderInApp(<ConnectClusterForm plan={plan()} />);
 
     await check(user);
 
-    expect(await screen.findByText(/none to change an index either/)).toBeInTheDocument();
+    expect(await screen.findByText(/It cannot change an index either/)).toBeInTheDocument();
+    // The limitation is no longer permanent (#332), so the copy that states it
+    // has to name the way out — otherwise a reader concludes PostgreSQL simply
+    // cannot apply, which was true and is not any more.
+    expect(await screen.findByText(/pg_cron/)).toBeInTheDocument();
   });
 
   // A property of the engine rather than of these credentials, so it shows on a

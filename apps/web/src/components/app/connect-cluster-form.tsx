@@ -140,8 +140,10 @@ const SCOPED_USER_COPY: Record<
     ),
     withheld: (
       <>
-        no permission to read a single row of your data — and none to change an index either, so
-        this role analyses only
+        no permission to read a single row of your data. It cannot change an index either — only a
+        table's owner may — so it analyses only, unless you install the <code>pg_cron</code> apply
+        function, which lets it ask for a build that runs as the owner without ever gaining read
+        access. The cluster's privileges panel carries the statements
       </>
     ),
     // Not a bare DROP ROLE: the CONNECT and USAGE grants above hold the role
