@@ -1,0 +1,1 @@
+ALTER TABLE "clusters" ADD COLUMN "provisioned_databases" text[];

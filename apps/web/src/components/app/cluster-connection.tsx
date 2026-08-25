@@ -22,6 +22,9 @@ interface ClusterConnectionInfo {
   readonly engine: ClusterEngine;
   readonly readOnly: boolean;
   readonly provisionedUsername: string | null;
+  // The engine's own removal statement(s), composed by the api (#338). Null
+  // exactly when provisionedUsername is.
+  readonly revokeCommand: string | null;
   readonly credentialPosture: "PROVISIONED" | "ADMIN" | "SCOPED" | null;
 }
 
@@ -262,11 +265,14 @@ export function ClusterConnection({
                     ? "Indexes still hidden in an observe window are restored first."
                     : "No index is left changed — nothing was hidden to restore."}
                 </p>
-                {cluster.provisionedUsername === null ? null : (
+                {cluster.revokeCommand === null ? null : (
                   <p>
                     The scoped user stays on your cluster — revoke it afterwards:
-                    <code className="mt-1 block break-all rounded bg-muted p-2 font-mono text-xs">
-                      db.getSiblingDB("admin").dropUser("{cluster.provisionedUsername}")
+                    {/* whitespace-pre-wrap, not break-all: PostgreSQL and SQL Server
+                        both need one statement per provisioned database and the
+                        order matters, so the line breaks are the meaning. */}
+                    <code className="mt-1 block whitespace-pre-wrap rounded bg-muted p-2 font-mono text-xs">
+                      {cluster.revokeCommand}
                     </code>
                   </p>
                 )}

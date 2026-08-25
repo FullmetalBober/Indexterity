@@ -346,6 +346,19 @@ export interface EngineAdapter {
     adminConnectionString: string,
     overrides?: TlsOverrides,
   ): Promise<ProvisionedUser>;
+  // The statement(s) that remove the scoped user, for the disconnect screen and
+  // the already-provisioned refusal. Handed to the operator rather than run:
+  // dropping a user needs the admin credentials this product deliberately does
+  // not keep, so this is text, not an action.
+  //
+  // Engine-specific in a way a caller cannot fake (#338). MongoDB's user lives
+  // in `admin` and one statement removes it; the other two grant per database,
+  // and both refuse a bare drop while any of those grants remain — so they need
+  // the database list and emit several statements. `databases` is what
+  // provisioning actually created a user in, replayed from the row rather than
+  // discovered now: a database created since then has no user of ours in it,
+  // and one dropped since needs no statement.
+  revokeStatements(username: string, databases: readonly string[]): string;
   // The username a string authenticates as, so rotation can tell whether the
   // stored "this is a provisioned user" marker still describes the new one.
   connStringUsername(value: string): string | null;
@@ -354,4 +367,9 @@ export interface EngineAdapter {
 export interface ProvisionedUser {
   readonly connectionString: string;
   readonly username: string;
+  // Where a user was actually created. Empty for an engine whose scoped user is
+  // server-scoped, which is MongoDB's single user in `admin`. Stored on the row
+  // because provisioning runs once from an admin string that is never kept, so
+  // this is the only chance to record what has to be undone.
+  readonly databases: readonly string[];
 }

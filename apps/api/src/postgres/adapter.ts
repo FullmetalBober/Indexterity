@@ -11,7 +11,7 @@ import { applyPgTlsOverrides, isPgConnString, pgConnStringUsername, pgHosts } fr
 import { PostgresConnection } from "./connection";
 import { diagnosePostgresConnection } from "./diagnose";
 import { PostgresIndexExecutor } from "./executor";
-import { provisionPostgresScopedUser } from "./provision";
+import { dropRoleStatements, provisionPostgresScopedUser } from "./provision";
 
 class PostgresEngineSession implements EngineSession {
   readonly collector: IndexCollector;
@@ -70,5 +70,6 @@ export const postgresAdapter: EngineAdapter = {
   },
   diagnose: diagnosePostgresConnection,
   provisionScopedUser: provisionPostgresScopedUser,
+  revokeStatements: dropRoleStatements,
   connStringUsername: pgConnStringUsername,
 };

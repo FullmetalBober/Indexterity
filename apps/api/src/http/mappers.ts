@@ -2,6 +2,7 @@ import { ORPCError } from "@orpc/server";
 import type { Cluster, ClusterEngine, Recommendation } from "@repo/contracts";
 import { clusters, recommendations } from "../db";
 import type { ConnectionDiagnosis as EngineConnectionDiagnosis } from "../engine/ports";
+import { revokeCommandFor } from "../engine/provision";
 import { isUnreachableError } from "../errors/unreachable";
 import { ClusterGoneError } from "../jobs/cluster-connection";
 
@@ -54,6 +55,7 @@ export function toCluster(
     engine: row.engine,
     readOnly: row.readOnly,
     provisionedUsername: row.provisionedUsername,
+    revokeCommand: revokeCommandFor(row.engine, row.provisionedUsername, row.provisionedDatabases),
     credentialPosture: row.credentialPosture,
     lastCollectedAt: lastCollectedAt?.toISOString() ?? null,
     tlsOverrides: row.tlsOverrides,

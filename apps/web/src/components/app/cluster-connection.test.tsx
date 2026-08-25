@@ -39,6 +39,7 @@ const cluster = {
   engine: "MONGODB",
   readOnly: true,
   provisionedUsername: null,
+  revokeCommand: null,
   credentialPosture: "SCOPED",
 } as const;
 
@@ -144,10 +145,42 @@ describe("ClusterConnection", () => {
 
   it("tells the reader how to revoke the scoped user it leaves behind", async () => {
     const user = userEvent.setup();
-    renderInApp(<ClusterConnection cluster={{ ...cluster, provisionedUsername: "idx_abc" }} />);
+    renderInApp(
+      <ClusterConnection
+        cluster={{
+          ...cluster,
+          provisionedUsername: "idx_abc",
+          revokeCommand: 'db.getSiblingDB("admin").dropUser("idx_abc")',
+        }}
+      />,
+    );
 
     await user.click(screen.getByRole("button", { name: "Disconnect" }));
     expect(await screen.findByText(/dropUser\("idx_abc"\)/)).toBeInTheDocument();
+  });
+
+  // #338: this dialog used to compose MongoDB's dropUser itself, so a PostgreSQL
+  // or SQL Server owner was told to run it against a server that has never heard
+  // of db.getSiblingDB. It now prints whatever the api's adapter answered.
+  it("shows the engine's own statements, not MongoDB's, on a PostgreSQL cluster", async () => {
+    const user = userEvent.setup();
+    const command = '\\c "appdb"\nDROP OWNED BY "indexterity";\nDROP ROLE "indexterity";';
+    renderInApp(
+      <ClusterConnection
+        cluster={{
+          ...cluster,
+          engine: "POSTGRESQL",
+          provisionedUsername: "indexterity",
+          revokeCommand: command,
+        }}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Disconnect" }));
+    const shown = await screen.findByText(/DROP OWNED BY/);
+    expect(shown).toBeInTheDocument();
+    expect(shown.textContent).toContain('DROP ROLE "indexterity";');
+    expect(screen.queryByText(/getSiblingDB/)).not.toBeInTheDocument();
   });
 
   it("reports restored indexes after a disconnect", async () => {

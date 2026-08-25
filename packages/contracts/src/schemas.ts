@@ -98,6 +98,15 @@ export const cluster = z.object({
   // Set when Indexterity provisioned its own least-privilege user on the
   // cluster (admin-string onboarding); null for pasted-string clusters.
   provisionedUsername: z.string().nullable(),
+  // What removes that user, in the engine's own language, null alongside the
+  // username above. Sent with the cluster rather than composed in the dashboard
+  // (#338): the disconnect dialog shows it BEFORE the call that would return it,
+  // and the version it used to compose there was MongoDB's on every engine.
+  //
+  // May be several statements separated by newlines — PostgreSQL and SQL Server
+  // both have to visit each provisioned database before dropping the principal —
+  // so it is rendered pre-formatted, not inline.
+  revokeCommand: z.string().nullable(),
   // What the stored credentials COULD do, as against what `readOnly` allows
   // them to. Recorded when they were stored and re-evaluated on rotation.
   //

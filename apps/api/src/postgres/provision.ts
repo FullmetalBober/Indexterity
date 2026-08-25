@@ -146,7 +146,7 @@ export async function provisionPostgresScopedUser(
     // actually read the statistics is worse than no role, because the failure
     // would arrive at the first collect instead of here.
     await verify(scoped, overrides);
-    return { connectionString: scoped, username };
+    return { connectionString: scoped, username, databases };
   } catch (error) {
     // Undo what was created, so a failed provision leaves nothing behind for
     // somebody to find later and wonder about.

@@ -27,7 +27,7 @@ import {
   type ProvisionedUser,
   type TlsOverrides,
 } from "../engine/ports";
-import { ProvisionDeniedError } from "../engine/provision";
+import { ProvisionDeniedError, revokeCommandFor } from "../engine/provision";
 import {
   adapterFor,
   detectEngine,
@@ -43,7 +43,7 @@ import { ClusterGoneError, openClusterSession, unsealCluster } from "../jobs/clu
 import { evictCluster } from "../jobs/connection-pool";
 import { Implement, route } from "../orpc/implement";
 import { assertLeastPrivilege } from "./least-privilege";
-import { restoreHiddenIndexes, revokeCommandFor } from "./offboard";
+import { restoreHiddenIndexes } from "./offboard";
 
 const CLUSTER_NAME_CONSTRAINT = "clusters_org_name";
 
@@ -97,7 +97,10 @@ export class ClustersController {
     name: string,
     engine: typeof clusters.$inferSelect.engine,
     connectionString: string,
-    provisionedUsername: string | null,
+    // Username and databases together, because neither is meaningful alone: the
+    // databases say where THIS user was created, and a row with no provisioned
+    // user has nothing to say about databases at all (#338).
+    provisioned: { username: string; databases: readonly string[] } | null,
     // What these credentials COULD do, as opposed to what `readOnly` allows.
     // Recorded at the moment they are stored, because that is the only time we
     // have a diagnosis in hand — asking again later would mean dialling.
@@ -129,7 +132,8 @@ export class ClustersController {
           sealedDek: Buffer.from(sealed.dek),
           sealedData: Buffer.from(sealed.data),
           keyVersion,
-          provisionedUsername,
+          provisionedUsername: provisioned?.username ?? null,
+          provisionedDatabases: provisioned === null ? null : [...provisioned.databases],
           credentialPosture,
           tlsOverrides,
           observedDatabases,
@@ -499,7 +503,7 @@ export class ClustersController {
           input.name,
           engine,
           provisioned.connectionString,
-          provisioned.username,
+          { username: provisioned.username, databases: provisioned.databases },
           // Known exactly here, unlike either other case: Indexterity created
           // this user, so its ceiling is the scoped role and nothing more.
           "PROVISIONED",
@@ -622,6 +626,12 @@ export class ClustersController {
             sealedData: Buffer.from(sealed.data),
             keyVersion,
             provisionedUsername,
+            // Travels with the marker above, both ways. Rotating onto a string
+            // that is not the scoped user drops the username, and the databases
+            // it was created in stop describing anything this row still holds —
+            // keeping them would make the disconnect screen offer to remove a
+            // user this cluster no longer runs as (#338).
+            provisionedDatabases: provisionedUsername === null ? null : row.provisionedDatabases,
             credentialPosture,
           })
           .where(eq(clusters.id, input.clusterId))
@@ -679,7 +689,14 @@ export class ClustersController {
             provisionedUsername: row.provisionedUsername,
           },
         });
-        return { unhidden, revokeCommand: revokeCommandFor(row.provisionedUsername) };
+        return {
+          unhidden,
+          revokeCommand: revokeCommandFor(
+            row.engine,
+            row.provisionedUsername,
+            row.provisionedDatabases,
+          ),
+        };
       },
     );
   }
