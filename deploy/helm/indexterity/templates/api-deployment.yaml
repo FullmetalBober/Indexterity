@@ -158,6 +158,31 @@ spec:
             {{- else }}
             {{- toYaml .Values.api.resources | nindent 12 }}
             {{- end }}
+          {{- with .Values.api.extraVolumeMounts }}
+          volumeMounts:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- /*
+Sidecars come AFTER the app container so `kubectl logs` and `kubectl exec` keep
+defaulting to the one anybody asking for "the api" means. They are rendered
+verbatim: a tunnel container needs NET_ADMIN and a device mount, which is the
+exact opposite of this chart's own securityContext, so imposing that here would
+make the values unusable for the only job they have.
+*/}}
+          {{- with .Values.api.extraContainers }}
+          {{- toYaml . | nindent 8 }}
+          {{- end }}
+      {{- with .Values.api.extraVolumes }}
+      volumes:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.dnsPolicy }}
+      dnsPolicy: {{ . }}
+      {{- end }}
+      {{- with .Values.api.dnsConfig }}
+      dnsConfig:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- with .Values.api.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

@@ -101,6 +101,14 @@ Private cluster targets are ALLOWED: accounts can point Indexterity at
 loopback and RFC1918 addresses. Correct for a self-hosted install whose
 database is on this network; unsafe if strangers can sign up.
 {{- end }}
+{{- if and .Values.api.extraContainers (not .Values.config.allowPrivateClusterTargets) }}
+
+NOTE: api.extraContainers is set but config.allowPrivateClusterTargets is
+false. If those containers are a VPN sidecar, the tunnel will come up and
+every cluster behind it will still be refused — the network guard blocks
+RFC1918 addresses whatever route exists to them. See "Reaching a database
+over a VPN" in the chart README.
+{{- end }}
 {{- if .Values.config.allowInsecureClusterTls }}
 
 TLS is NOT required on cluster connections: Indexterity will dial a MongoDB in

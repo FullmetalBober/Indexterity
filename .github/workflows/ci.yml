@@ -752,6 +752,43 @@ jobs:
           docker run --rm --entrypoint promtool -v "$PWD/rules.yaml:/rules.yaml:ro" \
             prom/prometheus:v3.6.0 check rules /rules.yaml
 
+      # The VPN recipe (#353) is values, not code: a tunnel sidecar reaches a
+      # private database only if the extra container lands in the api POD and
+      # the volumes land in the POD SPEC. Indent either one wrong and the chart
+      # still renders valid YAML that installs and silently does nothing, which
+      # is exactly the failure `helm lint` cannot see. Asserts the privilege
+      # split too — the whole point of a sidecar is that NET_ADMIN goes there
+      # and the app container keeps `drop: ALL`.
+      - name: VPN sidecar values must land in the api pod
+        if: matrix.topology == 'split'
+        run: |
+          helm template rel deploy/helm/indexterity \
+            --set secrets.databaseUrl=p --set secrets.betterAuthSecret=s \
+            --set secrets.masterKey=k --set config.allowInsecureAuthUrl=true \
+            --set 'api.extraContainers[0].name=wireguard' \
+            --set 'api.extraContainers[0].image=wg:1' \
+            --set 'api.extraContainers[0].securityContext.capabilities.add[0]=NET_ADMIN' \
+            --set 'api.extraVolumes[0].name=wg-config' \
+            --set 'api.extraVolumes[0].secret.secretName=wg-peer' \
+            --set api.dnsPolicy=None \
+            --set 'api.dnsConfig.nameservers[0]=10.8.0.1' \
+            | python3 -c "
+          import sys, yaml
+          for doc in yaml.safe_load_all(sys.stdin):
+              if doc and doc.get('kind') == 'Deployment' and doc['metadata']['name'].endswith('-api'):
+                  spec = doc['spec']['template']['spec']
+                  break
+          else:
+              raise SystemExit('no api Deployment rendered')
+          names = [c['name'] for c in spec['containers']]
+          assert names == ['api', 'wireguard'], names
+          assert spec['containers'][0]['securityContext']['capabilities'] == {'drop': ['ALL']}
+          assert spec['containers'][1]['securityContext']['capabilities'] == {'add': ['NET_ADMIN']}
+          assert [v['name'] for v in spec['volumes']] == ['wg-config'], spec['volumes']
+          assert spec['dnsPolicy'] == 'None', spec.get('dnsPolicy')
+          assert spec['dnsConfig']['nameservers'] == ['10.8.0.1'], spec.get('dnsConfig')
+          "
+
       # The two builds were this workflow's longest step by a wide margin, and
       # entirely uncached — every run reinstalled every dependency inside both
       # images from scratch. buildx with the GitHub cache backend reuses the
