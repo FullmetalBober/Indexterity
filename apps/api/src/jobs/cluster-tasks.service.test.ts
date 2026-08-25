@@ -1,6 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DatabaseService } from "../db/database.service";
+import { applyCluster } from "./apply";
+import { settleBuildsForCluster } from "./building";
+import { refreshInferredWindow } from "./change-window";
+import { classifyCluster } from "./classify";
+import { ClusterGoneError } from "./cluster-connection";
 import { ClusterTasksService } from "./cluster-tasks.service";
+import { collectCluster } from "./collect";
+import { applyCreatesForCluster } from "./create";
+import { probeCluster } from "./probe";
 
 // The passes themselves are tested where they live. What is untested — and what a
 // registry refactor can silently break — is which pass each queue name runs and
@@ -44,7 +52,6 @@ afterEach(() => {
 
 describe("the per-cluster passes", () => {
   it("runs the collect and then chases it with classify and suggest", async () => {
-    const { collectCluster } = await import("./collect");
     const help = helpers();
     await service().collect({ clusterId: CLUSTER }, help);
 
@@ -56,8 +63,6 @@ describe("the per-cluster passes", () => {
   // inside the pass, so a failure that the decision table survives leaves the
   // queue alone rather than re-deriving yesterday's answer.
   it("enqueues nothing when the collect throws something survivable", async () => {
-    const { collectCluster } = await import("./collect");
-    const { ClusterGoneError } = await import("./cluster-connection");
     vi.mocked(collectCluster).mockRejectedValueOnce(new ClusterGoneError(CLUSTER));
     const help = helpers();
     await service().collect({ clusterId: CLUSTER }, help);
@@ -65,8 +70,6 @@ describe("the per-cluster passes", () => {
   });
 
   it("re-derives the change window in the same pass as the classify", async () => {
-    const { classifyCluster } = await import("./classify");
-    const { refreshInferredWindow } = await import("./change-window");
     await service().classify({ clusterId: CLUSTER }, helpers());
     expect(classifyCluster).toHaveBeenCalledWith({}, CLUSTER);
     expect(refreshInferredWindow).toHaveBeenCalledWith({}, CLUSTER);
@@ -76,24 +79,26 @@ describe("the per-cluster passes", () => {
   // tick has to finish before this pass decides anything new (#332).
   it("settles builds before it applies anything", async () => {
     const order: string[] = [];
-    const { settleBuildsForCluster } = await import("./building");
-    const { applyCluster } = await import("./apply");
-    const { applyCreatesForCluster } = await import("./create");
+    // Each answers with the count of what it did, so the fakes return 0 rather
+    // than void — a real signature the static imports enforce and the
+    // `await import` these used to do did not.
     vi.mocked(settleBuildsForCluster).mockImplementationOnce(async () => {
       order.push("settle");
+      return 0;
     });
     vi.mocked(applyCluster).mockImplementationOnce(async () => {
       order.push("apply");
+      return 0;
     });
     vi.mocked(applyCreatesForCluster).mockImplementationOnce(async () => {
       order.push("create");
+      return 0;
     });
     await service().apply({ clusterId: CLUSTER }, helpers());
     expect(order).toEqual(["settle", "apply", "create"]);
   });
 
   it("asks for a suggest only when the probe found something", async () => {
-    const { probeCluster } = await import("./probe");
     const quiet = helpers();
     await service().probe({ clusterId: CLUSTER }, quiet);
     expect(quiet.addJob).not.toHaveBeenCalled();
