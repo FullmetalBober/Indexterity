@@ -13,13 +13,12 @@ import { auth } from "./auth";
 import { authRequestHeaders } from "./auth/http";
 import { sessionCookiesFor } from "./auth/session";
 import { apiEnv, trustProxySetting } from "./config/env";
-import { DatabaseService } from "./db/database.service";
 import { probeNotifyOrExit } from "./db/notify-probe";
 import { captureAuthFailure } from "./errors/reporting";
 import { quietProbes } from "./http/quiet-probes";
 import { securityHeaders } from "./http/security-headers";
 import { TickService } from "./jobs/tick.service";
-import { instrumentHttp, registerControlPlaneGauges, startMetricsServer } from "./metrics";
+import { instrumentHttp, startMetricsServer } from "./metrics";
 
 async function bootstrap(): Promise<void> {
   // Before anything serves: a DATABASE_URL that swallows NOTIFY is a dashboard whose
@@ -142,8 +141,9 @@ async function bootstrap(): Promise<void> {
   // serving no jobs opened a second pool to answer a scrape. Started before the
   // embedded worker below, and before listen, so no measurement predates the
   // endpoint.
-  const database = app.get(DatabaseService);
-  registerControlPlaneGauges(database.db, (message) => fastify.log.warn(message));
+  // The gauges themselves are registered by MetricsModule, on
+  // onApplicationBootstrap — which runs during app.init() above, so it still lands
+  // before listen and no measurement predates the endpoint.
   const metrics = await startMetricsServer({
     info: (message) => fastify.log.info(message),
     warn: (message) => fastify.log.warn(message),

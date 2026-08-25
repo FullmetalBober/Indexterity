@@ -11,6 +11,7 @@ import { HealthModule } from "./health/health.module";
 import { TenancyModule } from "./http/tenancy.module";
 import { InsightsModule } from "./insights/insights.module";
 import { JobsModule } from "./jobs/jobs.module";
+import { MetricsModule } from "./metrics/metrics.module";
 import { OrgModule } from "./org/org.module";
 import { PolicyModule } from "./policy/policy.module";
 import { RecommendationsModule } from "./recommendations/recommendations.module";
@@ -55,6 +56,7 @@ function sentryImports() {
     HealthModule,
     InsightsModule,
     JobsModule,
+    MetricsModule,
     OrgModule,
     PolicyModule,
     RecommendationsModule,
