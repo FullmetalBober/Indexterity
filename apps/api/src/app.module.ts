@@ -5,13 +5,11 @@ import { errorReportingEnabled } from "@repo/errors";
 import { SentryModule } from "@sentry/nestjs/setup";
 import { ClustersModule } from "./clusters/clusters.module";
 import { DatabaseModule } from "./db/database.module";
-import { ClusterEventsService } from "./events/cluster-events.service";
-import { EventsController } from "./events/events.controller";
-import { HealthController } from "./health/health.controller";
+import { EventsModule } from "./events/events.module";
+import { HealthModule } from "./health/health.module";
 import { TenancyModule } from "./http/tenancy.module";
 import { InsightsModule } from "./insights/insights.module";
-import { TickController } from "./jobs/tick.controller";
-import { TickService } from "./jobs/tick.service";
+import { JobsModule } from "./jobs/jobs.module";
 import { OrgModule } from "./org/org.module";
 import { PolicyModule } from "./policy/policy.module";
 import { RecommendationsModule } from "./recommendations/recommendations.module";
@@ -40,8 +38,10 @@ function sentryImports() {
   // modules below — listing the services here as well would give this module its
   // own second copy of each.
   //
-  // Feature modules are the direction (#333): a controller still listed here is
-  // one that has not moved yet, and this array shrinks to `imports` as they do.
+  // Every feature is a module (#333, finished in #354), so this is the whole
+  // application graph and nothing else: one `imports` list, no controller and no
+  // provider of its own. A controller listed HERE would be one that has not been
+  // given its module yet, and there are none left.
   imports: [
     ...sentryImports(),
     ConfigModule.forRoot({ isGlobal: true }),
@@ -49,14 +49,13 @@ function sentryImports() {
     DatabaseModule,
     TenancyModule,
     ClustersModule,
+    EventsModule,
+    HealthModule,
     InsightsModule,
+    JobsModule,
     OrgModule,
     PolicyModule,
     RecommendationsModule,
   ],
-  // One controller per area of the contract. They share TenancyService for the
-  // session/ownership rules and http/mappers.ts for the boundary conversions.
-  controllers: [HealthController, EventsController, TickController],
-  providers: [ClusterEventsService, TickService],
 })
 export class AppModule {}
