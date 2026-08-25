@@ -191,7 +191,28 @@ export interface IndexExecutor {
     keys: Record<string, 1 | -1>,
     options: CreateIndexOptions,
   ): Promise<IndexBuildOutcome>;
+  // What became of a build that create() reported as SCHEDULED, and the cleanup
+  // that goes with it (#332).
+  //
+  // Present exactly on an adapter whose create() can return SCHEDULED — so only
+  // PostgreSQL, and jobs/building.ts treats its absence as "this engine builds
+  // synchronously and there is nothing to settle". Called until it stops
+  // answering PENDING.
+  //
+  // Removing the scheduled job is this method's business, not the caller's: the
+  // mechanism that recurs is the adapter's own and nothing above the port knows
+  // a job exists.
+  settleBuild?(
+    database: string,
+    collection: string,
+    indexName: string,
+  ): Promise<IndexBuildSettlement>;
 }
+
+export type IndexBuildSettlement =
+  | { state: "PENDING" }
+  | { state: "READY" }
+  | { state: "FAILED"; message: string };
 
 // Whether the index EXISTS when create() returns, or has only been asked for.
 //

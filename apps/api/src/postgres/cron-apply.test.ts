@@ -109,3 +109,44 @@ it("exports the names the probe and the snippet must agree on", () => {
   expect(CRON_APPLY_SCHEMA).toBe("indexterity");
   expect(CRON_APPLY_FUNCTION).toBe("apply_index");
 });
+
+// Settling a build needs two more definer functions, and they are on the same
+// footing as apply_index: the scoped role holds EXECUTE and no cron access.
+describe("cronApplySetup — the settle functions", () => {
+  const snippet = cronApplySetup("appowner", "indexterity");
+
+  it("ships a status read and an unschedule beside the apply function", () => {
+    expect(snippet).toContain('"indexterity"."build_status"');
+    expect(snippet).toContain('"indexterity"."build_finish"');
+    // Three functions, all created inside the one SET ROLE block, so all three
+    // are owned by the table owner rather than by whoever pasted it.
+    expect(snippet.match(/CREATE OR REPLACE FUNCTION/g)).toHaveLength(3);
+    const setRole = snippet.indexOf('SET ROLE "appowner";');
+    const resetRole = snippet.indexOf("RESET ROLE;");
+    for (const match of snippet.matchAll(/CREATE OR REPLACE FUNCTION/g)) {
+      expect(match.index).toBeGreaterThan(setRole);
+      expect(match.index).toBeLessThan(resetRole);
+    }
+  });
+
+  it("revokes each of them from PUBLIC before granting", () => {
+    for (const fn of ["build_status", "build_finish"]) {
+      const revoke = snippet.indexOf(`REVOKE ALL ON FUNCTION "indexterity"."${fn}"(text)`);
+      const grant = snippet.indexOf(`GRANT EXECUTE ON FUNCTION "indexterity"."${fn}"(text)`);
+      expect(revoke).toBeGreaterThan(-1);
+      expect(grant).toBeGreaterThan(revoke);
+    }
+  });
+
+  it("keeps both SECURITY DEFINER with a pinned search_path", () => {
+    expect(snippet.match(/SECURITY DEFINER/g)).toHaveLength(3);
+    expect(snippet.match(/SET search_path = pg_catalog, pg_temp/g)).toHaveLength(3);
+  });
+
+  // Neither takes anything but a job name, so there is no argument that could
+  // widen what the scoped role can read or remove.
+  it("takes a job name and nothing else", () => {
+    expect(snippet).toContain('build_status"(job_name text)');
+    expect(snippet).toContain('build_finish"(job_name text)');
+  });
+});

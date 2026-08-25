@@ -7,6 +7,7 @@ import { emitPassFinished } from "../events/emit";
 import { ALERT_COOLDOWN_MS, alertAllowed, notifyClusterOwners } from "../mail/notify";
 import { recordClusterTask } from "../metrics";
 import { applyCluster } from "./apply";
+import { settleBuildsForCluster } from "./building";
 import { refreshInferredWindow } from "./change-window";
 import { classifyCluster } from "./classify";
 import { ClusterCredentialsError, ClusterGoneError } from "./cluster-connection";
@@ -189,6 +190,9 @@ export function createTaskList(db: Database) {
     },
     apply: async (payload: unknown, helpers: JobHelpers): Promise<void> => {
       await onCluster(db, "apply", payload, helpers, async (clusterId) => {
+        // Ahead of both, so a build asked for on an earlier tick is finished
+        // before this pass decides anything new (#332).
+        await settleBuildsForCluster(db, clusterId);
         await applyCluster(db, clusterId);
         await applyCreatesForCluster(db, clusterId);
       });

@@ -1,4 +1,9 @@
-import type { CreateIndexOptions, IndexBuildOutcome, IndexExecutor } from "../engine/ports";
+import type {
+  CreateIndexOptions,
+  IndexBuildOutcome,
+  IndexBuildSettlement,
+  IndexExecutor,
+} from "../engine/ports";
 import { allowUntestedVersions, UnsupportedServerError } from "../engine/version";
 import { splitTableRef } from "./collector";
 import type { PostgresConnection } from "./connection";
@@ -7,6 +12,8 @@ import {
   CRON_APPLY_PROBE_PARAMS,
   CRON_APPLY_PROBE_SQL,
   CRON_DATABASE_GUC,
+  CRON_FINISH_CALL_SQL,
+  CRON_STATUS_CALL_SQL,
   cronDirections,
   isUnrecognizedGuc,
   readCronApplyProbe,
@@ -116,6 +123,88 @@ export class PostgresIndexExecutor implements IndexExecutor {
       return rows[0]?.owns === true;
     } catch {
       return false;
+    }
+  }
+
+  // What happened to a build asked for earlier, and the cleanup that goes with
+  // it (#332).
+  //
+  // TWO sources, because neither alone is right, and the reason is measured.
+  //
+  // The job history alone LIES. The scheduled statement carries IF NOT EXISTS,
+  // so once a failed build has left its invalid carcass behind, every later run
+  // finds the relation present and reports `succeeded` — a unique index over
+  // duplicate rows failed on its first run and answered "succeeded" on the
+  // second. Trusting that would mark a broken index ACTIVE and take a write
+  // baseline against it.
+  //
+  // The catalog alone cannot tell a build that is still running from one that
+  // broke. A concurrent build passes through indisvalid=false/indisready=false
+  // on its way up, which is also exactly what a failed one leaves behind.
+  //
+  // Together they are unambiguous: the catalog says whether the index is really
+  // usable, and the history says whether anything has finished trying. The
+  // catalog is read in the TARGET database, which the scoped role can do —
+  // pg_class and pg_index are world-readable, and only the regclass CAST needs
+  // schema access this role has not got.
+  async settleBuild(
+    database: string,
+    collection: string,
+    indexName: string,
+  ): Promise<IndexBuildSettlement> {
+    const route = await this.resolveCronRoute();
+    if (!route.usable) {
+      return { state: "FAILED", message: "the pg_cron apply function is no longer available" };
+    }
+    const { schema } = splitTableRef(collection);
+    const index = await this.conn.query<{ valid: boolean }>(
+      `SELECT ix.indisvalid AS valid
+         FROM pg_catalog.pg_index ix
+         JOIN pg_catalog.pg_class i     ON i.oid = ix.indexrelid
+         JOIN pg_catalog.pg_namespace n ON n.oid = i.relnamespace
+        WHERE n.nspname = $1 AND i.relname = $2`,
+      [schema, indexName],
+      database,
+    );
+    if (index[0]?.valid === true) {
+      await this.finishBuild(indexName);
+      return { state: "READY" };
+    }
+    const runs = await this.conn.query<{ status: string; return_message: string | null }>(
+      CRON_STATUS_CALL_SQL,
+      [indexName],
+      route.database,
+    );
+    const last = runs[0];
+    // Nothing has finished trying yet: the schedule fires minutes after the
+    // apply, and a running build has a row that is neither of these.
+    if (last === undefined || (last.status !== "succeeded" && last.status !== "failed")) {
+      return { state: "PENDING" };
+    }
+    await this.finishBuild(indexName);
+    // A run that says it succeeded while the index is not valid is the IF NOT
+    // EXISTS skip described above — the carcass of an earlier failure.
+    const message =
+      last.status === "failed"
+        ? (last.return_message ?? "the build failed")
+        : "an earlier attempt left an invalid index, so the retry skipped the build";
+    return { state: "FAILED", message };
+  }
+
+  // Remove the job. A pg_cron job RECURS and cannot remove itself — one
+  // statement per job, and a two-statement command is transaction-wrapped, which
+  // CIC refuses. Left in place, a succeeded build re-runs a no-op
+  // `CREATE INDEX … IF NOT EXISTS` every five minutes forever and a failed one
+  // keeps failing, so unscheduling is not tidiness.
+  //
+  // Best effort: the outcome has already been decided by the caller, and losing
+  // the row to a failed unschedule would be worse than a job that outlives it.
+  private async finishBuild(indexName: string): Promise<void> {
+    const route = await this.resolveCronRoute();
+    try {
+      await this.conn.query(CRON_FINISH_CALL_SQL, [indexName], route.database);
+    } catch {
+      // nothing to do — the next settle pass tries again
     }
   }
 
