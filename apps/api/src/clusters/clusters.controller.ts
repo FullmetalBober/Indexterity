@@ -5,29 +5,11 @@ import type { FastifyRequest } from "fastify";
 import { actorFromRequest } from "../audit/http-actor";
 import { recordSecurityEvent, type SecurityEventDetails } from "../audit/security-events";
 import { currentKeyVersion, masterKeyBytesFor } from "../config/env";
-import {
-  and,
-  clusters,
-  desc,
-  envKeyProvider,
-  eq,
-  inArray,
-  indexSnapshots,
-  ne,
-  notInArray,
-  recommendations,
-  seal,
-  sql,
-} from "../db";
+import { and, clusters, envKeyProvider, eq, seal, sql } from "../db";
 import { DatabaseService } from "../db/database.service";
 import { allowPrivateTargets, assertTargetsAllowed, BlockedTargetError } from "../engine/net-guard";
-import {
-  DatabaseInaccessibleError,
-  NO_TLS_OVERRIDES,
-  type ProvisionedUser,
-  type TlsOverrides,
-} from "../engine/ports";
-import { ProvisionDeniedError, revokeCommandFor } from "../engine/provision";
+import { NO_TLS_OVERRIDES, type ProvisionedUser, type TlsOverrides } from "../engine/ports";
+import { ProvisionDeniedError } from "../engine/provision";
 import {
   adapterFor,
   detectEngine,
@@ -39,47 +21,11 @@ import { InsecureConnectionError } from "../engine/tls";
 import { consumeDialBudget } from "../errors/dial-budget";
 import { mapClusterError, toCluster, toDiagnosis } from "../http/mappers";
 import { TenancyService } from "../http/tenancy.service";
-import { ClusterGoneError, openClusterSession, unsealCluster } from "../jobs/cluster-connection";
+import { ClusterGoneError, unsealCluster } from "../jobs/cluster-connection";
 import { evictCluster } from "../jobs/connection-pool";
 import { Implement, route } from "../orpc/implement";
+import { ClustersService, duplicateNameMessage, isDuplicateClusterName } from "./clusters.service";
 import { assertLeastPrivilege } from "./least-privilege";
-import { restoreHiddenIndexes } from "./offboard";
-
-const CLUSTER_NAME_CONSTRAINT = "clusters_org_name";
-
-// `clusters_org_name` refused the write: this org already has a cluster by that
-// name (db/schema.ts). Postgres reports it on the driver's error rather than
-// through anything drizzle models, and the constraint is named in the schema
-// precisely so this check can be about that one rule instead of "some unique
-// index somewhere on clusters".
-//
-// Caught as well as pre-checked with a SELECT: two writers racing on the same
-// name would both find nothing and both go ahead, and the constraint is the only
-// answer that cannot lose that race.
-//
-// Walks the cause chain, because drizzle wraps what the driver threw — the pg
-// error with `code`/`constraint` on it is the cause of a DrizzleQueryError, not
-// the error itself. Reading the top-level object only was a 500 for a duplicate
-// name, which is the failure this function exists to prevent.
-function isDuplicateClusterName(error: unknown): boolean {
-  let current: unknown = error;
-  // Bounded: a cause chain that points back at itself must not spin here.
-  for (let depth = 0; depth < 5; depth += 1) {
-    if (typeof current !== "object" || current === null) return false;
-    if (
-      Reflect.get(current, "code") === "23505" &&
-      Reflect.get(current, "constraint") === CLUSTER_NAME_CONSTRAINT
-    ) {
-      return true;
-    }
-    current = Reflect.get(current, "cause");
-  }
-  return false;
-}
-
-function duplicateNameMessage(name: string): string {
-  return `this organization already has a cluster called "${name}" — pick another name`;
-}
 
 // Connecting, diagnosing, rotating and disconnecting customer clusters — the
 // endpoints that dial a host the user named. Owner-only throughout.
@@ -90,6 +36,7 @@ export class ClustersController {
   constructor(
     private readonly database: DatabaseService,
     private readonly tenancy: TenancyService,
+    private readonly clusters: ClustersService,
   ) {}
 
   private async storeCluster(
@@ -185,24 +132,12 @@ export class ClustersController {
   // a user on somebody's cluster, which nothing would then clean up.
   // `exceptClusterId` is the cluster being renamed: a rename that keeps the name
   // is a no-op, not a collision with itself.
-  private async assertNameFree(
+  private assertNameFree(
     orgId: string,
     name: string,
     errors: { BAD_REQUEST: (options: { message: string }) => Error },
-    exceptClusterId?: string,
   ): Promise<void> {
-    const [taken] = await this.database.db
-      .select({ id: clusters.id })
-      .from(clusters)
-      .where(
-        and(
-          eq(clusters.orgId, orgId),
-          eq(clusters.name, name),
-          ...(exceptClusterId === undefined ? [] : [ne(clusters.id, exceptClusterId)]),
-        ),
-      )
-      .limit(1);
-    if (taken !== undefined) throw errors.BAD_REQUEST({ message: duplicateNameMessage(name) });
+    return this.clusters.assertNameFree(orgId, name, errors);
   }
 
   // One row in the security trail for something done to a cluster's access
@@ -289,37 +224,7 @@ export class ClustersController {
         // `member`, for exactly that reason.
         const orgId = context.member?.orgId ?? null;
         if (orgId === null) return [];
-        const rows = await this.database.db
-          .select()
-          .from(clusters)
-          .where(eq(clusters.orgId, orgId))
-          .orderBy(desc(clusters.createdAt));
-        // One grouped query for freshness rather than one per cluster.
-        //
-        // max(last_seen_at), not max(captured_at): a cluster whose indexes are all
-        // idle stops writing new rows and only extends the ones it has, so
-        // captured_at would freeze at the last time anything changed and the
-        // dashboard would report a healthy cluster as last collected weeks ago.
-        const freshness = await this.database.db
-          .select({
-            clusterId: indexSnapshots.clusterId,
-            lastCollectedAt: sql<Date | null>`max(${indexSnapshots.lastSeenAt})`,
-          })
-          .from(indexSnapshots)
-          .where(
-            inArray(
-              indexSnapshots.clusterId,
-              rows.map((row) => row.id),
-            ),
-          )
-          .groupBy(indexSnapshots.clusterId);
-        const lastByCluster = new Map(
-          freshness.map((entry) => [
-            entry.clusterId,
-            entry.lastCollectedAt === null ? null : new Date(entry.lastCollectedAt),
-          ]),
-        );
-        return rows.map((row) => toCluster(row, lastByCluster.get(row.id) ?? null));
+        return this.clusters.list(orgId);
       },
     );
   }
@@ -667,36 +572,13 @@ export class ClustersController {
       async ({ input, errors, context }) => {
         // `freshOwner`, not merely owner: everything collected is deleted and
         // cannot be re-collected as it was (#52).
-        const orgId = context.member.orgId;
-        const [row] = await this.database.db
-          .select()
-          .from(clusters)
-          .where(and(eq(clusters.id, input.clusterId), eq(clusters.orgId, orgId)))
-          .limit(1);
-        if (row === undefined) throw errors.NOT_FOUND({ message: "cluster not found" });
-        const unhidden = await restoreHiddenIndexes(this.database.db, input.clusterId);
-        await this.database.db.delete(clusters).where(eq(clusters.id, input.clusterId));
-        // `clusterId` stays null here and the id goes in the metadata: the row it
-        // would point at has just been deleted, and this event is the one that has
-        // to outlive it — everything else about that cluster is gone.
-        await this.record(req, {
-          event: "CLUSTER_DISCONNECTED",
-          orgId,
-          target: row.name,
-          metadata: {
-            clusterId: row.id,
-            unhidden,
-            provisionedUsername: row.provisionedUsername,
-          },
-        });
-        return {
-          unhidden,
-          revokeCommand: revokeCommandFor(
-            row.engine,
-            row.provisionedUsername,
-            row.provisionedDatabases,
-          ),
-        };
+        return this.clusters.disconnect(
+          context.member.orgId,
+          input.clusterId,
+          errors,
+          () => actorFromRequest(this.database.db, req),
+          (message) => this.log.warn(message),
+        );
       },
     );
   }
@@ -713,25 +595,7 @@ export class ClustersController {
   renameCluster(@Req() req: FastifyRequest) {
     return route(this.tenancy, contract.renameCluster, req, "owner").handler(
       async ({ input, errors, context }) => {
-        const orgId = context.member.orgId;
-        await this.assertNameFree(orgId, input.name, errors, input.clusterId);
-        let row: typeof clusters.$inferSelect | undefined;
-        try {
-          [row] = await this.database.db
-            .update(clusters)
-            .set({ name: input.name })
-            .where(and(eq(clusters.id, input.clusterId), eq(clusters.orgId, orgId)))
-            .returning();
-        } catch (error) {
-          if (isDuplicateClusterName(error)) {
-            throw errors.BAD_REQUEST({ message: duplicateNameMessage(input.name) });
-          }
-          throw error;
-        }
-        // Scoped to the org in the WHERE, so another tenant's cluster is not found
-        // rather than renamed — the same shape as mode and rotation next door.
-        if (row === undefined) throw errors.NOT_FOUND({ message: "cluster not found" });
-        return toCluster(row);
+        return this.clusters.rename(context.member.orgId, input.clusterId, input.name, errors);
       },
     );
   }
@@ -748,21 +612,14 @@ export class ClustersController {
         // not — an emergency stop that waits on a password re-prompt is not an
         // emergency stop (#52).
         if (!input.readOnly) await this.tenancy.requireFreshOwner(req);
-        const orgId = context.member.orgId;
-        const [row] = await this.database.db
-          .update(clusters)
-          .set({ readOnly: input.readOnly })
-          .where(and(eq(clusters.id, input.clusterId), eq(clusters.orgId, orgId)))
-          .returning();
-        if (row === undefined) throw errors.NOT_FOUND({ message: "cluster not found" });
-        await this.record(req, {
-          event: "CLUSTER_MODE_CHANGED",
-          orgId,
-          clusterId: row.id,
-          target: row.name,
-          metadata: { readOnly: input.readOnly },
-        });
-        return toCluster(row);
+        return this.clusters.setMode(
+          context.member.orgId,
+          input.clusterId,
+          input.readOnly,
+          errors,
+          () => actorFromRequest(this.database.db, req),
+          (message) => this.log.warn(message),
+        );
       },
     );
   }
@@ -785,29 +642,8 @@ export class ClustersController {
   listClusterDatabases(@Req() req: FastifyRequest) {
     return route(this.tenancy, contract.listClusterDatabases, req, "owner").handler(
       async ({ input, errors, context }) => {
-        const orgId = context.member.orgId;
-        await this.tenancy.assertOwnsCluster(input.clusterId, orgId, errors);
-        let lease: Awaited<ReturnType<typeof openClusterSession>>;
-        try {
-          lease = await openClusterSession(this.database.db, input.clusterId, {
-            allDatabases: true,
-          });
-        } catch (error) {
-          if (error instanceof ClusterGoneError) {
-            throw errors.NOT_FOUND({ message: "cluster not found" });
-          }
-          mapClusterError(error);
-        }
-        try {
-          return {
-            available: await lease.session.listDatabaseNames(),
-            observed: lease.observedDatabases === null ? null : [...lease.observedDatabases],
-          };
-        } catch (error) {
-          mapClusterError(error);
-        } finally {
-          lease.release();
-        }
+        await this.tenancy.assertOwnsCluster(input.clusterId, context.member.orgId, errors);
+        return this.clusters.listDatabases(input.clusterId, errors);
       },
     );
   }
@@ -921,12 +757,7 @@ export class ClustersController {
     return route(this.tenancy, contract.setObservedDatabases, req, "owner").handler(
       async ({ input, errors, context }) => {
         const orgId = context.member.orgId;
-        const [row] = await this.database.db
-          .select()
-          .from(clusters)
-          .where(and(eq(clusters.id, input.clusterId), eq(clusters.orgId, orgId)))
-          .limit(1);
-        if (row === undefined) throw errors.NOT_FOUND({ message: "cluster not found" });
+        const row = await this.clusters.ownedById(input.clusterId, orgId, errors);
         // Checked against the cluster rather than against what we have collected,
         // for the same reason the GET above dials: a name that is only wrong
         // because we have never observed it is exactly the name this route exists
@@ -937,7 +768,7 @@ export class ClustersController {
           const added = input.databases.filter(
             (name) => row.observedDatabases !== null && !row.observedDatabases.includes(name),
           );
-          const { absent, unreadable } = await this.unusableDatabases(
+          const { absent, unreadable } = await this.clusters.unusableDatabases(
             input.clusterId,
             input.databases,
             added,
@@ -982,13 +813,16 @@ export class ClustersController {
         // and offboard.ts reads exactly those states to put it back. Dropping them
         // would leave an index hidden on a database nobody is watching, with
         // nothing left that knows to unhide it.
-        const discarded = await this.discardProposalsOutsideScope(input.clusterId, input.databases);
-        const [updated] = await this.database.db
-          .update(clusters)
-          .set({ observedDatabases: input.databases })
-          .where(and(eq(clusters.id, input.clusterId), eq(clusters.orgId, orgId)))
-          .returning();
-        if (updated === undefined) throw errors.NOT_FOUND({ message: "cluster not found" });
+        const discarded = await this.clusters.discardProposalsOutsideScope(
+          input.clusterId,
+          input.databases,
+        );
+        const updated = await this.clusters.setObservedDatabases(
+          orgId,
+          input.clusterId,
+          input.databases,
+          errors,
+        );
         await this.record(req, {
           event: "CLUSTER_OBSERVED_DATABASES_CHANGED",
           orgId,
@@ -1010,90 +844,12 @@ export class ClustersController {
   // refused because the cluster was briefly down, and the filter in
   // jobs/cluster-connection.ts intersects on every collect regardless, so a name
   // that turns out to be wrong costs nothing but its own absence.
-  private async unusableDatabases(
-    clusterId: string,
-    wanted: readonly string[],
-    added: readonly string[],
-    errors: { NOT_FOUND: (options: { message: string }) => Error },
-  ): Promise<{ absent: string[]; unreadable: string[] }> {
-    const none = { absent: [], unreadable: [] };
-    let lease: Awaited<ReturnType<typeof openClusterSession>>;
-    try {
-      lease = await openClusterSession(this.database.db, clusterId, { allDatabases: true });
-    } catch (error) {
-      if (error instanceof ClusterGoneError) {
-        throw errors.NOT_FOUND({ message: "cluster not found" });
-      }
-      return none;
-    }
-    try {
-      const available = await lease.session.listDatabaseNames();
-      const absent = wanted.filter((name) => !available.includes(name));
-      // Existence is not access, and on SQL Server the two come apart in exactly
-      // the way that matters here: `sys.databases` lists every database to every
-      // login (VIEW ANY DATABASE is granted to public — verified on 2022), while a
-      // scoped login provisioned for two databases of twelve has no user in the
-      // other ten and gets Msg 916 on every read. So a database that passes the
-      // check above can still be one we will never see a table in.
-      //
-      // Probed only for the databases being ADDED. The ones already selected are
-      // either working or already visible as a gap on the dashboard, and probing
-      // them would make every save cost a round trip per database for an answer
-      // nobody asked for.
-      const unreadable: string[] = [];
-      for (const database of added) {
-        if (absent.includes(database)) continue;
-        try {
-          await lease.session.collector.listCollectionNames(database);
-        } catch (error) {
-          if (error instanceof DatabaseInaccessibleError) unreadable.push(database);
-        }
-      }
-      return { absent, unreadable };
-    } catch {
-      // The cluster went away mid-check. Not a refusal: a selection must not be
-      // rejected because the cluster was briefly unreachable, and the collect
-      // intersects with what is really there on every pass regardless.
-      return none;
-    } finally {
-      lease.release();
-    }
-  }
-
-  // Delete the open proposals whose database is no longer observed, and return how
-  // many. Nothing is deleted when the selection is null (every database is in
-  // scope) or when it only grew.
-  private async discardProposalsOutsideScope(
-    clusterId: string,
-    observed: readonly string[] | null,
-  ): Promise<number> {
-    if (observed === null) return 0;
-    const discarded = await this.database.db
-      .delete(recommendations)
-      .where(
-        and(
-          eq(recommendations.clusterId, clusterId),
-          inArray(recommendations.state, ["PROPOSED", "APPROVED", "SCHEDULED"]),
-          notInArray(recommendations.database, [...observed]),
-        ),
-      )
-      .returning({ id: recommendations.id });
-    return discarded.length;
-  }
-
   @Implement(contract.triggerCollect)
   triggerCollect(@Req() req: FastifyRequest) {
     return route(this.tenancy, contract.triggerCollect, req, "owner").handler(
       async ({ input, errors, context }) => {
-        const orgId = context.member.orgId;
-        await this.tenancy.assertOwnsCluster(input.clusterId, orgId, errors);
-        // Hand it to the worker rather than dialling the cluster here. A collect
-        // walks every collection and can take minutes on a large one; the
-        // dashboard polls for the result instead of holding the request open.
-        await this.database.db.execute(
-          sql`select graphile_worker.add_job('collect', json_build_object('clusterId', ${input.clusterId}::text), max_attempts => 3)`,
-        );
-        return { queued: true };
+        await this.tenancy.assertOwnsCluster(input.clusterId, context.member.orgId, errors);
+        return this.clusters.queueCollect(input.clusterId);
       },
     );
   }
