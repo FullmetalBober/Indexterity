@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { attributesTo, joinTableRef, splitTableRef } from "./collector";
+import { DatabaseInaccessibleError, workloadKey } from "../engine/ports";
+import { attributesTo, joinTableRef, PostgresIndexCollector, splitTableRef } from "./collector";
+import type { PostgresConnection } from "./connection";
 
 // `collection` is a schema-qualified table here, because Postgres has a level
 // MongoDB does not and folding it away would make two tables of the same name in
@@ -60,5 +62,63 @@ describe("table attribution in normalized SQL", () => {
 
   it("does not match an unrelated table", () => {
     expect(mentions("SELECT * FROM sales.customers WHERE a = $1", "sales.orders")).toBe(false);
+  });
+});
+
+// The workload store is read once per database per pass, and reaching it is what
+// opens that database's pool — so this read is the FIRST to touch an inaccessible
+// database on the create side, not the last (#345). It used to go straight at the
+// connection while every other per-database read went through the classifier,
+// which reported "no access" as "no statements" and let the pass carry on
+// measuring a cluster it could not see.
+//
+// The codes are node-pg's, measured on 18.6: 42501 is a role without CONNECT,
+// 3D000 a database that is gone, 42P01 the extension not installed.
+describe("the workload store on an inaccessible database", () => {
+  function conn(answer: (database: string) => Promise<unknown[]>) {
+    return {
+      query: (_text: string, _params: readonly unknown[], database = "") => answer(database),
+    } as unknown as PostgresConnection;
+  }
+  const refusal = (code: string) => Object.assign(new Error(`refused ${code}`), { code });
+
+  it("raises DatabaseInaccessibleError rather than reporting an empty workload", async () => {
+    const collector = new PostgresIndexCollector(conn(() => Promise.reject(refusal("42501"))));
+    await expect(collector.collectDeletePatterns("gone", "public.orders")).rejects.toBeInstanceOf(
+      DatabaseInaccessibleError,
+    );
+  });
+
+  it("names the database it could not reach", async () => {
+    const collector = new PostgresIndexCollector(conn(() => Promise.reject(refusal("3D000"))));
+    await expect(collector.collectDeletePatterns("gone", "public.orders")).rejects.toMatchObject({
+      database: "gone",
+    });
+  });
+
+  // The extension is optional (WORKLOAD tier in diagnose.ts) and its absence is
+  // not an access problem, so it still reads as no statements.
+  it("still reads a missing pg_stat_statements as no statements", async () => {
+    const collector = new PostgresIndexCollector(conn(() => Promise.reject(refusal("42P01"))));
+    await expect(collector.collectDeletePatterns("app", "public.orders")).resolves.toEqual([]);
+  });
+
+  // One database of many. The batched read has a partial answer to give, so it
+  // gives it — the reachable database's shapes survive the unreachable one.
+  it("keeps the other databases when one is unreachable", async () => {
+    const collector = new PostgresIndexCollector(
+      conn((database) =>
+        database === "locked"
+          ? Promise.reject(refusal("42501"))
+          : Promise.resolve([
+              { query: "SELECT * FROM public.orders WHERE id = $1", calls: "12", rows: "12" },
+            ]),
+      ),
+    );
+    const shapes = await collector.collectWorkload([
+      { database: "locked", collection: "public.orders" },
+      { database: "app", collection: "public.orders" },
+    ]);
+    expect([...shapes.keys()]).toEqual([workloadKey("app", "public.orders")]);
   });
 });

@@ -9,6 +9,7 @@ import {
   SCOPED_USERNAME,
 } from "../engine/provision";
 import { mongoClient } from "./client";
+import { isAuthorizationError } from "./errors";
 
 export const ENGINE_ROLE = "indexterityEngine";
 
@@ -47,16 +48,9 @@ export const ENGINE_PRIVILEGES: readonly RolePrivilege[] = [
   { resource: { db: "config", collection: "collections" }, actions: ["find"] },
 ];
 
-function isAuthorizationError(error: unknown): boolean {
-  return (
-    error instanceof MongoServerError &&
-    (error.code === 13 || /not authorized|requires authentication/i.test(error.message))
-  );
-}
-
 // The scoped user is already on the cluster. Distinct from the authorization
-// refusal above because the remedy is the opposite one: nothing needs granting,
-// something needs recognising.
+// refusal in ./errors because the remedy is the opposite one: nothing needs
+// granting, something needs recognising.
 function isDuplicateUserError(error: unknown): boolean {
   return (
     error instanceof MongoServerError &&
