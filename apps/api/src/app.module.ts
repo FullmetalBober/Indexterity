@@ -3,12 +3,9 @@ import { ConfigModule } from "@nestjs/config";
 import { ORPCModule } from "@orpc/nest";
 import { errorReportingEnabled } from "@repo/errors";
 import { SentryModule } from "@sentry/nestjs/setup";
-import { AnalysisModule } from "./analysis/analysis.module";
 import { AuthModule } from "./auth/auth.module";
 import { ClustersModule } from "./clusters/clusters.module";
-import { ConfigEnvModule } from "./config/config.module";
 import { DatabaseModule } from "./db/database.module";
-import { EngineModule } from "./engine/engine.module";
 import { ErrorsModule } from "./errors/errors.module";
 import { EventsModule } from "./events/events.module";
 import { HealthModule } from "./health/health.module";
@@ -16,12 +13,8 @@ import { TenancyModule } from "./http/tenancy.module";
 import { InsightsModule } from "./insights/insights.module";
 import { JobsModule } from "./jobs/jobs.module";
 import { MetricsModule } from "./metrics/metrics.module";
-import { MongoAdapterModule } from "./mongo/mongo.module";
-import { MssqlAdapterModule } from "./mssql/mssql.module";
 import { OrgModule } from "./org/org.module";
-import { OrpcHelpersModule } from "./orpc/orpc.module";
 import { PolicyModule } from "./policy/policy.module";
-import { PostgresAdapterModule } from "./postgres/postgres.module";
 import { RecommendationsModule } from "./recommendations/recommendations.module";
 
 // SentryModule is the SDK's Nest wiring only — NOT its SentryGlobalFilter, which
@@ -52,6 +45,16 @@ function sentryImports() {
   // application graph and nothing else: one `imports` list, no controller and no
   // provider of its own. A controller listed HERE would be one that has not been
   // given its module yet, and there are none left.
+  //
+  // What is NOT here, and should not be: `analysis/`, `engine/`, `mongo/`,
+  // `postgres/`, `mssql/`, `config/` and `orpc/`. #354 briefly gave each an empty
+  // module and listed it below, on the argument that the graph should name every
+  // directory. That bought nothing — an empty module does nothing at runtime or at
+  // build time — so they were deleted again. Those directories are
+  // framework-independent by design: pure functions, an environment read before a
+  // container exists, a decorator applied at class definition, and connections
+  // built per cluster and closed with the lease that opened them. This list is the
+  // container's graph, not an inventory of the tree.
   imports: [
     ...sentryImports(),
     ConfigModule.forRoot({ isGlobal: true }),
@@ -69,18 +72,6 @@ function sentryImports() {
     OrgModule,
     PolicyModule,
     RecommendationsModule,
-    // Declared units with no providers, and listed here so the graph names every
-    // directory rather than only the ones the container reaches into. Each carries
-    // the reason it has nothing to provide — pure functions, decorators applied
-    // before a container exists, or a connection built per cluster and closed with
-    // its lease. This is where an export list goes the day that changes.
-    AnalysisModule,
-    ConfigEnvModule,
-    EngineModule,
-    MongoAdapterModule,
-    MssqlAdapterModule,
-    OrpcHelpersModule,
-    PostgresAdapterModule,
   ],
 })
 export class AppModule {}
