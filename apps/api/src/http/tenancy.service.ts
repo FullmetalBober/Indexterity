@@ -12,7 +12,7 @@ import {
   planFrom,
   withinLimit,
 } from "../billing/plans";
-import { seatsUsed } from "../billing/usage";
+import { UsageService } from "../billing/usage.service";
 import { requireOwnerTwoFactor } from "../config/env";
 import { and, clusters, eq, organizations } from "../db";
 import { DatabaseService } from "../db/database.service";
@@ -28,7 +28,10 @@ const membershipByRequest = new WeakMap<FastifyRequest, Promise<Membership | nul
 // belong in one place rather than in whichever controller happens to need them.
 @Injectable()
 export class TenancyService {
-  constructor(private readonly database: DatabaseService) {}
+  constructor(
+    private readonly database: DatabaseService,
+    private readonly usage: UsageService,
+  ) {}
 
   // 401 without a valid session, else who is asking.
   async userId(req: FastifyRequest): Promise<string> {
@@ -143,9 +146,7 @@ export class TenancyService {
   async requireRoomFor(orgId: string, what: "clusters" | "members"): Promise<void> {
     const plan = await this.plan(orgId);
     const current =
-      what === "clusters"
-        ? await this.countClusters(orgId)
-        : await seatsUsed(this.database.db, orgId);
+      what === "clusters" ? await this.countClusters(orgId) : await this.usage.seatsUsed(orgId);
     const verdict = withinLimit(plan, what, current);
     if (!verdict.allowed) {
       throw new ORPCError("PLAN_LIMIT", { status: 402, message: verdict.reason ?? "plan limit" });

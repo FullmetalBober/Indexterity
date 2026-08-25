@@ -1,4 +1,5 @@
 import { Module } from "@nestjs/common";
+import { BillingModule } from "../billing/billing.module";
 import { DatabaseModule } from "../db/database.module";
 import { TenancyService } from "./tenancy.service";
 
@@ -8,7 +9,7 @@ import { TenancyService } from "./tenancy.service";
 // TenancyService to run a route's auth level, so a module with a controller
 // imports this whether or not it names the service itself.
 @Module({
-  imports: [DatabaseModule],
+  imports: [BillingModule, DatabaseModule],
   providers: [TenancyService],
   exports: [TenancyService],
 })
