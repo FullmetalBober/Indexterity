@@ -5,6 +5,7 @@ import { errorReportingEnabled } from "@repo/errors";
 import { SentryModule } from "@sentry/nestjs/setup";
 import { ClustersModule } from "./clusters/clusters.module";
 import { DatabaseModule } from "./db/database.module";
+import { ErrorsModule } from "./errors/errors.module";
 import { EventsModule } from "./events/events.module";
 import { HealthModule } from "./health/health.module";
 import { TenancyModule } from "./http/tenancy.module";
@@ -49,6 +50,7 @@ function sentryImports() {
     DatabaseModule,
     TenancyModule,
     ClustersModule,
+    ErrorsModule,
     EventsModule,
     HealthModule,
     InsightsModule,

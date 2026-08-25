@@ -15,7 +15,6 @@ import { sessionCookiesFor } from "./auth/session";
 import { apiEnv, trustProxySetting } from "./config/env";
 import { DatabaseService } from "./db/database.service";
 import { probeNotifyOrExit } from "./db/notify-probe";
-import { AppExceptionFilter } from "./errors/exception.filter";
 import { captureAuthFailure } from "./errors/reporting";
 import { quietProbes } from "./http/quiet-probes";
 import { securityHeaders } from "./http/security-headers";
@@ -50,7 +49,6 @@ async function bootstrap(): Promise<void> {
   // fall back on, so a deployment that does not route /api here has a dashboard
   // whose every read 404s.
   app.setGlobalPrefix("api");
-  app.useGlobalFilters(new AppExceptionFilter());
   const fastify = app.getHttpAdapter().getInstance();
   // Before the routes exist, so the hooks see oRPC, better-auth and the health
   // check alike. That breadth is the whole point for the headers: better-auth

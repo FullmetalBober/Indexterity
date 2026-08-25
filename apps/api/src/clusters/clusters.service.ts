@@ -11,7 +11,7 @@ import { DatabaseInaccessibleError, NO_TLS_OVERRIDES, type TlsOverrides } from "
 import { revokeCommandFor } from "../engine/provision";
 import { adapterFor, engineSupported, supportedEngines } from "../engine/registry";
 import { InsecureConnectionError } from "../engine/tls";
-import { consumeDialBudget } from "../errors/dial-budget";
+import { DialBudgetService } from "../errors/dial-budget.service";
 import { mapClusterError, toCluster } from "../http/mappers";
 import { ClusterGoneError, openClusterSession } from "../jobs/cluster-connection";
 import { type ClusterRow, ClustersRepository } from "./clusters.repository";
@@ -78,6 +78,7 @@ export class ClustersService {
     private readonly database: DatabaseService,
     private readonly repository: ClustersRepository,
     private readonly audit: AuditService,
+    private readonly dialBudget: DialBudgetService,
   ) {}
 
   // The actor arrives as a THUNK. Who is asking is a fact about the REQUEST, so
@@ -244,7 +245,7 @@ export class ClustersService {
         message: `connection string must be ${adapter.connStringHint}`,
       });
     }
-    await consumeDialBudget(this.database.db, userId);
+    await this.dialBudget.consume(userId);
     const { hosts, isSrv } = adapter.hostsOf(value);
     try {
       await assertTargetsAllowed(hosts, isSrv, { allowPrivate: allowPrivateTargets() });
