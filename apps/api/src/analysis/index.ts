@@ -13,7 +13,7 @@ export * from "./redundancy";
 export * from "./regression";
 export * from "./reorder";
 export * from "./rollback";
-export * from "./safety";
+export * from "./safety.utils";
 export * from "./score";
 export * from "./severity";
 export * from "./silence";

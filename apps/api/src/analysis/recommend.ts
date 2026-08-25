@@ -3,9 +3,13 @@ import { z } from "zod";
 import type { IndexSpec } from "../engine/types";
 import { type ClassifyOptions, classifyUsage, usageHistoryIsTrustworthy } from "./classify";
 import { coversIncludes, isKeyPrefix, isRedundantPrefix, servedByBackwardWalk } from "./redundancy";
-import { isNeverDrop } from "./safety";
+import { SafetyUtils } from "./safety.utils";
 import { dropScore } from "./score";
 import { totalObservations, type UsageSnapshot } from "./types";
+
+// Stateless, so one instance for the module. Becomes an injected dependency when
+// this file becomes a provider itself (#354).
+const safety = new SafetyUtils();
 
 const directionSchema = z.union([
   z.literal(1),
@@ -79,7 +83,7 @@ export function recommendForCollection(
   activeHours?: number,
 ): RecommendationCandidate[] {
   const candidates: RecommendationCandidate[] = [];
-  const eligible = indexes.filter((index) => !isNeverDrop(index.spec));
+  const eligible = indexes.filter((index) => !safety.isNeverDrop(index.spec));
   const redundant = new Set<string>();
   // Usage-based findings need a history we can trust; redundancy is structural
   // and stands on its own.
@@ -143,7 +147,7 @@ export function recommendForCollection(
   // instead of staying silent. _id_ is exempt — it is never optional.
   const advised = new Set<string>();
   for (const index of indexes) {
-    if (!isNeverDrop(index.spec) || index.spec.name === "_id_") continue;
+    if (!safety.isNeverDrop(index.spec) || index.spec.name === "_id_") continue;
     if (!trusted(index)) continue;
     const usageClass = classifyUsage(index.history, options);
     if (usageClass !== "FLAT_ZERO" && usageClass !== "PERIODIC_DEAD") continue;

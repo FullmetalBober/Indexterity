@@ -3,12 +3,12 @@ import {
   activeHours,
   DEFAULT_OBSERVE_DAYS,
   type IndexInput,
-  isNeverDrop,
   MAX_GAP_HOURS,
   parseStoredSpec,
   type RefusalCounts,
   recommendForCollection,
   regressionWeight,
+  SafetyUtils,
   type SuppressionCounts,
   type SuppressionGuard,
   usageTrustRefusal,
@@ -39,6 +39,10 @@ import {
   watchedIndexKeys,
   watchKey,
 } from "./watched";
+
+// Stateless, so one instance for the module. Becomes an injected dependency when
+// this file becomes a provider itself (#354).
+const safety = new SafetyUtils();
 
 // Policy fallback, matching apply/finalize.
 
@@ -267,7 +271,7 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
     // excluded for its own reasons and would only dilute the answer.
     const decidedAt = new Date();
     for (const index of inputs) {
-      if (isNeverDrop(index.spec)) continue;
+      if (safety.isNeverDrop(index.spec)) continue;
       const refusal = usageTrustRefusal(index.history, CLASSIFY_OPTIONS, decidedAt, active);
       recordUsageTrust(engine, refusal);
       consideredIndexes += 1;

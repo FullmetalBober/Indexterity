@@ -1,6 +1,10 @@
-import { coversIncludes, isNeverDrop, isRedundantPrefix } from "../analysis";
+import { coversIncludes, isRedundantPrefix, SafetyUtils } from "../analysis";
 import type { IndexCollector } from "../engine/ports";
 import type { IndexSpec } from "../engine/types";
+
+// Stateless, so one instance for the module. Becomes an injected dependency when
+// this file becomes a provider itself (#354).
+const safety = new SafetyUtils();
 
 export interface PreflightResult {
   readonly safe: boolean;
@@ -68,7 +72,7 @@ export async function preflightDrop(
   if (spec === null) {
     return { safe: false, reason: "index no longer exists", spec: null };
   }
-  if (isNeverDrop(spec)) {
+  if (safety.isNeverDrop(spec)) {
     // The one exemption, and it is not a class exemption: this row names the
     // index that replaced it, and the claim is checked HERE, against what is on
     // the cluster now. If the replacement was itself dropped, hidden, or built

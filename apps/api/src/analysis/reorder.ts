@@ -1,6 +1,10 @@
 import type { IndexSpec, QueryShape, SortKey } from "../engine/types";
-import { isNeverDrop } from "./safety";
+import { SafetyUtils } from "./safety.utils";
 import { esrKeys, isRecurring, type WorkloadOptions } from "./workload";
+
+// Stateless, so one instance for the module. Becomes an injected dependency when
+// this file becomes a provider itself (#354).
+const safety = new SafetyUtils();
 
 // Re-ordering a PROTECTED index's keys, where only the direction changes.
 //
@@ -108,7 +112,7 @@ export function isReorderable(index: IndexSpec): boolean {
   // Everything left that the engine may not simply drop and rebuild elsewhere.
   // Today that is exactly the unique indexes; the test asserts it, so a new
   // never-drop reason cannot silently fall through to here.
-  return isNeverDrop(index);
+  return safety.isNeverDrop(index);
 }
 
 export interface ReorderCandidate {

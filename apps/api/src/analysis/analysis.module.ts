@@ -1,5 +1,6 @@
 import { Module } from "@nestjs/common";
 import { CostUtils } from "./cost.utils";
+import { SafetyUtils } from "./safety.utils";
 
 // The analysis half, as providers (#354).
 //
@@ -15,7 +16,7 @@ import { CostUtils } from "./cost.utils";
 // `severity` reads `workload`, `score` reads `severity`, and `recommend` reads
 // four. Grown one file at a time, so every step keeps 1143 tests green.
 @Module({
-  providers: [CostUtils],
-  exports: [CostUtils],
+  providers: [CostUtils, SafetyUtils],
+  exports: [CostUtils, SafetyUtils],
 })
 export class AnalysisModule {}

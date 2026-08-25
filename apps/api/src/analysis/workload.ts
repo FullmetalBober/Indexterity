@@ -1,7 +1,11 @@
 import type { RecommendationType } from "@repo/contracts";
 import type { ConstantValue, IndexSpec, QueryShape, SortKey } from "../engine/types";
 import { isWorthIndexing } from "./client";
-import { isNeverDrop } from "./safety";
+import { SafetyUtils } from "./safety.utils";
+
+// Stateless, so one instance for the module. Becomes an injected dependency when
+// this file becomes a provider itself (#354).
+const safety = new SafetyUtils();
 
 const HOURS_PER_WEEK = 168;
 
@@ -151,7 +155,7 @@ function servesOrder(index: IndexSpec, wanted: readonly SortKey[]): boolean {
 // one to keep is a judgement about the workload. Reported instead of silently
 // dropped, which is what happened before.
 //
-// PROTECTED indexes are included, and they were not. `!isNeverDrop(idx)`
+// PROTECTED indexes are included, and they were not. `!safety.isNeverDrop(idx)`
 // excluded them from being a blocker, and recommendCreates suppresses the
 // create whenever an index covers the fields — with no such exclusion — so a
 // unique index with the wrong directions produced NOTHING AT ALL: not a create,
@@ -321,7 +325,7 @@ export function recommendCreates(
     // means partial indexes with an identical filter — same keys and same
     // documents, so folding them together loses nothing.
     const compatible = (idx: IndexSpec): boolean =>
-      !isNeverDrop(idx) && sameFilter(idx.partialFilter, partialFilter);
+      !safety.isNeverDrop(idx) && sameFilter(idx.partialFilter, partialFilter);
     const extendable = existing.find((idx) => compatible(idx) && isPrefix(fieldsOf(idx), wanted));
     const singles = existing.filter(
       (idx) => compatible(idx) && idx.keys.length === 1 && wanted.includes(fieldsOf(idx)[0] ?? ""),
@@ -443,7 +447,7 @@ export function recommendNarrowing(
   for (const index of existing) {
     // Never-drop indexes keep their shape: a unique constraint or a shard key
     // makes the trailing keys load-bearing for something other than reads.
-    if (isNeverDrop(index) || index.keys.length < 2) continue;
+    if (safety.isNeverDrop(index) || index.keys.length < 2) continue;
     // Rebuilding a text/hashed/2dsphere key from a shape list is not something
     // to attempt — those keys are not ordinary ordered fields.
     if (index.keys.some((key) => key.direction !== 1 && key.direction !== -1)) continue;
