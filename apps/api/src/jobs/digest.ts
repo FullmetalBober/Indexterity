@@ -1,4 +1,4 @@
-import { monthlySavingsUsd } from "../analysis";
+import { CostUtils } from "../analysis";
 import type { Database } from "../db";
 import { and, clusters, desc, eq, recommendations } from "../db";
 import { notifyClusterOwners } from "../mail/notify";
@@ -20,7 +20,7 @@ export async function runDigest(db: Database): Promise<number> {
     const creates = proposed.filter((rec) => rec.type === "CREATE" || rec.type === "UPDATE");
     const advisories = proposed.filter((rec) => rec.type === "ADVISORY_REVIEW");
     const freedBytes = drops.reduce((sum, rec) => sum + rec.estimatedBytesSaved, 0);
-    const monthly = monthlySavingsUsd(freedBytes);
+    const monthly = new CostUtils().monthlySavingsUsd(freedBytes);
 
     const top = proposed
       .slice(0, 5)

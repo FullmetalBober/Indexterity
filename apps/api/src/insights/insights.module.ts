@@ -1,4 +1,5 @@
 import { Module } from "@nestjs/common";
+import { AnalysisModule } from "../analysis/analysis.module";
 import { DatabaseModule } from "../db/database.module";
 import { TenancyModule } from "../http/tenancy.module";
 import { InsightsController } from "./insights.controller";
@@ -8,7 +9,7 @@ import { InsightsService } from "./insights.service";
 // The first feature to earn a repository (#333). Nothing outside reads these
 // views, so nothing is exported.
 @Module({
-  imports: [DatabaseModule, TenancyModule],
+  imports: [AnalysisModule, DatabaseModule, TenancyModule],
   controllers: [InsightsController],
   providers: [InsightsService, InsightsRepository],
 })

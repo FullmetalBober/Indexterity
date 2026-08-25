@@ -17,9 +17,9 @@ import {
 } from "@repo/contracts";
 import { z } from "zod";
 import {
+  CostUtils,
   latencyGaps,
   latencyPoints,
-  monthlySavingsUsd,
   summarizeFootprint,
   summarizeLatency,
 } from "../analysis";
@@ -43,6 +43,7 @@ export class InsightsService {
   constructor(
     private readonly tenancy: TenancyService,
     private readonly repo: InsightsRepository,
+    private readonly cost: CostUtils,
   ) {}
 
   async roi(clusterId: string, orgId: string): Promise<ClusterRoi> {
@@ -89,7 +90,7 @@ export class InsightsService {
           collection: rec.collection,
           indexName: rec.indexName,
           freedBytes: bytes,
-          estimatedMonthlyUsd: monthlySavingsUsd(bytes, rate),
+          estimatedMonthlyUsd: this.cost.monthlySavingsUsd(bytes, rate),
         },
       ];
     });
@@ -97,7 +98,7 @@ export class InsightsService {
       clusterId,
       freedBytes,
       indexesDropped,
-      estimatedMonthlyUsd: monthlySavingsUsd(freedBytes, rate),
+      estimatedMonthlyUsd: this.cost.monthlySavingsUsd(freedBytes, rate),
       attribution,
     };
   }
