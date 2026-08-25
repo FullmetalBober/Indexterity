@@ -1,7 +1,8 @@
 import type { WorkerEvents } from "graphile-worker";
 import type { Database } from "../db";
 import { captureError } from "../errors/reporting";
-import { ALERT_COOLDOWN_MS, alertAllowed, notifyClusterOwners } from "../mail/notify";
+import { ALERT_COOLDOWN_MS, alertAllowed } from "../mail/notify";
+import { NotifyService } from "../mail/notify.service";
 import { instrumentRunner } from "../metrics";
 import { clusterIdOf, finalClusterFailure } from "./failure";
 import { alertClaims } from "./watermark";
@@ -69,8 +70,7 @@ export function wireRunnerEvents(db: Database, events: WorkerEvents): void {
       ) {
         return;
       }
-      await notifyClusterOwners(
-        db,
+      await new NotifyService(db).notifyClusterOwners(
         clusterId,
         `${job.task_identifier} keeps failing`,
         `The background ${job.task_identifier} task gave up after ${job.attempts} attempts.\n\n` +

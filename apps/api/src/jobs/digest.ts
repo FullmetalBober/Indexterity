@@ -1,7 +1,7 @@
 import { monthlySavingsUsd } from "../analysis";
 import type { Database } from "../db";
 import { and, clusters, desc, eq, recommendations } from "../db";
-import { notifyClusterOwners } from "../mail/notify";
+import { NotifyService } from "../mail/notify.service";
 
 // Weekly "here's what we WOULD have done" email for clusters still in
 // read-only mode — the go-live conversion driver. Skips quiet clusters.
@@ -42,8 +42,7 @@ export async function runDigest(db: Database): Promise<number> {
       ``,
       `Flip the cluster live on the dashboard to let the pipeline act (drops still observe first).`,
     ];
-    await notifyClusterOwners(
-      db,
+    await new NotifyService(db).notifyClusterOwners(
       cluster.id,
       "weekly digest — what we would have done",
       lines.join("\n"),
