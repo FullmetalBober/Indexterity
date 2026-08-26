@@ -7,7 +7,8 @@ import type { SecurityEventDetails } from "../audit/audit.types";
 import { RequestActorService } from "../audit/request-actor.service";
 import { clusters } from "../db";
 import { DatabaseService } from "../db/database.service";
-import { NO_TLS_OVERRIDES, type ProvisionedUser } from "../engine/ports";
+import type { TunnelRoute } from "../engine/net-guard";
+import { type DialProxy, NO_TLS_OVERRIDES, type ProvisionedUser } from "../engine/ports";
 import { ProvisionDeniedError } from "../engine/provision";
 import { adapterFor, detectEngine, supportedEngineOptions } from "../engine/registry";
 import { mapClusterError, toCluster, toDiagnosis } from "../http/mappers";
@@ -15,6 +16,8 @@ import { TenancyService } from "../http/tenancy.service";
 import { ClusterGoneError, unsealCluster } from "../jobs/cluster-connection";
 import { evictCluster } from "../jobs/connection-pool";
 import { Implement, route } from "../orpc/implement";
+import { TunnelService } from "../tunnel/tunnel.service";
+import { ClustersRepository } from "./clusters.repository";
 import { ClustersService } from "./clusters.service";
 import { assertLeastPrivilege } from "./least-privilege";
 
@@ -30,6 +33,8 @@ export class ClustersController {
     private readonly clusters: ClustersService,
     private readonly audit: AuditService,
     private readonly actors: RequestActorService,
+    private readonly tunnels: TunnelService,
+    private readonly repository: ClustersRepository,
   ) {}
 
   // Refuse a name the org is already using, BEFORE anything is dialed.
@@ -109,13 +114,28 @@ export class ClustersController {
         // rather than for the one that was typed.
         const overrides = input.tlsOverrides ?? NO_TLS_OVERRIDES;
         const value = adapter.applySecureTransport(input.connectionString, overrides);
-        await this.clusters.guardDial(context.userId, engine, value, errors, overrides);
+        // Resolved BEFORE the guard, because the guard's rules depend on it: a
+        // tunnelled cluster is judged against the tunnel's AllowedIPs instead
+        // of against our own network.
+        const routed = await this.resolveTunnel(
+          input.tunnelId ?? null,
+          context.member.orgId,
+          errors,
+        );
+        await this.clusters.guardDial(
+          context.userId,
+          engine,
+          value,
+          errors,
+          overrides,
+          routed.route,
+        );
         // The scope reaches the adapter, so a second check with fewer databases
         // ticked can turn a privilege gap into a grant (#244) — see the field's
         // comment in inputs.ts. Absent on the first check, which has no list yet.
         return toDiagnosis(
           engine,
-          await adapter.diagnose(value, overrides, input.observedDatabases),
+          await adapter.diagnose(value, overrides, input.observedDatabases, routed.proxy),
         );
       },
     );
@@ -139,10 +159,23 @@ export class ClustersController {
         const adapter = adapterFor(engine);
         const overrides = input.tlsOverrides ?? NO_TLS_OVERRIDES;
         const value = adapter.applySecureTransport(input.connectionString, overrides);
-        await this.clusters.guardDial(context.userId, engine, value, errors, overrides);
+        const routed = await this.resolveTunnel(input.tunnelId ?? null, orgId, errors);
+        await this.clusters.guardDial(
+          context.userId,
+          engine,
+          value,
+          errors,
+          overrides,
+          routed.route,
+        );
         // Verify before storing: an unusable string must fail at connect time
         // with the reason, not silently collect nothing for a day.
-        const diagnosis = await adapter.diagnose(value, overrides, input.observedDatabases);
+        const diagnosis = await adapter.diagnose(
+          value,
+          overrides,
+          input.observedDatabases,
+          routed.proxy,
+        );
         // A selection naming a database this cluster does not have is refused here
         // rather than stored and quietly intersected away by every collect: the
         // reader picked from a list we gave them, so a name that is not on it means
@@ -190,6 +223,7 @@ export class ClustersController {
           diagnosis.canProvision ? "ADMIN" : "SCOPED",
           overrides,
           input.observedDatabases ?? null,
+          input.tunnelId ?? null,
         );
         await this.record(req, {
           event: "CLUSTER_CONNECTED",
@@ -240,7 +274,18 @@ export class ClustersController {
         }
         const overrides = input.tlsOverrides ?? NO_TLS_OVERRIDES;
         const adminValue = adapter.applySecureTransport(input.adminConnectionString, overrides);
-        await this.clusters.guardDial(context.userId, engine, adminValue, errors, overrides);
+        // Provisioning dials the customer's cluster with an ADMIN string, so it
+        // has to go the same way a collect will — a database behind a VPN is
+        // not reachable for this either.
+        const routed = await this.resolveTunnel(input.tunnelId ?? null, orgId, errors);
+        await this.clusters.guardDial(
+          context.userId,
+          engine,
+          adminValue,
+          errors,
+          overrides,
+          routed.route,
+        );
         let provisioned: ProvisionedUser;
         try {
           // No selection passed, on purpose: what the provisioned user may reach is
@@ -248,7 +293,7 @@ export class ClustersController {
           // selection is stored on the row below and applies to every collect;
           // narrowing the GRANTS would make it un-editable, because there is no
           // admin string left afterwards to widen them with.
-          provisioned = await provision(adminValue, overrides);
+          provisioned = await provision(adminValue, overrides, routed.proxy);
         } catch (error) {
           if (error instanceof ProvisionDeniedError) {
             throw new ORPCError("PROVISION_DENIED", { status: 422, message: error.message });
@@ -266,6 +311,7 @@ export class ClustersController {
           "PROVISIONED",
           overrides,
           input.observedDatabases ?? null,
+          input.tunnelId ?? null,
         );
         await this.record(req, {
           event: "CLUSTER_CONNECTED",
@@ -691,5 +737,62 @@ export class ClustersController {
         return this.clusters.queueCollect(input.clusterId);
       },
     );
+  }
+
+  /**
+   * The tunnel this connect is routed through, brought up so the preflight
+   * dials the same way a collect will.
+   *
+   * Returns both halves because they are used at different moments and by
+   * different rules: `allowedIps` decides what the network guard will permit
+   * before anything is dialled, and `proxy` is how the driver actually reaches
+   * it. Null for the ordinary case of a cluster we can already open a socket
+   * to, which is most of them.
+   */
+  // Which tunnel reaches this cluster, or null to dial it directly (#353).
+  //
+  // Here rather than in TunnelController, and not only because the path says
+  // /clusters: putting it there made ClustersModule and TunnelModule import
+  // each other, and a forwardRef would have hidden a cycle rather than removed
+  // one. A tunnel assignment is a property of the CLUSTER.
+  @Implement(contract.setClusterTunnel)
+  setClusterTunnel(@Req() req: FastifyRequest) {
+    return route(this.tenancy, contract.setClusterTunnel, req, "owner").handler(
+      async ({ input, errors, context }) => {
+        const orgId = context.member.orgId;
+        await this.tenancy.assertOwnsCluster(input.clusterId, orgId, errors);
+        // Checked rather than trusted: a tunnel id from another org would
+        // otherwise route this org's dials through somebody else's network.
+        if (input.tunnelId !== null && !(await this.tunnels.ownedBy(input.tunnelId, orgId))) {
+          throw errors.BAD_REQUEST({ message: "no such tunnel" });
+        }
+        const row = await this.repository.setTunnel(input.clusterId, orgId, input.tunnelId);
+        if (row === undefined) throw errors.NOT_FOUND({ message: "no such cluster" });
+        return toCluster(row);
+      },
+    );
+  }
+
+  private async resolveTunnel(
+    tunnelId: string | null,
+    orgId: string,
+    errors: { BAD_REQUEST: (options: { message: string }) => Error },
+  ): Promise<{ route: TunnelRoute | null; proxy: DialProxy | undefined }> {
+    if (tunnelId === null) return { route: null, proxy: undefined };
+    // Checked rather than trusted: a tunnel id from another org would otherwise
+    // route this org's dial through somebody else's network.
+    if (!(await this.tunnels.ownedBy(tunnelId, orgId))) {
+      throw errors.BAD_REQUEST({ message: "no such tunnel" });
+    }
+    try {
+      return await this.tunnels.openFor(tunnelId);
+    } catch (error) {
+      // A tunnel that will not come up is a reason a connect fails, and saying
+      // which one beats "unreachable" — the owner would otherwise go looking at
+      // the database.
+      throw errors.BAD_REQUEST({
+        message: `the tunnel could not be brought up: ${(error as Error).message}`,
+      });
+    }
   }
 }

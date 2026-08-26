@@ -3,6 +3,7 @@ import { z } from "zod";
 import { scopeForDiagnosis } from "../engine/observe";
 import type {
   ConnectionDiagnosis,
+  DialProxy,
   PrivilegeCheck,
   PrivilegeTier,
   TlsOverrides,
@@ -555,8 +556,10 @@ export async function diagnoseConnection(
   // database reads as ungranted against a twelve-database cluster and as granted
   // against the one database somebody actually asked us to observe.
   observedDatabases?: readonly string[] | null,
+  // Route the dial through a tunnel when this cluster needs one (#353).
+  proxy?: DialProxy,
 ): Promise<ConnectionDiagnosis> {
-  const client = mongoClient(uri, overrides);
+  const client = mongoClient(uri, overrides, proxy);
   try {
     const admin = client.db("admin");
     // Version first: below the floor nothing else matters, and saying so at

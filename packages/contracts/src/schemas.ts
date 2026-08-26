@@ -95,6 +95,10 @@ export const cluster = z.object({
   connectionMode,
   engine: clusterEngine,
   readOnly: z.boolean(),
+  // Which WireGuard tunnel reaches this cluster, null when it is dialled
+  // directly (#353). Orthogonal to connectionMode rather than a value in it:
+  // "over a tunnel" and "via a relay agent" are not mutually exclusive.
+  tunnelId: z.uuid().nullable(),
   // Set when Indexterity provisioned its own least-privilege user on the
   // cluster (admin-string onboarding); null for pasted-string clusters.
   provisionedUsername: z.string().nullable(),
@@ -957,3 +961,41 @@ export const orgInfo = z.object({
   policy: orgPolicyView,
 });
 export type OrgInfo = z.infer<typeof orgInfo>;
+
+// A WireGuard peering the control plane terminates, so a cluster with no public
+// endpoint can be reached (#353).
+//
+// The config's SECRET half never appears here. The [Interface] PrivateKey is a
+// credential of the same weight as a connection string, and the dashboard has
+// no use for it: what an owner needs to see is which network this reaches and
+// whether the handshake is current. Everything below is derived from the sealed
+// config server-side rather than stored twice.
+export const tunnelHealth = z.enum(["UP", "HANDSHAKING", "DOWN", "IDLE"]);
+export type TunnelHealth = z.infer<typeof tunnelHealth>;
+
+export const tunnelView = z.object({
+  id: z.uuid(),
+  name: z.string(),
+  // host:port of the customer's gateway. Not a secret — it is an address they
+  // published to their own VPN clients — and it is the field that identifies
+  // which network this is at a glance.
+  endpoint: z.string(),
+  allowedIps: z.array(z.string()),
+  // Whose resolver answers names inside the tunnel. Empty when the config
+  // carried no DNS, which is worth showing: a cluster addressed by name will
+  // not resolve, and that failure otherwise reads as "unreachable".
+  dns: z.array(z.string()),
+  // IDLE means the tunnel has never been asked for since this process started.
+  // It is not a fault — tunnels come up on first use — and it must not be drawn
+  // as one.
+  health: tunnelHealth,
+  // Seconds since the last completed handshake; null when there has not been
+  // one in this process. A stale handshake is a condition of the TUNNEL, not of
+  // the clusters behind it.
+  handshakeAgeSeconds: z.number().nullable(),
+  // How many clusters would break if this were deleted, which is why the delete
+  // is refused while it is non-zero.
+  clusterCount: z.number().int(),
+  createdAt: z.string(),
+});
+export type TunnelView = z.infer<typeof tunnelView>;

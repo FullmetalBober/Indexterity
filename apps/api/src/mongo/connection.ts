@@ -1,5 +1,5 @@
 import type { Db, MongoClient } from "mongodb";
-import type { TlsOverrides } from "../engine/ports";
+import type { DialProxy, TlsOverrides } from "../engine/ports";
 import { mongoClient } from "./client";
 import type { ResolvedConnection } from "./conn-string";
 import { parseServerVersion, type ServerVersion } from "./version";
@@ -101,11 +101,11 @@ export class MongoConnection {
   // `overrides` is the cluster owner's recorded consent to skip specific
   // certificate checks. Omitted means none of them, which is the strict rule —
   // the direction a forgotten argument has to fail in.
-  constructor(connectionString: string, overrides?: TlsOverrides) {
+  constructor(connectionString: string, overrides?: TlsOverrides, proxy?: DialProxy) {
     // Throws InsecureConnectionError on a string that would not connect over
     // TLS, or one that disables a check nobody consented to — see
     // mongo/client.ts, the only place a driver client is built.
-    this.client = mongoClient(connectionString, overrides);
+    this.client = mongoClient(connectionString, overrides, proxy);
   }
 
   async connect(): Promise<void> {

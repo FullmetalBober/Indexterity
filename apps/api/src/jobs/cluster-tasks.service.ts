@@ -4,6 +4,7 @@ import { DatabaseService } from "../db/database.service";
 import { emitPassFinished } from "../events/emit";
 import { ALERT_COOLDOWN_MS, alertAllowed } from "../mail/notify";
 import { NotifyService } from "../mail/notify.service";
+import { TunnelRegistry } from "../tunnel/tunnel.registry";
 import { applyCluster } from "./apply";
 import { settleBuildsForCluster } from "./building";
 import { refreshInferredWindow } from "./change-window";
@@ -36,11 +37,15 @@ export class ClusterTasksService {
   constructor(
     private readonly database: DatabaseService,
     private readonly notify: NotifyService,
+    // Injected and handed down rather than reached for through a module
+    // global: this is the one place in the pipeline the container reaches, so
+    // it is the one place the dependency can be declared honestly (#353).
+    private readonly tunnels: TunnelRegistry,
   ) {}
 
   async collect(payload: unknown, helpers: JobHelpers): Promise<void> {
     await this.onCluster("collect", payload, helpers, async (clusterId) => {
-      await collectCluster(this.database.db, clusterId);
+      await collectCluster(this.database.db, clusterId, this.tunnels);
       // Only chase a collect that actually landed — re-analysing an unchanged
       // history just re-derives yesterday's answer.
       await helpers.addJob("classify", { clusterId });
@@ -62,7 +67,7 @@ export class ClusterTasksService {
   // window.
   async suggest(payload: unknown, helpers: JobHelpers): Promise<void> {
     await this.onCluster("suggest", payload, helpers, (clusterId) =>
-      suggestForCluster(this.database.db, clusterId),
+      suggestForCluster(this.database.db, clusterId, this.tunnels),
     );
   }
 
@@ -70,15 +75,15 @@ export class ClusterTasksService {
     await this.onCluster("apply", payload, helpers, async (clusterId) => {
       // Ahead of both, so a build asked for on an earlier tick is finished
       // before this pass decides anything new (#332).
-      await settleBuildsForCluster(this.database.db, clusterId);
-      await applyCluster(this.database.db, clusterId);
-      await applyCreatesForCluster(this.database.db, clusterId);
+      await settleBuildsForCluster(this.database.db, clusterId, this.tunnels);
+      await applyCluster(this.database.db, clusterId, this.tunnels);
+      await applyCreatesForCluster(this.database.db, clusterId, this.tunnels);
     });
   }
 
   async finalize(payload: unknown, helpers: JobHelpers): Promise<void> {
     await this.onCluster("finalize", payload, helpers, (clusterId) =>
-      finalizeCluster(this.database.db, clusterId),
+      finalizeCluster(this.database.db, clusterId, this.tunnels),
     );
   }
 
@@ -86,7 +91,7 @@ export class ClusterTasksService {
   // look for the missing index now rather than at the next hourly pass.
   async probe(payload: unknown, helpers: JobHelpers): Promise<void> {
     await this.onCluster("probe", payload, helpers, async (clusterId) => {
-      const findings = await probeCluster(this.database.db, clusterId);
+      const findings = await probeCluster(this.database.db, clusterId, this.tunnels);
       if (findings.length === 0) return;
       for (const finding of findings) {
         helpers.logger.info(

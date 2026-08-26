@@ -1,6 +1,7 @@
 import { inChangeWindow } from "../analysis";
 import type { Database } from "../db";
 import { actions, and, eq, inArray, policies, recommendations } from "../db";
+import type { TunnelRegistry } from "../tunnel/tunnel.registry";
 import { effectiveChangeWindow } from "./change-window";
 import { openClusterSession } from "./cluster-connection";
 
@@ -9,7 +10,15 @@ import { openClusterSession } from "./cluster-connection";
 // as DROP_REDUNDANT and routes them through the safe hide -> observe -> drop path.
 // At build time the collection's write latency is recorded as the baseline for
 // the post-build regression watch (finalize drops the index if writes regress).
-export async function applyCreatesForCluster(db: Database, clusterId: string): Promise<number> {
+export async function applyCreatesForCluster(
+  db: Database,
+  clusterId: string,
+  // The live tunnels, when this cluster is reached over one (#353).
+  // Optional because most callers have none and every cluster before
+  // #353 needs none; a cluster WITH a tunnel_id and no registry is
+  // refused rather than dialled directly.
+  tunnels?: TunnelRegistry,
+): Promise<number> {
   const approved = await db
     .select()
     .from(recommendations)
@@ -40,7 +49,7 @@ export async function applyCreatesForCluster(db: Database, clusterId: string): P
   const buildable = open ? approved : approved.filter((rec) => rec.urgent);
   if (buildable.length === 0) return 0;
 
-  const { session, readOnly, release } = await openClusterSession(db, clusterId);
+  const { session, readOnly, release } = await openClusterSession(db, clusterId, { tunnels });
   try {
     if (readOnly) return 0;
     const collector = session.collector;

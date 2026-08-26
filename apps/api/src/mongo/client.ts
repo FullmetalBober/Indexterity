@@ -1,7 +1,7 @@
 import { MongoClient } from "mongodb";
 import ConnectionString from "mongodb-connection-string-url";
 import { workerEnv } from "../config/env";
-import { NO_TLS_OVERRIDES, type TlsOverrides } from "../engine/ports";
+import { type DialProxy, NO_TLS_OVERRIDES, type TlsOverrides } from "../engine/ports";
 import { allowInsecureTls, InsecureConnectionError } from "../engine/tls";
 
 // Fail fast on unreachable clusters: 5s server selection instead of the driver's
@@ -147,10 +147,26 @@ export function assertTlsEnforced(value: string, overrides: TlsOverrides = NO_TL
 // `overrides` defaults to nothing turned off, so a caller that forgets them gets
 // the strict rule rather than a quiet exemption — the direction a default has to
 // fail in.
-export function mongoClient(uri: string, overrides: TlsOverrides = NO_TLS_OVERRIDES): MongoClient {
+export function mongoClient(
+  uri: string,
+  overrides: TlsOverrides = NO_TLS_OVERRIDES,
+  proxy?: DialProxy,
+): MongoClient {
   assertTlsEnforced(uri, overrides);
   return new MongoClient(uri, {
     serverSelectionTimeoutMS: SERVER_SELECTION_TIMEOUT_MS,
+    // The driver takes SOCKS natively, and hands the proxy the HOSTNAME from
+    // the string rather than an address it resolved — so a private replica
+    // set's member names are answered on the customer's side, which is the
+    // only side they mean anything on.
+    ...(proxy === undefined
+      ? {}
+      : {
+          proxyHost: proxy.host,
+          proxyPort: proxy.port,
+          proxyUsername: proxy.username,
+          proxyPassword: proxy.password,
+        }),
     // Bounded on purpose. The driver's default of 100 per client is a ceiling
     // nothing here approaches — the collectors fan out per replica-set member,
     // and each member has its own client — while the cost of it is paid twice:

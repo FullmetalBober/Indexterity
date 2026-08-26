@@ -16,6 +16,7 @@ import {
 } from "../db";
 import { emitClusterEvent } from "../events/emit";
 import { serializeSpec } from "../mongo";
+import type { TunnelRegistry } from "../tunnel/tunnel.registry";
 import { effectiveChangeWindow } from "./change-window";
 import { openClusterSession } from "./cluster-connection";
 import { historyWindow, planForCluster } from "./plan";
@@ -79,7 +80,15 @@ function applyResult(canHide: boolean, window: { days: number; reason: string | 
 // is the usage counters staying flat, which preflightDrop re-checks at the end.
 // Anything the threshold above promotes goes through the same gates as a drop
 // a human approved by hand.
-export async function applyCluster(db: Database, clusterId: string): Promise<number> {
+export async function applyCluster(
+  db: Database,
+  clusterId: string,
+  // The live tunnels, when this cluster is reached over one (#353).
+  // Optional because most callers have none and every cluster before
+  // #353 needs none; a cluster WITH a tunnel_id and no registry is
+  // refused rather than dialled directly.
+  tunnels?: TunnelRegistry,
+): Promise<number> {
   const [policy] = await db
     .select()
     .from(policies)
@@ -133,6 +142,7 @@ export async function applyCluster(db: Database, clusterId: string): Promise<num
   const { session, readOnly, observedDatabases, canHide, release } = await openClusterSession(
     db,
     clusterId,
+    { tunnels },
   );
   try {
     // Read-only clusters never execute writes.

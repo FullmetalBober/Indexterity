@@ -370,6 +370,46 @@ export const invites = pgTable(
 );
 
 // --- managed clusters ----------------------------------------------------
+// A WireGuard peering the control plane terminates in-process, so a cluster with
+// no public endpoint becomes reachable (#353).
+//
+// The whole wg0.conf is sealed as one blob rather than split into columns, and
+// that is deliberate. Only the [Interface] PrivateKey is a credential, so
+// storing the endpoint and AllowedIPs in the clear would be defensible — but
+// then two representations of one config exist and can drift, and the one that
+// drifts silently is the AllowedIPs the guard enforces against. Unsealing to
+// list them costs an AEAD decrypt.
+//
+// Orthogonal to connection_mode rather than a third value in it, which settles
+// #353's first open question. "Reached over a tunnel" and "reached via a relay
+// agent" are not mutually exclusive — an agent could itself sit behind a VPN —
+// and an enum forces a choice the domain does not.
+export const tunnels = pgTable(
+  "tunnels",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    // What the owner calls it, since one org may peer with several networks.
+    name: text("name").notNull(),
+    // The pasted wg0.conf, envelope-encrypted exactly as a connection string is
+    // (D8): it carries a private key of the same weight. keyVersion selects the
+    // master key that sealed it so the KEK can rotate without re-sealing.
+    sealedDek: bytea("sealed_dek").notNull(),
+    sealedData: bytea("sealed_data").notNull(),
+    keyVersion: integer("key_version").notNull().default(1),
+    createdAt,
+    updatedAt,
+  },
+  (table) => [
+    // One name per org, so the connect form can refer to a tunnel by something
+    // a person chose rather than by a uuid.
+    uniqueIndex("tunnels_org_name_key").on(table.orgId, table.name),
+    index("tunnels_org_idx").on(table.orgId),
+  ],
+);
+
 export const clusters = pgTable(
   "clusters",
   {
@@ -379,6 +419,15 @@ export const clusters = pgTable(
       .references(() => organizations.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
     connectionMode: connectionMode("connection_mode").notNull().default("HOSTED_DIRECT"),
+    // Which tunnel reaches this cluster, or null for the ordinary case of a
+    // cluster our egress can already open a socket to.
+    //
+    // RESTRICT rather than SET NULL on delete: a cluster silently losing its
+    // tunnel would keep its connection string and start being dialled directly,
+    // and the addresses in that string are private ones on somebody else's
+    // network. Refusing the delete makes the owner detach the clusters first,
+    // which is the decision they should be making anyway.
+    tunnelId: uuid("tunnel_id").references(() => tunnels.id, { onDelete: "restrict" }),
     // Which adapter dials this cluster (src/engine/registry.ts). Only MONGODB is
     // implemented today; the column makes the data model engine-ready.
     engine: clusterEngine("engine").notNull().default("MONGODB"),
@@ -456,6 +505,11 @@ export const clusters = pgTable(
   // rename for looking like one that already exists, which is a rule nobody
   // asked for.
   (table) => [
+    // Every foreign key gets one, and the integration suite enforces it: without
+    // it the RESTRICT on delete sequentially scans clusters, and so does every
+    // lookup of what a tunnel reaches. A product about index hygiene shipping an
+    // unindexed foreign key would be its own counterexample.
+    index("clusters_tunnel_idx").on(table.tunnelId),
     index("clusters_org").on(table.orgId),
     unique("clusters_org_name").on(table.orgId, table.name),
   ],

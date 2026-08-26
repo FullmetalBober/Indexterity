@@ -3,6 +3,8 @@ import { clusters, type Database, envKeyProvider, eq, open } from "../db";
 import { ObservedSession } from "../engine/observe";
 import type { ClusterEngine, EngineSession } from "../engine/ports";
 import { adapterFor } from "../engine/registry";
+import { proxyForCluster } from "../tunnel/resolve";
+import type { TunnelRegistry } from "../tunnel/tunnel.registry";
 import { acquireClusterSession } from "./connection-pool";
 
 // The stored credentials would not decrypt. Always a control-plane problem —
@@ -67,6 +69,11 @@ export interface OpenClusterOptions {
   // without having to know the filter exists, and so this comment is the only
   // place that has to argue for an exception.
   readonly allDatabases?: boolean;
+  // The live tunnels, when this cluster is reached over one (#353). Declared
+  // here rather than reached for through a module global, so a reader of this
+  // signature can see that a tunnelled cluster needs one — and so a test can
+  // supply a fake without remembering to reset anything afterwards.
+  readonly tunnels?: TunnelRegistry;
 }
 
 // The cluster row and the credentials it was sealed with.
@@ -108,11 +115,15 @@ export async function openClusterSession(
   options: OpenClusterOptions = {},
 ): Promise<ClusterSession> {
   const { cluster, connectionString: connString } = await unsealCluster(db, clusterId);
+  // Brings the tunnel up on first use if this cluster has one, and is null for
+  // every cluster that does not — which is all of them before #353.
+  const proxy = await proxyForCluster(db, cluster.tunnelId, options.tunnels);
   const { session, release } = await acquireClusterSession(
     clusterId,
     cluster.engine,
     connString,
     cluster.tlsOverrides,
+    proxy ?? undefined,
   );
   const observed = cluster.observedDatabases;
   return {

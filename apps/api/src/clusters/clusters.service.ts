@@ -6,7 +6,13 @@ import type { RequestActor } from "../audit/audit.types";
 import { currentKeyVersion, masterKeyBytesFor } from "../config/env";
 import { clusters, envKeyProvider, eq, seal, sql } from "../db";
 import { DatabaseService } from "../db/database.service";
-import { allowPrivateTargets, assertTargetsAllowed, BlockedTargetError } from "../engine/net-guard";
+import {
+  allowPrivateTargets,
+  assertDialTargetsAllowed,
+  BlockedTargetError,
+  type TunnelRoute,
+  TunnelTargetError,
+} from "../engine/net-guard";
 import { DatabaseInaccessibleError, NO_TLS_OVERRIDES, type TlsOverrides } from "../engine/ports";
 import { revokeCommandFor } from "../engine/provision";
 import { adapterFor, engineSupported, supportedEngines } from "../engine/registry";
@@ -154,6 +160,12 @@ export class ClustersService {
     // Undefined from a caller that has no opinion is stored as null, which is the
     // same behaviour every cluster had before the column existed.
     observedDatabases: string[] | null = null,
+    // The tunnel this cluster was connected THROUGH, so the collect that
+    // follows reaches it the same way the preflight just did (#353). Stored at
+    // connect rather than attached afterwards: a database with no public
+    // endpoint cannot be dialled at all without it, so a connect that had to
+    // succeed first would never happen for exactly the clusters this is for.
+    tunnelId: string | null = null,
   ): Promise<typeof clusters.$inferSelect> {
     const keyVersion = currentKeyVersion();
     const sealed = await seal(
@@ -181,6 +193,7 @@ export class ClustersService {
           credentialPosture,
           tlsOverrides,
           observedDatabases,
+          tunnelId,
         })
         .returning();
     } catch (error) {
@@ -231,6 +244,11 @@ export class ClustersService {
     value: string,
     errors: { BAD_REQUEST: (options: { message: string }) => Error },
     overrides: TlsOverrides = NO_TLS_OVERRIDES,
+    // How this cluster is reached, when it is not simply reachable: the
+    // tunnel's AllowedIPs, and a resolver that answers INSIDE it. Null is the
+    // default so a caller that forgets gets the stricter path, which is the
+    // direction a default has to fail in.
+    route: TunnelRoute | null = null,
   ): Promise<void> {
     if (!engineSupported(engine)) {
       throw errors.BAD_REQUEST({
@@ -248,9 +266,19 @@ export class ClustersService {
     await this.dialBudget.consume(userId);
     const { hosts, isSrv } = adapter.hostsOf(value);
     try {
-      await assertTargetsAllowed(hosts, isSrv, { allowPrivate: allowPrivateTargets() });
+      // One call, two routes, and which one is taken is the guard's business
+      // rather than this handler's. Both live side by side in
+      // engine/net-guard.ts so an auditor asking "what stops us dialling our
+      // own network" finds one place and sees both answers.
+      await assertDialTargetsAllowed(
+        hosts,
+        isSrv,
+        route === null
+          ? { kind: "direct", allowPrivate: allowPrivateTargets() }
+          : { kind: "tunnel", allowedIps: route.allowedIps, resolve: route.resolve },
+      );
     } catch (error) {
-      if (error instanceof BlockedTargetError) {
+      if (error instanceof BlockedTargetError || error instanceof TunnelTargetError) {
         throw errors.BAD_REQUEST({ message: error.message });
       }
       throw error;

@@ -1,4 +1,5 @@
 import { actions, and, type Database, eq, recommendations } from "../db";
+import type { TunnelRegistry } from "../tunnel/tunnel.registry";
 import { openClusterSession } from "./cluster-connection";
 
 // BUILDING -> ACTIVE, once the cluster says the index is really there (#332).
@@ -12,13 +13,21 @@ import { openClusterSession } from "./cluster-connection";
 // Runs at the START of the apply task, ahead of new builds: a row still building
 // is one this cluster is already paying for, and settling it first is what keeps
 // the next pass from proposing around a half-finished index.
-export async function settleBuildsForCluster(db: Database, clusterId: string): Promise<number> {
+export async function settleBuildsForCluster(
+  db: Database,
+  clusterId: string,
+  // The live tunnels, when this cluster is reached over one (#353).
+  // Optional because most callers have none and every cluster before
+  // #353 needs none; a cluster WITH a tunnel_id and no registry is
+  // refused rather than dialled directly.
+  tunnels?: TunnelRegistry,
+): Promise<number> {
   const building = await db
     .select()
     .from(recommendations)
     .where(and(eq(recommendations.clusterId, clusterId), eq(recommendations.state, "BUILDING")));
   if (building.length === 0) return 0;
-  const { session, release } = await openClusterSession(db, clusterId);
+  const { session, release } = await openClusterSession(db, clusterId, { tunnels });
   try {
     const executor = session.executor(false);
     const settle = executor.settleBuild?.bind(executor);

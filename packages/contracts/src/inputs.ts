@@ -81,10 +81,18 @@ export const observedDatabasesInput = z.object({
   databases: observedDatabases.nullable(),
 });
 
+// Which tunnel reaches this cluster (#353). On the CONNECT input and not only
+// on a later edit, because a database with no public endpoint cannot be dialled
+// at all without it — checking the connection first and attaching the tunnel
+// afterwards would mean the check could never pass for exactly the clusters
+// this feature exists for.
+export const tunnelSelection = z.uuid().nullable().optional();
+
 export const createClusterInput = z.object({
   name: clusterName,
   connectionString,
   engine: clusterEngine.optional(),
+  tunnelId: tunnelSelection,
   observedDatabases: observedDatabases.optional(),
   // Absent means all three off, which is what an older client and a plain
   // scripted connect both mean.
@@ -94,6 +102,7 @@ export const createClusterInput = z.object({
 export const checkConnectionInput = z.object({
   connectionString,
   engine: clusterEngine.optional(),
+  tunnelId: tunnelSelection,
   // Sent on a SECOND check, not the first: the first has no list to choose from
   // yet. It changes the verdict rather than only the plan — mongo's anyDb
   // requirements pass when every database in scope is covered (diagnose.ts,
@@ -108,6 +117,7 @@ export const checkConnectionInput = z.object({
 });
 
 export const provisionClusterInput = z.object({
+  tunnelId: tunnelSelection,
   name: clusterName,
   adminConnectionString: connectionString,
   // Stored on the row, and that is all it does here — it does NOT narrow what the
@@ -184,3 +194,20 @@ export const changePasswordInput = z.object({
 });
 // The same email rule sign-up applies — a change is a sign-up for the address.
 export const changeEmailInput = z.object({ newEmail: emailAddress });
+
+// The whole wg0.conf, pasted. Deliberately one textarea rather than a field per
+// directive: it is what a VPN admin exports and what they can paste without
+// transcribing, and the api parses it strictly so a config that means something
+// other than what its author read is refused rather than half-accepted.
+export const createTunnelInput = z.object({
+  name: z.string().trim().min(1, "Name this tunnel").max(80),
+  config: z
+    .string()
+    .min(1, "Paste the wg0.conf your VPN gave you")
+    // Enough to catch an empty paste or the wrong file; the real validation is
+    // the parser's, and its refusals name the exact directive.
+    .max(16_384, "That is larger than any WireGuard config"),
+});
+
+// Which tunnel reaches a cluster, or null to dial it directly.
+export const clusterTunnelInput = z.object({ tunnelId: z.uuid().nullable() });

@@ -43,6 +43,18 @@ function SettingsLayout() {
         >
           Organizations
         </Link>
+        {/* Shown to members too, for the same reason as Security below: the
+            list is readable by anyone in the org and only the form is
+            owner-only, so a tab that vanished would read as "we do not do
+            VPNs". */}
+        <Link
+          to="/app/settings/tunnels"
+          activeProps={TAB_ACTIVE}
+          inactiveProps={TAB_INACTIVE}
+          className={TAB}
+        >
+          VPN tunnels
+        </Link>
         <Link
           to="/app/settings/account"
           activeProps={TAB_ACTIVE}

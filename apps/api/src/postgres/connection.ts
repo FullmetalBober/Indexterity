@@ -1,5 +1,5 @@
 import type { Pool, PoolClient } from "pg";
-import type { TlsOverrides } from "../engine/ports";
+import type { DialProxy, TlsOverrides } from "../engine/ports";
 import { pgPool } from "./client";
 import { parsePgConnString, pgHosts, withPgDatabase } from "./conn-string";
 import { type PostgresServerVersion, parsePostgresVersion } from "./version";
@@ -57,6 +57,7 @@ export class PostgresConnection {
   constructor(
     private readonly connectionString: string,
     private readonly overrides?: TlsOverrides,
+    private readonly proxy?: DialProxy,
   ) {}
 
   // The database the pasted string itself names, which is where cluster-wide
@@ -76,7 +77,7 @@ export class PostgresConnection {
     // into a different keyword-form string for no reason.
     const target =
       database === "" ? this.connectionString : withPgDatabase(this.connectionString, database);
-    const pool = await pgPool(target, this.overrides);
+    const pool = await pgPool(target, this.overrides, undefined, this.proxy);
     this.pools.set(database, pool);
     return pool;
   }

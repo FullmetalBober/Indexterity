@@ -85,6 +85,19 @@ export class TunnelRegistry implements OnApplicationShutdown {
     return { host: "127.0.0.1", port: socks.port, credentials: socks.credentials };
   }
 
+  /**
+   * Resolve a name inside a tunnel, on the customer's own resolver.
+   *
+   * Exposed so the CONNECT path can judge a hostname before storing the
+   * cluster, against the same answers the dial will get. Throws when the tunnel
+   * is not up, which the caller treats as "cannot check" rather than "allowed".
+   */
+  async resolve(id: string, host: string): Promise<readonly string[]> {
+    const tunnel = this.#tunnels.get(id);
+    if (tunnel === undefined) throw new Error("tunnel is not up");
+    return tunnel.netstack.resolve(host);
+  }
+
   endpoint(id: string): TunnelEndpoint | null {
     const tunnel = this.#tunnels.get(id);
     if (tunnel === undefined) return null;

@@ -48,14 +48,18 @@ data. [Connecting a cluster](https://github.com/FullmetalBober/Indexterity/wiki/
 has the detail.
 
 A cluster has to be reachable from wherever Indexterity runs, and a database
-with no public endpoint is not. Self-hosted, that is a values change rather than
-a feature: run a WireGuard client as a sidecar beside the api and set
-`config.allowPrivateClusterTargets=true`, and a VPC-only or on-prem cluster
-becomes connectable with nothing in the app changed — the chart README's
-[Reaching a database over a VPN](./deploy/helm/indexterity/README.md#reaching-a-database-over-a-vpn)
-has the recipe. The tunnel changes which addresses are reachable and nothing
-else: TLS is still required, cloud metadata is still refused, and the connection
-string is still stored and opened here.
+with no public endpoint is not. **Paste the WireGuard config its network already
+uses** and Indexterity terminates the peering itself — in-process, in userspace,
+needing no privileges and nothing extra running on your side. Register it under
+Settings → VPN tunnels, pick it on the connect form, and a VPC-only or on-prem
+cluster connects like any other.
+
+The tunnel changes which addresses are reachable and nothing else: TLS is still
+required, cloud metadata is still refused whatever route reaches it, and the
+connection string is still stored and opened here. Self-hosted installs that
+would rather route at the node have a
+[sidecar recipe](./deploy/helm/indexterity/README.md#reaching-a-database-over-a-vpn)
+instead.
 
 ## Licence
 

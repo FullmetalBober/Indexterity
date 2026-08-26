@@ -1,11 +1,22 @@
 import { Module } from "@nestjs/common";
+import { DatabaseModule } from "../db/database.module";
+import { TenancyModule } from "../http/tenancy.module";
+import { TunnelController } from "./tunnel.controller";
 import { TunnelRegistry } from "./tunnel.registry";
+import { TunnelService } from "./tunnel.service";
 
-// One provider, exported. There is no controller here on purpose: a tunnel is
-// not a resource anybody addresses directly — it is how a cluster is reached,
-// so it is registered and inspected through the cluster that owns it.
+// The registry is exported because the job pipeline reaches it (through
+// tunnel/current.ts) and because nothing else should construct a second one.
+//
+// No ClustersModule import, deliberately: assigning a tunnel to a cluster is a
+// route on ClustersController, so the dependency runs one way — clusters know
+// about tunnels, tunnels do not know about clusters. Putting that route here
+// made the two modules import each other, and a forwardRef would have hidden
+// the cycle rather than removed it.
 @Module({
-  providers: [TunnelRegistry],
-  exports: [TunnelRegistry],
+  imports: [DatabaseModule, TenancyModule],
+  controllers: [TunnelController],
+  providers: [TunnelRegistry, TunnelService],
+  exports: [TunnelRegistry, TunnelService],
 })
 export class TunnelModule {}

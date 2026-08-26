@@ -1,4 +1,5 @@
 import type {
+  DialProxy,
   EngineAdapter,
   EngineSession,
   IndexCollector,
@@ -67,8 +68,16 @@ export const mssqlAdapter: EngineAdapter = {
   hostsOf: mssqlHosts,
   assertSecureTransport: assertMssqlTlsEnforced,
   applySecureTransport: applyMssqlTlsOverrides,
-  open: async (connectionString: string, overrides?: TlsOverrides): Promise<EngineSession> => {
-    const conn = new MssqlConnection(connectionString, overrides);
+  open: async (
+    connectionString: string,
+    overrides?: TlsOverrides,
+    proxy?: DialProxy,
+  ): Promise<EngineSession> => {
+    const conn = new MssqlConnection(
+      connectionString,
+      overrides,
+      proxy === undefined ? undefined : { proxy },
+    );
     await conn.connect();
     return new MssqlEngineSession(conn, connectionString, overrides);
   },

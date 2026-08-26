@@ -1,4 +1,4 @@
-import type { ConnectionDiagnosis, PrivilegeCheck, TlsOverrides } from "../engine/ports";
+import type { ConnectionDiagnosis, DialProxy, PrivilegeCheck, TlsOverrides } from "../engine/ports";
 import { pgConnStringUsername } from "./conn-string";
 import { PostgresConnection } from "./connection";
 import {
@@ -51,9 +51,11 @@ export async function diagnosePostgresConnection(
   connectionString: string,
   overrides?: TlsOverrides,
   observedDatabases?: readonly string[] | null,
+  // Route the dial through a tunnel when this cluster needs one (#353).
+  proxy?: DialProxy,
 ): Promise<ConnectionDiagnosis> {
   const username = pgConnStringUsername(connectionString);
-  const conn = new PostgresConnection(connectionString, overrides);
+  const conn = new PostgresConnection(connectionString, overrides, proxy);
   try {
     await conn.connect();
     const probe = await readProbe(conn);
