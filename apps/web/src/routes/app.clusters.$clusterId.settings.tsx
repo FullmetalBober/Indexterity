@@ -8,6 +8,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { ClusterConnection } from "~/components/app/cluster-connection";
 import { ClusterName } from "~/components/app/cluster-name";
+import { ClusterTunnel } from "~/components/app/cluster-tunnel";
 import { ObserveSection, ObserveSectionSkeleton } from "~/components/app/observe-section";
 import { PolicySection, PolicySectionSkeleton } from "~/components/app/policy-section";
 import { Unavailable } from "~/components/app/unavailable";
@@ -80,6 +81,13 @@ function ClusterSettings() {
       ) : databases.pending ? (
         <ObserveSectionSkeleton />
       ) : null}
+      {cluster === null ? null : (
+        <ClusterTunnel
+          clusterId={cluster.id}
+          tunnelId={cluster.tunnelId}
+          canEdit={org?.role === "owner"}
+        />
+      )}
       {cluster === null ? null : (
         <ClusterConnection
           cluster={cluster}

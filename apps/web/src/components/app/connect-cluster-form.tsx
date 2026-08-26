@@ -36,6 +36,7 @@ import {
   useProvisionCluster,
 } from "~/lib/queries/mutations/cluster";
 import { useEngines } from "~/lib/queries/shell";
+import { useTunnels } from "~/lib/queries/tunnels";
 import { CLUSTER_USER_DOCS_HREF } from "~/lib/site";
 
 // The api's own rules for these two fields, so a string it will refuse for being
@@ -296,6 +297,12 @@ export function ConnectClusterForm({
   // store deliberately: they are not validated fields, and the two buttons under
   // a diagnosis read them at click time the same way the credentials are read.
   const [tls, setTls] = useState<TlsOverrides>(NO_TLS_OVERRIDES);
+  // Which tunnel to reach this cluster through (#353). Part of the CHECK and
+  // not only of the connect: a database with no public endpoint cannot be
+  // reached by the preflight either, so attaching a tunnel afterwards would
+  // mean the check could never pass for the clusters this exists for.
+  const [tunnelId, setTunnelId] = useState<string | null>(null);
+  const tunnels = useTunnels();
   // What the typed string looks like, and — only when it looks like nothing —
   // which engine the reader said it is.
   const [hint, setHint] = useState<EngineHint>(null);
@@ -361,6 +368,11 @@ export function ConnectClusterForm({
         connectionString: value.connectionString,
         tlsOverrides: tls,
         engine: engineOverride(),
+        // Absent rather than null when dialling directly, the same way
+        // observedDatabases is absent when everything is observed: the api
+        // reads a missing field as "no tunnel", so sending one would only add a
+        // key to every ordinary connect.
+        ...(tunnelId === null ? {} : { tunnelId }),
       }),
   });
 
@@ -395,6 +407,7 @@ export function ConnectClusterForm({
     // api stores null for that, and null is what keeps a database added next month
     // observed as well.
     observedDatabases: observed === null ? undefined : [...observed],
+    ...(tunnelId === null ? {} : { tunnelId }),
   });
 
   // Whether the answer on screen was computed for the databases now ticked. Both
@@ -422,6 +435,7 @@ export function ConnectClusterForm({
       tlsOverrides: tls,
       engine: engineOverride(),
       observedDatabases: observed === null ? undefined : [...observed],
+      ...(tunnelId === null ? {} : { tunnelId }),
     });
   }
 
@@ -592,6 +606,37 @@ export function ConnectClusterForm({
           ) : null}
         </div>
 
+        {/* Above the certificate boxes, because it decides whether the dial
+            happens at all rather than how it is verified. Hidden entirely when
+            the org has no tunnels: a picker with one option is a question
+            nobody needs to be asked. */}
+        {tunnels.data.length > 0 ? (
+          <fieldset className="space-y-2">
+            <legend className="font-medium text-sm">
+              How to reach it{" "}
+              <span className="font-normal text-muted-foreground">
+                — leave this alone unless the database has no public endpoint
+              </span>
+            </legend>
+            <Select
+              value={tunnelId ?? "__direct__"}
+              onValueChange={(value) => setTunnelId(value === "__direct__" ? null : value)}
+            >
+              <SelectTrigger className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__direct__">Directly, from our own network</SelectItem>
+                {tunnels.data.map((tunnel) => (
+                  <SelectItem key={tunnel.id} value={tunnel.id}>
+                    Through {tunnel.name} — {tunnel.endpoint}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </fieldset>
+        ) : null}
+
         {/* Under the string, not beside it: these describe the connection the
             string makes, and each one gives up a check that TLS is otherwise
             there to perform. Refused outright unless ticked (mongo/client.ts),
@@ -760,6 +805,7 @@ export function ConnectClusterForm({
                         // databases that exist now, so the selection stays
                         // editable afterwards (#244).
                         observedDatabases: observed === null ? undefined : [...observed],
+                        ...(tunnelId === null ? {} : { tunnelId }),
                       });
                     }}
                   >

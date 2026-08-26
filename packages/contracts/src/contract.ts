@@ -2,7 +2,9 @@ import { eventIterator, oc } from "@orpc/contract";
 import { z } from "zod";
 import {
   checkConnectionInput,
+  clusterTunnelInput,
   createClusterInput,
+  createTunnelInput,
   observedDatabasesInput,
   orgPolicyInput,
   policyKnobsInput,
@@ -35,6 +37,7 @@ import {
   recommendation,
   securityTrail,
   supportedEngine,
+  tunnelView,
 } from "./schemas.js";
 
 const clusterId = z.object({ clusterId: z.uuid() });
@@ -459,6 +462,50 @@ export const contract = {
     })
     .input(orgPolicyInput)
     .output(orgPolicyView),
+
+  // Tunnels (#353). Org-scoped rather than cluster-scoped, because one peering
+  // commonly reaches several clusters on the same network and duplicating the
+  // config per cluster would mean rotating a key in N places.
+  listTunnels: oc
+    .route({
+      method: "GET",
+      path: "/tunnels",
+      summary: "The org's WireGuard tunnels, with handshake health and how many clusters use each",
+    })
+    .output(z.array(tunnelView)),
+
+  createTunnel: oc
+    .route({
+      method: "POST",
+      path: "/tunnels",
+      summary: "Register a WireGuard peering from a pasted wg0.conf (owner only)",
+    })
+    // BAD_REQUEST carries the parser's own sentence — which directive was wrong
+    // and why — because "invalid config" is useless to somebody holding a file
+    // they did not write.
+    .errors({ BAD_REQUEST: {}, CONFLICT: {} })
+    .input(createTunnelInput)
+    .output(tunnelView),
+
+  deleteTunnel: oc
+    .route({
+      method: "DELETE",
+      path: "/tunnels/{tunnelId}",
+      summary: "Remove a tunnel; refused while any cluster is still reached through it",
+    })
+    .errors({ NOT_FOUND: {}, CONFLICT: {} })
+    .input(z.object({ tunnelId: z.uuid() }))
+    .output(z.object({ deleted: z.literal(true) })),
+
+  setClusterTunnel: oc
+    .route({
+      method: "PUT",
+      path: "/clusters/{clusterId}/tunnel",
+      summary: "Choose which tunnel reaches this cluster, or null to dial it directly (owner only)",
+    })
+    .errors({ NOT_FOUND: {}, BAD_REQUEST: {} })
+    .input(clusterId.extend(clusterTunnelInput.shape))
+    .output(cluster),
 
   listOrgs: oc
     .route({

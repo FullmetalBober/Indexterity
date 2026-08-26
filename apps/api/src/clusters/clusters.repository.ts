@@ -109,6 +109,20 @@ export class ClustersRepository {
     return row;
   }
 
+  // Which tunnel reaches this cluster, or null to dial it directly (#353).
+  async setTunnel(
+    clusterId: string,
+    orgId: string,
+    tunnelId: string | null,
+  ): Promise<ClusterRow | undefined> {
+    const [row] = await this.db
+      .update(clusters)
+      .set({ tunnelId })
+      .where(this.owned(clusterId, orgId))
+      .returning();
+    return row;
+  }
+
   async setMode(
     clusterId: string,
     orgId: string,

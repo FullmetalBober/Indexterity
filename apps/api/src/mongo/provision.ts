@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { type Db, MongoServerError } from "mongodb";
 import ConnectionString from "mongodb-connection-string-url";
 import { z } from "zod";
-import type { ProvisionedUser, TlsOverrides } from "../engine/ports";
+import type { DialProxy, ProvisionedUser, TlsOverrides } from "../engine/ports";
 import {
   alreadyProvisionedMessage,
   ProvisionDeniedError,
@@ -160,10 +160,12 @@ async function upsertEngineRole(admin: Db): Promise<void> {
 export async function provisionScopedUser(
   adminUri: string,
   overrides?: TlsOverrides,
+  // Route the admin dial through a tunnel when the cluster needs one (#353).
+  proxy?: DialProxy,
 ): Promise<ProvisionedUser> {
   const username = SCOPED_USERNAME;
   const password = randomBytes(24).toString("base64url");
-  const adminClient = mongoClient(adminUri, overrides);
+  const adminClient = mongoClient(adminUri, overrides, proxy);
   try {
     const admin = adminClient.db("admin");
     if (await scopedUserExists(admin)) {
@@ -191,7 +193,8 @@ export async function provisionScopedUser(
     }
     const connectionString = scopedConnString(adminUri, username, password);
     // Prove the scoped credentials authenticate before storing anything.
-    const probe = mongoClient(connectionString, overrides);
+    // The probe verifies the user we just made, so it goes the same way.
+    const probe = mongoClient(connectionString, overrides, proxy);
     try {
       await probe.db("admin").command({ ping: 1 });
     } catch (error) {

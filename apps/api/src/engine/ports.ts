@@ -405,6 +405,7 @@ export interface EngineAdapter {
     connectionString: string,
     overrides?: TlsOverrides,
     observedDatabases?: readonly string[] | null,
+    proxy?: DialProxy,
   ): Promise<ConnectionDiagnosis>;
   // Use an admin string ONCE to create the least-privilege user this engine
   // would rather run as, and return that user's string. The admin string is
@@ -425,6 +426,7 @@ export interface EngineAdapter {
   provisionScopedUser?(
     adminConnectionString: string,
     overrides?: TlsOverrides,
+    proxy?: DialProxy,
   ): Promise<ProvisionedUser>;
   // The statement(s) that remove the scoped user, for the disconnect screen and
   // the already-provisioned refusal. Handed to the operator rather than run:

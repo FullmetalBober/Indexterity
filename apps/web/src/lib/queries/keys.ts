@@ -89,4 +89,8 @@ export const queryKeys = {
   // rotation replaces the credentials this describes, so that one invalidates it
   // on purpose.
   clusterPrivileges: (clusterId: string | null) => ["cluster-privileges", clusterId] as const,
+  // The org's WireGuard tunnels (#353). Org-scoped, not per cluster: one peering
+  // commonly reaches several, and the list carries live handshake health, so it
+  // must not be swept by every cluster-level write.
+  tunnels: () => ["tunnels"] as const,
 };

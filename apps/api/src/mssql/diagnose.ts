@@ -1,5 +1,5 @@
 import { scopeForDiagnosis } from "../engine/observe";
-import type { ConnectionDiagnosis, PrivilegeCheck, TlsOverrides } from "../engine/ports";
+import type { ConnectionDiagnosis, DialProxy, PrivilegeCheck, TlsOverrides } from "../engine/ports";
 import { asNumber, MssqlConnection, quoteIdent } from "./connection";
 import { mssqlVersionRefusal } from "./version";
 
@@ -414,8 +414,14 @@ export async function diagnoseMssqlConnection(
   // round trip below, so a twelve-database server narrowed to one is eleven
   // fewer.
   observedDatabases?: readonly string[] | null,
+  // Route the dial through a tunnel when this cluster needs one (#353).
+  proxy?: DialProxy,
 ): Promise<ConnectionDiagnosis> {
-  const conn = new MssqlConnection(connectionString, overrides);
+  const conn = new MssqlConnection(
+    connectionString,
+    overrides,
+    proxy === undefined ? undefined : { proxy },
+  );
   try {
     await conn.connect();
     // Version first: below the floor nothing else matters, and saying so at

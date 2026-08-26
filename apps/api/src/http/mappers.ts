@@ -54,6 +54,7 @@ export function toCluster(
     connectionMode: row.connectionMode,
     engine: row.engine,
     readOnly: row.readOnly,
+    tunnelId: row.tunnelId,
     provisionedUsername: row.provisionedUsername,
     revokeCommand: revokeCommandFor(row.engine, row.provisionedUsername, row.provisionedDatabases),
     credentialPosture: row.credentialPosture,

@@ -155,6 +155,12 @@ export class ClustersService {
     // Undefined from a caller that has no opinion is stored as null, which is the
     // same behaviour every cluster had before the column existed.
     observedDatabases: string[] | null = null,
+    // The tunnel this cluster was connected THROUGH, so the collect that
+    // follows reaches it the same way the preflight just did (#353). Stored at
+    // connect rather than attached afterwards: a database with no public
+    // endpoint cannot be dialled at all without it, so a connect that had to
+    // succeed first would never happen for exactly the clusters this is for.
+    tunnelId: string | null = null,
   ): Promise<typeof clusters.$inferSelect> {
     const keyVersion = currentKeyVersion();
     const sealed = await seal(
@@ -182,6 +188,7 @@ export class ClustersService {
           credentialPosture,
           tlsOverrides,
           observedDatabases,
+          tunnelId,
         })
         .returning();
     } catch (error) {

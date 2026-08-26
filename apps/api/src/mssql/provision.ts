@@ -1,5 +1,5 @@
 import { randomInt } from "node:crypto";
-import type { ProvisionedUser, TlsOverrides } from "../engine/ports";
+import type { DialProxy, ProvisionedUser, TlsOverrides } from "../engine/ports";
 import {
   alreadyProvisionedMessage,
   ProvisionDeniedError,
@@ -160,10 +160,16 @@ function inDatabase(database: string, statement: string): string {
 export async function provisionMssqlScopedUser(
   adminUri: string,
   overrides?: TlsOverrides,
+  // Route the admin dial through a tunnel when the cluster needs one (#353).
+  proxy?: DialProxy,
 ): Promise<ProvisionedUser> {
   const username = SCOPED_USERNAME;
   const password = scopedPassword();
-  const admin = new MssqlConnection(adminUri, overrides);
+  const admin = new MssqlConnection(
+    adminUri,
+    overrides,
+    proxy === undefined ? undefined : { proxy },
+  );
   const created: string[] = [];
   try {
     await admin.connect();
@@ -230,7 +236,12 @@ export async function provisionMssqlScopedUser(
     // Prove the scoped credentials authenticate before anything is stored. A
     // login that cannot connect is worse than no provisioning at all: the admin
     // string is already gone by the time anyone would notice.
-    const probe = new MssqlConnection(connectionString, overrides);
+    // The probe verifies the user we just made, so it goes the same way.
+    const probe = new MssqlConnection(
+      connectionString,
+      overrides,
+      proxy === undefined ? undefined : { proxy },
+    );
     try {
       await probe.connect();
       await probe.ping();

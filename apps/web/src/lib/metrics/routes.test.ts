@@ -20,6 +20,7 @@ describe("route patterns from the generated tree", () => {
       "/app/settings/account",
       "/app/settings/organizations",
       "/app/settings/security",
+      "/app/settings/tunnels",
       "/reset-password",
       "/verified",
     ]);

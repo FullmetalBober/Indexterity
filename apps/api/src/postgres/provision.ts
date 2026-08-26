@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import type { ProvisionedUser, TlsOverrides } from "../engine/ports";
+import type { DialProxy, ProvisionedUser, TlsOverrides } from "../engine/ports";
 import {
   alreadyProvisionedMessage,
   ProvisionDeniedError,
@@ -82,10 +82,12 @@ export const PROVISION_REFUSAL =
 export async function provisionPostgresScopedUser(
   adminConnectionString: string,
   overrides?: TlsOverrides,
+  // Route the admin dial through a tunnel when the cluster needs one (#353).
+  proxy?: DialProxy,
 ): Promise<ProvisionedUser> {
   const username = SCOPED_USERNAME;
   const password = scopedPassword();
-  const admin = new PostgresConnection(adminConnectionString, overrides);
+  const admin = new PostgresConnection(adminConnectionString, overrides, proxy);
   let roleCreated = false;
   try {
     await admin.connect();
