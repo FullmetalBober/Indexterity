@@ -1,4 +1,5 @@
 import type {
+  DialProxy,
   EngineAdapter,
   EngineSession,
   IndexCollector,
@@ -61,8 +62,12 @@ export const mongoAdapter: EngineAdapter = {
   hostsOf: mongoHosts,
   assertSecureTransport: assertTlsEnforced,
   applySecureTransport: applyTlsOverrides,
-  open: async (connectionString: string, overrides?: TlsOverrides): Promise<EngineSession> => {
-    const conn = new MongoConnection(connectionString, overrides);
+  open: async (
+    connectionString: string,
+    overrides?: TlsOverrides,
+    proxy?: DialProxy,
+  ): Promise<EngineSession> => {
+    const conn = new MongoConnection(connectionString, overrides, proxy);
     await conn.connect();
     return new MongoEngineSession(conn, connectionString, overrides);
   },

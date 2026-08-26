@@ -1,10 +1,10 @@
 import net from "node:net";
 import { Duplex } from "node:stream";
 import { SocksClient } from "socks";
-import type { TunnelEndpoint } from "./tunnel.registry";
+import type { DialProxy } from "./ports";
 
-// Turns a tunnel's loopback SOCKS5 endpoint into the shape each driver's dial
-// hook wants. Three engines, two shapes, and the difference is not cosmetic.
+// Turns a loopback SOCKS5 endpoint into the shape each driver's dial hook
+// wants. Three engines, two shapes, and the difference is not cosmetic.
 //
 // Measured against real servers before any of this was written (mongod 7.0.39,
 // PostgreSQL 18.6, SQL Server 2022 CU26): all three complete a dial through a
@@ -14,17 +14,17 @@ import type { TunnelEndpoint } from "./tunnel.registry";
 // side where a private replica set's member names mean something.
 
 /** MongoDB takes SOCKS natively; these go straight into MongoClientOptions. */
-export function mongoProxyOptions(endpoint: TunnelEndpoint): {
+export function mongoProxyOptions(proxy: DialProxy): {
   proxyHost: string;
   proxyPort: number;
   proxyUsername: string;
   proxyPassword: string;
 } {
   return {
-    proxyHost: endpoint.host,
-    proxyPort: endpoint.port,
-    proxyUsername: endpoint.credentials.username,
-    proxyPassword: endpoint.credentials.password,
+    proxyHost: proxy.host,
+    proxyPort: proxy.port,
+    proxyUsername: proxy.username,
+    proxyPassword: proxy.password,
   };
 }
 
@@ -37,16 +37,16 @@ export function mongoProxyOptions(endpoint: TunnelEndpoint): {
  * tunnelled SQL Server has to be addressed by port, not by instance name.
  */
 export function mssqlConnector(
-  endpoint: TunnelEndpoint,
+  proxy: DialProxy,
 ): (options: { host: string; port: number }) => Promise<net.Socket> {
   return async ({ host, port }) => {
     const { socket } = await SocksClient.createConnection({
       proxy: {
-        host: endpoint.host,
-        port: endpoint.port,
+        host: proxy.host,
+        port: proxy.port,
         type: 5,
-        userId: endpoint.credentials.username,
-        password: endpoint.credentials.password,
+        userId: proxy.username,
+        password: proxy.password,
       },
       command: "connect",
       destination: { host, port },
@@ -67,19 +67,19 @@ export function mssqlConnector(
  * any Duplex, so pg's TLS upgrade survives it — verified against a TLS-enabled
  * server, with pg_stat_ssl.ssl true through the tunnel.
  */
-export function pgStreamFactory(endpoint: TunnelEndpoint): () => Duplex {
-  return () => new TunnelStream(endpoint);
+export function pgStreamFactory(proxy: DialProxy): () => Duplex {
+  return () => new SocksStream(proxy);
 }
 
-class TunnelStream extends Duplex {
-  #endpoint: TunnelEndpoint;
+class SocksStream extends Duplex {
+  #proxy: DialProxy;
   #socket: net.Socket | null = null;
   #wantsRead = false;
   #failure: Error | null = null;
 
-  constructor(endpoint: TunnelEndpoint) {
+  constructor(proxy: DialProxy) {
     super();
-    this.#endpoint = endpoint;
+    this.#proxy = proxy;
   }
 
   // pg calls these before it knows anything about the socket; they are the
@@ -103,11 +103,11 @@ class TunnelStream extends Duplex {
   connect(port: number, host: string): this {
     void SocksClient.createConnection({
       proxy: {
-        host: this.#endpoint.host,
-        port: this.#endpoint.port,
+        host: this.#proxy.host,
+        port: this.#proxy.port,
         type: 5,
-        userId: this.#endpoint.credentials.username,
-        password: this.#endpoint.credentials.password,
+        userId: this.#proxy.username,
+        password: this.#proxy.password,
       },
       command: "connect",
       destination: { host, port },
@@ -152,7 +152,7 @@ class TunnelStream extends Duplex {
   ): void {
     const socket = this.#socket;
     if (socket === null) {
-      callback(new Error("wrote to the tunnel before it was connected"));
+      callback(new Error("wrote to the proxy before it was connected"));
       return;
     }
     // node's socket callback is (err?: Error | null); the stream's is

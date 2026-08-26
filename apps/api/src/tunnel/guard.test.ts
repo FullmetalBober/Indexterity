@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { assertDialableThroughTunnel, parseCidr, TunnelTargetError, withinCidr } from "./guard";
+import {
+  assertDialableThroughTunnel,
+  assertTunnelHostsAllowed,
+  parseCidr,
+  TunnelTargetError,
+  withinCidr,
+} from "./guard";
 
 const cidrs = (...entries: string[]) => entries.map(parseCidr);
 
@@ -78,5 +84,45 @@ describe("assertDialableThroughTunnel", () => {
 
   it("refuses everything when AllowedIPs is empty", () => {
     expect(() => assertDialableThroughTunnel("10.0.0.1", [])).toThrow(/outside this tunnel/);
+  });
+});
+
+describe("assertTunnelHostsAllowed", () => {
+  const allowed = ["10.0.0.0/8"];
+
+  it("allows a literal inside AllowedIPs", () => {
+    expect(() => assertTunnelHostsAllowed(["10.1.2.3:27017"], allowed)).not.toThrow();
+  });
+
+  it("refuses a literal outside AllowedIPs", () => {
+    expect(() => assertTunnelHostsAllowed(["192.168.1.1:27017"], allowed)).toThrow(
+      /outside this tunnel/,
+    );
+  });
+
+  it("refuses cloud metadata even when the tunnel routes everything", () => {
+    expect(() => assertTunnelHostsAllowed(["169.254.169.254:80"], ["0.0.0.0/0"])).toThrow(
+      /never a database/,
+    );
+  });
+
+  it("keeps a bracketed IPv6 literal intact rather than splitting it on a colon", () => {
+    expect(() => assertTunnelHostsAllowed(["[fd00::1]:27017"], ["fd00::/8"])).not.toThrow();
+    expect(() => assertTunnelHostsAllowed(["[fe80::1]:27017"], ["::/0"])).toThrow(
+      /never a database/,
+    );
+  });
+
+  // The deliberate hole, and it is not a hole. A name is resolved by the
+  // customer's resolver at dial time and judged there; resolving it here would
+  // either fail or answer about a different host.
+  it("lets a name through, to be judged when the tunnel resolves it", () => {
+    expect(() => assertTunnelHostsAllowed(["mongo-0.internal:27017"], allowed)).not.toThrow();
+  });
+
+  it("checks every host in a multi-host string", () => {
+    expect(() =>
+      assertTunnelHostsAllowed(["10.0.0.1:27017", "192.168.0.1:27018"], allowed),
+    ).toThrow(/outside this tunnel/);
   });
 });

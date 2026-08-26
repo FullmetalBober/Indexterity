@@ -27,6 +27,22 @@ export interface TlsOverrides {
   readonly insecure: boolean;
 }
 
+// Where a dial is routed, when the cluster is not reachable from our own egress.
+//
+// A SOCKS5 endpoint rather than "a tunnel", deliberately. A WireGuard peering
+// terminated in-process is one way to produce one (#353) and a relay agent the
+// customer runs would be another (#272); the adapters should not learn the
+// difference between them, and this way the second costs nothing here.
+//
+// Loopback in both cases — it addresses something inside this process — so it
+// is never itself a target the network guard has to vet.
+export interface DialProxy {
+  readonly host: string;
+  readonly port: number;
+  readonly username: string;
+  readonly password: string;
+}
+
 // The strict default, and the value an older client or a scripted connect means
 // by saying nothing.
 // The credentials cannot reach into this database at all — not "no rows", not
@@ -371,7 +387,11 @@ export interface EngineAdapter {
   // The owner's checkbox choices written into the string, so what is stored and
   // what was consented to cannot disagree.
   applySecureTransport(value: string, overrides: TlsOverrides): string;
-  open(connectionString: string, overrides?: TlsOverrides): Promise<EngineSession>;
+  open(
+    connectionString: string,
+    overrides?: TlsOverrides,
+    proxy?: DialProxy,
+  ): Promise<EngineSession>;
   // Report what these credentials may do, without writing anything.
   //
   // `observedDatabases` narrows what the answer is ABOUT (#244): both adapters

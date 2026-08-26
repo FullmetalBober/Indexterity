@@ -1,4 +1,5 @@
 import type {
+  DialProxy,
   EngineAdapter,
   EngineSession,
   IndexCollector,
@@ -63,8 +64,12 @@ export const postgresAdapter: EngineAdapter = {
   hostsOf: pgHosts,
   assertSecureTransport: assertPgTlsEnforced,
   applySecureTransport: applyPgTlsOverrides,
-  open: async (connectionString: string, overrides?: TlsOverrides): Promise<EngineSession> => {
-    const conn = new PostgresConnection(connectionString, overrides);
+  open: async (
+    connectionString: string,
+    overrides?: TlsOverrides,
+    proxy?: DialProxy,
+  ): Promise<EngineSession> => {
+    const conn = new PostgresConnection(connectionString, overrides, proxy);
     await conn.connect();
     return new PostgresEngineSession(conn);
   },

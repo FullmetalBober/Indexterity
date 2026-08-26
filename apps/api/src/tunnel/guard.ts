@@ -97,3 +97,30 @@ export function assertDialableThroughTunnel(address: string, allowedIps: readonl
     );
   }
 }
+
+/**
+ * The onboarding-time half, for a connection string that will be dialled
+ * through a tunnel.
+ *
+ * Only literals can be judged here. A NAME is deliberately let through: it is
+ * resolved by the customer's own resolver at dial time, and every address that
+ * comes back is put through assertDialableThroughTunnel before a socket opens
+ * (tunnel/netstack.ts). Checking a name here would mean resolving it on our
+ * side, which either fails — the name exists only inside the VPN — or succeeds
+ * against a DIFFERENT host than the one that will be dialled, and validating
+ * the wrong address is worse than validating none.
+ */
+export function assertTunnelHostsAllowed(
+  hosts: readonly string[],
+  allowedIps: readonly string[],
+): void {
+  const cidrs = allowedIps.map(parseCidr);
+  for (const hostPort of hosts) {
+    // Strip the port; keep bracketed IPv6 literals intact, exactly as
+    // assertTargetsAllowed does.
+    const bracketed = /^\[([^\]]+)\]/.exec(hostPort);
+    const host = bracketed?.[1] ?? hostPort.split(":")[0] ?? hostPort;
+    if (host.length === 0 || isIP(host) === 0) continue;
+    assertDialableThroughTunnel(host, cidrs);
+  }
+}
