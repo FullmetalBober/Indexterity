@@ -197,7 +197,7 @@ function CreateTunnel() {
               id="tunnel-config"
               value={config}
               onChange={(event) => setConfig(event.target.value)}
-              className="border-input bg-transparent placeholder:text-muted-foreground focus-visible:ring-ring/50 min-h-55 w-full rounded-md border px-3 py-2 font-mono text-sm shadow-xs focus-visible:ring-[3px] focus-visible:outline-none"
+              className="border-input bg-transparent placeholder:text-muted-foreground focus-visible:ring-ring/50 min-h-55 w-full rounded-md border px-3 py-2 font-mono text-sm shadow-xs focus-visible:ring-3 focus-visible:outline-none"
               placeholder={
                 "[Interface]\nPrivateKey = ...\nAddress = 10.9.0.2/32\nDNS = 10.9.0.1\n\n[Peer]\nPublicKey = ...\nAllowedIPs = 10.0.0.0/8\nEndpoint = vpn.example.com:51820"
               }
