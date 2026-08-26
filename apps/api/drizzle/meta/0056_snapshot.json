@@ -1,5 +1,5 @@
 {
-  "id": "2c8a022a-3369-4f78-8a45-15d00a913482",
+  "id": "4f1afc35-f55d-44b8-8ecf-d480777a7e41",
   "prevId": "10dc5690-db1c-4ed0-ba0f-04a5443ab36f",
   "version": "7",
   "dialect": "postgresql",
@@ -589,6 +589,21 @@
         }
       },
       "indexes": {
+        "clusters_tunnel_idx": {
+          "name": "clusters_tunnel_idx",
+          "columns": [
+            {
+              "expression": "tunnel_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
         "clusters_org": {
           "name": "clusters_org",
           "columns": [

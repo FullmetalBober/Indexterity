@@ -505,6 +505,11 @@ export const clusters = pgTable(
   // rename for looking like one that already exists, which is a rule nobody
   // asked for.
   (table) => [
+    // Every foreign key gets one, and the integration suite enforces it: without
+    // it the RESTRICT on delete sequentially scans clusters, and so does every
+    // lookup of what a tunnel reaches. A product about index hygiene shipping an
+    // unindexed foreign key would be its own counterexample.
+    index("clusters_tunnel_idx").on(table.tunnelId),
     index("clusters_org").on(table.orgId),
     unique("clusters_org_name").on(table.orgId, table.name),
   ],

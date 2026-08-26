@@ -13,4 +13,5 @@ ALTER TABLE "clusters" ADD COLUMN "tunnel_id" uuid;--> statement-breakpoint
 ALTER TABLE "tunnels" ADD CONSTRAINT "tunnels_org_id_organizations_id_fk" FOREIGN KEY ("org_id") REFERENCES "public"."organizations"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 CREATE UNIQUE INDEX "tunnels_org_name_key" ON "tunnels" USING btree ("org_id","name");--> statement-breakpoint
 CREATE INDEX "tunnels_org_idx" ON "tunnels" USING btree ("org_id");--> statement-breakpoint
-ALTER TABLE "clusters" ADD CONSTRAINT "clusters_tunnel_id_tunnels_id_fk" FOREIGN KEY ("tunnel_id") REFERENCES "public"."tunnels"("id") ON DELETE restrict ON UPDATE no action;
+ALTER TABLE "clusters" ADD CONSTRAINT "clusters_tunnel_id_tunnels_id_fk" FOREIGN KEY ("tunnel_id") REFERENCES "public"."tunnels"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+CREATE INDEX "clusters_tunnel_idx" ON "clusters" USING btree ("tunnel_id");
