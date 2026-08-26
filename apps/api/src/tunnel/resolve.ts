@@ -2,7 +2,7 @@ import { masterKeyBytesFor } from "../config/env";
 import { type Database, envKeyProvider, eq, open as openSealed, tunnels } from "../db";
 import type { DialProxy } from "../engine/ports";
 import { parseWireGuardConf } from "./conf";
-import { tunnelRegistry } from "./current";
+import type { TunnelRegistry } from "./tunnel.registry";
 
 // Cluster row's tunnel_id -> a live SOCKS5 endpoint the adapters can dial.
 //
@@ -25,18 +25,21 @@ export class TunnelUnavailableError extends Error {
 
 /**
  * Null when the cluster is dialled directly, which is the common case and every
- * cluster that existed before #353. Null is also what an unwired registry gives
- * — a unit test that never built the container must not be forced to.
+ * cluster that existed before #353.
  */
 export async function proxyForCluster(
   db: Database,
   tunnelId: string | null,
+  registry: TunnelRegistry | undefined,
 ): Promise<DialProxy | null> {
   if (tunnelId === null) return null;
 
-  const registry = tunnelRegistry();
-  if (registry === null) {
-    throw new TunnelUnavailableError(tunnelId, new Error("no tunnel registry in this process"));
+  // Undefined means the caller has no registry — a unit test, or a job entry
+  // point that was never given one. Refused rather than defaulted: the
+  // alternative to a tunnel is dialling the cluster's private addresses
+  // directly over the open internet.
+  if (registry === undefined) {
+    throw new TunnelUnavailableError(tunnelId, new Error("no tunnel registry was provided"));
   }
 
   // Already up: the overwhelmingly common path once a cluster is being

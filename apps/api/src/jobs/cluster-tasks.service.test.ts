@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DatabaseService } from "../db/database.service";
 import type { NotifyService } from "../mail/notify.service";
+import { TunnelRegistry } from "../tunnel/tunnel.registry";
 import { applyCluster } from "./apply";
 import { settleBuildsForCluster } from "./building";
 import { refreshInferredWindow } from "./change-window";
@@ -36,6 +37,9 @@ function service() {
   return new ClusterTasksService(
     { db } as unknown as DatabaseService,
     { notifyClusterOwners: vi.fn() } as unknown as NotifyService,
+    // A real registry with no tunnels in it: these tests are about what a task
+    // does with a failure, and no cluster here has a tunnel_id.
+    new TunnelRegistry(),
   );
 }
 
@@ -58,7 +62,10 @@ describe("the per-cluster passes", () => {
     const help = helpers();
     await service().collect({ clusterId: CLUSTER }, help);
 
-    expect(collectCluster).toHaveBeenCalledWith({}, CLUSTER);
+    // The third argument is the point of the change: the registry is handed
+    // DOWN from the one place the container reaches, rather than the pipeline
+    // reaching sideways for a module global.
+    expect(collectCluster).toHaveBeenCalledWith({}, CLUSTER, expect.any(TunnelRegistry));
     expect(help.addJob.mock.calls.map((call) => call[0])).toEqual(["classify", "suggest"]);
   });
 
