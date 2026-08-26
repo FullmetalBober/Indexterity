@@ -16,6 +16,7 @@ import { MetricsModule } from "./metrics/metrics.module";
 import { OrgModule } from "./org/org.module";
 import { PolicyModule } from "./policy/policy.module";
 import { RecommendationsModule } from "./recommendations/recommendations.module";
+import { TunnelModule } from "./tunnel/tunnel.module";
 
 // SentryModule is the SDK's Nest wiring only — NOT its SentryGlobalFilter, which
 // is deliberately absent: AppExceptionFilter is this app's catch-all and decides
@@ -72,6 +73,7 @@ function sentryImports() {
     OrgModule,
     PolicyModule,
     RecommendationsModule,
+    TunnelModule,
   ],
 })
 export class AppModule {}

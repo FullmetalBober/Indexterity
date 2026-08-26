@@ -42,6 +42,8 @@
     "pg": "^8.22.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2",
+    "socks": "^2.8.9",
+    "tcpip": "^0.4.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
