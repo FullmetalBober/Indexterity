@@ -3,6 +3,7 @@ import { clusters, type Database, envKeyProvider, eq, open } from "../db";
 import { ObservedSession } from "../engine/observe";
 import type { ClusterEngine, EngineSession } from "../engine/ports";
 import { adapterFor } from "../engine/registry";
+import { proxyForCluster } from "../tunnel/resolve";
 import { acquireClusterSession } from "./connection-pool";
 
 // The stored credentials would not decrypt. Always a control-plane problem —
@@ -108,11 +109,15 @@ export async function openClusterSession(
   options: OpenClusterOptions = {},
 ): Promise<ClusterSession> {
   const { cluster, connectionString: connString } = await unsealCluster(db, clusterId);
+  // Brings the tunnel up on first use if this cluster has one, and is null for
+  // every cluster that does not — which is all of them before #353.
+  const proxy = await proxyForCluster(db, cluster.tunnelId);
   const { session, release } = await acquireClusterSession(
     clusterId,
     cluster.engine,
     connString,
     cluster.tlsOverrides,
+    proxy ?? undefined,
   );
   const observed = cluster.observedDatabases;
   return {

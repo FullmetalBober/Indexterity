@@ -2,6 +2,7 @@ import { promises as dns } from "node:dns";
 import { Injectable, Logger, type OnApplicationShutdown } from "@nestjs/common";
 import { allowPrivateTargets, assertTargetsAllowed } from "../engine/net-guard";
 import type { WireGuardConf } from "./conf";
+import { setTunnelRegistry } from "./current";
 import { TunnelNetstack } from "./netstack";
 import { type SocksCredentials, SocksServer } from "./socks";
 import { publicKeyFromPrivate } from "./wireguard/crypto";
@@ -35,6 +36,13 @@ interface LiveTunnel {
 export class TunnelRegistry implements OnApplicationShutdown {
   readonly #logger = new Logger(TunnelRegistry.name);
   readonly #tunnels = new Map<string, LiveTunnel>();
+
+  constructor() {
+    // So the job pipeline, which is plain functions by design, can reach the
+    // tunnels without five signatures growing a parameter. See tunnel/current.ts
+    // for why that is the lesser evil here.
+    setTunnelRegistry(this);
+  }
 
   /**
    * Bring a tunnel up, or replace one already up under the same id.
@@ -118,6 +126,7 @@ export class TunnelRegistry implements OnApplicationShutdown {
   }
 
   async onApplicationShutdown(): Promise<void> {
+    setTunnelRegistry(null);
     const tunnels = [...this.#tunnels.values()];
     this.#tunnels.clear();
     await Promise.all(tunnels.map((tunnel) => this.#shutdown(tunnel)));
