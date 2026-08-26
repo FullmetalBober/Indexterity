@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { InsecureConnectionError } from "../engine/tls";
 import { UnsupportedServerError } from "../engine/version";
+import { TunnelUnavailableError } from "../tunnel/resolve";
 import { ClusterCredentialsError, ClusterGoneError } from "./cluster-connection";
 import { type ClusterTaskDeps, runClusterTask } from "./tasks";
 
@@ -48,6 +49,8 @@ function recorder(): {
 function unreachable(): Error {
   return new Error("connect ECONNREFUSED 10.0.0.4:27017");
 }
+
+const TUNNEL = "22222222-2222-2222-2222-222222222222";
 
 describe("runClusterTask", () => {
   // Offboarding does not reach into the queue, so a deleted cluster's ticks
@@ -172,5 +175,65 @@ describe("runClusterTask on a cluster we refuse to dial", () => {
     );
     expect(log.alerts.join()).not.toContain("unreachable");
     expect(log.warns.join()).not.toContain("unreachable");
+  });
+
+  // #353. A tunnel that will not come up is its own condition: the database
+  // behind it may be answering perfectly, and we never dialled it.
+  describe("a cluster behind a tunnel that is down", () => {
+    it("skips the tick rather than throwing, so no retry is burned", async () => {
+      const log = recorder();
+      await expect(
+        runClusterTask("collect", CLUSTER, log.deps, () => {
+          throw new TunnelUnavailableError(TUNNEL);
+        }),
+      ).resolves.toBeUndefined();
+      expect(log.warns[0]).toContain(TUNNEL);
+    });
+
+    it("announces nothing, because the tick changed nothing", async () => {
+      const log = recorder();
+      await runClusterTask("collect", CLUSTER, log.deps, () => {
+        throw new TunnelUnavailableError(TUNNEL);
+      });
+      expect(log.emitted).toHaveLength(0);
+    });
+
+    // The mail has to name the VPN, not the database. Saying "we could not
+    // reach your cluster" sends somebody to look at a database that is fine.
+    it("tells the owners the tunnel is down, not that the cluster is unreachable", async () => {
+      const log = recorder();
+      await runClusterTask("collect", CLUSTER, log.deps, () => {
+        throw new TunnelUnavailableError(TUNNEL);
+      });
+      expect(log.alerts).toEqual([
+        `${CLUSTER}:collect skipped — the VPN tunnel to this cluster is down`,
+      ]);
+    });
+
+    // One gateway commonly reaches several clusters. Keying the cooldown on the
+    // cluster would mail a customer once per database behind one down VPN.
+    it("alerts once per TUNNEL, not once per cluster behind it", async () => {
+      const log = recorder();
+      const second = "33333333-3333-3333-3333-333333333333";
+      await runClusterTask("collect", CLUSTER, log.deps, () => {
+        throw new TunnelUnavailableError(TUNNEL);
+      });
+      await runClusterTask("collect", second, log.deps, () => {
+        throw new TunnelUnavailableError(TUNNEL);
+      });
+      expect(log.alerts).toHaveLength(1);
+    });
+
+    it("still alerts separately for a different tunnel", async () => {
+      const log = recorder();
+      const other = "44444444-4444-4444-4444-444444444444";
+      await runClusterTask("collect", CLUSTER, log.deps, () => {
+        throw new TunnelUnavailableError(TUNNEL);
+      });
+      await runClusterTask("collect", CLUSTER, log.deps, () => {
+        throw new TunnelUnavailableError(other);
+      });
+      expect(log.alerts).toHaveLength(2);
+    });
   });
 });

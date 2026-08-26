@@ -4,6 +4,7 @@ import { InsecureConnectionError } from "../engine/tls";
 import { UnsupportedServerError } from "../engine/version";
 import { isUnreachableError } from "../errors/unreachable";
 import { recordClusterTask } from "../metrics";
+import { TunnelUnavailableError } from "../tunnel/resolve";
 import { ClusterCredentialsError, ClusterGoneError } from "./cluster-connection";
 import type { ClusterTasksService } from "./cluster-tasks.service";
 import { runDigest } from "./digest";
@@ -79,6 +80,42 @@ export async function runClusterTask(
           `nothing.\n\n${error.message}\n\nReconnect the cluster with a string that enables ` +
           `TLS and the pipeline resumes on the next tick. Nothing was executed and nothing ` +
           `was lost.`,
+      );
+      return;
+    }
+    // The cluster sits behind a VPN tunnel that will not come up (#353).
+    //
+    // Its own outcome, emphatically NOT folded into "unreachable", for exactly
+    // the reason InsecureConnectionError is not: the database may be perfectly
+    // healthy and we never dialled it, so "we could not reach your cluster"
+    // would send the owner hunting a firewall in front of a database that is
+    // answering fine. What is down is their VPN gateway, and that is what the
+    // mail says.
+    //
+    // Skipped rather than retried, like an unreachable cluster and for the same
+    // reason (architecture §7.4.1): nothing was executed, the schedule retries
+    // on the next tick, and a handshake that recovers needs nothing from us.
+    // Throwing here would burn five graphile-worker retries per tick printing
+    // the same stack while a customer's VPN is down for an afternoon.
+    if (error instanceof TunnelUnavailableError) {
+      recordClusterTask(task, clusterId, "tunnel-down");
+      deps.logger.warn(
+        `${task}: cluster ${clusterId} — tunnel ${error.tunnelId} is not up, skipped`,
+      );
+      // Keyed on the TUNNEL, not the cluster: one gateway commonly reaches
+      // several clusters, and a customer whose VPN is down should get one mail
+      // rather than one per database behind it.
+      if (!(await deps.alertAllowed(`tunnel:${error.tunnelId}`))) return;
+      await deps.alertOwners(
+        clusterId,
+        `${task} skipped — the VPN tunnel to this cluster is down`,
+        `Indexterity reaches this cluster over a WireGuard tunnel, and that tunnel is not ` +
+          `currently up — so the ${task} step did nothing and will retry on the next ` +
+          `schedule tick.\n\nThe database itself may be perfectly healthy; what is not ` +
+          `answering is the VPN gateway. Usual causes: the gateway is down or moved, its ` +
+          `endpoint address changed, or its keys were rotated without the config here being ` +
+          `updated.\n\nNothing was executed and nothing was lost — collection resumes once ` +
+          `the handshake does. The tunnel's status is on the VPN tunnels page.`,
       );
       return;
     }

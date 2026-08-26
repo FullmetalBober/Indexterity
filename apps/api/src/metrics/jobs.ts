@@ -16,6 +16,12 @@ import {
 export type ClusterTaskOutcome =
   | "ok"
   | "unreachable"
+  // The cluster's TUNNEL is down, which is a different fact from the cluster
+  // being unreachable and is kept apart for the same reason "insecure" is: the
+  // database may be perfectly healthy, and the thing to go and fix is a VPN
+  // gateway. Folding it into "unreachable" would put a healthy cluster on the
+  // unreachable gauge and send its owner hunting a firewall.
+  | "tunnel-down"
   | "unsupported"
   | "credentials"
   // Stored string would not connect over validated TLS. Its own label rather
@@ -56,6 +62,10 @@ export function recordClusterTask(
   } else if (outcome === "unreachable") {
     unreachable.add(clusterId);
   }
+  // "tunnel-down" deliberately touches neither: we did not reach the cluster,
+  // so it cannot be marked reachable, and we never dialled it either, so it
+  // has not been shown to be unreachable. The previous verdict stands, and the
+  // tunnel's own health is where that condition is reported.
   // Undecryptable credentials and unexpected errors say nothing either way, so
   // they leave the previous verdict standing.
 }
