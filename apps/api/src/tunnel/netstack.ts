@@ -1,7 +1,7 @@
 import { isIP } from "node:net";
+import { assertDialableThroughTunnel, type Cidr, parseCidr } from "../engine/net-guard";
 import type { WireGuardConf } from "./conf";
 import { type DnsTransport, resolveThroughTunnel } from "./dns";
-import { assertDialableThroughTunnel, type Cidr, parseCidr } from "./guard";
 import type { TunnelDevice } from "./wireguard/device";
 
 // A userspace TCP/IP stack bound to one tunnel, so a packet for 10.x inside it

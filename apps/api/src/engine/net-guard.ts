@@ -200,3 +200,180 @@ export async function assertTargetsAllowed(
 export function allowPrivateTargets(): boolean {
   return workerEnv().ALLOW_PRIVATE_CLUSTER_TARGETS;
 }
+
+// ---------------------------------------------------------------------------
+// The second route: a dial that goes through a tunnel (#353).
+//
+// It lives in THIS file, beside the direct one, on purpose. An auditor asking
+// "what stops the control plane dialling our own network" should find one
+// place and see both answers, not find assertTargetsAllowed and conclude it is
+// universal. It is not: a cluster with a tunnel_id takes the other branch.
+//
+// One table of what an address IS — classifyAddress above, shared. What differs
+// is only what a category MEANS:
+//
+//   direct   PRIVATE refused unless ALLOW_PRIVATE_CLUSTER_TARGETS
+//   tunnel   PRIVATE is the entire point, and allowed
+//   either   FORBIDDEN refused
+//
+// FORBIDDEN staying refused inside a tunnel is the load-bearing half. A peer
+// whose AllowedIPs covers 169.254.169.254 is either misconfigured or asking us
+// to read our own cloud metadata on its behalf — D18's primitive re-opened
+// through a route instead of through a resolver.
+// ---------------------------------------------------------------------------
+
+export class TunnelTargetError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TunnelTargetError";
+  }
+}
+
+export interface Cidr {
+  readonly address: string;
+  readonly bits: number;
+}
+
+export function parseCidr(entry: string): Cidr {
+  const [address, prefix] = entry.split("/");
+  if (address === undefined || isIP(address) === 0) {
+    throw new TunnelTargetError(`${entry} is not an address`);
+  }
+  const width = isIP(address) === 6 ? 128 : 32;
+  const bits = prefix === undefined ? width : Number(prefix);
+  if (!Number.isInteger(bits) || bits < 0 || bits > width) {
+    throw new TunnelTargetError(`${entry} has an impossible prefix length`);
+  }
+  return { address, bits };
+}
+
+// Compared as bit strings rather than as numbers, so one implementation covers
+// both families — a v4 shortcut plus a separate v6 path is where an IPv6 rule
+// gets written once and tested never.
+function toBits(address: string): string {
+  if (isIP(address) === 4) {
+    return address
+      .split(".")
+      .map((octet) => Number(octet).toString(2).padStart(8, "0"))
+      .join("");
+  }
+  // Expand :: and any short groups before widening to 16 bits each.
+  const [head, tail] = address.split("::");
+  const left = head === undefined || head === "" ? [] : head.split(":");
+  const right = tail === undefined || tail === "" ? [] : tail.split(":");
+  const middle = new Array(Math.max(0, 8 - left.length - right.length)).fill("0");
+  return [...left, ...middle, ...right]
+    .map((group) =>
+      Number.parseInt(group || "0", 16)
+        .toString(2)
+        .padStart(16, "0"),
+    )
+    .join("");
+}
+
+export function withinCidr(address: string, cidr: Cidr): boolean {
+  // A v4 address is never inside a v6 prefix and vice versa; comparing their
+  // bit strings would otherwise silently match on a shared prefix.
+  if (isIP(address) !== isIP(cidr.address)) return false;
+  if (cidr.bits === 0) return true;
+  return toBits(address).slice(0, cidr.bits) === toBits(cidr.address).slice(0, cidr.bits);
+}
+
+/**
+ * May this tunnel dial this address? Refuses with a sentence a person can act
+ * on rather than letting the packet be dropped as a timeout — a timeout is
+ * indistinguishable from a database that is merely down, and these two failures
+ * want completely different responses.
+ */
+export function assertDialableThroughTunnel(address: string, allowedIps: readonly Cidr[]): void {
+  const verdict = classifyAddress(address);
+  if (verdict.category === "FORBIDDEN") {
+    throw new TunnelTargetError(
+      `refusing to connect to ${address} through the tunnel: ${verdict.reason} — ` +
+        "never a database, whatever route reaches it",
+    );
+  }
+  if (!allowedIps.some((cidr) => withinCidr(address, cidr))) {
+    throw new TunnelTargetError(
+      `refusing to connect to ${address}: outside this tunnel's AllowedIPs, so the peer did not ` +
+        "agree to carry it",
+    );
+  }
+}
+
+export interface TunnelRoute {
+  readonly allowedIps: readonly string[];
+  /**
+   * Resolve a name INSIDE the tunnel, on the customer's own resolver.
+   *
+   * Passed in rather than imported so this file keeps knowing only about
+   * addresses — and so the check below can be the same one the dial makes,
+   * against the same answers, rather than a weaker approximation of it.
+   */
+  readonly resolve: (host: string) => Promise<readonly string[]>;
+}
+
+export type DialRoute =
+  | { readonly kind: "direct"; readonly allowPrivate: boolean }
+  | ({ readonly kind: "tunnel" } & TunnelRoute);
+
+/**
+ * May the control plane dial these hosts, by this route?
+ *
+ * The single entry point, and the reason it exists: `assertTargetsAllowed` is
+ * what an auditor finds when they go looking, and for a tunnelled cluster it is
+ * not the check that runs. Making the choice explicit here means the two
+ * answers are read together instead of one being discovered later.
+ */
+export async function assertDialTargetsAllowed(
+  hosts: readonly string[],
+  isSrv: boolean,
+  route: DialRoute,
+): Promise<void> {
+  if (route.kind === "direct") {
+    await assertTargetsAllowed(hosts, isSrv, { allowPrivate: route.allowPrivate });
+    return;
+  }
+  await assertTunnelHostsAllowed(hosts, route);
+}
+
+/**
+ * The tunnelled route, at onboarding.
+ *
+ * Names are resolved THROUGH THE TUNNEL and every answer judged, which is the
+ * same check the dial itself makes and against the same resolver — so a cluster
+ * is never stored on addresses nobody has vetted. Resolving them here on our
+ * own side would be worse than not checking: a name inside a customer's VPN
+ * either does not exist for us, or resolves to some unrelated public host that
+ * we would then have validated instead of the one about to be dialled.
+ *
+ * A name the tunnel cannot resolve is allowed through, deliberately, exactly as
+ * assertHostname lets an unresolvable host through: it is undialable anyway, and
+ * the connection attempt's own "unreachable" is a better message than a
+ * security error for a host that does not exist.
+ */
+export async function assertTunnelHostsAllowed(
+  hosts: readonly string[],
+  route: TunnelRoute,
+): Promise<void> {
+  const cidrs = route.allowedIps.map(parseCidr);
+  for (const hostPort of hosts) {
+    // Strip the port; keep bracketed IPv6 literals intact, exactly as
+    // assertTargetsAllowed does.
+    const bracketed = /^\[([^\]]+)\]/.exec(hostPort);
+    const host = bracketed?.[1] ?? hostPort.split(":")[0] ?? hostPort;
+    if (host.length === 0) continue;
+
+    if (isIP(host) !== 0) {
+      assertDialableThroughTunnel(host, cidrs);
+      continue;
+    }
+    let resolved: readonly string[];
+    try {
+      resolved = await route.resolve(host);
+    } catch {
+      continue;
+    }
+    for (const address of resolved) assertDialableThroughTunnel(address, cidrs);
+  }
+}

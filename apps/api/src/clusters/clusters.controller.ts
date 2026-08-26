@@ -7,6 +7,7 @@ import type { SecurityEventDetails } from "../audit/audit.types";
 import { RequestActorService } from "../audit/request-actor.service";
 import { clusters } from "../db";
 import { DatabaseService } from "../db/database.service";
+import type { TunnelRoute } from "../engine/net-guard";
 import { type DialProxy, NO_TLS_OVERRIDES, type ProvisionedUser } from "../engine/ports";
 import { ProvisionDeniedError } from "../engine/provision";
 import { adapterFor, detectEngine, supportedEngineOptions } from "../engine/registry";
@@ -127,7 +128,7 @@ export class ClustersController {
           value,
           errors,
           overrides,
-          routed.allowedIps,
+          routed.route,
         );
         // The scope reaches the adapter, so a second check with fewer databases
         // ticked can turn a privilege gap into a grant (#244) — see the field's
@@ -165,7 +166,7 @@ export class ClustersController {
           value,
           errors,
           overrides,
-          routed.allowedIps,
+          routed.route,
         );
         // Verify before storing: an unusable string must fail at connect time
         // with the reason, not silently collect nothing for a day.
@@ -283,7 +284,7 @@ export class ClustersController {
           adminValue,
           errors,
           overrides,
-          routed.allowedIps,
+          routed.route,
         );
         let provisioned: ProvisionedUser;
         try {
@@ -776,16 +777,15 @@ export class ClustersController {
     tunnelId: string | null,
     orgId: string,
     errors: { BAD_REQUEST: (options: { message: string }) => Error },
-  ): Promise<{ allowedIps: readonly string[] | null; proxy: DialProxy | undefined }> {
-    if (tunnelId === null) return { allowedIps: null, proxy: undefined };
+  ): Promise<{ route: TunnelRoute | null; proxy: DialProxy | undefined }> {
+    if (tunnelId === null) return { route: null, proxy: undefined };
     // Checked rather than trusted: a tunnel id from another org would otherwise
     // route this org's dial through somebody else's network.
     if (!(await this.tunnels.ownedBy(tunnelId, orgId))) {
       throw errors.BAD_REQUEST({ message: "no such tunnel" });
     }
     try {
-      const opened = await this.tunnels.openFor(tunnelId);
-      return { allowedIps: opened.allowedIps, proxy: opened.proxy };
+      return await this.tunnels.openFor(tunnelId);
     } catch (error) {
       // A tunnel that will not come up is a reason a connect fails, and saying
       // which one beats "unreachable" — the owner would otherwise go looking at

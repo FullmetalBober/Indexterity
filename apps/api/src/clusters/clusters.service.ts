@@ -6,7 +6,13 @@ import type { RequestActor } from "../audit/audit.types";
 import { currentKeyVersion, masterKeyBytesFor } from "../config/env";
 import { clusters, envKeyProvider, eq, seal, sql } from "../db";
 import { DatabaseService } from "../db/database.service";
-import { allowPrivateTargets, assertTargetsAllowed, BlockedTargetError } from "../engine/net-guard";
+import {
+  allowPrivateTargets,
+  assertDialTargetsAllowed,
+  BlockedTargetError,
+  type TunnelRoute,
+  TunnelTargetError,
+} from "../engine/net-guard";
 import { DatabaseInaccessibleError, NO_TLS_OVERRIDES, type TlsOverrides } from "../engine/ports";
 import { revokeCommandFor } from "../engine/provision";
 import { adapterFor, engineSupported, supportedEngines } from "../engine/registry";
@@ -14,7 +20,6 @@ import { InsecureConnectionError } from "../engine/tls";
 import { DialBudgetService } from "../errors/dial-budget.service";
 import { mapClusterError, toCluster } from "../http/mappers";
 import { ClusterGoneError, openClusterSession } from "../jobs/cluster-connection";
-import { assertTunnelHostsAllowed, TunnelTargetError } from "../tunnel/guard";
 import { type ClusterRow, ClustersRepository } from "./clusters.repository";
 import { restoreHiddenIndexes } from "./offboard";
 
@@ -239,10 +244,11 @@ export class ClustersService {
     value: string,
     errors: { BAD_REQUEST: (options: { message: string }) => Error },
     overrides: TlsOverrides = NO_TLS_OVERRIDES,
-    // The tunnel's AllowedIPs when this cluster is reached over one, null when
-    // it is dialled directly. Null is the default so a caller that forgets gets
-    // the stricter path, which is the direction a default has to fail in.
-    allowedIps: readonly string[] | null = null,
+    // How this cluster is reached, when it is not simply reachable: the
+    // tunnel's AllowedIPs, and a resolver that answers INSIDE it. Null is the
+    // default so a caller that forgets gets the stricter path, which is the
+    // direction a default has to fail in.
+    route: TunnelRoute | null = null,
   ): Promise<void> {
     if (!engineSupported(engine)) {
       throw errors.BAD_REQUEST({
@@ -260,33 +266,17 @@ export class ClustersService {
     await this.dialBudget.consume(userId);
     const { hosts, isSrv } = adapter.hostsOf(value);
     try {
-      // A tunnelled cluster SUBSTITUTES a guard rather than relaxing one, and
-      // the difference is the whole argument.
-      //
-      // assertTargetsAllowed resolves on OUR side. A name inside a customer's
-      // VPN does not exist there, so running it would fail every legitimate
-      // tunnelled cluster — and if it somehow resolved, it resolved to a
-      // different host than the one we are going to dial, which is worse than
-      // not checking. Relaxing it to admit PRIVATE would also admit every
-      // tenant to our own network, which is the primitive D18 closed.
-      //
-      // What replaces it is strictly NARROWER, not looser:
-      //   - the same FORBIDDEN tier, from the same classifyAddress table, so
-      //     metadata and link-local stay refused whatever route reaches them
-      //   - plus AllowedIPs containment, which the untunnelled path has no
-      //     equivalent of at all
-      //   - applied to every address the customer's own resolver returns, at
-      //     dial time, inside tunnel/netstack.ts — which is the only place the
-      //     addresses actually dialled are known
-      //
-      // Here, at onboarding, only literals can be judged: a name is checked
-      // when it resolves. That is not a gap left open, it is the same check
-      // moved to the only moment it can be made honestly.
-      if (allowedIps === null) {
-        await assertTargetsAllowed(hosts, isSrv, { allowPrivate: allowPrivateTargets() });
-      } else {
-        assertTunnelHostsAllowed(hosts, allowedIps);
-      }
+      // One call, two routes, and which one is taken is the guard's business
+      // rather than this handler's. Both live side by side in
+      // engine/net-guard.ts so an auditor asking "what stops us dialling our
+      // own network" finds one place and sees both answers.
+      await assertDialTargetsAllowed(
+        hosts,
+        isSrv,
+        route === null
+          ? { kind: "direct", allowPrivate: allowPrivateTargets() }
+          : { kind: "tunnel", allowedIps: route.allowedIps, resolve: route.resolve },
+      );
     } catch (error) {
       if (error instanceof BlockedTargetError || error instanceof TunnelTargetError) {
         throw errors.BAD_REQUEST({ message: error.message });

@@ -4,6 +4,7 @@ import { and, count, eq } from "drizzle-orm";
 import { masterKeyBytesFor } from "../config/env";
 import { clusters, envKeyProvider, open as openSealed, seal, tunnels } from "../db";
 import { DatabaseService } from "../db/database.service";
+import type { TunnelRoute } from "../engine/net-guard";
 import type { DialProxy } from "../engine/ports";
 import { InvalidWireGuardConfError, parseWireGuardConf, type WireGuardConf } from "./conf";
 import { TunnelRegistry } from "./tunnel.registry";
@@ -79,7 +80,7 @@ export class TunnelService {
    * the job pipeline goes through tunnel/resolve.ts instead, keyed on the
    * cluster's tunnel_id.
    */
-  async openFor(tunnelId: string): Promise<{ allowedIps: string[]; proxy: DialProxy }> {
+  async openFor(tunnelId: string): Promise<{ route: TunnelRoute; proxy: DialProxy }> {
     const [row] = await this.database.db
       .select()
       .from(tunnels)
@@ -102,7 +103,12 @@ export class TunnelService {
     // steps of one connect.
     const endpoint = this.registry.endpoint(tunnelId) ?? (await this.registry.open(tunnelId, conf));
     return {
-      allowedIps: [...conf.peer.allowedIps],
+      route: {
+        allowedIps: [...conf.peer.allowedIps],
+        // Bound to this tunnel, so the guard resolves through the same peering
+        // the dial will use rather than through ours.
+        resolve: (host) => this.registry.resolve(tunnelId, host),
+      },
       proxy: {
         host: endpoint.host,
         port: endpoint.port,

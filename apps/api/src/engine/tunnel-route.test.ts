@@ -5,7 +5,7 @@ import {
   parseCidr,
   TunnelTargetError,
   withinCidr,
-} from "./guard";
+} from "./net-guard";
 
 const cidrs = (...entries: string[]) => entries.map(parseCidr);
 
@@ -88,41 +88,90 @@ describe("assertDialableThroughTunnel", () => {
 });
 
 describe("assertTunnelHostsAllowed", () => {
-  const allowed = ["10.0.0.0/8"];
-
-  it("allows a literal inside AllowedIPs", () => {
-    expect(() => assertTunnelHostsAllowed(["10.1.2.3:27017"], allowed)).not.toThrow();
+  const route = (allowedIps: string[], answers: Record<string, string[]> = {}) => ({
+    allowedIps,
+    resolve: (host: string) => Promise.resolve(answers[host] ?? []),
   });
 
-  it("refuses a literal outside AllowedIPs", () => {
-    expect(() => assertTunnelHostsAllowed(["192.168.1.1:27017"], allowed)).toThrow(
-      /outside this tunnel/,
-    );
+  it("allows a literal inside AllowedIPs", async () => {
+    await expect(
+      assertTunnelHostsAllowed(["10.1.2.3:27017"], route(["10.0.0.0/8"])),
+    ).resolves.toBeUndefined();
   });
 
-  it("refuses cloud metadata even when the tunnel routes everything", () => {
-    expect(() => assertTunnelHostsAllowed(["169.254.169.254:80"], ["0.0.0.0/0"])).toThrow(
+  it("refuses a literal outside AllowedIPs", async () => {
+    await expect(
+      assertTunnelHostsAllowed(["192.168.1.1:27017"], route(["10.0.0.0/8"])),
+    ).rejects.toThrow(/outside this tunnel/);
+  });
+
+  it("refuses cloud metadata even when the tunnel routes everything", async () => {
+    await expect(
+      assertTunnelHostsAllowed(["169.254.169.254:80"], route(["0.0.0.0/0"])),
+    ).rejects.toThrow(/never a database/);
+  });
+
+  it("keeps a bracketed IPv6 literal intact rather than splitting it on a colon", async () => {
+    await expect(
+      assertTunnelHostsAllowed(["[fd00::1]:27017"], route(["fd00::/8"])),
+    ).resolves.toBeUndefined();
+    await expect(assertTunnelHostsAllowed(["[fe80::1]:27017"], route(["::/0"]))).rejects.toThrow(
       /never a database/,
     );
   });
 
-  it("keeps a bracketed IPv6 literal intact rather than splitting it on a colon", () => {
-    expect(() => assertTunnelHostsAllowed(["[fd00::1]:27017"], ["fd00::/8"])).not.toThrow();
-    expect(() => assertTunnelHostsAllowed(["[fe80::1]:27017"], ["::/0"])).toThrow(
-      /never a database/,
-    );
+  // The window this closes: a NAME is resolved on the customer's resolver and
+  // every answer judged, so a cluster is never stored on addresses nobody
+  // checked. Resolving it on our side would validate a different host.
+  it("resolves a name THROUGH the tunnel and judges what comes back", async () => {
+    await expect(
+      assertTunnelHostsAllowed(
+        ["mongo-0.internal:27017"],
+        route(["10.0.0.0/8"], { "mongo-0.internal": ["10.4.5.6"] }),
+      ),
+    ).resolves.toBeUndefined();
   });
 
-  // The deliberate hole, and it is not a hole. A name is resolved by the
-  // customer's resolver at dial time and judged there; resolving it here would
-  // either fail or answer about a different host.
-  it("lets a name through, to be judged when the tunnel resolves it", () => {
-    expect(() => assertTunnelHostsAllowed(["mongo-0.internal:27017"], allowed)).not.toThrow();
+  it("refuses a name whose in-tunnel answer is outside AllowedIPs", async () => {
+    await expect(
+      assertTunnelHostsAllowed(
+        ["mongo-0.internal:27017"],
+        route(["10.0.0.0/8"], { "mongo-0.internal": ["192.168.9.9"] }),
+      ),
+    ).rejects.toThrow(/outside this tunnel/);
   });
 
-  it("checks every host in a multi-host string", () => {
-    expect(() =>
-      assertTunnelHostsAllowed(["10.0.0.1:27017", "192.168.0.1:27018"], allowed),
-    ).toThrow(/outside this tunnel/);
+  // Every address, not the first: a permitted A record must not excuse a
+  // forbidden one, which is the rule assertHostname applies on the direct path.
+  it("judges every address a name resolves to", async () => {
+    await expect(
+      assertTunnelHostsAllowed(
+        ["mongo-0.internal:27017"],
+        route(["0.0.0.0/0"], { "mongo-0.internal": ["10.1.1.1", "169.254.169.254"] }),
+      ),
+    ).rejects.toThrow(/never a database/);
+  });
+
+  // Undialable anyway, and the connection attempt's own "unreachable" is a
+  // better message than a security error about a host that does not exist.
+  it("lets an unresolvable name through rather than refusing it", async () => {
+    await expect(
+      assertTunnelHostsAllowed(["nowhere.internal:27017"], route(["10.0.0.0/8"])),
+    ).resolves.toBeUndefined();
+  });
+
+  it("lets a name through when the tunnel cannot be asked at all", async () => {
+    await expect(
+      assertTunnelHostsAllowed(["mongo-0.internal:27017"], {
+        allowedIps: ["10.0.0.0/8"],
+        resolve: () => Promise.reject(new Error("tunnel is not up")),
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("checks every host in a multi-host string", async () => {
+    await expect(
+      assertTunnelHostsAllowed(["10.0.0.1:27017", "192.168.0.1:27018"], route(["10.0.0.0/8"])),
+    ).rejects.toThrow(/outside this tunnel/);
   });
 });
