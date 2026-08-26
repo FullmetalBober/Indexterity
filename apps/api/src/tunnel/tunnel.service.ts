@@ -94,7 +94,13 @@ export class TunnelService {
         ),
       ),
     );
-    const endpoint = await this.registry.open(tunnelId, conf);
+    // Reuse a tunnel that is already up rather than replacing it. registry.open
+    // REPLACES by design — that is how a rotated key lands — so calling it
+    // unconditionally meant a preflight followed by a connect tore down a
+    // working peering and rebuilt it seconds later, dropping anything in
+    // flight. Observed in the walkthrough as up → down → up between the two
+    // steps of one connect.
+    const endpoint = this.registry.endpoint(tunnelId) ?? (await this.registry.open(tunnelId, conf));
     return {
       allowedIps: [...conf.peer.allowedIps],
       proxy: {
