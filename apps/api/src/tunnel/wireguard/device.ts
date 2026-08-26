@@ -40,13 +40,16 @@ export interface DeviceOptions {
 
 export type DeviceState = "down" | "handshaking" | "up";
 
-export interface TunnelDevice {
-  on(event: "packet", listener: (packet: Buffer) => void): this;
-  on(event: "state", listener: (state: DeviceState) => void): this;
-  on(event: "error", listener: (error: Error) => void): this;
-}
+// Typed through EventEmitter's generic rather than by merging an interface into
+// the class: the merge is the usual trick for this, and it also lets a later
+// declaration silently widen the class, which is what biome objects to.
+type DeviceEvents = {
+  packet: [Buffer];
+  state: [DeviceState];
+  error: [Error];
+};
 
-export class TunnelDevice extends EventEmitter {
+export class TunnelDevice extends EventEmitter<DeviceEvents> {
   #options: DeviceOptions;
   #socket: dgram.Socket | null = null;
   #session: Session | null = null;
@@ -109,7 +112,8 @@ export class TunnelDevice extends EventEmitter {
     if (this.#closed) throw new Error("tunnel is closed");
     const session = this.#session;
     if (session === null || session.expired()) {
-      if (this.#queue.length < TunnelDevice.MAX_QUEUED_PACKETS) this.#queue.push(Buffer.from(packet));
+      if (this.#queue.length < TunnelDevice.MAX_QUEUED_PACKETS)
+        this.#queue.push(Buffer.from(packet));
       void this.#beginHandshake();
       return;
     }
