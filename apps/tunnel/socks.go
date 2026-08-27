@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -268,14 +269,7 @@ func (s *socksServer) negotiate(client net.Conn) error {
 	if _, err := io.ReadFull(client, methods); err != nil {
 		return err
 	}
-	offered := false
-	for _, method := range methods {
-		if method == methodUserPass {
-			offered = true
-			break
-		}
-	}
-	if !offered {
+	if !slices.Contains(methods, methodUserPass) {
 		if _, err := client.Write([]byte{socksVersion, methodNone}); err != nil {
 			return err
 		}

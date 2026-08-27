@@ -22,7 +22,9 @@ func parseLastHandshake(document string) (time.Time, error) {
 	var seconds, nanoseconds int64
 	var haveSeconds bool
 
-	for _, line := range strings.Split(document, "\n") {
+	// SplitSeq rather than Split: the document is every field of the device, and
+	// this reads two of them — no reason to allocate a slice of the rest.
+	for line := range strings.SplitSeq(document, "\n") {
 		key, value, found := strings.Cut(strings.TrimSpace(line), "=")
 		if !found {
 			continue
