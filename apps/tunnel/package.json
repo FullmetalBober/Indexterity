@@ -7,6 +7,6 @@
     "build": "CGO_ENABLED=0 go build -trimpath -o dist/indexterity-tunnel .",
     "typecheck": "go vet ./...",
     "test": "go test ./...",
-    "lint": "golangci-lint run"
+    "lint": "golangci-lint config verify && golangci-lint run"
   }
 }

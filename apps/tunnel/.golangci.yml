@@ -9,6 +9,17 @@
 # Where an error genuinely has no consumer, the code says so with `_ =` and a
 # comment giving the reason. That is a decision on the record; a bare call is
 # not, and this is what tells the two apart.
+# `settings` is NESTED UNDER `linters`, which is where v2 wants it. It sat at the
+# top level for several commits, along with an `exclusions` block, and
+# `golangci-lint run` accepted the file and quietly ignored both — so neither did
+# anything at all. `golangci-lint config verify` is what says so, and it runs
+# before `run` in this package's lint script now.
+#
+# There are no exclusions. The one that used to be here — errcheck off for
+# throwaway socket writes in tests — turned out to exclude nothing once the block
+# was in a position to take effect, and an exclusion that excludes nothing is a
+# decision nobody made. A test that genuinely wants to drop an error can say
+# `_ =` and why, which is the rule this file already states.
 version: "2"
 
 linters:
@@ -28,27 +39,28 @@ linters:
     - errorlint
     # A context that is created and never used, and a nil one passed in.
     - contextcheck
+    # Suspicious constructs the others miss. Its DEFAULT set only — checked, and
+    # it reports nothing today, so this is free. `enable-all` additionally wants a
+    # 152-byte config passed by pointer and two-value returns named, neither of
+    # which is an improvement here: by value is what stops a callee mutating a
+    # struct carrying a private key, and `id, answers := v.open()` reads fine.
+    - gocritic
     # Simplification analyzers. NOT the same set gopls reports, which was measured
     # rather than assumed: this finds `slices.Contains` and `strings.SplitSeq`
     # cases gopls stays quiet about, and it does NOT find the WriteString
     # concatenations gopls flags. So both run — this one here, and gopls itself
     # through scripts/lint-gopls.ts, which is the tool an editor uses.
     - modernize
+  settings:
+    errcheck:
+      # Deferred Close() included: a Close whose error is dropped must say so
+      # explicitly, like everything else.
+      check-type-assertions: true
+      check-blank: false
 
-settings:
-  errcheck:
-    # Deferred Close() included: a Close whose error is dropped must say so
-    # explicitly, like everything else.
-    check-type-assertions: true
-    check-blank: false
-
-exclusions:
-  rules:
-    # A test's job is to fail loudly on the thing it asserts; a helper's Close in
-    # t.Cleanup already reports through t.Errorf.
-    - path: _test\.go
-      linters:
-        - errcheck
-      # Deliberately narrow: only the throwaway writes a test makes while
-      # driving a socket, never the assertions themselves.
-      source: "^\\s*(_, )?(client|server)\\.(Write|Close)"
+# Formatting, which was NOT checked anywhere before this: a deliberately mangled
+# function passed `golangci-lint run` and every script in the chain, and only a
+# bare `gofmt -l` noticed. Verified by breaking it on purpose.
+formatters:
+  enable:
+    - gofmt
