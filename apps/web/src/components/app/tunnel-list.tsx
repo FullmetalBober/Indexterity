@@ -1,10 +1,9 @@
-import type { TunnelTestResult, TunnelView } from "@repo/contracts";
+import { createTunnelInput, type TunnelTestResult, type TunnelView } from "@repo/contracts";
 import { useState } from "react";
+import { useAppForm } from "~/components/form";
 import { Button } from "~/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
 import { Empty } from "~/components/ui/empty";
-import { Field, FieldDescription, FieldLabel } from "~/components/ui/field";
-import { Input } from "~/components/ui/input";
 import { Skeleton } from "~/components/ui/skeleton";
 import {
   useCreateTunnel,
@@ -27,6 +26,21 @@ import type { Read } from "~/lib/queries/read";
 // weight as a connection string. That decides the shape of the edit form: a
 // rename is an ordinary prefilled field, and changing the config means pasting
 // a whole new file, because there is nothing here to amend.
+
+// The api's own rules, field by field, rather than a second copy of them: the
+// same schema createTunnel validates against on the way in, so a paste refused
+// here is refused for the reason it would have been refused there.
+const NAME = createTunnelInput.shape.name;
+const CONFIG = createTunnelInput.shape.config;
+
+// On an edit, an empty box is the only way to say "keep the config that is
+// stored" — there is nothing to prefill it with, since the PrivateKey in it never
+// comes back from the api. Anything else goes through the rule above.
+function optionalConfig({ value }: { value: string }): string | undefined {
+  if (value.trim() === "") return undefined;
+  const result = CONFIG.safeParse(value);
+  return result.success ? undefined : result.error.issues[0]?.message;
+}
 
 const HEALTH: Record<TunnelView["health"], { label: string; tone: string; title: string }> = {
   UP: { label: "Up", tone: "text-emerald-600", title: "Handshake current" },
@@ -217,64 +231,76 @@ function Verdict({ pending, result }: { pending: boolean; result: TunnelTestResu
 }
 
 function EditTunnel({ tunnel, onDone }: { tunnel: TunnelView; onDone: () => void }) {
-  const [name, setName] = useState(tunnel.name);
-  const [config, setConfig] = useState("");
   const update = useUpdateTunnel();
-
-  const renamed = name.trim() !== "" && name.trim() !== tunnel.name;
-  const replaced = config.trim() !== "";
-
-  const submit = (event: React.FormEvent) => {
-    event.preventDefault();
-    // Only what changed is sent, which is also why an empty config field is not
-    // an error: it means "leave the stored one alone".
-    update.mutate(
-      {
-        tunnelId: tunnel.id,
-        ...(renamed ? { name: name.trim() } : {}),
-        ...(replaced ? { config } : {}),
-      },
-      { onSuccess: onDone },
-    );
-  };
+  const form = useAppForm({
+    defaultValues: { name: tunnel.name, config: "" },
+    onSubmit: ({ value }) => {
+      const name = value.name.trim();
+      // Only what changed is sent, which is also why an empty config box is not
+      // an error: it means "leave the stored one alone".
+      update.mutate(
+        {
+          tunnelId: tunnel.id,
+          ...(name === tunnel.name ? {} : { name }),
+          ...(value.config.trim() === "" ? {} : { config: value.config }),
+        },
+        { onSuccess: onDone },
+      );
+    },
+  });
 
   return (
-    <form className="bg-muted/40 space-y-4 rounded-md border p-4" onSubmit={submit}>
-      <Field>
-        <FieldLabel htmlFor={`tunnel-name-${tunnel.id}`}>Name</FieldLabel>
-        <Input
-          id={`tunnel-name-${tunnel.id}`}
-          value={name}
-          onChange={(event) => setName(event.target.value)}
-          maxLength={80}
-          required
-        />
-      </Field>
-      <ConfigField
-        id={`tunnel-config-${tunnel.id}`}
-        label="Replace the WireGuard config"
-        value={config}
-        onChange={setConfig}
-        hint="Empty keeps the stored config. Pasting a new wg0.conf replaces it whole — which is how a rotated key or a moved gateway lands."
-      />
-      {replaced ? (
-        // Said before the click, not after: an owner replacing a config while
-        // clusters are collecting through the tunnel deserves to know the
-        // peering goes down for a moment.
-        <p className="text-amber-600 text-xs">
-          Saving this drops the live peering. It comes back up on the next collect, or as soon as
-          you press Test.
-        </p>
-      ) : null}
+    <form
+      className="bg-muted/40 space-y-4 rounded-md border p-4"
+      onSubmit={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        void form.handleSubmit();
+      }}
+    >
+      <form.AppField name="name" validators={{ onChange: NAME }}>
+        {(field) => <field.TextField label="Name" maxLength={80} />}
+      </form.AppField>
+      <form.AppField name="config" validators={{ onChange: optionalConfig }}>
+        {(field) => (
+          <field.TextareaField
+            label="Replace the WireGuard config"
+            className="min-h-40"
+            placeholder={CONFIG_PLACEHOLDER}
+            description="Empty keeps the stored config. Pasting a new wg0.conf replaces it whole — which is how a rotated key or a moved gateway lands."
+          />
+        )}
+      </form.AppField>
+      <form.Subscribe selector={(state) => state.values.config.trim() !== ""}>
+        {(replaced) =>
+          replaced ? (
+            // Said before the click, not after: an owner replacing a config while
+            // clusters are collecting through the tunnel deserves to know the
+            // peering goes down for a moment.
+            <p className="text-amber-600 text-xs">
+              Saving this drops the live peering. It comes back up on the next collect, or as soon
+              as you press Test.
+            </p>
+          ) : null
+        }
+      </form.Subscribe>
       <div className="flex items-center gap-2">
-        <Button
-          type="submit"
-          // Nothing changed is not a request worth making: the api refuses a
-          // patch with neither field, and rightly.
-          disabled={update.isPending || (!renamed && !replaced)}
-        >
-          {update.isPending ? "Saving…" : "Save changes"}
-        </Button>
+        <form.Subscribe selector={(state) => state.values}>
+          {(values) => (
+            <form.AppForm>
+              <form.SubmitButton
+                pending={update.isPending}
+                // Nothing changed is the one reason to grey this out — the api
+                // refuses a patch with neither field, and rightly. NOT gated on
+                // validity: handleSubmit refuses an invalid form and touches the
+                // fields on the way, which is what makes the errors appear.
+                disabled={values.name.trim() === tunnel.name && values.config.trim() === ""}
+              >
+                {update.isPending ? "Saving…" : "Save changes"}
+              </form.SubmitButton>
+            </form.AppForm>
+          )}
+        </form.Subscribe>
         <Button type="button" variant="outline" onClick={onDone} disabled={update.isPending}>
           Cancel
         </Button>
@@ -284,22 +310,17 @@ function EditTunnel({ tunnel, onDone }: { tunnel: TunnelView; onDone: () => void
 }
 
 function CreateTunnel() {
-  const [name, setName] = useState("");
-  const [config, setConfig] = useState("");
   const create = useCreateTunnel();
-
-  const submit = (event: React.FormEvent) => {
-    event.preventDefault();
-    create.mutate(
-      { name: name.trim(), config },
-      {
-        onSuccess: () => {
-          setName("");
-          setConfig("");
-        },
-      },
-    );
-  };
+  const form = useAppForm({
+    defaultValues: { name: "", config: "" },
+    onSubmit: ({ value, formApi }) =>
+      create.mutate(
+        { name: value.name.trim(), config: value.config },
+        // Cleared only on success, so a refusal leaves the paste in the box for
+        // the owner to fix rather than making them fetch the file again.
+        { onSuccess: () => formApi.reset() },
+      ),
+  });
 
   return (
     <Card>
@@ -311,28 +332,33 @@ function CreateTunnel() {
         </CardDescription>
       </CardHeader>
       <CardContent>
-        <form className="space-y-4" onSubmit={submit}>
-          <Field>
-            <FieldLabel htmlFor="tunnel-name">Name</FieldLabel>
-            <Input
-              id="tunnel-name"
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              placeholder="Production VPC"
-              maxLength={80}
-              required
-            />
-          </Field>
-          <ConfigField
-            id="tunnel-config"
-            label="WireGuard config"
-            value={config}
-            onChange={setConfig}
-            required
-          />
-          <Button type="submit" disabled={create.isPending || name.trim() === "" || config === ""}>
-            {create.isPending ? "Checking…" : "Register tunnel"}
-          </Button>
+        <form
+          className="space-y-4"
+          onSubmit={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            void form.handleSubmit();
+          }}
+        >
+          <form.AppField name="name" validators={{ onChange: NAME }}>
+            {(field) => (
+              <field.TextField label="Name" placeholder="Production VPC" maxLength={80} />
+            )}
+          </form.AppField>
+          <form.AppField name="config" validators={{ onChange: CONFIG }}>
+            {(field) => (
+              <field.TextareaField
+                label="WireGuard config"
+                className="min-h-55"
+                placeholder={CONFIG_PLACEHOLDER}
+              />
+            )}
+          </form.AppField>
+          <form.AppForm>
+            <form.SubmitButton pending={create.isPending}>
+              {create.isPending ? "Checking…" : "Register tunnel"}
+            </form.SubmitButton>
+          </form.AppForm>
         </form>
       </CardContent>
     </Card>
@@ -350,38 +376,3 @@ const CONFIG_PLACEHOLDER = [
   "AllowedIPs = 10.0.0.0/8",
   "Endpoint = vpn.example.com:51820",
 ].join("\n");
-
-// One textarea, used by the registration form and by the edit form. They differ
-// only in whether a paste is required, and a second copy of it would be a
-// second place for the two to drift apart.
-function ConfigField({
-  id,
-  label,
-  value,
-  onChange,
-  required = false,
-  hint,
-}: {
-  id: string;
-  label: string;
-  value: string;
-  onChange: (value: string) => void;
-  required?: boolean;
-  hint?: string;
-}) {
-  return (
-    <Field>
-      <FieldLabel htmlFor={id}>{label}</FieldLabel>
-      <textarea
-        id={id}
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        className="border-input bg-transparent placeholder:text-muted-foreground focus-visible:ring-ring/50 min-h-55 w-full rounded-md border px-3 py-2 font-mono text-sm shadow-xs focus-visible:ring-3 focus-visible:outline-none"
-        placeholder={CONFIG_PLACEHOLDER}
-        spellCheck={false}
-        required={required}
-      />
-      {hint === undefined ? null : <FieldDescription>{hint}</FieldDescription>}
-    </Field>
-  );
-}

@@ -24,6 +24,7 @@ import {
   FieldLabel,
 } from "~/components/ui/field";
 import { Input } from "~/components/ui/input";
+import { Textarea } from "~/components/ui/textarea";
 import { cn } from "~/lib/utils";
 
 const { fieldContext, formContext, useFieldContext, useFormContext } = createFormHookContexts();
@@ -78,6 +79,43 @@ function TextField({ label, description, hideLabel, id, ...props }: Chrome & Con
         onBlur={field.handleBlur}
         onChange={(event) => field.handleChange(event.target.value)}
         aria-invalid={invalid}
+        {...props}
+      />
+      {description ? <FieldDescription>{description}</FieldDescription> : null}
+      {invalid ? <FieldError errors={asMessages(field.state.meta.errors)} /> : null}
+    </Field>
+  );
+}
+
+// The same field for something that arrives as a whole file rather than as a
+// value somebody types — a wg0.conf, pasted. Monospaced by default, because what
+// goes in one is read back for a mistyped key, and spellcheck off for the same
+// reason: every line of it is underlined otherwise.
+function TextareaField({
+  label,
+  description,
+  hideLabel,
+  id,
+  className,
+  ...props
+}: Chrome & Omit<React.ComponentProps<typeof Textarea>, "value" | "onChange" | "onBlur">) {
+  const field = useFieldContext<string>();
+  const invalid = invalidState(field.state.meta);
+  const controlId = id ?? field.name;
+  return (
+    <Field data-invalid={invalid}>
+      <FieldLabel htmlFor={controlId} className={cn(hideLabel && "sr-only")}>
+        {label}
+      </FieldLabel>
+      <Textarea
+        id={controlId}
+        name={field.name}
+        value={field.state.value}
+        onBlur={field.handleBlur}
+        onChange={(event) => field.handleChange(event.target.value)}
+        aria-invalid={invalid}
+        spellCheck={false}
+        className={cn("font-mono text-sm", className)}
         {...props}
       />
       {description ? <FieldDescription>{description}</FieldDescription> : null}
@@ -173,6 +211,6 @@ function SubmitButton({
 export const { useAppForm } = createFormHook({
   fieldContext,
   formContext,
-  fieldComponents: { TextField, NumberField, CheckboxField },
+  fieldComponents: { TextField, TextareaField, NumberField, CheckboxField },
   formComponents: { SubmitButton },
 });
