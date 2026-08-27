@@ -16,6 +16,7 @@
       "!**/.turbo",
       "!**/graphify-out",
       "!.agents",
+      "!**/.claude/settings.local.json",
       "!**/drizzle",
       "!**/routeTree.gen.ts",
       "!**/*.css",
@@ -44,7 +45,13 @@
     "rules": {
       "preset": "recommended",
       "suspicious": {
-        "noExplicitAny": "error"
+        "noExplicitAny": "error",
+        "noUndeclaredEnvVars": {
+          "level": "error",
+          "options": {
+            "allowedEnvVars": ["SSR", "DEV", "PROD", "MODE", "BASE_URL"]
+          }
+        }
       },
       "style": {
         "noNonNullAssertion": "error",

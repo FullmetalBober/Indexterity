@@ -1,6 +1,12 @@
 {
   "$schema": "https://turbo.build/schema.json",
   "ui": "stream",
+  // passThrough, not `globalEnv`: none of these change what a build or a test
+  // produces, they are read at run time by the process the task starts — so they
+  // belong in turbo's hash-free list. They are listed at all because
+  // `noUndeclaredEnvVars` (biome, turborepo domain) reads this file and an
+  // undeclared `process.env.X` is either a caching bug or a variable nobody
+  // documented; keeping the list closed is what makes the rule able to say which.
   "globalPassThroughEnv": [
     "NODE_ENV",
     "PORT",
@@ -24,6 +30,11 @@
     "SIGNUP_MODE",
     "REQUIRE_EMAIL_VERIFICATION",
     "ALLOW_PRIVATE_CLUSTER_TARGETS",
+    "ALLOW_INSECURE_CLUSTER_TLS",
+    "ALLOW_UNTESTED_DATABASE_VERSION",
+    "MONGO_MAX_POOL_SIZE",
+    "DEFAULT_ORG_PLAN",
+    "RETENTION_DAYS",
     "STORAGE_USD_PER_GB_MONTH",
     "WORKER_CONCURRENCY",
     "RUN_CRONJOB",
@@ -35,6 +46,13 @@
     "SENTRY_DSN_WEB",
     "SENTRY_ENVIRONMENT",
     "INT_API_PORT",
+    "E2E_WEB_PORT",
+    "E2E_API_PORT",
+    "MONGO_ADMIN_URL",
+    "POSTGRES_URL",
+    "MSSQL_URL",
+    "MSSQL_AG_URL",
+    "MSSQL_AG_SECONDARY_URL",
     "WEB_METRICS_PORT",
     "WEB_SENTRY_DSN",
     "SUPERVISOR_GRACE_MS",
@@ -62,12 +80,22 @@
     "typecheck": {
       "dependsOn": ["transit"]
     },
-    // scripts/ belongs to no workspace, so the fan-out above never reaches it.
+    // scripts/ and deploy/ belong to no workspace, so the fan-out above never
+    // reaches them.
     // A root task is how turbo runs something in the repo root itself, and
-    // `npm run typecheck` asks for both — otherwise the only source files CI
-    // never type-checks would stay that way.
+    // `npm run typecheck` asks for both — otherwise the source outside every
+    // workspace would go unchecked, which is how it got here (D53).
     "//#typecheck:scripts": {
-      "inputs": ["scripts/**/*.ts", "tsconfig.scripts.json", "packages/config/tsconfig.base.json"]
+      // deploy/ as well as scripts/: tsconfig.json checks both, so leaving it out
+      // of the cache key made an edit to the supervisor or the manifest rewriter a
+      // FULL TURBO hit on a check that never read it.
+      "inputs": [
+        "scripts/**/*.ts",
+        "deploy/**/*.ts",
+        "deploy/**/*.mts",
+        "tsconfig.json",
+        "packages/config/tsconfig.base.json"
+      ]
     },
     // `^build`, not nothing. Both suites import @repo/contracts, whose package
     // main is dist/index.js — so without a dependency here `npm test` on a fresh

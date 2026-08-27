@@ -9,9 +9,5 @@
     // reference them.
     "types": ["node"]
   },
-  "include": ["src"],
-  // The scrubber's tests are the point of the package, but they are not part of
-  // what the api and the dashboard import — emitting them puts a second copy of
-  // every case in dist/ for vitest to find and run twice.
-  "exclude": ["src/**/*.test.ts"]
+  "include": ["src"]
 }
