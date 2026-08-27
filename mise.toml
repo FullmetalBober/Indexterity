@@ -1,2 +1,10 @@
 [tools]
 node = "26"
+# The tunnel binary (apps/tunnel): wireguard-go and gvisor's netstack, which the
+# api spawns per peering. Pinned like node is, so a build here and a build in CI
+# compile the same source with the same toolchain.
+go = "1.27"
+# The Go lint gate. errcheck is the reason it is here rather than plain `go vet`:
+# an unchecked error is the one class of bug this repo's rules do not tolerate,
+# and vet does not look for it.
+golangci-lint = "2"

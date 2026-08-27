@@ -1,0 +1,3 @@
+# `go build ./...` drops a binary named after this directory. The build script
+# writes to dist/ instead, which the root .gitignore already covers.
+/tunnel
