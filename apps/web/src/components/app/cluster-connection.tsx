@@ -128,7 +128,7 @@ export function ClusterConnection({
   });
 
   return (
-    <Card className="mt-8">
+    <Card>
       <CardHeader>
         <CardTitle className="text-base">Connection</CardTitle>
         <CardDescription>
