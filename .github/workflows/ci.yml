@@ -105,6 +105,14 @@ jobs:
       # mise.toml pins the same major for a developer's machine, and a linter
       # that changes version underneath a green branch is a red one tomorrow.
       - run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.1
+      # And gopls, because the two catch different things — gopls has no
+      # unchecked-error analyzer, golangci-lint does not report what gopls calls
+      # an inefficient concatenation, and both were measured saying nothing about
+      # the other's findings. mise has no plugin for gopls, so it is pinned here
+      # and in scripts/lint-gopls.ts, which is what fails when it is absent. This
+      # is a source build and costs a minute or two; the alternative is a class of
+      # warning that is visible in an editor and invisible here.
+      - run: go install golang.org/x/tools/gopls@v0.23.0
       - run: npm run lint
       - run: npm run version:check
       - run: npm run build

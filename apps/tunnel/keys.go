@@ -51,15 +51,26 @@ func uapiConfig(c config) (string, error) {
 	// strings.Builder's Write* never returns an error (its own doc says so), and
 	// it is the only writer used here for that reason — every other writer in
 	// this process has its error checked.
-	out.WriteString("private_key=" + privateKey + "\n")
-	out.WriteString("replace_peers=true\n")
-	out.WriteString("public_key=" + publicKey + "\n")
+	//
+	// A directive at a time rather than one concatenated string per line. The
+	// concatenation allocated a temporary for the builder to copy, which is what
+	// gopls objects to, and a helper says the shape once instead of six times.
+	line := func(key, value string) {
+		out.WriteString(key)
+		out.WriteString("=")
+		out.WriteString(value)
+		out.WriteString("\n")
+	}
+
+	line("private_key", privateKey)
+	line("replace_peers", "true")
+	line("public_key", publicKey)
 	if c.Peer.PresharedKey != "" {
 		presharedKey, keyErr := decodeKey("[Peer] PresharedKey", c.Peer.PresharedKey)
 		if keyErr != nil {
 			return "", keyErr
 		}
-		out.WriteString("preshared_key=" + presharedKey + "\n")
+		line("preshared_key", presharedKey)
 	}
 	if c.Peer.Endpoint == "" {
 		return "", fmt.Errorf("[Peer] Endpoint is empty — the api resolves and vets it before this")
@@ -70,7 +81,7 @@ func uapiConfig(c config) (string, error) {
 	if _, err = netip.ParseAddrPort(c.Peer.Endpoint); err != nil {
 		return "", fmt.Errorf("[Peer] Endpoint %q is not an ip:port: %w", c.Peer.Endpoint, err)
 	}
-	out.WriteString("endpoint=" + c.Peer.Endpoint + "\n")
+	line("endpoint", c.Peer.Endpoint)
 	if len(c.Peer.AllowedIPs) == 0 {
 		return "", fmt.Errorf("[Peer] AllowedIPs is empty — the tunnel could carry nothing")
 	}
@@ -79,10 +90,10 @@ func uapiConfig(c config) (string, error) {
 		if prefixErr != nil {
 			return "", fmt.Errorf("[Peer] AllowedIPs %q is not a CIDR: %w", cidr, prefixErr)
 		}
-		out.WriteString("allowed_ip=" + prefix.String() + "\n")
+		line("allowed_ip", prefix.String())
 	}
 	if c.Peer.PersistentKeepalive > 0 {
-		out.WriteString("persistent_keepalive_interval=" + strconv.Itoa(c.Peer.PersistentKeepalive) + "\n")
+		line("persistent_keepalive_interval", strconv.Itoa(c.Peer.PersistentKeepalive))
 	}
 	return out.String(), nil
 }

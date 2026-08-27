@@ -28,6 +28,12 @@ linters:
     - errorlint
     # A context that is created and never used, and a nil one passed in.
     - contextcheck
+    # Simplification analyzers. NOT the same set gopls reports, which was measured
+    # rather than assumed: this finds `slices.Contains` and `strings.SplitSeq`
+    # cases gopls stays quiet about, and it does NOT find the WriteString
+    # concatenations gopls flags. So both run — this one here, and gopls itself
+    # through scripts/lint-gopls.ts, which is the tool an editor uses.
+    - modernize
 
 settings:
   errcheck:
