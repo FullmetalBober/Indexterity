@@ -34,7 +34,7 @@
 // nearest package.json, and this is copied to /tmp — deliberately outside the tree
 // the runtime image is built from, so it does not ship — where there is none. The
 // explicit extension is what makes it an ES module wherever it is put. Types are
-// stripped by node on the way in, and typechecked by tsconfig.scripts.json like
+// stripped by node on the way in, and typechecked by the root tsconfig.json like
 // every other hand-written script here.
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";

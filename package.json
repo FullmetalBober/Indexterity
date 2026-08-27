@@ -15,7 +15,7 @@
     "build": "turbo run build",
     "dev": "turbo run dev",
     "typecheck": "turbo run typecheck //#typecheck:scripts",
-    "typecheck:scripts": "tsc -p tsconfig.scripts.json",
+    "typecheck:scripts": "tsc -p tsconfig.json",
     "test": "turbo run test",
     "audit:gate": "node scripts/audit-gate.ts",
     "lint": "biome check . && node scripts/lint-tailwind.ts && node scripts/lint-migrations.ts && node scripts/lint-source-bytes.ts",

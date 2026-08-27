@@ -10,6 +10,13 @@
   //
   // Both are run by `node <file>.ts` directly, with no build step: Node strips
   // types on the way in. Everything here exists to keep that true.
+  //
+  // The name is load-bearing: it was `tsconfig.scripts.json`, and a language
+  // server discovers `tsconfig.json` and `jsconfig.json` and nothing else. So
+  // every file below opened in an editor got the compiler's defaults instead of
+  // this file — no node types, which is `process` and every `node:` import
+  // underlined red (TS2591) in a tree where `tsc` was green. CI read the config
+  // and the editor could not, and the editor is where the code is written.
   "extends": "./packages/config/tsconfig.base.json",
   "compilerOptions": {
     "noEmit": true,
