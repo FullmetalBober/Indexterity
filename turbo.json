@@ -53,6 +53,10 @@
     "MSSQL_URL",
     "MSSQL_AG_URL",
     "MSSQL_AG_SECONDARY_URL",
+    // The opt-in WireGuard gateway for src/tunnel/reach.test.ts: a wg0.conf
+    // naming a peer that is actually listening. Set on a developer's machine and
+    // nowhere else, which is where that test skips rather than fails.
+    "WG_TEST_CONF",
     "WEB_METRICS_PORT",
     "WEB_SENTRY_DSN",
     "SUPERVISOR_GRACE_MS",

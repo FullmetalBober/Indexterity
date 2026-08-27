@@ -1,6 +1,9 @@
 import { EventEmitter } from "node:events";
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { parseWireGuardConf } from "./conf";
 import { probeReachability } from "./reach";
+import { TunnelRegistry } from "./tunnel.registry";
 import type { DeviceState, TunnelDevice } from "./wireguard/device";
 
 // A device stands in for the protocol here. What is worth pinning is not the
@@ -127,4 +130,80 @@ describe("probing whether a gateway answers", () => {
     expect(fake.listenerCount("handshake")).toBe(0);
     expect(fake.listenerCount("error")).toBe(0);
   });
+});
+
+// Everything above is a fake device. This is the part that cannot be faked: a
+// handshake the reference implementation accepts, against a peer that is
+// actually listening. Opt-in, because it needs a gateway — skipped, not failed,
+// when there is none, so the ordinary suite is unaffected.
+//
+//   wg genkey > c.key; wg pubkey < c.key > c.pub
+//   wg genkey > s.key; wg pubkey < s.key > s.pub
+//   podman run --rm -d --name wgpeer --cap-add NET_ADMIN -p 51820:51820/udp \
+//     -e SRVKEY="$(cat s.key)" -e CLIPUB="$(cat c.pub)" alpine:3 sh -c '
+//       apk add --no-cache wireguard-tools iproute2 >/dev/null
+//       ip link add wg0 type wireguard
+//       printf "%s" "$SRVKEY" > /k
+//       wg set wg0 listen-port 51820 private-key /k peer "$CLIPUB" allowed-ips 10.99.0.2/32
+//       ip addr add 10.99.0.1/24 dev wg0; ip link set wg0 up; sleep 3600'
+//
+// Then a wg0.conf naming c.key, s.pub and 127.0.0.1:51820, and:
+//
+//   ALLOW_PRIVATE_CLUSTER_TARGETS=true WG_TEST_CONF=./wg0.conf npx vitest run src/tunnel/reach
+//
+// The flag is needed because the gateway is on loopback, which the network guard
+// classifies PRIVATE — the same refusal a customer's RFC1918 gateway gets on a
+// hosted install, and the reason this is a local proof rather than a CI job.
+const CONF = process.env.WG_TEST_CONF;
+const ID = "11111111-1111-4111-8111-111111111111";
+
+describe.skipIf(CONF === undefined)("against a real WireGuard gateway", () => {
+  it("completes a handshake, and completes another on the live session", async () => {
+    const registry = new TunnelRegistry();
+    const conf = parseWireGuardConf(readFileSync(CONF as string, "utf8"));
+    try {
+      await registry.open(ID, conf);
+      const first = await registry.probe(ID);
+
+      expect(first.reachable).toBe(true);
+      expect(first.state).toBe("up");
+      expect(first.error).toBeNull();
+      expect(first.handshakeAgeSeconds).toBeLessThan(5);
+
+      // The claim the dashboard's verdict rests on: a tunnel that is ALREADY up
+      // still gets a fresh handshake, so "reachable" means the gateway answered
+      // just now rather than an hour ago. A rekey does not change the state, so
+      // a falling handshake age is the only thing that can show it happened.
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
+      const before = registry.health(ID)?.handshakeAgeSeconds ?? 0;
+      const second = await registry.probe(ID);
+
+      expect(before).toBeGreaterThan(1);
+      expect(second.reachable).toBe(true);
+      expect(second.handshakeAgeSeconds ?? Number.POSITIVE_INFINITY).toBeLessThan(before);
+    } finally {
+      await registry.close(ID);
+    }
+  }, 30_000);
+
+  it("reports unreachable when nothing is listening on the endpoint", async () => {
+    const registry = new TunnelRegistry();
+    // The same gateway, one port along: permitted by the guard, answered by
+    // nobody. This is the shape of every real failure — a moved endpoint, a
+    // dropped UDP port, a revoked peer — and it has no cause to report.
+    const conf = parseWireGuardConf(
+      readFileSync(CONF as string, "utf8").replace(":51820", ":51821"),
+    );
+    try {
+      await registry.open(ID, conf);
+      const result = await registry.probe(ID, 3_000);
+
+      expect(result.reachable).toBe(false);
+      expect(result.state).toBe("handshaking");
+      expect(result.error).toBeNull();
+      expect(result.handshakeAgeSeconds).toBeNull();
+    } finally {
+      await registry.close(ID);
+    }
+  }, 30_000);
 });
