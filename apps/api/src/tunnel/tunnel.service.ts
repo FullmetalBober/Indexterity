@@ -109,20 +109,30 @@ export class TunnelService {
    * a mistyped PublicKey or a revoked peering is a perfectly valid file. See
    * reach.ts for why this forces a handshake rather than reading the state.
    */
-  async test(tunnelId: string): Promise<TunnelTestResult> {
+  async test(tunnelId: string): Promise<{ verdict: TunnelTestResult; tunnel: TunnelView }> {
+    // The row is read either way: the conf to open with, and the view the caller
+    // needs to record what was tested. One read, rather than the caller listing
+    // every tunnel in the org to find out this one's name.
+    const row = await this.#row(tunnelId);
+
     // Opened only when it is not up already. A test must not tear down a
     // peering other clusters are collecting through — and it does not need to,
     // because the probe negotiates a fresh session on the live device either
     // way.
     if (this.registry.endpoint(tunnelId) === null) {
-      await this.registry.open(tunnelId, await this.#conf(tunnelId));
+      await this.registry.open(tunnelId, await this.#unseal(row));
     }
     const reach = await this.registry.probe(tunnelId);
     return {
-      reachable: reach.reachable,
-      health: toHealth(reach.state),
-      handshakeAgeSeconds: reach.handshakeAgeSeconds,
-      error: reach.error,
+      verdict: {
+        reachable: reach.reachable,
+        health: toHealth(reach.state),
+        handshakeAgeSeconds: reach.handshakeAgeSeconds,
+        error: reach.error,
+      },
+      // Built AFTER the probe, so its health is the health the probe just
+      // established rather than what it was a moment before.
+      tunnel: await this.#view(row),
     };
   }
 

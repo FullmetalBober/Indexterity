@@ -127,6 +127,20 @@ export interface SecurityEventMetadata {
   // Here rather than on the row for the reason CLUSTER_DISCONNECTED carries its
   // cluster id: the act deletes the thing a column would point at.
   TUNNEL_REMOVED: { tunnelId: string; endpoint: string; allowedIps: string[] };
+  // The verdict, not just the fact of asking. A run of these against a gateway
+  // that never answers is a different story from one that answered every time,
+  // and only the outcome tells them apart.
+  TUNNEL_TESTED: {
+    tunnelId: string;
+    endpoint: string;
+    reachable: boolean;
+    // down | handshaking | up at the moment the answer came back.
+    health: string;
+    // Why it did not answer, when there was a reason to give. Null covers both
+    // "it answered" and "it stayed silent", which is the honest shape: silence
+    // has no cause to report.
+    error: string | null;
+  };
 }
 
 interface SecurityEventColumns {

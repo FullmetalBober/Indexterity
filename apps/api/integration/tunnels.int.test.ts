@@ -245,6 +245,21 @@ describe("testing one", () => {
     });
   }, 30_000);
 
+  it("records the verdict on the trail, not just that somebody asked", async () => {
+    const tested = await trail(owner, "TUNNEL_TESTED");
+    expect(tested).toHaveLength(1);
+    expect(tested[0]).toMatchObject({ target: "Production VPC (Frankfurt)" });
+    expect(asRecord(tested[0]?.metadata)).toMatchObject({
+      tunnelId,
+      endpoint: "127.0.0.1:51998",
+      // The gateway in this suite is a port nothing listens on, so the honest
+      // row is a failed test — which is the row worth having.
+      reachable: false,
+      health: "HANDSHAKING",
+      error: null,
+    });
+  });
+
   it("shows the tunnel as no longer idle once it has been asked", async () => {
     const [tunnel] = await tunnels(owner);
     expect(tunnel?.health).not.toBe("IDLE");

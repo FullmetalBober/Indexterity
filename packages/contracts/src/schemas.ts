@@ -845,6 +845,13 @@ export const SECURITY_EVENTS = [
   "TUNNEL_REGISTERED",
   "TUNNEL_UPDATED",
   "TUNNEL_REMOVED",
+  // A reachability test, which changes nothing and is recorded anyway. It was
+  // left out at first for that reason — a row per button press buries the three
+  // acts above it. What changes the calculation is that a test is the one thing
+  // here that reaches OUT: it sends datagrams to a customer's gateway on demand,
+  // and "who probed whose network, when, and what came back" is a question an
+  // incident asks. The kind filter keeps it out of the way of the rest.
+  "TUNNEL_TESTED",
 ] as const;
 
 export type SecurityEventName = (typeof SECURITY_EVENTS)[number];

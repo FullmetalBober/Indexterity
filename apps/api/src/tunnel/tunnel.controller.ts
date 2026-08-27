@@ -148,7 +148,23 @@ export class TunnelController {
           throw errors.NOT_FOUND({ message: "no such tunnel" });
         }
         try {
-          return await this.tunnels.test(input.tunnelId);
+          const { verdict, tunnel } = await this.tunnels.test(input.tunnelId);
+          // After the answer rather than before the ask: what an incident wants
+          // is what came back, and a row written on the way in could only say
+          // somebody pressed a button.
+          await this.record(req, {
+            event: "TUNNEL_TESTED",
+            orgId: context.member.orgId,
+            target: tunnel.name,
+            metadata: {
+              tunnelId: tunnel.id,
+              endpoint: tunnel.endpoint,
+              reachable: verdict.reachable,
+              health: verdict.health,
+              error: verdict.error,
+            },
+          });
+          return verdict;
         } catch (error) {
           // A gateway that does not answer is NOT this branch — that is a 200
           // with reachable:false, because it is the answer to the question.
