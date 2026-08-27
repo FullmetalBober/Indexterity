@@ -412,7 +412,7 @@ func (s *socksServer) verdictFor(ctx context.Context, host string, port uint16) 
 
 // Both directions, and the pair dies together: a database connection whose
 // halves outlive each other is a socket nobody will close.
-func splice(client net.Conn, upstream net.Conn) {
+func splice(client, upstream net.Conn) {
 	var wait sync.WaitGroup
 	wait.Add(2)
 	copyOnce := func(to net.Conn, from net.Conn) {

@@ -202,7 +202,7 @@ func (t *tunnel) lastHandshake() (time.Time, error) {
 // available: when a handshake last completed, and when traffic last asked for
 // one. wireguard-go reports the first; the second is ours because nothing
 // reports it.
-func (t *tunnel) stateAt(handshake time.Time, now time.Time) tunnelState {
+func (t *tunnel) stateAt(handshake, now time.Time) tunnelState {
 	if !handshake.IsZero() && now.Sub(handshake) < rejectAfter {
 		return stateUp
 	}
@@ -246,8 +246,8 @@ func (t *tunnel) watch(ctx context.Context, emit func(event) error) error {
 			t.mu.Unlock()
 
 			if fresh {
-				if err = emit(newHandshake(now.Sub(handshake).Seconds())); err != nil {
-					return err
+				if emitErr := emit(newHandshake(now.Sub(handshake).Seconds())); emitErr != nil {
+					return emitErr
 				}
 			}
 
@@ -260,8 +260,8 @@ func (t *tunnel) watch(ctx context.Context, emit func(event) error) error {
 			t.mu.Unlock()
 
 			if changed {
-				if err = emit(newState(string(state))); err != nil {
-					return err
+				if emitErr := emit(newState(string(state))); emitErr != nil {
+					return emitErr
 				}
 			}
 		}
