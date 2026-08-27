@@ -13,7 +13,6 @@
     "baseUrl": "."
   },
   "module": {
-    "type": "commonjs",
-    "ignoreDynamic": true
+    "type": "commonjs"
   }
 }

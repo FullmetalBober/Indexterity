@@ -49,7 +49,7 @@ has the detail.
 
 A cluster has to be reachable from wherever Indexterity runs, and a database
 with no public endpoint is not. **Paste the WireGuard config its network already
-uses** and Indexterity terminates the peering itself — in-process, in userspace,
+uses** and Indexterity terminates the peering itself — in userspace,
 needing no privileges and nothing extra running on your side. Register it under
 Settings → VPN tunnels, pick it on the connect form, and a VPC-only or on-prem
 cluster connects like any other. Registering only reads the file, so each tunnel

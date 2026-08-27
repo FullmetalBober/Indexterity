@@ -1,12 +1,9 @@
 import { promises as dns } from "node:dns";
 import { Injectable, Logger, type OnApplicationShutdown } from "@nestjs/common";
-import { tunnelBinary, tunnelRuntime } from "../config/env";
+import { tunnelBinary } from "../config/env";
 import { allowPrivateTargets, assertTargetsAllowed } from "../engine/net-guard";
-import type { TunnelBackend, TunnelEndpoint, TunnelHealth } from "./backend";
-import { ChildTunnel } from "./child";
+import { ChildTunnel, type Reachability, type TunnelEndpoint, type TunnelHealth } from "./child";
 import type { WireGuardConf } from "./conf";
-import { InProcessTunnel } from "./inprocess";
-import type { Reachability } from "./reach";
 
 // The one provider in this directory, and it earns that on two of the three
 // counts §5.1 names: lifecycle, and being a single instance the rest of the app
@@ -14,19 +11,18 @@ import type { Reachability } from "./reach";
 // parser — is pure or per-tunnel, so none of it is injectable, for the same
 // reason analysis/ and the three adapters are not.
 //
-// It holds the map and the lifecycle and nothing about HOW a peering is carried:
-// TUNNEL_RUNTIME picks between the userspace stack in this process and the Go
-// binary spawned per tunnel (D111), both of which answer backend.ts. That is why
-// the switch is a switch and not a fork — the same integration suite proves each.
+// It holds the map and the lifecycle; a peering itself is carried by the process
+// child.ts supervises — wireguard-go and gvisor's netstack, one process per
+// tunnel (D111).
 
-// Re-exported because callers have imported them from here since #353, and the
-// split into backend.ts is not their business.
+// Re-exported because callers have imported them from here since #353, and where
+// the types live is not their business.
 export type { TunnelEndpoint, TunnelHealth };
 
 @Injectable()
 export class TunnelRegistry implements OnApplicationShutdown {
   readonly #logger = new Logger(TunnelRegistry.name);
-  readonly #tunnels = new Map<string, TunnelBackend>();
+  readonly #tunnels = new Map<string, ChildTunnel>();
 
   /**
    * Bring a tunnel up, or replace one already up under the same id.
@@ -44,26 +40,23 @@ export class TunnelRegistry implements OnApplicationShutdown {
     };
     const onState = (state: string) => this.#logger.log(`tunnel ${id} is ${state}`);
 
-    const backend =
-      tunnelRuntime() === "binary"
-        ? await ChildTunnel.start({
-            conf,
-            // Resolved and vetted HERE, once, because the guard is ours: a
-            // customer-supplied endpoint is an outbound dial we make. The binary
-            // refuses a hostname for the same reason.
-            gateway: await this.#resolveGateway(conf),
-            binary: tunnelBinary(),
-            onError,
-            onState,
-            onExit: (code) => {
-              // Not removed from the map: `endpoint()` still answers, so a dial
-              // fails fast against a dead listener rather than silently opening
-              // a second peering. The next open() replaces it.
-              this.#logger.warn(`tunnel ${id} process exited with ${code ?? "a signal"}`);
-            },
-            log: (line) => this.#logger.warn(`tunnel ${id}: ${line}`),
-          })
-        : await InProcessTunnel.start(conf, () => this.#resolveGateway(conf), onError, onState);
+    const backend = await ChildTunnel.start({
+      conf,
+      // Resolved and vetted HERE, because the guard is ours: a customer-supplied
+      // endpoint is an outbound dial we make. The binary refuses a hostname for
+      // the same reason.
+      gateway: await this.#resolveGateway(conf),
+      binary: tunnelBinary(),
+      onError,
+      onState,
+      onExit: (code) => {
+        // Not removed from the map: `endpoint()` still answers, so a dial fails
+        // fast against a dead listener rather than silently opening a second
+        // peering. The next open() replaces it.
+        this.#logger.warn(`tunnel ${id} process exited with ${code ?? "a signal"}`);
+      },
+      log: (line) => this.#logger.warn(`tunnel ${id}: ${line}`),
+    });
 
     // The replacement is built before the old one is torn down, so a failed
     // replace leaves the tunnel that was working in place rather than none.
@@ -128,7 +121,7 @@ export class TunnelRegistry implements OnApplicationShutdown {
     await Promise.all(tunnels.map((tunnel) => this.#shutdown(tunnel)));
   }
 
-  async #shutdown(tunnel: TunnelBackend): Promise<void> {
+  async #shutdown(tunnel: ChildTunnel): Promise<void> {
     await tunnel.close().catch(() => {});
   }
 

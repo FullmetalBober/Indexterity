@@ -6,9 +6,9 @@ import { clusters, envKeyProvider, open as openSealed, seal, tunnels } from "../
 import { DatabaseService } from "../db/database.service";
 import type { TunnelRoute } from "../engine/net-guard";
 import type { DialProxy } from "../engine/ports";
+import type { TunnelState } from "./child";
 import { InvalidWireGuardConfError, parseWireGuardConf, type WireGuardConf } from "./conf";
 import { TunnelRegistry } from "./tunnel.registry";
-import type { DeviceState } from "./wireguard/device";
 
 // Reads and writes the tunnel rows, and derives what the dashboard shows.
 //
@@ -282,7 +282,7 @@ export class TunnelService {
 // A device's state as the dashboard's four-way health. Shared by the list and
 // the reachability test rather than written twice: the two must never disagree
 // about what "up" means, and null — no live tunnel at all — is IDLE in both.
-function toHealth(state: DeviceState | null): TunnelHealth {
+function toHealth(state: TunnelState | null): TunnelHealth {
   if (state === null) return "IDLE";
   if (state === "up") return "UP";
   return state === "handshaking" ? "HANDSHAKING" : "DOWN";
