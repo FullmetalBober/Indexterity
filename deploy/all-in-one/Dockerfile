@@ -77,6 +77,25 @@ RUN --mount=type=cache,target=/root/.npm \
     && rm -rf node_modules \
     && npm install --omit=dev
 
+# The tunnel binary (apps/tunnel, D111): wireguard-go and gvisor's netstack,
+# spawned per peering by the api.
+#
+# Its own stage, from the FULL context rather than from the pruned tree, because
+# `turbo prune @repo/api` cannot see it: the api spawns the binary rather than
+# importing it, so there is no package dependency to prune along. CGO off, so
+# what lands in an alpine runtime is a static binary with nothing to link
+# against — the same reason `find node_modules -name "*.node"` returning zero is
+# what made the musl base swap safe.
+FROM docker.io/library/golang:1.27.0-alpine AS tunnel
+WORKDIR /src
+COPY apps/tunnel/go.mod apps/tunnel/go.sum ./
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod go mod download
+COPY apps/tunnel/ ./
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    CGO_ENABLED=0 go build -trimpath -o /out/indexterity-tunnel .
+
 FROM docker.io/library/node:26-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
@@ -85,6 +104,7 @@ ENV NODE_ENV=production
 # (cwd /app/apps/web, entry .output/server/index.mjs) rather than a layout that
 # only exists here.
 COPY --from=builder /app .
+COPY --from=tunnel /out/indexterity-tunnel apps/tunnel/dist/indexterity-tunnel
 # Copied, not built: node strips the types when it loads it, so what runs in the
 # container is the file in the repository. The pruned root package.json that came
 # with the tree above is `"type": "module"`, which is what makes this an ES module

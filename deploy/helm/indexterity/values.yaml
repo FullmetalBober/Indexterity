@@ -378,6 +378,15 @@ config:
   # install must leave it false, or any account can probe the internal network.
   # Cloud metadata and other never-a-database ranges stay blocked either way.
   allowPrivateClusterTargets: false
+  # Which implementation terminates a registered WireGuard peering (D111):
+  # `node` is the userspace stack inside the api, `binary` spawns the tunnel
+  # binary the image carries — wireguard-go and gvisor's netstack. Neither asks
+  # for a capability, so this is not a privilege decision; it is which of two
+  # implementations carries the packets. Both answer the same api.
+  tunnelRuntime: node
+  # Where that binary is, for an image that puts it somewhere other than
+  # /app/apps/tunnel/dist/indexterity-tunnel. Empty means the default.
+  tunnelBinary: ""
   # Allow connecting clusters that do not offer validated TLS. Every outbound
   # connection requires it by default, including the ones the pipeline makes from
   # stored credentials — so a cluster connected without it stops being collected
