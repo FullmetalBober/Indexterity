@@ -6,6 +6,7 @@ import { ALERT_COOLDOWN_MS, alertAllowed } from "../mail/notify";
 import { NotifyService } from "../mail/notify.service";
 import { TunnelRegistry } from "../tunnel/tunnel.registry";
 import { applyCluster } from "./apply";
+import { markBlocked, markUnblocked } from "./blocked";
 import { settleBuildsForCluster } from "./building";
 import { refreshInferredWindow } from "./change-window";
 import { classifyCluster } from "./classify";
@@ -130,6 +131,11 @@ export class ClusterTasksService {
       },
       alertAllowed: (scope) => alertAllowed(alertClaims(db), scope, ALERT_COOLDOWN_MS),
       emitPassFinished: (clusterId, task) => emitPassFinished(db, clusterId, task),
+      // Not best-effort: this is the only copy of why the pipeline stopped, and a
+      // write that fails silently would put the dashboard back to inferring it
+      // from staleness. A failure here fails the pass, which is retried.
+      markBlocked: (clusterId, reason, detail) => markBlocked(db, clusterId, reason, detail),
+      markUnblocked: (clusterId) => markUnblocked(db, clusterId),
     };
   }
 }

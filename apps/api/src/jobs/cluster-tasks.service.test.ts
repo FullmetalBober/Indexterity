@@ -24,6 +24,10 @@ vi.mock("./building", () => ({ settleBuildsForCluster: vi.fn() }));
 vi.mock("./create", () => ({ applyCreatesForCluster: vi.fn() }));
 vi.mock("./finalize", () => ({ finalizeCluster: vi.fn() }));
 vi.mock("./probe", () => ({ probeCluster: vi.fn(async () => []) }));
+// Why the pipeline stopped is written to the clusters row, and this suite's db is
+// an empty object: what it pins is which pass each queue name runs, not what a
+// pass records about itself (tasks.test.ts owns that).
+vi.mock("./blocked", () => ({ markBlocked: vi.fn(), markUnblocked: vi.fn() }));
 vi.mock("../events/emit", () => ({ emitPassFinished: vi.fn() }));
 vi.mock("../mail/notify", () => ({
   ALERT_COOLDOWN_MS: 1,

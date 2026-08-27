@@ -89,6 +89,44 @@ export const NO_TLS_OVERRIDES: TlsOverrides = {
   insecure: false,
 };
 
+// Why the pipeline is not running against a cluster.
+//
+// The condition was always known — a metric, a log line, a mail once a day — and
+// none of it reached a screen, so a cluster nobody could reach looked exactly
+// like a cluster with nothing to collect: `lastCollectedAt` quietly going stale.
+// A problem that renders as an absence reads as "nothing is obviously wrong".
+export const BLOCKED_REASONS = [
+  // We dialled and nothing answered.
+  "UNREACHABLE",
+  // The VPN gateway did not come up. NOT unreachable: the database may be
+  // answering perfectly and we never dialled it (#353).
+  "TUNNEL_DOWN",
+  // The stored string would connect in plaintext, so we declined to dial.
+  "INSECURE",
+  // The sealed credentials cannot be opened — an operator's problem.
+  "CREDENTIALS",
+  // A major series this release has not been probed against.
+  "UNSUPPORTED",
+  // Anything else, which is also the one that gets retried and dead-lettered.
+  "ERROR",
+] as const;
+export type BlockedReason = (typeof BLOCKED_REASONS)[number];
+
+export const clusterBlock = z.object({
+  // A string rather than the enum above, deliberately. The column is text so
+  // that adding a reason is a constant rather than a migration — and a reason
+  // written by a newer worker than the api reading it must render as itself
+  // rather than fail the whole cluster read, which is the failure this field
+  // exists to stop happening.
+  reason: z.string(),
+  // When it STARTED, not when it was last seen: "for six days" is the part that
+  // decides whether somebody acts.
+  since: z.string(),
+  // The sentence, usually the driver's own words.
+  detail: z.string(),
+});
+export type ClusterBlock = z.infer<typeof clusterBlock>;
+
 export const cluster = z.object({
   id: z.uuid(),
   name: z.string(),
@@ -122,6 +160,9 @@ export const cluster = z.object({
   // Newest index snapshot, or null before the first collect. The dashboard
   // flags stale data so numbers from before an outage cannot read as current.
   lastCollectedAt: z.string().nullable(),
+  // Null when the pipeline is running. When it is not, this is the answer to
+  // "why are these numbers old", which staleness alone cannot give.
+  blocked: clusterBlock.nullable(),
   // Which TLS checks this cluster was connected with turned off. Read back, not
   // just written: a security concession the owner cannot see afterwards is one
   // nobody reviews.
