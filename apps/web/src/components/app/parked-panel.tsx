@@ -3,7 +3,7 @@ import { Truncated } from "~/components/truncated";
 import { Badge } from "~/components/ui/badge";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "~/components/ui/empty";
 import { Skeleton } from "~/components/ui/skeleton";
-import { LocalTime } from "~/lib/hydration";
+import { LocalTime } from "~/lib/local-time";
 
 // Indexes the engine has agreed not to propose again (#159).
 //

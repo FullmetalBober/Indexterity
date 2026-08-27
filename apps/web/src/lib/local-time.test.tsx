@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { formatTimestamp, LocalTime } from "./hydration";
+import { LocalTime } from "./local-time";
 
 // 2026-08-19T13:06:00Z — the instant from the report, where a UTC server wrote
 // "01:06 PM" into the HTML and a UTC+3 reader's browser rendered "04:06 PM".
@@ -42,12 +42,5 @@ describe("LocalTime", () => {
 
   it("draws a dash for a timestamp that is not one", () => {
     expect(renderToString(<LocalTime iso="not a date" />)).toContain("—");
-  });
-});
-
-describe("formatTimestamp", () => {
-  it("is UTC before mount and local after", () => {
-    expect(formatTimestamp(ISO, false)).toBe("2026-08-19 13:06 UTC");
-    expect(formatTimestamp(ISO, true)).not.toContain("UTC");
   });
 });

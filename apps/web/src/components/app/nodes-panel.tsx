@@ -1,7 +1,7 @@
 import type { ClusterNodes } from "@repo/contracts";
 import { Badge } from "~/components/ui/badge";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "~/components/ui/empty";
-import { LocalTime } from "~/lib/hydration";
+import { LocalTime } from "~/lib/local-time";
 
 // With the year, same reasoning as the sessions list: a roster stale enough to
 // matter is exactly the one where the day alone is ambiguous.

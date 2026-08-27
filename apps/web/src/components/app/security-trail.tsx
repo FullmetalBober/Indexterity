@@ -13,7 +13,7 @@ import {
   SelectValue,
 } from "~/components/ui/select";
 import { Skeleton } from "~/components/ui/skeleton";
-import { LocalTime } from "~/lib/hydration";
+import { LocalTime } from "~/lib/local-time";
 
 // The security trail: 23 kinds of act, recorded since #53 and read by nothing
 // until #158.
