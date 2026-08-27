@@ -1,5 +1,6 @@
 import { type ClusterEngine, canHideIndexes } from "@repo/contracts";
 import { useState } from "react";
+import { CONNECTION_SCHEME } from "~/components/app/connection-dialect";
 import { CredentialPrivilegesPanel } from "~/components/app/credential-privileges";
 import { ReauthDialog } from "~/components/app/reauth-dialog";
 import { ConfirmButton } from "~/components/confirm-button";
@@ -234,7 +235,12 @@ export function ClusterConnection({
               <Input
                 aria-label="New connection string"
                 className="min-w-72 flex-1 font-mono text-xs"
-                placeholder="new mongodb:// connection string (verified before stored)"
+                // The engine of the cluster in front of the reader, not
+                // MongoDB's. This said `mongodb://` on a PostgreSQL cluster,
+                // which is the field telling somebody the wrong thing about
+                // their own database at the moment they are pasting a
+                // credential into it.
+                placeholder={`new ${CONNECTION_SCHEME[cluster.engine]} connection string (verified before stored)`}
                 value={rotateString}
                 onChange={(event) => setRotateString(event.target.value)}
               />

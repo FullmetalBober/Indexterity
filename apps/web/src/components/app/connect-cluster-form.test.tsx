@@ -1,4 +1,5 @@
 import type { ConnectionDiagnosis, PlanInfo, PrivilegeCheck } from "@repo/contracts";
+import { clusterEngine, engineFromScheme } from "@repo/contracts";
 import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -590,12 +591,22 @@ describe("ConnectClusterForm engines", () => {
 
   // The field itself has to stop implying MongoDB-only, because the placeholder is
   // what a reader looks at before they read anything else.
-  it("shows both dialects in the placeholder", () => {
+  //
+  // Asserted through the product's OWN scheme sniffer against the contract's OWN
+  // engine list, rather than against strings spelled here. This test used to say
+  // "both dialects" and passed for a release after PostgreSQL shipped, because two
+  // of three satisfied it. Now every example in the placeholder has to be
+  // recognisable as the engine it stands for, and the next adapter added to
+  // ClusterEngine fails this test until the field mentions it.
+  it("names every supported engine, recognisably", () => {
     renderInApp(<ConnectClusterForm plan={plan()} />);
 
-    const field = screen.getByLabelText("Connection string");
-    expect(field).toHaveAttribute("placeholder", expect.stringContaining("mongodb://"));
-    expect(field).toHaveAttribute("placeholder", expect.stringContaining("Server="));
+    const placeholder = screen.getByLabelText("Connection string").getAttribute("placeholder");
+    const detected = new Set(
+      (placeholder ?? "").split("·").map((example) => engineFromScheme(example.trim())),
+    );
+
+    expect(detected).toEqual(new Set(clusterEngine.options));
   });
 
   it("says which engine it is reading an ADO string as, before any check", async () => {

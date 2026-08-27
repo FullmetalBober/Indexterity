@@ -503,4 +503,26 @@ describe("ClusterConnection least-privilege policy", () => {
     ).toBeInTheDocument();
     expect(screen.queryByText("Out of policy for this organization")).not.toBeInTheDocument();
   });
+
+  // The field said `mongodb://` on every cluster, including the ones that are
+  // not MongoDB — a credential field confidently naming the wrong dialect at the
+  // moment somebody is pasting a secret into it.
+  it("names the dialect of the cluster in front of the reader", async () => {
+    const user = userEvent.setup();
+
+    for (const [engine, expected] of [
+      ["MONGODB", "mongodb://"],
+      ["POSTGRESQL", "postgres://"],
+      ["MSSQL", "mssql:// or Server=…"],
+    ] as const) {
+      const { unmount } = renderInApp(<ClusterConnection cluster={{ ...cluster, engine }} />);
+      await user.click(screen.getByRole("button", { name: "Rotate string" }));
+
+      expect(screen.getByLabelText("New connection string")).toHaveAttribute(
+        "placeholder",
+        `new ${expected} connection string (verified before stored)`,
+      );
+      unmount();
+    }
+  });
 });

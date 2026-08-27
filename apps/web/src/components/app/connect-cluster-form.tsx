@@ -9,6 +9,7 @@ import {
   type TlsOverrides,
 } from "@repo/contracts";
 import { type ReactNode, useState } from "react";
+import { ANY_CONNECTION_EXAMPLE } from "~/components/app/connection-dialect";
 import { usage } from "~/components/app/format";
 import {
   MIN_DATABASES_TO_CHOOSE,
@@ -75,12 +76,6 @@ const ENGINE_LABEL: Record<ClusterEngine, string> = {
   MSSQL: "SQL Server",
   POSTGRESQL: "PostgreSQL",
 };
-
-// A placeholder for each dialect, so the field itself stops implying that
-// MongoDB is all this takes (#239). Shortened from the api's own hints, which
-// are complete and too long to sit inside an input — the hints are printed in
-// full under the field, where they have the room.
-const PLACEHOLDER = "mongodb://user:pass@host:27017   or   Server=host;User Id=sa;Password=…";
 
 // What the scoped user IS, per engine — the offer is engine-neutral (it hangs
 // off `canProvision`), the words cannot be: "no read access to your documents"
@@ -538,7 +533,7 @@ export function ConnectClusterForm({
               <field.TextField
                 label="Connection string"
                 className="font-mono"
-                placeholder={PLACEHOLDER}
+                placeholder={ANY_CONNECTION_EXAMPLE}
               />
             )}
           </form.AppField>
