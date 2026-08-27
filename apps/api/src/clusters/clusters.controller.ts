@@ -355,9 +355,22 @@ export class ClustersController {
         // silently withdraw a concession the cluster still needs to connect at all.
         const overrides = input.tlsOverrides ?? row.tlsOverrides;
         const value = adapter.applySecureTransport(input.connectionString, overrides);
-        await this.clusters.guardDial(context.userId, row.engine, value, errors, overrides);
+        // Through the tunnel this cluster is ALREADY reached through, not around
+        // it. The three onboarding routes took a tunnel from the form and this
+        // one did not, so verifying a rotated string dialled the customer's
+        // database directly — which for a cluster that only answers inside a VPN
+        // fails as "unreachable" and reads as a bad password.
+        const routed = await this.resolveTunnel(row.tunnelId, orgId, errors);
+        await this.clusters.guardDial(
+          context.userId,
+          row.engine,
+          value,
+          errors,
+          overrides,
+          routed.route,
+        );
         try {
-          const probe = await adapter.open(value, overrides);
+          const probe = await adapter.open(value, overrides, routed.proxy);
           try {
             await probe.ping();
           } finally {
@@ -388,7 +401,7 @@ export class ClustersController {
         const diagnosis =
           provisionedUsername !== null
             ? null
-            : await adapter.diagnose(value, overrides).catch(() => null);
+            : await adapter.diagnose(value, overrides, undefined, routed.proxy).catch(() => null);
         const credentialPosture =
           provisionedUsername !== null
             ? "PROVISIONED"
@@ -570,12 +583,16 @@ export class ClustersController {
           throw error;
         }
         const adapter = adapterFor(cluster.engine);
+        // Same omission as the rotation above: this card dials to say what the
+        // stored credentials can do NOW, and it was dialling around the tunnel.
+        const routed = await this.resolveTunnel(cluster.tunnelId, orgId, errors);
         await this.clusters.guardDial(
           context.userId,
           cluster.engine,
           connectionString,
           errors,
           cluster.tlsOverrides,
+          routed.route,
         );
         // Stamped before the dial rather than after, so a slow probe cannot label
         // its own answer as newer than it is.
@@ -590,6 +607,7 @@ export class ClustersController {
             connectionString,
             cluster.tlsOverrides,
             cluster.observedDatabases,
+            routed.proxy,
           );
         } catch (error) {
           // The adapters return `reachable: false` for the failures they

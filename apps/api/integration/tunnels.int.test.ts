@@ -1,6 +1,16 @@
 import type { ChildProcess } from "node:child_process";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createDatabase, eq, inArray, organizations, user } from "../src/db";
+import { masterKeyBytesFor } from "../src/config/env";
+import {
+  clusters,
+  createDatabase,
+  envKeyProvider,
+  eq,
+  inArray,
+  organizations,
+  seal,
+  user,
+} from "../src/db";
 import { api, authPost, databaseUrl, type Session, signUp, startApi, stopApi } from "./helpers";
 
 // The tunnel routes end to end (#353): register, edit, test, remove — with the
@@ -314,6 +324,82 @@ describe("the refusals", () => {
   it("refuses an unauthenticated caller outright", async () => {
     expect((await api("/tunnels", null)).status).toBe(401);
     expect((await api(`/tunnels/${tunnelId}/test`, null, { method: "POST" })).status).toBe(401);
+  });
+});
+
+// The tunnel was wired into the three ONBOARDING routes — they take a tunnel id
+// from the connect form — and into the job pipeline. Everything a cluster's
+// settings page does afterwards dialled around it: the credential re-check
+// reported the customer's database as unreachable, and a rotated string was
+// verified against a database the api cannot reach without the VPN.
+//
+// Asserted through the GUARD, which is what makes it decisive. A silent gateway
+// is not enough: the tunnel still opens (the binary starts and listens), so a
+// dial through it fails at the database and looks exactly like a direct dial that
+// failed. So the fixture's host is 192.168.5.5 — OUTSIDE this tunnel's AllowedIPs
+// and therefore refused by the tunnel guard, while the direct guard admits it,
+// because this suite runs with ALLOW_PRIVATE_CLUSTER_TARGETS. One address, two
+// verdicts, and only the tunnelled one is correct for a tunnelled cluster.
+describe("a cluster reached through this tunnel", () => {
+  let clusterId: string;
+
+  beforeAll(async () => {
+    const orgId = asString(asRecord(await (await api("/org", owner)).json()).id);
+    // Real sealed credentials rather than dummy bytes: both routes unseal BEFORE
+    // they reach the tunnel, so a fixture that cannot be opened would fail
+    // earlier and prove nothing about this.
+    const sealed = await seal(
+      new TextEncoder().encode("mongodb://reader:secret@192.168.5.5:27017/app"),
+      envKeyProvider(masterKeyBytesFor(1)),
+    );
+    const [row] = await db
+      .insert(clusters)
+      .values({
+        orgId,
+        name: "behind-the-vpn",
+        engine: "MONGODB",
+        sealedDek: Buffer.from(sealed.dek),
+        sealedData: Buffer.from(sealed.data),
+        keyVersion: 1,
+        tunnelId,
+      })
+      .returning();
+    if (row === undefined) throw new Error("could not create the fixture cluster");
+    clusterId = row.id;
+  });
+
+  afterAll(async () => {
+    // Before the removal test below: the FK is RESTRICT, and a tunnel still
+    // reaching a cluster is refused — which is its own test, further up.
+    await db
+      .delete(clusters)
+      .where(eq(clusters.id, clusterId))
+      .catch(() => {});
+  });
+
+  it("re-checks the stored credentials THROUGH the tunnel", async () => {
+    const res = await api(`/clusters/${clusterId}/privileges`, owner);
+
+    // Refused, because the peer never agreed to carry this address. Dialling
+    // around the tunnel gave a 200 whose body blamed the database — "server
+    // unreachable — check the host, port and network access" — about an address
+    // the tunnel would not have carried in the first place.
+    expect(res.status).toBe(400);
+    expect(asString(asRecord(await res.json()).message)).toMatch(/AllowedIPs/);
+  });
+
+  it("verifies a rotated string THROUGH the tunnel", async () => {
+    const res = await api(`/clusters/${clusterId}/connection`, owner, {
+      method: "PATCH",
+      body: JSON.stringify({
+        connectionString: "mongodb://reader:rotated@192.168.5.5:27017/app",
+      }),
+    });
+
+    // Owner-only AND fresh-owner, so a 403 would mean the re-auth gate spoke
+    // first — a different refusal, and one that would make this test vacuous.
+    expect(res.status).toBe(400);
+    expect(asString(asRecord(await res.json()).message)).toMatch(/AllowedIPs/);
   });
 });
 
