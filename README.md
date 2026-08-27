@@ -52,7 +52,9 @@ with no public endpoint is not. **Paste the WireGuard config its network already
 uses** and Indexterity terminates the peering itself — in-process, in userspace,
 needing no privileges and nothing extra running on your side. Register it under
 Settings → VPN tunnels, pick it on the connect form, and a VPC-only or on-prem
-cluster connects like any other.
+cluster connects like any other. Registering only reads the file, so each tunnel
+has a **Test** that makes your gateway prove it answers, and an **Edit** for the
+day a key is rotated or the gateway moves.
 
 The tunnel changes which addresses are reachable and nothing else: TLS is still
 required, cloud metadata is still refused whatever route reaches it, and the

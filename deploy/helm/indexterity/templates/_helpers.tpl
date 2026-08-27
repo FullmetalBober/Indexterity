@@ -200,6 +200,16 @@ test and the port-forward in NOTES.txt all read the same number they did before.
   value: {{ .Values.config.logLevel | quote }}
 - name: ALLOW_PRIVATE_CLUSTER_TARGETS
   value: {{ .Values.config.allowPrivateClusterTargets | quote }}
+# Which implementation terminates a registered WireGuard peering (D111). Neither
+# needs a capability or /dev/net/tun, so this changes no securityContext — it
+# picks between the userspace stack inside the api and the tunnel binary the
+# image already carries.
+- name: TUNNEL_RUNTIME
+  value: {{ .Values.config.tunnelRuntime | quote }}
+{{- if .Values.config.tunnelBinary }}
+- name: TUNNEL_BINARY
+  value: {{ .Values.config.tunnelBinary | quote }}
+{{- end }}
 # Sockets opened against ONE connected cluster. Held per cluster, so the worst
 # case multiplies by the fleet — and they are spent on the customer's mongod.
 - name: MONGO_MAX_POOL_SIZE

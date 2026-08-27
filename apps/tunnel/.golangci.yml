@@ -1,0 +1,48 @@
+# The Go half of this repo's rules, which are the same rules as the TypeScript
+# half: everything typed, and nothing ignored.
+#
+# errcheck is the whole reason this file exists. `go vet` does not look for an
+# unchecked error, and an unchecked error here is not a style question — this
+# process holds a customer's private key and decides which sockets get opened,
+# so a `Write` whose failure nobody read is a packet nobody knows was dropped.
+#
+# Where an error genuinely has no consumer, the code says so with `_ =` and a
+# comment giving the reason. That is a decision on the record; a bare call is
+# not, and this is what tells the two apart.
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    # An error returned and not looked at.
+    - errcheck
+    # Ineffectual assignments, which is the other half of the same mistake.
+    - ineffassign
+    # Suspicious constructs vet does not carry.
+    - staticcheck
+    - govet
+    # Unused code: a helper nobody calls in a process this small is a leftover.
+    - unused
+    # Errors compared with == rather than errors.Is, which breaks on a wrapped
+    # error — and every error in this package is wrapped with %w.
+    - errorlint
+    # A context that is created and never used, and a nil one passed in.
+    - contextcheck
+
+settings:
+  errcheck:
+    # Deferred Close() included: a Close whose error is dropped must say so
+    # explicitly, like everything else.
+    check-type-assertions: true
+    check-blank: false
+
+exclusions:
+  rules:
+    # A test's job is to fail loudly on the thing it asserts; a helper's Close in
+    # t.Cleanup already reports through t.Errorf.
+    - path: _test\.go
+      linters:
+        - errcheck
+      # Deliberately narrow: only the throwaway writes a test makes while
+      # driving a socket, never the assertions themselves.
+      source: "^\\s*(_, )?(client|server)\\.(Write|Close)"

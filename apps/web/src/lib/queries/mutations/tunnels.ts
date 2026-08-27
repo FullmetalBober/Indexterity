@@ -1,4 +1,4 @@
-// Registering and removing WireGuard tunnels.
+// Registering, editing, testing and removing WireGuard tunnels.
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { api } from "../../api";
@@ -18,6 +18,44 @@ export function useCreateTunnel() {
     // "invalid config", which would tell somebody holding a file they did not
     // write nothing they can act on.
     onError: (error) => toast.error(apiMessage(error, "Could not register that tunnel")),
+  });
+}
+
+export function useUpdateTunnel() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    // Only what changed is sent. A rename carries no config — the stored
+    // PrivateKey is never shown, so there is nothing to prefill and nothing to
+    // send back — and replacing the config is a separate decision an owner
+    // makes when a key is rotated or a gateway moves.
+    mutationFn: (draft: { tunnelId: string; name?: string; config?: string }) =>
+      api().updateTunnel(draft),
+    onSuccess: (tunnel) => {
+      toast.success(`Tunnel "${tunnel.name}" saved`);
+      return queryClient.invalidateQueries({ queryKey: queryKeys.tunnels() });
+    },
+    // The parser's own sentence again, verbatim, for the same reason as on
+    // create: it names the directive.
+    onError: (error) => toast.error(apiMessage(error, "Could not save that change")),
+  });
+}
+
+export function useTestTunnel() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (tunnelId: string) => api().testTunnel({ tunnelId }),
+    onSuccess: (result) => {
+      // A gateway that did not answer is a successful request with a negative
+      // answer, not a failed one. It gets an error-toned toast because it is bad
+      // news, and the row keeps the verdict afterwards — a toast that has faded
+      // is no use to somebody now editing the config it was about.
+      if (result.reachable) toast.success("The gateway answered");
+      else toast.error(result.error ?? "The gateway did not answer");
+      // Health and handshake age just moved, for this tunnel and possibly for
+      // the count of what is up.
+      return queryClient.invalidateQueries({ queryKey: queryKeys.tunnels() });
+    },
+    onError: (error) => toast.error(apiMessage(error, "Could not test that tunnel")),
   });
 }
 

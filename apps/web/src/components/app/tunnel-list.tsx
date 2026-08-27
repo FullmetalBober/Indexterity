@@ -1,12 +1,16 @@
-import type { TunnelView } from "@repo/contracts";
+import { createTunnelInput, type TunnelTestResult, type TunnelView } from "@repo/contracts";
 import { useState } from "react";
+import { useAppForm } from "~/components/form";
 import { Button } from "~/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
 import { Empty } from "~/components/ui/empty";
-import { Field, FieldLabel } from "~/components/ui/field";
-import { Input } from "~/components/ui/input";
 import { Skeleton } from "~/components/ui/skeleton";
-import { useCreateTunnel, useDeleteTunnel } from "~/lib/queries/mutations/tunnels";
+import {
+  useCreateTunnel,
+  useDeleteTunnel,
+  useTestTunnel,
+  useUpdateTunnel,
+} from "~/lib/queries/mutations/tunnels";
 import type { Read } from "~/lib/queries/read";
 
 // Register a WireGuard peering by pasting the wg0.conf, and see whether it is
@@ -19,7 +23,24 @@ import type { Read } from "~/lib/queries/read";
 //
 // The [Interface] PrivateKey never comes back from the api. Nothing on this
 // screen can show it, which is the point — it is a credential of the same
-// weight as a connection string.
+// weight as a connection string. That decides the shape of the edit form: a
+// rename is an ordinary prefilled field, and changing the config means pasting
+// a whole new file, because there is nothing here to amend.
+
+// The api's own rules, field by field, rather than a second copy of them: the
+// same schema createTunnel validates against on the way in, so a paste refused
+// here is refused for the reason it would have been refused there.
+const NAME = createTunnelInput.shape.name;
+const CONFIG = createTunnelInput.shape.config;
+
+// On an edit, an empty box is the only way to say "keep the config that is
+// stored" — there is nothing to prefill it with, since the PrivateKey in it never
+// comes back from the api. Anything else goes through the rule above.
+function optionalConfig({ value }: { value: string }): string | undefined {
+  if (value.trim() === "") return undefined;
+  const result = CONFIG.safeParse(value);
+  return result.success ? undefined : result.error.issues[0]?.message;
+}
 
 const HEALTH: Record<TunnelView["health"], { label: string; tone: string; title: string }> = {
   UP: { label: "Up", tone: "text-emerald-600", title: "Handshake current" },
@@ -95,79 +116,211 @@ export function TunnelList({
 
 function TunnelRow({ tunnel, canEdit }: { tunnel: TunnelView; canEdit: boolean }) {
   const remove = useDeleteTunnel();
+  const test = useTestTunnel();
+  const [editing, setEditing] = useState(false);
   const health = HEALTH[tunnel.health];
   const inUse = tunnel.clusterCount > 0;
+  const unreadable = tunnel.endpoint === "";
 
   return (
-    <li className="flex flex-wrap items-start justify-between gap-4 py-4">
-      <div className="min-w-0 space-y-1">
-        <div className="flex items-center gap-2">
-          <span className="font-medium">{tunnel.name}</span>
-          <span className={`text-xs ${health.tone}`} title={health.title}>
-            ● {health.label}
-          </span>
-          <span className="text-muted-foreground text-xs">{age(tunnel.handshakeAgeSeconds)}</span>
-        </div>
-        <p className="text-muted-foreground text-sm">
-          {tunnel.endpoint === "" ? (
-            // A row whose config cannot be unsealed — a master key rotated
-            // without its predecessor. It stays listed so it can be deleted.
-            <span className="text-destructive">This tunnel's config cannot be read.</span>
-          ) : (
-            <>
-              gateway <code>{tunnel.endpoint}</code> · reaches{" "}
-              <code>{tunnel.allowedIps.join(", ")}</code>
-            </>
-          )}
-        </p>
-        {tunnel.dns.length === 0 && tunnel.endpoint !== "" ? (
-          // Worth saying out loud: without a resolver inside the tunnel, a
-          // connection string naming a host fails as "unreachable", which reads
-          // like a firewall problem and sends people looking in the wrong place.
-          <p className="text-amber-600 text-xs">
-            No DNS in this config — clusters behind it must be addressed by IP.
+    <li className="space-y-3 py-4">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div className="min-w-0 space-y-1">
+          <div className="flex items-center gap-2">
+            <span className="font-medium">{tunnel.name}</span>
+            <span className={`text-xs ${health.tone}`} title={health.title}>
+              ● {health.label}
+            </span>
+            <span className="text-muted-foreground text-xs">{age(tunnel.handshakeAgeSeconds)}</span>
+          </div>
+          <p className="text-muted-foreground text-sm">
+            {tunnel.endpoint === "" ? (
+              // A row whose config cannot be unsealed — a master key rotated
+              // without its predecessor. It stays listed so it can be deleted.
+              <span className="text-destructive">This tunnel's config cannot be read.</span>
+            ) : (
+              <>
+                gateway <code>{tunnel.endpoint}</code> · reaches{" "}
+                <code>{tunnel.allowedIps.join(", ")}</code>
+              </>
+            )}
           </p>
+          {tunnel.dns.length === 0 && tunnel.endpoint !== "" ? (
+            // Worth saying out loud: without a resolver inside the tunnel, a
+            // connection string naming a host fails as "unreachable", which reads
+            // like a firewall problem and sends people looking in the wrong place.
+            <p className="text-amber-600 text-xs">
+              No DNS in this config — clusters behind it must be addressed by IP.
+            </p>
+          ) : null}
+          <p className="text-muted-foreground text-xs">
+            {inUse
+              ? `${tunnel.clusterCount} cluster${tunnel.clusterCount === 1 ? "" : "s"} reached through this`
+              : "No clusters use this yet"}
+          </p>
+        </div>
+        {canEdit ? (
+          <div className="flex shrink-0 items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              // Nothing else on this row is evidence: every field of it, health
+              // included, is derived from a file that was parsed. This is the one
+              // control that asks the gateway.
+              disabled={test.isPending || unreadable}
+              title={
+                unreadable
+                  ? "There is no config to test"
+                  : "Negotiate a handshake with the gateway now"
+              }
+              onClick={() => test.mutate(tunnel.id)}
+            >
+              {test.isPending ? "Testing…" : "Test"}
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => setEditing((open) => !open)}>
+              {editing ? "Cancel" : "Edit"}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              // Disabled rather than hidden, with the reason: a delete that is
+              // refused after the click teaches nothing about what to do instead.
+              disabled={inUse || remove.isPending}
+              title={inUse ? "Point its clusters somewhere else first" : undefined}
+              onClick={() => remove.mutate(tunnel.id)}
+            >
+              Remove
+            </Button>
+          </div>
         ) : null}
-        <p className="text-muted-foreground text-xs">
-          {inUse
-            ? `${tunnel.clusterCount} cluster${tunnel.clusterCount === 1 ? "" : "s"} reached through this`
-            : "No clusters use this yet"}
-        </p>
       </div>
-      {canEdit ? (
-        <Button
-          variant="outline"
-          size="sm"
-          // Disabled rather than hidden, with the reason: a delete that is
-          // refused after the click teaches nothing about what to do instead.
-          disabled={inUse || remove.isPending}
-          title={inUse ? "Point its clusters somewhere else first" : undefined}
-          onClick={() => remove.mutate(tunnel.id)}
-        >
-          Remove
-        </Button>
-      ) : null}
+      <Verdict pending={test.isPending} result={test.data} />
+      {editing ? <EditTunnel tunnel={tunnel} onDone={() => setEditing(false)} /> : null}
     </li>
   );
 }
 
-function CreateTunnel() {
-  const [name, setName] = useState("");
-  const [config, setConfig] = useState("");
-  const create = useCreateTunnel();
-
-  const submit = (event: React.FormEvent) => {
-    event.preventDefault();
-    create.mutate(
-      { name: name.trim(), config },
-      {
-        onSuccess: () => {
-          setName("");
-          setConfig("");
-        },
-      },
+// The result of the last test, kept on the row rather than only in a toast: a
+// toast that has faded is no use to somebody who is now editing the config it
+// was about.
+function Verdict({ pending, result }: { pending: boolean; result: TunnelTestResult | undefined }) {
+  if (pending) {
+    return (
+      <p className="text-muted-foreground text-sm">Negotiating a handshake with the gateway…</p>
     );
-  };
+  }
+  if (result === undefined) return null;
+  if (result.reachable) {
+    return (
+      <p className="text-sm text-emerald-600">
+        The gateway answered. Databases behind this tunnel are reachable.
+      </p>
+    );
+  }
+  return (
+    <p className="text-destructive text-sm">
+      {result.error ??
+        // No cause to report: silence is what an endpoint that is not there, a
+        // UDP port a firewall drops and a PublicKey the gateway does not know
+        // all look like from our side, so the three are listed rather than
+        // guessed between.
+        "No answer from the gateway. Check its Endpoint, that the UDP port is open to us, and that the PublicKey is the one your VPN expects."}
+      {result.health === "HANDSHAKING" ? " Still retrying in the background." : null}
+    </p>
+  );
+}
+
+function EditTunnel({ tunnel, onDone }: { tunnel: TunnelView; onDone: () => void }) {
+  const update = useUpdateTunnel();
+  const form = useAppForm({
+    defaultValues: { name: tunnel.name, config: "" },
+    onSubmit: ({ value }) => {
+      const name = value.name.trim();
+      // Only what changed is sent, which is also why an empty config box is not
+      // an error: it means "leave the stored one alone".
+      update.mutate(
+        {
+          tunnelId: tunnel.id,
+          ...(name === tunnel.name ? {} : { name }),
+          ...(value.config.trim() === "" ? {} : { config: value.config }),
+        },
+        { onSuccess: onDone },
+      );
+    },
+  });
+
+  return (
+    <form
+      className="bg-muted/40 space-y-4 rounded-md border p-4"
+      onSubmit={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        void form.handleSubmit();
+      }}
+    >
+      <form.AppField name="name" validators={{ onChange: NAME }}>
+        {(field) => <field.TextField label="Name" maxLength={80} />}
+      </form.AppField>
+      <form.AppField name="config" validators={{ onChange: optionalConfig }}>
+        {(field) => (
+          <field.TextareaField
+            label="Replace the WireGuard config"
+            className="min-h-40"
+            placeholder={CONFIG_PLACEHOLDER}
+            description="Empty keeps the stored config. Pasting a new wg0.conf replaces it whole — which is how a rotated key or a moved gateway lands."
+          />
+        )}
+      </form.AppField>
+      <form.Subscribe selector={(state) => state.values.config.trim() !== ""}>
+        {(replaced) =>
+          replaced ? (
+            // Said before the click, not after: an owner replacing a config while
+            // clusters are collecting through the tunnel deserves to know the
+            // peering goes down for a moment.
+            <p className="text-amber-600 text-xs">
+              Saving this drops the live peering. It comes back up on the next collect, or as soon
+              as you press Test.
+            </p>
+          ) : null
+        }
+      </form.Subscribe>
+      <div className="flex items-center gap-2">
+        <form.Subscribe selector={(state) => state.values}>
+          {(values) => (
+            <form.AppForm>
+              <form.SubmitButton
+                pending={update.isPending}
+                // Nothing changed is the one reason to grey this out — the api
+                // refuses a patch with neither field, and rightly. NOT gated on
+                // validity: handleSubmit refuses an invalid form and touches the
+                // fields on the way, which is what makes the errors appear.
+                disabled={values.name.trim() === tunnel.name && values.config.trim() === ""}
+              >
+                {update.isPending ? "Saving…" : "Save changes"}
+              </form.SubmitButton>
+            </form.AppForm>
+          )}
+        </form.Subscribe>
+        <Button type="button" variant="outline" onClick={onDone} disabled={update.isPending}>
+          Cancel
+        </Button>
+      </div>
+    </form>
+  );
+}
+
+function CreateTunnel() {
+  const create = useCreateTunnel();
+  const form = useAppForm({
+    defaultValues: { name: "", config: "" },
+    onSubmit: ({ value, formApi }) =>
+      create.mutate(
+        { name: value.name.trim(), config: value.config },
+        // Cleared only on success, so a refusal leaves the paste in the box for
+        // the owner to fix rather than making them fetch the file again.
+        { onSuccess: () => formApi.reset() },
+      ),
+  });
 
   return (
     <Card>
@@ -179,37 +332,47 @@ function CreateTunnel() {
         </CardDescription>
       </CardHeader>
       <CardContent>
-        <form className="space-y-4" onSubmit={submit}>
-          <Field>
-            <FieldLabel htmlFor="tunnel-name">Name</FieldLabel>
-            <Input
-              id="tunnel-name"
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              placeholder="Production VPC"
-              maxLength={80}
-              required
-            />
-          </Field>
-          <Field>
-            <FieldLabel htmlFor="tunnel-config">WireGuard config</FieldLabel>
-            <textarea
-              id="tunnel-config"
-              value={config}
-              onChange={(event) => setConfig(event.target.value)}
-              className="border-input bg-transparent placeholder:text-muted-foreground focus-visible:ring-ring/50 min-h-55 w-full rounded-md border px-3 py-2 font-mono text-sm shadow-xs focus-visible:ring-3 focus-visible:outline-none"
-              placeholder={
-                "[Interface]\nPrivateKey = ...\nAddress = 10.9.0.2/32\nDNS = 10.9.0.1\n\n[Peer]\nPublicKey = ...\nAllowedIPs = 10.0.0.0/8\nEndpoint = vpn.example.com:51820"
-              }
-              spellCheck={false}
-              required
-            />
-          </Field>
-          <Button type="submit" disabled={create.isPending || name.trim() === "" || config === ""}>
-            {create.isPending ? "Checking…" : "Register tunnel"}
-          </Button>
+        <form
+          className="space-y-4"
+          onSubmit={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            void form.handleSubmit();
+          }}
+        >
+          <form.AppField name="name" validators={{ onChange: NAME }}>
+            {(field) => (
+              <field.TextField label="Name" placeholder="Production VPC" maxLength={80} />
+            )}
+          </form.AppField>
+          <form.AppField name="config" validators={{ onChange: CONFIG }}>
+            {(field) => (
+              <field.TextareaField
+                label="WireGuard config"
+                className="min-h-55"
+                placeholder={CONFIG_PLACEHOLDER}
+              />
+            )}
+          </form.AppField>
+          <form.AppForm>
+            <form.SubmitButton pending={create.isPending}>
+              {create.isPending ? "Checking…" : "Register tunnel"}
+            </form.SubmitButton>
+          </form.AppForm>
         </form>
       </CardContent>
     </Card>
   );
 }
+
+const CONFIG_PLACEHOLDER = [
+  "[Interface]",
+  "PrivateKey = ...",
+  "Address = 10.9.0.2/32",
+  "DNS = 10.9.0.1",
+  "",
+  "[Peer]",
+  "PublicKey = ...",
+  "AllowedIPs = 10.0.0.0/8",
+  "Endpoint = vpn.example.com:51820",
+].join("\n");

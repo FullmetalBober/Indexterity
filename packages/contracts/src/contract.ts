@@ -11,6 +11,7 @@ import {
   provisionClusterInput,
   renameClusterInput,
   rotateConnectionInput,
+  updateTunnelInput,
 } from "./inputs.js";
 import {
   auditAction,
@@ -37,6 +38,7 @@ import {
   recommendation,
   securityTrail,
   supportedEngine,
+  tunnelTestResult,
   tunnelView,
 } from "./schemas.js";
 
@@ -486,6 +488,43 @@ export const contract = {
     .errors({ BAD_REQUEST: {}, CONFLICT: {} })
     .input(createTunnelInput)
     .output(tunnelView),
+
+  updateTunnel: oc
+    .route({
+      method: "PATCH",
+      path: "/tunnels/{tunnelId}",
+      summary: "Rename a tunnel, or replace its wg0.conf after a key rotation (owner only)",
+    })
+    // A config replaced here goes through the same parser a registration does,
+    // so the same directive-naming sentence comes back. CONFLICT is the org's
+    // unique name, exactly as on create.
+    .errors({ NOT_FOUND: {}, BAD_REQUEST: {}, CONFLICT: {} })
+    .input(
+      z
+        .object({ tunnelId: z.uuid() })
+        .extend(updateTunnelInput.shape)
+        // A PATCH with neither field is a bug in the caller, not an owner
+        // clearing something: there is nothing on a tunnel that can be unset.
+        .refine((input) => input.name !== undefined || input.config !== undefined, {
+          message: "Change the name, the config, or both",
+        }),
+    )
+    .output(tunnelView),
+
+  testTunnel: oc
+    .route({
+      method: "POST",
+      path: "/tunnels/{tunnelId}/test",
+      summary: "Bring the tunnel up and wait for a handshake, to prove the gateway answers",
+    })
+    // A tunnel that will not come up is a 200 with reachable:false, not an
+    // error: "the gateway did not answer" is the ANSWER to this request, and an
+    // error status would make the dashboard draw it as a failed request.
+    // BAD_REQUEST is kept for the config being unreadable, where there is
+    // nothing to test.
+    .errors({ NOT_FOUND: {}, BAD_REQUEST: {} })
+    .input(z.object({ tunnelId: z.uuid() }))
+    .output(tunnelTestResult),
 
   deleteTunnel: oc
     .route({

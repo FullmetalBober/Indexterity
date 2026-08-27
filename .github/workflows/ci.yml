@@ -76,6 +76,13 @@ jobs:
         with:
           node-version: "26"
           cache: npm
+      # The tunnel binary (apps/tunnel) is part of `npm run build`, so every job
+      # that builds needs a Go toolchain. The version is read from go.mod rather
+      # than written here, so this and mise.toml cannot drift apart.
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: apps/tunnel/go.mod
+          cache-dependency-path: apps/tunnel/go.sum
       - uses: actions/cache@v6
         id: modules
         with:
@@ -93,6 +100,11 @@ jobs:
           restore-keys: |
             turbo-check-
             turbo-
+      # `npm run lint` ends with golangci-lint over apps/tunnel (root
+      # package.json), so the binary has to be on PATH before it runs. Pinned:
+      # mise.toml pins the same major for a developer's machine, and a linter
+      # that changes version underneath a green branch is a red one tomorrow.
+      - run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.1
       - run: npm run lint
       - run: npm run version:check
       - run: npm run build
@@ -162,6 +174,13 @@ jobs:
         with:
           node-version: "26"
           cache: npm
+      # The tunnel binary (apps/tunnel) is part of `npm run build`, so every job
+      # that builds needs a Go toolchain. The version is read from go.mod rather
+      # than written here, so this and mise.toml cannot drift apart.
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: apps/tunnel/go.mod
+          cache-dependency-path: apps/tunnel/go.sum
       - uses: actions/cache@v6
         id: modules
         with:
@@ -225,6 +244,13 @@ jobs:
         with:
           node-version: "26"
           cache: npm
+      # The tunnel binary (apps/tunnel) is part of `npm run build`, so every job
+      # that builds needs a Go toolchain. The version is read from go.mod rather
+      # than written here, so this and mise.toml cannot drift apart.
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: apps/tunnel/go.mod
+          cache-dependency-path: apps/tunnel/go.sum
       - uses: actions/cache@v6
         id: modules
         with:
@@ -270,6 +296,13 @@ jobs:
         with:
           node-version: "26"
           cache: npm
+      # The tunnel binary (apps/tunnel) is part of `npm run build`, so every job
+      # that builds needs a Go toolchain. The version is read from go.mod rather
+      # than written here, so this and mise.toml cannot drift apart.
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: apps/tunnel/go.mod
+          cache-dependency-path: apps/tunnel/go.sum
       - uses: actions/cache@v6
         id: modules
         with:
@@ -351,6 +384,13 @@ jobs:
         with:
           node-version: "26"
           cache: npm
+      # The tunnel binary (apps/tunnel) is part of `npm run build`, so every job
+      # that builds needs a Go toolchain. The version is read from go.mod rather
+      # than written here, so this and mise.toml cannot drift apart.
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: apps/tunnel/go.mod
+          cache-dependency-path: apps/tunnel/go.sum
       - uses: actions/cache@v6
         id: modules
         with:
@@ -446,6 +486,13 @@ jobs:
         with:
           node-version: "26"
           cache: npm
+      # The tunnel binary (apps/tunnel) is part of `npm run build`, so every job
+      # that builds needs a Go toolchain. The version is read from go.mod rather
+      # than written here, so this and mise.toml cannot drift apart.
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: apps/tunnel/go.mod
+          cache-dependency-path: apps/tunnel/go.sum
       - uses: actions/cache@v6
         id: modules
         with:

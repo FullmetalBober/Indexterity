@@ -209,5 +209,20 @@ export const createTunnelInput = z.object({
     .max(16_384, "That is larger than any WireGuard config"),
 });
 
+// An edit to a tunnel already registered. Both fields are optional and at least
+// one has to be present, because the two edits are asked for separately: a
+// rename never needs the config re-pasted, and a rotated key or a moved gateway
+// arrives as a whole new file. There is no partial config edit — the stored
+// PrivateKey is never shown, so nothing on the dashboard could prefill a
+// textarea for the owner to amend.
+export const updateTunnelInput = z.object({
+  name: z.string().trim().min(1, "Name this tunnel").max(80).optional(),
+  config: z
+    .string()
+    .min(1, "Paste the wg0.conf your VPN gave you")
+    .max(16_384, "That is larger than any WireGuard config")
+    .optional(),
+});
+
 // Which tunnel reaches a cluster, or null to dial it directly.
 export const clusterTunnelInput = z.object({ tunnelId: z.uuid().nullable() });
