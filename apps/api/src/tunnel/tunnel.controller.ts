@@ -12,7 +12,9 @@ import { TunnelInUseError, TunnelService } from "./tunnel.service";
 //
 // Reads are open to members — knowing a VPN exists is not sensitive, and the
 // secret half never leaves the api. Writes are owner-only, because registering
-// a peering decides where the control plane will open sockets.
+// a peering decides where the control plane will open sockets. The reachability
+// test counts as one: it sends datagrams to a customer's gateway on demand, so
+// it is not something a member should be able to do on a loop.
 @Controller()
 export class TunnelController {
   constructor(
@@ -49,6 +51,58 @@ export class TunnelController {
             throw errors.CONFLICT({ message: `you already have a tunnel called "${input.name}"` });
           }
           throw error;
+        }
+      },
+    );
+  }
+
+  @Implement(contract.updateTunnel)
+  updateTunnel(@Req() req: FastifyRequest) {
+    return route(this.tenancy, contract.updateTunnel, req, "owner").handler(
+      async ({ input, errors, context }) => {
+        if (!(await this.tunnels.ownedBy(input.tunnelId, context.member.orgId))) {
+          throw errors.NOT_FOUND({ message: "no such tunnel" });
+        }
+        try {
+          return await this.tunnels.update(input.tunnelId, {
+            ...(input.name === undefined ? {} : { name: input.name }),
+            ...(input.config === undefined ? {} : { config: input.config }),
+          });
+        } catch (error) {
+          // Same two refusals a registration has, for the same reasons: the
+          // parser's own sentence names the directive, and the org's unique
+          // name is how the connect form refers to a tunnel.
+          if (error instanceof InvalidWireGuardConfError) {
+            throw errors.BAD_REQUEST({ message: error.message });
+          }
+          if (isUniqueViolation(error)) {
+            throw errors.CONFLICT({ message: `you already have a tunnel called "${input.name}"` });
+          }
+          throw error;
+        }
+      },
+    );
+  }
+
+  @Implement(contract.testTunnel)
+  testTunnel(@Req() req: FastifyRequest) {
+    return route(this.tenancy, contract.testTunnel, req, "owner").handler(
+      async ({ input, errors, context }) => {
+        if (!(await this.tunnels.ownedBy(input.tunnelId, context.member.orgId))) {
+          throw errors.NOT_FOUND({ message: "no such tunnel" });
+        }
+        try {
+          return await this.tunnels.test(input.tunnelId);
+        } catch (error) {
+          // A gateway that does not answer is NOT this branch — that is a 200
+          // with reachable:false, because it is the answer to the question.
+          // This is the tunnel being untestable at all: a config that cannot be
+          // unsealed after a master key rotated without its predecessor, or a
+          // gateway address the network guard refuses outright. Both are facts
+          // about the config, so neither is dressed up as "unreachable".
+          throw errors.BAD_REQUEST({
+            message: `this tunnel could not be brought up: ${(error as Error).message}`,
+          });
         }
       },
     );

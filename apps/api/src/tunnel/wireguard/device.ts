@@ -47,6 +47,11 @@ type DeviceEvents = {
   packet: [Buffer];
   state: [DeviceState];
   error: [Error];
+  // A handshake completed. Distinct from state, deliberately: a rekey on a
+  // tunnel that is already up completes without the state changing at all, and
+  // that is exactly the case the reachability test has to observe — "still up"
+  // is not evidence the gateway answered just now.
+  handshake: [];
 };
 
 export class TunnelDevice extends EventEmitter<DeviceEvents> {
@@ -81,6 +86,23 @@ export class TunnelDevice extends EventEmitter<DeviceEvents> {
   /** Seconds since the last completed handshake, or null if there has never been one. */
   handshakeAgeSeconds(now: number = Date.now()): number | null {
     return this.#lastHandshakeAt === null ? null : (now - this.#lastHandshakeAt) / 1000;
+  }
+
+  /**
+   * Negotiate a fresh session now, without a packet to send.
+   *
+   * Every other handshake on this device is started by traffic or by a rekey
+   * timer. The reachability test has neither: a device that gave up on its last
+   * attempt holds no pending handshake, and a device that is up holds a session
+   * it will happily keep using even if the gateway has been switched off since
+   * it was negotiated. So the test asks for one directly, and waits for the
+   * `handshake` event.
+   *
+   * Safe to call repeatedly — the retry window below still applies, so this
+   * cannot turn button presses into a flood of initiations.
+   */
+  async handshake(): Promise<void> {
+    await this.#beginHandshake();
   }
 
   async start(): Promise<void> {
@@ -223,6 +245,8 @@ export class TunnelDevice extends EventEmitter<DeviceEvents> {
     const queued = this.#queue;
     this.#queue = [];
     for (const packet of queued) this.#write(session.encapsulate(packet));
+
+    this.emit("handshake");
 
     this.#startKeepalive();
     this.#scheduleRekey();

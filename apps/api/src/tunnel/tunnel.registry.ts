@@ -3,6 +3,7 @@ import { Injectable, Logger, type OnApplicationShutdown } from "@nestjs/common";
 import { allowPrivateTargets, assertTargetsAllowed } from "../engine/net-guard";
 import type { WireGuardConf } from "./conf";
 import { TunnelNetstack } from "./netstack";
+import { probeReachability, type Reachability } from "./reach";
 import { type SocksCredentials, SocksServer } from "./socks";
 import { publicKeyFromPrivate } from "./wireguard/crypto";
 import { type DeviceState, TunnelDevice } from "./wireguard/device";
@@ -121,6 +122,20 @@ export class TunnelRegistry implements OnApplicationShutdown {
       state: tunnel.device.state,
       handshakeAgeSeconds: tunnel.device.handshakeAgeSeconds(),
     };
+  }
+
+  /**
+   * Force a handshake and report whether the gateway answered, for the
+   * reachability test an owner can run from the dashboard.
+   *
+   * Throws when the tunnel is not up, the same contract resolve() has and for
+   * the same reason: the caller has just opened it, so "there is no such live
+   * tunnel" is a fault here, not a verdict about the gateway.
+   */
+  async probe(id: string, timeoutMs?: number): Promise<Reachability> {
+    const tunnel = this.#tunnels.get(id);
+    if (tunnel === undefined) throw new Error("tunnel is not up");
+    return probeReachability(tunnel.device, timeoutMs);
   }
 
   async close(id: string): Promise<void> {

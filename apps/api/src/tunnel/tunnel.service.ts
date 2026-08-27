@@ -1,5 +1,5 @@
 import { Injectable } from "@nestjs/common";
-import type { TunnelView } from "@repo/contracts";
+import type { TunnelHealth, TunnelTestResult, TunnelView } from "@repo/contracts";
 import { and, count, eq } from "drizzle-orm";
 import { masterKeyBytesFor } from "../config/env";
 import { clusters, envKeyProvider, open as openSealed, seal, tunnels } from "../db";
@@ -8,6 +8,7 @@ import type { TunnelRoute } from "../engine/net-guard";
 import type { DialProxy } from "../engine/ports";
 import { InvalidWireGuardConfError, parseWireGuardConf, type WireGuardConf } from "./conf";
 import { TunnelRegistry } from "./tunnel.registry";
+import type { DeviceState } from "./wireguard/device";
 
 // Reads and writes the tunnel rows, and derives what the dashboard shows.
 //
@@ -43,22 +44,78 @@ export class TunnelService {
     // with the parser's own sentence rather than accepted and then failing at
     // the first dial, where the reason would be a timeout.
     const conf = parseWireGuardConf(config);
-    const sealed = await seal(
-      new TextEncoder().encode(config),
-      envKeyProvider(masterKeyBytesFor(1)),
-    );
     const [row] = await this.database.db
       .insert(tunnels)
-      .values({
-        orgId,
-        name,
-        sealedDek: Buffer.from(sealed.dek),
-        sealedData: Buffer.from(sealed.data),
-        keyVersion: 1,
-      })
+      .values({ orgId, name, ...(await this.#seal(config)) })
       .returning();
     if (row === undefined) throw new Error("insert returned no row");
     return this.#viewFrom(row.id, row.name, row.createdAt, conf);
+  }
+
+  /**
+   * Rename a tunnel, replace its config, or both.
+   *
+   * The two edits arrive separately by design. A rename never needs the config
+   * re-pasted — and could not ask for it, since the stored PrivateKey is never
+   * shown, so there is nothing the dashboard could prefill. A rotated key or a
+   * moved gateway arrives as a whole new wg0.conf, which is what the VPN admin
+   * exports anyway.
+   */
+  async update(tunnelId: string, patch: { name?: string; config?: string }): Promise<TunnelView> {
+    // Parsed BEFORE anything is stored, exactly as on create: a config that
+    // cannot work is refused with the parser's own sentence rather than saved
+    // and then failing at the next collect, where the reason would be a timeout.
+    if (patch.config !== undefined) parseWireGuardConf(patch.config);
+
+    const [row] = await this.database.db
+      .update(tunnels)
+      .set({
+        ...(patch.name === undefined ? {} : { name: patch.name }),
+        ...(patch.config === undefined ? {} : await this.#seal(patch.config)),
+        updatedAt: new Date(),
+      })
+      .where(eq(tunnels.id, tunnelId))
+      .returning();
+    if (row === undefined) throw new Error("update returned no row");
+
+    if (patch.config !== undefined) {
+      // The live peering is DROPPED rather than replaced in place. A stored
+      // config and a running device that disagree is the one failure here that
+      // is silent — every dial would keep using the key that was just rotated
+      // away, and nothing would say so — and replacing carries that risk in
+      // its own error path, since registry.open leaves the old tunnel up when
+      // the new one cannot be built.
+      //
+      // Nothing is lost by dropping it: tunnels come up on first use, so the
+      // next collect brings this one back from what is now stored, and an owner
+      // who wants to see that happen has the reachability test.
+      await this.registry.close(tunnelId);
+    }
+    return this.#view(row);
+  }
+
+  /**
+   * Bring the tunnel up and prove the gateway answers.
+   *
+   * The answer registering a tunnel cannot give: the parser reads the file, and
+   * a mistyped PublicKey or a revoked peering is a perfectly valid file. See
+   * reach.ts for why this forces a handshake rather than reading the state.
+   */
+  async test(tunnelId: string): Promise<TunnelTestResult> {
+    // Opened only when it is not up already. A test must not tear down a
+    // peering other clusters are collecting through — and it does not need to,
+    // because the probe negotiates a fresh session on the live device either
+    // way.
+    if (this.registry.endpoint(tunnelId) === null) {
+      await this.registry.open(tunnelId, await this.#conf(tunnelId));
+    }
+    const reach = await this.registry.probe(tunnelId);
+    return {
+      reachable: reach.reachable,
+      health: toHealth(reach.state),
+      handshakeAgeSeconds: reach.handshakeAgeSeconds,
+      error: reach.error,
+    };
   }
 
   async remove(tunnelId: string): Promise<void> {
@@ -81,20 +138,7 @@ export class TunnelService {
    * cluster's tunnel_id.
    */
   async openFor(tunnelId: string): Promise<{ route: TunnelRoute; proxy: DialProxy }> {
-    const [row] = await this.database.db
-      .select()
-      .from(tunnels)
-      .where(eq(tunnels.id, tunnelId))
-      .limit(1);
-    if (row === undefined) throw new Error("no such tunnel");
-    const conf = parseWireGuardConf(
-      new TextDecoder().decode(
-        await openSealed(
-          { dek: row.sealedDek, data: row.sealedData },
-          envKeyProvider(masterKeyBytesFor(row.keyVersion)),
-        ),
-      ),
-    );
+    const conf = await this.#conf(tunnelId);
     // Reuse a tunnel that is already up rather than replacing it. registry.open
     // REPLACES by design — that is how a rotated key lands — so calling it
     // unconditionally meant a preflight followed by a connect tore down a
@@ -143,17 +187,46 @@ export class TunnelService {
     return row?.value ?? 0;
   }
 
+  /** Envelope-encrypt a pasted config, in the columns the table wants it in. */
+  async #seal(
+    config: string,
+  ): Promise<Pick<typeof tunnels.$inferInsert, "sealedDek" | "sealedData" | "keyVersion">> {
+    const sealed = await seal(
+      new TextEncoder().encode(config),
+      envKeyProvider(masterKeyBytesFor(1)),
+    );
+    return {
+      sealedDek: Buffer.from(sealed.dek),
+      sealedData: Buffer.from(sealed.data),
+      keyVersion: 1,
+    };
+  }
+
+  async #conf(tunnelId: string): Promise<WireGuardConf> {
+    const [row] = await this.database.db
+      .select()
+      .from(tunnels)
+      .where(eq(tunnels.id, tunnelId))
+      .limit(1);
+    if (row === undefined) throw new Error("no such tunnel");
+    return this.#unseal(row);
+  }
+
+  async #unseal(row: typeof tunnels.$inferSelect): Promise<WireGuardConf> {
+    return parseWireGuardConf(
+      new TextDecoder().decode(
+        await openSealed(
+          { dek: row.sealedDek, data: row.sealedData },
+          envKeyProvider(masterKeyBytesFor(row.keyVersion)),
+        ),
+      ),
+    );
+  }
+
   async #view(row: typeof tunnels.$inferSelect): Promise<TunnelView> {
     let conf: WireGuardConf | null = null;
     try {
-      conf = parseWireGuardConf(
-        new TextDecoder().decode(
-          await openSealed(
-            { dek: row.sealedDek, data: row.sealedData },
-            envKeyProvider(masterKeyBytesFor(row.keyVersion)),
-          ),
-        ),
-      );
+      conf = await this.#unseal(row);
     } catch (error) {
       // A row we can no longer read is a real state — a master key rotated
       // without its predecessor, say — and it must still be listable so the
@@ -180,17 +253,19 @@ export class TunnelService {
       // No live tunnel is IDLE, not DOWN: tunnels come up on first use, so
       // "nobody has asked yet" is the normal state of a healthy new one and
       // drawing it as a fault would train owners to ignore the indicator.
-      health:
-        health === null
-          ? "IDLE"
-          : health.state === "up"
-            ? "UP"
-            : health.state === "handshaking"
-              ? "HANDSHAKING"
-              : "DOWN",
+      health: toHealth(health?.state ?? null),
       handshakeAgeSeconds: health?.handshakeAgeSeconds ?? null,
       clusterCount: await this.#clusterCount(id),
       createdAt: createdAt.toISOString(),
     };
   }
+}
+
+// A device's state as the dashboard's four-way health. Shared by the list and
+// the reachability test rather than written twice: the two must never disagree
+// about what "up" means, and null — no live tunnel at all — is IDLE in both.
+function toHealth(state: DeviceState | null): TunnelHealth {
+  if (state === null) return "IDLE";
+  if (state === "up") return "UP";
+  return state === "handshaking" ? "HANDSHAKING" : "DOWN";
 }

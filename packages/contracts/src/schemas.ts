@@ -999,3 +999,25 @@ export const tunnelView = z.object({
   createdAt: z.string(),
 });
 export type TunnelView = z.infer<typeof tunnelView>;
+
+// What a reachability test found. A tunnel is registered from a pasted file, so
+// until something dials through it the only thing that has been checked is that
+// the file parses — and a wrong PublicKey or an endpoint the gateway does not
+// listen on both parse perfectly. This is the answer to "would it work", asked
+// on purpose rather than discovered at the first collect.
+export const tunnelTestResult = z.object({
+  // Did a handshake complete inside the window? The whole verdict, in one
+  // field, because that is the only thing a yes/no answer can honestly claim:
+  // the gateway answered us, right now.
+  reachable: z.boolean(),
+  health: tunnelHealth,
+  handshakeAgeSeconds: z.number().nullable(),
+  // Why it did not come up, verbatim from the device — a refused gateway
+  // address, a name that does not resolve, a response that failed to verify.
+  // Null when it did come up, and also when it simply never answered: silence
+  // is what an unreachable endpoint or a wrong PublicKey both look like, and
+  // inventing a cause for it would send the owner somewhere specific for a
+  // reason we do not have.
+  error: z.string().nullable(),
+});
+export type TunnelTestResult = z.infer<typeof tunnelTestResult>;
