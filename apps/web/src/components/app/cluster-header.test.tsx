@@ -19,6 +19,7 @@ const cluster = {
   provisionedUsername: null,
   lastCollectedAt: NOW.toISOString(),
   tlsOverrides: NO_OVERRIDES,
+  blocked: null,
 };
 
 beforeEach(() => {
@@ -128,5 +129,43 @@ describe("ClusterHeader certificate concessions", () => {
       />,
     );
     expect(screen.getByText(/certificate not verified/)).toBeInTheDocument();
+  });
+
+  // The gap this badge closes. "last collected 7 days ago" has innocent causes —
+  // a paused schedule, a cluster with nothing left to collect — so on its own it
+  // reads as "nothing is obviously wrong".
+  it("says why collection stopped, not just that figures are old", () => {
+    renderInApp(
+      <ClusterHeader
+        cluster={{
+          ...cluster,
+          lastCollectedAt: new Date(NOW.getTime() - 7 * 24 * 3_600_000).toISOString(),
+          blocked: {
+            reason: "UNREACHABLE",
+            since: new Date(NOW.getTime() - 7 * 24 * 3_600_000).toISOString(),
+            detail: "connect ECONNREFUSED 10.0.0.4:27017",
+          },
+        }}
+      />,
+    );
+
+    expect(screen.getByText("⚠ cannot be reached")).toBeInTheDocument();
+    // Both, and in that order: the reason explains the staleness beside it.
+    expect(screen.getByText("⚠ last collected 7 days ago")).toBeInTheDocument();
+  });
+
+  it("renders a reason it has no wording for rather than nothing", () => {
+    // The column is text so that adding a reason is a constant rather than a
+    // migration, which is only safe if an older dashboard degrades.
+    renderInApp(
+      <ClusterHeader
+        cluster={{
+          ...cluster,
+          blocked: { reason: "QUOTA_EXHAUSTED", since: NOW.toISOString(), detail: "" },
+        }}
+      />,
+    );
+
+    expect(screen.getByText("⚠ collection stopped")).toBeInTheDocument();
   });
 });

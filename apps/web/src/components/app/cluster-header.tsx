@@ -1,4 +1,5 @@
-import type { TlsOverrides } from "@repo/contracts";
+import type { ClusterBlock, TlsOverrides } from "@repo/contracts";
+import { blockedBadge, blockedFor } from "~/components/app/cluster-blocked";
 import { Badge } from "~/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "~/components/ui/tooltip";
 import { useMounted } from "~/lib/hydration";
@@ -9,6 +10,7 @@ interface ClusterIdentity {
   readonly provisionedUsername: string | null;
   readonly lastCollectedAt: string | null;
   readonly tlsOverrides: TlsOverrides;
+  readonly blocked: ClusterBlock | null;
 }
 
 // Anything older than this means the numbers on screen predate a gap in
@@ -57,7 +59,10 @@ export function staleness(lastCollectedAt: string | null): string | null {
 export function ClusterHeader({ cluster }: { cluster: ClusterIdentity }) {
   // "How long since we last collected" depends on the reader's clock, so it
   // resolves after hydration rather than differing between the two renders.
-  const stale = useMounted() ? staleness(cluster.lastCollectedAt) : null;
+  const mounted = useMounted();
+  const stale = mounted ? staleness(cluster.lastCollectedAt) : null;
+  // Same reason: a duration is the reader's clock against a stored timestamp.
+  const blocked = mounted && cluster.blocked !== null ? blockedFor(cluster.blocked.since) : null;
   // Not clock-dependent, so it renders on the server too — unlike staleness.
   const concessions = tlsConcessions(cluster.tlsOverrides);
 
@@ -89,6 +94,21 @@ export function ClusterHeader({ cluster }: { cluster: ClusterIdentity }) {
           <TooltipContent>
             The connection to this cluster is encrypted, but {concessions.join(" and ")} — chosen
             when it was connected. Reconnect it with those boxes cleared to restore the check.
+          </TooltipContent>
+        </Tooltip>
+      ) : null}
+      {cluster.blocked !== null ? (
+        // Destructive rather than amber, and before the staleness badge: the two
+        // are the same story, and this is the half that says why. A reader who
+        // sees only "last collected 7 days ago" has to guess between a paused
+        // schedule, a quiet cluster and a broken one.
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Badge variant="destructive">⚠ {blockedBadge(cluster.blocked.reason)}</Badge>
+          </TooltipTrigger>
+          <TooltipContent>
+            Collection stopped{blocked === null ? "" : ` ${blocked}`}. The banner under this heading
+            says what to do about it.
           </TooltipContent>
         </Tooltip>
       ) : null}

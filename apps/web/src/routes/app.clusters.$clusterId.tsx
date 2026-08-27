@@ -12,6 +12,7 @@
 // concrete before anything reads it, so a cluster-scoped cache key cannot be
 // keyed on "whichever is first" any more (see lib/queries/keys.ts).
 import { createFileRoute, Link, Navigate, Outlet, redirect } from "@tanstack/react-router";
+import { ClusterBlockedBanner } from "~/components/app/cluster-blocked";
 import { ClusterHeader } from "~/components/app/cluster-header";
 import { useLiveClusterEvents } from "~/lib/queries/live";
 import { clustersQuery, useCluster, useShell } from "~/lib/queries/shell";
@@ -62,6 +63,9 @@ function ClusterLayout() {
   return (
     <>
       <ClusterHeader cluster={cluster} />
+      {cluster.blocked === null ? null : (
+        <ClusterBlockedBanner clusterId={clusterId} block={cluster.blocked} />
+      )}
       <nav aria-label="Cluster" className="mt-4 mb-6 flex gap-4 border-b text-sm">
         <Link
           to="/app/clusters/$clusterId"
