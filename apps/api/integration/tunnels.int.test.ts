@@ -11,9 +11,11 @@ import { api, authPost, databaseUrl, type Session, signUp, startApi, stopApi } f
 // No real gateway is involved, on purpose. The endpoint points at a loopback
 // port nothing listens on, so what this suite proves about the network is the
 // honest half: a tunnel comes up, gets asked, and reports silence as silence.
-// That a handshake actually COMPLETES cannot be faked and is not faked — it is
-// proven against a kernel WireGuard peer in src/tunnel/reach.test.ts, which is
-// opt-in because it needs one.
+// That a handshake actually COMPLETES cannot be faked here. It is proven against
+// a kernel WireGuard peer by hand (D111 records the run), and the layer between
+// this suite and the binary — the verdict this api gives a dial, and what a probe
+// concludes — is unit-tested in src/tunnel/child.test.ts against a stub that
+// speaks the protocol and no WireGuard at all.
 //
 // Mongo-free and dial-free, so this costs nothing from the dial budget.
 

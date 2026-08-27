@@ -200,12 +200,9 @@ test and the port-forward in NOTES.txt all read the same number they did before.
   value: {{ .Values.config.logLevel | quote }}
 - name: ALLOW_PRIVATE_CLUSTER_TARGETS
   value: {{ .Values.config.allowPrivateClusterTargets | quote }}
-# Which implementation terminates a registered WireGuard peering (D111). Neither
-# needs a capability or /dev/net/tun, so this changes no securityContext — it
-# picks between the userspace stack inside the api and the tunnel binary the
-# image already carries.
-- name: TUNNEL_RUNTIME
-  value: {{ .Values.config.tunnelRuntime | quote }}
+# Where the tunnel binary is, for an image that puts it somewhere other than the
+# default (D111). It needs no capability and no /dev/net/tun, so nothing here
+# touches a securityContext.
 {{- if .Values.config.tunnelBinary }}
 - name: TUNNEL_BINARY
   value: {{ .Values.config.tunnelBinary | quote }}

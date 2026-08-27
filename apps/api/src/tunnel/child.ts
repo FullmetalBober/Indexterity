@@ -4,10 +4,7 @@ import path from "node:path";
 import { createInterface } from "node:readline";
 import { z } from "zod";
 import { assertDialableThroughTunnel, type Cidr, parseCidr } from "../engine/net-guard";
-import type { TunnelBackend, TunnelEndpoint, TunnelHealth } from "./backend";
 import type { WireGuardConf } from "./conf";
-import type { Reachability } from "./reach";
-import type { DeviceState } from "./wireguard/device";
 
 // The peering carried by apps/tunnel: wireguard-go for the protocol, gvisor's
 // netstack for IP and TCP, one process per tunnel (D111).
@@ -21,6 +18,35 @@ import type { DeviceState } from "./wireguard/device";
 // one there would skip the guard.
 //
 // Two pipe round trips per CONNECTION, and none per packet.
+
+/** down | handshaking | up, which is what the dashboard draws. */
+export type TunnelState = "down" | "handshaking" | "up";
+
+export interface TunnelEndpoint {
+  /** Loopback SOCKS5 the drivers dial. */
+  readonly host: "127.0.0.1";
+  readonly port: number;
+  readonly credentials: { readonly username: string; readonly password: string };
+}
+
+export interface TunnelHealth {
+  readonly state: TunnelState;
+  readonly handshakeAgeSeconds: number | null;
+}
+
+/**
+ * What a reachability test found. `error` is null when the gateway answered, and
+ * ALSO when it simply stayed silent: an endpoint that is not there, a dropped UDP
+ * port and a PublicKey the gateway does not know are indistinguishable from
+ * here, so there is no cause to report and inventing one would send an owner
+ * somewhere specific for a reason nobody has.
+ */
+export interface Reachability {
+  readonly reachable: boolean;
+  readonly state: TunnelState;
+  readonly handshakeAgeSeconds: number | null;
+  readonly error: string | null;
+}
 
 // The binary's stdout, parsed rather than trusted: it is a separate artefact
 // that a deployment could have at a different version, and an event we cannot
@@ -72,13 +98,13 @@ interface Waiter {
   readonly timer: NodeJS.Timeout;
 }
 
-export class ChildTunnel implements TunnelBackend {
+export class ChildTunnel {
   readonly endpoint: TunnelEndpoint;
   readonly #child: ChildProcess;
   readonly #allowedIps: readonly Cidr[];
   readonly #onError: (error: Error) => void;
 
-  #state: DeviceState = "down";
+  #state: TunnelState = "down";
   #lastHandshakeAt: number | null = null;
   #lastError: Error | null = null;
   #exited = false;

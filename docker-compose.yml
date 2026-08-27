@@ -38,12 +38,6 @@ services:
     command: sh -c "npm install && exec npx turbo run dev --filter=@repo/api"
     environment:
       DATABASE_URL: postgres://mongo_optimizer:mongo_optimizer@postgres:5432/mongo_optimizer
-      # Which implementation carries a WireGuard peering (D111). `binary` needs
-      # apps/tunnel built for this container's platform — `npm run build` does
-      # that, and the tree is mounted, so a flip plus a restart is the whole
-      # change. Left on the userspace stack by default so a fresh clone needs no
-      # Go toolchain.
-      TUNNEL_RUNTIME: ${TUNNEL_RUNTIME:-node}
       API_PORT: "3001"
       # Dev targets live on the compose network; sign-up is open for convenience.
       ALLOW_PRIVATE_CLUSTER_TARGETS: "true"
