@@ -1,3 +1,4 @@
+import type { BlockedReason } from "@repo/contracts";
 import type { JobHelpers } from "graphile-worker";
 import type { Database } from "../db";
 import { InsecureConnectionError } from "../engine/tls";
@@ -22,6 +23,13 @@ export interface ClusterTaskDeps {
   // value is that a task can be tested without a queue or a database.
   readonly alertAllowed: (scope: string) => Promise<boolean>;
   readonly emitPassFinished: (clusterId: string, task: string) => Promise<void>;
+  /**
+   * Why the pipeline is not running, for a screen to read a week later. The
+   * metric beside every call to this answers an operator watching a gauge; this
+   * answers the owner who opens the cluster and finds week-old numbers.
+   */
+  readonly markBlocked: (clusterId: string, reason: BlockedReason, detail: string) => Promise<void>;
+  readonly markUnblocked: (clusterId: string) => Promise<void>;
 }
 
 // A customer cluster can be unreachable for days — maintenance, a rotated
@@ -41,6 +49,9 @@ export async function runClusterTask(
   try {
     await run(clusterId);
     recordClusterTask(task, clusterId, "ok");
+    // A pass that got through clears whatever stopped the last one: the state is
+    // "why the pipeline is not running", so it cannot outlive a run.
+    await deps.markUnblocked(clusterId);
     // Only the ok outcome: a skipped tick changed nothing, so there is nothing
     // for a dashboard to refetch. Best-effort by construction (emit.ts) — a
     // lost nudge must not turn a landed pass into a retried one.
@@ -57,6 +68,7 @@ export async function runClusterTask(
     // cluster, for the same reason.
     if (error instanceof UnsupportedServerError) {
       recordClusterTask(task, clusterId, "unsupported");
+      await deps.markBlocked(clusterId, "UNSUPPORTED", error.message);
       deps.logger.warn(`${task}: cluster ${clusterId} — ${error.message}`);
       if (!(await deps.alertAllowed(`${clusterId}:unsupported`))) return;
       await deps.alertOwners(clusterId, "cluster version not supported", error.message);
@@ -70,6 +82,7 @@ export async function runClusterTask(
     // hunting a firewall that is not the problem.
     if (error instanceof InsecureConnectionError) {
       recordClusterTask(task, clusterId, "insecure");
+      await deps.markBlocked(clusterId, "INSECURE", error.message);
       deps.logger.warn(`${task}: cluster ${clusterId} — ${error.message}`);
       if (!(await deps.alertAllowed(`${clusterId}:insecure`))) return;
       await deps.alertOwners(
@@ -99,6 +112,12 @@ export async function runClusterTask(
     // the same stack while a customer's VPN is down for an afternoon.
     if (error instanceof TunnelUnavailableError) {
       recordClusterTask(task, clusterId, "tunnel-down");
+      await deps.markBlocked(
+        clusterId,
+        "TUNNEL_DOWN",
+        "The VPN tunnel this cluster is reached through is not up. The database itself may be " +
+          "answering fine; what is not is the gateway.",
+      );
       deps.logger.warn(
         `${task}: cluster ${clusterId} — tunnel ${error.tunnelId} is not up, skipped`,
       );
@@ -123,6 +142,7 @@ export async function runClusterTask(
     // customer email — log it every tick so it stays visible, and move on.
     if (error instanceof ClusterCredentialsError) {
       recordClusterTask(task, clusterId, "credentials");
+      await deps.markBlocked(clusterId, "CREDENTIALS", error.message);
       deps.logger.error(`${task}: ${error.message}`);
       return;
     }
@@ -130,9 +150,14 @@ export async function runClusterTask(
       // Rethrown, so graphile-worker retries and eventually dead-letters it —
       // counted here too, because this is where the kind is known.
       recordClusterTask(task, clusterId, "error");
+      // Recorded before the rethrow: graphile-worker will retry and eventually
+      // dead-letter this, and the owner should not have to wait for that to find
+      // out their cluster stopped.
+      await deps.markBlocked(clusterId, "ERROR", messageOf(error));
       throw error;
     }
     recordClusterTask(task, clusterId, "unreachable");
+    await deps.markBlocked(clusterId, "UNREACHABLE", messageOf(error));
     deps.logger.warn(
       `${task}: cluster ${clusterId} unreachable — skipped, retrying on the next tick`,
     );
@@ -197,4 +222,11 @@ export function createTaskList(db: Database, cluster: ClusterTasksService) {
       await runDigest(db);
     },
   };
+}
+
+// A sentence for the badge, from whatever was thrown. The driver's own words are
+// usually the useful ones — "connect ETIMEDOUT 10.0.0.5:27017" tells an owner
+// more than any wording of ours — and the address in them is their own.
+function messageOf(error: unknown): string {
+  return error instanceof Error && error.message !== "" ? error.message : String(error);
 }

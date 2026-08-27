@@ -13,17 +13,23 @@ function recorder(): {
   errors: string[];
   alerts: string[];
   emitted: string[];
+  blocked: string[];
+  unblocked: string[];
 } {
   const warns: string[] = [];
   const errors: string[] = [];
   const alerts: string[] = [];
   const emitted: string[] = [];
+  const blocked: string[] = [];
+  const unblocked: string[] = [];
   const claimed = new Set<string>();
   return {
     warns,
     errors,
     alerts,
     emitted,
+    blocked,
+    unblocked,
     deps: {
       logger: {
         warn: (message) => void warns.push(message),
@@ -40,6 +46,14 @@ function recorder(): {
       alertAllowed: (scope) => Promise.resolve(claimed.has(scope) ? false : !!claimed.add(scope)),
       emitPassFinished: (clusterId, task) => {
         emitted.push(`${clusterId}:${task}`);
+        return Promise.resolve();
+      },
+      markBlocked: (clusterId, reason, detail) => {
+        blocked.push(`${clusterId}:${reason}:${detail}`);
+        return Promise.resolve();
+      },
+      markUnblocked: (clusterId) => {
+        unblocked.push(clusterId);
         return Promise.resolve();
       },
     },
@@ -64,6 +78,10 @@ describe("runClusterTask", () => {
     expect(log.warns).toHaveLength(0);
     expect(log.errors).toHaveLength(0);
     expect(log.alerts).toHaveLength(0);
+    // Nothing recorded either: the row this would be written to is gone, and the
+    // owners deleted it on purpose.
+    expect(log.blocked).toHaveLength(0);
+    expect(log.unblocked).toHaveLength(0);
   });
 
   it("passes a successful run straight through", async () => {
@@ -77,6 +95,10 @@ describe("runClusterTask", () => {
     expect(log.alerts).toHaveLength(0);
     // The landed pass is announced, so the dashboard can refetch what it wrote.
     expect(log.emitted).toEqual([`${CLUSTER}:collect`]);
+    // And whatever stopped the last pass is cleared: the stored state is "why
+    // the pipeline is not running", so it cannot survive a pass that ran.
+    expect(log.unblocked).toEqual([CLUSTER]);
+    expect(log.blocked).toHaveLength(0);
   });
 
   it("announces nothing for a tick that changed nothing", async () => {
@@ -235,5 +257,76 @@ describe("runClusterTask on a cluster we refuse to dial", () => {
       });
       expect(log.alerts).toHaveLength(2);
     });
+  });
+
+  // The gap this closes. The condition was always diagnosed here — a metric, a
+  // log line, a mail once a day — and then thrown away, so a dashboard opened a
+  // week later could only show `lastCollectedAt` going stale, which has innocent
+  // causes and reads as "nothing is obviously wrong".
+  it("records why the pipeline stopped, in the driver's own words", async () => {
+    const log = recorder();
+
+    await runClusterTask("collect", CLUSTER, log.deps, () => Promise.reject(unreachable()));
+
+    expect(log.blocked).toEqual([`${CLUSTER}:UNREACHABLE:connect ECONNREFUSED 10.0.0.4:27017`]);
+    expect(log.unblocked).toHaveLength(0);
+  });
+
+  it("blames the tunnel rather than the database when the tunnel is down", async () => {
+    const log = recorder();
+
+    await runClusterTask("collect", CLUSTER, log.deps, () => {
+      throw new TunnelUnavailableError(TUNNEL);
+    });
+
+    // Its own reason, for the reason the mail and the metric keep theirs: the
+    // database may be answering perfectly and we never dialled it.
+    expect(log.blocked[0]).toContain(":TUNNEL_DOWN:");
+    expect(log.blocked[0]).toContain("gateway");
+  });
+
+  it("distinguishes declining to dial from failing to reach", async () => {
+    const log = recorder();
+
+    await runClusterTask("collect", CLUSTER, log.deps, () => {
+      throw new InsecureConnectionError("the stored string would connect in plaintext");
+    });
+
+    expect(log.blocked[0]).toContain(":INSECURE:");
+    expect(log.blocked[0]).not.toContain("UNREACHABLE");
+  });
+
+  it("records an unsupported server, which no retry can fix", async () => {
+    const log = recorder();
+
+    await runClusterTask("collect", CLUSTER, log.deps, () => {
+      throw new UnsupportedServerError("mongodb 4.4 is below the floor");
+    });
+
+    expect(log.blocked[0]).toBe(`${CLUSTER}:UNSUPPORTED:mongodb 4.4 is below the floor`);
+  });
+
+  it("records credentials that cannot be opened, which needs an operator", async () => {
+    const log = recorder();
+
+    await runClusterTask("collect", CLUSTER, log.deps, () => {
+      throw new ClusterCredentialsError(CLUSTER, 2, new Error("no key for version 2"));
+    });
+
+    expect(log.blocked[0]).toContain(":CREDENTIALS:");
+  });
+
+  it("records an unexpected failure BEFORE rethrowing it", async () => {
+    const log = recorder();
+
+    // Rethrown so graphile-worker retries and eventually dead-letters it — but an
+    // owner should not have to wait for that to find out collection stopped.
+    await expect(
+      runClusterTask("collect", CLUSTER, log.deps, () => {
+        throw new Error("something nobody has classified");
+      }),
+    ).rejects.toThrow("something nobody has classified");
+
+    expect(log.blocked).toEqual([`${CLUSTER}:ERROR:something nobody has classified`]);
   });
 });

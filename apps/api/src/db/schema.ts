@@ -472,6 +472,26 @@ export const clusters = pgTable(
     // Set at connect and re-evaluated on every rotation, because rotating is
     // exactly when it changes: swapping an admin string for a scoped one is a
     // narrowing somebody should be able to see happened.
+    // Why the pipeline is not running against this cluster, or null when it is.
+    //
+    // Stored rather than derived, which is the whole point. A cluster nobody can
+    // reach produces no snapshots, so the only evidence on the dashboard was
+    // `lastCollectedAt` going stale — and staleness has innocent causes (a paused
+    // schedule, a plan window, a cluster with nothing left to collect). The
+    // condition was known: `runClusterTask` records a metric, logs a line and
+    // mails the owners once a day. None of that reaches a screen somebody opens
+    // a week later, so the failure rendered as an absence, which reads as "all
+    // is well" (#24's rule, arrived at again).
+    //
+    // Text, not an enum, for the reason `security_events.event` is text: adding
+    // a reason should be a constant, not a migration.
+    blockedReason: text("blocked_reason"),
+    // When it STARTED, not when it was last seen — set on the first blocked pass
+    // and left alone while it stays blocked, because "for six days" is the part
+    // that decides whether somebody acts.
+    blockedSince: timestamp("blocked_since", { withTimezone: true }),
+    // The sentence, as the owner's own alert mail words it.
+    blockedDetail: text("blocked_detail"),
     credentialPosture: credentialPosture("credential_posture"),
     // Which TLS checks the owner turned off when connecting, as checkboxes on the
     // connect form. Held HERE and not inferred from the sealed string, for two
