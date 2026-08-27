@@ -77,7 +77,7 @@ export function ObserveSection({
   // feature rather than as an answer.
   if (databases.available.length < MIN_DATABASES_TO_CHOOSE) {
     return (
-      <Card className="mt-6">
+      <Card>
         <CardHeader>
           <CardTitle>Databases</CardTitle>
           <CardDescription>
@@ -103,7 +103,7 @@ export function ObserveSection({
     stored !== null && (draft === null || draft.some((name) => !stored.includes(name)));
 
   return (
-    <Card className="mt-6">
+    <Card>
       <CardHeader>
         <CardTitle>Databases</CardTitle>
         <CardDescription>
@@ -181,7 +181,7 @@ export function ObserveSection({
 // a page that is loading and a page that is broken.
 export function ObserveSectionSkeleton() {
   return (
-    <Card className="mt-6">
+    <Card>
       <CardHeader>
         <CardTitle>Databases</CardTitle>
         <CardDescription>Asking the cluster which databases it has…</CardDescription>

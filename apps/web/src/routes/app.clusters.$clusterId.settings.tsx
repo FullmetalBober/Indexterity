@@ -49,7 +49,13 @@ function ClusterSettings() {
     // Capped, unlike the overview beside it. Everything here is a form, and a
     // "days" box a thousand pixels wide tells a reader it wants a thousand
     // pixels of answer.
-    <div className="max-w-3xl">
+    //
+    // The gap between the sections is decided HERE rather than by each card
+    // carrying its own `mt-*`, which is how the tunnel card arrived flush
+    // against the one above it: a new section had to remember a margin, and
+    // forgot. A card that renders null contributes no gap, so the conditionals
+    // below cost nothing.
+    <div className="max-w-3xl space-y-8">
       {/* First, because it is the cheapest thing on the page to understand and
           the one that was impossible until #96. Keyed by the cluster: the field
           holds a name being edited, and switching clusters must not carry the
@@ -64,9 +70,7 @@ function ClusterSettings() {
       ) : policy.pending ? (
         <PolicySectionSkeleton />
       ) : policy.failed ? (
-        <div className="mt-6">
-          <Unavailable what="this cluster's policy" onRetry={policy.retry} />
-        </div>
+        <Unavailable what="this cluster's policy" onRetry={policy.retry} />
       ) : null}
       {/* Above the connection, below the policy: it is a question about this
           cluster's data rather than about its credentials, and unlike the policy
