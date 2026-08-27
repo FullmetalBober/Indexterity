@@ -22,6 +22,13 @@ import type { TunnelDevice } from "./wireguard/device";
 // SyntaxError at load. The ESM build is fine, and a dynamic import reaches it
 // from this CommonJS package. `.swcrc` sets module.ignoreDynamic so the build
 // leaves the import() alone rather than lowering it back to a require().
+//
+// The DEV loader needs saying separately, because it bit: @swc-node/register
+// does not read `.swcrc`, and takes the same switch as SWC_NODE_IGNORE_DYNAMIC
+// in the environment (it is on the api's dev script). Without it every tunnel
+// open fails with `SyntaxError: Unexpected token ','` — from inside tcpip's
+// bundle, naming nothing that would lead anybody here — while the built dist
+// works perfectly, so it looks like a product bug rather than a loader one.
 
 const DNS_PORT = 53;
 
