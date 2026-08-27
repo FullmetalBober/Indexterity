@@ -206,6 +206,19 @@ const workerShape = {
   // — which is why this one has no default.
   RETENTION_DAYS: optionalPositive(),
   STORAGE_USD_PER_GB_MONTH: optionalPositive(),
+  // Which implementation terminates a WireGuard peering (#353, D111).
+  //
+  // `node` is the userspace stack in this process; `binary` spawns apps/tunnel
+  // per peering — wireguard-go and gvisor's netstack, neither of them ours.
+  // Both answer the same TunnelRegistry API and both are proven by the same
+  // integration suite, so this is a switch rather than a fork: it exists so the
+  // replacement can be turned on per environment and turned off again without a
+  // deploy that also changes something else.
+  TUNNEL_RUNTIME: z.enum(["node", "binary"]).default("node"),
+  // Where that binary is. Defaults to the layout both the repo and the image
+  // have — apps/tunnel/dist beside apps/api — and is here for the deployments
+  // that put it somewhere else.
+  TUNNEL_BINARY: z.string().min(1).optional(),
   ALLOW_PRIVATE_CLUSTER_TARGETS: flag(false),
   ALLOW_INSECURE_CLUSTER_TLS: flag(false),
   // One flag for every engine rather than one per engine. The knob answers a

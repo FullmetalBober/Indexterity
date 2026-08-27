@@ -50,6 +50,11 @@ export async function startApi(
       // The suite's mongo is on localhost, and it signs up freely — both are
       // non-defaults, which is exactly why the guards need their own tests.
       ALLOW_PRIVATE_CLUSTER_TARGETS: "true",
+      // Which tunnel implementation the spawned api uses (D111). Inherited from
+      // the shell so the SAME suite proves both — `TUNNEL_RUNTIME=binary npm run
+      // test:int -w @repo/api -- integration/tunnels.int.test.ts` runs the whole
+      // narrative against the Go binary, which is the point of the switch.
+      TUNNEL_RUNTIME: process.env.TUNNEL_RUNTIME ?? "node",
       // The compose mongo serves no TLS; the suite dials it on purpose.
       ALLOW_INSECURE_CLUSTER_TLS: "true",
       SIGNUP_MODE: "open",

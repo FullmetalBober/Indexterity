@@ -205,6 +205,18 @@ export function trustsProxy(): boolean {
   return trustProxySetting() !== false;
 }
 
+// Which implementation terminates a WireGuard peering, and where its binary is
+// (D111). Read at open() rather than at boot, so an operator flipping it and
+// restarting gets the other implementation for every tunnel that comes up next —
+// tunnels come up on first use, so that is soon and needs no migration.
+export function tunnelRuntime(): "node" | "binary" {
+  return workerEnv().TUNNEL_RUNTIME;
+}
+
+export function tunnelBinary(): string | undefined {
+  return workerEnv().TUNNEL_BINARY;
+}
+
 // Whether owners must have a second factor before any owner-only mutation (#55).
 // A deployment posture like SIGNUP_MODE, off by default so dev and the test
 // suites work without every account enrolling an authenticator first.

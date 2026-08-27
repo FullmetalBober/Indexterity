@@ -1,41 +1,32 @@
 import { promises as dns } from "node:dns";
 import { Injectable, Logger, type OnApplicationShutdown } from "@nestjs/common";
+import { tunnelBinary, tunnelRuntime } from "../config/env";
 import { allowPrivateTargets, assertTargetsAllowed } from "../engine/net-guard";
+import type { TunnelBackend, TunnelEndpoint, TunnelHealth } from "./backend";
+import { ChildTunnel } from "./child";
 import type { WireGuardConf } from "./conf";
-import { TunnelNetstack } from "./netstack";
-import { probeReachability, type Reachability } from "./reach";
-import { type SocksCredentials, SocksServer } from "./socks";
-import { publicKeyFromPrivate } from "./wireguard/crypto";
-import { type DeviceState, TunnelDevice } from "./wireguard/device";
+import { InProcessTunnel } from "./inprocess";
+import type { Reachability } from "./reach";
 
 // The one provider in this directory, and it earns that on two of the three
 // counts §5.1 names: lifecycle, and being a single instance the rest of the app
 // resolves against. Everything below it — the protocol, the netstack, the
 // parser — is pure or per-tunnel, so none of it is injectable, for the same
 // reason analysis/ and the three adapters are not.
+//
+// It holds the map and the lifecycle and nothing about HOW a peering is carried:
+// TUNNEL_RUNTIME picks between the userspace stack in this process and the Go
+// binary spawned per tunnel (D111), both of which answer backend.ts. That is why
+// the switch is a switch and not a fork — the same integration suite proves each.
 
-export interface TunnelEndpoint {
-  /** Loopback SOCKS5 the drivers dial. */
-  readonly host: "127.0.0.1";
-  readonly port: number;
-  readonly credentials: SocksCredentials;
-}
-
-export interface TunnelHealth {
-  readonly state: DeviceState;
-  readonly handshakeAgeSeconds: number | null;
-}
-
-interface LiveTunnel {
-  readonly device: TunnelDevice;
-  readonly netstack: TunnelNetstack;
-  readonly socks: SocksServer;
-}
+// Re-exported because callers have imported them from here since #353, and the
+// split into backend.ts is not their business.
+export type { TunnelEndpoint, TunnelHealth };
 
 @Injectable()
 export class TunnelRegistry implements OnApplicationShutdown {
   readonly #logger = new Logger(TunnelRegistry.name);
-  readonly #tunnels = new Map<string, LiveTunnel>();
+  readonly #tunnels = new Map<string, TunnelBackend>();
 
   /**
    * Bring a tunnel up, or replace one already up under the same id.
@@ -45,45 +36,42 @@ export class TunnelRegistry implements OnApplicationShutdown {
    * a rotated key or a moved endpoint lands.
    */
   async open(id: string, conf: WireGuardConf): Promise<TunnelEndpoint> {
-    const device = new TunnelDevice({
-      keys: {
-        privateKey: conf.privateKey,
-        publicKey: publicKeyFromPrivate(conf.privateKey),
-        peerPublicKey: conf.peer.publicKey,
-        ...(conf.peer.presharedKey === undefined ? {} : { presharedKey: conf.peer.presharedKey }),
-      },
-      resolveEndpoint: () => this.#resolveGateway(conf),
-      ...(conf.peer.persistentKeepalive === undefined
-        ? {}
-        : { persistentKeepalive: conf.peer.persistentKeepalive }),
-    });
-
-    device.on("error", (error) => {
+    const onError = (error: Error) => {
       // A tunnel error is a condition of this tunnel, not of the process. It is
-      // logged and the device keeps retrying; a cluster behind a tunnel that is
+      // logged and the peering keeps retrying; a cluster behind a tunnel that is
       // down must read as "unreachable", not as a fault in the pipeline.
       this.#logger.warn(`tunnel ${id}: ${error.message}`);
-    });
-    device.on("state", (state) => this.#logger.log(`tunnel ${id} is ${state}`));
+    };
+    const onState = (state: string) => this.#logger.log(`tunnel ${id} is ${state}`);
 
-    let netstack: TunnelNetstack;
-    let socks: SocksServer;
-    try {
-      netstack = await TunnelNetstack.create(device, conf);
-      await device.start();
-      socks = await SocksServer.start(netstack);
-    } catch (error) {
-      device.close();
-      throw error;
-    }
+    const backend =
+      tunnelRuntime() === "binary"
+        ? await ChildTunnel.start({
+            conf,
+            // Resolved and vetted HERE, once, because the guard is ours: a
+            // customer-supplied endpoint is an outbound dial we make. The binary
+            // refuses a hostname for the same reason.
+            gateway: await this.#resolveGateway(conf),
+            binary: tunnelBinary(),
+            onError,
+            onState,
+            onExit: (code) => {
+              // Not removed from the map: `endpoint()` still answers, so a dial
+              // fails fast against a dead listener rather than silently opening
+              // a second peering. The next open() replaces it.
+              this.#logger.warn(`tunnel ${id} process exited with ${code ?? "a signal"}`);
+            },
+            log: (line) => this.#logger.warn(`tunnel ${id}: ${line}`),
+          })
+        : await InProcessTunnel.start(conf, () => this.#resolveGateway(conf), onError, onState);
 
     // The replacement is built before the old one is torn down, so a failed
     // replace leaves the tunnel that was working in place rather than none.
     const previous = this.#tunnels.get(id);
-    this.#tunnels.set(id, { device, netstack, socks });
+    this.#tunnels.set(id, backend);
     if (previous !== undefined) await this.#shutdown(previous);
 
-    return { host: "127.0.0.1", port: socks.port, credentials: socks.credentials };
+    return backend.endpoint;
   }
 
   /**
@@ -96,17 +84,11 @@ export class TunnelRegistry implements OnApplicationShutdown {
   async resolve(id: string, host: string): Promise<readonly string[]> {
     const tunnel = this.#tunnels.get(id);
     if (tunnel === undefined) throw new Error("tunnel is not up");
-    return tunnel.netstack.resolve(host);
+    return tunnel.resolve(host);
   }
 
   endpoint(id: string): TunnelEndpoint | null {
-    const tunnel = this.#tunnels.get(id);
-    if (tunnel === undefined) return null;
-    return {
-      host: "127.0.0.1",
-      port: tunnel.socks.port,
-      credentials: tunnel.socks.credentials,
-    };
+    return this.#tunnels.get(id)?.endpoint ?? null;
   }
 
   /**
@@ -116,12 +98,7 @@ export class TunnelRegistry implements OnApplicationShutdown {
    * must not burn its scheduled occurrence.
    */
   health(id: string): TunnelHealth | null {
-    const tunnel = this.#tunnels.get(id);
-    if (tunnel === undefined) return null;
-    return {
-      state: tunnel.device.state,
-      handshakeAgeSeconds: tunnel.device.handshakeAgeSeconds(),
-    };
+    return this.#tunnels.get(id)?.health() ?? null;
   }
 
   /**
@@ -135,7 +112,7 @@ export class TunnelRegistry implements OnApplicationShutdown {
   async probe(id: string, timeoutMs?: number): Promise<Reachability> {
     const tunnel = this.#tunnels.get(id);
     if (tunnel === undefined) throw new Error("tunnel is not up");
-    return probeReachability(tunnel.device, timeoutMs);
+    return tunnel.probe(timeoutMs);
   }
 
   async close(id: string): Promise<void> {
@@ -151,9 +128,8 @@ export class TunnelRegistry implements OnApplicationShutdown {
     await Promise.all(tunnels.map((tunnel) => this.#shutdown(tunnel)));
   }
 
-  async #shutdown(tunnel: LiveTunnel): Promise<void> {
-    await tunnel.socks.close().catch(() => {});
-    tunnel.netstack.close();
+  async #shutdown(tunnel: TunnelBackend): Promise<void> {
+    await tunnel.close().catch(() => {});
   }
 
   /**
