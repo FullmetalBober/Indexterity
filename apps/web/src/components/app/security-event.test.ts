@@ -141,4 +141,27 @@ describe("a VPN tunnel act", () => {
     expect(line).toMatchObject({ label: "VPN tunnel registered", tone: "neutral" });
     expect(line.subject).toBe("Production VPC gateway vpn.example.com:51820");
   });
+
+  it("says what a tunnel test found, not just that one happened", () => {
+    const answered = eventLine(
+      event({
+        event: "TUNNEL_TESTED",
+        target: "Production VPC",
+        metadata: { tunnelId: "t1", endpoint: "vpn.example.com:51820", reachable: true },
+      }),
+    );
+    // Ordinary work, so neutral: an owner checking their own gateway is not an
+    // act an incident is read to find.
+    expect(answered).toMatchObject({ label: "VPN tunnel tested", tone: "neutral" });
+    expect(answered.subject).toBe("Production VPC the gateway answered");
+
+    const silent = eventLine(
+      event({
+        event: "TUNNEL_TESTED",
+        target: "Production VPC",
+        metadata: { tunnelId: "t1", endpoint: "vpn.example.com:51820", reachable: false },
+      }),
+    );
+    expect(silent.subject).toBe("Production VPC no answer");
+  });
 });

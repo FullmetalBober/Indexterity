@@ -53,6 +53,7 @@ const LABELS: Record<string, string> = {
   TUNNEL_REGISTERED: "VPN tunnel registered",
   TUNNEL_UPDATED: "VPN tunnel changed",
   TUNNEL_REMOVED: "VPN tunnel removed",
+  TUNNEL_TESTED: "VPN tunnel tested",
 };
 
 // The acts that take something away, or hand something over. Not "bad" — an
@@ -127,6 +128,11 @@ function detailFor(event: SecurityEvent): string | null {
     // different network on the far side of it.
     if (metadata.config !== null && metadata.config !== undefined) return "config replaced";
     return metadata.name === null || metadata.name === undefined ? null : "renamed";
+  }
+  if (event.event === "TUNNEL_TESTED") {
+    // The verdict, which is the whole reason the row is worth keeping: a run of
+    // failed tests against one gateway is a story, and "tested" alone is not.
+    return metadata.reachable === true ? "the gateway answered" : "no answer";
   }
   if (event.event === "TUNNEL_REGISTERED" || event.event === "TUNNEL_REMOVED") {
     // The gateway, because "a tunnel was registered" does not say which network
