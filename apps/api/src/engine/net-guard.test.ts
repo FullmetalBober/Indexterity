@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { assertTargetsAllowed, BlockedTargetError, classifyAddress } from "./net-guard";
+import {
+  assertDialableThroughTunnel,
+  assertTargetsAllowed,
+  BlockedTargetError,
+  classifyAddress,
+  parseCidr,
+} from "./net-guard";
 
 function category(ip: string): string {
   return classifyAddress(ip).category;
@@ -104,5 +110,64 @@ describe("assertTargetsAllowed", () => {
     await expect(
       assertTargetsAllowed(["no-such-host.invalid"], false, strict),
     ).resolves.toBeUndefined();
+  });
+});
+
+// The check every tunnelled dial goes through, and — since the peering moved into
+// a separate process (D111) — the ONLY place that decision is made. The binary
+// asks and this answers, so an untested rule here is an unguarded dial.
+describe("assertDialableThroughTunnel", () => {
+  const carries = (...cidrs: string[]) => cidrs.map(parseCidr);
+
+  it("allows an address the peer agreed to carry", () => {
+    expect(() => assertDialableThroughTunnel("10.4.5.6", carries("10.0.0.0/8"))).not.toThrow();
+  });
+
+  it("refuses an address outside AllowedIPs, saying the peer did not agree to it", () => {
+    expect(() => assertDialableThroughTunnel("192.168.5.5", carries("10.0.0.0/8"))).toThrow(
+      /AllowedIPs/,
+    );
+  });
+
+  // The one that matters most. A peering carrying 0.0.0.0/0 — which a full-tunnel
+  // VPN exports — agrees to carry the metadata endpoint too, and the FORBIDDEN
+  // tier has to outrank what a peer agreed to.
+  it("refuses cloud metadata even when AllowedIPs covers it", () => {
+    expect(() => assertDialableThroughTunnel("169.254.169.254", carries("0.0.0.0/0"))).toThrow(
+      /never a database/,
+    );
+  });
+
+  it("refuses link-local v6 inside a peering that covers everything", () => {
+    expect(() => assertDialableThroughTunnel("fe80::1", carries("::/0"))).toThrow(
+      /never a database/,
+    );
+  });
+
+  // Proven end to end against a real v6-only peering (D111): a unique-local
+  // address inside a v6 prefix is the shape that reaches this.
+  it("allows a unique-local v6 address the peer carries", () => {
+    expect(() => assertDialableThroughTunnel("fd00::1", carries("fd00::/64"))).not.toThrow();
+  });
+
+  it("refuses a v6 address outside the v6 prefix", () => {
+    expect(() => assertDialableThroughTunnel("fd00:1::1", carries("fd00::/64"))).toThrow(
+      /AllowedIPs/,
+    );
+  });
+
+  // Families do not blur: a bit-string comparison that ignored the family would
+  // match a v4 address against a v6 prefix on a shared leading run of zeroes.
+  it("does not read a v4 address as inside a v6 prefix", () => {
+    expect(() => assertDialableThroughTunnel("10.4.5.6", carries("fd00::/8"))).toThrow(
+      /AllowedIPs/,
+    );
+    expect(() => assertDialableThroughTunnel("fd00::1", carries("10.0.0.0/8"))).toThrow(
+      /AllowedIPs/,
+    );
+  });
+
+  it("refuses everything when the peering carries nothing", () => {
+    expect(() => assertDialableThroughTunnel("10.4.5.6", [])).toThrow(/AllowedIPs/);
   });
 });
