@@ -20,6 +20,7 @@ import { InsecureConnectionError } from "../engine/tls";
 import { DialBudgetService } from "../errors/dial-budget.service";
 import { mapClusterError, toCluster } from "../http/mappers";
 import { ClusterGoneError, openClusterSession } from "../jobs/cluster-connection";
+import { TunnelRegistry } from "../tunnel/tunnel.registry";
 import { type ClusterRow, ClustersRepository } from "./clusters.repository";
 import { restoreHiddenIndexes } from "./offboard";
 
@@ -85,6 +86,12 @@ export class ClustersService {
     private readonly repository: ClustersRepository,
     private readonly audit: AuditService,
     private readonly dialBudget: DialBudgetService,
+    // Held for the same reason the pipeline holds one: openClusterSession brings
+    // a cluster's tunnel up on first use, and handed no registry it REFUSES a
+    // tunnelled cluster rather than dialling it directly (tunnel/resolve.ts).
+    // Fail-closed was right and it also meant listing a tunnelled cluster's
+    // databases, and disconnecting one, could not work at all.
+    private readonly tunnels: TunnelRegistry,
   ) {}
 
   // The actor arrives as a THUNK. Who is asking is a fact about the REQUEST, so
@@ -426,7 +433,10 @@ export class ClustersService {
     errors: NotFound,
   ): Promise<Awaited<ReturnType<typeof openClusterSession>>> {
     try {
-      return await openClusterSession(this.database.db, clusterId, { allDatabases: true });
+      return await openClusterSession(this.database.db, clusterId, {
+        allDatabases: true,
+        tunnels: this.tunnels,
+      });
     } catch (error) {
       if (error instanceof ClusterGoneError) {
         throw errors.NOT_FOUND({ message: "cluster not found" });
@@ -446,7 +456,10 @@ export class ClustersService {
     const none = { absent: [], unreadable: [] };
     let lease: Awaited<ReturnType<typeof openClusterSession>>;
     try {
-      lease = await openClusterSession(this.database.db, clusterId, { allDatabases: true });
+      lease = await openClusterSession(this.database.db, clusterId, {
+        allDatabases: true,
+        tunnels: this.tunnels,
+      });
     } catch (error) {
       if (error instanceof ClusterGoneError) {
         throw errors.NOT_FOUND({ message: "cluster not found" });
