@@ -97,6 +97,36 @@ export interface SecurityEventMetadata {
   SESSION_REVOKED: { scope: "one" | "others" };
   MEMBER_ROLE_CHANGED: { role: string | null };
   INVITE_CREATED: { role: string | null };
+  // The gateway and what it was allowed to reach — never the config. The sealed
+  // blob holds a PrivateKey, and this table is read by people who are not meant
+  // to be able to bring the tunnel up, which is the same rule that keeps a
+  // connection string out of CLUSTER_CONNECTED.
+  //
+  // `tunnelId` in the metadata because there is no column for it: a tunnel is an
+  // org's, not a cluster's, and one row per cluster behind it would be three
+  // rows for one act.
+  TUNNEL_REGISTERED: {
+    tunnelId: string;
+    endpoint: string;
+    allowedIps: string[];
+    dns: string[];
+  };
+  // One nullable block per kind of change, so the row says WHICH of the two
+  // happened rather than leaving a reader to diff two snapshots. A present
+  // `config` is a replaced wg0.conf, which means a new PrivateKey as well as
+  // whatever moved in the fields recorded here — and both sides of it, because
+  // the question an incident asks is what this tunnel reached before.
+  TUNNEL_UPDATED: {
+    tunnelId: string;
+    name: { from: string; to: string } | null;
+    config: {
+      from: { endpoint: string; allowedIps: string[]; dns: string[] };
+      to: { endpoint: string; allowedIps: string[]; dns: string[] };
+    } | null;
+  };
+  // Here rather than on the row for the reason CLUSTER_DISCONNECTED carries its
+  // cluster id: the act deletes the thing a column would point at.
+  TUNNEL_REMOVED: { tunnelId: string; endpoint: string; allowedIps: string[] };
 }
 
 interface SecurityEventColumns {

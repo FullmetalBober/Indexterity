@@ -1,4 +1,5 @@
 import { Module } from "@nestjs/common";
+import { AuditModule } from "../audit/audit.module";
 import { DatabaseModule } from "../db/database.module";
 import { TenancyModule } from "../http/tenancy.module";
 import { TunnelController } from "./tunnel.controller";
@@ -14,7 +15,7 @@ import { TunnelService } from "./tunnel.service";
 // made the two modules import each other, and a forwardRef would have hidden
 // the cycle rather than removed it.
 @Module({
-  imports: [DatabaseModule, TenancyModule],
+  imports: [AuditModule, DatabaseModule, TenancyModule],
   controllers: [TunnelController],
   providers: [TunnelRegistry, TunnelService],
   exports: [TunnelRegistry, TunnelService],

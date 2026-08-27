@@ -61,11 +61,19 @@ export class TunnelService {
    * moved gateway arrives as a whole new wg0.conf, which is what the VPN admin
    * exports anyway.
    */
-  async update(tunnelId: string, patch: { name?: string; config?: string }): Promise<TunnelView> {
+  async update(
+    tunnelId: string,
+    patch: { name?: string; config?: string },
+  ): Promise<{ tunnel: TunnelView; before: TunnelView }> {
     // Parsed BEFORE anything is stored, exactly as on create: a config that
     // cannot work is refused with the parser's own sentence rather than saved
     // and then failing at the next collect, where the reason would be a timeout.
     if (patch.config !== undefined) parseWireGuardConf(patch.config);
+
+    // Read before the write, because the trail records both sides: what this
+    // tunnel reached BEFORE a config was replaced is the question an incident
+    // asks, and by then the only copy of it has been overwritten.
+    const before = await this.#view(await this.#row(tunnelId));
 
     const [row] = await this.database.db
       .update(tunnels)
@@ -91,7 +99,7 @@ export class TunnelService {
       // who wants to see that happen has the reachability test.
       await this.registry.close(tunnelId);
     }
-    return this.#view(row);
+    return { tunnel: await this.#view(row), before };
   }
 
   /**
@@ -118,15 +126,21 @@ export class TunnelService {
     };
   }
 
-  async remove(tunnelId: string): Promise<void> {
-    const using = await this.#clusterCount(tunnelId);
+  /**
+   * Returns what was removed, which the caller needs to record it: the row is
+   * gone by the time the trail is written, and "a tunnel was removed" without
+   * the gateway it reached answers nothing an incident asks.
+   */
+  async remove(tunnelId: string): Promise<TunnelView> {
+    const removed = await this.#view(await this.#row(tunnelId));
     // Checked here as well as by the FK, so the owner gets a sentence naming the
     // number rather than a foreign-key violation.
-    if (using > 0) throw new TunnelInUseError(using);
+    if (removed.clusterCount > 0) throw new TunnelInUseError(removed.clusterCount);
     await this.database.db.delete(tunnels).where(eq(tunnels.id, tunnelId));
     // The live peering goes with the row; leaving it up would hold a socket and
     // a key for a tunnel nothing can reach any more.
     await this.registry.close(tunnelId);
+    return removed;
   }
 
   /**
@@ -203,13 +217,17 @@ export class TunnelService {
   }
 
   async #conf(tunnelId: string): Promise<WireGuardConf> {
+    return this.#unseal(await this.#row(tunnelId));
+  }
+
+  async #row(tunnelId: string): Promise<typeof tunnels.$inferSelect> {
     const [row] = await this.database.db
       .select()
       .from(tunnels)
       .where(eq(tunnels.id, tunnelId))
       .limit(1);
     if (row === undefined) throw new Error("no such tunnel");
-    return this.#unseal(row);
+    return row;
   }
 
   async #unseal(row: typeof tunnels.$inferSelect): Promise<WireGuardConf> {

@@ -1,6 +1,9 @@
-import { Controller, Req } from "@nestjs/common";
-import { contract } from "@repo/contracts";
+import { Controller, Logger, Req } from "@nestjs/common";
+import { contract, type TunnelView } from "@repo/contracts";
 import type { FastifyRequest } from "fastify";
+import { AuditService } from "../audit/audit.service";
+import type { SecurityEventDetails } from "../audit/audit.types";
+import { RequestActorService } from "../audit/request-actor.service";
 import { TenancyService } from "../http/tenancy.service";
 import { Implement, route } from "../orpc/implement";
 import { InvalidWireGuardConfError } from "./conf";
@@ -17,10 +20,37 @@ import { TunnelInUseError, TunnelService } from "./tunnel.service";
 // it is not something a member should be able to do on a loop.
 @Controller()
 export class TunnelController {
+  private readonly log = new Logger(TunnelController.name);
+
   constructor(
     private readonly tenancy: TenancyService,
     private readonly tunnels: TunnelService,
+    private readonly audit: AuditService,
+    private readonly actors: RequestActorService,
   ) {}
+
+  // After the act, never in front of it, and it cannot fail the request — the
+  // same trade every other trail writer here makes: the act already happened,
+  // and refusing the response would not un-record it.
+  private async record(req: FastifyRequest, entry: SecurityEventDetails): Promise<void> {
+    const actor = await this.actors.actorFromRequest(req);
+    await this.audit.record({ ...entry, ...actor }, (message) => this.log.warn(message));
+  }
+
+  // What a tunnel reached, in the three fields the trail keeps of it. Never the
+  // config: it carries a PrivateKey, and this table is read by people who are
+  // not meant to be able to bring the peering up.
+  private static reach(tunnel: TunnelView): {
+    endpoint: string;
+    allowedIps: string[];
+    dns: string[];
+  } {
+    return {
+      endpoint: tunnel.endpoint,
+      allowedIps: [...tunnel.allowedIps],
+      dns: [...tunnel.dns],
+    };
+  }
 
   @Implement(contract.listTunnels)
   listTunnels(@Req() req: FastifyRequest) {
@@ -34,7 +64,14 @@ export class TunnelController {
     return route(this.tenancy, contract.createTunnel, req, "owner").handler(
       async ({ input, errors, context }) => {
         try {
-          return await this.tunnels.create(context.member.orgId, input.name, input.config);
+          const tunnel = await this.tunnels.create(context.member.orgId, input.name, input.config);
+          await this.record(req, {
+            event: "TUNNEL_REGISTERED",
+            orgId: context.member.orgId,
+            target: tunnel.name,
+            metadata: { tunnelId: tunnel.id, ...TunnelController.reach(tunnel) },
+          });
+          return tunnel;
         } catch (error) {
           // The parser's sentence, verbatim. It names the directive and why —
           // "[Peer] has no Endpoint, and Indexterity dials out" — which is the
@@ -64,10 +101,29 @@ export class TunnelController {
           throw errors.NOT_FOUND({ message: "no such tunnel" });
         }
         try {
-          return await this.tunnels.update(input.tunnelId, {
+          const { tunnel, before } = await this.tunnels.update(input.tunnelId, {
             ...(input.name === undefined ? {} : { name: input.name }),
             ...(input.config === undefined ? {} : { config: input.config }),
           });
+          await this.record(req, {
+            event: "TUNNEL_UPDATED",
+            orgId: context.member.orgId,
+            target: tunnel.name,
+            metadata: {
+              tunnelId: tunnel.id,
+              // Null when the field was not part of this edit, so a row says
+              // which of the two acts it was rather than repeating a value that
+              // did not move. A rename is recorded even though it is not a
+              // security act: it changes what every other row here calls this
+              // tunnel, and a trail has to be followable across it.
+              name: before.name === tunnel.name ? null : { from: before.name, to: tunnel.name },
+              config:
+                input.config === undefined
+                  ? null
+                  : { from: TunnelController.reach(before), to: TunnelController.reach(tunnel) },
+            },
+          });
+          return tunnel;
         } catch (error) {
           // Same two refusals a registration has, for the same reasons: the
           // parser's own sentence names the directive, and the org's unique
@@ -116,7 +172,17 @@ export class TunnelController {
           throw errors.NOT_FOUND({ message: "no such tunnel" });
         }
         try {
-          await this.tunnels.remove(input.tunnelId);
+          const removed = await this.tunnels.remove(input.tunnelId);
+          await this.record(req, {
+            event: "TUNNEL_REMOVED",
+            orgId: context.member.orgId,
+            target: removed.name,
+            metadata: {
+              tunnelId: removed.id,
+              endpoint: removed.endpoint,
+              allowedIps: [...removed.allowedIps],
+            },
+          });
         } catch (error) {
           if (error instanceof TunnelInUseError) {
             throw errors.CONFLICT({ message: error.message });

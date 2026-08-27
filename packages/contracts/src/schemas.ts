@@ -796,6 +796,14 @@ export const SECURITY_EVENTS = [
   // much of somebody's cluster we look at, and an owner narrowing it wants that
   // recorded as much as an incident reader wants to see it widened.
   "CLUSTER_OBSERVED_DATABASES_CHANGED",
+  // The VPN peerings the control plane dials THROUGH (#353). Not cluster acts —
+  // one tunnel commonly reaches several — and the same class of decision as the
+  // cluster ones: registering one decides where we open sockets, replacing its
+  // config hands us a new key for somebody's private network, and removing one
+  // takes the route to every database behind it away.
+  "TUNNEL_REGISTERED",
+  "TUNNEL_UPDATED",
+  "TUNNEL_REMOVED",
 ] as const;
 
 export type SecurityEventName = (typeof SECURITY_EVENTS)[number];
