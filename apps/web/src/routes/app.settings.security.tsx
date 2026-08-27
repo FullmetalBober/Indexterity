@@ -50,7 +50,7 @@ function SecurityPage() {
 
   return (
     <div className="pb-8">
-      <h2 className="mt-6 font-semibold text-lg">Security trail</h2>
+      <h2 className="font-semibold text-lg">Security trail</h2>
       <p className="text-muted-foreground text-sm">
         Who did what, from where — sign-ins and failed sign-ins, two-factor, roles and invitations,
         and everything done to a cluster's access. Index operations are on each cluster's Activity

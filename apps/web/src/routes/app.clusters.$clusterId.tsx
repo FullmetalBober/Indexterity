@@ -62,7 +62,7 @@ function ClusterLayout() {
   return (
     <>
       <ClusterHeader cluster={cluster} />
-      <nav aria-label="Cluster" className="mt-4 flex gap-4 border-b text-sm">
+      <nav aria-label="Cluster" className="mt-4 mb-6 flex gap-4 border-b text-sm">
         <Link
           to="/app/clusters/$clusterId"
           params={{ clusterId }}

@@ -74,7 +74,7 @@ function CredentialPolicyCard({ org, isOwner }: { org: OrgDetail; isOwner: boole
   const save = useSaveOrgPolicy();
   const required = org.policy.requireLeastPrivilege;
   return (
-    <Card className="mt-4">
+    <Card>
       <CardHeader>
         <CardTitle className="text-base">Credential policy</CardTitle>
         <CardDescription>
