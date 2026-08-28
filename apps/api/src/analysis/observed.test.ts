@@ -112,12 +112,36 @@ describe("observedWindow", () => {
     expect(observed.verdict).toBe("NO_BASELINE");
   });
 
-  it("ignores windows too quiet to have been hurt by the hide", () => {
-    // Two reads an hour cannot show that hiding an index cost anything, so those
-    // windows measure nothing and the observation does not advance on them.
+  it("watches a trickle of traffic without drawing a ratio from it", () => {
+    // A handful of reads across the whole window cannot show that hiding an index
+    // cost anything — even when each one is slow. The time still counts as
+    // watched (we were looking, and nothing was there to hurt), and the verdict
+    // is the same "too quiet to have been hurt" the cumulative gate gave.
     const hiddenAt = START + 24 * HOUR;
-    const all = [...readings(25, 100, 100), ...readings(49, 2, 100, hiddenAt)];
-    expect(observedWindow(all, hiddenAt, 1, OPTIONS).observedMs).toBe(0);
+    const all = [
+      ...readings(25, 100, 100),
+      // 4 windows × 4 reads = 16 ops, under minWindowOps, at 10x the latency.
+      ...readings(5, 4, 1_000, hiddenAt),
+    ];
+    const observed = observedWindow(all, hiddenAt, 0.15, OPTIONS);
+    expect(Math.round(observed.observedMs / HOUR)).toBe(4);
+    expect(observed.verdict).toBe("STABLE");
+    expect(observed.ratio).toBeNull();
+  });
+
+  // A collection nobody queries. An edge case here and the ordinary case on the
+  // write side, where most collections take no writes at all.
+  it("counts quiet time as observed and calls it stable, not incomplete", () => {
+    // Hiding an index cannot have hurt anyone who did not read — the cumulative
+    // gate said so by returning a null ratio and STABLE, and this must agree.
+    // Counting only busy windows left this INCOMPLETE forever, so the index was
+    // un-hidden past the cap and re-proposed: the cycle this module ends,
+    // reached from the quiet side instead of the restarting one.
+    const hiddenAt = START + 24 * HOUR;
+    const all = [...readings(25, 100, 100), ...readings(49, 0, 0, hiddenAt)];
+    const observed = observedWindow(all, hiddenAt, 1, OPTIONS);
+    expect(Math.round(observed.observedMs / HOUR)).toBe(48);
+    expect(observed.verdict).toBe("STABLE");
   });
 });
 

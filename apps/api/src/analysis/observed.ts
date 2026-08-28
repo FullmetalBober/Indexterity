@@ -71,9 +71,16 @@ interface Window {
   readonly ops: number;
 }
 
-// Consecutive readings, differenced, keeping only the pairs a restart did not
-// eat. Same test `windowAvg` applies — a negative delta on a cumulative counter
-// is a reset, and a zero-op window measures nothing.
+// Consecutive readings, differenced, dropping only the pairs a RESET ate.
+//
+// A negative delta on a cumulative counter is the whole exclusion. A window with
+// no operations in it is not excluded — it is time we watched and during which
+// nothing could have been hurt, which is the distinction the observation count
+// turns on. Filtering those out here instead made a collection nobody queries
+// accumulate no observation at all, so its window never filled and the index was
+// eventually un-hidden and re-proposed: the same never-terminating cycle this
+// module exists to end, arrived at from the quiet side rather than the restarting
+// one. `minWindowOps` belongs to the RATIO, and is applied where that is computed.
 function readWindows(readings: readonly LatencyReading[]): Window[] {
   const sorted = sortedRuns(readings);
   const windows: Window[] = [];
@@ -83,10 +90,14 @@ function readWindows(readings: readonly LatencyReading[]): Window[] {
     if (previous === undefined || next === undefined) continue;
     const ops = next.readOps - previous.readOps;
     const micros = next.readLatencyMicros - previous.readLatencyMicros;
-    if (ops <= 0 || micros < 0) continue;
+    if (ops < 0 || micros < 0) continue;
     windows.push({ startMs: spanEnd(previous), endMs: spanStart(next), micros, ops });
   }
   return windows;
+}
+
+function totalOps(windows: readonly Window[]): number {
+  return windows.reduce((sum, window) => sum + window.ops, 0);
 }
 
 function averageMicrosPerOp(windows: readonly Window[]): number | null {
@@ -135,26 +146,31 @@ export function observedWindow(
 ): ObservedWindow {
   const windows = readWindows(readings);
   const observeMs = observeDays * DAY_MS;
-  const since = windows.filter(
-    (window) => window.startMs >= hiddenAtMs && window.ops >= options.minWindowOps,
-  );
+  const since = windows.filter((window) => window.startMs >= hiddenAtMs);
   const before = windows.filter(
     (window) => window.endMs <= hiddenAtMs && window.startMs >= hiddenAtMs - observeMs,
   );
   const observedMs = since.reduce((sum, window) => sum + (window.endMs - window.startMs), 0);
 
+  // Watch the whole window before drawing any conclusion from it, including the
+  // conclusion that it was quiet.
+  if (observedMs < observeMs) return { verdict: "INCOMPLETE", observedMs, ratio: null };
+  // Too little traffic to have been hurt. Said before the baseline is consulted,
+  // and deliberately: a collection nobody reads has no rate on either side, and
+  // calling that "no baseline" would refuse the one case where the answer is
+  // certain. The old cumulative gate reached the same verdict the same way round,
+  // returning a null ratio before it ever divided by the baseline average.
+  if (totalOps(since) < options.minWindowOps) return { verdict: "STABLE", observedMs, ratio: null };
+
   const baseline = averageMicrosPerOp(before) ?? options.recordedBaselineMicrosPerOp ?? null;
-  // Said before INCOMPLETE, because it does not resolve by waiting: the readings
-  // that would have answered it are the ones from before the hide, and no amount
-  // of further observing creates them.
+  // Traffic on this side of the hide and none on the other: there is nothing to
+  // compare against, and no amount of further observing creates readings from
+  // before it. Never spelled STABLE — the caller acts irreversibly on the
+  // difference.
   if (baseline === null || baseline <= 0)
     return { verdict: "NO_BASELINE", observedMs, ratio: null };
-  if (observedMs < observeMs) return { verdict: "INCOMPLETE", observedMs, ratio: null };
 
   const current = averageMicrosPerOp(since);
-  // Reached the window on the length of its readings but has no rate to show for
-  // them. Not reachable through the filters above, and not worth spelling STABLE
-  // if it ever becomes so.
   if (current === null) return { verdict: "NO_BASELINE", observedMs, ratio: null };
   const ratio = current / baseline;
   return { verdict: ratio > options.factor ? "REGRESSED" : "STABLE", observedMs, ratio };
