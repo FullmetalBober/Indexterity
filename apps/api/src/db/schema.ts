@@ -1048,10 +1048,14 @@ export const clusterRosters = pgTable("cluster_rosters", {
 //
 // The engine declining to make a finding is a state with no representation
 // anywhere: an empty recommendations panel reads as "your indexes are all fine",
-// and on a cluster whose counters reset oftener than the warm-up the usage gate
-// refuses EVERY eligible index, forever, silently. `usageTrustRefusal` (#267)
+// and a cluster short of trustworthy history gets nothing from the usage gate
+// with no sign anywhere that a gate is what it hit. `usageTrustRefusal` (#267)
 // answers it per index and `indexterity.usage_trust.decisions` (#274) counts it
 // for the operator; this is the customer's half.
+//
+// The `refusals` map is keyed by whatever the writing pass called its refusal,
+// and readers look up only the kinds they know — so a kind that is retired stops
+// being explained without a migration, and without an old row failing to load.
 //
 // Replaced whole on every pass rather than appended to, like cluster_rosters: the
 // question is "why is it quiet NOW", and the history of that question is what the

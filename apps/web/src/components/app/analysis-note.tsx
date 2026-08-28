@@ -5,12 +5,11 @@ import { LocalTime } from "~/lib/local-time";
 // Why the recommendations list is as short as it is (#277).
 //
 // An empty list is indistinguishable from "your indexes are all fine", and it is
-// the wrong reading twice over. A cluster whose usage counters reset oftener than
-// the observation window can never receive a usage-based recommendation, and the
-// condition does not clear on its own — on a weekly restart the reset is always
-// inside the retained window. And every collision guard in the engine works by
-// making a finding disappear silently, so "nothing to suggest" and "we suggested
-// it and hid it" looked the same from here.
+// the wrong reading twice over. A cluster can be short of trustworthy usage
+// history for any of seven reasons and receive no usage-based recommendation at
+// all, with nothing saying which. And every collision guard in the engine works
+// by making a finding disappear silently, so "nothing to suggest" and "we
+// suggested it and hid it" looked the same from here.
 //
 // Drawn ABOVE the table on purpose: it is the sentence that tells a reader how to
 // read what follows, and under the table it would be read after the conclusion it

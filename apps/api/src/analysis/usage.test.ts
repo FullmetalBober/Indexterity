@@ -55,9 +55,16 @@ describe("usageSeries", () => {
     expect(series.map((point) => point.ops)).toEqual([900, 5]);
   });
 
-  it("treats a decrease with no since change as an unseen reset, never as negative", () => {
+  it("counts a decrease with no since change in full, as the reset it is", () => {
+    // A cumulative counter that shrank restarted, whatever `since` says — SQL
+    // Server's ALTER INDEX REBUILD, or a Mongo row written before `since` was
+    // persisted. The 5 is what has been served since, and it used to be clamped
+    // to zero, which was safe only while a reset refused the whole history.
+    // Now that a reset merely segments it, dropping the 5 would report an index
+    // as idle over a stretch it was serving — so the counter is read the same
+    // way a `since` move is read. Never negative either way.
     const series = usageSeries([run(20, 20, 1, 900), run(10, 10, 1, 5)]);
-    expect(series.map((point) => point.ops)).toEqual([900, 0]);
+    expect(series.map((point) => point.ops)).toEqual([900, 5]);
   });
 
   it("counts a member that appeared in full and one that vanished not at all", () => {

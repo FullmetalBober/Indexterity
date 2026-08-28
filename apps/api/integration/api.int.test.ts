@@ -1658,7 +1658,7 @@ async function bareCluster(name: string): Promise<string> {
 }
 
 describe("outage resilience", () => {
-  it("un-hides and re-proposes instead of dropping when the counters reset", async () => {
+  it("keeps observing across a restart, and gives up only past the wall-clock cap", async () => {
     process.env.MASTER_KEY =
       process.env.MASTER_KEY ?? Buffer.from("0123456789abcdef0123456789abcdef").toString("base64");
     await mongo.db("inttest").collection("orders").createIndex({ outage: 1 }, { name: "outage_1" });
@@ -1666,9 +1666,182 @@ describe("outage resilience", () => {
       .db("inttest")
       .command({ collMod: "orders", index: { name: "outage_1", hidden: true } });
 
-    // Hidden a month ago, its observe window long elapsed, with a baseline
-    // FAR above the live counters — exactly what a mongod restart during an
-    // outage leaves behind.
+    // Hidden four days ago with a two-day window, and a baseline FAR above the
+    // live counters — what a mongod restart during the window leaves behind.
+    // The old gate read that as "the observation never happened", un-hid the
+    // index and re-proposed it; on a cluster that restarts nightly it did so
+    // every time, forever. Now the restart costs the stretch it landed in and
+    // the rest of the observation stands.
+    const hiddenAt = new Date(Date.now() - 4 * 86_400_000);
+    const insert = async (name: string, at: Date) =>
+      (
+        await db
+          .insert(recommendations)
+          .values({
+            clusterId,
+            type: "DROP_UNUSED",
+            state: "HIDDEN",
+            database: "inttest",
+            collection: name,
+            indexName: "outage_1",
+            rationale: "outage test",
+            estimatedBytesSaved: 0,
+            hiddenAt: at,
+            observeDays: 2,
+            baselineReadOps: 5_000_000,
+            baselineReadLatency: 5_000_000_000,
+          })
+          .returning()
+      )[0];
+
+    // Hourly readings across the window, with the counters restarting a day in.
+    // Latency per op is steady at 1000µs, well under the recorded baseline's
+    // 1000µs — so nothing regressed and the drop is owed.
+    const samples = [];
+    let ops = 4_000;
+    let micros = 4_000 * 1_000;
+    for (let hour = 0; hour < 96; hour++) {
+      if (hour === 24) {
+        ops = 0;
+        micros = 0;
+      }
+      const at = new Date(hiddenAt.getTime() + hour * 3_600_000);
+      samples.push({
+        clusterId,
+        database: "inttest",
+        collection: "orders",
+        readOps: ops,
+        readLatencyMicros: micros,
+        writeOps: 0,
+        writeLatencyMicros: 0,
+        capturedAt: at,
+        lastSeenAt: at,
+      });
+      ops += 500;
+      micros += 500 * 1_000;
+    }
+    await insertLatency(db, samples);
+
+    const rec = await insert("orders", hiddenAt);
+    if (rec === undefined) throw new Error("failed to insert recommendation");
+    await finalizeCluster(db, clusterId);
+
+    const [after] = await db.select().from(recommendations).where(eq(recommendations.id, rec.id));
+    // The restart cost one hour of observation out of 95, so the two-day window
+    // filled and the drop went through — where before it was un-hidden.
+    expect(after?.state).toBe("DROPPED");
+    const specs = await mongo.db("inttest").collection("orders").indexes();
+    expect(specs.some((spec) => spec.name === "outage_1")).toBe(false);
+  });
+
+  it("graduates a build across restarts, and files the retirement that depends on it", async () => {
+    process.env.MASTER_KEY =
+      process.env.MASTER_KEY ?? Buffer.from("0123456789abcdef0123456789abcdef").toString("base64");
+    // The post-build write watch used to reset `built_at` to now whenever the
+    // counters fell, so on a cluster restarting oftener than the window it never
+    // reached the end — and graduation is the ONLY thing that files the
+    // retirement of what the build superseded (#394). Nothing was executed
+    // wrongly; a correct finding was simply never made.
+    // The suite does not reset the database between runs, and both tables reject
+    // a second copy of this fixture — latency_samples on its no-overlap
+    // exclusion, recommendations on the one-live-claim index.
+    await db
+      .delete(latencySamples)
+      .where(
+        and(eq(latencySamples.clusterId, clusterId), eq(latencySamples.collection, "graduates")),
+      );
+    await db
+      .delete(recommendations)
+      .where(
+        and(eq(recommendations.clusterId, clusterId), eq(recommendations.collection, "graduates")),
+      );
+    // Long enough to clear the policy's observe window whichever it is here —
+    // the write watch reads the cluster policy, not the row's own `observeDays`.
+    const builtAt = new Date(Date.now() - 32 * 86_400_000);
+    const samples = [];
+    let ops = 4_000;
+    let micros = 4_000 * 1_000;
+    for (let hour = 0; hour < 32 * 24; hour++) {
+      // Restarted a day into the watch: the whole reason the old gate gave up.
+      if (hour === 24) {
+        ops = 0;
+        micros = 0;
+      }
+      const at = new Date(builtAt.getTime() + hour * 3_600_000);
+      samples.push({
+        clusterId,
+        database: "inttest",
+        collection: "graduates",
+        readOps: 0,
+        readLatencyMicros: 0,
+        writeOps: ops,
+        writeLatencyMicros: micros,
+        capturedAt: at,
+        lastSeenAt: at,
+      });
+      ops += 500;
+      micros += 500 * 1_000;
+    }
+    await insertLatency(db, samples);
+
+    const [rec] = await db
+      .insert(recommendations)
+      .values({
+        clusterId,
+        type: "UPDATE",
+        state: "ACTIVE",
+        source: "WORKLOAD",
+        database: "inttest",
+        collection: "graduates",
+        indexName: "a_1_b_1",
+        rationale: "extend a_1 to {a, b}",
+        score: 70,
+        builtAt,
+        baselineWriteOps: 4_000,
+        baselineWriteLatency: 4_000 * 1_000,
+        targetSpec: { keys: ["a", "b"], retire: ["a_1"] },
+      })
+      .returning();
+    if (rec === undefined) throw new Error("failed to insert recommendation");
+
+    await finalizeCluster(db, clusterId);
+
+    // Graduated: baselines cleared, so it also leaves the `watched` guard that
+    // was suppressing every later finding on this index.
+    const [after] = await db.select().from(recommendations).where(eq(recommendations.id, rec.id));
+    expect(after?.baselineWriteOps).toBeNull();
+    // ...and the retirement the graduation exists to file.
+    const [retirement] = await db
+      .select()
+      .from(recommendations)
+      .where(
+        and(
+          eq(recommendations.clusterId, clusterId),
+          eq(recommendations.collection, "graduates"),
+          eq(recommendations.indexName, "a_1"),
+        ),
+      );
+    expect(retirement?.type).toBe("DROP_REDUNDANT");
+    expect(retirement?.state).toBe("PROPOSED");
+  });
+
+  it("un-hides an index whose window cannot fill, rather than leaving it hidden", async () => {
+    process.env.MASTER_KEY =
+      process.env.MASTER_KEY ?? Buffer.from("0123456789abcdef0123456789abcdef").toString("base64");
+    // Its own collection, so the un-hide below has a real namespace to reach and
+    // no latency history exists for it — which is the state under test.
+    await mongo.db("inttest").collection("blindcoll").insertOne({ blind: 1 });
+    await mongo
+      .db("inttest")
+      .collection("blindcoll")
+      .createIndex({ blind: 1 }, { name: "blind_1" });
+    await mongo
+      .db("inttest")
+      .command({ collMod: "blindcoll", index: { name: "blind_1", hidden: true } });
+
+    // Hidden for well past the cap with no readings at all to show for it. The
+    // observation cannot complete, so the index goes back rather than sitting
+    // hidden indefinitely waiting for evidence that is not coming.
     const [rec] = await db
       .insert(recommendations)
       .values({
@@ -1676,12 +1849,12 @@ describe("outage resilience", () => {
         type: "DROP_UNUSED",
         state: "HIDDEN",
         database: "inttest",
-        collection: "orders",
-        indexName: "outage_1",
-        rationale: "outage test",
+        collection: "blindcoll",
+        indexName: "blind_1",
+        rationale: "blind test",
         estimatedBytesSaved: 0,
         hiddenAt: new Date(Date.now() - 30 * 86_400_000),
-        observeDays: 7,
+        observeDays: 2,
         baselineReadOps: 5_000_000,
         baselineReadLatency: 5_000_000_000,
       })
@@ -1691,17 +1864,16 @@ describe("outage resilience", () => {
     await finalizeCluster(db, clusterId);
 
     const [after] = await db.select().from(recommendations).where(eq(recommendations.id, rec.id));
-    // Not dropped, and not left hidden either: restored and re-proposed.
     expect(after?.state).toBe("PROPOSED");
     expect(after?.hiddenAt).toBeNull();
-    const specs = await mongo.db("inttest").collection("orders").indexes();
-    const restored = specs.find((spec) => spec.name === "outage_1");
+    const trail = await db.select().from(actions).where(eq(actions.recommendationId, rec.id));
+    expect(trail.some((entry) => entry.result.includes("could be measured"))).toBe(true);
+    // Really put back, not just marked so.
+    const specs = await mongo.db("inttest").collection("blindcoll").indexes();
+    const restored = specs.find((spec) => spec.name === "blind_1");
     expect(restored !== undefined && restored.hidden !== true).toBe(true);
 
-    const trail = await db.select().from(actions).where(eq(actions.recommendationId, rec.id));
-    expect(trail.some((entry) => entry.result.includes("observation lost"))).toBe(true);
-
-    await mongo.db("inttest").collection("orders").dropIndex("outage_1");
+    await mongo.db("inttest").collection("blindcoll").drop();
   });
 
   // The Definition of Done of the change that made storage independent of the
@@ -1946,17 +2118,19 @@ describe("outage resilience", () => {
       .where(eq(recommendations.clusterId, restartId));
     expect(proposals).toHaveLength(0);
 
-    // ...and the empty list now says why (#277). This is the exact cluster the
-    // issue is about: the refusal is correct and permanent, and until this note
-    // existed the customer's only signal was a panel indistinguishable from
-    // "your indexes are all fine".
+    // ...and the empty list now says why (#277). The reason is the WARM-UP, not
+    // the restart: the restart ends the first epoch after a day of watching and
+    // opens a second that is one snapshot long, so a seven-day gate has a day of
+    // trustworthy history to weigh and refuses on that. Which is the difference
+    // the epoch model bought — a day that counts and grows, where a reset used to
+    // void the history and keep voiding it for as long as the restarts lasted.
     const [note] = await db
       .select()
       .from(analysisNotes)
       .where(eq(analysisNotes.clusterId, restartId));
     expect(note?.consideredIndexes).toBe(1);
     expect(note?.trustedIndexes).toBe(0);
-    expect(note?.refusals).toEqual({ "counters-reset": 1 });
+    expect(note?.refusals).toEqual({ "span-too-short": 1 });
 
     // Through the endpoint the dashboard actually reads, with the sentence built
     // from the thresholds the gate used rather than stored beside them.
@@ -1965,9 +2139,10 @@ describe("outage resilience", () => {
     );
     const analysis = asRecord(payload.analysis);
     expect(analysis.usagePaused).toBe(true);
-    expect(analysis.dominantRefusal).toBe("counters-reset");
+    expect(analysis.dominantRefusal).toBe("span-too-short");
     expect(analysis.refusedIndexes).toBe(1);
-    expect(String(analysis.explanation)).toContain("7-day observation window");
+    expect(String(analysis.explanation)).toContain("less than 7 days");
+    expect(String(analysis.explanation)).toContain("A restart does not reset that clock");
     expect(String(analysis.explanation)).toContain("Redundancy findings are unaffected.");
   });
 
@@ -4901,7 +5076,9 @@ describe("bounded per-cluster reads", () => {
     const now = Date.now();
     const fixtures = [];
     // Enough collections to exceed the cap, with the first ones carrying more
-    // readings so the top-N is decided by evidence rather than by luck.
+    // readings so the top-N is decided by evidence rather than by luck. Every
+    // one of them is READ-ONLY — its write counter never moves — which is the
+    // ordinary shape of a busy cluster and the one that broke the cut.
     for (let c = 0; c < LATENCY_SERIES_MAX_COLLECTIONS + 3; c++) {
       const looks = c < LATENCY_SERIES_MAX_COLLECTIONS ? 5 : 3;
       for (let t = 0; t < looks; t++) {
@@ -4912,12 +5089,30 @@ describe("bounded per-cluster reads", () => {
           collection: `in_window_${c}`,
           readOps: 100 * (t + 1),
           readLatencyMicros: 1_000 * (t + 1),
-          writeOps: 50 * (t + 1),
-          writeLatencyMicros: 500 * (t + 1),
+          writeOps: 50,
+          writeLatencyMicros: 500,
           capturedAt: at,
           lastSeenAt: at,
         });
       }
+    }
+    // The only collection on the cluster anyone WRITES to, and deliberately the
+    // one with the least to show for itself: three readings against the leaders'
+    // five. A cut ranked once by total point count drops it, and the write chart
+    // then reports the cut's blind spot as an absence of writes.
+    for (let t = 0; t < 3; t++) {
+      const at = new Date(now - (3 - t) * 3_600_000);
+      fixtures.push({
+        clusterId: seriesId,
+        database: "app",
+        collection: "written_to",
+        readOps: 10,
+        readLatencyMicros: 100,
+        writeOps: 50 * (t + 1),
+        writeLatencyMicros: 500 * (t + 1),
+        capturedAt: at,
+        lastSeenAt: at,
+      });
     }
     // Inside the plan's 90-day history, outside the series' 30-day window —
     // the case the new floor exists for.
@@ -4941,9 +5136,12 @@ describe("bounded per-cluster reads", () => {
     const collections = body.collections as { collection: string }[];
     // The denominator counts what had readings IN the window, so the panel can
     // say how many it is not drawing.
-    expect(body.totalCollections).toBe(LATENCY_SERIES_MAX_COLLECTIONS + 3);
+    expect(body.totalCollections).toBe(LATENCY_SERIES_MAX_COLLECTIONS + 4);
     expect(collections).toHaveLength(LATENCY_SERIES_MAX_COLLECTIONS);
     expect(collections.map((entry) => entry.collection)).not.toContain("ancient");
+    // Half the budget is the write chart's, so the one collection that can fill
+    // it survives eight better-evidenced readers.
+    expect(collections.map((entry) => entry.collection)).toContain("written_to");
 
     // The long-term view is still whole: the before/after table reads the same
     // rows without the series' tighter window.

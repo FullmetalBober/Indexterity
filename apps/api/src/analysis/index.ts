@@ -6,6 +6,7 @@ export * from "./footprint";
 export * from "./health";
 export * from "./latency";
 export * from "./observe";
+export * from "./observed";
 export * from "./pressure";
 export * from "./purge";
 export * from "./recommend";

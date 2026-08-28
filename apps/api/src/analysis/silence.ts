@@ -29,6 +29,11 @@ export type SuppressionGuard =
   | "standing"
   // Hinted, so the automatic drop is withheld and only the advisory surfaces.
   | "hinted"
+  // The collection's own history says an observe window on it would not finish
+  // inside the wall clock the cap allows, so the drop is not started. Restarts,
+  // usually: each one costs the window it lands in, and enough of them and the
+  // observation never fills.
+  | "unobservable"
   // A build the collection's index count kept from being made unattended
   // (#281). The odd one out: nothing was withheld from the customer, only from
   // the engine's own hand — the proposal is on screen with its score reduced and
@@ -41,6 +46,7 @@ export const SUPPRESSION_GUARDS: readonly SuppressionGuard[] = [
   "standing",
   "hinted",
   "budget",
+  "unobservable",
 ];
 
 export type RefusalCounts = Partial<Record<UsageTrustRefusal["kind"], number>>;
@@ -63,12 +69,19 @@ export interface AnalysisSilence {
 //
 // A tie-break rather than a ranking of severity, and it has to be deterministic:
 // the alternative is a panel whose reason changes between two passes that
-// measured the same thing. Ordered by how long the condition can persist.
-// `counters-reset` is first because it is the one that can persist forever — on a
-// cluster restarting weekly it is always inside the window — while the warm-up
-// reasons below it clear by themselves with nothing but time.
+// measured the same thing. Ordered by how long the condition can persist:
+// staleness and holes need something about the cluster or the collector to
+// change, while the warm-up reasons below them clear by themselves with nothing
+// but time.
+//
+// `counters-reset` used to head this list, as the one reason that could persist
+// forever — a cluster restarting oftener than the window can never escape it.
+// It is gone rather than reordered: a restart segments the history now instead of
+// voiding it (analysis/classify.ts), so what such a cluster reports is
+// `span-too-short`, which is true, and which its own trusted watch time grows out
+// of. A stored key from before the change is ignored here rather than rendered,
+// the same way an unknown suppression guard is.
 const REFUSAL_PRECEDENCE: readonly UsageTrustRefusal["kind"][] = [
-  "counters-reset",
   "history-stale",
   "gap-inside-run",
   "gap-between-runs",
@@ -124,14 +137,6 @@ export function explainRefusal(
 ): string {
   const unaffected = " Redundancy findings are unaffected.";
   switch (kind) {
-    case "counters-reset":
-      return (
-        `Its index usage counters were reset — a server restart, or an index rebuild — more ` +
-        `recently than the ${options.minHistoryDays}-day observation window, so the usage ` +
-        `recorded before the reset is gone and an index that was busy before it looks idle ` +
-        `after. This clears once the cluster runs ${options.minHistoryDays} days without one.` +
-        unaffected
-      );
     case "history-stale":
       return (
         `We have not heard from this cluster in over ${options.maxGapHours} hours, so its usage ` +
@@ -158,7 +163,11 @@ export function explainRefusal(
       return (
         `We have been watching this cluster for less than ${options.minHistoryDays} days. That ` +
         `is the warm-up, not a fault: a shorter window would call the weekly batch job's index ` +
-        `dead because it happened not to run yet. Usage findings begin once it passes.` +
+        `dead because it happened not to run yet. Usage findings begin once it passes. A ` +
+        `restart does not reset that clock — the counters it zeroed are read as a fresh ` +
+        `stretch and the time already watched still counts — but the minutes between our last ` +
+        `reading and the restart are nobody's observation, so a cluster that restarts often ` +
+        `reaches the threshold more slowly than one that does not.` +
         unaffected
       );
     case "too-few-collects":
@@ -192,6 +201,14 @@ export function explainSuppression(guard: SuppressionGuard, findings: number): s
         `${count} held back from automatic action: the collection is already absorbing builds, ` +
         `and every write to it updates every index on it. Still proposed — approve when you are ` +
         `ready.`
+      );
+    case "unobservable":
+      return (
+        `${count} held back: this collection's server restarts often enough that a drop's observe ` +
+        `window would not finish. Every drop is hidden first and watched for a regression before ` +
+        `it is taken, and a restart costs the stretch it lands in — so proposing one here would ` +
+        `hide an index, fail to measure it, and put it back, indefinitely. Usage and redundancy ` +
+        `analysis are unaffected; it is the safe-drop procedure that cannot run.`
       );
   }
 }

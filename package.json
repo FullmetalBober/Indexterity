@@ -1,6 +1,6 @@
 {
   "name": "indexterity",
-  "version": "0.14.2",
+  "version": "0.15.0",
   "private": true,
   "type": "module",
   "packageManager": "npm@11.6.2",

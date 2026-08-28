@@ -28,8 +28,11 @@ export interface LatencyTrend {
 // restart resets every namespace on the cluster together.
 //
 // There is no `since` to check the way index usage has (see classify.ts's
-// countersRestartedDuring) — latencyStats carries no counter-start stamp at all, so
-// the total having fallen IS the evidence, and the only evidence.
+// counterEpochs) — latencyStats carries no counter-start stamp at all, so the
+// total having fallen IS the evidence, and the only evidence. Which is also why
+// this side cannot segment the way the usage side now does: with no stamp there
+// is nothing to date the restart by, so the window spanning it is unmeasurable
+// rather than merely short.
 //
 // Null rather than zero or the absolute value: we do not know what the latency was
 // across that interval, and the honest shape of not knowing is a gap. Zero would
@@ -191,4 +194,86 @@ export function summarizeLatency(readings: readonly LatencyReading[]): LatencyTr
     baselineWriteMicros: baselineWrite,
     writeDeltaPct: deltaPct(baselineWrite, currentWrite),
   };
+}
+
+export interface ChartableSeries {
+  readonly database: string;
+  readonly collection: string;
+  readonly points: readonly LatencyPoint[];
+}
+
+function namespaceOf(series: ChartableSeries): string {
+  return `${series.database}.${series.collection}`;
+}
+
+// The collections the two latency charts are sent, ranked ONCE PER METRIC.
+//
+// #85 came in a third time through this cut. It used to be a single ranking by
+// total point count — but every collection on a cluster is read on the same
+// cadence, so every one carries the same number of points. Measured on a live
+// cluster: 101 collections, all with exactly 77. A sort where every comparison
+// returns 0 leaves the input untouched, so the slice took whichever came back
+// from postgres first, which there was eight collections nobody writes to.
+// Fourteen others had write traffic and none of them made the cut, so the write
+// chart drew nothing and said "no write operations recorded over this history" —
+// the panel stating the cut's blind spot as a fact about the cluster, which is
+// the exact sentence latency-series.ts was written to stop it saying.
+//
+// Half the budget per metric and union the two, so a collection that is only
+// ever written cannot be crowded out by ones that are only ever read. Half,
+// rather than the whole cap twice, because the payload #64 measured its way down
+// to must not double: the panel draws four series per chart, and half of eight is
+// what it can show anyway.
+//
+// Counted on DRAWABLE points — ones whose metric is non-null — and not on how
+// many readings the collection has, which is what let "most evidence" mean
+// "collected for longest". Ties break on namespace, so a cluster charts the same
+// collections on every load instead of reshuffling with postgres's row order.
+function topByMetric<T extends ChartableSeries>(
+  collections: readonly T[],
+  metric: (point: LatencyPoint) => number | null,
+  limit: number,
+): T[] {
+  return [...collections]
+    .map((series) => ({
+      series,
+      drawable: series.points.filter((point) => metric(point) !== null).length,
+    }))
+    .filter((entry) => entry.drawable > 0)
+    .sort(
+      (a, b) =>
+        b.drawable - a.drawable || namespaceOf(a.series).localeCompare(namespaceOf(b.series)),
+    )
+    .slice(0, limit)
+    .map((entry) => entry.series);
+}
+
+// Returns at most `limit` collections for any limit of 2 or more.
+//
+// The top-up at the end is not padding. A chart with nothing to draw explains
+// itself from the `readGap`/`writeGap` of the collections it WAS sent, so a
+// cluster on its first collect — where neither metric has a drawable point and
+// both rankings come back empty — would ship an empty array and leave the panel
+// with nothing to say but "not enough samples yet". That is #85's original
+// wording and the whole thing this pair of fields exists to replace.
+export function chartableCollections<T extends ChartableSeries>(
+  collections: readonly T[],
+  limit: number,
+): T[] {
+  const perMetric = Math.max(1, Math.floor(limit / 2));
+  const chosen = new Map<string, T>();
+  for (const series of topByMetric(collections, (point) => point.readMicros, perMetric)) {
+    chosen.set(namespaceOf(series), series);
+  }
+  for (const series of topByMetric(collections, (point) => point.writeMicros, perMetric)) {
+    chosen.set(namespaceOf(series), series);
+  }
+  const byEvidence = [...collections].sort(
+    (a, b) => b.points.length - a.points.length || namespaceOf(a).localeCompare(namespaceOf(b)),
+  );
+  for (const series of byEvidence) {
+    if (chosen.size >= limit) break;
+    chosen.set(namespaceOf(series), series);
+  }
+  return [...chosen.values()];
 }

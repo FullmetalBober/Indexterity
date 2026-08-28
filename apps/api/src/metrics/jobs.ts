@@ -1,5 +1,7 @@
 import type { WorkerEvents } from "graphile-worker";
 import type { UsageTrustRefusal } from "../analysis/classify";
+import type { ObservedVerdict } from "../analysis/observed";
+import type { RegressionVerdict } from "../analysis/regression";
 import {
   clustersUnreachable,
   clusterTaskRuns,
@@ -96,7 +98,14 @@ export function recordRegressionVerdict(
   // against the oldest baseline still live for the collection, which is a
   // different question from either per-index stage and worth telling apart.
   stage: "observe" | "post_build" | "cumulative",
-  verdict: "REGRESSED" | "STABLE" | "UNOBSERVABLE",
+  // Two vocabularies, because the two gates now measure differently. The write
+  // watch and the cumulative reading still difference a baseline the row carries
+  // and report UNOBSERVABLE when a restart voids it; the observe gate reads
+  // stored history instead (analysis/observed.ts), where a restart costs one
+  // window and the states worth counting are "still accumulating" and "nothing
+  // from before the hide to compare with". Folding them together would hide the
+  // distinction the second gate exists to draw.
+  verdict: RegressionVerdict | ObservedVerdict,
 ): void {
   regressionGate.add(1, { stage, verdict: verdict.toLowerCase() });
 }
@@ -107,19 +116,19 @@ export function recordDrop(outcome: "dropped" | "unhidden" | "absent"): void {
 
 // One per index the classifier considered. `refusal` null means the history was
 // trusted and a usage finding was possible; otherwise it is the check that said
-// no, with the counter-reset trigger broken out because the three are not
-// equally strict and #267 turns on telling them apart.
+// no.
+//
+// The `trigger` label went with `counters-reset`. It existed to tell the three
+// ways of noticing a restart apart, which mattered while a restart refused the
+// whole history; it segments the history now, so there is no refusal to break
+// down and a label nobody can act on is one fewer series per engine to store.
 export function recordUsageTrust(
   engine: string,
   refusal: UsageTrustRefusal | null,
   count = 1,
 ): void {
   if (count <= 0) return;
-  usageTrustDecisions.add(count, {
-    engine,
-    outcome: refusal === null ? "trusted" : refusal.kind,
-    ...(refusal !== null && refusal.kind === "counters-reset" ? { trigger: refusal.trigger } : {}),
-  });
+  usageTrustDecisions.add(count, { engine, outcome: refusal === null ? "trusted" : refusal.kind });
 }
 
 // Job-level counters from graphile-worker's own events, so the numbers agree with

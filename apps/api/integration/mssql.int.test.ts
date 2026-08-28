@@ -68,21 +68,52 @@ describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", 
     // a backward scan and emits no Sort operator at all (#207). The two
     // literal variants prove shape merging across Query Store's per-text
     // fragmentation.
-    await seed.query(`USE [${DB}]; SELECT COUNT(*) AS n FROM dbo.orders WHERE customer_id = 42`);
-    await seed.query(
-      `USE [${DB}]; SELECT TOP 3 id FROM dbo.orders WHERE customer_id = 7 ORDER BY status DESC`,
-    );
-    await seed.query(
-      `USE [${DB}]; SELECT TOP 3 id FROM dbo.orders WHERE customer_id = 8 ORDER BY status DESC`,
-    );
-    // Equality + range in one seek. Two predicates on purpose: the server
-    // auto-parameterizes single-predicate trivial plans AND removes those
-    // Query Store entries again on index DDL against the table (observed
-    // live) — the hide-lifecycle test below performs exactly such DDL, so
-    // the workload assertions ride only on non-trivial plans.
-    await seed.query(
-      `USE [${DB}]; SELECT COUNT(*) AS n FROM dbo.orders WHERE customer_id = 9 AND id > 100`,
-    );
+    //
+    // Run until Query Store has them, because setting the capture mode does not
+    // take effect when it returns. Measured on 2025 (RTM-CU8): the first pass of
+    // these four is captured ZERO times out of three trials and a second or
+    // third pass lands, while `sys.database_query_store_options` reports
+    // ALL throughout — so the DMV cannot be polled for readiness, and the
+    // queries themselves are the only probe. Waiting does not help either: ten
+    // seconds and an explicit `sp_query_store_flush_db` leave a missed pass
+    // missed, so what is lost is the capture decision, not a flush.
+    //
+    // 2022 (RTM-CU26) captures the first pass every time — 6 runs of this file
+    // green against it, against 3 of 6 on 2025, which is what a one-shot seed
+    // was costing CI.
+    //
+    // Re-running is safe: every one of these is a SELECT, and the workload
+    // assertions deliberately rest on nothing but the shapes' existence.
+    const seedWorkload = async (): Promise<void> => {
+      await seed.query(`USE [${DB}]; SELECT COUNT(*) AS n FROM dbo.orders WHERE customer_id = 42`);
+      await seed.query(
+        `USE [${DB}]; SELECT TOP 3 id FROM dbo.orders WHERE customer_id = 7 ORDER BY status DESC`,
+      );
+      await seed.query(
+        `USE [${DB}]; SELECT TOP 3 id FROM dbo.orders WHERE customer_id = 8 ORDER BY status DESC`,
+      );
+      // Equality + range in one seek. Two predicates on purpose: the server
+      // auto-parameterizes single-predicate trivial plans AND removes those
+      // Query Store entries again on index DDL against the table (observed
+      // live) — the hide-lifecycle test below performs exactly such DDL, so
+      // the workload assertions ride only on non-trivial plans.
+      await seed.query(
+        `USE [${DB}]; SELECT COUNT(*) AS n FROM dbo.orders WHERE customer_id = 9 AND id > 100`,
+      );
+    };
+    // Both shapes the workload assertions need, by the text Query Store keeps.
+    const capturedShapes = async (): Promise<number> => {
+      const rows = await seed.query<{ n: number }>(
+        `USE [${DB}]; SELECT COUNT(*) AS n FROM sys.query_store_query_text
+           WHERE query_sql_text LIKE '%FROM dbo.orders WHERE customer_id = 7 ORDER BY%'
+              OR query_sql_text LIKE '%FROM dbo.orders WHERE customer_id = 9 AND id > 100%'`,
+      );
+      return rows[0]?.n ?? 0;
+    };
+    for (let pass = 0; pass < 10; pass++) {
+      await seedWorkload();
+      if ((await capturedShapes()) >= 2) break;
+    }
     session = await mssqlAdapter.open(MSSQL_URL as string, OVERRIDES);
   }, 120_000);
 

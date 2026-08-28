@@ -553,6 +553,11 @@ export type CollectionLatencySeries = z.infer<typeof collectionLatencySeries>;
 // the chart drew four collections — so the api sends the top few by evidence
 // and says how many it did not. Shared constants because the panel explains
 // the cap in the same numbers the api applies.
+//
+// The cap is the whole payload, and the api splits it in HALF between the two
+// charts rather than ranking once for both — see `chartableCollections`. Half
+// of eight is also what a chart can draw, since the palette has four colours,
+// so nothing is sent that could not be shown.
 export const LATENCY_SERIES_WINDOW_DAYS = 30;
 export const LATENCY_SERIES_MAX_COLLECTIONS = 8;
 
@@ -643,11 +648,15 @@ export const RECOMMENDATIONS_CAP = 500;
 // Why the engine had nothing to say (#277).
 //
 // An empty recommendations list is indistinguishable from "your indexes are all
-// fine", and on a cluster whose usage counters reset oftener than the observation
-// window the usage gate refuses every eligible index, indefinitely, with nothing
-// anywhere saying so. This is that state, made a thing the dashboard can draw.
+// fine", and until #277 nothing anywhere said which of the usage gate's checks
+// had refused every eligible index. This is that state, made a thing the
+// dashboard can draw.
+//
+// `counters-reset` was one of these and is not any more: a restart segments the
+// usage history rather than voiding it, so the reasons left are all about how
+// much has been watched. `dominantRefusal` reads only the kinds it knows, so a
+// stored count under the old key is ignored rather than failing this schema.
 export const usageTrustRefusalKind = z.enum([
-  "counters-reset",
   "no-history",
   "too-few-collects",
   "span-too-short",
@@ -659,7 +668,14 @@ export const usageTrustRefusalKind = z.enum([
 export type UsageTrustRefusalKind = z.infer<typeof usageTrustRefusalKind>;
 
 // A finding the engine derived and then withheld, by which guard.
-export const suppressionGuard = z.enum(["cooldown", "watched", "standing", "hinted", "budget"]);
+export const suppressionGuard = z.enum([
+  "cooldown",
+  "watched",
+  "standing",
+  "hinted",
+  "budget",
+  "unobservable",
+]);
 export type SuppressionGuard = z.infer<typeof suppressionGuard>;
 
 export const suppressedFindings = z.object({

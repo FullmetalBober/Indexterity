@@ -226,6 +226,11 @@ jobs:
             turbo-
       - run: npm run build
       - run: npm run db:migrate
+      # GitHub starts the steps as soon as the service CONTAINERS exist, and only
+      # a health check delays that. Postgres has one; the mongods cannot use one
+      # (see scripts/wait-for-mongo.ts) so they are waited on from out here,
+      # after npm ci because it needs the driver.
+      - run: node scripts/wait-for-mongo.ts
       - run: npm run test:int -w @repo/api
 
   # The MSSQL adapter against real SQL Servers — its own job rather than extra
@@ -445,6 +450,9 @@ jobs:
             turbo-
       - run: npm run build
       - run: npm run db:migrate
+      # Same race as the integration job, and this one runs the auth-enabled
+      # mongod too — see scripts/wait-for-mongo.ts.
+      - run: node scripts/wait-for-mongo.ts
       - run: npm run test:e2e -w @repo/web
       - uses: actions/upload-artifact@v7
         if: failure()

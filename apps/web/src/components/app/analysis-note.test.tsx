@@ -9,21 +9,22 @@ function note(overrides: Partial<AnalysisNote> = {}): AnalysisNote {
     consideredIndexes: 12,
     trustedIndexes: 0,
     usagePaused: true,
-    dominantRefusal: "counters-reset",
+    dominantRefusal: "span-too-short",
     refusedIndexes: 12,
-    explanation: "Its index usage counters were reset. Redundancy findings are unaffected.",
+    explanation:
+      "We have been watching this cluster for less than 7 days. Redundancy findings are unaffected.",
     suppressed: [],
     ...overrides,
   };
 }
 
 describe("AnalysisNotePanel", () => {
-  // The state the panel exists for: a customer whose counters reset oftener than
-  // the warm-up gets nothing, forever, and the empty list reads as "all fine".
+  // The state the panel exists for: nothing cleared the usage gate, so the empty
+  // list below reads as "all fine" when it means "we cannot tell yet".
   it("says usage recommendations are paused, and why", () => {
     render(<AnalysisNotePanel analysis={note()} />);
     expect(screen.getByText(/Usage-based recommendations are paused/)).toBeInTheDocument();
-    expect(screen.getByText(/counters were reset/)).toBeInTheDocument();
+    expect(screen.getByText(/less than 7 days/)).toBeInTheDocument();
     expect(screen.getByText(/12 indexes affected/)).toBeInTheDocument();
   });
 

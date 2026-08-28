@@ -4,7 +4,9 @@ import {
   DEFAULT_OBSERVE_DAYS,
   type IndexInput,
   isNeverDrop,
+  type LatencyReading,
   MAX_GAP_HOURS,
+  observationCanFinish,
   parseStoredSpec,
   type RefusalCounts,
   recommendForCollection,
@@ -84,6 +86,12 @@ export const CLASSIFY_OPTIONS = {
   // disappears inside a row.
   maxGapHours: MAX_GAP_HOURS,
 };
+
+// The types that go through hide -> observe -> drop, and therefore the ones the
+// observability guard applies to. MERGE reaches that path too, but it is a BUILD
+// here and its originals are retired later by finalize.ts, which files them as
+// DROP_REDUNDANT — so they are judged on the pass that proposes them.
+const DROP_CANDIDATES = new Set(["DROP_UNUSED", "DROP_REDUNDANT"]);
 
 // Read a cluster's snapshots, run the pure engine per collection, and replace
 // the cluster's PROPOSED recommendations. Returns the number proposed.
@@ -173,25 +181,29 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
     .from(indexSnapshots)
     .innerJoin(clusterIndexes, eq(indexSnapshots.indexId, clusterIndexes.id))
     .where(and(eq(indexSnapshots.clusterId, clusterId), gte(indexSnapshots.lastSeenAt, since)));
-  // Per-collection read counters, for the activity gate.
+  // Per-collection latency counters. Two questions off one read: whether the
+  // collection served enough reads for absence of usage to mean anything (the
+  // activity gate), and whether an observe window on it could finish (below).
   const latencyRows = await db
-    .select({
-      database: latencySamples.database,
-      collection: latencySamples.collection,
-      readOps: latencySamples.readOps,
-      capturedAt: latencySamples.capturedAt,
-      lastSeenAt: latencySamples.lastSeenAt,
-      observations: latencySamples.observations,
-      maxGapMs: latencySamples.maxGapMs,
-    })
+    .select()
     .from(latencySamples)
     .where(and(eq(latencySamples.clusterId, clusterId), gte(latencySamples.lastSeenAt, since)));
   const activityByCollection = new Map<string, ActivityPoint[]>();
+  const latencyByCollection = new Map<string, LatencyReading[]>();
   for (const sample of latencyRows) {
     const key = `${sample.database}\u0000${sample.collection}`;
     const list = activityByCollection.get(key) ?? [];
     list.push({ ...runFrom(sample), readOps: sample.readOps });
     activityByCollection.set(key, list);
+    const readings = latencyByCollection.get(key) ?? [];
+    readings.push({
+      ...runFrom(sample),
+      readOps: sample.readOps,
+      readLatencyMicros: sample.readLatencyMicros,
+      writeOps: sample.writeOps,
+      writeLatencyMicros: sample.writeLatencyMicros,
+    });
+    latencyByCollection.set(key, readings);
   }
   type Row = (typeof rows)[number];
 
@@ -311,6 +323,28 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
         hintedKeys.has(watchKey(entry.database, entry.collection, candidate.indexName))
       ) {
         suppress("hinted");
+        continue;
+      }
+      // Every drop is hidden, watched for a read regression, and only then taken.
+      // On a collection whose server restarts often enough, that window never
+      // fills: each restart costs the stretch it lands in, so the observation
+      // accumulates slower than the wall clock and finalize.ts eventually un-hides
+      // the index and re-proposes it. Proposing one here starts a cycle that
+      // hides somebody's index, measures nothing, and repeats.
+      //
+      // Both sides read OBSERVE_WALLCLOCK_MULTIPLE, so "can finish" means the
+      // same thing to the pass that proposes a drop and the pass that gives up on
+      // one. Every drop type, not only DROP_UNUSED: they all go through the same
+      // hide-and-observe path and would all churn.
+      if (
+        DROP_CANDIDATES.has(candidate.type) &&
+        !observationCanFinish(
+          latencyByCollection.get(`${entry.database}\u0000${entry.collection}`) ?? [],
+          "read",
+          observeDays,
+        )
+      ) {
+        suppress("unobservable");
         continue;
       }
       toInsert.push({
