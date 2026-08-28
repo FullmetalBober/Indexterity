@@ -29,6 +29,11 @@ export type SuppressionGuard =
   | "standing"
   // Hinted, so the automatic drop is withheld and only the advisory surfaces.
   | "hinted"
+  // The collection's own history says an observe window on it would not finish
+  // inside the wall clock the cap allows, so the drop is not started. Restarts,
+  // usually: each one costs the window it lands in, and enough of them and the
+  // observation never fills.
+  | "unobservable"
   // A build the collection's index count kept from being made unattended
   // (#281). The odd one out: nothing was withheld from the customer, only from
   // the engine's own hand — the proposal is on screen with its score reduced and
@@ -41,6 +46,7 @@ export const SUPPRESSION_GUARDS: readonly SuppressionGuard[] = [
   "standing",
   "hinted",
   "budget",
+  "unobservable",
 ];
 
 export type RefusalCounts = Partial<Record<UsageTrustRefusal["kind"], number>>;
@@ -195,6 +201,14 @@ export function explainSuppression(guard: SuppressionGuard, findings: number): s
         `${count} held back from automatic action: the collection is already absorbing builds, ` +
         `and every write to it updates every index on it. Still proposed — approve when you are ` +
         `ready.`
+      );
+    case "unobservable":
+      return (
+        `${count} held back: this collection's server restarts often enough that a drop's observe ` +
+        `window would not finish. Every drop is hidden first and watched for a regression before ` +
+        `it is taken, and a restart costs the stretch it lands in — so proposing one here would ` +
+        `hide an index, fail to measure it, and put it back, indefinitely. Usage and redundancy ` +
+        `analysis are unaffected; it is the safe-drop procedure that cannot run.`
       );
   }
 }

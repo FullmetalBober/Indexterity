@@ -2,11 +2,26 @@ import {
   DEFAULT_OBSERVE_DAYS,
   evaluateRegression,
   inChangeWindow,
+  type LatencyReading,
   latencyRatio,
+  OBSERVE_WALLCLOCK_MULTIPLE,
+  observedWindow,
   oldestLiveBaseline,
+  outstayedWindow,
+  runFrom,
 } from "../analysis";
 import type { Database } from "../db";
-import { actions, and, eq, inArray, policies, recommendations, roiMetrics } from "../db";
+import {
+  actions,
+  and,
+  eq,
+  gte,
+  inArray,
+  latencySamples,
+  policies,
+  recommendations,
+  roiMetrics,
+} from "../db";
 import { emitClusterEvent } from "../events/emit";
 import { NotifyService } from "../mail/notify.service";
 import { recordDrop, recordRegressionVerdict } from "../metrics";
@@ -19,6 +34,11 @@ import { preflightDrop } from "./preflight";
 
 const DAY_MS = 86_400_000;
 const REGRESSION_OPTIONS = { factor: 1.5, minWindowOps: 20 };
+// The read side of the same judgement, asked of stored history instead of a
+// baseline the row carries (analysis/observed.ts). Same numbers deliberately:
+// the mechanism changed because a restart broke the old one, and moving the
+// threshold in the same commit would make the two impossible to tell apart.
+const OBSERVED_OPTIONS = { factor: 1.5, minWindowOps: 20 };
 // The same measurement asked of the COLLECTION rather than of one index (#282),
 // and it gets its own factor because it is a different question.
 //
@@ -35,6 +55,40 @@ const CUMULATIVE_REGRESSION_OPTIONS = { factor: 1.3, minWindowOps: 20 };
 // A superseded index is a structural finding backed by a replacement that has
 // already proven itself, so it scores like any other redundancy.
 const SUPERSEDED_SCORE = 55;
+
+// This collection's stored latency readings, back far enough to hold both halves
+// of the observe comparison: the window itself, and the same length of history
+// before the hide to compare it against.
+//
+// A read per hidden row rather than one per collect, because the set of hidden
+// rows is small — the collection budget and the one-live-claim constraint both
+// bound it — and a join would tie this gate to the shape of the insights read.
+async function collectionLatencyHistory(
+  db: Database,
+  clusterId: string,
+  database: string,
+  collection: string,
+  since: Date,
+): Promise<LatencyReading[]> {
+  const rows = await db
+    .select()
+    .from(latencySamples)
+    .where(
+      and(
+        eq(latencySamples.clusterId, clusterId),
+        eq(latencySamples.database, database),
+        eq(latencySamples.collection, collection),
+        gte(latencySamples.lastSeenAt, since),
+      ),
+    );
+  return rows.map((row) => ({
+    ...runFrom(row),
+    readOps: row.readOps,
+    readLatencyMicros: row.readLatencyMicros,
+    writeOps: row.writeOps,
+    writeLatencyMicros: row.writeLatencyMicros,
+  }));
+}
 
 // HIDDEN drops whose observe window has elapsed -> pre-flight -> drop -> DROPPED.
 // The drop is the only irreversible step. A failed pre-flight during observe
@@ -71,13 +125,16 @@ export async function finalizeCluster(
     .from(recommendations)
     .where(and(eq(recommendations.clusterId, clusterId), eq(recommendations.state, "HIDDEN")));
   const now = Date.now();
-  // Each drop observes for the window decided at hide time (dynamic — periodic
-  // usage extends it, proven idleness shortens it); policy is the fallback.
-  const due = hiddenRecs.filter(
-    (rec) =>
-      rec.hiddenAt !== null &&
-      now - rec.hiddenAt.getTime() >= (rec.observeDays ?? observeDays) * DAY_MS,
-  );
+  // Every hidden row is examined on every pass, and OBSERVED time decides
+  // whether it has waited long enough — not elapsed wall clock.
+  //
+  // Those were the same number while a restart aborted the window. They are not
+  // now: `observedWindow` sums the stretches that produced a reading and skips
+  // the one a reset landed in, so a cluster that restarts nightly accumulates
+  // its 30 days a little slower than the calendar rather than never. Filtering
+  // on wall clock here would have let a row become "due" with most of its window
+  // unmeasured, which is the reading the gate below exists to refuse.
+  const due = hiddenRecs.filter((rec) => rec.hiddenAt !== null);
   // Built indexes still under the post-build write watch.
   const watched = await db
     .select()
@@ -194,18 +251,49 @@ export async function finalizeCluster(
     for (const rec of due) {
       // Regression gate: did hiding this index slow the collection's reads
       // during observe? If so, un-hide and re-propose instead of dropping.
-      if (rec.baselineReadOps !== null && rec.baselineReadLatency !== null) {
-        const current = await collector.readLatency(rec.database, rec.collection);
-        const baseline = { ops: rec.baselineReadOps, latencyMicros: rec.baselineReadLatency };
-        const verdict = evaluateRegression(baseline, current, REGRESSION_OPTIONS);
-        recordRegressionVerdict("observe", verdict);
-        // Counters reset (the server restarted, typically while we could not
-        // reach it): the window we thought we observed never happened. Put the
-        // index back and re-propose — the drop is the one irreversible step, so
-        // it does not get taken on evidence we no longer have. This also ends
-        // the case where an index sat hidden through a long outage.
-        if (verdict === "UNOBSERVABLE") {
-          if (canHide) await executor.unhide(rec.database, rec.collection, rec.indexName);
+      //
+      // Read off `latency_samples` rather than a baseline this row carries, so a
+      // restart costs the window it lands in instead of the whole observation —
+      // see analysis/observed.ts for why re-baselining the old way could not
+      // work. The row's own baseline columns are what the hide RECORDED and are
+      // left alone; nothing decides on them any more.
+      // The row's own baseline columns still decide WHETHER a read-latency
+      // measurement is owed — apply.ts records them exactly when the index was
+      // really hidden, and an engine that cannot hide records neither. Only HOW
+      // the measurement is taken has changed.
+      if (
+        rec.hiddenAt !== null &&
+        rec.baselineReadOps !== null &&
+        rec.baselineReadLatency !== null
+      ) {
+        const hiddenAtMs = rec.hiddenAt.getTime();
+        const days = rec.observeDays ?? observeDays;
+        // Two windows back: the observation, and the reference before it. The
+        // wall-clock cap bounds how long the first can take, so this is the
+        // furthest back either half can reach.
+        const readings = await collectionLatencyHistory(
+          db,
+          clusterId,
+          rec.database,
+          rec.collection,
+          new Date(hiddenAtMs - days * DAY_MS),
+        );
+        const observed = observedWindow(readings, hiddenAtMs, days, {
+          ...OBSERVED_OPTIONS,
+          // What the hide measured, as the reference of last resort.
+          recordedBaselineMicrosPerOp:
+            rec.baselineReadOps > 0 ? rec.baselineReadLatency / rec.baselineReadOps : undefined,
+        });
+        recordRegressionVerdict("observe", observed.verdict);
+        // Hidden far longer than the observation was worth. A collection blind
+        // enough that its window never fills is one we cannot judge, and waiting
+        // it out costs somebody a hidden index indefinitely — so the index goes
+        // back and the finding is re-proposed rather than quietly abandoned.
+        // classify.ts declines to propose a drop it can already see hitting this,
+        // so reaching it means the cluster got worse after the proposal was made.
+        const undecided = observed.verdict === "INCOMPLETE" || observed.verdict === "NO_BASELINE";
+        if (undecided && outstayedWindow(hiddenAtMs, days, now)) {
+          await executor.unhide(rec.database, rec.collection, rec.indexName);
           await db
             .update(recommendations)
             .set({
@@ -222,13 +310,17 @@ export async function finalizeCluster(
             recommendationId: rec.id,
             kind: "HIDE",
             actor: "system",
-            result:
-              "aborted + un-hidden: observation lost (counters reset — server restarted during the observe window)",
+            result: `aborted + un-hidden: only ${Math.round(observed.observedMs / DAY_MS)} of ${days} days could be measured in ${OBSERVE_WALLCLOCK_MULTIPLE}× the window`,
           });
           continue;
         }
-        if (verdict === "REGRESSED") {
-          if (canHide) await executor.unhide(rec.database, rec.collection, rec.indexName);
+        // Still accumulating, or nothing from before the hide to compare against.
+        // Neither is a verdict, and the index stays hidden and keeps observing —
+        // NO_BASELINE resolves as soon as one clean pre-hide window is retained,
+        // and the cap above is what stops either waiting forever.
+        if (undecided) continue;
+        if (observed.verdict === "REGRESSED") {
+          await executor.unhide(rec.database, rec.collection, rec.indexName);
           const until = await recordRegression(
             db,
             clusterId,
@@ -262,6 +354,16 @@ export async function finalizeCluster(
           await emitClusterEvent(db, { clusterId, kind: "REGRESSION_FIRED", task: null });
           continue;
         }
+      } else if (
+        rec.hiddenAt !== null &&
+        now - rec.hiddenAt.getTime() < (rec.observeDays ?? observeDays) * DAY_MS
+      ) {
+        // An engine with no reversible hide (cluster-connection.ts). Nothing was
+        // hidden, so there is no read-latency question to ask and no observation
+        // to accumulate — elapsed wall clock is the only clock this case ever
+        // had, and the evidence for the drop is the usage counters staying flat,
+        // which preflightDrop re-checks below.
+        continue;
       }
       // The regression gate above ran (safety); the drop itself waits for the
       // change window — the index simply stays hidden until a tick inside it.
