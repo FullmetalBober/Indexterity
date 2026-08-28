@@ -1734,6 +1734,97 @@ describe("outage resilience", () => {
     expect(specs.some((spec) => spec.name === "outage_1")).toBe(false);
   });
 
+  it("graduates a build across restarts, and files the retirement that depends on it", async () => {
+    process.env.MASTER_KEY =
+      process.env.MASTER_KEY ?? Buffer.from("0123456789abcdef0123456789abcdef").toString("base64");
+    // The post-build write watch used to reset `built_at` to now whenever the
+    // counters fell, so on a cluster restarting oftener than the window it never
+    // reached the end — and graduation is the ONLY thing that files the
+    // retirement of what the build superseded (#394). Nothing was executed
+    // wrongly; a correct finding was simply never made.
+    // The suite does not reset the database between runs, and both tables reject
+    // a second copy of this fixture — latency_samples on its no-overlap
+    // exclusion, recommendations on the one-live-claim index.
+    await db
+      .delete(latencySamples)
+      .where(
+        and(eq(latencySamples.clusterId, clusterId), eq(latencySamples.collection, "graduates")),
+      );
+    await db
+      .delete(recommendations)
+      .where(
+        and(eq(recommendations.clusterId, clusterId), eq(recommendations.collection, "graduates")),
+      );
+    // Long enough to clear the policy's observe window whichever it is here —
+    // the write watch reads the cluster policy, not the row's own `observeDays`.
+    const builtAt = new Date(Date.now() - 32 * 86_400_000);
+    const samples = [];
+    let ops = 4_000;
+    let micros = 4_000 * 1_000;
+    for (let hour = 0; hour < 32 * 24; hour++) {
+      // Restarted a day into the watch: the whole reason the old gate gave up.
+      if (hour === 24) {
+        ops = 0;
+        micros = 0;
+      }
+      const at = new Date(builtAt.getTime() + hour * 3_600_000);
+      samples.push({
+        clusterId,
+        database: "inttest",
+        collection: "graduates",
+        readOps: 0,
+        readLatencyMicros: 0,
+        writeOps: ops,
+        writeLatencyMicros: micros,
+        capturedAt: at,
+        lastSeenAt: at,
+      });
+      ops += 500;
+      micros += 500 * 1_000;
+    }
+    await insertLatency(db, samples);
+
+    const [rec] = await db
+      .insert(recommendations)
+      .values({
+        clusterId,
+        type: "UPDATE",
+        state: "ACTIVE",
+        source: "WORKLOAD",
+        database: "inttest",
+        collection: "graduates",
+        indexName: "a_1_b_1",
+        rationale: "extend a_1 to {a, b}",
+        score: 70,
+        builtAt,
+        baselineWriteOps: 4_000,
+        baselineWriteLatency: 4_000 * 1_000,
+        targetSpec: { keys: ["a", "b"], retire: ["a_1"] },
+      })
+      .returning();
+    if (rec === undefined) throw new Error("failed to insert recommendation");
+
+    await finalizeCluster(db, clusterId);
+
+    // Graduated: baselines cleared, so it also leaves the `watched` guard that
+    // was suppressing every later finding on this index.
+    const [after] = await db.select().from(recommendations).where(eq(recommendations.id, rec.id));
+    expect(after?.baselineWriteOps).toBeNull();
+    // ...and the retirement the graduation exists to file.
+    const [retirement] = await db
+      .select()
+      .from(recommendations)
+      .where(
+        and(
+          eq(recommendations.clusterId, clusterId),
+          eq(recommendations.collection, "graduates"),
+          eq(recommendations.indexName, "a_1"),
+        ),
+      );
+    expect(retirement?.type).toBe("DROP_REDUNDANT");
+    expect(retirement?.state).toBe("PROPOSED");
+  });
+
   it("un-hides an index whose window cannot fill, rather than leaving it hidden", async () => {
     process.env.MASTER_KEY =
       process.env.MASTER_KEY ?? Buffer.from("0123456789abcdef0123456789abcdef").toString("base64");

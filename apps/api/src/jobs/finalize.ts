@@ -33,11 +33,12 @@ import { recordRegression, WHOLE_COLLECTION } from "./cooldowns";
 import { preflightDrop } from "./preflight";
 
 const DAY_MS = 86_400_000;
-const REGRESSION_OPTIONS = { factor: 1.5, minWindowOps: 20 };
-// The read side of the same judgement, asked of stored history instead of a
-// baseline the row carries (analysis/observed.ts). Same numbers deliberately:
-// the mechanism changed because a restart broke the old one, and moving the
-// threshold in the same commit would make the two impossible to tell apart.
+// Both per-index gates — did hiding this index slow reads, did building it slow
+// writes — are measured over stored history now (analysis/observed.ts), so the
+// options they read live here rather than in a pair that could disagree. Same
+// numbers the cumulative baseline gate used: the mechanism changed because a
+// restart broke it, and moving the threshold in the same change would make the
+// two impossible to tell apart.
 const OBSERVED_OPTIONS = { factor: 1.5, minWindowOps: 20 };
 // The same measurement asked of the COLLECTION rather than of one index (#282),
 // and it gets its own factor because it is a different question.
@@ -177,32 +178,54 @@ export async function finalizeCluster(
         continue;
       }
       const { writes } = await collector.collectionLatency(rec.database, rec.collection);
-      const baseline = { ops: rec.baselineWriteOps, latencyMicros: rec.baselineWriteLatency };
-      const verdict = evaluateRegression(baseline, writes, REGRESSION_OPTIONS);
-      recordRegressionVerdict("post_build", verdict);
-      // The server restarted mid-watch: the baseline is meaningless now. Start
-      // the watch again rather than graduating an index nobody ever checked.
-      if (verdict === "UNOBSERVABLE") {
-        await db
-          .update(recommendations)
-          .set({
-            builtAt: new Date(),
-            baselineWriteOps: writes.ops,
-            baselineWriteLatency: writes.latencyMicros,
-            updatedAt: new Date(),
-          })
-          .where(eq(recommendations.id, rec.id));
+      const builtAtMs = rec.builtAt.getTime();
+      // Measured the same way the drop side measures its window (#394): summed
+      // over the stretches of stored history a restart did not eat, rather than
+      // differenced against the baseline on this row.
+      //
+      // That baseline used to be the whole watch, and a restart voided it — so
+      // the watch went back to zero, `builtAt` with it, and on a cluster that
+      // restarts oftener than the window it could never reach the end. Nothing
+      // was executed wrongly; the index simply never GRADUATED, which is the
+      // event that retires the originals it superseded, runs the cumulative
+      // check, and releases the index from the watched guard. A correct finding
+      // that is never made, and it compounds — every un-graduated build leaves a
+      // row that suppresses its own index.
+      const history = await collectionLatencyHistory(
+        db,
+        clusterId,
+        rec.database,
+        rec.collection,
+        new Date(builtAtMs - observeDays * DAY_MS),
+      );
+      const observed = observedWindow(history, "write", builtAtMs, observeDays, {
+        ...OBSERVED_OPTIONS,
+        recordedBaselineMicrosPerOp:
+          rec.baselineWriteOps > 0 ? rec.baselineWriteLatency / rec.baselineWriteOps : undefined,
+      });
+      recordRegressionVerdict("post_build", observed.verdict);
+      const verdict = observed.verdict;
+      // Still watching. Unlike the drop side there is nothing to undo by giving
+      // up — the index is built and serving either way — so past the cap the
+      // watch CONCLUDES on what it managed to measure instead of un-doing
+      // anything. Leaving it open is the worse option and the one that shipped:
+      // it withholds the retirement and suppresses the index indefinitely, on a
+      // collection quiet enough that nothing could have been measured anyway.
+      const undecided = verdict === "INCOMPLETE" || verdict === "NO_BASELINE";
+      if (undecided && !outstayedWindow(builtAtMs, observeDays, now)) continue;
+      if (undecided) {
         await db.insert(actions).values({
           recommendationId: rec.id,
           kind: "CREATE",
           actor: "system",
-          result: "write watch restarted: counters reset (server restarted) during the window",
+          result: `write watch cut short: only ${Math.round(observed.observedMs / DAY_MS)} of ${observeDays} days could be measured in ${OBSERVE_WALLCLOCK_MULTIPLE}× the window`,
         });
-        continue;
       }
-      // Graduation is checked only AFTER a real reading, so a window that
-      // elapsed while we could not observe does not silently pass.
-      if (now - rec.builtAt.getTime() >= observeDays * DAY_MS && verdict === "STABLE") {
+      // Everything that is not a regression graduates: measured and fine, too
+      // quiet to have been hurt, or — past the cap — as much of the window as
+      // this collection was ever going to give. Never on elapsed time alone,
+      // which is what the observation count above replaces.
+      if (verdict !== "REGRESSED") {
         // Before the baselines are cleared, ask the question this row cannot:
         // has the whole RUN of builds slowed the collection, even though this one
         // did not? (#282) The oldest baseline still live for the collection is
@@ -217,7 +240,6 @@ export async function finalizeCluster(
         await emitClusterEvent(db, { clusterId, kind: "BUILD_GRADUATED", task: null });
         continue;
       }
-      if (verdict !== "REGRESSED") continue;
       await executor.drop(rec.database, rec.collection, rec.indexName);
       const until = await recordRegression(
         db,
@@ -278,7 +300,7 @@ export async function finalizeCluster(
           rec.collection,
           new Date(hiddenAtMs - days * DAY_MS),
         );
-        const observed = observedWindow(readings, hiddenAtMs, days, {
+        const observed = observedWindow(readings, "read", hiddenAtMs, days, {
           ...OBSERVED_OPTIONS,
           // What the hide measured, as the reference of last resort.
           recordedBaselineMicrosPerOp:
@@ -620,7 +642,16 @@ async function judgeCumulative(
   // UNOBSERVABLE answers the reset question (#282's fourth) without a rule of its
   // own: a counter below the oldest baseline means the server restarted since it
   // was taken, so the chain spans a reset and the arithmetic across it is
-  // meaningless. The individual watch re-baselines on the same signal.
+  // meaningless.
+  //
+  // The one comparison still made this way, and the reason it may stay: the
+  // per-index watches moved to stored history because a reset made them refuse
+  // FOREVER on a restarting cluster, and the response there was destructive
+  // either way round. This one only ever reports, and a chain spanning several
+  // builds is a different measurement from the windows `observedWindow` sums —
+  // so on a cluster that restarts oftener than a run of builds takes, the
+  // cumulative reading stays silent. Smaller residual, non-destructive, and not
+  // worth a second mechanism until somebody is missing the finding.
   if (verdict !== "REGRESSED") return;
 
   const ratio = latencyRatio(oldest.baseline, current, CUMULATIVE_REGRESSION_OPTIONS.minWindowOps);

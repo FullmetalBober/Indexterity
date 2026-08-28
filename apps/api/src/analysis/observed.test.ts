@@ -57,14 +57,14 @@ function around(hours: number, beforeMicros: number, afterMicros: number, resetA
 describe("observedWindow", () => {
   it("counts observation in measured windows, not in elapsed wall clock", () => {
     const { hiddenAt, all } = around(48, 100, 100);
-    const observed = observedWindow(all, hiddenAt, 1, OPTIONS);
+    const observed = observedWindow(all, "read", hiddenAt, 1, OPTIONS);
     expect(observed.verdict).toBe("STABLE");
     expect(Math.round(observed.observedMs / HOUR)).toBe(48);
   });
 
   it("keeps observing while the window is short rather than calling it fine", () => {
     const { hiddenAt, all } = around(6, 100, 100);
-    expect(observedWindow(all, hiddenAt, 1, OPTIONS).verdict).toBe("INCOMPLETE");
+    expect(observedWindow(all, "read", hiddenAt, 1, OPTIONS).verdict).toBe("INCOMPLETE");
   });
 
   it("charges a restart the window it lands in and keeps the rest", () => {
@@ -72,7 +72,7 @@ describe("observedWindow", () => {
     // dropped; the other 47 stand — where the cumulative gate would have thrown
     // away all 48 and un-hidden the index.
     const { hiddenAt, all } = around(48, 100, 100, 24);
-    const observed = observedWindow(all, hiddenAt, 1, OPTIONS);
+    const observed = observedWindow(all, "read", hiddenAt, 1, OPTIONS);
     expect(Math.round(observed.observedMs / HOUR)).toBe(47);
     expect(observed.verdict).toBe("STABLE");
   });
@@ -87,20 +87,26 @@ describe("observedWindow", () => {
     for (let day = 0; day < 4; day++) {
       after.push(...readings(24, 100, 100, hiddenAt + day * DAY, 0));
     }
-    const observed = observedWindow([...before, ...after], hiddenAt, 3, OPTIONS);
+    const observed = observedWindow([...before, ...after], "read", hiddenAt, 3, OPTIONS);
     expect(observed.verdict).toBe("STABLE");
     expect(observed.observedMs).toBeGreaterThanOrEqual(3 * DAY);
   });
 
   it("calls the collection regressed when the hidden window is slower", () => {
     const { hiddenAt, all } = around(48, 100, 400);
-    const observed = observedWindow(all, hiddenAt, 1, OPTIONS);
+    const observed = observedWindow(all, "read", hiddenAt, 1, OPTIONS);
     expect(observed.verdict).toBe("REGRESSED");
     expect(observed.ratio).toBeCloseTo(4, 5);
   });
 
   it("does not call a modest slowdown a regression", () => {
-    const observed = observedWindow(around(48, 100, 140).all, START + 24 * HOUR, 1, OPTIONS);
+    const observed = observedWindow(
+      around(48, 100, 140).all,
+      "read",
+      START + 24 * HOUR,
+      1,
+      OPTIONS,
+    );
     expect(observed.verdict).toBe("STABLE");
   });
 
@@ -108,7 +114,7 @@ describe("observedWindow", () => {
   // the same as "all clear", because the caller drops an index on the difference.
   it("says NO_BASELINE rather than STABLE when nothing precedes the hide", () => {
     const hiddenAt = START;
-    const observed = observedWindow(readings(49, 100, 100, hiddenAt), hiddenAt, 1, OPTIONS);
+    const observed = observedWindow(readings(49, 100, 100, hiddenAt), "read", hiddenAt, 1, OPTIONS);
     expect(observed.verdict).toBe("NO_BASELINE");
   });
 
@@ -123,25 +129,10 @@ describe("observedWindow", () => {
       // 4 windows × 4 reads = 16 ops, under minWindowOps, at 10x the latency.
       ...readings(5, 4, 1_000, hiddenAt),
     ];
-    const observed = observedWindow(all, hiddenAt, 0.15, OPTIONS);
+    const observed = observedWindow(all, "read", hiddenAt, 0.15, OPTIONS);
     expect(Math.round(observed.observedMs / HOUR)).toBe(4);
     expect(observed.verdict).toBe("STABLE");
     expect(observed.ratio).toBeNull();
-  });
-
-  // A collection nobody queries. An edge case here and the ordinary case on the
-  // write side, where most collections take no writes at all.
-  it("counts quiet time as observed and calls it stable, not incomplete", () => {
-    // Hiding an index cannot have hurt anyone who did not read — the cumulative
-    // gate said so by returning a null ratio and STABLE, and this must agree.
-    // Counting only busy windows left this INCOMPLETE forever, so the index was
-    // un-hidden past the cap and re-proposed: the cycle this module ends,
-    // reached from the quiet side instead of the restarting one.
-    const hiddenAt = START + 24 * HOUR;
-    const all = [...readings(25, 100, 100), ...readings(49, 0, 0, hiddenAt)];
-    const observed = observedWindow(all, hiddenAt, 1, OPTIONS);
-    expect(Math.round(observed.observedMs / HOUR)).toBe(48);
-    expect(observed.verdict).toBe("STABLE");
   });
 });
 
@@ -159,13 +150,13 @@ describe("outstayedWindow", () => {
 
 describe("observationCanFinish", () => {
   it("says yes for a collection that is readable throughout", () => {
-    expect(observationCanFinish(readings(72, 100, 100), 7)).toBe(true);
+    expect(observationCanFinish(readings(72, 100, 100), "read", 7)).toBe(true);
   });
 
   it("says yes for one restarting nightly, which only slows the window", () => {
     const all: LatencyReading[] = [];
     for (let day = 0; day < 4; day++) all.push(...readings(24, 100, 100, START + day * DAY, 0));
-    expect(observationCanFinish(all, 7)).toBe(true);
+    expect(observationCanFinish(all, "read", 7)).toBe(true);
   });
 
   it("says no when nothing measurable ever accumulates", () => {
@@ -190,13 +181,79 @@ describe("observationCanFinish", () => {
         writeLatencyMicros: 0,
       };
     });
-    expect(observationCanFinish(all, 7)).toBe(false);
+    expect(observationCanFinish(all, "read", 7)).toBe(false);
   });
 
   // Every other gate on the drop path already asks whether there is enough
   // evidence. Answering it a second time in a different vocabulary is how two
   // guards come to disagree about the same cluster.
   it("does not refuse a collection it has no history for", () => {
-    expect(observationCanFinish([], 7)).toBe(true);
+    expect(observationCanFinish([], "read", 7)).toBe(true);
+  });
+});
+
+// Regression check for the quiet collection. Written while porting this to the
+// write side (#394), where it stops being an edge case: most collections take
+// no writes at all, so "nothing happened" has to read as observation.
+describe("a collection nobody is querying", () => {
+  it("counts quiet time as observed and calls it stable, not incomplete", () => {
+    // Hidden on a collection with no reads at all during the window. Hiding an
+    // index cannot have hurt anyone who did not read — the old cumulative gate
+    // said so by returning a null ratio and STABLE, and this must agree.
+    const hiddenAt = START + 24 * HOUR;
+    const all = [...readings(25, 100, 100), ...readings(49, 0, 0, hiddenAt)];
+    const observed = observedWindow(all, "read", hiddenAt, 1, OPTIONS);
+    expect(Math.round(observed.observedMs / HOUR)).toBe(48);
+    expect(observed.verdict).toBe("STABLE");
+  });
+});
+
+// The write side (#394). Same arithmetic, different columns — and one case that
+// is an edge on the read side and the COMMON case here: most collections take no
+// writes at all, so a build on them can never have slowed any.
+describe("the write metric", () => {
+  const built = (
+    count: number,
+    ops: number,
+    micros: number,
+    from: number,
+    resetAt = -1,
+  ): LatencyReading[] =>
+    readings(count, 0, 0, from).map((reading, i) => {
+      const runIndex = resetAt >= 0 && i >= resetAt ? i - resetAt : i;
+      return {
+        ...reading,
+        writeOps: runIndex * ops,
+        writeLatencyMicros: runIndex * ops * micros,
+      };
+    });
+
+  it("differences the write counters, not the read ones", () => {
+    const builtAt = START + 24 * HOUR;
+    const all = [...built(25, 100, 100, START), ...built(49, 100, 400, builtAt)];
+    const observed = observedWindow(all, "write", builtAt, 1, OPTIONS);
+    expect(observed.verdict).toBe("REGRESSED");
+    // Reads are flat zero throughout, so the same history says nothing on the
+    // other metric — which is the whole point of passing one.
+    expect(observedWindow(all, "read", builtAt, 1, OPTIONS).verdict).toBe("STABLE");
+  });
+
+  it("graduates a collection nobody writes to instead of watching it forever", () => {
+    // The ordinary case. Building an index cannot have slowed writes that never
+    // happened, so the window fills on quiet time and the verdict is stable —
+    // where counting only busy windows would leave it INCOMPLETE indefinitely.
+    const builtAt = START + 24 * HOUR;
+    const all = [...built(25, 0, 0, START), ...built(49, 0, 0, builtAt)];
+    const observed = observedWindow(all, "write", builtAt, 1, OPTIONS);
+    expect(Math.round(observed.observedMs / HOUR)).toBe(48);
+    expect(observed.verdict).toBe("STABLE");
+  });
+
+  it("keeps the observation a restart did not eat", () => {
+    const builtAt = START + 24 * HOUR;
+    const all = [...built(25, 100, 100, START), ...built(49, 100, 100, builtAt, 24)];
+    const observed = observedWindow(all, "write", builtAt, 1, OPTIONS);
+    expect(Math.round(observed.observedMs / HOUR)).toBe(47);
+    expect(observed.verdict).toBe("STABLE");
   });
 });
