@@ -28,8 +28,11 @@ export interface LatencyTrend {
 // restart resets every namespace on the cluster together.
 //
 // There is no `since` to check the way index usage has (see classify.ts's
-// countersRestartedDuring) — latencyStats carries no counter-start stamp at all, so
-// the total having fallen IS the evidence, and the only evidence.
+// counterEpochs) — latencyStats carries no counter-start stamp at all, so the
+// total having fallen IS the evidence, and the only evidence. Which is also why
+// this side cannot segment the way the usage side now does: with no stamp there
+// is nothing to date the restart by, so the window spanning it is unmeasurable
+// rather than merely short.
 //
 // Null rather than zero or the absolute value: we do not know what the latency was
 // across that interval, and the honest shape of not knowing is a gap. Zero would

@@ -64,79 +64,113 @@ function parseTime(value: string | undefined): number | null {
   return Number.isFinite(time) ? time : null;
 }
 
-// Did any member's usage counter restart inside this history? The counter
-// resets to zero when the server restarts or the index is rebuilt. Three ways
-// to notice:
+// A stretch of history the counters can speak for continuously.
+//
+// `$indexStats.accesses.ops` resets to zero when the server restarts or the index
+// is rebuilt, and the three ways to notice are unchanged:
 //
 //   1. `since` advanced for a member between two snapshots, or
-//   2. the newest counters are YOUNGER than the window being judged — i.e.
-//      they cannot possibly account for the whole period we are claiming was
-//      idle (architecture §6.2), or
-//   3. a member's cumulative ops went BACKWARDS between two snapshots. A
-//      cumulative counter cannot shrink; one that did restarted, whatever its
-//      `since` claims. This is the only trigger that catches SQL Server's
-//      ALTER INDEX REBUILD, which zeroes the index's row in
-//      sys.dm_db_index_usage_stats without the service restarting (verified on
-//      2022 CU24) — and index-rebuild maintenance jobs are routine in MSSQL
-//      shops, so without it a busy index reads as dead the week after every
-//      rebuild. Mongo's $indexStats moves `since` on its resets, so rule 1
-//      already covers it there; this is belt and braces for every engine.
+//   2. a member's cumulative ops went BACKWARDS. A cumulative counter cannot
+//      shrink; one that did restarted, whatever its `since` claims. This is the
+//      only one that catches SQL Server's ALTER INDEX REBUILD, which zeroes the
+//      index's row in sys.dm_db_index_usage_stats without the service restarting
+//      (verified on 2022 CU24) — and rebuild maintenance jobs are routine in MSSQL
+//      shops, so without it a busy index reads as dead the week after every one.
+//      Mongo's $indexStats moves `since` on its resets, so rule 1 already covers it
+//      there; this is belt and braces for every engine.
+//   3. a member appearing or vanishing, which usage.ts already counts in full.
 //
-// Snapshots collected before `since` was persisted carry none, and are simply
-// skipped by rules 1 and 2: no evidence either way, and the irreversible step
-// downstream is still guarded by the regression gate. Rule 3 needs no `since`
-// at all.
+// What CHANGED is what a reset costs. It used to refuse the whole history: one
+// restart anywhere inside the window and every index on the cluster was
+// unanalysable. That is right for a counter read as a level and wrong for one read
+// as a difference, which is what #265 made these — and this file's own note said
+// so, that a reset is something "we can reason around", while the gate below went
+// on refusing anyway. Measured on a cluster restarting nightly: three epochs of
+// 39.2, 24.0 and 11.7 hours, separated by blind windows of 56 and 43 minutes. The
+// gate discarded 74.9 hours of good observation to avoid 1.6 hours of blindness,
+// and — because the restarts never stop — would have gone on discarding it
+// forever, which is the property that makes it a bug rather than a conservative
+// choice.
 //
-// Which of the three noticed it, or null for none. Named rather than counted,
-// because the three are not equally strict and #267 turns on telling them apart:
-// 1 and 3 bracket a reset we can reason around now that usage is a difference
-// (#265), while 2 says the counters cannot speak for the period at all, which no
-// amount of differencing repairs.
-export type CounterResetTrigger =
-  | "since-advanced"
-  | "counters-younger-than-span"
-  | "ops-went-backwards";
-
-export function counterResetDuring(history: readonly UsageSnapshot[]): CounterResetTrigger | null {
-  const sorted = sortedRuns(history);
-  const first = sorted[0];
-  const last = sorted.at(-1);
-  if (first === undefined || last === undefined) return null;
-
-  const earliestSince = new Map<string, number>();
-  const previousOps = new Map<string, number>();
-  for (const snapshot of sorted) {
-    for (const member of snapshot.perMember) {
-      const before = previousOps.get(member.member);
-      if (before !== undefined && member.ops < before) return "ops-went-backwards";
-      previousOps.set(member.member, member.ops);
-      const since = parseTime(member.since);
-      if (since === null) continue;
-      const previous = earliestSince.get(member.member);
-      if (previous === undefined) earliestSince.set(member.member, since);
-      else if (since > previous) return "since-advanced";
-    }
-  }
-
-  // Both ends of the WATCHED period, not of the row list: the newest run may
-  // have been extended long past the moment it was first written, and that
-  // stretch is precisely the part being claimed as idle. Measuring to
-  // `capturedAt` instead would understate the window and let a counter younger
-  // than the claim slip through.
-  const spanMs = spanEnd(last) - spanStart(first);
-  const lastSeen = spanEnd(last);
-  for (const member of last.perMember) {
-    const since = parseTime(member.since);
-    if (since === null) continue;
-    if (lastSeen - since < spanMs) return "counters-younger-than-span";
-  }
-  return null;
+// So a reset SEGMENTS the history instead of voiding it. Inside an epoch the
+// counter is monotone and every difference is valid; across the boundary sits a
+// blind window, from the last reading we took to the instant the counter restarted,
+// whose usage nobody recorded. That window is a hole in the observation and is
+// judged as one — see the gap checks in usageTrustRefusal, which already bound it.
+//
+// ANY member resetting ends the epoch for all of them. On a replica set where one
+// member bounced and two kept counting that is stricter than the evidence requires;
+// it is also the semantics the previous rule had, and widening the claim is not
+// something to do in the same change that loosens the gate.
+export interface CounterEpoch {
+  // First and last instant this epoch's counters were confirmed, in ms.
+  readonly startMs: number;
+  readonly endMs: number;
 }
 
-// The question every existing caller asks, over the answer above. Kept so that
-// "did anything reset" and "which one noticed" can never disagree.
-export function countersRestartedDuring(history: readonly UsageSnapshot[]): boolean {
-  return counterResetDuring(history) !== null;
+// Did this run's counters restart relative to the one before it?
+function restartedBetween(previous: UsageSnapshot, next: UsageSnapshot): boolean {
+  const before = new Map(previous.perMember.map((member) => [member.member, member]));
+  for (const member of next.perMember) {
+    const prior = before.get(member.member);
+    if (prior === undefined) continue;
+    if (member.ops < prior.ops) return true;
+    const was = parseTime(prior.since);
+    const now = parseTime(member.since);
+    if (was !== null && now !== null && now > was) return true;
+  }
+  return false;
+}
+
+// The latest instant any of this run's counters claims to have started. An epoch
+// cannot testify to anything before it, however long we had been watching.
+function countersStartedAt(run: UsageSnapshot): number | null {
+  let latest: number | null = null;
+  for (const member of run.perMember) {
+    const since = parseTime(member.since);
+    if (since !== null && (latest === null || since > latest)) latest = since;
+  }
+  return latest;
+}
+
+export function counterEpochs(history: readonly UsageSnapshot[]): CounterEpoch[] {
+  const sorted = sortedRuns(history);
+  const epochs: CounterEpoch[] = [];
+  let first: UsageSnapshot | null = null;
+  let end = 0;
+  // An epoch begins where we started reading it OR where its counters started,
+  // whichever is LATER, and cannot run past its own end.
+  //
+  // The clamp is the whole of the old `counters-younger-than-span` rule, kept
+  // rather than dropped with the veto around it. A boundary is only visible
+  // between two snapshots, so the first epoch has none to be found by: a cluster
+  // whose first collect landed after a restart looks unbroken, and dating it from
+  // that collect would credit us with watching a counter that did not exist yet.
+  // It bites there and nowhere else — after a restart we can SEE, `since` is the
+  // restart instant and that is before the first reading taken after it.
+  const close = (from: UsageSnapshot, to: number): void => {
+    const started = countersStartedAt(from);
+    const begins = started === null ? spanStart(from) : Math.max(spanStart(from), started);
+    epochs.push({ startMs: Math.min(begins, to), endMs: to });
+  };
+  for (const [i, run] of sorted.entries()) {
+    const previous = sorted[i - 1];
+    if (first === null) first = run;
+    else if (previous !== undefined && restartedBetween(previous, run)) {
+      close(first, end);
+      first = run;
+    }
+    end = spanEnd(run);
+  }
+  if (first !== null) close(first, end);
+  return epochs;
+}
+
+// How long the counters could actually be read continuously, summed over the
+// epochs. Equals the plain first-to-last span on a cluster that never restarted,
+// which is every cluster the old measure was right about.
+export function trustedWatchMs(history: readonly UsageSnapshot[]): number {
+  return counterEpochs(history).reduce((sum, epoch) => sum + (epoch.endMs - epoch.startMs), 0);
 }
 
 // Is this history good enough to claim an index is UNUSED? Absence of evidence
@@ -151,13 +185,12 @@ export function countersRestartedDuring(history: readonly UsageSnapshot[]): bool
 // batch and the quarterly export. Counting snapshots measures how often we
 // looked; only the span measures how long we watched.
 //
-// Returns WHICH check refused rather than a bare no (#267). The gate has eight
-// of them and they are not equally strict — one is about the counters resetting,
-// two are about holes we did not watch through, the rest are about there not
-// being enough history yet. "Findings are being suppressed" is not actionable
-// until you know which, and the reason is free here and unrecoverable later.
+// Returns WHICH check refused rather than a bare no (#267). The gate has seven
+// of them and they are not equally strict — two are about holes we did not watch
+// through, the rest are about there not being enough history yet. "Findings are
+// being suppressed" is not actionable until you know which, and the reason is
+// free here and unrecoverable later.
 export type UsageTrustRefusal =
-  | { kind: "counters-reset"; trigger: CounterResetTrigger }
   | { kind: "no-history" }
   | { kind: "too-few-collects" }
   | { kind: "span-too-short" }
@@ -175,8 +208,6 @@ export function usageTrustRefusal(
   // closed, since older data has no way to supply it.
   collectionActiveHours?: number,
 ): UsageTrustRefusal | null {
-  const reset = counterResetDuring(history);
-  if (reset !== null) return { kind: "counters-reset", trigger: reset };
   const runs = sortedRuns(history);
   // Collects, not rows. An index idle for a year is a single run, and counting
   // rows here would refuse the very finding the run-length storage exists to
@@ -185,9 +216,15 @@ export function usageTrustRefusal(
   const first = runs[0];
   const last = runs.at(-1);
   if (first === undefined || last === undefined) return { kind: "no-history" };
-  // The span we actually watched: from the first thing we saw to the last time
-  // anything was confirmed.
-  if (spanEnd(last) - spanStart(first) < options.minHistoryDays * 24 * HOUR_MS) {
+  // The span we actually watched, summed over the counter epochs rather than
+  // measured first-to-last. The two are the same number on a cluster that never
+  // restarted; where one did, the difference is that a restart now costs the
+  // blind window it opened instead of the whole history (see counterEpochs).
+  //
+  // `first` and `last` are still the ones the staleness and gap checks below
+  // read, because those ask when we last HEARD from the cluster, which a restart
+  // does not change.
+  if (trustedWatchMs(runs) < options.minHistoryDays * 24 * HOUR_MS) {
     return { kind: "span-too-short" };
   }
   // "This index served none of the reads" is only a claim when there were reads
@@ -196,7 +233,11 @@ export function usageTrustRefusal(
     return { kind: "collection-idle" };
   }
   const maxGap = options.maxGapHours * HOUR_MS;
-  // Two kinds of hole, and both have to be checked.
+  // Two kinds of hole, and both have to be checked. A restart's blind window is
+  // a third name for the first kind and needs no check of its own: it runs from
+  // our last reading to the instant the counter restarted, which is a
+  // sub-interval of the gap to the next run, so anything long enough to matter
+  // trips `gap-between-runs` first.
   //
   // BETWEEN runs, the obvious one: from the moment a state was last confirmed to
   // the moment the next was first seen. Differencing run STARTS instead would read

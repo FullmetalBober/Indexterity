@@ -36,8 +36,18 @@ export interface UsagePoint extends Run {
 // A member whose `since` moved was restarted and its counter restarted with it,
 // so what it now reports accumulated after that restart and counts in full
 // rather than as a difference. A member that appeared counts in full for the
-// same reason, one that vanished contributes nothing, and `max(0, …)` catches a
-// reset we could not see — an older row that predates the `since` field.
+// same reason, and one that vanished contributes nothing.
+//
+// A counter that went BACKWARDS restarted too, whatever its `since` says, and now
+// counts in full on that evidence alone. It used to fall to the `max(0, …)` and
+// contribute nothing — which was safe while a reset anywhere refused the whole
+// history, and is not now that a reset only segments it: the post-restart usage
+// would have been dropped and the index read as idle over a stretch it was
+// serving. It is the direction that matters. Counting in full can only ever say
+// an index was used more than it was, which costs a drop nobody makes; the
+// clamp could only ever say less, which costs a drop somebody regrets. Reachable
+// on any engine whose reset carries no `since` to notice it by — SQL Server's
+// ALTER INDEX REBUILD, and Mongo rows written before `since` was persisted.
 function activityBetween(
   previous: ReadonlyMap<string, MemberUsage> | null,
   current: readonly MemberUsage[],
@@ -46,9 +56,9 @@ function activityBetween(
   for (const member of current) {
     const before = previous?.get(member.member);
     total +=
-      before === undefined || before.since !== member.since
+      before === undefined || before.since !== member.since || member.ops < before.ops
         ? Math.max(0, member.ops)
-        : Math.max(0, member.ops - before.ops);
+        : member.ops - before.ops;
   }
   return total;
 }

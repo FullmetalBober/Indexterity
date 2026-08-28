@@ -30,30 +30,40 @@ describe("dominantRefusal", () => {
   });
 
   it("picks the refusal accounting for the most indexes", () => {
-    expect(dominantRefusal({ "span-too-short": 2, "counters-reset": 9 })).toBe("counters-reset");
-    expect(dominantRefusal({ "span-too-short": 9, "counters-reset": 2 })).toBe("span-too-short");
+    expect(dominantRefusal({ "span-too-short": 2, "history-stale": 9 })).toBe("history-stale");
+    expect(dominantRefusal({ "span-too-short": 9, "history-stale": 2 })).toBe("span-too-short");
+  });
+
+  // A restart no longer refuses anything, so nothing writes this key any more —
+  // but rows written before that change still carry it, and the panel reads
+  // them. Skipped rather than surfaced, the same way an unknown suppression
+  // guard is: the alternative is a dashboard explaining a rule that is gone.
+  it("ignores a stored kind it no longer knows", () => {
+    expect(dominantRefusal({ "counters-reset": 99, "span-too-short": 1 } as RefusalCounts)).toBe(
+      "span-too-short",
+    );
   });
 
   // The whole point of a fixed precedence: two passes that measure the same
   // thing must not report different reasons, and an object's key order is not
   // something to rest that on.
   it("breaks a tie the same way whatever order the counts arrive in", () => {
-    const forwards: RefusalCounts = { "counters-reset": 4, "too-few-collects": 4 };
-    const backwards: RefusalCounts = { "too-few-collects": 4, "counters-reset": 4 };
-    expect(dominantRefusal(forwards)).toBe("counters-reset");
-    expect(dominantRefusal(backwards)).toBe("counters-reset");
+    const forwards: RefusalCounts = { "history-stale": 4, "too-few-collects": 4 };
+    const backwards: RefusalCounts = { "too-few-collects": 4, "history-stale": 4 };
+    expect(dominantRefusal(forwards)).toBe("history-stale");
+    expect(dominantRefusal(backwards)).toBe("history-stale");
   });
 
   // Ties go to the condition that can persist. A warm-up clears itself with
-  // nothing but time; a reset on a cluster that restarts weekly never does, so
-  // it is the one worth the customer's attention.
+  // nothing but time; a cluster we have stopped hearing from does not, so it is
+  // the one worth the customer's attention.
   it("prefers the reason that does not clear on its own", () => {
-    expect(dominantRefusal({ "counters-reset": 1, "span-too-short": 1 })).toBe("counters-reset");
+    expect(dominantRefusal({ "history-stale": 1, "span-too-short": 1 })).toBe("history-stale");
     expect(dominantRefusal({ "history-stale": 1, "no-history": 1 })).toBe("history-stale");
   });
 
   it("ignores a kind counted zero", () => {
-    expect(dominantRefusal({ "counters-reset": 0, "span-too-short": 3 })).toBe("span-too-short");
+    expect(dominantRefusal({ "history-stale": 0, "span-too-short": 3 })).toBe("span-too-short");
   });
 });
 
@@ -64,7 +74,7 @@ describe("usageAnalysisPaused", () => {
   it("is false when anything cleared the gate", () => {
     expect(
       usageAnalysisPaused(
-        silence({ consideredIndexes: 10, trustedIndexes: 1, refusals: { "counters-reset": 9 } }),
+        silence({ consideredIndexes: 10, trustedIndexes: 1, refusals: { "span-too-short": 9 } }),
       ),
     ).toBe(false);
   });
@@ -72,7 +82,7 @@ describe("usageAnalysisPaused", () => {
   it("is true only when nothing did", () => {
     expect(
       usageAnalysisPaused(
-        silence({ consideredIndexes: 9, trustedIndexes: 0, refusals: { "counters-reset": 9 } }),
+        silence({ consideredIndexes: 9, trustedIndexes: 0, refusals: { "span-too-short": 9 } }),
       ),
     ).toBe(true);
   });
@@ -89,16 +99,17 @@ describe("explainRefusal", () => {
   // The thresholds are the reason this sentence lives beside the gate rather
   // than in the dashboard: it has to be able to quote them.
   it("quotes the observation window the gate actually used", () => {
-    const text = explainRefusal("counters-reset", { ...OPTIONS, minHistoryDays: 14 });
-    expect(text).toContain("14-day observation window");
-    expect(text).toContain("14 days without one");
-    expect(text).not.toContain("7");
+    const text = explainRefusal("span-too-short", { ...OPTIONS, minHistoryDays: 14 });
+    expect(text).toContain("less than 14 days");
+    expect(text).not.toContain("7 days");
   });
 
-  it("names the reset's two real causes rather than only a restart", () => {
-    const text = explainRefusal("counters-reset", OPTIONS);
-    expect(text).toContain("server restart");
-    expect(text).toContain("index rebuild");
+  // The sentence a restarting cluster now gets, and the one thing it must not
+  // leave the reader believing: that a restart threw the watching away.
+  it("says a restart costs the blind minutes and not the history", () => {
+    const text = explainRefusal("span-too-short", OPTIONS);
+    expect(text).toContain("A restart does not reset that clock");
+    expect(text).toContain("still counts");
   });
 
   // The warm-up is reassuring and has to read that way: a fresh cluster is not
@@ -109,7 +120,6 @@ describe("explainRefusal", () => {
 
   it("says what is still working, whichever reason it gives", () => {
     for (const kind of [
-      "counters-reset",
       "no-history",
       "too-few-collects",
       "span-too-short",

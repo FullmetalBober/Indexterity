@@ -107,19 +107,19 @@ export function recordDrop(outcome: "dropped" | "unhidden" | "absent"): void {
 
 // One per index the classifier considered. `refusal` null means the history was
 // trusted and a usage finding was possible; otherwise it is the check that said
-// no, with the counter-reset trigger broken out because the three are not
-// equally strict and #267 turns on telling them apart.
+// no.
+//
+// The `trigger` label went with `counters-reset`. It existed to tell the three
+// ways of noticing a restart apart, which mattered while a restart refused the
+// whole history; it segments the history now, so there is no refusal to break
+// down and a label nobody can act on is one fewer series per engine to store.
 export function recordUsageTrust(
   engine: string,
   refusal: UsageTrustRefusal | null,
   count = 1,
 ): void {
   if (count <= 0) return;
-  usageTrustDecisions.add(count, {
-    engine,
-    outcome: refusal === null ? "trusted" : refusal.kind,
-    ...(refusal !== null && refusal.kind === "counters-reset" ? { trigger: refusal.trigger } : {}),
-  });
+  usageTrustDecisions.add(count, { engine, outcome: refusal === null ? "trusted" : refusal.kind });
 }
 
 // Job-level counters from graphile-worker's own events, so the numbers agree with

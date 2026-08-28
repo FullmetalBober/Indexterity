@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   classifyUsage,
-  counterResetDuring,
-  countersRestartedDuring,
+  counterEpochs,
+  trustedWatchMs,
   usageHistoryIsTrustworthy,
   usageTrustRefusal,
 } from "./classify";
@@ -296,7 +296,7 @@ describe("usageHistoryIsTrustworthy", () => {
   });
 });
 
-describe("countersRestartedDuring", () => {
+describe("counterEpochs", () => {
   const snap = (
     day: number,
     members: Array<{ member: string; ops: number; since?: string }>,
@@ -304,29 +304,35 @@ describe("countersRestartedDuring", () => {
     capturedAt: `2026-03-0${day}T00:00:00Z`,
     perMember: members,
   });
-  // Counters that started well before the window.
   const OLD = "2026-01-01T00:00:00Z";
+  const DAY = 24 * 3_600_000;
+  const hours = (history: UsageSnapshot[]): number[] =>
+    counterEpochs(history).map((epoch) => (epoch.endMs - epoch.startMs) / 3_600_000);
 
-  it("is false when every counter predates the window and never moves", () => {
+  it("is one unbroken epoch when every counter predates the window and never moves", () => {
     const history = [
       snap(1, [{ member: "a", ops: 0, since: OLD }]),
       snap(2, [{ member: "a", ops: 0, since: OLD }]),
       snap(3, [{ member: "a", ops: 0, since: OLD }]),
     ];
-    expect(countersRestartedDuring(history)).toBe(false);
+    expect(hours(history)).toEqual([48]);
+    expect(trustedWatchMs(history)).toBe(2 * DAY);
   });
 
-  it("catches a member whose counter start jumped forward", () => {
+  it("splits where a member's counter start jumped forward, and counts both halves", () => {
     const history = [
       snap(1, [{ member: "a", ops: 500, since: OLD }]),
       snap(2, [{ member: "a", ops: 500, since: OLD }]),
       // Restarted: counter start moves up and ops begin again at zero.
       snap(3, [{ member: "a", ops: 0, since: "2026-03-02T18:00:00Z" }]),
     ];
-    expect(countersRestartedDuring(history)).toBe(true);
+    // Day 1 to day 2 is watched; the restart ends it; day 3 is a fresh epoch of
+    // no length yet. The 18:00-to-day-3 blind window is nobody's observation and
+    // is credited to neither.
+    expect(hours(history)).toEqual([24, 0]);
   });
 
-  it("catches one restarted member among several healthy ones", () => {
+  it("splits on one restarted member among several healthy ones", () => {
     const history = [
       snap(1, [
         { member: "a", ops: 10, since: OLD },
@@ -337,21 +343,24 @@ describe("countersRestartedDuring", () => {
         { member: "b", ops: 0, since: "2026-03-02T00:00:00Z" },
       ]),
     ];
-    expect(countersRestartedDuring(history)).toBe(true);
+    expect(counterEpochs(history)).toHaveLength(2);
   });
 
-  it("catches counters younger than the window they are supposed to cover", () => {
-    // Three days of snapshots, but the counter only started yesterday: it
-    // cannot testify that the index was idle for those three days.
+  it("dates the first epoch from its counters when they are younger than the history", () => {
+    // Three days of snapshots, but the counter only started midway through the
+    // second: it cannot testify that the index was idle for the days before it.
+    // No boundary is visible here — there is no earlier snapshot to have seen it
+    // — so the clamp is the only thing standing between this and a false claim
+    // of three days' watching.
     const history = [
       snap(1, [{ member: "a", ops: 0, since: "2026-03-02T12:00:00Z" }]),
       snap(2, [{ member: "a", ops: 0, since: "2026-03-02T12:00:00Z" }]),
       snap(3, [{ member: "a", ops: 0, since: "2026-03-02T12:00:00Z" }]),
     ];
-    expect(countersRestartedDuring(history)).toBe(true);
+    expect(hours(history)).toEqual([12]);
   });
 
-  it("catches a cumulative counter that went backwards, even when since holds still", () => {
+  it("splits on a cumulative counter that went backwards, even when since holds still", () => {
     // The SQL Server trap (#36): ALTER INDEX REBUILD zeroes the index's usage
     // row without the service restarting, so `since` — the server start —
     // never moves. Verified on 2022 CU24. A counter cannot shrink; one that
@@ -361,16 +370,18 @@ describe("countersRestartedDuring", () => {
       snap(2, [{ member: "a", ops: 520, since: OLD }]),
       snap(3, [{ member: "a", ops: 0, since: OLD }]),
     ];
-    expect(countersRestartedDuring(history)).toBe(true);
+    expect(hours(history)).toEqual([24, 0]);
   });
 
-  it("catches a backwards counter on legacy rows with no since at all", () => {
+  it("splits on a backwards counter on legacy rows with no since at all", () => {
     const history = [
       snap(1, [{ member: "a", ops: 300 }]),
       snap(2, [{ member: "a", ops: 40 }]),
       snap(3, [{ member: "a", ops: 45 }]),
     ];
-    expect(countersRestartedDuring(history)).toBe(true);
+    // The first epoch is one lone reading, so it spans nothing — a rate needs
+    // two — and only the pair after the rebuild is watch time.
+    expect(hours(history)).toEqual([0, 24]);
   });
 
   it("does not read ordinary growth as a restart", () => {
@@ -379,16 +390,38 @@ describe("countersRestartedDuring", () => {
       snap(2, [{ member: "a", ops: 100, since: OLD }]),
       snap(3, [{ member: "a", ops: 260, since: OLD }]),
     ];
-    expect(countersRestartedDuring(history)).toBe(false);
+    expect(hours(history)).toEqual([48]);
   });
 
-  it("says nothing when snapshots predate the field (legacy rows)", () => {
+  it("is one epoch when snapshots predate the field (legacy rows)", () => {
     const history = [
       snap(1, [{ member: "a", ops: 0 }]),
       snap(2, [{ member: "a", ops: 0 }]),
       snap(3, [{ member: "a", ops: 0 }]),
     ];
-    expect(countersRestartedDuring(history)).toBe(false);
+    expect(hours(history)).toEqual([48]);
+  });
+
+  // The measurement the whole change came from: a cluster restarting nightly,
+  // where the old rule discarded 74.9 hours of observation to avoid 1.6 hours
+  // of blindness, and went on discarding it for as long as the restarts lasted.
+  it("accumulates watch time across nightly restarts instead of refusing forever", () => {
+    const at = (iso: string, ops: number, since: string): UsageSnapshot => ({
+      capturedAt: iso,
+      perMember: [{ member: "mongodb-0:27017", ops, since }],
+    });
+    const history = [
+      at("2026-08-25T08:50:00Z", 0, "2026-08-25T01:42:07Z"),
+      at("2026-08-27T00:00:00Z", 0, "2026-08-25T01:42:07Z"),
+      at("2026-08-27T01:01:00Z", 0, "2026-08-27T00:57:19Z"),
+      at("2026-08-28T01:00:00Z", 0, "2026-08-27T00:57:19Z"),
+      at("2026-08-28T02:00:00Z", 0, "2026-08-28T01:44:15Z"),
+      at("2026-08-28T13:41:00Z", 0, "2026-08-28T01:44:15Z"),
+    ];
+    const watched = hours(history);
+    expect(watched.map((h) => Math.round(h * 10) / 10)).toEqual([39.2, 24, 11.7]);
+    // Nothing like the wall-clock span, and nothing like the zero it used to be.
+    expect(Math.round(trustedWatchMs(history) / 3_600_000)).toBe(75);
   });
 });
 
@@ -417,14 +450,29 @@ describe("usageHistoryIsTrustworthy with restart evidence", () => {
     ).toBe(true);
   });
 
-  it("refuses once a restart lands inside it", () => {
+  it("still trusts it once a restart lands inside it", () => {
+    // minHistoryDays is 0 here, so what this asserts is that the restart itself
+    // no longer refuses: the epochs either side are read, not thrown away.
     expect(
       usageHistoryIsTrustworthy(
         history(["2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z", "2026-03-02T06:00:00Z"]),
         opts,
         now,
       ),
-    ).toBe(false);
+    ).toBe(true);
+  });
+
+  it("charges the restart for the watch time it cost, against the warm-up", () => {
+    // Two days of snapshots either side of a restart on day 2. Asking for two
+    // days of watching fails, because the epochs sum to less than that; asking
+    // for one passes, because what WAS watched still counts.
+    const restarted = history([
+      "2026-01-01T00:00:00Z",
+      "2026-01-01T00:00:00Z",
+      "2026-03-02T06:00:00Z",
+    ]);
+    expect(usageHistoryIsTrustworthy(restarted, { ...opts, minHistoryDays: 2 }, now)).toBe(false);
+    expect(usageHistoryIsTrustworthy(restarted, { ...opts, minHistoryDays: 1 }, now)).toBe(true);
   });
 });
 
@@ -631,15 +679,26 @@ describe("usageTrustRefusal", () => {
     expect(usageTrustRefusal(dense, opts, now)).toBeNull();
   });
 
-  it("names the counter reset, and which of the three noticed it", () => {
+  it("refuses nothing for a restart on its own", () => {
     const restarted = [
       at("2026-03-01T00:00:00Z", 900, "2026-01-01T00:00:00Z"),
       at("2026-03-02T00:00:00Z", 5, "2026-02-01T00:00:00Z"),
       at("2026-03-03T12:00:00Z", 9, "2026-02-01T00:00:00Z"),
     ];
-    expect(usageTrustRefusal(restarted, opts, now)).toEqual({
-      kind: "counters-reset",
-      trigger: "ops-went-backwards",
+    expect(usageTrustRefusal(restarted, opts, now)).toBeNull();
+  });
+
+  it("names the warm-up when a restart is what kept the watch time short", () => {
+    // The reason a restarting cluster now reports, and the difference that
+    // matters: span-too-short is a number that grows, where counters-reset was
+    // a state such a cluster could never leave.
+    const restarted = [
+      at("2026-03-01T00:00:00Z", 900, "2026-01-01T00:00:00Z"),
+      at("2026-03-02T00:00:00Z", 5, "2026-02-01T00:00:00Z"),
+      at("2026-03-03T12:00:00Z", 9, "2026-02-01T00:00:00Z"),
+    ];
+    expect(usageTrustRefusal(restarted, { ...opts, minHistoryDays: 2 }, now)).toEqual({
+      kind: "span-too-short",
     });
   });
 
@@ -703,23 +762,5 @@ describe("usageTrustRefusal", () => {
         usageTrustRefusal(history, options, now, activeHours) === null,
       );
     }
-  });
-});
-
-// Same relationship on the reset side.
-describe("counterResetDuring", () => {
-  it("agrees with countersRestartedDuring", () => {
-    const clean = [
-      { capturedAt: "2026-03-01T00:00:00Z", perMember: [{ member: "m", ops: 1, since: "s" }] },
-      { capturedAt: "2026-03-02T00:00:00Z", perMember: [{ member: "m", ops: 2, since: "s" }] },
-    ];
-    const reset = [
-      { capturedAt: "2026-03-01T00:00:00Z", perMember: [{ member: "m", ops: 9, since: "s1" }] },
-      { capturedAt: "2026-03-02T00:00:00Z", perMember: [{ member: "m", ops: 1, since: "s2" }] },
-    ];
-    expect(counterResetDuring(clean)).toBeNull();
-    expect(countersRestartedDuring(clean)).toBe(false);
-    expect(counterResetDuring(reset)).toBe("ops-went-backwards");
-    expect(countersRestartedDuring(reset)).toBe(true);
   });
 });
