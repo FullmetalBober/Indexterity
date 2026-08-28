@@ -110,6 +110,15 @@ interface Waiter {
 
 export class RemoteTunnel {
   readonly endpoint: TunnelEndpoint;
+  /**
+   * The peering's AllowedIPs as the conf wrote them.
+   *
+   * Kept alongside the parsed form because the guard has two callers with two
+   * shapes: this class judges addresses itself against #allowedIps, and the
+   * engine adapters are handed a TunnelRoute carrying the strings — member
+   * discovery being the one that needs it (#382).
+   */
+  readonly allowedIps: readonly string[];
   readonly #socket: Socket;
   readonly #allowedIps: readonly Cidr[];
   readonly #onError: (error: Error) => void;
@@ -125,12 +134,13 @@ export class RemoteTunnel {
   private constructor(
     socket: Socket,
     endpoint: TunnelEndpoint,
-    allowedIps: readonly Cidr[],
+    allowedIps: readonly string[],
     onError: (error: Error) => void,
   ) {
     this.#socket = socket;
     this.endpoint = endpoint;
-    this.#allowedIps = allowedIps;
+    this.allowedIps = allowedIps;
+    this.#allowedIps = allowedIps.map(parseCidr);
     this.#onError = onError;
   }
 
@@ -166,7 +176,7 @@ export class RemoteTunnel {
     // waiting on it is a dial verdict with a database driver behind it.
     socket.setNoDelay(true);
 
-    const allowedIps = options.conf.peer.allowedIps.map(parseCidr);
+    const allowedIps = [...options.conf.peer.allowedIps];
     let tunnel: RemoteTunnel | null = null;
     // Events that arrive between `listening` and the instance existing — one
     // microtask, but the FIRST state change and the first handshake land in it,

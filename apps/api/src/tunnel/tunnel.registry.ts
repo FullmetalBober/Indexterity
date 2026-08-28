@@ -1,7 +1,7 @@
 import { promises as dns } from "node:dns";
 import { Injectable, Logger, type OnApplicationShutdown } from "@nestjs/common";
 import { tunnelPort } from "../config/env";
-import { allowPrivateTargets, assertTargetsAllowed } from "../engine/net-guard";
+import { allowPrivateTargets, assertTargetsAllowed, type TunnelRoute } from "../engine/net-guard";
 import type { WireGuardConf } from "./conf";
 import { type Reachability, RemoteTunnel, type TunnelEndpoint, type TunnelHealth } from "./remote";
 
@@ -128,6 +128,26 @@ export class TunnelRegistry implements OnApplicationShutdown {
     const tunnel = this.#tunnels.get(id);
     if (tunnel === undefined || !tunnel.live) return null;
     return tunnel.endpoint;
+  }
+
+  /**
+   * How a dial through this tunnel must be JUDGED — its AllowedIPs, and a
+   * resolver that answers inside it. Null when the tunnel is not up.
+   *
+   * Handed to the engine adapters alongside the proxy, because the proxy alone
+   * only says where to dial. #382 is what that cost: member discovery had the
+   * proxy and not this, so it judged a replica set's private members with the
+   * DIRECT guard and refused every one of them.
+   */
+  routeFor(id: string): TunnelRoute | null {
+    const tunnel = this.#tunnels.get(id);
+    if (tunnel === undefined || !tunnel.live) return null;
+    return {
+      allowedIps: tunnel.allowedIps,
+      // Bound to this tunnel, so a name is answered by the customer's resolver
+      // rather than ours.
+      resolve: (host) => this.resolve(id, host),
+    };
   }
 
   /**

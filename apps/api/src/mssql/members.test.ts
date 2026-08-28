@@ -1,6 +1,22 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { MssqlConnection, MssqlReplica } from "./connection";
 import { MssqlMemberConnections } from "./members";
+
+// A replica dial that fails at once, so a test can tell "the guard allowed it and
+// the socket did not answer" (`unreachable`) from "the guard refused it"
+// (`refused`) without waiting out a TCP timeout to a private address. Every test
+// above this mock ends before a dial, so nothing else is affected by it.
+vi.mock("./connection", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./connection")>();
+  return {
+    ...actual,
+    MssqlConnection: class {
+      connect(): Promise<void> {
+        return Promise.reject(new Error("no server in a unit test"));
+      }
+    },
+  };
+});
 
 // A base connection that answers only what the dialer asks it: the replica
 // catalog. Dialling itself is not exercised here — that needs two live servers,
@@ -76,5 +92,36 @@ describe("MssqlMemberConnections", () => {
     await members.dials();
     await members.dials();
     expect(reads).toBe(1);
+  });
+});
+
+// #382. A group behind a tunnel is made of private addresses, so judging its
+// replicas with the DIRECT guard refused every one of them — and the roster said
+// "refused", which reads like a replica that is down rather than our own guard.
+describe("a group reached through a tunnel", () => {
+  const PRIVATE = replica({ name: "ag2", routingUrl: "tcp://10.4.5.6:1433" });
+
+  it("judges a replica against the peering's AllowedIPs, not the private flag", async () => {
+    const members = new MssqlMemberConnections(baseWith([PRIVATE]), CONN, undefined, undefined, {
+      allowedIps: ["10.0.0.0/8"],
+      resolve: () => Promise.reject(new Error("not asked: the routing URL is an address")),
+    });
+
+    // `unreachable` rather than `refused`: the guard allowed it and the dial is
+    // what failed, which is the whole distinction the bug destroyed.
+    expect(await members.dials()).toEqual([
+      { host: "ag2", state: "unreachable", connection: null },
+    ]);
+  });
+
+  it("still refuses a replica the peering did not agree to carry", async () => {
+    const members = new MssqlMemberConnections(baseWith([PRIVATE]), CONN, undefined, undefined, {
+      // The group named 10.4.5.6 and this peer carries only 192.168.0.0/16, so
+      // the address is outside what the peer agreed to route.
+      allowedIps: ["192.168.0.0/16"],
+      resolve: () => Promise.reject(new Error("not asked")),
+    });
+
+    expect(await members.dials()).toEqual([{ host: "ag2", state: "refused", connection: null }]);
   });
 });

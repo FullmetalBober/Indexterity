@@ -370,7 +370,12 @@ export class ClustersController {
           routed.route,
         );
         try {
-          const probe = await adapter.open(value, overrides, routed.proxy);
+          const probe = await adapter.open(
+            value,
+            overrides,
+            routed.proxy,
+            routed.route ?? undefined,
+          );
           try {
             await probe.ping();
           } finally {

@@ -1,5 +1,9 @@
-import { allowPrivateTargets, assertTargetsAllowed } from "../engine/net-guard";
-import type { TlsOverrides } from "../engine/ports";
+import {
+  allowPrivateTargets,
+  assertDialTargetsAllowed,
+  type TunnelRoute,
+} from "../engine/net-guard";
+import type { DialProxy, TlsOverrides } from "../engine/ports";
 import { parseMssqlConnString, parseRoutingUrl, retargetMssqlConnString } from "./conn-string";
 import { MssqlConnection } from "./connection";
 
@@ -44,6 +48,10 @@ export class MssqlMemberConnections {
     private readonly base: MssqlConnection,
     private readonly connString: string,
     private readonly overrides?: TlsOverrides,
+    // Where a replica's socket goes, and what its address is judged against.
+    // Both absent for a group dialled directly, which is the common case.
+    private readonly proxy?: DialProxy,
+    private readonly route?: TunnelRoute,
   ) {}
 
   async all(): Promise<MssqlConnection[]> {
@@ -83,10 +91,19 @@ export class MssqlMemberConnections {
       }
       const target = `${route.host}:${route.port === 0 ? (defaultPort ?? 1433) : route.port}`;
       // The routing URL comes from the cluster, so it is user-influenced input
-      // like any connection string and goes through the same guard.
-      const allowed = await assertTargetsAllowed([target], false, {
-        allowPrivate: allowPrivateTargets(),
-      })
+      // like any connection string and goes through the same guard — and through
+      // the SAME BRANCH of it the group's own connection took.
+      //
+      // That was the bug (#382): this called the direct guard unconditionally, so
+      // a group behind a tunnel had every replica refused for being private, and
+      // the roster said "refused" where the cause was our own guard.
+      const allowed = await assertDialTargetsAllowed(
+        [target],
+        false,
+        this.route === undefined
+          ? { kind: "direct", allowPrivate: allowPrivateTargets() }
+          : { kind: "tunnel", ...this.route },
+      )
         .then(() => true)
         .catch(() => false);
       if (!allowed) {
@@ -98,8 +115,12 @@ export class MssqlMemberConnections {
           retargetMssqlConnString(this.connString, route.host, route.port),
           this.overrides,
           // A READ_ONLY replica refuses a plain connection (Msg 978) and an ALL
-          // replica accepts read intent, so every member dial declares it.
-          { readOnlyIntent: true },
+          // replica accepts read intent, so every member dial declares it. The
+          // proxy rides along: judging a replica correctly and then dialling it
+          // outside the tunnel is the same bug wearing the other hat.
+          this.proxy === undefined
+            ? { readOnlyIntent: true }
+            : { readOnlyIntent: true, proxy: this.proxy },
         );
         await conn.connect();
         this.dialled.push({ host: replica.name, state: "answered", connection: conn });
