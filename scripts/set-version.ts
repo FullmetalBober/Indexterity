@@ -38,6 +38,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const PACKAGES = [
   "package.json",
   "apps/api/package.json",
+  "apps/tunnel/package.json",
   "apps/web/package.json",
   "packages/config/package.json",
   "packages/contracts/package.json",
