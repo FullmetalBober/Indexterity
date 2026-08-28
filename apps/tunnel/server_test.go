@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"net"
+	"sync"
 	"testing"
 	"time"
 )
@@ -16,8 +17,28 @@ import (
 // is the point: a greeting being accepted, a listener being announced and a
 // closed connection taking the stack down are all decided on this side.
 
-func testControl(t *testing.T) (*controlServer, *registry) {
+// Lines the service logged, so a test can assert on SILENCE — which is the
+// contract for a connection that was never the api (hello()).
+type logCapture struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (c *logCapture) add(message string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lines = append(c.lines, message)
+}
+
+func (c *logCapture) all() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.lines...)
+}
+
+func testControl(t *testing.T) (*controlServer, *registry, *logCapture) {
 	t.Helper()
+	logged := &logCapture{}
 	peerings := newRegistry()
 	socks, err := startSocks("127.0.0.1:0", peerings, func(message string) {
 		t.Logf("socks: %s", message)
@@ -33,13 +54,14 @@ func testControl(t *testing.T) (*controlServer, *registry) {
 
 	control, err := startControl("127.0.0.1:0", peerings, port, stderrLogger(), func(message string) {
 		t.Logf("control: %s", message)
+		logged.add(message)
 	})
 	if err != nil {
 		t.Fatalf("startControl: %v", err)
 	}
 	t.Cleanup(func() { _ = control.close() })
 	go control.serve(t.Context())
-	return control, peerings
+	return control, peerings, logged
 }
 
 func dialControl(t *testing.T, control *controlServer) net.Conn {
@@ -84,7 +106,7 @@ func waitForCount(t *testing.T, peerings *registry, want int) {
 // the credential. What a greeting still has to carry is an id and a config that
 // can come up, and neither being refused quietly is what these pin.
 func TestControlRefusesAGreetingThatNamesNoPeering(t *testing.T) {
-	control, peerings := testControl(t)
+	control, peerings, _ := testControl(t)
 	client := dialControl(t, control)
 
 	greet(t, client, "")
@@ -100,7 +122,7 @@ func TestControlRefusesAGreetingThatNamesNoPeering(t *testing.T) {
 }
 
 func TestControlRefusesAnUnreadableGreeting(t *testing.T) {
-	control, peerings := testControl(t)
+	control, peerings, _ := testControl(t)
 	client := dialControl(t, control)
 
 	// Unknown fields are refused rather than ignored, so a build that disagrees
@@ -140,7 +162,7 @@ func TestTheListenersAreLoopbackOnly(t *testing.T) {
 }
 
 func TestControlAnnouncesTheSharedSocksPortAndThePeeringsOwnCredentials(t *testing.T) {
-	control, peerings := testControl(t)
+	control, peerings, _ := testControl(t)
 	client := dialControl(t, control)
 
 	greet(t, client, "tunnel-under-test")
@@ -182,7 +204,7 @@ func TestControlAnnouncesTheSharedSocksPortAndThePeeringsOwnCredentials(t *testi
 // do, and losing it would mean an api that died left a live WireGuard session
 // into a customer's network behind.
 func TestClosingTheConnectionTakesThePeeringDown(t *testing.T) {
-	control, peerings := testControl(t)
+	control, peerings, _ := testControl(t)
 	client := dialControl(t, control)
 
 	greet(t, client, "tunnel-under-test")
@@ -201,7 +223,7 @@ func TestClosingTheConnectionTakesThePeeringDown(t *testing.T) {
 // One peering ending must not touch another, which is the property a shared
 // process has to earn and a process per peering got for free.
 func TestOnePeeringEndingLeavesTheOthersUp(t *testing.T) {
-	control, peerings := testControl(t)
+	control, peerings, _ := testControl(t)
 
 	first := dialControl(t, control)
 	greet(t, first, "first-peering")
@@ -227,4 +249,52 @@ func TestOnePeeringEndingLeavesTheOthersUp(t *testing.T) {
 	if _, err := second.Write([]byte("{\"cmd\":\"handshake\"}\n")); err != nil {
 		t.Fatalf("the surviving peering's connection is gone: %v", err)
 	}
+}
+
+// A platform prober speaking HTTP at every open port it finds is what this port
+// actually receives most of, and each one used to write a line — about once a
+// second on Render, which buried everything else in the container's log.
+func TestControlIgnoresAPortProbeWithoutSayingAnything(t *testing.T) {
+	control, peerings, logged := testControl(t)
+	client := dialControl(t, control)
+
+	if _, err := client.Write([]byte("HEAD / HTTP/1.1\r\nHost: localhost\r\n\r\n")); err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+
+	// Closed, and nothing written back: a caller that is not the api learns
+	// nothing about what this service is.
+	if _, err := bufio.NewReader(client).ReadString('\n'); err == nil {
+		t.Fatal("the service answered an HTTP probe")
+	}
+	if peerings.count() != 0 {
+		t.Fatalf("a probe left %d peerings", peerings.count())
+	}
+	// The point of the fix: silence.
+	if lines := logged.all(); len(lines) != 0 {
+		t.Fatalf("a probe was logged: %q", lines)
+	}
+}
+
+// The other half — a greeting that IS this protocol and still wrong means an api
+// disagreeing with this build, and that stays visible.
+func TestControlStillLogsAGreetingItCouldNotRead(t *testing.T) {
+	control, _, logged := testControl(t)
+	client := dialControl(t, control)
+
+	if _, err := client.Write([]byte("{\"id\":\"x\",\"nonsense\":true}\n")); err != nil {
+		t.Fatalf("greeting: %v", err)
+	}
+	if _, err := bufio.NewReader(client).ReadString('\n'); err == nil {
+		t.Fatal("the service answered a greeting it could not read")
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(logged.all()) > 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("an unreadable greeting was not logged")
 }
