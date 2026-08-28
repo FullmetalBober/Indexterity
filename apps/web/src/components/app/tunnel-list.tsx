@@ -1,6 +1,7 @@
 import { createTunnelInput, type TunnelTestResult, type TunnelView } from "@repo/contracts";
 import { useState } from "react";
 import { useAppForm } from "~/components/form";
+import { Alert, AlertDescription, AlertTitle } from "~/components/ui/alert";
 import { Button } from "~/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
 import { Empty } from "~/components/ui/empty";
@@ -11,7 +12,7 @@ import {
   useTestTunnel,
   useUpdateTunnel,
 } from "~/lib/queries/mutations/tunnels";
-import type { Read } from "~/lib/queries/read";
+import type { Tunnels } from "~/lib/queries/tunnels";
 
 // Register a WireGuard peering by pasting the wg0.conf, and see whether it is
 // currently up.
@@ -70,13 +71,27 @@ function age(seconds: number | null): string {
   return `handshake ${Math.round(seconds / 60)}m ago`;
 }
 
-export function TunnelList({
-  tunnels,
-  canEdit,
-}: {
-  tunnels: Read<TunnelView[]>;
-  canEdit: boolean;
-}) {
+// The feature is OFF, not broken: a deployment with no tunnel service is a
+// supported configuration. So this says what is true and who can change it,
+// rather than reading as a fault the owner should be chasing.
+//
+// It names the setting because on a self-hosted install the person reading this
+// is usually the person who sets it — and on a hosted one it tells them what to
+// ask for, which beats a sentence that only says no.
+function TunnelsOff() {
+  return (
+    <Alert>
+      <AlertTitle>VPN tunnels are turned off on this deployment</AlertTitle>
+      <AlertDescription>
+        Reaching a database over a VPN needs the tunnel service running beside the api. Whoever
+        operates this install turns it on by setting <code>TUNNEL_PORT</code>. Anything already
+        registered stays listed and starts working again the moment it is set.
+      </AlertDescription>
+    </Alert>
+  );
+}
+
+export function TunnelList({ tunnels, canEdit }: { tunnels: Tunnels; canEdit: boolean }) {
   return (
     <div className="space-y-6">
       <Card>
@@ -89,6 +104,9 @@ export function TunnelList({
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
+          {/* Only once the answer is in. `enabled` defaults to true while the
+              request is in flight precisely so this cannot flash. */}
+          {!tunnels.pending && !tunnels.failed && !tunnels.enabled ? <TunnelsOff /> : null}
           {tunnels.pending ? (
             <Skeleton className="h-20 w-full" />
           ) : tunnels.failed ? (
@@ -99,7 +117,11 @@ export function TunnelList({
               </Button>
             </div>
           ) : tunnels.data.length === 0 ? (
-            <Empty>No tunnels yet. Paste a WireGuard config below to add one.</Empty>
+            <Empty>
+              {tunnels.enabled
+                ? "No tunnels yet. Paste a WireGuard config below to add one."
+                : "No tunnels registered."}
+            </Empty>
           ) : (
             <ul className="divide-y">
               {tunnels.data.map((tunnel) => (
@@ -109,7 +131,11 @@ export function TunnelList({
           )}
         </CardContent>
       </Card>
-      {canEdit ? <CreateTunnel /> : null}
+      {/* No form when the feature is off: registering a peering nothing can bring
+          up is exactly the "form whose every submission fails at the last step"
+          this state exists to avoid. The api still accepts a create, so a row
+          registered before the setting was removed is not a special case. */}
+      {canEdit && tunnels.enabled ? <CreateTunnel /> : null}
     </div>
   );
 }

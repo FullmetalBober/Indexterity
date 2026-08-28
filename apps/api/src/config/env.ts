@@ -205,11 +205,11 @@ export function trustsProxy(): boolean {
   return trustProxySetting() !== false;
 }
 
-// Where the tunnel binary is (D111). Undefined means the layout the repo and the
-// image share, resolved by tunnel/child.ts from its own module rather than from a
-// working directory.
-export function tunnelBinary(): string | undefined {
-  return workerEnv().TUNNEL_BINARY;
+// The loopback port the tunnel service listens on (D113). Undefined means no
+// service is configured, which is the VPN feature being off rather than a
+// misconfiguration — TunnelRegistry.enabled() is what the routes read.
+export function tunnelPort(): number | undefined {
+  return workerEnv().TUNNEL_PORT;
 }
 
 // Whether owners must have a second factor before any owner-only mutation (#55).

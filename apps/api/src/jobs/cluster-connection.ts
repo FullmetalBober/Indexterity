@@ -3,7 +3,7 @@ import { clusters, type Database, envKeyProvider, eq, open } from "../db";
 import { ObservedSession } from "../engine/observe";
 import type { ClusterEngine, EngineSession } from "../engine/ports";
 import { adapterFor } from "../engine/registry";
-import { proxyForCluster } from "../tunnel/resolve";
+import { routeForCluster } from "../tunnel/resolve";
 import type { TunnelRegistry } from "../tunnel/tunnel.registry";
 import { acquireClusterSession } from "./connection-pool";
 
@@ -117,13 +117,14 @@ export async function openClusterSession(
   const { cluster, connectionString: connString } = await unsealCluster(db, clusterId);
   // Brings the tunnel up on first use if this cluster has one, and is null for
   // every cluster that does not — which is all of them before #353.
-  const proxy = await proxyForCluster(db, cluster.tunnelId, options.tunnels);
+  const routed = await routeForCluster(db, cluster.tunnelId, options.tunnels);
   const { session, release } = await acquireClusterSession(
     clusterId,
     cluster.engine,
     connString,
     cluster.tlsOverrides,
-    proxy ?? undefined,
+    routed?.proxy,
+    routed?.route,
   );
   const observed = cluster.observedDatabases;
   return {

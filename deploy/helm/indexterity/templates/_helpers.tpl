@@ -57,6 +57,10 @@ app.kubernetes.io/component: {{ .component }}
 {{- printf "%s:%s" .Values.api.image.repository (default .Chart.AppVersion .Values.api.image.tag) -}}
 {{- end -}}
 
+{{- define "indexterity.tunnelImage" -}}
+{{- printf "%s:%s" .Values.tunnel.image.repository (default .Chart.AppVersion .Values.tunnel.image.tag) -}}
+{{- end -}}
+
 {{- define "indexterity.webImage" -}}
 {{- printf "%s:%s" .Values.web.image.repository (default .Chart.AppVersion .Values.web.image.tag) -}}
 {{- end -}}
@@ -200,12 +204,19 @@ test and the port-forward in NOTES.txt all read the same number they did before.
   value: {{ .Values.config.logLevel | quote }}
 - name: ALLOW_PRIVATE_CLUSTER_TARGETS
   value: {{ .Values.config.allowPrivateClusterTargets | quote }}
-# Where the tunnel binary is, for an image that puts it somewhere other than the
-# default (D111). It needs no capability and no /dev/net/tun, so nothing here
-# touches a securityContext.
-{{- if .Values.config.tunnelBinary }}
-- name: TUNNEL_BINARY
-  value: {{ .Values.config.tunnelBinary | quote }}
+# The LOOPBACK port the tunnel service listens on (D113). A port and no host,
+# because the service runs as a container IN THIS POD and therefore in this
+# network namespace — so a customer's private key never crosses a network, the
+# SOCKS5 proxy into their network is reachable from nowhere else, and there is no
+# shared secret to carry here.
+#
+# Not a Secret for the same reason: a port number is not one.
+#
+# The service needs no capability and no /dev/net/tun, so nothing here touches a
+# securityContext. Absent, the api reports the VPN feature as off.
+{{- if .Values.tunnel.enabled }}
+- name: TUNNEL_PORT
+  value: {{ .Values.tunnel.port | quote }}
 {{- end }}
 # Sockets opened against ONE connected cluster. Held per cluster, so the worst
 # case multiplies by the fleet — and they are spent on the customer's mongod.

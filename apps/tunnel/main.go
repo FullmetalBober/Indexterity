@@ -5,34 +5,61 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/netip"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 
 	"golang.zx2c4.com/wireguard/device"
 )
 
-// indexterity-tunnel: one WireGuard peering, terminated in userspace, spawned by
-// the api per tunnel.
+// indexterity-tunnel: WireGuard peerings terminated in userspace, as a service
+// the api connects to.
 //
 // It needs no capability and no TUN device — which is the whole reason it can
 // serve a hosted install, where NET_ADMIN and /dev/net/tun are both unavailable
 // and one routing table per pod could not tell two customers on 10.0.0.0/8
 // apart. It holds no policy either: the api decides every dial (see socks.go).
 //
-// Contract, in both directions:
+// It used to be spawned per tunnel and speak over stdin and stdout. It is now
+// one process holding many devices, and the pipe became a socket — see D113 for
+// why, and for what that costs. The protocol did not change.
 //
-//	stdin   line 1      the config, as JSON — including the PrivateKey
-//	stdin   line 2..n   commands: handshake, resolve, endpoint, dialAllow,
-//	                    dialDeny, shutdown
-//	stdout              events: listening, state, handshake, resolved, failed,
-//	                    dialRequest, error — one JSON object per line
-//	stderr              wireguard-go's own log, and nothing that is protocol
+// Two listeners:
 //
-// It exits 0 when told to shut down, when stdin closes (the api is gone), or on
-// SIGTERM. It exits 1 only when it could not start, having said why on stderr.
+//	control   one connection per peering. First line is the greeting (id and
+//	          config, including the PrivateKey), then commands: handshake,
+//	          resolve, endpoint, dialAllow, dialDeny, shutdown. Events come back
+//	          on the same connection — listening, state, handshake, resolved,
+//	          failed, dialRequest, error — one JSON object per line. The
+//	          connection IS the peering's lifetime: closing it takes the device
+//	          down, and nothing else's.
+//	socks     SOCKS5 on an ephemeral port, shared by every peering. The
+//	          credentials announced to a peering in its `listening` event are what
+//	          select it.
+//
+// BOTH LISTEN ON LOOPBACK, and that is not a default — it is the design. This
+// service runs beside the api in one network namespace: the same container in the
+// all-in-one image, a sidecar in the api's pod, `network_mode: service:api` in
+// compose. So the trust boundary is the pod, exactly as it was when the api
+// spawned this as a child process, and the two properties that made a pipe safe
+// are preserved rather than traded away: a customer's private key never crosses a
+// network, and the SOCKS5 proxy into their network is not reachable from anywhere
+// else. There is consequently NO shared secret to configure, because there is no
+// listener a stranger could reach to need one.
+//
+// stderr carries wireguard-go's log and this service's own, and neither is ever
+// protocol. It exits 0 on SIGTERM, and 1 only when it could not start, having
+// said why on stderr.
+//
+// Environment:
+//
+//	TUNNEL_PORT   the loopback port the control listener binds, default 9411.
+//	              The SAME variable the api reads to find it, so the two cannot
+//	              be configured into disagreement.
 
 func main() {
 	if err := run(); err != nil {
@@ -41,37 +68,57 @@ func main() {
 	}
 }
 
+// Where the service listens.
+//
+// One knob, and only the control port: the SOCKS5 listener takes an ephemeral
+// port and announces it to each peering, so there is nothing to configure and
+// nothing for a deployment to keep in step. The api learns it from the
+// `listening` event, which it already reads.
+type settings struct {
+	control string
+	socks   string
+}
+
+const (
+	defaultPort = 9411
+	// Not configurable, deliberately. A bindable address would be a way to put
+	// this service's control port — which accepts a peering, with a private key,
+	// from whoever asks — on a network, and the whole reason there is no token to
+	// configure is that there is no such way. See the header.
+	loopback = "127.0.0.1"
+)
+
+func fromEnvironment() (settings, error) {
+	port := defaultPort
+	if raw := os.Getenv("TUNNEL_PORT"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > 65535 {
+			return settings{}, fmt.Errorf("TUNNEL_PORT %q is not a port number", raw)
+		}
+		port = parsed
+	}
+	return settings{
+		control: net.JoinHostPort(loopback, strconv.Itoa(port)),
+		socks:   net.JoinHostPort(loopback, "0"),
+	}, nil
+}
+
 func run() error {
-	events := newEventWriter(os.Stdout)
-	input := bufio.NewReader(os.Stdin)
-
-	configLine, err := input.ReadString('\n')
-	if err != nil {
-		return fmt.Errorf("could not read the config from stdin: %w", err)
-	}
-	var settings config
-	// Unknown fields are refused rather than ignored: a field the api thinks it
-	// is setting and this build silently drops is the kind of disagreement that
-	// shows up as a tunnel that works and carries the wrong AllowedIPs.
-	decoder := json.NewDecoder(strings.NewReader(configLine))
-	decoder.DisallowUnknownFields()
-	if err = decoder.Decode(&settings); err != nil {
-		return fmt.Errorf("the config is not the expected JSON: %w", err)
-	}
-
-	// wireguard-go's NewLogger writes to STDOUT, which here carries protocol. One
-	// Verbosef line into it would corrupt the stream, so the log is rebuilt onto
-	// stderr rather than configured.
-	logger := stderrLogger()
-
-	peering, err := newTunnel(settings, logger)
+	chosen, err := fromEnvironment()
 	if err != nil {
 		return err
 	}
-	defer peering.close()
 
-	pending := newVerdicts()
-	socks, err := startSocks(peering, pending, events.emit)
+	log := func(message string) {
+		fmt.Fprintln(os.Stderr, "indexterity-tunnel: "+message)
+	}
+
+	// The SOCKS5 listener comes up FIRST, because its port is announced to every
+	// peering in the greeting's answer. A control connection accepted before there
+	// is a port to name would have to be told later, which is a second message
+	// nobody needs.
+	peerings := newRegistry()
+	socks, err := startSocks(chosen.socks, peerings, log)
 	if err != nil {
 		return err
 	}
@@ -80,37 +127,37 @@ func run() error {
 		// with it either way.
 		_ = socks.close()
 	}()
+	port, err := socks.port()
+	if err != nil {
+		return err
+	}
+
+	// wireguard-go's NewLogger writes to STDOUT. Rebuilt onto stderr rather than
+	// configured, so the service's log and its peerings' protocol can never be the
+	// same stream.
+	control, err := startControl(chosen.control, peerings, port, stderrLogger(), log)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = control.close()
+	}()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
 	go socks.serve(ctx)
+	go control.serve(ctx)
 
-	watching := make(chan error, 1)
-	go func() { watching <- peering.watch(ctx, events.emit) }()
+	log(fmt.Sprintf("control on %s, socks on %s", chosen.control, chosen.socks))
 
-	port, err := socks.port()
-	if err != nil {
-		return err
-	}
-	if err = events.emit(newListening(port, socks.username, socks.password)); err != nil {
-		return fmt.Errorf("could not announce the listener: %w", err)
-	}
-
-	commands := make(chan error, 1)
-	go func() { commands <- readCommands(ctx, input, peering, pending, events.emit) }()
-
-	// Whichever ends first ends the process: stdin closing means the api is gone,
-	// a signal means the pod is going, and a failed emit means stdout is broken —
-	// in every case there is nobody left to serve.
-	select {
-	case <-ctx.Done():
-		return nil
-	case err = <-commands:
-		return err
-	case err = <-watching:
-		return err
-	}
+	// A signal is the only thing that ends the SERVICE now. A peering ending is a
+	// condition of one connection and is handled there — which is the difference
+	// this refactor makes: one customer's gateway going away used to be a process
+	// exit, and an exiting process was the api's signal to give up on it.
+	<-ctx.Done()
+	log(fmt.Sprintf("shutting down, %d peerings were up", peerings.count()))
+	return nil
 }
 
 // A device logger that keeps stdout clean. Verbose output is dropped rather than

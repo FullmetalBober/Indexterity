@@ -1,29 +1,43 @@
-import { type ChildProcess, spawn } from "node:child_process";
-import { isIP } from "node:net";
-import path from "node:path";
+import net, { isIP, type Socket } from "node:net";
 import { createInterface } from "node:readline";
 import { z } from "zod";
 import { assertDialableThroughTunnel, type Cidr, parseCidr } from "../engine/net-guard";
 import type { WireGuardConf } from "./conf";
 
 // The peering carried by apps/tunnel: wireguard-go for the protocol, gvisor's
-// netstack for IP and TCP, one process per tunnel (D111).
+// netstack for IP and TCP, in a service the api connects to (D113, amending
+// D111's process per tunnel).
 //
 // This file is the api's half of that contract, and the whole of the difference
-// is who answers what. The binary carries packets and holds NO policy: it asks
+// is who answers what. The service carries packets and holds NO policy: it asks
 // about every dial it is given, including one whose host is already an address,
 // and this class answers with the same assertDialableThroughTunnel the direct
-// path uses. The gateway is resolved and vetted HERE too, before the process is
-// started — a hostname reaching the binary is refused by it, because resolving
-// one there would skip the guard.
+// path uses. The gateway is resolved and vetted HERE too, before the greeting is
+// sent — a hostname reaching the service is refused by it, because resolving one
+// there would skip the guard.
 //
-// Two pipe round trips per CONNECTION, and none per packet.
+// One CONNECTION per peering, on LOOPBACK, and what it carries is the same
+// line-delimited JSON the pipe carried. Two round trips per dial, and none per
+// packet.
+//
+// Loopback is what keeps this as safe as the pipe it replaced. The service runs
+// in the api's own network namespace — one container in the all-in-one image, a
+// sidecar in the api's pod — so a customer's private key never crosses a network
+// and the SOCKS5 proxy into their network is reachable from nowhere else. There
+// is no token, because there is no listener a stranger could reach.
+//
+// The connection IS the peering: there is no handle to a peering that outlives
+// its socket, which is what makes a lost api the end of a live session rather
+// than an orphan nobody is watching.
 
 /** down | handshaking | up, which is what the dashboard draws. */
 export type TunnelState = "down" | "handshaking" | "up";
 
 export interface TunnelEndpoint {
-  /** Loopback SOCKS5 the drivers dial. */
+  /**
+   * Loopback SOCKS5 the drivers dial. The service shares this network namespace,
+   * so the only thing that varies per peering is the port and the credentials.
+   */
   readonly host: "127.0.0.1";
   readonly port: number;
   readonly credentials: { readonly username: string; readonly password: string };
@@ -48,7 +62,7 @@ export interface Reachability {
   readonly error: string | null;
 }
 
-// The binary's stdout, parsed rather than trusted: it is a separate artefact
+// The service's events, parsed rather than trusted: it is a separate artefact
 // that a deployment could have at a different version, and an event we cannot
 // read is better reported than silently ignored.
 const tunnelEvent = z.discriminatedUnion("type", [
@@ -71,7 +85,10 @@ const tunnelEvent = z.discriminatedUnion("type", [
   z.object({ type: z.literal("error"), message: z.string() }),
 ]);
 
-/** How long the binary gets to report its listener before the open is a failure. */
+/** The service shares this network namespace; there is no other address it could be at. */
+const LOOPBACK = "127.0.0.1";
+
+/** How long the service gets to report its listener before the open is a failure. */
 const START_TIMEOUT_MS = 15_000;
 /** A resolver inside a tunnel that is not up takes as long as it takes. */
 const RESOLVE_TIMEOUT_MS = 10_000;
@@ -82,15 +99,8 @@ const RESOLVE_TIMEOUT_MS = 10_000;
  * window — and asking for another would wait for an event that will not come.
  */
 const HANDSHAKE_SUPPRESSION_MS = 5_000;
-/** After shutdown is asked for politely. */
-const EXIT_GRACE_MS = 5_000;
-
-// The default location: the layout the repo and the image share, resolved from
-// this module rather than from the working directory, so `dist/` and `src/` — one
-// level under apps/api either way — both land on apps/tunnel/dist.
-function defaultBinary(): string {
-  return path.resolve(__dirname, "../../../tunnel/dist/indexterity-tunnel");
-}
+/** After shutdown is asked for politely, before the socket is destroyed. */
+const CLOSE_GRACE_MS = 5_000;
 
 interface Waiter {
   readonly resolve: (addresses: readonly string[]) => void;
@@ -98,60 +108,76 @@ interface Waiter {
   readonly timer: NodeJS.Timeout;
 }
 
-export class ChildTunnel {
+export class RemoteTunnel {
   readonly endpoint: TunnelEndpoint;
-  readonly #child: ChildProcess;
+  /**
+   * The peering's AllowedIPs as the conf wrote them.
+   *
+   * Kept alongside the parsed form because the guard has two callers with two
+   * shapes: this class judges addresses itself against #allowedIps, and the
+   * engine adapters are handed a TunnelRoute carrying the strings — member
+   * discovery being the one that needs it (#382).
+   */
+  readonly allowedIps: readonly string[];
+  readonly #socket: Socket;
   readonly #allowedIps: readonly Cidr[];
   readonly #onError: (error: Error) => void;
 
   #state: TunnelState = "down";
   #lastHandshakeAt: number | null = null;
   #lastError: Error | null = null;
-  #exited = false;
+  #gone = false;
   #nextId = 0;
   readonly #resolving = new Map<string, Waiter>();
   readonly #handshakeWaiters = new Set<() => void>();
 
   private constructor(
-    child: ChildProcess,
+    socket: Socket,
     endpoint: TunnelEndpoint,
-    allowedIps: readonly Cidr[],
+    allowedIps: readonly string[],
     onError: (error: Error) => void,
   ) {
-    this.#child = child;
+    this.#socket = socket;
     this.endpoint = endpoint;
-    this.#allowedIps = allowedIps;
+    this.allowedIps = allowedIps;
+    this.#allowedIps = allowedIps.map(parseCidr);
     this.#onError = onError;
   }
 
+  /** Whether this peering's connection is still there. */
+  get live(): boolean {
+    return !this.#gone;
+  }
+
   /**
-   * Spawn the binary and wait for it to report its listener.
+   * Connect to the tunnel service, greet it, and wait for it to report its
+   * listener.
    *
    * `gateway` is already resolved and vetted as a PUBLIC target by the caller,
-   * which is the same check the in-process device makes per attempt. The
-   * difference — and it is worth naming — is that the child holds the address it
-   * was given rather than re-resolving per attempt, so a gateway on dynamic DNS
-   * moves when the api pushes an `endpoint` command. probe() re-pushes, which
-   * makes Test the thing that recovers a moved gateway.
+   * which is the same check the device makes per attempt. The difference — and it
+   * is worth naming — is that the service holds the address it was given rather
+   * than re-resolving per attempt, so a gateway on dynamic DNS moves when the api
+   * pushes an `endpoint` command. probe() re-pushes, which makes Test the thing
+   * that recovers a moved gateway.
    */
-  static async start(options: {
+  static async connect(options: {
+    readonly id: string;
+    /** The loopback port the service's control listener is on. */
+    readonly port: number;
     readonly conf: WireGuardConf;
     readonly gateway: { readonly address: string; readonly port: number };
-    readonly binary?: string | undefined;
     readonly onError: (error: Error) => void;
     readonly onState: (state: string) => void;
-    readonly onExit: (code: number | null) => void;
-    readonly log: (message: string) => void;
-  }): Promise<ChildTunnel> {
-    const executable = options.binary ?? defaultBinary();
-    const child = spawn(executable, [], { stdio: ["pipe", "pipe", "pipe"] });
-    if (child.stdin === null || child.stdout === null || child.stderr === null) {
-      child.kill("SIGKILL");
-      throw new Error("could not open a pipe to the tunnel process");
-    }
+    readonly onClose: () => void;
+  }): Promise<RemoteTunnel> {
+    const socket = net.connect({ host: LOOPBACK, port: options.port });
+    // Nagle off. Every write here is a whole command or a whole event, so holding
+    // one back to coalesce it with the next only adds latency — and the thing
+    // waiting on it is a dial verdict with a database driver behind it.
+    socket.setNoDelay(true);
 
-    const allowedIps = options.conf.peer.allowedIps.map(parseCidr);
-    let tunnel: ChildTunnel | null = null;
+    const allowedIps = [...options.conf.peer.allowedIps];
+    let tunnel: RemoteTunnel | null = null;
     // Events that arrive between `listening` and the instance existing — one
     // microtask, but the FIRST state change and the first handshake land in it,
     // and a dropped handshake is a probe that reports a healthy gateway as
@@ -160,31 +186,42 @@ export class ChildTunnel {
 
     const listening = new Promise<TunnelEndpoint>((resolve, reject) => {
       const timer = setTimeout(() => {
-        reject(new Error(`the tunnel process did not start within ${START_TIMEOUT_MS}ms`));
+        reject(new Error(`the tunnel service did not answer within ${START_TIMEOUT_MS}ms`));
       }, START_TIMEOUT_MS);
       timer.unref?.();
 
-      child.once("error", (error: Error) => {
+      socket.once("error", (error: Error) => {
         clearTimeout(timer);
-        reject(new Error(`could not start ${executable}: ${error.message}`));
+        reject(
+          new Error(
+            `could not reach the tunnel service on ${LOOPBACK}:${options.port}: ${error.message}`,
+          ),
+        );
       });
-      child.once("exit", (code) => {
+      socket.once("close", () => {
         clearTimeout(timer);
-        reject(new Error(`the tunnel process exited with ${code ?? "a signal"} before listening`));
+        // Dropped before a listener was announced, which is how a refused
+        // greeting looks from here: a token that did not match, or a config the
+        // service could not bring up. The service says which on its own stderr,
+        // and deliberately tells an unauthenticated caller nothing.
+        reject(new Error("the tunnel service closed the connection before announcing a listener"));
       });
 
-      const lines = createInterface({ input: child.stdout as NodeJS.ReadableStream });
+      const lines = createInterface({ input: socket });
       lines.on("line", (line) => {
         const parsed = tunnelEvent.safeParse(safeJson(line));
         if (!parsed.success) {
-          options.onError(new Error(`unreadable event from the tunnel process: ${line}`));
+          options.onError(new Error(`unreadable event from the tunnel service: ${line}`));
           return;
         }
         const event = parsed.data;
         if (event.type === "listening") {
           clearTimeout(timer);
           resolve({
-            host: "127.0.0.1",
+            // The port the service announced. One shared SOCKS5 listener serves
+            // every peering it holds, so what makes this endpoint THIS peering's
+            // is the credentials, not the port.
+            host: LOOPBACK,
             port: event.port,
             credentials: { username: event.username, password: event.password },
           });
@@ -198,27 +235,25 @@ export class ChildTunnel {
       });
     });
 
-    // The private key, on stdin and nowhere else: argv is world-readable through
-    // /proc and a file outlives the process that needed it.
-    child.stdin.write(`${JSON.stringify(configFor(options.conf, options.gateway))}\n`);
+    // The private key, on the connection and nowhere else: argv is world-readable
+    // through /proc and a file outlives the process that needed it. The connection
+    // is loopback, so it does not leave the network namespace either.
+    socket.write(`${JSON.stringify(helloFor(options.id, options.conf, options.gateway))}\n`);
 
-    const stderr = createInterface({ input: child.stderr as NodeJS.ReadableStream });
-    stderr.on("line", (line) => options.log(line));
-
-    child.on("exit", (code) => {
-      tunnel?.markExited();
-      options.onExit(code);
+    socket.on("close", () => {
+      tunnel?.markGone();
+      options.onClose();
     });
 
     let endpoint: TunnelEndpoint;
     try {
       endpoint = await listening;
     } catch (error) {
-      child.kill("SIGKILL");
+      socket.destroy();
       throw error;
     }
 
-    tunnel = new ChildTunnel(child, endpoint, allowedIps, options.onError);
+    tunnel = new RemoteTunnel(socket, endpoint, allowedIps, options.onError);
     tunnel.#onStateChange = options.onState;
     for (const event of buffered) tunnel.handle(event);
     buffered.length = 0;
@@ -228,7 +263,7 @@ export class ChildTunnel {
   #onStateChange: (state: string) => void = () => {};
 
   /**
-   * One parsed event, from the reader start() attached. Public because that
+   * One parsed event, from the reader connect() attached. Public because that
    * reader outlives the constructor and replays what it buffered.
    */
   handle(event: z.infer<typeof tunnelEvent>): void {
@@ -275,13 +310,13 @@ export class ChildTunnel {
     }
   }
 
-  markExited(): void {
-    this.#exited = true;
+  markGone(): void {
+    this.#gone = true;
     this.#state = "down";
     for (const [id, waiter] of this.#resolving) {
       this.#resolving.delete(id);
       clearTimeout(waiter.timer);
-      waiter.reject(new Error("the tunnel process is gone"));
+      waiter.reject(new Error("this peering's connection to the tunnel service is gone"));
     }
     for (const waiter of [...this.#handshakeWaiters]) waiter();
   }
@@ -317,7 +352,7 @@ export class ChildTunnel {
   }
 
   async resolve(host: string): Promise<readonly string[]> {
-    if (this.#exited) throw new Error("the tunnel process is gone");
+    if (this.#gone) throw new Error("this peering's connection to the tunnel service is gone");
     const id = String(++this.#nextId);
     return new Promise<readonly string[]>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -339,12 +374,12 @@ export class ChildTunnel {
   }
 
   async probe(timeoutMs = 8_000): Promise<Reachability> {
-    if (this.#exited) {
+    if (this.#gone) {
       return {
         reachable: false,
         state: "down",
         handshakeAgeSeconds: null,
-        error: "the tunnel process is gone",
+        error: "this peering's connection to the tunnel service is gone",
       };
     }
 
@@ -402,33 +437,52 @@ export class ChildTunnel {
     this.#send({ cmd: "endpoint", endpoint: socketAddress(gateway.address, gateway.port) });
   }
 
+  /**
+   * Ask the service to drop this peering, then close the connection.
+   *
+   * Both, in that order, and the second is what actually guarantees it: the
+   * service treats a closed connection as the end of the peering, so a `shutdown`
+   * that is never read still ends with the device down. The polite command is
+   * there so the ordinary case is orderly rather than a reset.
+   */
   async close(): Promise<void> {
-    if (this.#exited) return;
-    const exited = new Promise<void>((resolve) => this.#child.once("exit", () => resolve()));
+    if (this.#gone) return;
+    const closed = new Promise<void>((resolve) => this.#socket.once("close", () => resolve()));
     this.#send({ cmd: "shutdown" });
-    this.#child.stdin?.end();
+    this.#socket.end();
     await Promise.race([
-      exited,
+      closed,
       new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, EXIT_GRACE_MS);
+        const timer = setTimeout(resolve, CLOSE_GRACE_MS);
         timer.unref?.();
       }),
     ]);
-    if (!this.#exited) this.#child.kill("SIGKILL");
+    if (!this.#gone) this.#socket.destroy();
   }
 
   #send(command: Record<string, string | number>): void {
-    const stdin = this.#child.stdin;
-    if (stdin === null || this.#exited) return;
-    // A failed write means the pipe is gone, which the exit handler is already
-    // dealing with; there is nothing a caller could do with the error.
-    stdin.write(`${JSON.stringify(command)}\n`, () => {});
+    if (this.#gone || this.#socket.writableEnded) return;
+    // A failed write means the connection is gone, which the close handler is
+    // already dealing with; there is nothing a caller could do with the error.
+    this.#socket.write(`${JSON.stringify(command)}\n`, () => {});
   }
 }
 
-// The serialization the binary's own config struct expects, field for field. It
-// refuses unknown fields, so a mismatch here fails loudly at start rather than
-// carrying an AllowedIPs nobody chose.
+// The greeting, field for field as the service's own structs expect it. Unknown
+// fields are refused on that side, so a mismatch here fails loudly at connect
+// rather than carrying an AllowedIPs nobody chose.
+//
+// There is no credential in it: the service accepts a greeting because it arrived
+// on loopback. The id is for its log, not for routing — what selects a peering on
+// the data path is the credential handed back in `listening`.
+function helloFor(
+  id: string,
+  conf: WireGuardConf,
+  gateway: { readonly address: string; readonly port: number },
+): Record<string, unknown> {
+  return { id, config: configFor(conf, gateway) };
+}
+
 function configFor(
   conf: WireGuardConf,
   gateway: { readonly address: string; readonly port: number },

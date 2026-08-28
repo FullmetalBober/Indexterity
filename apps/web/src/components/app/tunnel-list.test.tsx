@@ -2,7 +2,7 @@ import type { TunnelView } from "@repo/contracts";
 import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { Read } from "~/lib/queries/read";
+import type { Tunnels } from "~/lib/queries/tunnels";
 import { renderInApp } from "~/test-utils";
 import { TunnelList } from "./tunnel-list";
 
@@ -41,8 +41,8 @@ const TUNNEL: TunnelView = {
   createdAt: "2026-08-27T09:00:00.000Z",
 };
 
-function read(tunnels: TunnelView[] = [TUNNEL]): Read<TunnelView[]> {
-  return { data: tunnels, pending: false, failed: false, retry: () => {} };
+function read(tunnels: TunnelView[] = [TUNNEL], enabled = true): Tunnels {
+  return { data: tunnels, enabled, pending: false, failed: false, retry: () => {} };
 }
 
 beforeEach(() => {
@@ -200,5 +200,49 @@ describe("testing a tunnel", () => {
     for (const name of ["Test", "Edit", "Remove", "Register tunnel"]) {
       expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
     }
+  });
+});
+
+describe("a deployment with no tunnel service", () => {
+  // The feature being off is a supported configuration, so the page has to say so
+  // — the failure it replaces was a form that accepted a peering nothing could
+  // ever bring up.
+  it("says the feature is off and offers no registration form", () => {
+    renderInApp(<TunnelList tunnels={read([], false)} canEdit />);
+
+    expect(screen.getByText("VPN tunnels are turned off on this deployment")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Register tunnel" })).not.toBeInTheDocument();
+  });
+
+  it("still lists what is registered, so an owner can see and remove it", () => {
+    renderInApp(<TunnelList tunnels={read([TUNNEL], false)} canEdit />);
+
+    expect(screen.getByText(TUNNEL.name)).toBeInTheDocument();
+    expect(screen.getByText("VPN tunnels are turned off on this deployment")).toBeInTheDocument();
+  });
+
+  it("says nothing about it while the answer is still in flight", () => {
+    // `enabled` defaults to true for exactly this: a page that flashed "the
+    // feature is off" before its data arrived would be telling the reader
+    // something untrue about their own deployment.
+    renderInApp(
+      <TunnelList
+        tunnels={{ data: [], enabled: true, pending: true, failed: false, retry: () => {} }}
+        canEdit
+      />,
+    );
+
+    expect(
+      screen.queryByText("VPN tunnels are turned off on this deployment"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps the form when the feature is on", () => {
+    renderInApp(<TunnelList tunnels={read([])} canEdit />);
+
+    expect(screen.getByRole("button", { name: "Register tunnel" })).toBeInTheDocument();
+    expect(
+      screen.queryByText("VPN tunnels are turned off on this deployment"),
+    ).not.toBeInTheDocument();
   });
 });

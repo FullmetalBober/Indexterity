@@ -20,7 +20,25 @@ export function tunnelsQuery() {
   });
 }
 
-export function useTunnels(): Read<TunnelView[]> {
-  const { data = [], isPending, isError, refetch } = useQuery(tunnelsQuery());
-  return { data, pending: isPending, failed: isError, retry: () => void refetch() };
+export interface Tunnels extends Read<TunnelView[]> {
+  /**
+   * Whether this deployment has a tunnel service at all.
+   *
+   * Defaults to TRUE while the first request is in flight, which is the opposite
+   * of the usual "assume nothing" default and deliberate: `false` renders as "the
+   * feature is off", and a page that flashes that before its own data arrives
+   * tells the reader something untrue about their deployment. Pending is pending.
+   */
+  readonly enabled: boolean;
+}
+
+export function useTunnels(): Tunnels {
+  const { data, isPending, isError, refetch } = useQuery(tunnelsQuery());
+  return {
+    data: data?.tunnels ?? [],
+    enabled: data?.enabled ?? true,
+    pending: isPending,
+    failed: isError,
+    retry: () => void refetch(),
+  };
 }

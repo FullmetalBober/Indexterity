@@ -472,9 +472,22 @@ export const contract = {
     .route({
       method: "GET",
       path: "/tunnels",
-      summary: "The org's WireGuard tunnels, with handshake health and how many clusters use each",
+      summary: "The org's WireGuard tunnels, and whether this deployment can use them at all",
     })
-    .output(z.array(tunnelView)),
+    // An object rather than the bare array it was, so the answer can carry
+    // `enabled`. A deployment with no tunnel service configured is a SUPPORTED
+    // state — the feature is off — and the dashboard has to be able to say so
+    // instead of drawing a form whose every submission fails at the last step.
+    //
+    // The rows come back either way. A peering registered before the operator
+    // removed the setting still exists, and hiding it would leave an owner unable
+    // to see or remove what their org is carrying.
+    .output(
+      z.object({
+        enabled: z.boolean(),
+        tunnels: z.array(tunnelView),
+      }),
+    ),
 
   createTunnel: oc
     .route({

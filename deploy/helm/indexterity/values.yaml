@@ -378,9 +378,6 @@ config:
   # install must leave it false, or any account can probe the internal network.
   # Cloud metadata and other never-a-database ranges stay blocked either way.
   allowPrivateClusterTargets: false
-  # Where the tunnel binary is, for an image that puts it somewhere other than
-  # /app/apps/tunnel/dist/indexterity-tunnel. Empty means the default.
-  tunnelBinary: ""
   # Allow connecting clusters that do not offer validated TLS. Every outbound
   # connection requires it by default, including the ones the pipeline makes from
   # stored credentials — so a cluster connected without it stops being collected
@@ -488,6 +485,55 @@ config:
   # that terminates no TLS anywhere — a Kind or minikube smoke test. Never set
   # it on anything a browser reaches over the network.
   allowInsecureAuthUrl: false
+
+# The tunnel service (apps/tunnel): WireGuard peerings terminated in userspace,
+# for reaching a database that has no public endpoint.
+#
+# It listens on LOOPBACK, so it has to be a container in the API'S OWN POD — a
+# sidecar, sharing the network namespace. That is the design and not a limitation:
+# it is what keeps a customer's private key off the network and keeps the SOCKS5
+# proxy into their network unreachable from anywhere else, which is exactly what
+# held when the api spawned it as a child process.
+#
+# Turning this on adds the container to the api's pod and points the api at it.
+# Off means the api reports the VPN feature as unavailable and the dashboard says
+# so, which is a supported state rather than a broken one.
+#
+# It asks for nothing privileged: no NET_ADMIN, no /dev/net/tun, no volume. It
+# runs under this chart's own securityContext — nonroot, `drop: ALL` — which is
+# the payoff for terminating the peering in userspace rather than with a kernel
+# device, and the reason it can sit in the api's pod at all.
+#
+# config.allowPrivateClusterTargets is NOT required for this, which is the one
+# thing to get right when reading it beside api.extraContainers below: the
+# THIRD-PARTY VPN CLIENT recipe there needs it, because the api then dials the
+# private address directly through the pod's routes and the direct guard applies.
+# A cluster reached through THIS service takes the tunnel branch instead, which
+# judges FORBIDDEN ranges and the peering's AllowedIPs — private is what it
+# expects.
+#
+# It still governs two things: a gateway on a private address (the VPN endpoint is
+# vetted as an ordinary outbound target), and per-member figures on a replica set
+# (member discovery has no tunnel-aware path yet — see #382).
+tunnel:
+  enabled: false
+  image:
+    repository: ghcr.io/fullmetalbober/indexterity-tunnel
+    # Defaults to .Chart.AppVersion.
+    tag: ""
+    pullPolicy: IfNotPresent
+  # Given to the api and to the container as the same value, from here: one
+  # number, so they cannot be configured into disagreement.
+  port: 9411
+  # A gvisor netstack and a wireguard-go device per peering. Measured at ~16 MiB
+  # resident holding one idle peering, so this is that with room for several and
+  # the buffers a busy one uses — not a figure to raise without watching first.
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 128Mi
 
 secrets:
   # Bring your own Secret instead of the values below. It must contain:

@@ -54,8 +54,11 @@ export class TunnelController {
 
   @Implement(contract.listTunnels)
   listTunnels(@Req() req: FastifyRequest) {
-    return route(this.tenancy, contract.listTunnels, req, "member").handler(({ context }) =>
-      this.tunnels.list(context.member.orgId),
+    return route(this.tenancy, contract.listTunnels, req, "member").handler(
+      async ({ context }) => ({
+        enabled: this.tunnels.enabled(),
+        tunnels: await this.tunnels.list(context.member.orgId),
+      }),
     );
   }
 

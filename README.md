@@ -58,10 +58,17 @@ day a key is rotated or the gateway moves.
 
 The tunnel changes which addresses are reachable and nothing else: TLS is still
 required, cloud metadata is still refused whatever route reaches it, and the
-connection string is still stored and opened here. Self-hosted installs that
-would rather route at the node have a
-[sidecar recipe](./deploy/helm/indexterity/README.md#reaching-a-database-over-a-vpn)
-instead.
+connection string is still stored and opened here. Reach is granted **per
+peering** — bounded by that config's own `AllowedIPs`, by the org that registered
+it — so nothing global has to be relaxed for one tenant to reach one network.
+
+Self-hosted installs run the peering as a sidecar in the api's pod
+(`tunnel.enabled` in the chart), which needs no privilege: no `NET_ADMIN`, no
+`/dev/net/tun`, a read-only root filesystem. Deployments that would rather route
+at the node, or that use a VPN which is not WireGuard, have a
+[recipe for their own client](./deploy/helm/indexterity/README.md#reaching-a-database-over-a-vpn)
+instead. A deployment with no tunnel service configured reports the feature as
+unavailable rather than offering it.
 
 ## Licence
 

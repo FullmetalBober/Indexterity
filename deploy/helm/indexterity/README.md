@@ -242,7 +242,9 @@ stays off by default — the dashboard does not need it.
 | `secrets.cronTriggerSecret` | The bearer token that endpoint demands, required when `api.runCronjob=false`. It authorises the whole pipeline and there is no user session behind it: `openssl rand -hex 32` |
 | `config.signupMode` | `invite` (default), `open` or `closed`. The first account always bootstraps the install; after that invite-only. `open` lets any stranger register — and every account can make the control plane dial hosts it names |
 | `config.allowPrivateClusterTargets` | Set `true` when the MongoDB you manage is on a private network (the normal self-hosted case). Leave `false` for anything strangers can reach, or accounts can probe your internal network. Cloud metadata stays blocked either way |
-| `api.extraContainers` / `api.extraVolumes` / `api.extraVolumeMounts` / `api.dnsPolicy` / `api.dnsConfig` | Run a VPN client beside the api so a database with no public endpoint becomes reachable — see **Reaching a database over a VPN** below. Generic extension points; that is the job they exist for |
+| `tunnel.enabled` | Run the tunnel service as a sidecar in the api pod, so a database with no public endpoint can be reached over a WireGuard peering an org registers in the dashboard. Off means the api reports the feature as unavailable and the dashboard says so. Needs no capability, no device and no global private-target flag — see **Reaching a database over a VPN** below |
+| `tunnel.image` / `tunnel.port` / `tunnel.resources` | The sidecar's image (defaults to `.Chart.AppVersion`), the loopback port it listens on — given to both containers from this one value — and its budget. ~16 MiB resident per idle peering |
+| `api.extraContainers` / `api.extraVolumes` / `api.extraVolumeMounts` / `api.dnsPolicy` / `api.dnsConfig` | Run YOUR OWN VPN client beside the api, for a VPN that is not WireGuard. Generic extension points; that is the job they exist for. Unlike `tunnel.enabled`, that route dials privately and does need `config.allowPrivateClusterTargets` |
 | `config.allowInsecureClusterTls` | Set `true` only when the MongoDB you manage genuinely serves no certificate and the network between is trusted. Every outbound connection requires validated TLS otherwise — including the ones the pipeline makes from stored credentials, so a cluster connected without it stops being collected and its owners are told why. Kept apart from `allowPrivateClusterTargets` on purpose: a VPC-peered or PrivateLink cluster is a private address that must still be forced to TLS |
 | `metrics.enabled` | Prometheus metrics on port `metrics.port` (9464) for all three workloads. **Off by default** — an exporter costs memory in every process, and an install with nothing scraping it was paying that for nobody. Turn it on if anything is; the endpoint is never routed by the ingress |
 | `metrics.serviceMonitor.enabled` | One Prometheus Operator ServiceMonitor per workload. Off by default — it needs the `monitoring.coreos.com` CRDs, and a chart that assumes them cannot install without them |
@@ -339,10 +341,40 @@ that lives behind the customer's VPN, with no public endpoint, cannot be
 connected at all — and those are often the installs with the worst index
 problems.
 
-For a **self-hosted** install this needs no feature, only values: run a
-WireGuard client as a sidecar in the api pod, and the route it creates is a
-route the api dials through. A sidecar shares the pod's network namespace, so
-nothing in the application changes.
+**Turn on `tunnel.enabled` and an owner registers the peering in the dashboard.**
+That runs the tunnel service (`apps/tunnel`) as a sidecar in the api pod, and an
+org pastes the `wg0.conf` its network already uses under Settings → VPN tunnels,
+then picks that tunnel on a cluster. One peering commonly reaches several
+clusters, so the config is registered once rather than per database.
+
+```yaml
+tunnel:
+  enabled: true
+```
+
+That is the whole of it. No capability, no `/dev/net/tun`, no host path and no
+volume: the peering is terminated in userspace — wireguard-go for the protocol,
+gvisor's netstack for IP and TCP — so the container runs under this chart's own
+`drop: ALL` and nonroot defaults, with a read-only root filesystem. The image is
+`scratch` plus one static binary.
+
+It also needs no `allowPrivateClusterTargets`. A cluster reached this way is
+judged against **that peering's own `AllowedIPs`** rather than against a global
+private/public flag, which is what makes the feature safe to offer on a shared
+install: reach is granted per peering, by the org that owns it, instead of to
+everybody at once. (Two things the flag still governs: a gateway whose own
+address is private, and per-member figures on a replica set — see
+[#382](https://github.com/FullmetalBober/Indexterity/issues/382).)
+
+### Running your own VPN client instead
+
+For a VPN that is not WireGuard, or where you would rather run the client you
+already operate, the generic extension points still work: run it as a sidecar in
+the api pod and the route it creates is a route the api dials through. A sidecar
+shares the pod's network namespace, so nothing in the application changes.
+
+Unlike the built-in service, this route dials the private address **directly**,
+so it does need the global flag:
 
 ```yaml
 config:
@@ -408,11 +440,16 @@ Three things this does **not** change, each worth being explicit about:
   stored here and opened here. A tunnel changes which addresses are reachable,
   not where the secret lives.
 
-`allowPrivateClusterTargets` is a single global flag, which is why this recipe
-is documented for self-hosted installs and not offered on the hosted service:
-there, flipping it would give *every* tenant the ability to aim a connection
-string at our own private network. A per-cluster tunnel that closes that gap is
-[#353](https://github.com/FullmetalBober/Indexterity/issues/353).
+`allowPrivateClusterTargets` is a single global flag, which is why the
+run-your-own-client recipe is documented for self-hosted installs and not offered
+on the hosted service: there, flipping it would give *every* tenant the ability to
+aim a connection string at our own private network.
+
+**`tunnel.enabled` is the per-peering answer to that**, and it shipped in
+[#353](https://github.com/FullmetalBober/Indexterity/issues/353): reach is
+granted by the org that registered the peering, bounded by its `AllowedIPs`, and
+judged on every single dial — so no global flag has to be relaxed for one tenant
+to reach one network.
 
 ## Notes on the workloads
 
