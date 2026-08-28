@@ -14,15 +14,26 @@ import (
 // made at all: the credentials, the request parsing, and — the load-bearing one
 // — that a name is passed to the api verbatim rather than resolved here.
 
-// A server with no tunnel: every test below ends before a dial is attempted,
-// either at authentication, at parsing, or at the verdict.
-func testServer(t *testing.T) (*socksServer, *verdicts, chan event) {
+// A server holding one peering with no device behind it: every test below ends
+// before a dial is attempted, either at authentication, at parsing, or at the
+// verdict.
+//
+// The peering is returned rather than the server's credentials, because the
+// server no longer has any — they belong to the peering the caller authenticates
+// as, which is the whole of the routing change.
+func testServer(t *testing.T) (*socksServer, *peering, chan event) {
 	t.Helper()
 	emitted := make(chan event, 16)
-	pending := newVerdicts()
-	server, err := startSocks(nil, pending, func(e event) error {
+	peerings := newRegistry()
+	entry, err := peerings.add("test-peering", nil, newVerdicts(), func(e event) error {
 		emitted <- e
 		return nil
+	})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	server, err := startSocks("127.0.0.1:0", peerings, func(message string) {
+		t.Logf("socks: %s", message)
 	})
 	if err != nil {
 		t.Fatalf("startSocks: %v", err)
@@ -32,7 +43,7 @@ func testServer(t *testing.T) (*socksServer, *verdicts, chan event) {
 			t.Errorf("close: %v", closeErr)
 		}
 	})
-	return server, pending, emitted
+	return server, entry, emitted
 }
 
 func dialServer(t *testing.T, server *socksServer) net.Conn {
@@ -94,7 +105,7 @@ func connect(t *testing.T, client net.Conn, host string, port uint16) {
 }
 
 func TestSocksRefusesTheWrongPassword(t *testing.T) {
-	server, _, _ := testServer(t)
+	server, entry, _ := testServer(t)
 	go server.serve(t.Context())
 	client := dialServer(t, server)
 
@@ -106,8 +117,8 @@ func TestSocksRefusesTheWrongPassword(t *testing.T) {
 		t.Fatalf("greeting reply: %v", err)
 	}
 
-	request := []byte{authVersion, byte(len(server.username))}
-	request = append(request, server.username...)
+	request := []byte{authVersion, byte(len(entry.username))}
+	request = append(request, entry.username...)
 	request = append(request, byte(len("wrong")))
 	request = append(request, "wrong"...)
 	if _, err := client.Write(request); err != nil {
@@ -144,11 +155,11 @@ func TestSocksRefusesACallerOfferingNoAuth(t *testing.T) {
 }
 
 func TestSocksAsksTheApiAboutTheNameItWasGiven(t *testing.T) {
-	server, pending, emitted := testServer(t)
+	server, entry, emitted := testServer(t)
 	go server.serve(t.Context())
 	client := dialServer(t, server)
 
-	if err := authenticate(t, client, server.username, server.password); err != nil {
+	if err := authenticate(t, client, entry.username, entry.password); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 	connect(t, client, "db.internal", 27017)
@@ -174,17 +185,17 @@ func TestSocksAsksTheApiAboutTheNameItWasGiven(t *testing.T) {
 
 	// Nobody waiting is worth saying so: it means the two sides disagree about
 	// what is in flight.
-	if pending.deliver("nobody", verdict{refusal: "no"}) {
+	if entry.verdicts.deliver("nobody", verdict{refusal: "no"}) {
 		t.Fatal("delivering to an unknown id claimed a waiter")
 	}
 }
 
 func TestSocksRefusesTheDialTheApiRefuses(t *testing.T) {
-	server, pending, emitted := testServer(t)
+	server, entry, emitted := testServer(t)
 	go server.serve(t.Context())
 	client := dialServer(t, server)
 
-	if err := authenticate(t, client, server.username, server.password); err != nil {
+	if err := authenticate(t, client, entry.username, entry.password); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 	connect(t, client, "169.254.169.254", 80)
@@ -202,7 +213,7 @@ func TestSocksRefusesTheDialTheApiRefuses(t *testing.T) {
 	}
 
 	// The guard's own sentence, from the api.
-	if !pending.deliver(id, verdict{refusal: "cloud metadata — never a database, whatever route reaches it"}) {
+	if !entry.verdicts.deliver(id, verdict{refusal: "cloud metadata — never a database, whatever route reaches it"}) {
 		t.Fatal("nothing was waiting for the verdict")
 	}
 
@@ -216,11 +227,11 @@ func TestSocksRefusesTheDialTheApiRefuses(t *testing.T) {
 }
 
 func TestSocksRefusesBind(t *testing.T) {
-	server, _, _ := testServer(t)
+	server, entry, _ := testServer(t)
 	go server.serve(t.Context())
 	client := dialServer(t, server)
 
-	if err := authenticate(t, client, server.username, server.password); err != nil {
+	if err := authenticate(t, client, entry.username, entry.password); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 	// A database driver opens outbound connections. A proxy that also listens on
@@ -239,11 +250,11 @@ func TestSocksRefusesBind(t *testing.T) {
 }
 
 func TestSocksPassesAnIPLiteralThroughTheSameVerdict(t *testing.T) {
-	server, _, emitted := testServer(t)
+	server, entry, emitted := testServer(t)
 	go server.serve(t.Context())
 	client := dialServer(t, server)
 
-	if err := authenticate(t, client, server.username, server.password); err != nil {
+	if err := authenticate(t, client, entry.username, entry.password); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 	// atyp=1, no name to resolve — and it is asked about anyway. An address the

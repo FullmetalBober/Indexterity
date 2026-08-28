@@ -2,9 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/subtle"
-	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -17,7 +14,7 @@ import (
 	"time"
 )
 
-// SOCKS5 on loopback, which is the seam.
+// SOCKS5, which is the seam.
 //
 // The three database drivers all speak SOCKS5 — mongodb via proxyHost, pg via
 // its stream factory, tedious via options.connector — and all three hand the
@@ -116,47 +113,39 @@ func (v *verdicts) deliver(id string, answer verdict) bool {
 	return true
 }
 
+// One listener, in front of every peering this process holds.
+//
+// It was loopback with an ephemeral port when the process WAS one tunnel and the
+// api was its parent. As a service it has to be reachable from the api's own
+// container, and that changes what the credentials are for: they used to be what
+// stopped another process on the same host using an open proxy, and they are now
+// also what SELECTS the peering, so a caller reaches exactly the one device its
+// credentials name.
+//
+// One port rather than one per peering, because an ephemeral port per customer
+// cannot be published. A kubernetes Service routes the ports it declares, so a
+// port nobody declared is a peering the api cannot reach — the shape that made
+// per-peering listeners work is exactly the shape a service does not have.
 type socksServer struct {
 	listener *net.TCPListener
-	username string
-	password string
-	tunnel   *tunnel
-	verdicts *verdicts
-	emit     func(event) error
+	peerings *registry
+	// Problems that belong to no peering: a failed accept, a listener that died.
+	// They go to stderr rather than into some customer's event stream, because
+	// attributing them to whichever peering happened to be handy is a lie in a
+	// log somebody will read during an incident.
+	log func(string)
 }
 
-// Loopback and an ephemeral port: nothing outside this host can reach it, and
-// the credentials below are what stop another process on the host using it as
-// an open proxy into a customer's network.
-func startSocks(t *tunnel, v *verdicts, emit func(event) error) (*socksServer, error) {
-	listener, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+func startSocks(address string, peerings *registry, log func(string)) (*socksServer, error) {
+	resolved, err := net.ResolveTCPAddr("tcp", address)
 	if err != nil {
-		return nil, fmt.Errorf("could not listen on loopback: %w", err)
+		return nil, fmt.Errorf("socks listen address %q is not usable: %w", address, err)
 	}
-	username, err := secret()
+	listener, err := net.ListenTCP("tcp", resolved)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("could not listen on %s: %w", address, err)
 	}
-	password, err := secret()
-	if err != nil {
-		return nil, err
-	}
-	return &socksServer{
-		listener: listener,
-		username: username,
-		password: password,
-		tunnel:   t,
-		verdicts: v,
-		emit:     emit,
-	}, nil
-}
-
-func secret() (string, error) {
-	raw := make([]byte, 24)
-	if _, err := rand.Read(raw); err != nil {
-		return "", fmt.Errorf("could not generate a credential: %w", err)
-	}
-	return base64.RawURLEncoding.EncodeToString(raw), nil
+	return &socksServer{listener: listener, peerings: peerings, log: log}, nil
 }
 
 func (s *socksServer) port() (uint16, error) {
@@ -183,9 +172,7 @@ func (s *socksServer) serve(ctx context.Context) {
 			if errors.Is(err, net.ErrClosed) || ctx.Err() != nil {
 				return
 			}
-			if emitErr := s.emit(newError("socks accept failed: " + err.Error())); emitErr != nil {
-				return
-			}
+			s.log("socks accept failed: " + err.Error())
 			continue
 		}
 		go s.handle(ctx, connection)
@@ -200,10 +187,14 @@ func (s *socksServer) handle(ctx context.Context, client net.Conn) {
 	}()
 
 	if err := client.SetDeadline(time.Now().Add(handshakeTimeout)); err != nil {
-		_ = s.emit(newError("could not set a handshake deadline: " + err.Error()))
+		s.log("could not set a handshake deadline: " + err.Error())
 		return
 	}
-	if err := s.negotiate(client); err != nil {
+	// Which peering this caller reached is decided HERE, by its credentials, and
+	// nothing after this line consults anything else. A dial cannot cross from
+	// one customer's device to another's without a credential that names it.
+	entry, err := s.negotiate(client)
+	if err != nil {
 		// A refused greeting is a fact about the caller, not about the tunnel, and
 		// a driver retrying with the wrong password would fill the trail with it.
 		// It goes nowhere on purpose.
@@ -215,17 +206,17 @@ func (s *socksServer) handle(ctx context.Context, client net.Conn) {
 		return
 	}
 
-	target, refusal, err := s.verdictFor(ctx, host, port)
+	target, refusal, err := entry.verdictFor(ctx, host, port)
 	if err != nil {
 		_ = writeReply(client, replyGeneralFailure)
-		_ = s.emit(newError(err.Error()))
+		_ = entry.emit(newError(err.Error()))
 		return
 	}
 	if refusal != "" {
 		// The guard's own sentence goes to the api, which is what logs it against
 		// the tunnel; SOCKS has no field for a reason.
 		_ = writeReply(client, replyNotAllowed)
-		_ = s.emit(newError(refusal))
+		_ = entry.emit(newError(refusal))
 		return
 	}
 
@@ -239,7 +230,7 @@ func (s *socksServer) handle(ctx context.Context, client net.Conn) {
 
 	dialCtx, cancel := context.WithTimeout(ctx, verdictTimeout)
 	defer cancel()
-	upstream, err := s.tunnel.dial(dialCtx, target)
+	upstream, err := entry.device.dial(dialCtx, target)
 	if err != nil {
 		_ = writeReply(client, replyRefused)
 		return
@@ -254,62 +245,68 @@ func (s *socksServer) handle(ctx context.Context, client net.Conn) {
 	splice(client, upstream)
 }
 
-// RFC 1928 greeting and RFC 1929 authentication. Username/password only: an
-// unauthenticated proxy on loopback is reachable by every process on the host,
-// and what is on the other side of it is a customer's private network.
-func (s *socksServer) negotiate(client net.Conn) error {
+// RFC 1928 greeting and RFC 1929 authentication, answering with the peering the
+// caller authenticated as.
+//
+// Username/password is the only method offered, and it is no longer only about
+// authentication: this listener is on a container network rather than loopback,
+// so the credentials are simultaneously what proves the caller is the api and
+// what names the device it may reach. There is deliberately no method by which a
+// caller reaches "the tunnel" without naming one.
+func (s *socksServer) negotiate(client net.Conn) (*peering, error) {
 	header := make([]byte, 2)
 	if _, err := io.ReadFull(client, header); err != nil {
-		return err
+		return nil, err
 	}
 	if header[0] != socksVersion {
-		return fmt.Errorf("socks version %d is not supported", header[0])
+		return nil, fmt.Errorf("socks version %d is not supported", header[0])
 	}
 	methods := make([]byte, int(header[1]))
 	if _, err := io.ReadFull(client, methods); err != nil {
-		return err
+		return nil, err
 	}
 	if !slices.Contains(methods, methodUserPass) {
 		if _, err := client.Write([]byte{socksVersion, methodNone}); err != nil {
-			return err
+			return nil, err
 		}
-		return fmt.Errorf("the caller offered no username/password method")
+		return nil, fmt.Errorf("the caller offered no username/password method")
 	}
 	if _, err := client.Write([]byte{socksVersion, methodUserPass}); err != nil {
-		return err
+		return nil, err
 	}
 
 	version := make([]byte, 1)
 	if _, err := io.ReadFull(client, version); err != nil {
-		return err
+		return nil, err
 	}
 	if version[0] != authVersion {
-		return fmt.Errorf("auth version %d is not supported", version[0])
+		return nil, fmt.Errorf("auth version %d is not supported", version[0])
 	}
 	username, err := readByteString(client)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	password, err := readByteString(client)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	// Constant time, and both halves compared even when the first already
-	// failed: a length or a timing difference here is a credential oracle for
-	// anything else running on the host.
-	userOk := subtle.ConstantTimeCompare(username, []byte(s.username))
-	passOk := subtle.ConstantTimeCompare(password, []byte(s.password))
-	if userOk&passOk != 1 {
+	// The password comparison is constant time; the username is a map key, which
+	// it has to be for the lookup to happen at all, so a caller can learn that a
+	// username exists by timing. That is the cost of routing by credential and it
+	// is accepted: the username is 24 random bytes it has to guess first, and
+	// knowing one exists does not get it past the password.
+	entry := s.peerings.authenticate(string(username), string(password))
+	if entry == nil {
 		if _, err = client.Write([]byte{authVersion, 0x01}); err != nil {
-			return err
+			return nil, err
 		}
-		return fmt.Errorf("the caller's credentials do not match")
+		return nil, fmt.Errorf("the caller's credentials do not match a peering")
 	}
 	if _, err = client.Write([]byte{authVersion, 0x00}); err != nil {
-		return err
+		return nil, err
 	}
-	return nil
+	return entry, nil
 }
 
 func readByteString(client net.Conn) ([]byte, error) {
@@ -387,11 +384,16 @@ func writeReply(client net.Conn, code byte) error {
 }
 
 // Asks the api whether this connection may be made, and to which address.
-func (s *socksServer) verdictFor(ctx context.Context, host string, port uint16) (netip.AddrPort, string, error) {
-	id, answers := s.verdicts.open()
-	defer s.verdicts.close(id)
+//
+// A method on the peering rather than on the server, because the question and
+// the answer both belong to one control connection: the request goes out on this
+// peering's own stream and the api that answers is the one holding it. It lives
+// in this file because the dial path is what it is for.
+func (p *peering) verdictFor(ctx context.Context, host string, port uint16) (netip.AddrPort, string, error) {
+	id, answers := p.verdicts.open()
+	defer p.verdicts.close(id)
 
-	if err := s.emit(newDialRequest(id, host, port)); err != nil {
+	if err := p.emit(newDialRequest(id, host, port)); err != nil {
 		return netip.AddrPort{}, "", fmt.Errorf("could not ask about %s: %w", host, err)
 	}
 

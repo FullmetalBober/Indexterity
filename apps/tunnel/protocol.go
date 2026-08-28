@@ -7,20 +7,37 @@ import (
 	"sync"
 )
 
-// The wire between the api and this process: line-delimited JSON, config and
-// commands in on stdin, events out on stdout.
+// The wire between the api and this service: line-delimited JSON, a greeting and
+// then commands in, events out, one control connection per peering.
 //
-// Two rules shape it. The PrivateKey arrives on stdin and never on argv or on
-// disk — argv is world-readable through /proc and a file outlives the process
-// that needed it. And stdout carries protocol and nothing else, which is why
-// wireguard-go's own logger is pointed at stderr in main.go: device.NewLogger
-// writes to stdout, and one Verbosef line would corrupt the stream.
+// Two rules shape it. The PrivateKey arrives on the connection and never on argv
+// or on disk — argv is world-readable through /proc and a file outlives the
+// process that needed it. And the connection carries protocol and nothing else,
+// which is why wireguard-go's own logger is pointed at stderr: device.NewLogger
+// writes to stdout, and the service's log and its protocol must not be the same
+// stream even now that they are no longer the same file descriptor.
 //
 // Everything here is a concrete struct. A map[string]any would move the shape
-// of the protocol out of the compiler's reach on both sides of a pipe that is
-// carrying a private key.
+// of the protocol out of the compiler's reach on both sides of a connection that
+// is carrying a private key.
 
-// What the api hands over on the first line. A serialization of the
+// The first line of a control connection: who is asking, and what to bring up.
+//
+// The token is the whole of the control plane's authentication. It rides here
+// rather than in a header because there is no header — the transport is a socket
+// carrying JSON lines — and it is compared in constant time before the config is
+// so much as looked at (server.go).
+type hello struct {
+	Token string `json:"token"`
+	// The api's own id for this peering, echoed into this service's log so a line
+	// about a failing peering names the tunnel an operator can look up. Never a
+	// secret and never used for routing: what selects a peering on the data path
+	// is its generated SOCKS5 credential, not this.
+	ID     string `json:"id"`
+	Config config `json:"config"`
+}
+
+// What the api hands over inside the greeting. A serialization of the
 // WireGuardConf it has already parsed and validated (tunnel/conf.ts) — this
 // process re-decodes the keys, because it has to, and re-parses nothing else.
 type config struct {
