@@ -514,8 +514,16 @@ config:
 # peering in userspace. A first-class sidecar with its own image is the next
 # change here.
 #
-# Set config.allowPrivateClusterTargets alongside it: a cluster behind a VPN is an
-# RFC1918 address by definition.
+# config.allowPrivateClusterTargets is NOT required for this, which is the one
+# thing to get right when reading it beside api.extraContainers above: the
+# SIDECAR recipe needs it, because there the api dials the private address
+# directly through the pod's routes and the direct guard applies. A cluster
+# reached through THIS service takes the tunnel branch instead, which judges
+# FORBIDDEN ranges and the peering's AllowedIPs — private is what it expects.
+#
+# It still governs two things: a gateway on a private address (the VPN endpoint is
+# vetted as an ordinary outbound target), and per-member figures on a replica set
+# (member discovery has no tunnel-aware path yet).
 tunnel:
   enabled: false
   # Must match what the container is given as TUNNEL_PORT — it is one variable on
