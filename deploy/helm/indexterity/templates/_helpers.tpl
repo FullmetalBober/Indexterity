@@ -57,6 +57,10 @@ app.kubernetes.io/component: {{ .component }}
 {{- printf "%s:%s" .Values.api.image.repository (default .Chart.AppVersion .Values.api.image.tag) -}}
 {{- end -}}
 
+{{- define "indexterity.tunnelImage" -}}
+{{- printf "%s:%s" .Values.tunnel.image.repository (default .Chart.AppVersion .Values.tunnel.image.tag) -}}
+{{- end -}}
+
 {{- define "indexterity.webImage" -}}
 {{- printf "%s:%s" .Values.web.image.repository (default .Chart.AppVersion .Values.web.image.tag) -}}
 {{- end -}}

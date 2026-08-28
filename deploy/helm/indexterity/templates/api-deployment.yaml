@@ -163,11 +163,44 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
 {{- /*
-Sidecars come AFTER the app container so `kubectl logs` and `kubectl exec` keep
-defaulting to the one anybody asking for "the api" means. They are rendered
-verbatim: a tunnel container needs NET_ADMIN and a device mount, which is the
-exact opposite of this chart's own securityContext, so imposing that here would
-make the values unusable for the only job they have.
+The tunnel service (D112), in THIS pod because it listens on loopback: the api
+reaches it at 127.0.0.1 and nothing outside the pod can reach it at all. That is
+what keeps a customer's private key off the network and the SOCKS5 proxy into
+their network unreachable — the same boundary that held when the api spawned it
+as a child process.
+
+It takes the chart's OWN securityContext, unmodified, which is the payoff for
+terminating the peering in userspace: no NET_ADMIN, no /dev/net/tun, no volume,
+nonroot and `drop: ALL` like everything else here.
+
+After the app container, so `kubectl logs` and `kubectl exec` keep defaulting to
+the one anybody asking for "the api" means.
+*/}}
+{{- if .Values.tunnel.enabled }}
+        - name: tunnel
+          image: {{ include "indexterity.tunnelImage" . }}
+          imagePullPolicy: {{ .Values.tunnel.image.pullPolicy }}
+          securityContext:
+            {{- /* The chart's context, with the root filesystem read-only whatever
+                   it says: this image is `scratch` plus one static binary and the
+                   process writes nothing — no cache, no temp file, no socket on
+                   disk. The api container cannot have that (node wants /tmp),
+                   which is why the shared value is false and this one overrides
+                   it rather than the reverse. */}}
+            {{- toYaml (merge (dict "readOnlyRootFilesystem" true) .Values.securityContext) | nindent 12 }}
+          env:
+            {{- /* The same variable the api is given, from the same value: one
+                   number that cannot be configured into disagreement. */}}
+            - name: TUNNEL_PORT
+              value: {{ .Values.tunnel.port | quote }}
+          resources:
+            {{- toYaml .Values.tunnel.resources | nindent 12 }}
+{{- end }}
+{{- /*
+An operator's OWN sidecars, rendered verbatim — a third-party VPN client needs
+NET_ADMIN and a device mount, which is the exact opposite of this chart's
+securityContext, so imposing that here would make the values unusable for the
+only job they have.
 */}}
           {{- with .Values.api.extraContainers }}
           {{- toYaml . | nindent 8 }}
