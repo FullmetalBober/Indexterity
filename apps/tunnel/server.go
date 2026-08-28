@@ -29,9 +29,12 @@ import (
 // the api's own network namespace, no credential either. What authenticates a
 // greeting is that it could only have come from inside the pod.
 
-// How long a connection has to say who it is. A control port that lets an
-// unauthenticated caller hold a socket open is a port a scan accumulates on.
+// How long a connection has to say who it is. A control port that lets a caller
+// hold a socket open is a port a scan accumulates on.
 const helloTimeout = 10 * time.Second
+
+// Something that is not the api at all — closed in silence. See hello().
+var errNotOurProtocol = errors.New("not this protocol")
 
 // TCP keepalive on an accepted control connection.
 //
@@ -118,8 +121,11 @@ func (c *controlServer) session(ctx context.Context, connection *net.TCPConn) {
 	greeting, err := c.hello(connection, input)
 	if err != nil {
 		// Nothing is emitted and nothing is attributed: a connection that never
-		// named a peering has none to log against.
-		c.log("control connection refused: " + err.Error())
+		// named a peering has none to log against. A port prober is not even
+		// logged — see hello().
+		if !errors.Is(err, errNotOurProtocol) {
+			c.log("control connection refused: " + err.Error())
+		}
 		return
 	}
 
@@ -206,6 +212,19 @@ func (c *controlServer) hello(connection *net.TCPConn, input *bufio.Reader) (*he
 	}
 	if err = connection.SetReadDeadline(time.Time{}); err != nil {
 		return nil, fmt.Errorf("could not lift the greeting deadline: %w", err)
+	}
+
+	// A first byte that is not `{` is not this protocol at all, and saying so in
+	// the log is worse than useless. Render's platform prober speaks HTTP at every
+	// open port it finds inside the container — including this one, roughly once a
+	// second — which turned a refusal into a line a second in production and buried
+	// everything else. There is nothing here an operator can act on: the connection
+	// never named a peering and never will.
+	//
+	// A greeting that IS JSON and still wrong stays logged, because that one means
+	// an api disagreeing with this build about the shape, which is worth seeing.
+	if !strings.HasPrefix(strings.TrimSpace(line), "{") {
+		return nil, errNotOurProtocol
 	}
 
 	var greeting hello
