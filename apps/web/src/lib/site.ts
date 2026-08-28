@@ -9,7 +9,12 @@ export const CANONICAL_ORIGIN = "https://indexterity.alivlad.com";
 
 // Where someone without an account asks for one. Indexterity ships invite-only
 // by default (SIGNUP_MODE), so the marketing CTA has to lead somewhere real.
-export const CONTACT_EMAIL = "hello@alivlad.com";
+//
+// On the same domain as CANONICAL_ORIGIN above, which is the point: a product
+// whose site is indexterity.alivlad.com and whose contact address is somewhere
+// else reads as forwarded-on, and the two constants a fork edits should not
+// disagree about where this deployment lives.
+export const CONTACT_EMAIL = "hello@indexterity.alivlad.com";
 
 export const REQUEST_ACCESS_HREF = `mailto:${CONTACT_EMAIL}?subject=${encodeURIComponent(
   "Indexterity access request",
