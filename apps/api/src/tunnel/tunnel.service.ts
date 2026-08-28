@@ -34,6 +34,17 @@ export class TunnelService {
     private readonly registry: TunnelRegistry,
   ) {}
 
+  /**
+   * Whether this deployment has a tunnel service to reach at all.
+   *
+   * Reported alongside the list rather than discovered at the first use, so the
+   * dashboard can say the feature is off instead of offering a form that cannot
+   * complete. A deployment without one is configured, not broken.
+   */
+  enabled(): boolean {
+    return this.registry.enabled();
+  }
+
   async list(orgId: string): Promise<TunnelView[]> {
     const rows = await this.database.db.select().from(tunnels).where(eq(tunnels.orgId, orgId));
     return Promise.all(rows.map((row) => this.#view(row)));
@@ -114,6 +125,24 @@ export class TunnelService {
     // needs to record what was tested. One read, rather than the caller listing
     // every tunnel in the org to find out this one's name.
     const row = await this.#row(tunnelId);
+
+    // No service, no test — and that is an ANSWER rather than an error, for the
+    // same reason a gateway that stays silent is: the caller asked whether this
+    // peering can be reached, and "this deployment cannot reach any peering" is a
+    // truthful no with a cause worth printing. An error status would make the
+    // dashboard draw a failed request instead of the reason.
+    if (!this.registry.enabled()) {
+      return {
+        verdict: {
+          reachable: false,
+          health: toHealth("down"),
+          handshakeAgeSeconds: null,
+          error:
+            "this deployment has no tunnel service configured, so no peering can be brought up",
+        },
+        tunnel: await this.#view(row),
+      };
+    }
 
     // Opened only when it is not up already. A test must not tear down a
     // peering other clusters are collecting through — and it does not need to,

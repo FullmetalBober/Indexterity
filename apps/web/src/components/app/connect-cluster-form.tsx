@@ -604,8 +604,14 @@ export function ConnectClusterForm({
         {/* Above the certificate boxes, because it decides whether the dial
             happens at all rather than how it is verified. Hidden entirely when
             the org has no tunnels: a picker with one option is a question
-            nobody needs to be asked. */}
-        {tunnels.data.length > 0 ? (
+            nobody needs to be asked.
+            
+            Hidden too when the deployment has no tunnel service, even though rows
+            may still exist from before the setting was removed — offering them
+            here would let somebody choose a route that cannot be dialled and
+            learn it only from the preflight. The settings page is where that
+            state is explained. */}
+        {tunnels.enabled && tunnels.data.length > 0 ? (
           <fieldset className="space-y-2">
             <legend className="font-medium text-sm">
               How to reach it{" "}
