@@ -112,11 +112,10 @@ function ClusterOverview() {
 
   // Ranked per metric, not once for both charts — see latency-series.ts for the bug
   // that made this its own module rather than four lines here.
-  const { readSeries, writeSeries, readNote, writeNote } = latencyCharts(
+  const { readSeries, writeSeries, readNote, writeNote, chartedCount } = latencyCharts(
     latencySeries.data.collections,
     SERIES_PALETTE,
   );
-  const chartedCount = Math.max(readSeries.length, writeSeries.length);
   // Against the server's denominator, not the payload's length: the api sends
   // the top few by evidence and says how many had readings (#64), so this one
   // number covers both its cut and the chart's own fold to the palette.

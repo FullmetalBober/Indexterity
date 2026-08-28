@@ -4901,7 +4901,9 @@ describe("bounded per-cluster reads", () => {
     const now = Date.now();
     const fixtures = [];
     // Enough collections to exceed the cap, with the first ones carrying more
-    // readings so the top-N is decided by evidence rather than by luck.
+    // readings so the top-N is decided by evidence rather than by luck. Every
+    // one of them is READ-ONLY — its write counter never moves — which is the
+    // ordinary shape of a busy cluster and the one that broke the cut.
     for (let c = 0; c < LATENCY_SERIES_MAX_COLLECTIONS + 3; c++) {
       const looks = c < LATENCY_SERIES_MAX_COLLECTIONS ? 5 : 3;
       for (let t = 0; t < looks; t++) {
@@ -4912,12 +4914,30 @@ describe("bounded per-cluster reads", () => {
           collection: `in_window_${c}`,
           readOps: 100 * (t + 1),
           readLatencyMicros: 1_000 * (t + 1),
-          writeOps: 50 * (t + 1),
-          writeLatencyMicros: 500 * (t + 1),
+          writeOps: 50,
+          writeLatencyMicros: 500,
           capturedAt: at,
           lastSeenAt: at,
         });
       }
+    }
+    // The only collection on the cluster anyone WRITES to, and deliberately the
+    // one with the least to show for itself: three readings against the leaders'
+    // five. A cut ranked once by total point count drops it, and the write chart
+    // then reports the cut's blind spot as an absence of writes.
+    for (let t = 0; t < 3; t++) {
+      const at = new Date(now - (3 - t) * 3_600_000);
+      fixtures.push({
+        clusterId: seriesId,
+        database: "app",
+        collection: "written_to",
+        readOps: 10,
+        readLatencyMicros: 100,
+        writeOps: 50 * (t + 1),
+        writeLatencyMicros: 500 * (t + 1),
+        capturedAt: at,
+        lastSeenAt: at,
+      });
     }
     // Inside the plan's 90-day history, outside the series' 30-day window —
     // the case the new floor exists for.
@@ -4941,9 +4961,12 @@ describe("bounded per-cluster reads", () => {
     const collections = body.collections as { collection: string }[];
     // The denominator counts what had readings IN the window, so the panel can
     // say how many it is not drawing.
-    expect(body.totalCollections).toBe(LATENCY_SERIES_MAX_COLLECTIONS + 3);
+    expect(body.totalCollections).toBe(LATENCY_SERIES_MAX_COLLECTIONS + 4);
     expect(collections).toHaveLength(LATENCY_SERIES_MAX_COLLECTIONS);
     expect(collections.map((entry) => entry.collection)).not.toContain("ancient");
+    // Half the budget is the write chart's, so the one collection that can fill
+    // it survives eight better-evidenced readers.
+    expect(collections.map((entry) => entry.collection)).toContain("written_to");
 
     // The long-term view is still whole: the before/after table reads the same
     // rows without the series' tighter window.

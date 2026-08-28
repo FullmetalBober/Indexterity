@@ -94,18 +94,21 @@ describe("latencyCharts", () => {
     expect(new Set(used.map((entry) => entry.split(":")[1])).size).toBe(3);
   });
 
-  it("counts only the collections that reached neither chart", () => {
+  it("counts a collection drawn on either chart once, and one drawn on neither not at all", () => {
     const collections = [
       series("charted-read", [{ read: 1, write: null }]),
       series("charted-write", [{ read: null, write: 2 }]),
+      series("charted-both", [{ read: 3, write: 4 }]),
       // No drawable point of either kind — a run with no ops through it.
       series("silent", [{ read: null, write: null }]),
     ];
-    expect(latencyCharts(collections, PALETTE).foldedCount).toBe(1);
+    // Three drawn, not the two the read chart alone shows: the count is the
+    // union, so the caller's "+N more" does not swallow a write-only collection.
+    expect(latencyCharts(collections, PALETTE).chartedCount).toBe(3);
   });
 
-  it("never claims more collections are folded than exist", () => {
-    expect(latencyCharts([], PALETTE).foldedCount).toBe(0);
+  it("charts nothing when it was sent nothing", () => {
+    expect(latencyCharts([], PALETTE).chartedCount).toBe(0);
   });
 
   it("recycles the palette rather than handing out undefined", () => {
