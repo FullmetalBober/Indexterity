@@ -29,7 +29,7 @@ Change Date:          Four years from the date each version of the Licensed
 Change License:       Apache License, Version 2.0
 
 For information about alternative licensing arrangements for the Licensed Work,
-please contact hello@alivlad.com.
+please contact hello@indexterity.alivlad.com.
 
 -----------------------------------------------------------------------------
 

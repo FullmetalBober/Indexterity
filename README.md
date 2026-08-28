@@ -89,7 +89,7 @@ is withheld permanently.
 One cluster means one deployment behind one connection string: a three-node
 replica set is one, a sharded deployment behind its mongos is one.
 
-Want more than that? [hello@alivlad.com](mailto:hello@alivlad.com?subject=Indexterity%20commercial%20licence).
+Want more than that? [hello@indexterity.alivlad.com](mailto:hello@indexterity.alivlad.com?subject=Indexterity%20commercial%20licence).
 The copyright is held by one person, so a commercial licence is a conversation,
 not a legal project.
 
