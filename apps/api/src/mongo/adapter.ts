@@ -1,3 +1,4 @@
+import type { TunnelRoute } from "../engine/net-guard";
 import type {
   DialProxy,
   EngineAdapter,
@@ -23,13 +24,15 @@ class MongoEngineSession implements EngineSession {
     private readonly conn: MongoConnection,
     connString: string,
     overrides?: TlsOverrides,
+    proxy?: DialProxy,
+    route?: TunnelRoute,
   ) {
     // Opened lazily on the first usage collection and held for the session's
     // life, so a 3-member set costs 3 connections rather than 3 per collect.
     // The members inherit the cluster's own consent: they are the same cluster,
     // reached one node at a time, and a certificate the owner accepted for it is
     // accepted for its members too.
-    this.members = new MemberConnections(conn, connString, overrides);
+    this.members = new MemberConnections(conn, connString, overrides, proxy, route);
     this.collector = new MongoIndexCollector(conn, this.members);
   }
 
@@ -66,10 +69,13 @@ export const mongoAdapter: EngineAdapter = {
     connectionString: string,
     overrides?: TlsOverrides,
     proxy?: DialProxy,
+    route?: TunnelRoute,
   ): Promise<EngineSession> => {
     const conn = new MongoConnection(connectionString, overrides, proxy);
     await conn.connect();
-    return new MongoEngineSession(conn, connectionString, overrides);
+    // The proxy AND the route go to the session, because the members it discovers
+    // later are dialled through the one and judged by the other (#382).
+    return new MongoEngineSession(conn, connectionString, overrides, proxy, route);
   },
   diagnose: diagnoseConnection,
   provisionScopedUser,

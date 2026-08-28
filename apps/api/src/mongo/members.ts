@@ -1,5 +1,9 @@
-import { allowPrivateTargets, assertTargetsAllowed } from "../engine/net-guard";
-import type { TlsOverrides } from "../engine/ports";
+import {
+  allowPrivateTargets,
+  assertDialTargetsAllowed,
+  type TunnelRoute,
+} from "../engine/net-guard";
+import type { DialProxy, TlsOverrides } from "../engine/ports";
 import { directConnectionTo } from "./conn-string";
 import { MongoConnection } from "./connection";
 
@@ -38,6 +42,12 @@ export class MemberConnections {
     private readonly primary: MongoConnection,
     private readonly connString: string,
     private readonly overrides?: TlsOverrides,
+    // How this cluster is REACHED, when it is not simply reachable. Both halves
+    // are needed and for different reasons: the proxy is where a member's socket
+    // goes, and the route is what a member's address is judged against. Absent
+    // for every cluster dialled directly, which is the common case.
+    private readonly proxy?: DialProxy,
+    private readonly route?: TunnelRoute,
   ) {}
 
   // Connections to every member the set admits to (including the address the
@@ -71,10 +81,22 @@ export class MemberConnections {
       // The member list comes from the cluster, which means a hostile or
       // misconfigured one could name an address we must not dial. It is
       // user-influenced input like any connection string, so it goes through
-      // the same guard.
-      const ok = await assertTargetsAllowed([host], false, {
-        allowPrivate: allowPrivateTargets(),
-      })
+      // the same guard — and through the SAME BRANCH of it the cluster's own
+      // connection took.
+      //
+      // That last part was the bug (#382). This called the direct guard
+      // unconditionally, and a tunnelled replica set is made entirely of private
+      // addresses, so with ALLOW_PRIVATE_CLUSTER_TARGETS off — the default, and
+      // the right one — every member was refused and only the base connection
+      // ever contributed. Nothing said so: the roster showed members as refused,
+      // which reads like an unreachable node rather than our own guard.
+      const ok = await assertDialTargetsAllowed(
+        [host],
+        false,
+        this.route === undefined
+          ? { kind: "direct", allowPrivate: allowPrivateTargets() }
+          : { kind: "tunnel", ...this.route },
+      )
         .then(() => true)
         .catch(() => false);
       if (!ok) {
@@ -82,9 +104,13 @@ export class MemberConnections {
         continue;
       }
       try {
+        // Through the same proxy the cluster's own connection uses. Judging a
+        // member correctly and then dialling it outside the tunnel would be the
+        // same bug wearing the other hat: the address is only reachable in there.
         const conn = new MongoConnection(
           directConnectionTo(this.connString, host, resolved),
           this.overrides,
+          this.proxy,
         );
         await conn.connect();
         this.dialled.push({ host, state: "answered", connection: conn });

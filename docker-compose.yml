@@ -45,6 +45,11 @@ services:
       # dial one on purpose. Never set this in a deployment that dials real
       # customer databases.
       ALLOW_INSECURE_CLUSTER_TLS: "true"
+      # The tunnel service, which this stack always starts. It shares this
+      # container's network namespace, so the port is the whole address. Absent
+      # this variable the VPN feature reports itself off, which is what a
+      # deployment with no tunnel container gets.
+      TUNNEL_PORT: ${TUNNEL_PORT:-9411}
       SIGNUP_MODE: open
       # Off in dev so nothing demands an authenticator app of a test account;
       # a hosted install sets it (see .env.example, REQUIRE_OWNER_2FA).
@@ -92,6 +97,35 @@ services:
       postgres:
         condition: service_healthy
 
+  # WireGuard peerings, terminated in userspace (apps/tunnel, D113). Go rather
+  # than node, so this one runs from source with the Go toolchain instead of
+  # turbo — `go run` rebuilds on restart, which is as much dev loop as a service
+  # with no UI needs.
+  #
+  # `network_mode: service:api` puts it in the API's OWN network namespace, which
+  # is the whole design rather than a convenience: its listeners are on loopback,
+  # so the api reaches them at 127.0.0.1 and nothing else can reach them at all.
+  # That is the same boundary a child process had, and it is why there is no
+  # shared secret here — and it mirrors a kubernetes sidecar exactly, so dev and
+  # prod agree about what "beside the api" means.
+  #
+  # No `ports:` and no networks of its own: a container sharing another's
+  # namespace cannot have either, which is the constraint saying out loud that
+  # this service is not independently reachable.
+  tunnel:
+    image: docker.io/library/golang:1.27.0-alpine
+    working_dir: /app/apps/tunnel
+    command: sh -c "exec go run ."
+    network_mode: service:api
+    environment:
+      TUNNEL_PORT: ${TUNNEL_PORT:-9411}
+    volumes:
+      - ./:/app
+      - tunnel_go_cache:/root/.cache/go-build
+      - tunnel_go_mod:/go/pkg/mod
+    depends_on:
+      - api
+
   web:
     image: docker.io/library/node:26-slim
     working_dir: /app
@@ -133,3 +167,7 @@ volumes:
   pgdata18:
   api_node_modules:
   web_node_modules:
+  # The Go build and module caches, so `go run` on restart is a link rather than
+  # a rebuild of wireguard-go and gvisor.
+  tunnel_go_cache:
+  tunnel_go_mod:

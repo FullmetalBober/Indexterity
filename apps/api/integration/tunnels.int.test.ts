@@ -11,7 +11,18 @@ import {
   seal,
   user,
 } from "../src/db";
-import { api, authPost, databaseUrl, type Session, signUp, startApi, stopApi } from "./helpers";
+import {
+  api,
+  authPost,
+  databaseUrl,
+  type Session,
+  signUp,
+  startApi,
+  startTunnelService,
+  stopApi,
+  stopTunnelService,
+  TUNNEL_PORT,
+} from "./helpers";
 
 // The tunnel routes end to end (#353): register, edit, test, remove — with the
 // tenancy and role refusals that make them safe to expose, and the trail row
@@ -70,8 +81,17 @@ function conf(options: { endpoint?: string; allowedIps?: string; dns?: boolean }
   ].join("\n");
 }
 
+// `{ enabled, tunnels }` rather than a bare array since the feature can be off:
+// the rows still come back, and the flag is what the dashboard reads to say so.
 async function tunnels(session: Session): Promise<Record<string, unknown>[]> {
-  return asArray(await (await api("/tunnels", session)).json()).map(asRecord);
+  return asArray(asRecord(await (await api("/tunnels", session)).json()).tunnels).map(asRecord);
+}
+
+// Whether this deployment reports a tunnel service at all. The suite runs one, so
+// this is `true` — asserted rather than assumed, because every tunnel test below
+// depends on it and a false here would explain all of them at once.
+async function tunnelsEnabled(session: Session): Promise<unknown> {
+  return asRecord(await (await api("/tunnels", session)).json()).enabled;
 }
 
 async function trail(session: Session, event: string): Promise<Record<string, unknown>[]> {
@@ -81,6 +101,7 @@ async function trail(session: Session, event: string): Promise<Record<string, un
 }
 
 let server: ChildProcess;
+let tunnelService: ChildProcess;
 let db: ReturnType<typeof createDatabase>;
 let owner: Session;
 let member: Session;
@@ -91,7 +112,10 @@ const createdEmails: string[] = [];
 const createdOrgIds: string[] = [];
 
 beforeAll(async () => {
-  server = await startApi();
+  // The service first: the api is handed its URL, and a peering cannot come up
+  // without something answering on it.
+  tunnelService = await startTunnelService();
+  server = await startApi({ TUNNEL_PORT: String(TUNNEL_PORT) });
   db = createDatabase(databaseUrl(), 2);
 
   owner = await signUp("tunnel-owner");
@@ -132,6 +156,16 @@ afterAll(async () => {
   }
   await db.$client.end();
   await stopApi(server);
+  await stopTunnelService(tunnelService);
+});
+
+describe("the feature's availability", () => {
+  // Every test below depends on this being true, and a deployment with no tunnel
+  // service is a supported state that reports itself — so if this is false, it
+  // explains all of them at once rather than each failing on its own terms.
+  it("reports itself enabled, because this suite runs a tunnel service", async () => {
+    expect(await tunnelsEnabled(owner)).toBe(true);
+  });
 });
 
 describe("registering a tunnel", () => {

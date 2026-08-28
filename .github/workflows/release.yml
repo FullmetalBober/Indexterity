@@ -1,6 +1,6 @@
 name: Release
 
-# Tag-driven: `git tag v0.2.0 && git push --tags` publishes the three images and
+# Tag-driven: `git tag v0.2.0 && git push --tags` publishes the four images and
 # the chart, all versioned from that tag. Nothing publishes from main, so a
 # merge can never move what someone's cluster pulls.
 on:
@@ -75,6 +75,22 @@ jobs:
             ghcr.io/${{ steps.meta.outputs.owner }}/indexterity-web:latest
           cache-from: type=gha,scope=web
           cache-to: type=gha,scope=web,mode=max
+
+      # The tunnel service (D113), which runs as a sidecar in the api's pod. Its
+      # own image because it is its own container — the api image stopped carrying
+      # the binary when nothing there spawned it any more. Published from the same
+      # tag as the rest, so a chart version names images it was tested against.
+      - name: Build and push the tunnel image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: apps/tunnel/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ steps.meta.outputs.owner }}/indexterity-tunnel:${{ steps.meta.outputs.version }}
+            ghcr.io/${{ steps.meta.outputs.owner }}/indexterity-tunnel:latest
+          cache-from: type=gha,scope=tunnel
+          cache-to: type=gha,scope=tunnel,mode=max
 
       # Both apps and a supervisor in one container, for a host that runs one
       # container per service and has no pods — and for the chart's

@@ -1,5 +1,6 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import { connect } from "node:net";
 import path from "node:path";
 import {
   and,
@@ -25,6 +26,61 @@ export function databaseUrl(): string {
     throw new Error("integration tests need DATABASE_URL (a migrated postgres)");
   }
   return url;
+}
+
+// The tunnel service the api dials (apps/tunnel, D113). One fixed loopback port,
+// which is the same variable both sides read — the api to find it, the service to
+// bind it.
+//
+// 127.0.0.1 explicitly: podman publishes IPv4 only, so `localhost` can resolve to
+// ::1 and be refused.
+export const TUNNEL_PORT = 19_411;
+
+/**
+ * Spawn the real tunnel service and wait for its control port to accept.
+ *
+ * The REAL one, not a stub: what this suite exists to prove is that the api's
+ * client and the service agree, and a stub on this side would only prove the api
+ * agrees with itself. The stub lives in src/tunnel/remote.test.ts, where that is
+ * the point.
+ */
+export async function startTunnelService(): Promise<ChildProcess> {
+  const binary = path.resolve(__dirname, "../../tunnel/dist/indexterity-tunnel");
+  if (!existsSync(binary)) {
+    throw new Error(
+      "apps/tunnel/dist/indexterity-tunnel missing — run `turbo run build` before the integration suite",
+    );
+  }
+  const child = spawn(binary, [], {
+    env: { ...process.env, TUNNEL_PORT: String(TUNNEL_PORT) },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  for (let i = 0; i < 60; i++) {
+    if (await accepts(TUNNEL_PORT)) return child;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  child.kill("SIGKILL");
+  throw new Error("the tunnel service did not start");
+}
+
+export async function stopTunnelService(child: ChildProcess): Promise<void> {
+  child.kill("SIGTERM");
+  await new Promise((resolve) => {
+    child.once("exit", resolve);
+    setTimeout(resolve, 3_000);
+  });
+}
+
+function accepts(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = connect({ host: "127.0.0.1", port });
+    const done = (answer: boolean) => {
+      socket.destroy();
+      resolve(answer);
+    };
+    socket.once("connect", () => done(true));
+    socket.once("error", () => done(false));
+  });
 }
 
 // Spawn the built api and wait for /api/health. The caller owns teardown.

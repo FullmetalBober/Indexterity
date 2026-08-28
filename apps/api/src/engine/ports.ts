@@ -1,3 +1,4 @@
+import type { TunnelRoute } from "./net-guard";
 import type { IndexSpec, QueryShape, ServerHealth } from "./types";
 
 // The engine-neutral boundary. Everything above this file — the analysis core,
@@ -387,10 +388,17 @@ export interface EngineAdapter {
   // The owner's checkbox choices written into the string, so what is stored and
   // what was consented to cannot disagree.
   applySecureTransport(value: string, overrides: TlsOverrides): string;
+  // `proxy` says where to dial; `route` says how every address reached this way
+  // must be JUDGED. Both, because a session does more dialling than the one
+  // connection it is opened with: replica-set and availability-group members are
+  // discovered from the cluster's own answer and dialled afterwards, and with
+  // only the proxy those dials were judged by the direct guard — which refuses
+  // the private addresses a tunnelled set is entirely made of (#382).
   open(
     connectionString: string,
     overrides?: TlsOverrides,
     proxy?: DialProxy,
+    route?: TunnelRoute,
   ): Promise<EngineSession>;
   // Report what these credentials may do, without writing anything.
   //

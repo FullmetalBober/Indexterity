@@ -206,10 +206,20 @@ const workerShape = {
   // — which is why this one has no default.
   RETENTION_DAYS: optionalPositive(),
   STORAGE_USD_PER_GB_MONTH: optionalPositive(),
-  // Where the tunnel binary is (#353, D111). Defaults to the layout both the
-  // repo and the image have — apps/tunnel/dist beside apps/api — and is here for
-  // the deployments that put it somewhere else.
-  TUNNEL_BINARY: z.string().min(1).optional(),
+  // The LOOPBACK port the tunnel service listens on (#353, D113). The same
+  // variable the service itself reads, so the two cannot be configured into
+  // disagreement — there is no host, because there is no deployment where the
+  // service is anywhere but beside the api in one network namespace: the same
+  // container in the all-in-one image, a sidecar in the api's pod.
+  //
+  // That is what keeps the two properties a pipe had. A customer's private key
+  // never crosses a network, and the SOCKS5 proxy into their network is not
+  // reachable from outside the pod — so there is no shared secret to configure
+  // either, because there is no door a stranger could knock on.
+  //
+  // Absent means the VPN feature is OFF, which is a supported state the dashboard
+  // reports rather than a missing setting with a default.
+  TUNNEL_PORT: optionalPositive(),
   ALLOW_PRIVATE_CLUSTER_TARGETS: flag(false),
   ALLOW_INSECURE_CLUSTER_TLS: flag(false),
   // One flag for every engine rather than one per engine. The knob answers a

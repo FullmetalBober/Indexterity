@@ -44,7 +44,14 @@ export function ClusterTunnel({
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
-        {tunnels.pending ? null : tunnels.data.length === 0 ? (
+        {/* Off, and nothing selected: there is no choice to offer, so the card says
+            why instead of showing a picker with one option in it. */}
+        {tunnels.pending ? null : !tunnels.enabled && tunnelId === null ? (
+          <p className="text-muted-foreground text-sm">
+            VPN tunnels are turned off on this deployment, so this cluster can only be dialled
+            directly.
+          </p>
+        ) : tunnels.data.length === 0 ? (
           <p className="text-muted-foreground text-sm">
             No tunnels registered.{" "}
             <Link to="/app/settings/tunnels" className="underline">
@@ -53,25 +60,37 @@ export function ClusterTunnel({
             to reach a database that has no public endpoint.
           </p>
         ) : (
-          <Select
-            value={tunnelId ?? DIRECT}
-            disabled={!canEdit || set.isPending}
-            onValueChange={(value) =>
-              set.mutate({ clusterId, tunnelId: value === DIRECT ? null : value })
-            }
-          >
-            <SelectTrigger className="w-full sm:w-96">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value={DIRECT}>Directly, from our own network</SelectItem>
-              {tunnels.data.map((tunnel) => (
-                <SelectItem key={tunnel.id} value={tunnel.id}>
-                  {tunnel.name} — {tunnel.endpoint}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <>
+            {/* Off WITH a tunnel selected is the one case that needs both: the
+                sentence, because this cluster is currently unreachable, and the
+                picker, because switching back to direct is the owner's way out of
+                it. Hiding the control here would strand them. */}
+            {tunnels.enabled ? null : (
+              <p className="text-destructive text-sm">
+                VPN tunnels are turned off on this deployment, so this cluster cannot be reached
+                until the tunnel service is running or it is dialled directly again.
+              </p>
+            )}
+            <Select
+              value={tunnelId ?? DIRECT}
+              disabled={!canEdit || set.isPending}
+              onValueChange={(value) =>
+                set.mutate({ clusterId, tunnelId: value === DIRECT ? null : value })
+              }
+            >
+              <SelectTrigger className="w-full sm:w-96">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={DIRECT}>Directly, from our own network</SelectItem>
+                {tunnels.data.map((tunnel) => (
+                  <SelectItem key={tunnel.id} value={tunnel.id}>
+                    {tunnel.name} — {tunnel.endpoint}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </>
         )}
         {/* A down tunnel is a condition of the TUNNEL. Saying so here stops it
             being read as a broken cluster, which is the wrong thing to go and

@@ -1,3 +1,4 @@
+import type { TunnelRoute } from "../engine/net-guard";
 import type { ClusterEngine, DialProxy, EngineSession, TlsOverrides } from "../engine/ports";
 import { adapterFor } from "../engine/registry";
 
@@ -51,8 +52,9 @@ async function createEntry(
   connString: string,
   overrides?: TlsOverrides,
   proxy?: DialProxy,
+  route?: TunnelRoute,
 ): Promise<PoolEntry> {
-  const session = await adapterFor(engine).open(connString, overrides, proxy);
+  const session = await adapterFor(engine).open(connString, overrides, proxy, route);
   return { connString, session, refs: 0, lastUsed: Date.now(), doomed: false };
 }
 
@@ -69,6 +71,10 @@ export async function acquireClusterSession(
   // tunnel, and a tunnel that is replaced closes its listener, which fails the
   // pooled session and dooms the entry the same way a rotated string does.
   proxy?: DialProxy,
+  // Judged with, not merely dialled through. Same lifetime argument as the proxy:
+  // it belongs to the tunnel, and a replaced tunnel closes its listener, which
+  // fails the pooled session and dooms the entry.
+  route?: TunnelRoute,
 ): Promise<PooledSession> {
   ensureSweeper();
   let pending = entries.get(clusterId);
@@ -89,7 +95,7 @@ export async function acquireClusterSession(
     }
   }
   if (pending === undefined) {
-    pending = createEntry(engine, connString, overrides, proxy);
+    pending = createEntry(engine, connString, overrides, proxy, route);
     entries.set(clusterId, pending);
     pending.catch(() => entries.delete(clusterId));
   }

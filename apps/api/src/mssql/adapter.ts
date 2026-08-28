@@ -1,3 +1,4 @@
+import type { TunnelRoute } from "../engine/net-guard";
 import type {
   DialProxy,
   EngineAdapter,
@@ -27,13 +28,15 @@ class MssqlEngineSession implements EngineSession {
     private readonly conn: MssqlConnection,
     connString: string,
     overrides?: TlsOverrides,
+    proxy?: DialProxy,
+    route?: TunnelRoute,
   ) {
     // Opened lazily on the first usage collection and held for the session's
     // life, so a three-replica group costs three connections rather than three
     // per collect. The replicas inherit the cluster's own consent: they are the
     // same cluster reached one node at a time, and a certificate the owner
     // accepted for it is accepted for its replicas too.
-    this.members = new MssqlMemberConnections(conn, connString, overrides);
+    this.members = new MssqlMemberConnections(conn, connString, overrides, proxy, route);
     this.collector = new MssqlIndexCollector(conn, this.members);
   }
 
@@ -72,6 +75,7 @@ export const mssqlAdapter: EngineAdapter = {
     connectionString: string,
     overrides?: TlsOverrides,
     proxy?: DialProxy,
+    route?: TunnelRoute,
   ): Promise<EngineSession> => {
     const conn = new MssqlConnection(
       connectionString,
@@ -79,7 +83,9 @@ export const mssqlAdapter: EngineAdapter = {
       proxy === undefined ? undefined : { proxy },
     );
     await conn.connect();
-    return new MssqlEngineSession(conn, connectionString, overrides);
+    // Both, because the AG replicas this session discovers later are dialled
+    // through the one and judged by the other (#382).
+    return new MssqlEngineSession(conn, connectionString, overrides, proxy, route);
   },
   diagnose: diagnoseMssqlConnection,
   provisionScopedUser: provisionMssqlScopedUser,

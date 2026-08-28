@@ -1,10 +1,16 @@
 import { masterKeyBytesFor } from "../config/env";
 import { type Database, envKeyProvider, eq, open as openSealed, tunnels } from "../db";
+import type { TunnelRoute } from "../engine/net-guard";
 import type { DialProxy } from "../engine/ports";
 import { parseWireGuardConf } from "./conf";
 import type { TunnelRegistry } from "./tunnel.registry";
 
-// Cluster row's tunnel_id -> a live SOCKS5 endpoint the adapters can dial.
+// Cluster row's tunnel_id -> how the adapters reach it: a live SOCKS5 endpoint to
+// dial through, AND the route every address must be judged against.
+//
+// Both, because the proxy alone only says where to dial. #382 is what one without
+// the other cost: member discovery had the proxy and judged a replica set's
+// private members with the direct guard, refusing all of them.
 //
 // Lazy, and that is the design. A tunnel is brought up the first time something
 // needs it rather than at boot, so an api that restarts does not hold peerings
@@ -23,15 +29,20 @@ export class TunnelUnavailableError extends Error {
   }
 }
 
+export interface ClusterDialRoute {
+  readonly proxy: DialProxy;
+  readonly route: TunnelRoute;
+}
+
 /**
  * Null when the cluster is dialled directly, which is the common case and every
  * cluster that existed before #353.
  */
-export async function proxyForCluster(
+export async function routeForCluster(
   db: Database,
   tunnelId: string | null,
   registry: TunnelRegistry | undefined,
-): Promise<DialProxy | null> {
+): Promise<ClusterDialRoute | null> {
   if (tunnelId === null) return null;
 
   // Undefined means the caller has no registry — a unit test, or a job entry
@@ -45,7 +56,13 @@ export async function proxyForCluster(
   // Already up: the overwhelmingly common path once a cluster is being
   // collected on a schedule.
   const existing = registry.endpoint(tunnelId);
-  if (existing !== null) return toProxy(existing);
+  if (existing !== null) {
+    const route = registry.routeFor(tunnelId);
+    // An endpoint with no route would mean the tunnel went away between those two
+    // reads. Falling through re-opens it rather than dialling with half of what a
+    // dial needs.
+    if (route !== null) return { proxy: toProxy(existing), route };
+  }
 
   const [row] = await db.select().from(tunnels).where(eq(tunnels.id, tunnelId)).limit(1);
   if (row === undefined) {
@@ -64,7 +81,14 @@ export async function proxyForCluster(
         ),
       ),
     );
-    return toProxy(await registry.open(tunnelId, conf));
+    const endpoint = await registry.open(tunnelId, conf);
+    return {
+      proxy: toProxy(endpoint),
+      route: {
+        allowedIps: [...conf.peer.allowedIps],
+        resolve: (host) => registry.resolve(tunnelId, host),
+      },
+    };
   } catch (error) {
     throw new TunnelUnavailableError(tunnelId, error);
   }
