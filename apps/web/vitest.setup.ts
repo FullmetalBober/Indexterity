@@ -1,6 +1,39 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup } from "@testing-library/react";
-import { afterEach } from "vitest";
+import { afterEach, beforeEach } from "vitest";
+
+// A duplicate React key is a console warning and nothing else: the page renders,
+// React reuses the wrong component, and the state of one card can show up in
+// another. It shipped once — three sibling cards on a cluster's settings keyed by
+// the same cluster id — and the only reason anybody noticed was a browser console
+// somebody happened to have open. So it fails a test now.
+//
+// Narrow on purpose. React logs plenty a test may legitimately provoke, and a
+// blanket console.error gate would turn every error-state test into a false
+// failure. Collected and thrown in afterEach rather than from inside
+// console.error, because throwing there lands in the middle of React's own
+// warning path.
+const KEY_WARNINGS = /same key|unique "key"/;
+const realConsoleError = console.error;
+let keyWarnings: string[] = [];
+
+beforeEach(() => {
+  keyWarnings = [];
+  console.error = (...args: unknown[]) => {
+    const text = args.map((arg) => String(arg)).join(" ");
+    if (KEY_WARNINGS.test(text)) keyWarnings.push(text);
+    realConsoleError(...args);
+  };
+});
+
+afterEach(() => {
+  console.error = realConsoleError;
+  if (keyWarnings.length > 0) {
+    const seen = keyWarnings.join("\n");
+    keyWarnings = [];
+    throw new Error(`React reported a duplicate or missing key:\n${seen}`);
+  }
+});
 
 // jsdom does not implement these, and Radix's primitives call them on open.
 // Without them every dialog, select and tooltip test throws instead of failing

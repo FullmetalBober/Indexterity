@@ -189,7 +189,7 @@ function TunnelRow({ tunnel, canEdit }: { tunnel: TunnelView; canEdit: boolean }
               title={inUse ? "Point its clusters somewhere else first" : undefined}
               onClick={() => remove.mutate(tunnel.id)}
             >
-              Remove
+              {remove.isPending ? "Removing…" : "Remove"}
             </Button>
           </div>
         ) : null}

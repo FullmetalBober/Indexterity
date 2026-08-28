@@ -140,7 +140,13 @@ export function ClusterConnection({
         <div className="flex flex-wrap items-center gap-3">
           {cluster.readOnly ? (
             <ConfirmButton
-              trigger={<Button variant="outline">Go live</Button>}
+              pending={toggleMode.isPending}
+              pendingLabel="Going live…"
+              trigger={
+                <Button variant="outline" disabled={toggleMode.isPending}>
+                  {toggleMode.isPending ? "Going live…" : "Go live"}
+                </Button>
+              }
               title="Enable live mode?"
               description={`The engine will be allowed to modify indexes on "${cluster.name}" — ${
                 canHide ? "hide, drop and build" : "drop and build"
@@ -149,8 +155,14 @@ export function ClusterConnection({
               onConfirm={() => toggleMode.mutate(false)}
             />
           ) : (
-            <Button variant="outline" onClick={() => toggleMode.mutate(true)}>
-              Make read-only
+            <Button
+              variant="outline"
+              // Two presses were two requests, and this one flips what the engine
+              // is allowed to do to somebody's database.
+              disabled={toggleMode.isPending}
+              onClick={() => toggleMode.mutate(true)}
+            >
+              {toggleMode.isPending ? "Switching…" : "Make read-only"}
             </Button>
           )}
           <p className="text-muted-foreground text-sm">
@@ -244,8 +256,14 @@ export function ClusterConnection({
                 value={rotateString}
                 onChange={(event) => setRotateString(event.target.value)}
               />
-              <Button type="submit" disabled={rotateString.length === 0}>
-                Save
+              <Button
+                type="submit"
+                // The verify dials the customer's database, which takes as long as
+                // a network round trip through a VPN — the longest wait on this
+                // card, and the one that most needed saying.
+                disabled={rotateString.length === 0 || rotate.isPending}
+              >
+                {rotate.isPending ? "Verifying…" : "Save"}
               </Button>
             </form>
           ) : null}
@@ -257,8 +275,8 @@ export function ClusterConnection({
           <ConfirmButton
             destructive
             trigger={
-              <Button variant="ghost" className="text-destructive">
-                Disconnect
+              <Button variant="ghost" className="text-destructive" disabled={disconnect.isPending}>
+                {disconnect.isPending ? "Disconnecting…" : "Disconnect"}
               </Button>
             }
             title={`Disconnect "${cluster.name}"?`}
@@ -285,6 +303,7 @@ export function ClusterConnection({
               </>
             }
             confirmLabel="Disconnect"
+            pending={disconnect.isPending}
             onConfirm={() => disconnect.mutate()}
           />
           <p className="mt-2 text-muted-foreground text-sm">

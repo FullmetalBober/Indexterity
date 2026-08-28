@@ -1,5 +1,5 @@
 import { ORPCError } from "@orpc/client";
-import { screen } from "@testing-library/react";
+import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { apiError, authOk, renderInApp } from "~/test-utils";
@@ -524,5 +524,66 @@ describe("ClusterConnection least-privilege policy", () => {
       );
       unmount();
     }
+  });
+
+  // Every action on this card changes something on somebody's database, and none
+  // of them said anything while it was in flight: the button stayed live, so a
+  // second press was a second request. The rotation is the worst of them — it
+  // DIALS the customer's cluster to verify, which through a VPN is seconds.
+  describe("while an action is in flight", () => {
+    // A promise that never settles, so the mutation stays pending for the
+    // assertions rather than racing them.
+    const never = () => new Promise(() => {});
+
+    it("blocks the mode switch and says what it is doing", async () => {
+      setClusterMode.mockImplementation(never);
+      const user = userEvent.setup();
+      renderInApp(<ClusterConnection cluster={{ ...cluster, readOnly: false }} />);
+
+      await user.click(screen.getByRole("button", { name: "Make read-only" }));
+
+      const button = await screen.findByRole("button", { name: "Switching…" });
+      expect(button).toBeDisabled();
+      expect(setClusterMode).toHaveBeenCalledTimes(1);
+    });
+
+    it("blocks the rotation, which is the longest wait here", async () => {
+      rotateConnection.mockImplementation(never);
+      const user = userEvent.setup();
+      renderInApp(<ClusterConnection cluster={cluster} />);
+
+      await user.click(screen.getByRole("button", { name: "Rotate string" }));
+      await user.type(
+        screen.getByLabelText("New connection string"),
+        "mongodb://user:pass@host:27017",
+      );
+      await user.click(screen.getByRole("button", { name: "Save" }));
+
+      const button = await screen.findByRole("button", { name: "Verifying…" });
+      expect(button).toBeDisabled();
+      expect(rotateConnection).toHaveBeenCalledTimes(1);
+    });
+
+    // The irreversible one. A second confirm used to fire a second delete, and
+    // the second answers "no such cluster" — an error about the reader's own
+    // successful action.
+    it("blocks the disconnect trigger once it has been confirmed", async () => {
+      deleteCluster.mockImplementation(never);
+      const user = userEvent.setup();
+      renderInApp(<ClusterConnection cluster={cluster} />);
+
+      await user.click(screen.getByRole("button", { name: "Disconnect" }));
+      // Both the trigger and the dialog's action are called "Disconnect", so the
+      // confirm is taken from inside the dialog.
+      const dialog = await screen.findByRole("alertdialog");
+      await user.click(within(dialog).getByRole("button", { name: "Disconnect" }));
+
+      // The dialog is gone and the trigger is where the reader now looks.
+      const trigger = await screen.findByRole("button", { name: "Disconnecting…" });
+      expect(trigger).toBeDisabled();
+
+      await user.click(trigger);
+      expect(deleteCluster).toHaveBeenCalledTimes(1);
+    });
   });
 });
