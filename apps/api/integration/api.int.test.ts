@@ -1946,17 +1946,19 @@ describe("outage resilience", () => {
       .where(eq(recommendations.clusterId, restartId));
     expect(proposals).toHaveLength(0);
 
-    // ...and the empty list now says why (#277). This is the exact cluster the
-    // issue is about: the refusal is correct and permanent, and until this note
-    // existed the customer's only signal was a panel indistinguishable from
-    // "your indexes are all fine".
+    // ...and the empty list now says why (#277). The reason is the WARM-UP, not
+    // the restart: the restart ends the first epoch after a day of watching and
+    // opens a second that is one snapshot long, so a seven-day gate has a day of
+    // trustworthy history to weigh and refuses on that. Which is the difference
+    // the epoch model bought — a day that counts and grows, where a reset used to
+    // void the history and keep voiding it for as long as the restarts lasted.
     const [note] = await db
       .select()
       .from(analysisNotes)
       .where(eq(analysisNotes.clusterId, restartId));
     expect(note?.consideredIndexes).toBe(1);
     expect(note?.trustedIndexes).toBe(0);
-    expect(note?.refusals).toEqual({ "counters-reset": 1 });
+    expect(note?.refusals).toEqual({ "span-too-short": 1 });
 
     // Through the endpoint the dashboard actually reads, with the sentence built
     // from the thresholds the gate used rather than stored beside them.
@@ -1965,9 +1967,10 @@ describe("outage resilience", () => {
     );
     const analysis = asRecord(payload.analysis);
     expect(analysis.usagePaused).toBe(true);
-    expect(analysis.dominantRefusal).toBe("counters-reset");
+    expect(analysis.dominantRefusal).toBe("span-too-short");
     expect(analysis.refusedIndexes).toBe(1);
-    expect(String(analysis.explanation)).toContain("7-day observation window");
+    expect(String(analysis.explanation)).toContain("less than 7 days");
+    expect(String(analysis.explanation)).toContain("A restart does not reset that clock");
     expect(String(analysis.explanation)).toContain("Redundancy findings are unaffected.");
   });
 

@@ -648,11 +648,15 @@ export const RECOMMENDATIONS_CAP = 500;
 // Why the engine had nothing to say (#277).
 //
 // An empty recommendations list is indistinguishable from "your indexes are all
-// fine", and on a cluster whose usage counters reset oftener than the observation
-// window the usage gate refuses every eligible index, indefinitely, with nothing
-// anywhere saying so. This is that state, made a thing the dashboard can draw.
+// fine", and until #277 nothing anywhere said which of the usage gate's checks
+// had refused every eligible index. This is that state, made a thing the
+// dashboard can draw.
+//
+// `counters-reset` was one of these and is not any more: a restart segments the
+// usage history rather than voiding it, so the reasons left are all about how
+// much has been watched. `dominantRefusal` reads only the kinds it knows, so a
+// stored count under the old key is ignored rather than failing this schema.
 export const usageTrustRefusalKind = z.enum([
-  "counters-reset",
   "no-history",
   "too-few-collects",
   "span-too-short",
