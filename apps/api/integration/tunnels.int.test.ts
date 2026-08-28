@@ -81,8 +81,17 @@ function conf(options: { endpoint?: string; allowedIps?: string; dns?: boolean }
   ].join("\n");
 }
 
+// `{ enabled, tunnels }` rather than a bare array since the feature can be off:
+// the rows still come back, and the flag is what the dashboard reads to say so.
 async function tunnels(session: Session): Promise<Record<string, unknown>[]> {
-  return asArray(await (await api("/tunnels", session)).json()).map(asRecord);
+  return asArray(asRecord(await (await api("/tunnels", session)).json()).tunnels).map(asRecord);
+}
+
+// Whether this deployment reports a tunnel service at all. The suite runs one, so
+// this is `true` — asserted rather than assumed, because every tunnel test below
+// depends on it and a false here would explain all of them at once.
+async function tunnelsEnabled(session: Session): Promise<unknown> {
+  return asRecord(await (await api("/tunnels", session)).json()).enabled;
 }
 
 async function trail(session: Session, event: string): Promise<Record<string, unknown>[]> {
@@ -148,6 +157,15 @@ afterAll(async () => {
   await db.$client.end();
   await stopApi(server);
   await stopTunnelService(tunnelService);
+});
+
+describe("the feature's availability", () => {
+  // Every test below depends on this being true, and a deployment with no tunnel
+  // service is a supported state that reports itself — so if this is false, it
+  // explains all of them at once rather than each failing on its own terms.
+  it("reports itself enabled, because this suite runs a tunnel service", async () => {
+    expect(await tunnelsEnabled(owner)).toBe(true);
+  });
 });
 
 describe("registering a tunnel", () => {
