@@ -668,7 +668,14 @@ export const usageTrustRefusalKind = z.enum([
 export type UsageTrustRefusalKind = z.infer<typeof usageTrustRefusalKind>;
 
 // A finding the engine derived and then withheld, by which guard.
-export const suppressionGuard = z.enum(["cooldown", "watched", "standing", "hinted", "budget"]);
+export const suppressionGuard = z.enum([
+  "cooldown",
+  "watched",
+  "standing",
+  "hinted",
+  "budget",
+  "unobservable",
+]);
 export type SuppressionGuard = z.infer<typeof suppressionGuard>;
 
 export const suppressedFindings = z.object({

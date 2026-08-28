@@ -1,5 +1,7 @@
 import type { WorkerEvents } from "graphile-worker";
 import type { UsageTrustRefusal } from "../analysis/classify";
+import type { ObservedVerdict } from "../analysis/observed";
+import type { RegressionVerdict } from "../analysis/regression";
 import {
   clustersUnreachable,
   clusterTaskRuns,
@@ -96,7 +98,14 @@ export function recordRegressionVerdict(
   // against the oldest baseline still live for the collection, which is a
   // different question from either per-index stage and worth telling apart.
   stage: "observe" | "post_build" | "cumulative",
-  verdict: "REGRESSED" | "STABLE" | "UNOBSERVABLE",
+  // Two vocabularies, because the two gates now measure differently. The write
+  // watch and the cumulative reading still difference a baseline the row carries
+  // and report UNOBSERVABLE when a restart voids it; the observe gate reads
+  // stored history instead (analysis/observed.ts), where a restart costs one
+  // window and the states worth counting are "still accumulating" and "nothing
+  // from before the hide to compare with". Folding them together would hide the
+  // distinction the second gate exists to draw.
+  verdict: RegressionVerdict | ObservedVerdict,
 ): void {
   regressionGate.add(1, { stage, verdict: verdict.toLowerCase() });
 }

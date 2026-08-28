@@ -1658,7 +1658,7 @@ async function bareCluster(name: string): Promise<string> {
 }
 
 describe("outage resilience", () => {
-  it("un-hides and re-proposes instead of dropping when the counters reset", async () => {
+  it("keeps observing across a restart, and gives up only past the wall-clock cap", async () => {
     process.env.MASTER_KEY =
       process.env.MASTER_KEY ?? Buffer.from("0123456789abcdef0123456789abcdef").toString("base64");
     await mongo.db("inttest").collection("orders").createIndex({ outage: 1 }, { name: "outage_1" });
@@ -1666,9 +1666,91 @@ describe("outage resilience", () => {
       .db("inttest")
       .command({ collMod: "orders", index: { name: "outage_1", hidden: true } });
 
-    // Hidden a month ago, its observe window long elapsed, with a baseline
-    // FAR above the live counters — exactly what a mongod restart during an
-    // outage leaves behind.
+    // Hidden four days ago with a two-day window, and a baseline FAR above the
+    // live counters — what a mongod restart during the window leaves behind.
+    // The old gate read that as "the observation never happened", un-hid the
+    // index and re-proposed it; on a cluster that restarts nightly it did so
+    // every time, forever. Now the restart costs the stretch it landed in and
+    // the rest of the observation stands.
+    const hiddenAt = new Date(Date.now() - 4 * 86_400_000);
+    const insert = async (name: string, at: Date) =>
+      (
+        await db
+          .insert(recommendations)
+          .values({
+            clusterId,
+            type: "DROP_UNUSED",
+            state: "HIDDEN",
+            database: "inttest",
+            collection: name,
+            indexName: "outage_1",
+            rationale: "outage test",
+            estimatedBytesSaved: 0,
+            hiddenAt: at,
+            observeDays: 2,
+            baselineReadOps: 5_000_000,
+            baselineReadLatency: 5_000_000_000,
+          })
+          .returning()
+      )[0];
+
+    // Hourly readings across the window, with the counters restarting a day in.
+    // Latency per op is steady at 1000µs, well under the recorded baseline's
+    // 1000µs — so nothing regressed and the drop is owed.
+    const samples = [];
+    let ops = 4_000;
+    let micros = 4_000 * 1_000;
+    for (let hour = 0; hour < 96; hour++) {
+      if (hour === 24) {
+        ops = 0;
+        micros = 0;
+      }
+      const at = new Date(hiddenAt.getTime() + hour * 3_600_000);
+      samples.push({
+        clusterId,
+        database: "inttest",
+        collection: "orders",
+        readOps: ops,
+        readLatencyMicros: micros,
+        writeOps: 0,
+        writeLatencyMicros: 0,
+        capturedAt: at,
+        lastSeenAt: at,
+      });
+      ops += 500;
+      micros += 500 * 1_000;
+    }
+    await insertLatency(db, samples);
+
+    const rec = await insert("orders", hiddenAt);
+    if (rec === undefined) throw new Error("failed to insert recommendation");
+    await finalizeCluster(db, clusterId);
+
+    const [after] = await db.select().from(recommendations).where(eq(recommendations.id, rec.id));
+    // The restart cost one hour of observation out of 95, so the two-day window
+    // filled and the drop went through — where before it was un-hidden.
+    expect(after?.state).toBe("DROPPED");
+    const specs = await mongo.db("inttest").collection("orders").indexes();
+    expect(specs.some((spec) => spec.name === "outage_1")).toBe(false);
+  });
+
+  it("un-hides an index whose window cannot fill, rather than leaving it hidden", async () => {
+    process.env.MASTER_KEY =
+      process.env.MASTER_KEY ?? Buffer.from("0123456789abcdef0123456789abcdef").toString("base64");
+    // Its own collection, so the un-hide below has a real namespace to reach and
+    // no latency history exists for it — which is the state under test.
+    await mongo.db("inttest").collection("blindcoll").insertOne({ blind: 1 });
+    await mongo
+      .db("inttest")
+      .collection("blindcoll")
+      .createIndex({ blind: 1 }, { name: "blind_1" });
+    await mongo
+      .db("inttest")
+      .command({ collMod: "blindcoll", index: { name: "blind_1", hidden: true } });
+
+    // Hidden for well past the cap with no readings at all to show for it. The
+    // observation cannot complete, so the index goes back rather than sitting
+    // hidden indefinitely waiting for evidence that is not coming.
     const [rec] = await db
       .insert(recommendations)
       .values({
@@ -1676,12 +1758,12 @@ describe("outage resilience", () => {
         type: "DROP_UNUSED",
         state: "HIDDEN",
         database: "inttest",
-        collection: "orders",
-        indexName: "outage_1",
-        rationale: "outage test",
+        collection: "blindcoll",
+        indexName: "blind_1",
+        rationale: "blind test",
         estimatedBytesSaved: 0,
         hiddenAt: new Date(Date.now() - 30 * 86_400_000),
-        observeDays: 7,
+        observeDays: 2,
         baselineReadOps: 5_000_000,
         baselineReadLatency: 5_000_000_000,
       })
@@ -1691,17 +1773,16 @@ describe("outage resilience", () => {
     await finalizeCluster(db, clusterId);
 
     const [after] = await db.select().from(recommendations).where(eq(recommendations.id, rec.id));
-    // Not dropped, and not left hidden either: restored and re-proposed.
     expect(after?.state).toBe("PROPOSED");
     expect(after?.hiddenAt).toBeNull();
-    const specs = await mongo.db("inttest").collection("orders").indexes();
-    const restored = specs.find((spec) => spec.name === "outage_1");
+    const trail = await db.select().from(actions).where(eq(actions.recommendationId, rec.id));
+    expect(trail.some((entry) => entry.result.includes("could be measured"))).toBe(true);
+    // Really put back, not just marked so.
+    const specs = await mongo.db("inttest").collection("blindcoll").indexes();
+    const restored = specs.find((spec) => spec.name === "blind_1");
     expect(restored !== undefined && restored.hidden !== true).toBe(true);
 
-    const trail = await db.select().from(actions).where(eq(actions.recommendationId, rec.id));
-    expect(trail.some((entry) => entry.result.includes("observation lost"))).toBe(true);
-
-    await mongo.db("inttest").collection("orders").dropIndex("outage_1");
+    await mongo.db("inttest").collection("blindcoll").drop();
   });
 
   // The Definition of Done of the change that made storage independent of the
