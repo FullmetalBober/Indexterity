@@ -20,8 +20,12 @@ export interface ChartSeries {
 export interface LatencyCharts {
   readonly readSeries: ChartSeries[];
   readonly writeSeries: ChartSeries[];
-  // Collections on neither chart, for the "+N more" note under them.
-  readonly foldedCount: number;
+  // How many DISTINCT collections the two charts draw between them, for the
+  // "+N more" note under them. Not `readSeries.length`, and not the larger of
+  // the two: the charts rank separately and now routinely draw disjoint sets, so
+  // either of those counts one chart's work as the whole panel's and overstates
+  // what is folded away.
+  readonly chartedCount: number;
   // What to say when the chart above has no series at all. Null when it has
   // some, or when the collector has told us nothing to explain.
   readonly readNote: string | null;
@@ -119,9 +123,9 @@ export function latencyCharts(
   return {
     readSeries: build(readCollections, (point) => point.readMicros),
     writeSeries: build(writeCollections, (point) => point.writeMicros),
-    // Against the union, so the note counts collections that reached NEITHER chart
-    // rather than letting one metric's ranking speak for both.
-    foldedCount: Math.max(0, collections.length - union.length),
+    // The union, so the caller's "+N more" subtracts what BOTH charts drew
+    // rather than letting one metric's ranking speak for the panel.
+    chartedCount: union.length,
     // Only for a chart that drew nothing. A chart with a line on it has already
     // said everything it needs to.
     readNote:

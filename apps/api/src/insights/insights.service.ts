@@ -17,6 +17,7 @@ import {
 } from "@repo/contracts";
 import { z } from "zod";
 import {
+  chartableCollections,
   latencyGaps,
   latencyPoints,
   monthlySavingsUsd,
@@ -120,31 +121,33 @@ export class InsightsService {
   // collect, forever*: measured at 200 collections × 90 days of hourly readings,
   // the full payload was 30.9 MB per dashboard load — of which the chart drew
   // four collections. A 30-day window bounds time (the trend chart is about
-  // recently, the before/after table covers the long term), the top-N by
-  // evidence bounds collections the same way the chart already ranked them, and
-  // totalCollections keeps the cut honest on screen.
+  // recently, the before/after table covers the long term), `chartableCollections`
+  // bounds collections, and totalCollections keeps the cut honest on screen.
+  //
+  // That cut is ranked PER METRIC and not once for both charts. Ranking it once
+  // is what sent the write chart eight collections nobody writes to and let it
+  // report the ranking's blind spot as an absence of writes — see the comment on
+  // chartableCollections, which owns the rule and the measurement behind it.
   async latencySeries(clusterId: string, orgId: string): Promise<ClusterLatencySeries> {
     if (!(await this.tenancy.ownsCluster(clusterId, orgId))) {
       return { clusterId, totalCollections: 0, collections: [] };
     }
     const since = await this.repo.readableSince(clusterId, InsightsService.trendWindow());
     const groups = await this.repo.latencyReadings(clusterId, since);
-    const collections = [...groups.values()]
-      .map((group) => {
-        const gaps = latencyGaps(group.readings);
-        return {
-          database: group.database,
-          collection: group.collection,
-          points: latencyPoints(group.readings),
-          readGap: gaps.read,
-          writeGap: gaps.write,
-        };
-      })
-      .sort((a, b) => b.points.length - a.points.length);
+    const collections = [...groups.values()].map((group) => {
+      const gaps = latencyGaps(group.readings);
+      return {
+        database: group.database,
+        collection: group.collection,
+        points: latencyPoints(group.readings),
+        readGap: gaps.read,
+        writeGap: gaps.write,
+      };
+    });
     return {
       clusterId,
       totalCollections: collections.length,
-      collections: collections.slice(0, LATENCY_SERIES_MAX_COLLECTIONS),
+      collections: chartableCollections(collections, LATENCY_SERIES_MAX_COLLECTIONS),
     };
   }
 

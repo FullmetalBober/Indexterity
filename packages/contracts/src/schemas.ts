@@ -553,6 +553,11 @@ export type CollectionLatencySeries = z.infer<typeof collectionLatencySeries>;
 // the chart drew four collections — so the api sends the top few by evidence
 // and says how many it did not. Shared constants because the panel explains
 // the cap in the same numbers the api applies.
+//
+// The cap is the whole payload, and the api splits it in HALF between the two
+// charts rather than ranking once for both — see `chartableCollections`. Half
+// of eight is also what a chart can draw, since the palette has four colours,
+// so nothing is sent that could not be shown.
 export const LATENCY_SERIES_WINDOW_DAYS = 30;
 export const LATENCY_SERIES_MAX_COLLECTIONS = 8;
 
