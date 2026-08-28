@@ -138,7 +138,25 @@ function start(
   cwd: string,
   env: Record<string, string>,
 ): ChildProcess {
-  const child = spawn(process.execPath, [entry], {
+  return spawnChild(name, process.execPath, [entry], cwd, env);
+}
+
+/**
+ * The same supervision for a process that is not node.
+ *
+ * The tunnel service is a Go binary, and what it needs from this file is exactly
+ * what the two node processes need: its output on the container's own streams, a
+ * forwarded signal, and its unexpected exit taken as the container's failure. So
+ * the command varies and nothing else does.
+ */
+function spawnChild(
+  name: string,
+  command: string,
+  args: string[],
+  cwd: string,
+  env: Record<string, string>,
+): ChildProcess {
+  const child = spawn(command, args, {
     cwd,
     env: { ...process.env, ...env },
     // The children write straight to the container's stdout/stderr. Nothing is
@@ -193,7 +211,21 @@ for (const signal of FORWARDED) {
   process.on(signal, () => shutdown(signal));
 }
 
-// The api first, and not awaited: it needs no dashboard, while the dashboard's
+// The tunnel service, when there is a port for it — the SAME variable the api
+// reads to find it, so one setting turns on both halves of the feature and they
+// cannot be turned on separately. Absent, nothing runs and the api reports the
+// VPN feature as off.
+//
+// First, because it is the api that dials it and its boot is milliseconds. It
+// listens on loopback, which in this image is the same loopback the api is on —
+// one container is the tightest version of the "beside the api" the design wants
+// (D112).
+const TUNNEL_PORT = process.env.TUNNEL_PORT;
+if (TUNNEL_PORT !== undefined && TUNNEL_PORT !== "") {
+  spawnChild("tunnel", "/app/apps/tunnel/dist/indexterity-tunnel", [], "/app", { TUNNEL_PORT });
+}
+
+// The api next, and not awaited: it needs no dashboard, while the dashboard's
 // first server-side render needs it. Neither ordering is load-bearing — the
 // passthrough answers 502 until the api is up, which is what the readiness probe
 // is reading — but starting them in this order keeps that window as short as the

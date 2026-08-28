@@ -495,11 +495,24 @@ config:
 # proxy into their network unreachable from anywhere else, which is exactly what
 # held when the api spawned it as a child process.
 #
-# This chart does not yet run that container for you. Add it with
-# api.extraContainers below (the same field the VPN-client recipe uses) and turn
-# this on so the api knows to look for it: ON WITH NO CONTAINER IN THE POD means
-# every tunnel open fails against a port nothing is listening on. A first-class
-# sidecar, with its own published image, is the next change here.
+# This chart does not yet run that container for you, and ON WITH NO CONTAINER IN
+# THE POD means every tunnel open fails against a port nothing is listening on.
+# Until it does, add it with api.extraContainers — the api image already carries
+# the binary, so it needs no image of its own:
+#
+#   api:
+#     extraContainers:
+#       - name: tunnel
+#         image: ghcr.io/fullmetalbober/indexterity-api:0.14.0
+#         command: ["apps/tunnel/dist/indexterity-tunnel"]
+#         env:
+#           - name: TUNNEL_PORT
+#             value: "9411"
+#
+# It wants no capability, no device and no volume — the same securityContext the
+# app container runs under is enough, which is the whole point of terminating the
+# peering in userspace. A first-class sidecar with its own image is the next
+# change here.
 #
 # Set config.allowPrivateClusterTargets alongside it: a cluster behind a VPN is an
 # RFC1918 address by definition.
