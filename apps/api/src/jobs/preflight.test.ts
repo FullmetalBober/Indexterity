@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { IndexKey, IndexSpec } from "../analysis";
-import type { IndexCollector } from "../mongo";
+import type { IndexCollector } from "../engine/ports";
+import type { IndexKey, IndexSpec } from "../engine/types";
 import { enforcesTheSame, preflightDrop } from "./preflight";
 
 function index(name: string, keys: IndexKey[], overrides: Partial<IndexSpec> = {}): IndexSpec {

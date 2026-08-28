@@ -200,6 +200,13 @@ test and the port-forward in NOTES.txt all read the same number they did before.
   value: {{ .Values.config.logLevel | quote }}
 - name: ALLOW_PRIVATE_CLUSTER_TARGETS
   value: {{ .Values.config.allowPrivateClusterTargets | quote }}
+# Where the tunnel binary is, for an image that puts it somewhere other than the
+# default (D111). It needs no capability and no /dev/net/tun, so nothing here
+# touches a securityContext.
+{{- if .Values.config.tunnelBinary }}
+- name: TUNNEL_BINARY
+  value: {{ .Values.config.tunnelBinary | quote }}
+{{- end }}
 # Sockets opened against ONE connected cluster. Held per cluster, so the worst
 # case multiplies by the fleet — and they are spent on the customer's mongod.
 - name: MONGO_MAX_POOL_SIZE

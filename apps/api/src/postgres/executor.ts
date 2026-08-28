@@ -1,8 +1,23 @@
-import type { CreateIndexOptions, IndexExecutor } from "../engine/ports";
-import { UnsupportedServerError } from "../mongo/executor";
-import { allowUntestedVersions } from "../mongo/version";
+import type {
+  CreateIndexOptions,
+  IndexBuildOutcome,
+  IndexBuildSettlement,
+  IndexExecutor,
+} from "../engine/ports";
+import { allowUntestedVersions, UnsupportedServerError } from "../engine/version";
 import { splitTableRef } from "./collector";
 import type { PostgresConnection } from "./connection";
+import {
+  CRON_APPLY_CALL_SQL,
+  CRON_APPLY_PROBE_PARAMS,
+  CRON_APPLY_PROBE_SQL,
+  CRON_DATABASE_GUC,
+  CRON_FINISH_CALL_SQL,
+  CRON_STATUS_CALL_SQL,
+  cronDirections,
+  isUnrecognizedGuc,
+  readCronApplyProbe,
+} from "./cron-apply";
 import { postgresVersionRefusal } from "./version";
 
 // Raised by hide/unhide, which this engine cannot do at all.
@@ -51,6 +66,147 @@ export class PostgresIndexExecutor implements IndexExecutor {
     private readonly conn: PostgresConnection,
     private readonly readOnly: boolean,
   ) {}
+
+  // The cron apply route, resolved once per executor and then reused.
+  //
+  // Null means "not looked up yet"; the resolved value carries the cron database
+  // and whether the function is there and callable. Cached because a build asks
+  // for it per index and the answer cannot change inside one session in any way
+  // that matters — a setup that appears mid-run is picked up on the next tick.
+  private cronRoute: Promise<{ database: string; usable: boolean }> | null = null;
+
+  private resolveCronRoute(): Promise<{ database: string; usable: boolean }> {
+    if (this.cronRoute === null) {
+      this.cronRoute = (async () => {
+        const none = { database: "", usable: false };
+        let database: string;
+        try {
+          const rows = await this.conn.query<Record<string, string>>(`SHOW ${CRON_DATABASE_GUC}`);
+          const value = Object.values(rows[0] ?? {})[0];
+          if (typeof value !== "string" || value.length === 0) return none;
+          database = value;
+        } catch (error) {
+          // `unrecognized configuration parameter` is a server without pg_cron
+          // preloaded, which is the ordinary case rather than a fault.
+          if (isUnrecognizedGuc(error)) return none;
+          return none;
+        }
+        try {
+          const rows = await this.conn.query<{
+            security_definer: boolean;
+            executable: boolean;
+            owner: string;
+          }>(CRON_APPLY_PROBE_SQL, CRON_APPLY_PROBE_PARAMS, database);
+          const probe = readCronApplyProbe(rows);
+          return { database, usable: probe.installed && probe.executable };
+        } catch {
+          return { database, usable: false };
+        }
+      })();
+    }
+    return this.cronRoute;
+  }
+
+  // Whether this role can issue index DDL on the table itself. Ownership, or
+  // membership of the owning role — the same test ownershipAcross makes in
+  // diagnose.ts, asked here for the ONE table about to be indexed.
+  private async ownsTable(database: string, schema: string, table: string): Promise<boolean> {
+    try {
+      const rows = await this.conn.query<{ owns: boolean }>(
+        `SELECT pg_catalog.pg_has_role(current_user, c.relowner, 'USAGE') AS owns
+           FROM pg_catalog.pg_class c
+           JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+          WHERE n.nspname = $1 AND c.relname = $2`,
+        [schema, table],
+        database,
+      );
+      return rows[0]?.owns === true;
+    } catch {
+      return false;
+    }
+  }
+
+  // What happened to a build asked for earlier, and the cleanup that goes with
+  // it (#332).
+  //
+  // TWO sources, because neither alone is right, and the reason is measured.
+  //
+  // The job history alone LIES. The scheduled statement carries IF NOT EXISTS,
+  // so once a failed build has left its invalid carcass behind, every later run
+  // finds the relation present and reports `succeeded` — a unique index over
+  // duplicate rows failed on its first run and answered "succeeded" on the
+  // second. Trusting that would mark a broken index ACTIVE and take a write
+  // baseline against it.
+  //
+  // The catalog alone cannot tell a build that is still running from one that
+  // broke. A concurrent build passes through indisvalid=false/indisready=false
+  // on its way up, which is also exactly what a failed one leaves behind.
+  //
+  // Together they are unambiguous: the catalog says whether the index is really
+  // usable, and the history says whether anything has finished trying. The
+  // catalog is read in the TARGET database, which the scoped role can do —
+  // pg_class and pg_index are world-readable, and only the regclass CAST needs
+  // schema access this role has not got.
+  async settleBuild(
+    database: string,
+    collection: string,
+    indexName: string,
+  ): Promise<IndexBuildSettlement> {
+    const route = await this.resolveCronRoute();
+    if (!route.usable) {
+      return { state: "FAILED", message: "the pg_cron apply function is no longer available" };
+    }
+    const { schema } = splitTableRef(collection);
+    const index = await this.conn.query<{ valid: boolean }>(
+      `SELECT ix.indisvalid AS valid
+         FROM pg_catalog.pg_index ix
+         JOIN pg_catalog.pg_class i     ON i.oid = ix.indexrelid
+         JOIN pg_catalog.pg_namespace n ON n.oid = i.relnamespace
+        WHERE n.nspname = $1 AND i.relname = $2`,
+      [schema, indexName],
+      database,
+    );
+    if (index[0]?.valid === true) {
+      await this.finishBuild(indexName);
+      return { state: "READY" };
+    }
+    const runs = await this.conn.query<{ status: string; return_message: string | null }>(
+      CRON_STATUS_CALL_SQL,
+      [indexName],
+      route.database,
+    );
+    const last = runs[0];
+    // Nothing has finished trying yet: the schedule fires minutes after the
+    // apply, and a running build has a row that is neither of these.
+    if (last === undefined || (last.status !== "succeeded" && last.status !== "failed")) {
+      return { state: "PENDING" };
+    }
+    await this.finishBuild(indexName);
+    // A run that says it succeeded while the index is not valid is the IF NOT
+    // EXISTS skip described above — the carcass of an earlier failure.
+    const message =
+      last.status === "failed"
+        ? (last.return_message ?? "the build failed")
+        : "an earlier attempt left an invalid index, so the retry skipped the build";
+    return { state: "FAILED", message };
+  }
+
+  // Remove the job. A pg_cron job RECURS and cannot remove itself — one
+  // statement per job, and a two-statement command is transaction-wrapped, which
+  // CIC refuses. Left in place, a succeeded build re-runs a no-op
+  // `CREATE INDEX … IF NOT EXISTS` every five minutes forever and a failed one
+  // keeps failing, so unscheduling is not tidiness.
+  //
+  // Best effort: the outcome has already been decided by the caller, and losing
+  // the row to a failed unschedule would be worse than a job that outlives it.
+  private async finishBuild(indexName: string): Promise<void> {
+    const route = await this.resolveCronRoute();
+    try {
+      await this.conn.query(CRON_FINISH_CALL_SQL, [indexName], route.database);
+    } catch {
+      // nothing to do — the next settle pass tries again
+    }
+  }
 
   private assertWritable(action: string): void {
     if (this.readOnly) {
@@ -127,7 +283,7 @@ export class PostgresIndexExecutor implements IndexExecutor {
     collection: string,
     keys: Record<string, 1 | -1>,
     options: CreateIndexOptions,
-  ): Promise<void> {
+  ): Promise<IndexBuildOutcome> {
     const { schema, table } = splitTableRef(collection);
     const name = options.name ?? derivedName(table, keys);
     this.assertWritable(`create index ${name}`);
@@ -145,6 +301,43 @@ export class PostgresIndexExecutor implements IndexExecutor {
     // The partial predicate round-trips as the SQL text the collector read out of
     // `indpred`. Anything else would be this file inventing a predicate.
     const where = partialPredicate(options);
+    // The scoped role owns nothing, so the direct build below would answer
+    // `must be owner of table …`. The pg_cron route is what makes applying
+    // possible for it at all (#332), and it is tried ONLY when ownership is
+    // absent: a role that owns the table can build synchronously, which is
+    // simpler, immediate, and does not depend on an extension.
+    if (!(await this.ownsTable(database, schema, table))) {
+      const route = await this.resolveCronRoute();
+      if (route.usable) {
+        // A partial index cannot go this way. The predicate is arbitrary SQL and
+        // the function takes identifiers only, by design — so rather than
+        // silently building an index WITHOUT its predicate, which would be a
+        // different index than the one recommended, this refuses and says why.
+        if (where !== "") {
+          throw new Error(
+            `refusing to build partial index ${name} through the pg_cron apply function: ` +
+              "its predicate is arbitrary SQL and the function accepts identifiers only, " +
+              "so the index would be built without the predicate. Apply this one with an " +
+              "owner connection string.",
+          );
+        }
+        await this.conn.query(
+          CRON_APPLY_CALL_SQL,
+          [
+            database,
+            schema,
+            table,
+            name,
+            Object.keys(keys),
+            cronDirections(keys),
+            options.unique === true,
+            options.include ?? [],
+          ],
+          route.database,
+        );
+        return "SCHEDULED";
+      }
+    }
     const statement =
       `CREATE${options.unique === true ? " UNIQUE" : ""} INDEX CONCURRENTLY ` +
       `IF NOT EXISTS ${quoteIdent(name)} ON ${quoteIdent(schema)}.${quoteIdent(table)} ` +
@@ -155,6 +348,7 @@ export class PostgresIndexExecutor implements IndexExecutor {
       await this.dropInvalidLeftover(database, schema, name);
       throw error;
     }
+    return "BUILT";
   }
 
   // Remove the invalid index a failed CREATE INDEX CONCURRENTLY leaves behind,

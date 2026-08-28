@@ -1,8 +1,14 @@
 {
   "extends": "../../packages/config/tsconfig.nestjs.json",
   "compilerOptions": {
-    "outDir": "dist",
-    "rootDir": "src"
+    // The build is swc, so tsc here only ever type-checks — and the outDir and
+    // rootDir this used to carry were not merely unused: rootDir kept every file
+    // beside src/ out of the project (TS6059 for anything above it). The five
+    // files added to `include` below are what fell through that gap — a config
+    // and a setup file are code, and drizzle.config.ts decides which database
+    // `db:migrate` writes to.
+    "noEmit": true
   },
-  "include": ["src"]
+  // Globs, not names, so the next config or setup file arrives checked.
+  "include": ["src", "*.config.ts", "*.setup.ts"]
 }

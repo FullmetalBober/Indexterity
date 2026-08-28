@@ -1,4 +1,5 @@
 import { and, clusters, type Database, eq, inArray, recommendations } from "../db";
+import { revokeCommandFor } from "../engine/provision";
 import { openClusterSession } from "../jobs/cluster-connection";
 import { evictCluster } from "../jobs/connection-pool";
 
@@ -56,19 +57,6 @@ export async function restoreHiddenIndexes(db: Database, clusterId: string): Pro
   return unhidden;
 }
 
-// The mongo shell command that removes the least-privilege user Indexterity
-// created during admin-string onboarding. Null when the customer pasted a
-// ready-made string, because then there is nothing of ours on their cluster.
-//
-// Handed back rather than run: dropping a user needs admin credentials we
-// deliberately did not keep, and guessing that the analysis credentials will do
-// it would fail at exactly the moment nobody is watching.
-export function revokeCommandFor(provisionedUsername: string | null): string | null {
-  return provisionedUsername === null
-    ? null
-    : `db.getSiblingDB("admin").dropUser("${provisionedUsername}")`;
-}
-
 // Every provisioned user an org would leave behind on someone else's cluster.
 // Shown before an org is deleted, because after it there is no row left to say
 // which server the user is on or what it was called.
@@ -77,7 +65,12 @@ export async function provisionedUsersIn(
   orgId: string,
 ): Promise<{ cluster: string; username: string; revokeCommand: string }[]> {
   const rows = await db
-    .select({ name: clusters.name, username: clusters.provisionedUsername })
+    .select({
+      name: clusters.name,
+      engine: clusters.engine,
+      username: clusters.provisionedUsername,
+      databases: clusters.provisionedDatabases,
+    })
     .from(clusters)
     .where(eq(clusters.orgId, orgId));
   return rows.flatMap((row) =>
@@ -87,7 +80,7 @@ export async function provisionedUsersIn(
           {
             cluster: row.name,
             username: row.username,
-            revokeCommand: revokeCommandFor(row.username) ?? "",
+            revokeCommand: revokeCommandFor(row.engine, row.username, row.databases) ?? "",
           },
         ],
   );

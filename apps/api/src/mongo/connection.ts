@@ -1,5 +1,6 @@
 import type { Db, MongoClient } from "mongodb";
-import { mongoClient, type TlsOverrides } from "./client";
+import type { DialProxy, TlsOverrides } from "../engine/ports";
+import { mongoClient } from "./client";
 import type { ResolvedConnection } from "./conn-string";
 import { parseServerVersion, type ServerVersion } from "./version";
 
@@ -35,6 +36,27 @@ export function membersFromHello(hello: unknown): string[] {
   // Deduplicated because the two arrays are documented as disjoint and a
   // duplicate would cost a redundant connection per collect if they ever are not.
   return [...new Set([...stringsAt(hello, "hosts"), ...stringsAt(hello, "passives")])];
+}
+
+// MongoDB's own three, excluded by name. `admin` holds the users and roles,
+// `config` the sharding catalog, `local` the oplog — none of them is a database
+// anybody puts an application in, and none has an index this product should have
+// an opinion about.
+//
+// By name rather than by capability, which is the rule all three adapters follow
+// (#347). A privileged credential is shown them: `listDatabases` names all three
+// to a user holding the cluster action (measured on 7.0), so this filter is what
+// keeps them off the observe checkboxes — and a scoped user without that action is
+// shown only what it can read, so the same filter has nothing left to do.
+const SYSTEM_DATABASES = new Set(["admin", "local", "config"]);
+
+// One spelling of the rule, because there are two callers and they draw two
+// different screens from it: `listDatabaseNames` below feeds the settings page and
+// the collect's scope, and mongo/diagnose.ts feeds the connect form's checkboxes.
+// Two spellings drifting apart means the form offers a database the collect will
+// never walk, or hides one it does.
+export function withoutSystemDatabases(names: readonly string[]): string[] {
+  return names.filter((name) => !SYSTEM_DATABASES.has(name));
 }
 
 // What one node's own `hello` says about itself — the roster's row (#100).
@@ -79,11 +101,11 @@ export class MongoConnection {
   // `overrides` is the cluster owner's recorded consent to skip specific
   // certificate checks. Omitted means none of them, which is the strict rule —
   // the direction a forgotten argument has to fail in.
-  constructor(connectionString: string, overrides?: TlsOverrides) {
+  constructor(connectionString: string, overrides?: TlsOverrides, proxy?: DialProxy) {
     // Throws InsecureConnectionError on a string that would not connect over
     // TLS, or one that disables a check nobody consented to — see
     // mongo/client.ts, the only place a driver client is built.
-    this.client = mongoClient(connectionString, overrides);
+    this.client = mongoClient(connectionString, overrides, proxy);
   }
 
   async connect(): Promise<void> {
@@ -152,9 +174,10 @@ export class MongoConnection {
     };
   }
 
+  // User databases only, the contract every adapter answers (engine/ports.ts).
   async listDatabaseNames(): Promise<string[]> {
     const result = await this.client.db("admin").admin().listDatabases();
-    return result.databases.map((entry) => entry.name);
+    return withoutSystemDatabases(result.databases.map((entry) => entry.name));
   }
 
   async close(): Promise<void> {

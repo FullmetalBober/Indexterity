@@ -8,9 +8,10 @@ import {
 import type { Database } from "../db";
 import { actions, and, eq, inArray, policies, recommendations, roiMetrics } from "../db";
 import { emitClusterEvent } from "../events/emit";
-import { notifyClusterOwners } from "../mail/notify";
+import { NotifyService } from "../mail/notify.service";
 import { recordDrop, recordRegressionVerdict } from "../metrics";
 import { serializeSpec } from "../mongo";
+import type { TunnelRegistry } from "../tunnel/tunnel.registry";
 import { effectiveChangeWindow } from "./change-window";
 import { openClusterSession } from "./cluster-connection";
 import { recordRegression, WHOLE_COLLECTION } from "./cooldowns";
@@ -39,7 +40,15 @@ const SUPERSEDED_SCORE = 55;
 // The drop is the only irreversible step. A failed pre-flight during observe
 // un-hides the index and re-proposes it (the reversible safety path). Freed
 // bytes are recorded to roi_metrics for the dashboard headline.
-export async function finalizeCluster(db: Database, clusterId: string): Promise<number> {
+export async function finalizeCluster(
+  db: Database,
+  clusterId: string,
+  // The live tunnels, when this cluster is reached over one (#353).
+  // Optional because most callers have none and every cluster before
+  // #353 needs none; a cluster WITH a tunnel_id and no registry is
+  // refused rather than dialled directly.
+  tunnels?: TunnelRegistry,
+): Promise<number> {
   const periodStart = new Date();
   const [policy] = await db
     .select()
@@ -82,7 +91,9 @@ export async function finalizeCluster(db: Database, clusterId: string): Promise<
     );
   if (due.length === 0 && watched.length === 0) return 0;
 
-  const { session, readOnly, canHide, release } = await openClusterSession(db, clusterId);
+  const { session, readOnly, canHide, release } = await openClusterSession(db, clusterId, {
+    tunnels,
+  });
   try {
     // Read-only clusters never execute writes.
     if (readOnly) return 0;
@@ -173,8 +184,7 @@ export async function finalizeCluster(db: Database, clusterId: string): Promise<
         actor: "system",
         result: `rolled back + cooldown until ${day}: write-latency regression after build`,
       });
-      await notifyClusterOwners(
-        db,
+      await new NotifyService(db).notifyClusterOwners(
         clusterId,
         `rolled back ${rec.indexName}`,
         `The index ${rec.indexName} on ${rec.database}.${rec.collection} slowed writes after being built, so it was dropped automatically. It is cooling down until ${day}.`,
@@ -242,8 +252,7 @@ export async function finalizeCluster(db: Database, clusterId: string): Promise<
             actor: "system",
             result: `aborted + cooldown until ${day}: read-latency regression during observe`,
           });
-          await notifyClusterOwners(
-            db,
+          await new NotifyService(db).notifyClusterOwners(
             clusterId,
             `kept ${rec.indexName} (regression)`,
             canHide
@@ -319,8 +328,7 @@ export async function finalizeCluster(db: Database, clusterId: string): Promise<
       dropped += 1;
     }
     if (dropped > 0) {
-      await notifyClusterOwners(
-        db,
+      await new NotifyService(db).notifyClusterOwners(
         clusterId,
         `dropped ${dropped} ${dropped === 1 ? "index" : "indexes"}`,
         `${dropped} ${dropped === 1 ? "index" : "indexes"} passed the observe window and regression gates and ${dropped === 1 ? "was" : "were"} dropped, freeing ~${Math.round(freedBytes / 1024)} KB. Undo is available on the dashboard.`,
@@ -535,8 +543,7 @@ async function judgeCumulative(
     actor: "system",
     result: `graduated, but ${reason} — ${rec.database}.${rec.collection} will not be built on unattended until ${day}`,
   });
-  await notifyClusterOwners(
-    db,
+  await new NotifyService(db).notifyClusterOwners(
     clusterId,
     `${rec.database}.${rec.collection} is slower to write than before`,
     `Each index built on ${rec.database}.${rec.collection} passed its own post-build check, and ` +

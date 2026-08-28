@@ -1,5 +1,5 @@
-import type { CreateIndexOptions, IndexExecutor } from "../engine/ports";
-import { UnsupportedServerError } from "../mongo/executor";
+import type { CreateIndexOptions, IndexBuildOutcome, IndexExecutor } from "../engine/ports";
+import { UnsupportedServerError } from "../engine/version";
 import { MssqlConnection, qualifiedTable, quoteIdent } from "./connection";
 import { mssqlVersionRefusal } from "./version";
 
@@ -152,7 +152,7 @@ export class MssqlIndexExecutor implements IndexExecutor {
     collection: string,
     keys: Record<string, 1 | -1>,
     options: CreateIndexOptions,
-  ): Promise<void> {
+  ): Promise<IndexBuildOutcome> {
     this.assertWritable("create index");
     await this.assertSupported();
     const columns = Object.entries(keys);
@@ -188,5 +188,7 @@ export class MssqlIndexExecutor implements IndexExecutor {
       `CREATE ${options.unique === true ? "UNIQUE " : ""}NONCLUSTERED INDEX ${quoteIdent(name)} ` +
         `ON ${qualifiedTable(database, collection)} (${keyList})${include}${where}`,
     );
+    // CREATE INDEX returns when the index exists — ONLINE builds included.
+    return "BUILT";
   }
 }

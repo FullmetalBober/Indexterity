@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { loadEnv } from "../config/env";
+import { InsecureConnectionError } from "../engine/tls";
 import {
   applyTlsOverrides,
   assertTlsEnforced,
-  InsecureConnectionError,
   maxPoolSize,
   mongoClient,
   unconsentedTlsOverrides,

@@ -3,18 +3,20 @@ import { ConfigModule } from "@nestjs/config";
 import { ORPCModule } from "@orpc/nest";
 import { errorReportingEnabled } from "@repo/errors";
 import { SentryModule } from "@sentry/nestjs/setup";
-import { ClustersController } from "./clusters/clusters.controller";
-import { DatabaseService } from "./db/database.service";
-import { ClusterEventsService } from "./events/cluster-events.service";
-import { EventsController } from "./events/events.controller";
-import { HealthController } from "./health/health.controller";
-import { TenancyService } from "./http/tenancy.service";
-import { InsightsController } from "./insights/insights.controller";
-import { TickController } from "./jobs/tick.controller";
-import { TickService } from "./jobs/tick.service";
-import { OrgController } from "./org/org.controller";
-import { PolicyController } from "./policy/policy.controller";
-import { RecommendationsController } from "./recommendations/recommendations.controller";
+import { AuthModule } from "./auth/auth.module";
+import { ClustersModule } from "./clusters/clusters.module";
+import { DatabaseModule } from "./db/database.module";
+import { ErrorsModule } from "./errors/errors.module";
+import { EventsModule } from "./events/events.module";
+import { HealthModule } from "./health/health.module";
+import { TenancyModule } from "./http/tenancy.module";
+import { InsightsModule } from "./insights/insights.module";
+import { JobsModule } from "./jobs/jobs.module";
+import { MetricsModule } from "./metrics/metrics.module";
+import { OrgModule } from "./org/org.module";
+import { PolicyModule } from "./policy/policy.module";
+import { RecommendationsModule } from "./recommendations/recommendations.module";
+import { TunnelModule } from "./tunnel/tunnel.module";
 
 // SentryModule is the SDK's Nest wiring only — NOT its SentryGlobalFilter, which
 // is deliberately absent: AppExceptionFilter is this app's catch-all and decides
@@ -34,19 +36,44 @@ function sentryImports() {
 
 @Module({
   // ORPCModule provides the interceptor that @Implement handlers run through.
-  imports: [...sentryImports(), ConfigModule.forRoot({ isGlobal: true }), ORPCModule.forRoot({})],
-  // One controller per area of the contract. They share TenancyService for the
-  // session/ownership rules and http/mappers.ts for the boundary conversions.
-  controllers: [
-    HealthController,
-    ClustersController,
-    RecommendationsController,
-    InsightsController,
-    PolicyController,
-    OrgController,
-    EventsController,
-    TickController,
+  //
+  // DatabaseModule and TenancyModule are imported rather than provided so that
+  // the pool and the tenancy rules are ONE instance shared with the feature
+  // modules below — listing the services here as well would give this module its
+  // own second copy of each.
+  //
+  // Every feature is a module (#333, finished in #354), so this is the whole
+  // application graph and nothing else: one `imports` list, no controller and no
+  // provider of its own. A controller listed HERE would be one that has not been
+  // given its module yet, and there are none left.
+  //
+  // What is NOT here, and should not be: `analysis/`, `engine/`, `mongo/`,
+  // `postgres/`, `mssql/`, `config/` and `orpc/`. #354 briefly gave each an empty
+  // module and listed it below, on the argument that the graph should name every
+  // directory. That bought nothing — an empty module does nothing at runtime or at
+  // build time — so they were deleted again. Those directories are
+  // framework-independent by design: pure functions, an environment read before a
+  // container exists, a decorator applied at class definition, and connections
+  // built per cluster and closed with the lease that opened them. This list is the
+  // container's graph, not an inventory of the tree.
+  imports: [
+    ...sentryImports(),
+    ConfigModule.forRoot({ isGlobal: true }),
+    ORPCModule.forRoot({}),
+    DatabaseModule,
+    TenancyModule,
+    AuthModule,
+    ClustersModule,
+    ErrorsModule,
+    EventsModule,
+    HealthModule,
+    InsightsModule,
+    JobsModule,
+    MetricsModule,
+    OrgModule,
+    PolicyModule,
+    RecommendationsModule,
+    TunnelModule,
   ],
-  providers: [DatabaseService, TenancyService, ClusterEventsService, TickService],
 })
 export class AppModule {}

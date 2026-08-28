@@ -4,21 +4,17 @@
 // transport enforcement has to live where the pool is built or existing
 // clusters keep dialling plaintext forever.
 
+import type net from "node:net";
 import mssql from "mssql";
-import {
-  allowInsecureTls,
-  InsecureConnectionError,
-  NO_TLS_OVERRIDES,
-  type TlsOverrides,
-} from "../mongo/client";
+import { type DialProxy, NO_TLS_OVERRIDES, type TlsOverrides } from "../engine/ports";
+import { mssqlConnector } from "../engine/socks-dial";
+import { allowInsecureTls, InsecureConnectionError } from "../engine/tls";
 import {
   encryptModeOf,
   type ParsedMssqlConnString,
   parseMssqlConnString,
   trustsServerCertificate,
 } from "./conn-string";
-
-export { InsecureConnectionError, NO_TLS_OVERRIDES, type TlsOverrides } from "../mongo/client";
 
 // Fail fast on unreachable servers, same budget as the mongo client's 5s
 // server-selection timeout.
@@ -78,6 +74,15 @@ export interface MssqlDialOptions {
   // config has always ignored: honouring one now would silently break the
   // apply path for a cluster that connects fine today.
   readonly readOnlyIntent?: boolean;
+  // Route this dial through a SOCKS5 proxy — a tunnel (#353) or a relay agent
+  // (#272). tedious takes a `connector` that is handed the destination up
+  // front, so unlike node-pg this drops straight in.
+  //
+  // One caveat that belongs here rather than in a wiki page: the instance-name
+  // lookup tedious can do BEFORE connecting speaks UDP 1434 on the HOST's
+  // network and is not routed through this. A SQL Server reached over a tunnel
+  // has to be addressed by port.
+  readonly proxy?: DialProxy;
 }
 
 export function mssqlConfig(
@@ -106,6 +111,14 @@ export function mssqlConfig(
       // all, which is why only the member dials set it.
       readOnlyIntent: dial?.readOnlyIntent ?? false,
       appName: "indexterity",
+      // Cast because @types/mssql declares `connector` as taking no arguments,
+      // and tedious 20 calls it with the destination: connection.js:1259 passes
+      // `connectOpts` (host, port, localAddress) into whatever custom connector
+      // it was given. Verified against a live SQL Server 2022 — a connector
+      // written to the declared signature would have nowhere to dial.
+      ...(dial?.proxy === undefined
+        ? {}
+        : { connector: mssqlConnector(dial.proxy) as unknown as () => Promise<net.Socket> }),
     },
   };
 }

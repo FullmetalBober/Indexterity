@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { ENGINE_PRIVILEGES, scopedConnString } from "./provision";
+import { alreadyProvisionedMessage, SCOPED_USERNAME } from "../engine/provision";
+import { dropUserStatement, ENGINE_PRIVILEGES, scopedConnString } from "./provision";
 
 describe("scopedConnString", () => {
   it("swaps credentials and forces authSource=admin, preserving topology", () => {
@@ -53,5 +54,27 @@ describe("ENGINE_PRIVILEGES", () => {
         expect(collection === "system.profile" || db === "config").toBe(true);
       }
     }
+  });
+});
+
+describe("SCOPED_USERNAME", () => {
+  // Fixed rather than random, which is what stops a cluster collecting one
+  // abandoned user per connect — nothing here can drop them, because the admin
+  // credentials that could are thrown away by design.
+  it("is one fixed name, not a per-provision one", () => {
+    expect(SCOPED_USERNAME).toBe("indexterity");
+  });
+});
+
+describe("alreadyProvisionedMessage", () => {
+  // The server cannot tell the two apart, so the sentence has to carry both: a
+  // cluster somebody is adding twice, and one whose user outlived its
+  // connection. Only the second needs the statement, and without it that case is
+  // a dead end — provisioning would be unreachable on that cluster forever.
+  it("names the user, the likely cause, and the way out of the other one", () => {
+    const message = alreadyProvisionedMessage(dropUserStatement(SCOPED_USERNAME));
+    expect(message).toContain(`"${SCOPED_USERNAME}"`);
+    expect(message).toMatch(/already connected/i);
+    expect(message).toContain('db.getSiblingDB("admin").dropUser("indexterity")');
   });
 });

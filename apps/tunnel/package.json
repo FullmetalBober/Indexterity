@@ -1,0 +1,12 @@
+{
+  "name": "@repo/tunnel",
+  "version": "0.14.0",
+  "private": true,
+  "description": "The WireGuard peering the api spawns per tunnel: wireguard-go and gvisor's netstack, SOCKS5 on loopback",
+  "scripts": {
+    "build": "CGO_ENABLED=0 go build -trimpath -o dist/indexterity-tunnel .",
+    "typecheck": "go vet ./...",
+    "test": "go test ./...",
+    "lint": "golangci-lint config verify && golangci-lint run"
+  }
+}

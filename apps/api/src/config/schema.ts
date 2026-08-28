@@ -206,6 +206,10 @@ const workerShape = {
   // — which is why this one has no default.
   RETENTION_DAYS: optionalPositive(),
   STORAGE_USD_PER_GB_MONTH: optionalPositive(),
+  // Where the tunnel binary is (#353, D111). Defaults to the layout both the
+  // repo and the image have — apps/tunnel/dist beside apps/api — and is here for
+  // the deployments that put it somewhere else.
+  TUNNEL_BINARY: z.string().min(1).optional(),
   ALLOW_PRIVATE_CLUSTER_TARGETS: flag(false),
   ALLOW_INSECURE_CLUSTER_TLS: flag(false),
   // One flag for every engine rather than one per engine. The knob answers a

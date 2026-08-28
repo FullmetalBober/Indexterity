@@ -1,6 +1,7 @@
 // Presentation helpers shared by the dashboard's sections.
 import { Tooltip, TooltipContent, TooltipTrigger } from "~/components/ui/tooltip";
-import { LocalTime, useMounted } from "~/lib/hydration";
+import { useMounted } from "~/lib/hydration";
+import { LocalTime } from "~/lib/local-time";
 
 export function badgeVariant(type: string): "secondary" | "destructive" | "default" | "outline" {
   if (type === "DROP_REDUNDANT" || type === "ADVISORY_REVIEW") return "secondary";

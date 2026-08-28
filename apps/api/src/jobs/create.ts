@@ -1,6 +1,7 @@
 import { inChangeWindow } from "../analysis";
 import type { Database } from "../db";
 import { actions, and, eq, inArray, policies, recommendations } from "../db";
+import type { TunnelRegistry } from "../tunnel/tunnel.registry";
 import { effectiveChangeWindow } from "./change-window";
 import { openClusterSession } from "./cluster-connection";
 
@@ -9,7 +10,15 @@ import { openClusterSession } from "./cluster-connection";
 // as DROP_REDUNDANT and routes them through the safe hide -> observe -> drop path.
 // At build time the collection's write latency is recorded as the baseline for
 // the post-build regression watch (finalize drops the index if writes regress).
-export async function applyCreatesForCluster(db: Database, clusterId: string): Promise<number> {
+export async function applyCreatesForCluster(
+  db: Database,
+  clusterId: string,
+  // The live tunnels, when this cluster is reached over one (#353).
+  // Optional because most callers have none and every cluster before
+  // #353 needs none; a cluster WITH a tunnel_id and no registry is
+  // refused rather than dialled directly.
+  tunnels?: TunnelRegistry,
+): Promise<number> {
   const approved = await db
     .select()
     .from(recommendations)
@@ -40,7 +49,7 @@ export async function applyCreatesForCluster(db: Database, clusterId: string): P
   const buildable = open ? approved : approved.filter((rec) => rec.urgent);
   if (buildable.length === 0) return 0;
 
-  const { session, readOnly, release } = await openClusterSession(db, clusterId);
+  const { session, readOnly, release } = await openClusterSession(db, clusterId, { tunnels });
   try {
     if (readOnly) return 0;
     const collector = session.collector;
@@ -71,7 +80,7 @@ export async function applyCreatesForCluster(db: Database, clusterId: string): P
         continue;
       }
       const carried = target.options;
-      await executor.create(rec.database, rec.collection, keys, {
+      const outcome = await executor.create(rec.database, rec.collection, keys, {
         name: rec.indexName,
         ...(target.partial === undefined ? {} : { partialFilterExpression: target.partial }),
         ...(carried === undefined
@@ -88,6 +97,27 @@ export async function applyCreatesForCluster(db: Database, clusterId: string): P
                 : { include: carried.include }),
             }),
       });
+      // A scheduled build does not exist yet (#332). PostgreSQL's pg_cron route
+      // returns as soon as the job is registered and the index appears minutes
+      // later in a background worker, so ACTIVE here would claim a finished
+      // build — and the write-latency baseline taken beside it would be measured
+      // on a table the index is not on, which is the reference the post-build
+      // regression watch then compares against. BUILDING says what is true, and
+      // jobs/building.ts finishes the row when the index reports itself valid.
+      if (outcome === "SCHEDULED") {
+        await db
+          .update(recommendations)
+          .set({ state: "BUILDING", updatedAt: new Date() })
+          .where(eq(recommendations.id, rec.id));
+        await db.insert(actions).values({
+          recommendationId: rec.id,
+          kind: "CREATE",
+          actor: "system",
+          result: "scheduled: the build runs on the cluster and a later tick records the result",
+        });
+        built += 1;
+        continue;
+      }
       // Write-latency baseline at build time — the reference for the post-build watch.
       const { writes } = await collector.collectionLatency(rec.database, rec.collection);
       await db

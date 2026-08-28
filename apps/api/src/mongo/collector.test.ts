@@ -1,11 +1,15 @@
+import { MongoServerError } from "mongodb";
 import { describe, expect, it } from "vitest";
+import { DatabaseInaccessibleError } from "../engine/ports";
 import {
   dateRangeCutoff,
   equalityConstants,
   lookupJoins,
+  MongoIndexCollector,
   pipelineShape,
   sumLatencyStats,
 } from "./collector";
+import type { MongoConnection } from "./connection";
 
 describe("pipelineShape", () => {
   it("extracts equality/range/directed sort from leading $match + $sort", () => {
@@ -158,6 +162,58 @@ describe("sumLatencyStats", () => {
     expect(sumLatencyStats([])).toEqual({
       reads: { ops: 0, latencyMicros: 0 },
       writes: { ops: 0, latencyMicros: 0 },
+    });
+  });
+});
+
+// A database the credentials can see and cannot read (#345). The shape that
+// reaches it: a connection string holding the cluster `listDatabases` action
+// without per-database grants to match, which is what a customer's own scoped
+// user usually is. Measured on 7.0 — listDatabases names every database, and each
+// read of an ungranted one comes back code 13 / Unauthorized.
+describe("listCollectionNames on an inaccessible database", () => {
+  function refusing(error: unknown) {
+    return {
+      db: () => ({ listCollections: () => ({ toArray: () => Promise.reject(error) }) }),
+    } as unknown as MongoConnection;
+  }
+
+  it("raises DatabaseInaccessibleError for code 13", async () => {
+    const failure = new MongoServerError({
+      message: "not authorized on other to execute command { listCollections: 1 }",
+      code: 13,
+      codeName: "Unauthorized",
+    });
+    const collector = new MongoIndexCollector(refusing(failure));
+    await expect(collector.listCollectionNames("other")).rejects.toBeInstanceOf(
+      DatabaseInaccessibleError,
+    );
+  });
+
+  // Atlas and mongos both wrap this refusal with their own numbering, so the
+  // wording is matched as well as the code.
+  it("falls back to the server's wording when no code survives", async () => {
+    const failure = new MongoServerError({ message: "not authorized on other" });
+    const collector = new MongoIndexCollector(refusing(failure));
+    await expect(collector.listCollectionNames("other")).rejects.toBeInstanceOf(
+      DatabaseInaccessibleError,
+    );
+  });
+
+  // Anything else still aborts the pass. A collector that turned every failure
+  // into "no access" would report a cluster as collected when the driver had died.
+  it("lets every other failure through unchanged", async () => {
+    const collector = new MongoIndexCollector(refusing(new Error("connection lost")));
+    await expect(collector.listCollectionNames("app")).rejects.toThrow("connection lost");
+  });
+
+  // Not authorized is about the database, not about a collection inside it, so
+  // the name it carries is the one the callers skip on.
+  it("names the database it could not read", async () => {
+    const failure = new MongoServerError({ message: "not authorized on other", code: 13 });
+    const collector = new MongoIndexCollector(refusing(failure));
+    await expect(collector.listCollectionNames("other")).rejects.toMatchObject({
+      database: "other",
     });
   });
 });

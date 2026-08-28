@@ -1,8 +1,15 @@
 import type { Admin } from "mongodb";
 import { z } from "zod";
 import { scopeForDiagnosis } from "../engine/observe";
-import type { ConnectionDiagnosis, PrivilegeCheck, PrivilegeTier } from "../engine/ports";
-import { mongoClient, type TlsOverrides } from "./client";
+import type {
+  ConnectionDiagnosis,
+  DialProxy,
+  PrivilegeCheck,
+  PrivilegeTier,
+  TlsOverrides,
+} from "../engine/ports";
+import { mongoClient } from "./client";
+import { withoutSystemDatabases } from "./connection";
 import { ENGINE_ROLE } from "./provision";
 import {
   hasQueryStatsPlanMetrics,
@@ -154,7 +161,7 @@ export const PROVISION_PRIVILEGES: readonly RequiredPrivilege[] = [
   {
     key: "createUser",
     label: "Create a user (createUser)",
-    enables: "creating the idx_… user Indexterity would run as",
+    enables: "creating the `indexterity` user Indexterity would run as",
     tier: "PROVISION",
     actions: ["createUser"],
     scope: { kind: "exact", db: "admin", collection: "" },
@@ -549,8 +556,10 @@ export async function diagnoseConnection(
   // database reads as ungranted against a twelve-database cluster and as granted
   // against the one database somebody actually asked us to observe.
   observedDatabases?: readonly string[] | null,
+  // Route the dial through a tunnel when this cluster needs one (#353).
+  proxy?: DialProxy,
 ): Promise<ConnectionDiagnosis> {
-  const client = mongoClient(uri, overrides);
+  const client = mongoClient(uri, overrides, proxy);
   try {
     const admin = client.db("admin");
     // Version first: below the floor nothing else matters, and saying so at
@@ -578,9 +587,7 @@ export async function diagnoseConnection(
     let listWorks = true;
     try {
       const result = await admin.admin().listDatabases();
-      userDatabases = result.databases
-        .map((entry) => entry.name)
-        .filter((name) => name !== "admin" && name !== "local" && name !== "config");
+      userDatabases = withoutSystemDatabases(result.databases.map((entry) => entry.name));
     } catch {
       listWorks = false;
     }

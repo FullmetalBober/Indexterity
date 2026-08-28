@@ -2,6 +2,7 @@ import { ORPCError } from "@orpc/server";
 import type { Cluster, ClusterEngine, Recommendation } from "@repo/contracts";
 import { clusters, recommendations } from "../db";
 import type { ConnectionDiagnosis as EngineConnectionDiagnosis } from "../engine/ports";
+import { revokeCommandFor } from "../engine/provision";
 import { isUnreachableError } from "../errors/unreachable";
 import { ClusterGoneError } from "../jobs/cluster-connection";
 
@@ -53,9 +54,22 @@ export function toCluster(
     connectionMode: row.connectionMode,
     engine: row.engine,
     readOnly: row.readOnly,
+    tunnelId: row.tunnelId,
     provisionedUsername: row.provisionedUsername,
+    revokeCommand: revokeCommandFor(row.engine, row.provisionedUsername, row.provisionedDatabases),
     credentialPosture: row.credentialPosture,
     lastCollectedAt: lastCollectedAt?.toISOString() ?? null,
+    // Three columns, one field: a reason with no start and no sentence is not
+    // something a screen can say anything useful with, so they travel together
+    // or not at all.
+    blocked:
+      row.blockedReason === null || row.blockedSince === null
+        ? null
+        : {
+            reason: row.blockedReason,
+            since: row.blockedSince.toISOString(),
+            detail: row.blockedDetail ?? "",
+          },
     tlsOverrides: row.tlsOverrides,
     observedDatabases: row.observedDatabases,
     createdAt: row.createdAt.toISOString(),

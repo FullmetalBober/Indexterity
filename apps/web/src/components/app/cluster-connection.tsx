@@ -1,5 +1,6 @@
 import { type ClusterEngine, canHideIndexes } from "@repo/contracts";
 import { useState } from "react";
+import { CONNECTION_SCHEME } from "~/components/app/connection-dialect";
 import { CredentialPrivilegesPanel } from "~/components/app/credential-privileges";
 import { ReauthDialog } from "~/components/app/reauth-dialog";
 import { ConfirmButton } from "~/components/confirm-button";
@@ -22,6 +23,9 @@ interface ClusterConnectionInfo {
   readonly engine: ClusterEngine;
   readonly readOnly: boolean;
   readonly provisionedUsername: string | null;
+  // The engine's own removal statement(s), composed by the api (#338). Null
+  // exactly when provisionedUsername is.
+  readonly revokeCommand: string | null;
   readonly credentialPosture: "PROVISIONED" | "ADMIN" | "SCOPED" | null;
 }
 
@@ -125,7 +129,7 @@ export function ClusterConnection({
   });
 
   return (
-    <Card className="mt-8">
+    <Card>
       <CardHeader>
         <CardTitle className="text-base">Connection</CardTitle>
         <CardDescription>
@@ -136,7 +140,13 @@ export function ClusterConnection({
         <div className="flex flex-wrap items-center gap-3">
           {cluster.readOnly ? (
             <ConfirmButton
-              trigger={<Button variant="outline">Go live</Button>}
+              pending={toggleMode.isPending}
+              pendingLabel="Going live…"
+              trigger={
+                <Button variant="outline" disabled={toggleMode.isPending}>
+                  {toggleMode.isPending ? "Going live…" : "Go live"}
+                </Button>
+              }
               title="Enable live mode?"
               description={`The engine will be allowed to modify indexes on "${cluster.name}" — ${
                 canHide ? "hide, drop and build" : "drop and build"
@@ -145,8 +155,14 @@ export function ClusterConnection({
               onConfirm={() => toggleMode.mutate(false)}
             />
           ) : (
-            <Button variant="outline" onClick={() => toggleMode.mutate(true)}>
-              Make read-only
+            <Button
+              variant="outline"
+              // Two presses were two requests, and this one flips what the engine
+              // is allowed to do to somebody's database.
+              disabled={toggleMode.isPending}
+              onClick={() => toggleMode.mutate(true)}
+            >
+              {toggleMode.isPending ? "Switching…" : "Make read-only"}
             </Button>
           )}
           <p className="text-muted-foreground text-sm">
@@ -231,12 +247,23 @@ export function ClusterConnection({
               <Input
                 aria-label="New connection string"
                 className="min-w-72 flex-1 font-mono text-xs"
-                placeholder="new mongodb:// connection string (verified before stored)"
+                // The engine of the cluster in front of the reader, not
+                // MongoDB's. This said `mongodb://` on a PostgreSQL cluster,
+                // which is the field telling somebody the wrong thing about
+                // their own database at the moment they are pasting a
+                // credential into it.
+                placeholder={`new ${CONNECTION_SCHEME[cluster.engine]} connection string (verified before stored)`}
                 value={rotateString}
                 onChange={(event) => setRotateString(event.target.value)}
               />
-              <Button type="submit" disabled={rotateString.length === 0}>
-                Save
+              <Button
+                type="submit"
+                // The verify dials the customer's database, which takes as long as
+                // a network round trip through a VPN — the longest wait on this
+                // card, and the one that most needed saying.
+                disabled={rotateString.length === 0 || rotate.isPending}
+              >
+                {rotate.isPending ? "Verifying…" : "Save"}
               </Button>
             </form>
           ) : null}
@@ -248,8 +275,8 @@ export function ClusterConnection({
           <ConfirmButton
             destructive
             trigger={
-              <Button variant="ghost" className="text-destructive">
-                Disconnect
+              <Button variant="ghost" className="text-destructive" disabled={disconnect.isPending}>
+                {disconnect.isPending ? "Disconnecting…" : "Disconnect"}
               </Button>
             }
             title={`Disconnect "${cluster.name}"?`}
@@ -262,17 +289,21 @@ export function ClusterConnection({
                     ? "Indexes still hidden in an observe window are restored first."
                     : "No index is left changed — nothing was hidden to restore."}
                 </p>
-                {cluster.provisionedUsername === null ? null : (
+                {cluster.revokeCommand === null ? null : (
                   <p>
                     The scoped user stays on your cluster — revoke it afterwards:
-                    <code className="mt-1 block break-all rounded bg-muted p-2 font-mono text-xs">
-                      db.getSiblingDB("admin").dropUser("{cluster.provisionedUsername}")
+                    {/* whitespace-pre-wrap, not break-all: PostgreSQL and SQL Server
+                        both need one statement per provisioned database and the
+                        order matters, so the line breaks are the meaning. */}
+                    <code className="mt-1 block whitespace-pre-wrap rounded bg-muted p-2 font-mono text-xs">
+                      {cluster.revokeCommand}
                     </code>
                   </p>
                 )}
               </>
             }
             confirmLabel="Disconnect"
+            pending={disconnect.isPending}
             onConfirm={() => disconnect.mutate()}
           />
           <p className="mt-2 text-muted-foreground text-sm">

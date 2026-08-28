@@ -8,6 +8,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { ClusterConnection } from "~/components/app/cluster-connection";
 import { ClusterName } from "~/components/app/cluster-name";
+import { ClusterTunnel } from "~/components/app/cluster-tunnel";
 import { ObserveSection, ObserveSectionSkeleton } from "~/components/app/observe-section";
 import { PolicySection, PolicySectionSkeleton } from "~/components/app/policy-section";
 import { Unavailable } from "~/components/app/unavailable";
@@ -48,24 +49,35 @@ function ClusterSettings() {
     // Capped, unlike the overview beside it. Everything here is a form, and a
     // "days" box a thousand pixels wide tells a reader it wants a thousand
     // pixels of answer.
-    <div className="max-w-3xl">
+    //
+    // The gap between the sections is decided HERE rather than by each card
+    // carrying its own `mt-*`, which is how the tunnel card arrived flush
+    // against the one above it: a new section had to remember a margin, and
+    // forgot. A card that renders null contributes no gap, so the conditionals
+    // below cost nothing.
+    <div className="max-w-3xl space-y-8">
+      {/* Three cards on this page are keyed by the cluster, because each holds
+          edit state — a name being typed, a policy being changed, a set of
+          databases being ticked — and switching clusters must not carry the
+          previous one's into the next. React keys are unique among SIBLINGS
+          though, and these are siblings: `cluster.id` on two of them plus
+          `policy.data.clusterId` (the same uuid) on the third made three
+          children share one key, which React warns about and answers by reusing
+          the wrong component. Prefixed, so each still changes with the cluster
+          and no two collide. */}
       {/* First, because it is the cheapest thing on the page to understand and
-          the one that was impossible until #96. Keyed by the cluster: the field
-          holds a name being edited, and switching clusters must not carry the
-          previous one's into it. */}
-      {cluster === null ? null : <ClusterName key={cluster.id} cluster={cluster} />}
+          the one that was impossible until #96. */}
+      {cluster === null ? null : <ClusterName key={`name-${cluster.id}`} cluster={cluster} />}
       {/* Null means three different things — no cluster, a failed read, and not
           yet — and each now gets its own answer (#289). The failed one used to
           draw nothing, so a reader whose policy would not load saw a page with no
           policy section and no way to tell that from a cluster that has none. */}
       {policy.data !== null ? (
-        <PolicySection key={policy.data.clusterId} policy={policy.data} />
+        <PolicySection key={`policy-${policy.data.clusterId}`} policy={policy.data} />
       ) : policy.pending ? (
         <PolicySectionSkeleton />
       ) : policy.failed ? (
-        <div className="mt-6">
-          <Unavailable what="this cluster's policy" onRetry={policy.retry} />
-        </div>
+        <Unavailable what="this cluster's policy" onRetry={policy.retry} />
       ) : null}
       {/* Above the connection, below the policy: it is a question about this
           cluster's data rather than about its credentials, and unlike the policy
@@ -76,10 +88,21 @@ function ClusterSettings() {
           of that form would be describing the problem the form is there to
           solve. */}
       {cluster === null ? null : databases.data !== null ? (
-        <ObserveSection key={cluster.id} cluster={cluster} databases={databases.data} />
+        <ObserveSection
+          key={`observe-${cluster.id}`}
+          cluster={cluster}
+          databases={databases.data}
+        />
       ) : databases.pending ? (
         <ObserveSectionSkeleton />
       ) : null}
+      {cluster === null ? null : (
+        <ClusterTunnel
+          clusterId={cluster.id}
+          tunnelId={cluster.tunnelId}
+          canEdit={org?.role === "owner"}
+        />
+      )}
       {cluster === null ? null : (
         <ClusterConnection
           cluster={cluster}

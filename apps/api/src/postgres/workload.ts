@@ -1,5 +1,5 @@
-import type { QueryShape, SortKey } from "../analysis";
 import type { DeletePattern } from "../engine/ports";
+import type { QueryShape, SortKey } from "../engine/types";
 
 // Query shapes out of `pg_stat_statements`, and the hardest piece of this
 // adapter — stated plainly rather than discovered later.

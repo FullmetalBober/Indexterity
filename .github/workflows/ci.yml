@@ -27,19 +27,29 @@ on:
 #
 # `dev` is exempt on purpose rather than by omission. Its runs are the record of
 # whether the integration branch is sound, and a cancelled one leaves a commit
-# with no verdict — so pushes there run to completion and only the pull_request
-# runs collapse. Grouping by `github.ref` keeps the two kinds apart on their
-# own: a push is `refs/heads/dev`, a pull request is `refs/pull/<n>/merge`, so
-# neither can cancel the other. (`main` was exempt here too until it stopped
-# running this workflow at all.)
+# with no verdict.
+#
+# That exemption is expressed in the GROUP, not in `cancel-in-progress`. It used
+# to be `cancel-in-progress: ${{ github.ref != 'refs/heads/dev' }}`, and that did
+# not work: four pull requests merged inside 34 seconds and two of the resulting
+# `dev` runs were cancelled, leaving exactly the commits-with-no-verdict the
+# paragraph above exists to prevent (#334). An `${{ }}` expression reaches
+# `cancel-in-progress` as the string "false", which is not empty and therefore
+# truthy. Appending the SHA instead makes every push to `dev` its own group, so
+# there is never a run for it to supersede and the boolean's value stops
+# mattering. Pull requests keep a stable group — `CI-refs/pull/<n>/merge`, since
+# the `&&`/`||` arm yields the empty string off `dev` — so a superseded pull
+# request run is still cancelled. A push is `refs/heads/dev` and a pull request
+# is `refs/pull/<n>/merge`, so neither kind can cancel the other either way.
+# (`main` was exempt here too until it stopped running this workflow at all.)
 #
 # release.yml deliberately has none of this. It is tag-driven and publishes
 # images and the chart to ghcr.io; cancelling a publish half way is how a chart
 # ends up naming an image tag that was never pushed, which is the exact failure
 # the RELEASE mode of kind-test.sh exists to catch.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/dev' }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/dev' && github.sha || '' }}
+  cancel-in-progress: true
 
 # Three caches carry the work between runs, and they answer different questions.
 #
@@ -66,6 +76,13 @@ jobs:
         with:
           node-version: "26"
           cache: npm
+      # The tunnel binary (apps/tunnel) is part of `npm run build`, so every job
+      # that builds needs a Go toolchain. The version is read from go.mod rather
+      # than written here, so this and mise.toml cannot drift apart.
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: apps/tunnel/go.mod
+          cache-dependency-path: apps/tunnel/go.sum
       - uses: actions/cache@v6
         id: modules
         with:
@@ -83,6 +100,34 @@ jobs:
           restore-keys: |
             turbo-check-
             turbo-
+      # `npm run lint` ends with golangci-lint over apps/tunnel (root
+      # package.json), so the binary has to be on PATH before it runs. Pinned:
+      # mise.toml pins the same major for a developer's machine, and a linter
+      # that changes version underneath a green branch is a red one tomorrow.
+      # The two Go linters `npm run lint` ends with. They catch different things —
+      # gopls has no unchecked-error analyzer, golangci-lint does not report what
+      # gopls calls an inefficient concatenation, and each was measured saying
+      # nothing about the other's findings — so both are required rather than
+      # either being a substitute.
+      #
+      # CACHED, and that is not a speed optimisation. `go install` of either is a
+      # source build that resolves the module proxy and verifies every dependency
+      # against sum.golang.org, and one dev run has already failed on exactly
+      # that: `reading https://sum.golang.org/tile/8/0/x136/923: stream error;
+      # INTERNAL_ERROR`, with nothing wrong in the tree. Two source builds per
+      # `check` run is two chances per run to fail for a reason nobody can fix,
+      # and a red integration branch that means nothing is worse than a slow one.
+      # Keyed on the pinned versions, so a bump reinstalls and nothing else does.
+      - uses: actions/cache@v6
+        id: golint
+        with:
+          path: ~/go/bin
+          key: go-lint-tools-${{ runner.os }}-golangci-2.13.1-gopls-0.23.0
+      - name: Install the Go linters
+        if: steps.golint.outputs.cache-hit != 'true'
+        run: |
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.1
+          go install golang.org/x/tools/gopls@v0.23.0
       - run: npm run lint
       - run: npm run version:check
       - run: npm run build
@@ -129,9 +174,21 @@ jobs:
         image: mongo:${{ matrix.mongo }}
         ports:
           - "27017:27017"
+      # A second mongod with authentication ON, the way the e2e job runs one. The
+      # server above has auth disabled, and that is the single state in which a
+      # database these credentials cannot read cannot exist — so the per-database
+      # refusal #345 is about had nowhere to be measured.
+      mongo-auth:
+        image: mongo:${{ matrix.mongo }}
+        env:
+          MONGO_INITDB_ROOT_USERNAME: root
+          MONGO_INITDB_ROOT_PASSWORD: int-root
+        ports:
+          - "27018:27017"
     env:
       DATABASE_URL: postgres://mongo_optimizer:mongo_optimizer@localhost:5432/mongo_optimizer
       MONGO_URL: mongodb://localhost:27017
+      MONGO_ADMIN_URL: mongodb://root:int-root@localhost:27018
       BETTER_AUTH_SECRET: integration-secret
       MASTER_KEY: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
     steps:
@@ -140,6 +197,13 @@ jobs:
         with:
           node-version: "26"
           cache: npm
+      # The tunnel binary (apps/tunnel) is part of `npm run build`, so every job
+      # that builds needs a Go toolchain. The version is read from go.mod rather
+      # than written here, so this and mise.toml cannot drift apart.
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: apps/tunnel/go.mod
+          cache-dependency-path: apps/tunnel/go.sum
       - uses: actions/cache@v6
         id: modules
         with:
@@ -203,6 +267,13 @@ jobs:
         with:
           node-version: "26"
           cache: npm
+      # The tunnel binary (apps/tunnel) is part of `npm run build`, so every job
+      # that builds needs a Go toolchain. The version is read from go.mod rather
+      # than written here, so this and mise.toml cannot drift apart.
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: apps/tunnel/go.mod
+          cache-dependency-path: apps/tunnel/go.sum
       - uses: actions/cache@v6
         id: modules
         with:
@@ -248,6 +319,13 @@ jobs:
         with:
           node-version: "26"
           cache: npm
+      # The tunnel binary (apps/tunnel) is part of `npm run build`, so every job
+      # that builds needs a Go toolchain. The version is read from go.mod rather
+      # than written here, so this and mise.toml cannot drift apart.
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: apps/tunnel/go.mod
+          cache-dependency-path: apps/tunnel/go.sum
       - uses: actions/cache@v6
         id: modules
         with:
@@ -329,6 +407,13 @@ jobs:
         with:
           node-version: "26"
           cache: npm
+      # The tunnel binary (apps/tunnel) is part of `npm run build`, so every job
+      # that builds needs a Go toolchain. The version is read from go.mod rather
+      # than written here, so this and mise.toml cannot drift apart.
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: apps/tunnel/go.mod
+          cache-dependency-path: apps/tunnel/go.sum
       - uses: actions/cache@v6
         id: modules
         with:
@@ -424,6 +509,13 @@ jobs:
         with:
           node-version: "26"
           cache: npm
+      # The tunnel binary (apps/tunnel) is part of `npm run build`, so every job
+      # that builds needs a Go toolchain. The version is read from go.mod rather
+      # than written here, so this and mise.toml cannot drift apart.
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: apps/tunnel/go.mod
+          cache-dependency-path: apps/tunnel/go.sum
       - uses: actions/cache@v6
         id: modules
         with:
@@ -628,6 +720,24 @@ jobs:
           # the SAME tree the pull request just filtered, that was the one place
           # it was guaranteed to be redundant. Two Kind clusters, ~9 minutes, on
           # every merge whether or not a chart file had been touched.
+          # A release pull request charts unconditionally (#322). Not because the
+          # diff has ever been seen to miss the chart on one — #300, #311, #318
+          # and #321 all computed true and ran both legs, and the range is right:
+          # `origin/main...HEAD` against the PR's merge commit has main's tip as
+          # its merge base, so the diff is everything dev brings, chart included.
+          #
+          # It is that this is the LAST gate before a tag publishes the chart, and
+          # a path filter is the wrong thing to be depending on there. A filter is
+          # an optimisation everywhere else in this file; here it would be load
+          # bearing. Release PRs are rare, so the ~9 minutes buy the guarantee
+          # outright instead of buying it back every time somebody edits the
+          # pattern.
+          if [ "${{ github.event_name }}" = "pull_request" ] &&
+             [ "${{ github.base_ref }}" = "main" ]; then
+            echo "chart=true (release pull request into main — filter not consulted)"
+            echo "chart=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           case "${{ github.event_name }}" in
             pull_request) range="origin/${{ github.base_ref }}...HEAD" ;;
             push)         range="${{ github.event.before }}...HEAD" ;;
@@ -644,9 +754,20 @@ jobs:
             exit 0
           fi
           changed=$(git diff --name-only "$range")
-          if echo "$changed" | grep -qE '^(deploy/|apps/[a-z]+/Dockerfile|\.github/workflows/ci\.yml)|^apps/api/src/(jobs/|main\.ts)'; then
+          # `|| true` because bash runs this with -e and grep exits 1 on no match,
+          # which is an answer here rather than a failure.
+          matched=$(echo "$changed" | grep -E '^(deploy/|apps/[a-z]+/Dockerfile|\.github/workflows/ci\.yml)|^apps/api/src/(jobs/|main\.ts)' || true)
+          # Say which files decided it, either way. The skip used to be silent,
+          # and #322 is what that costs: answering "did the chart run, and why?"
+          # meant replaying the range by hand months later, on a release nobody
+          # could reconstruct from the log it left.
+          if [ -n "$matched" ]; then
+            echo "chart=true — $range touched:"
+            echo "$matched" | sed 's/^/  /'
             echo "chart=true" >> "$GITHUB_OUTPUT"
           else
+            echo "chart=false — nothing in $range touched the chart's inputs"
+            if [ -n "$changed" ]; then echo "$changed" | sed 's/^/  /'; fi
             echo "chart=false" >> "$GITHUB_OUTPUT"
           fi
 
@@ -700,6 +821,43 @@ jobs:
           "
           docker run --rm --entrypoint promtool -v "$PWD/rules.yaml:/rules.yaml:ro" \
             prom/prometheus:v3.6.0 check rules /rules.yaml
+
+      # The VPN recipe (#353) is values, not code: a tunnel sidecar reaches a
+      # private database only if the extra container lands in the api POD and
+      # the volumes land in the POD SPEC. Indent either one wrong and the chart
+      # still renders valid YAML that installs and silently does nothing, which
+      # is exactly the failure `helm lint` cannot see. Asserts the privilege
+      # split too — the whole point of a sidecar is that NET_ADMIN goes there
+      # and the app container keeps `drop: ALL`.
+      - name: VPN sidecar values must land in the api pod
+        if: matrix.topology == 'split'
+        run: |
+          helm template rel deploy/helm/indexterity \
+            --set secrets.databaseUrl=p --set secrets.betterAuthSecret=s \
+            --set secrets.masterKey=k --set config.allowInsecureAuthUrl=true \
+            --set 'api.extraContainers[0].name=wireguard' \
+            --set 'api.extraContainers[0].image=wg:1' \
+            --set 'api.extraContainers[0].securityContext.capabilities.add[0]=NET_ADMIN' \
+            --set 'api.extraVolumes[0].name=wg-config' \
+            --set 'api.extraVolumes[0].secret.secretName=wg-peer' \
+            --set api.dnsPolicy=None \
+            --set 'api.dnsConfig.nameservers[0]=10.8.0.1' \
+            | python3 -c "
+          import sys, yaml
+          for doc in yaml.safe_load_all(sys.stdin):
+              if doc and doc.get('kind') == 'Deployment' and doc['metadata']['name'].endswith('-api'):
+                  spec = doc['spec']['template']['spec']
+                  break
+          else:
+              raise SystemExit('no api Deployment rendered')
+          names = [c['name'] for c in spec['containers']]
+          assert names == ['api', 'wireguard'], names
+          assert spec['containers'][0]['securityContext']['capabilities'] == {'drop': ['ALL']}
+          assert spec['containers'][1]['securityContext']['capabilities'] == {'add': ['NET_ADMIN']}
+          assert [v['name'] for v in spec['volumes']] == ['wg-config'], spec['volumes']
+          assert spec['dnsPolicy'] == 'None', spec.get('dnsPolicy')
+          assert spec['dnsConfig']['nameservers'] == ['10.8.0.1'], spec.get('dnsConfig')
+          "
 
       # The two builds were this workflow's longest step by a wide margin, and
       # entirely uncached — every run reinstalled every dependency inside both

@@ -1,4 +1,5 @@
 import type {
+  DialProxy,
   EngineAdapter,
   EngineSession,
   IndexCollector,
@@ -12,9 +13,7 @@ import { MongoConnection } from "./connection";
 import { diagnoseConnection } from "./diagnose";
 import { MongoIndexExecutor } from "./executor";
 import { MemberConnections } from "./members";
-import { connStringUsername, provisionScopedUser } from "./provision";
-
-const SYSTEM_DATABASES = new Set(["admin", "local", "config"]);
+import { connStringUsername, dropUserStatement, provisionScopedUser } from "./provision";
 
 class MongoEngineSession implements EngineSession {
   readonly collector: IndexCollector;
@@ -38,9 +37,10 @@ class MongoEngineSession implements EngineSession {
     return new MongoIndexExecutor(this.conn, readOnly);
   }
 
-  async listDatabaseNames(): Promise<string[]> {
-    const names = await this.conn.listDatabaseNames();
-    return names.filter((name) => !SYSTEM_DATABASES.has(name));
+  // System databases are excluded inside listDatabaseNames itself, the way the
+  // other two adapters do it.
+  listDatabaseNames(): Promise<string[]> {
+    return this.conn.listDatabaseNames();
   }
 
   async ping(): Promise<void> {
@@ -62,12 +62,17 @@ export const mongoAdapter: EngineAdapter = {
   hostsOf: mongoHosts,
   assertSecureTransport: assertTlsEnforced,
   applySecureTransport: applyTlsOverrides,
-  open: async (connectionString: string, overrides?: TlsOverrides): Promise<EngineSession> => {
-    const conn = new MongoConnection(connectionString, overrides);
+  open: async (
+    connectionString: string,
+    overrides?: TlsOverrides,
+    proxy?: DialProxy,
+  ): Promise<EngineSession> => {
+    const conn = new MongoConnection(connectionString, overrides, proxy);
     await conn.connect();
     return new MongoEngineSession(conn, connectionString, overrides);
   },
   diagnose: diagnoseConnection,
   provisionScopedUser,
+  revokeStatements: dropUserStatement,
   connStringUsername,
 };

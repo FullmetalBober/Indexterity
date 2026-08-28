@@ -102,3 +102,66 @@ describe("eventLine", () => {
     expect(eventLine(event({ event: "SIGN_OUT", target: null })).subject).toBeNull();
   });
 });
+
+describe("a VPN tunnel act", () => {
+  it("says which of the two edits a change was, and marks a replaced config", () => {
+    const line = eventLine(
+      event({
+        event: "TUNNEL_UPDATED",
+        target: "Production VPC",
+        metadata: {
+          tunnelId: "t1",
+          name: null,
+          config: {
+            from: { endpoint: "vpn.old.example:51820", allowedIps: ["10.0.0.0/8"], dns: [] },
+            to: { endpoint: "vpn.new.example:51820", allowedIps: ["10.0.0.0/8"], dns: [] },
+          },
+        },
+      }),
+    );
+    // Severe for the reason a rotated credential is: a new PrivateKey, on
+    // somebody's private network, and possibly a different network.
+    expect(line).toMatchObject({ label: "VPN tunnel changed", tone: "severe" });
+    expect(line.subject).toBe("Production VPC config replaced");
+  });
+
+  it("names the gateway a registration opened", () => {
+    const line = eventLine(
+      event({
+        event: "TUNNEL_REGISTERED",
+        target: "Production VPC",
+        metadata: {
+          tunnelId: "t1",
+          endpoint: "vpn.example.com:51820",
+          allowedIps: ["10.0.0.0/8"],
+          dns: ["10.9.0.1"],
+        },
+      }),
+    );
+    expect(line).toMatchObject({ label: "VPN tunnel registered", tone: "neutral" });
+    expect(line.subject).toBe("Production VPC gateway vpn.example.com:51820");
+  });
+
+  it("says what a tunnel test found, not just that one happened", () => {
+    const answered = eventLine(
+      event({
+        event: "TUNNEL_TESTED",
+        target: "Production VPC",
+        metadata: { tunnelId: "t1", endpoint: "vpn.example.com:51820", reachable: true },
+      }),
+    );
+    // Ordinary work, so neutral: an owner checking their own gateway is not an
+    // act an incident is read to find.
+    expect(answered).toMatchObject({ label: "VPN tunnel tested", tone: "neutral" });
+    expect(answered.subject).toBe("Production VPC the gateway answered");
+
+    const silent = eventLine(
+      event({
+        event: "TUNNEL_TESTED",
+        target: "Production VPC",
+        metadata: { tunnelId: "t1", endpoint: "vpn.example.com:51820", reachable: false },
+      }),
+    );
+    expect(silent.subject).toBe("Production VPC no answer");
+  });
+});

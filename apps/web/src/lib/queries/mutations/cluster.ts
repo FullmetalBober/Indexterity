@@ -227,6 +227,10 @@ export function useCheckConnection(handlers: {
       tlsOverrides: TlsOverrides;
       engine?: ClusterEngine;
       observedDatabases?: string[];
+      // Which tunnel to route this dial through (#353), null for direct. Sent
+      // on the CHECK and not only on the connect: a database with no public
+      // endpoint cannot be reached by the preflight either.
+      tunnelId?: string | null;
     }) => api().checkConnection(input),
     onMutate: handlers.onStart,
     onSuccess: (diagnosis, input) =>
@@ -266,6 +270,7 @@ export function useConnectCluster(handlers: ConnectHandlers) {
       tlsOverrides: TlsOverrides;
       engine?: ClusterEngine;
       observedDatabases?: string[];
+      tunnelId?: string | null;
     }) => api().createCluster(credentials),
     onMutate: handlers.onStart,
     onSuccess: async (created) => {
@@ -306,6 +311,7 @@ export function useProvisionCluster(
       tlsOverrides: TlsOverrides;
       engine?: ClusterEngine;
       observedDatabases?: string[];
+      tunnelId?: string | null;
     }) => api().provisionCluster(credentials),
     onMutate: handlers.onStart,
     onSuccess: async (created) => {

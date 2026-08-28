@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { membersFromHello, nodeFromHello } from "./connection";
+import { membersFromHello, nodeFromHello, withoutSystemDatabases } from "./connection";
 
 // The shape a real 5-member 8.0 set answered with — primary, two priority-1
 // secondaries, one priority-0 secondary, one hidden. Reading `hosts` alone found
@@ -87,5 +87,43 @@ describe("nodeFromHello", () => {
     expect(nodeFromHello({ setName: "rs0" }).role).toBe("unknown");
     expect(nodeFromHello(null)).toEqual({ me: null, role: "unknown" });
     expect(nodeFromHello("not a document")).toEqual({ me: null, role: "unknown" });
+  });
+});
+
+// One spelling of "which databases are this cluster's own", read by two screens:
+// the settings page (through listDatabaseNames) and the connect form's checkboxes
+// (through mongo/diagnose.ts). It used to be written twice, and two spellings
+// drifting apart means the form offers a database the collect will never walk
+// (#347).
+describe("withoutSystemDatabases", () => {
+  // What a credential holding the cluster `listDatabases` action is actually
+  // shown, measured on 7.0 — all three of mongo's own, interleaved by name.
+  it("drops mongo's three and keeps everything else", () => {
+    expect(withoutSystemDatabases(["admin", "app", "config", "local", "orders"])).toEqual([
+      "app",
+      "orders",
+    ]);
+  });
+
+  // The gate that draws the observe checkboxes is MIN_DATABASES_TO_CHOOSE (2), so
+  // a one-application cluster has to come back as ONE name and not four.
+  it("leaves a single-application cluster with one database", () => {
+    expect(withoutSystemDatabases(["admin", "config", "local", "app"])).toEqual(["app"]);
+  });
+
+  // By name, which is what makes this predictable: a customer database whose name
+  // merely contains one of the three is not a system database.
+  it("matches the whole name, not part of one", () => {
+    expect(withoutSystemDatabases(["admin_archive", "configuration", "localised"])).toEqual([
+      "admin_archive",
+      "configuration",
+      "localised",
+    ]);
+  });
+
+  // A scoped user without the cluster action is shown only what it can read, and
+  // the filter has nothing left to do.
+  it("passes through a list the server already narrowed", () => {
+    expect(withoutSystemDatabases(["app"])).toEqual(["app"]);
   });
 });

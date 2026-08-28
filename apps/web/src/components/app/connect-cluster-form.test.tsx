@@ -1,4 +1,5 @@
 import type { ConnectionDiagnosis, PlanInfo, PrivilegeCheck } from "@repo/contracts";
+import { clusterEngine, engineFromScheme } from "@repo/contracts";
 import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -590,12 +591,22 @@ describe("ConnectClusterForm engines", () => {
 
   // The field itself has to stop implying MongoDB-only, because the placeholder is
   // what a reader looks at before they read anything else.
-  it("shows both dialects in the placeholder", () => {
+  //
+  // Asserted through the product's OWN scheme sniffer against the contract's OWN
+  // engine list, rather than against strings spelled here. This test used to say
+  // "both dialects" and passed for a release after PostgreSQL shipped, because two
+  // of three satisfied it. Now every example in the placeholder has to be
+  // recognisable as the engine it stands for, and the next adapter added to
+  // ClusterEngine fails this test until the field mentions it.
+  it("names every supported engine, recognisably", () => {
     renderInApp(<ConnectClusterForm plan={plan()} />);
 
-    const field = screen.getByLabelText("Connection string");
-    expect(field).toHaveAttribute("placeholder", expect.stringContaining("mongodb://"));
-    expect(field).toHaveAttribute("placeholder", expect.stringContaining("Server="));
+    const placeholder = screen.getByLabelText("Connection string").getAttribute("placeholder");
+    const detected = new Set(
+      (placeholder ?? "").split("·").map((example) => engineFromScheme(example.trim())),
+    );
+
+    expect(detected).toEqual(new Set(clusterEngine.options));
   });
 
   it("says which engine it is reading an ADO string as, before any check", async () => {
@@ -625,7 +636,7 @@ describe("ConnectClusterForm engines", () => {
     await check(user);
 
     expect(await screen.findByText(/no permission to read a single row/)).toBeInTheDocument();
-    expect(screen.getByText(/DROP LOGIN idx_…/)).toBeInTheDocument();
+    expect(screen.getByText(/DROP LOGIN indexterity/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Create a scoped login and connect/ })).toBeTruthy();
   });
 
@@ -848,7 +859,10 @@ describe("ConnectClusterForm — PostgreSQL", () => {
     await check(user);
 
     expect(await screen.findByText(/pg_monitor/)).toBeInTheDocument();
-    expect(screen.getByText(/DROP ROLE idx_…/)).toBeInTheDocument();
+    // Both halves: a bare DROP ROLE is refused while the grants above still
+    // point at the role, so the sentence has to name DROP OWNED BY too.
+    expect(screen.getByText(/DROP OWNED BY indexterity/)).toBeInTheDocument();
+    expect(screen.getByText(/DROP ROLE indexterity/)).toBeInTheDocument();
     // None of MongoDB's sentence survives.
     expect(screen.queryByText(/indexterityEngine/)).not.toBeInTheDocument();
     expect(screen.queryByText(/dropUser/)).not.toBeInTheDocument();
@@ -858,14 +872,18 @@ describe("ConnectClusterForm — PostgreSQL", () => {
   // The role withholds MORE here than on the other two engines, and that is the
   // half somebody reading "exactly the privileges above and nothing else" has to
   // understand.
-  it("says the provisioned role cannot apply either", async () => {
+  it("says the provisioned role cannot apply, and names the way it could", async () => {
     checkConnection.mockResolvedValue(diagnosis({ engine: "POSTGRESQL", canProvision: true }));
     const user = userEvent.setup();
     renderInApp(<ConnectClusterForm plan={plan()} />);
 
     await check(user);
 
-    expect(await screen.findByText(/none to change an index either/)).toBeInTheDocument();
+    expect(await screen.findByText(/It cannot change an index either/)).toBeInTheDocument();
+    // The limitation is no longer permanent (#332), so the copy that states it
+    // has to name the way out — otherwise a reader concludes PostgreSQL simply
+    // cannot apply, which was true and is not any more.
+    expect(await screen.findByText(/pg_cron/)).toBeInTheDocument();
   });
 
   // A property of the engine rather than of these credentials, so it shows on a

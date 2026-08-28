@@ -9,12 +9,9 @@
 // deployment posture, and a pure string reader has no business reading env.
 
 import { Pool } from "pg";
-import {
-  allowInsecureTls,
-  InsecureConnectionError,
-  NO_TLS_OVERRIDES,
-  type TlsOverrides,
-} from "../mongo/client";
+import { type DialProxy, NO_TLS_OVERRIDES, type TlsOverrides } from "../engine/ports";
+import { pgStreamFactory } from "../engine/socks-dial";
+import { allowInsecureTls, InsecureConnectionError } from "../engine/tls";
 import {
   effectivePgTrust,
   MODE_RANK,
@@ -23,8 +20,6 @@ import {
   parsePgConnString,
   sslModeOf,
 } from "./conn-string";
-
-export { InsecureConnectionError, NO_TLS_OVERRIDES, type TlsOverrides } from "../mongo/client";
 
 // Fail fast on unreachable servers, the same budget as the mongo client's
 // server-selection timeout and the mssql connect timeout.
@@ -99,6 +94,7 @@ export async function pgPool(
   connectionString: string,
   overrides?: TlsOverrides,
   database?: string,
+  proxy?: DialProxy,
 ): Promise<Pool> {
   assertPgTlsEnforced(connectionString, overrides);
   const parsed = parsePgConnString(connectionString);
@@ -115,6 +111,11 @@ export async function pgPool(
     // Named so a DBA reading pg_stat_activity knows who is asking. The same
     // string mssql sets as appName.
     application_name: "indexterity",
+    // node-pg is the one of the three that cannot take a connect-on-create
+    // SOCKS client: it calls stream.connect(port, host) AFTER this factory
+    // returns. See engine/socks-dial.ts for what that costs and why the shim
+    // is a plain Duplex.
+    ...(proxy === undefined ? {} : { stream: pgStreamFactory(proxy) }),
   });
   // A pool hands out connections lazily, so nothing above has dialled yet — and
   // a bad password or an unreachable host must surface HERE rather than at the

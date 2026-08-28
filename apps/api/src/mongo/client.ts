@@ -1,6 +1,8 @@
 import { MongoClient } from "mongodb";
 import ConnectionString from "mongodb-connection-string-url";
 import { workerEnv } from "../config/env";
+import { type DialProxy, NO_TLS_OVERRIDES, type TlsOverrides } from "../engine/ports";
+import { allowInsecureTls, InsecureConnectionError } from "../engine/tls";
 
 // Fail fast on unreachable clusters: 5s server selection instead of the driver's
 // 30s default, so requests surface a 502 quickly.
@@ -32,35 +34,8 @@ const VALIDATION_DISABLED: readonly [string, keyof TlsOverrides][] = [
   ["tlsinsecure", "insecure"],
 ];
 
-export class InsecureConnectionError extends Error {}
-
-// Which TLS checks this particular cluster's owner chose to turn off. Recorded
-// on the cluster row, so the dial is verified against a decision rather than
-// against whatever the string it was handed happens to contain.
-export interface TlsOverrides {
-  readonly allowInvalidCertificates: boolean;
-  readonly allowInvalidHostnames: boolean;
-  readonly insecure: boolean;
-}
-
-export const NO_TLS_OVERRIDES: TlsOverrides = {
-  allowInvalidCertificates: false,
-  allowInvalidHostnames: false,
-  insecure: false,
-};
-
-// Self-hosted installs and the dev stack point at a local mongod with no
-// certificate. Deliberately its OWN switch rather than riding on
-// ALLOW_PRIVATE_CLUSTER_TARGETS: a VPC-peered or PrivateLink Atlas cluster is a
-// private address that must still be forced to TLS, so coupling a transport rule
-// to an addressing rule would quietly weaken real deployments.
-export function allowInsecureTls(): boolean {
-  return workerEnv().ALLOW_INSECURE_CLUSTER_TLS;
-}
-
-// Read per call rather than captured at module load, for the same reason the flag
-// above is: the schema is validated at boot, and reading through it keeps one
-// answer for what the environment says.
+// Read per call rather than captured at module load: the schema is validated at
+// boot, and reading through it keeps one answer for what the environment says.
 export function maxPoolSize(): number {
   return workerEnv().MONGO_MAX_POOL_SIZE;
 }
@@ -172,10 +147,26 @@ export function assertTlsEnforced(value: string, overrides: TlsOverrides = NO_TL
 // `overrides` defaults to nothing turned off, so a caller that forgets them gets
 // the strict rule rather than a quiet exemption — the direction a default has to
 // fail in.
-export function mongoClient(uri: string, overrides: TlsOverrides = NO_TLS_OVERRIDES): MongoClient {
+export function mongoClient(
+  uri: string,
+  overrides: TlsOverrides = NO_TLS_OVERRIDES,
+  proxy?: DialProxy,
+): MongoClient {
   assertTlsEnforced(uri, overrides);
   return new MongoClient(uri, {
     serverSelectionTimeoutMS: SERVER_SELECTION_TIMEOUT_MS,
+    // The driver takes SOCKS natively, and hands the proxy the HOSTNAME from
+    // the string rather than an address it resolved — so a private replica
+    // set's member names are answered on the customer's side, which is the
+    // only side they mean anything on.
+    ...(proxy === undefined
+      ? {}
+      : {
+          proxyHost: proxy.host,
+          proxyPort: proxy.port,
+          proxyUsername: proxy.username,
+          proxyPassword: proxy.password,
+        }),
     // Bounded on purpose. The driver's default of 100 per client is a ceiling
     // nothing here approaches — the collectors fan out per replica-set member,
     // and each member has its own client — while the cost of it is paid twice:

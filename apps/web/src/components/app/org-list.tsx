@@ -25,7 +25,7 @@ export function OrgList({
 
   return (
     <>
-      <Card className="mt-6">
+      <Card>
         <CardHeader>
           <CardTitle className="text-base">You belong to</CardTitle>
           <CardDescription>

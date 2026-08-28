@@ -50,6 +50,10 @@ const LABELS: Record<string, string> = {
   CLUSTER_MODE_CHANGED: "Mode changed",
   CLUSTER_OBSERVED_DATABASES_CHANGED: "Observed databases changed",
   ORG_POLICY_CHANGED: "Organization policy changed",
+  TUNNEL_REGISTERED: "VPN tunnel registered",
+  TUNNEL_UPDATED: "VPN tunnel changed",
+  TUNNEL_REMOVED: "VPN tunnel removed",
+  TUNNEL_TESTED: "VPN tunnel tested",
 };
 
 // The acts that take something away, or hand something over. Not "bad" — an
@@ -71,6 +75,14 @@ const SEVERE = new Set([
   // switching least privilege OFF is what lets the next connect store an admin
   // string, and the row is worth finding whichever way it went.
   "ORG_POLICY_CHANGED",
+  // A replaced wg0.conf is a key rotation on somebody's private network, and it
+  // can move the network too — the tunnel act that belongs beside
+  // CLUSTER_CREDENTIALS_ROTATED. A rename lands here as well rather than
+  // splitting the act in two on the writing side; the detail says which it was.
+  "TUNNEL_UPDATED",
+  // Takes the route to every database behind it away, which is the shape of
+  // CLUSTER_DISCONNECTED.
+  "TUNNEL_REMOVED",
 ]);
 
 export function eventLabel(event: string): string {
@@ -109,6 +121,24 @@ function detailFor(event: SecurityEvent): string | null {
     const required = Reflect.get(to, "requireLeastPrivilege");
     if (typeof required !== "boolean") return null;
     return required ? "least privilege now required" : "least privilege no longer required";
+  }
+  if (event.event === "TUNNEL_UPDATED") {
+    // Which of the two edits this row is. A replaced config is the one worth
+    // finding in a page of a hundred: a new PrivateKey, and possibly a
+    // different network on the far side of it.
+    if (metadata.config !== null && metadata.config !== undefined) return "config replaced";
+    return metadata.name === null || metadata.name === undefined ? null : "renamed";
+  }
+  if (event.event === "TUNNEL_TESTED") {
+    // The verdict, which is the whole reason the row is worth keeping: a run of
+    // failed tests against one gateway is a story, and "tested" alone is not.
+    return metadata.reachable === true ? "the gateway answered" : "no answer";
+  }
+  if (event.event === "TUNNEL_REGISTERED" || event.event === "TUNNEL_REMOVED") {
+    // The gateway, because "a tunnel was registered" does not say which network
+    // the control plane can now dial into.
+    const endpoint = metadata.endpoint;
+    return typeof endpoint === "string" && endpoint !== "" ? `gateway ${endpoint}` : null;
   }
   if (event.event === "CLUSTER_OBSERVED_DATABASES_CHANGED") {
     // The count, not the names. A twelve-database instance would push the rest of

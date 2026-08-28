@@ -1,4 +1,4 @@
-import type { ClusterEngine, EngineSession, TlsOverrides } from "../engine/ports";
+import type { ClusterEngine, DialProxy, EngineSession, TlsOverrides } from "../engine/ports";
 import { adapterFor } from "../engine/registry";
 
 // One engine session per cluster, shared across jobs and requests — drivers
@@ -50,8 +50,9 @@ async function createEntry(
   engine: ClusterEngine,
   connString: string,
   overrides?: TlsOverrides,
+  proxy?: DialProxy,
 ): Promise<PoolEntry> {
-  const session = await adapterFor(engine).open(connString, overrides);
+  const session = await adapterFor(engine).open(connString, overrides, proxy);
   return { connString, session, refs: 0, lastUsed: Date.now(), doomed: false };
 }
 
@@ -63,6 +64,11 @@ export async function acquireClusterSession(
   // it only ever changes alongside the string it was chosen for, which already
   // dooms the entry below.
   overrides?: TlsOverrides,
+  // Where the dial is routed when the cluster sits behind a tunnel. Not part
+  // of the entry key: a tunnel's SOCKS port is stable for the life of the
+  // tunnel, and a tunnel that is replaced closes its listener, which fails the
+  // pooled session and dooms the entry the same way a rotated string does.
+  proxy?: DialProxy,
 ): Promise<PooledSession> {
   ensureSweeper();
   let pending = entries.get(clusterId);
@@ -83,7 +89,7 @@ export async function acquireClusterSession(
     }
   }
   if (pending === undefined) {
-    pending = createEntry(engine, connString, overrides);
+    pending = createEntry(engine, connString, overrides, proxy);
     entries.set(clusterId, pending);
     pending.catch(() => entries.delete(clusterId));
   }

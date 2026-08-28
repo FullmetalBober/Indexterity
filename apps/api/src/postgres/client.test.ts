@@ -1,12 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NO_TLS_OVERRIDES } from "../engine/ports";
-import { assertPgTlsEnforced, InsecureConnectionError } from "./client";
+import { InsecureConnectionError } from "../engine/tls";
+import { assertPgTlsEnforced } from "./client";
 
 const allowInsecure = vi.hoisted(() => vi.fn(() => false));
-// The deployment-wide escape hatch lives in mongo/client.ts and reads env, which
-// is exactly why the assert sits here rather than in conn-string.ts.
-vi.mock("../mongo/client", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../mongo/client")>()),
+// The deployment-wide escape hatch is engine/tls.ts and reads env, which is
+// exactly why the assert sits here rather than in conn-string.ts.
+vi.mock("../engine/tls", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../engine/tls")>()),
   allowInsecureTls: allowInsecure,
 }));
 

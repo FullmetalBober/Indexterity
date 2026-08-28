@@ -1,4 +1,4 @@
-import type { ServerHealth } from "../analysis";
+import type { ServerHealth } from "../engine/types";
 import type { PostgresConnection } from "./connection";
 
 // The server-wide query-engine counters behind the health probe.

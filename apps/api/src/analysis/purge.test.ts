@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
+import type { IndexKey, IndexSpec } from "../engine/types";
 import { type PurgePattern, purgeAdvisory, purgeIsSupported } from "./purge";
-import type { IndexKey, IndexSpec } from "./types";
 
 function index(name: string, keys: IndexKey[], overrides: Partial<IndexSpec> = {}): IndexSpec {
   return {

@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  // The repo's own TypeScript that belongs to no workspace. Without this file
+  // `npm run typecheck` fans out to apps/* and packages/* and reads none of
+  // it — so `scripts/` was the only source in the tree that nothing checked.
+  //
+  // Two kinds live here now: `scripts/` and the all-in-one image's supervisor,
+  // which is PID 1 of a container and so is the last file in the repo that should
+  // go unchecked.
+  //
+  // Both are run by `node <file>.ts` directly, with no build step: Node strips
+  // types on the way in. Everything here exists to keep that true.
+  //
+  // The name is load-bearing: it was `tsconfig.scripts.json`, and a language
+  // server discovers `tsconfig.json` and `jsconfig.json` and nothing else. So
+  // every file below opened in an editor got the compiler's defaults instead of
+  // this file — no node types, which is `process` and every `node:` import
+  // underlined red (TS2591) in a tree where `tsc` was green. CI read the config
+  // and the editor could not, and the editor is where the code is written.
+  "extends": "./packages/config/tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    // Node erases types, it does not compile them. `enum`, parameter
+    // properties and `namespace` all need code generated for them, so they
+    // parse here and then fail at runtime — this turns that into a type error
+    // instead of a stack trace in CI.
+    "erasableSyntaxOnly": true,
+    // Nothing emitted, so nothing to declare or map.
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false,
+    "types": ["node"]
+  },
+  "include": ["scripts/**/*.ts", "deploy/**/*.ts", "deploy/**/*.mts"]
+}

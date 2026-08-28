@@ -3,7 +3,6 @@ import {
   crowdingPenalty,
   DEFAULT_OBSERVE_DAYS,
   executionsPerWeek,
-  type IndexSpec,
   isRecurring,
   isReorderable,
   MIN_WEEKLY_DOCS_EXAMINED,
@@ -15,7 +14,6 @@ import {
   regressionWeight,
   reorderScore,
   type ScanSeverity,
-  type SortKey,
   scanCost,
   sortOrderAdvisories,
   weeklyScanCost,
@@ -24,6 +22,8 @@ import { entitledAutomation } from "../billing/plans";
 import type { Database } from "../db";
 import { analysisNotes, and, eq, indexCooldowns, policies, recommendations } from "../db";
 import { DatabaseInaccessibleError, type WorkloadTarget, workloadKey } from "../engine/ports";
+import type { IndexSpec, SortKey } from "../engine/types";
+import type { TunnelRegistry } from "../tunnel/tunnel.registry";
 import { openClusterSession } from "./cluster-connection";
 import {
   collectionIndexesAfterBuild,
@@ -74,7 +74,15 @@ function encodeKeys(keys: readonly SortKey[]): string[] {
 // instantCreate is opted in and the cluster is writable, is auto-approved and
 // built immediately (creates only — never drops; the wiki's Architecture page,
 // Apply pipeline).
-export async function suggestForCluster(db: Database, clusterId: string): Promise<number> {
+export async function suggestForCluster(
+  db: Database,
+  clusterId: string,
+  // The live tunnels, when this cluster is reached over one (#353).
+  // Optional because most callers have none and every cluster before
+  // #353 needs none; a cluster WITH a tunnel_id and no registry is
+  // refused rather than dialled directly.
+  tunnels?: TunnelRegistry,
+): Promise<number> {
   const [policy] = await db
     .select()
     .from(policies)
@@ -132,7 +140,9 @@ export async function suggestForCluster(db: Database, clusterId: string): Promis
     await planForCluster(db, clusterId),
   );
 
-  const { session, engine, readOnly, release } = await openClusterSession(db, clusterId);
+  const { session, engine, readOnly, release } = await openClusterSession(db, clusterId, {
+    tunnels,
+  });
   let created = 0;
   let instantApproved = 0;
   try {

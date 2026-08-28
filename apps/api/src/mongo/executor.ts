@@ -1,20 +1,7 @@
-import type { CreateIndexOptions, IndexExecutor } from "../engine/ports";
+import type { CreateIndexOptions, IndexBuildOutcome, IndexExecutor } from "../engine/ports";
+import { UnsupportedServerError } from "../engine/version";
 import type { MongoConnection } from "./connection";
 import { versionRefusal } from "./version";
-
-// The server cannot do what the pipeline requires. Distinct from a network
-// failure and from a permission failure: retrying will never fix it, so the
-// jobs treat it as a condition to report rather than an error to retry.
-export class UnsupportedServerError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "UnsupportedServerError";
-  }
-}
-
-// The executor CONTRACT lives in the engine-neutral ports (../engine/ports);
-// this file is the MongoDB implementation. Types re-exported for convenience.
-export type { CreateIndexOptions, IndexExecutor } from "../engine/ports";
 
 // Enforces read-only mode structurally: every write throws unless the cluster
 // was explicitly switched to live mode (docs/decisions.md, D11).
@@ -74,7 +61,7 @@ export class MongoIndexExecutor implements IndexExecutor {
     collection: string,
     keys: Record<string, 1 | -1>,
     options: CreateIndexOptions,
-  ): Promise<void> {
+  ): Promise<IndexBuildOutcome> {
     this.assertWritable("create index");
     await this.assertSupported();
     // `include` is a covering-column list, which MongoDB has no concept of —
@@ -83,5 +70,8 @@ export class MongoIndexExecutor implements IndexExecutor {
     // spec ever carries one.
     const { include: _include, ...mongoOptions } = options;
     await this.conn.db(database).collection(collection).createIndex(keys, mongoOptions);
+    // createIndexes does not return until the index is usable, so there is
+    // nothing for a later tick to finish.
+    return "BUILT";
   }
 }

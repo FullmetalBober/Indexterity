@@ -1,6 +1,3 @@
-import { clusters, type Database, eq, members, user } from "../db";
-import { sendMail } from "./mailer";
-
 // Repeating alerts (a cluster that has been unreachable for a week fails its
 // collect every hour) become noise nobody reads. One per key per window.
 //
@@ -29,25 +26,4 @@ export function alertAllowed(
   now: Date = new Date(),
 ): Promise<boolean> {
   return claim(key, new Date(now.getTime() - cooldownMs), now);
-}
-
-// Email every owner of the cluster's org — the audience for engine alerts
-// (drops executed, regressions rolled back). Best-effort.
-export async function notifyClusterOwners(
-  db: Database,
-  clusterId: string,
-  subject: string,
-  text: string,
-): Promise<void> {
-  const rows = await db
-    .select({ email: user.email, role: members.role, clusterName: clusters.name })
-    .from(clusters)
-    .innerJoin(members, eq(members.orgId, clusters.orgId))
-    .innerJoin(user, eq(user.id, members.userId))
-    .where(eq(clusters.id, clusterId));
-  const clusterName = rows[0]?.clusterName ?? clusterId;
-  for (const row of rows) {
-    if (row.role !== "owner") continue;
-    await sendMail(row.email, `[Indexterity] ${clusterName}: ${subject}`, text);
-  }
 }

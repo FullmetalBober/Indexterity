@@ -1,5 +1,4 @@
 import { apiEnv } from "../config/env";
-import { and, type Database, eq, gt, invites, sql, user } from "../db";
 
 // Who may create an account.
 //   invite  — the default. The FIRST account is always allowed (someone has to
@@ -20,7 +19,7 @@ export interface SignupDecision {
   readonly reason: string;
 }
 
-const ALLOWED: SignupDecision = { allowed: true, reason: "" };
+export const ALLOWED: SignupDecision = { allowed: true, reason: "" };
 
 // Pure enough to unit-test: the caller supplies the two facts a decision needs.
 export function decideSignup(
@@ -36,24 +35,4 @@ export function decideSignup(
     allowed: false,
     reason: "sign-up is invite-only — ask an owner to invite this email address",
   };
-}
-
-export async function evaluateSignup(db: Database, email: string): Promise<SignupDecision> {
-  const mode = signupMode();
-  if (mode === "open") return ALLOWED;
-  const [existing] = await db.select({ total: sql<number>`count(*)::int` }).from(user);
-  const isFirstUser = (existing?.total ?? 0) === 0;
-  if (mode === "closed") return decideSignup(mode, { isFirstUser, hasPendingInvite: false });
-  const [pending] = await db
-    .select({ id: invites.id })
-    .from(invites)
-    .where(
-      and(
-        eq(invites.email, email.toLowerCase()),
-        eq(invites.status, "pending"),
-        gt(invites.expiresAt, new Date()),
-      ),
-    )
-    .limit(1);
-  return decideSignup(mode, { isFirstUser, hasPendingInvite: pending !== undefined });
 }

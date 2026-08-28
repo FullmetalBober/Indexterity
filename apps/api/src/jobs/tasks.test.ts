@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { InsecureConnectionError } from "../mongo/client";
-import { UnsupportedServerError } from "../mongo/executor";
+import { InsecureConnectionError } from "../engine/tls";
+import { UnsupportedServerError } from "../engine/version";
+import { TunnelUnavailableError } from "../tunnel/resolve";
 import { ClusterCredentialsError, ClusterGoneError } from "./cluster-connection";
 import { type ClusterTaskDeps, runClusterTask } from "./tasks";
 
@@ -12,17 +13,23 @@ function recorder(): {
   errors: string[];
   alerts: string[];
   emitted: string[];
+  blocked: string[];
+  unblocked: string[];
 } {
   const warns: string[] = [];
   const errors: string[] = [];
   const alerts: string[] = [];
   const emitted: string[] = [];
+  const blocked: string[] = [];
+  const unblocked: string[] = [];
   const claimed = new Set<string>();
   return {
     warns,
     errors,
     alerts,
     emitted,
+    blocked,
+    unblocked,
     deps: {
       logger: {
         warn: (message) => void warns.push(message),
@@ -41,6 +48,14 @@ function recorder(): {
         emitted.push(`${clusterId}:${task}`);
         return Promise.resolve();
       },
+      markBlocked: (clusterId, reason, detail) => {
+        blocked.push(`${clusterId}:${reason}:${detail}`);
+        return Promise.resolve();
+      },
+      markUnblocked: (clusterId) => {
+        unblocked.push(clusterId);
+        return Promise.resolve();
+      },
     },
   };
 }
@@ -48,6 +63,8 @@ function recorder(): {
 function unreachable(): Error {
   return new Error("connect ECONNREFUSED 10.0.0.4:27017");
 }
+
+const TUNNEL = "22222222-2222-2222-2222-222222222222";
 
 describe("runClusterTask", () => {
   // Offboarding does not reach into the queue, so a deleted cluster's ticks
@@ -61,6 +78,10 @@ describe("runClusterTask", () => {
     expect(log.warns).toHaveLength(0);
     expect(log.errors).toHaveLength(0);
     expect(log.alerts).toHaveLength(0);
+    // Nothing recorded either: the row this would be written to is gone, and the
+    // owners deleted it on purpose.
+    expect(log.blocked).toHaveLength(0);
+    expect(log.unblocked).toHaveLength(0);
   });
 
   it("passes a successful run straight through", async () => {
@@ -74,6 +95,10 @@ describe("runClusterTask", () => {
     expect(log.alerts).toHaveLength(0);
     // The landed pass is announced, so the dashboard can refetch what it wrote.
     expect(log.emitted).toEqual([`${CLUSTER}:collect`]);
+    // And whatever stopped the last pass is cleared: the stored state is "why
+    // the pipeline is not running", so it cannot survive a pass that ran.
+    expect(log.unblocked).toEqual([CLUSTER]);
+    expect(log.blocked).toHaveLength(0);
   });
 
   it("announces nothing for a tick that changed nothing", async () => {
@@ -172,5 +197,136 @@ describe("runClusterTask on a cluster we refuse to dial", () => {
     );
     expect(log.alerts.join()).not.toContain("unreachable");
     expect(log.warns.join()).not.toContain("unreachable");
+  });
+
+  // #353. A tunnel that will not come up is its own condition: the database
+  // behind it may be answering perfectly, and we never dialled it.
+  describe("a cluster behind a tunnel that is down", () => {
+    it("skips the tick rather than throwing, so no retry is burned", async () => {
+      const log = recorder();
+      await expect(
+        runClusterTask("collect", CLUSTER, log.deps, () => {
+          throw new TunnelUnavailableError(TUNNEL);
+        }),
+      ).resolves.toBeUndefined();
+      expect(log.warns[0]).toContain(TUNNEL);
+    });
+
+    it("announces nothing, because the tick changed nothing", async () => {
+      const log = recorder();
+      await runClusterTask("collect", CLUSTER, log.deps, () => {
+        throw new TunnelUnavailableError(TUNNEL);
+      });
+      expect(log.emitted).toHaveLength(0);
+    });
+
+    // The mail has to name the VPN, not the database. Saying "we could not
+    // reach your cluster" sends somebody to look at a database that is fine.
+    it("tells the owners the tunnel is down, not that the cluster is unreachable", async () => {
+      const log = recorder();
+      await runClusterTask("collect", CLUSTER, log.deps, () => {
+        throw new TunnelUnavailableError(TUNNEL);
+      });
+      expect(log.alerts).toEqual([
+        `${CLUSTER}:collect skipped — the VPN tunnel to this cluster is down`,
+      ]);
+    });
+
+    // One gateway commonly reaches several clusters. Keying the cooldown on the
+    // cluster would mail a customer once per database behind one down VPN.
+    it("alerts once per TUNNEL, not once per cluster behind it", async () => {
+      const log = recorder();
+      const second = "33333333-3333-3333-3333-333333333333";
+      await runClusterTask("collect", CLUSTER, log.deps, () => {
+        throw new TunnelUnavailableError(TUNNEL);
+      });
+      await runClusterTask("collect", second, log.deps, () => {
+        throw new TunnelUnavailableError(TUNNEL);
+      });
+      expect(log.alerts).toHaveLength(1);
+    });
+
+    it("still alerts separately for a different tunnel", async () => {
+      const log = recorder();
+      const other = "44444444-4444-4444-4444-444444444444";
+      await runClusterTask("collect", CLUSTER, log.deps, () => {
+        throw new TunnelUnavailableError(TUNNEL);
+      });
+      await runClusterTask("collect", CLUSTER, log.deps, () => {
+        throw new TunnelUnavailableError(other);
+      });
+      expect(log.alerts).toHaveLength(2);
+    });
+  });
+
+  // The gap this closes. The condition was always diagnosed here — a metric, a
+  // log line, a mail once a day — and then thrown away, so a dashboard opened a
+  // week later could only show `lastCollectedAt` going stale, which has innocent
+  // causes and reads as "nothing is obviously wrong".
+  it("records why the pipeline stopped, in the driver's own words", async () => {
+    const log = recorder();
+
+    await runClusterTask("collect", CLUSTER, log.deps, () => Promise.reject(unreachable()));
+
+    expect(log.blocked).toEqual([`${CLUSTER}:UNREACHABLE:connect ECONNREFUSED 10.0.0.4:27017`]);
+    expect(log.unblocked).toHaveLength(0);
+  });
+
+  it("blames the tunnel rather than the database when the tunnel is down", async () => {
+    const log = recorder();
+
+    await runClusterTask("collect", CLUSTER, log.deps, () => {
+      throw new TunnelUnavailableError(TUNNEL);
+    });
+
+    // Its own reason, for the reason the mail and the metric keep theirs: the
+    // database may be answering perfectly and we never dialled it.
+    expect(log.blocked[0]).toContain(":TUNNEL_DOWN:");
+    expect(log.blocked[0]).toContain("gateway");
+  });
+
+  it("distinguishes declining to dial from failing to reach", async () => {
+    const log = recorder();
+
+    await runClusterTask("collect", CLUSTER, log.deps, () => {
+      throw new InsecureConnectionError("the stored string would connect in plaintext");
+    });
+
+    expect(log.blocked[0]).toContain(":INSECURE:");
+    expect(log.blocked[0]).not.toContain("UNREACHABLE");
+  });
+
+  it("records an unsupported server, which no retry can fix", async () => {
+    const log = recorder();
+
+    await runClusterTask("collect", CLUSTER, log.deps, () => {
+      throw new UnsupportedServerError("mongodb 4.4 is below the floor");
+    });
+
+    expect(log.blocked[0]).toBe(`${CLUSTER}:UNSUPPORTED:mongodb 4.4 is below the floor`);
+  });
+
+  it("records credentials that cannot be opened, which needs an operator", async () => {
+    const log = recorder();
+
+    await runClusterTask("collect", CLUSTER, log.deps, () => {
+      throw new ClusterCredentialsError(CLUSTER, 2, new Error("no key for version 2"));
+    });
+
+    expect(log.blocked[0]).toContain(":CREDENTIALS:");
+  });
+
+  it("records an unexpected failure BEFORE rethrowing it", async () => {
+    const log = recorder();
+
+    // Rethrown so graphile-worker retries and eventually dead-letters it — but an
+    // owner should not have to wait for that to find out collection stopped.
+    await expect(
+      runClusterTask("collect", CLUSTER, log.deps, () => {
+        throw new Error("something nobody has classified");
+      }),
+    ).rejects.toThrow("something nobody has classified");
+
+    expect(log.blocked).toEqual([`${CLUSTER}:ERROR:something nobody has classified`]);
   });
 });

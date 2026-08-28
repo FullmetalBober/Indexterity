@@ -205,6 +205,13 @@ export function trustsProxy(): boolean {
   return trustProxySetting() !== false;
 }
 
+// Where the tunnel binary is (D111). Undefined means the layout the repo and the
+// image share, resolved by tunnel/child.ts from its own module rather than from a
+// working directory.
+export function tunnelBinary(): string | undefined {
+  return workerEnv().TUNNEL_BINARY;
+}
+
 // Whether owners must have a second factor before any owner-only mutation (#55).
 // A deployment posture like SIGNUP_MODE, off by default so dev and the test
 // suites work without every account enrolling an authenticator first.

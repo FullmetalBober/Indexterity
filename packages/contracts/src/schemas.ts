@@ -89,15 +89,66 @@ export const NO_TLS_OVERRIDES: TlsOverrides = {
   insecure: false,
 };
 
+// Why the pipeline is not running against a cluster.
+//
+// The condition was always known — a metric, a log line, a mail once a day — and
+// none of it reached a screen, so a cluster nobody could reach looked exactly
+// like a cluster with nothing to collect: `lastCollectedAt` quietly going stale.
+// A problem that renders as an absence reads as "nothing is obviously wrong".
+export const BLOCKED_REASONS = [
+  // We dialled and nothing answered.
+  "UNREACHABLE",
+  // The VPN gateway did not come up. NOT unreachable: the database may be
+  // answering perfectly and we never dialled it (#353).
+  "TUNNEL_DOWN",
+  // The stored string would connect in plaintext, so we declined to dial.
+  "INSECURE",
+  // The sealed credentials cannot be opened — an operator's problem.
+  "CREDENTIALS",
+  // A major series this release has not been probed against.
+  "UNSUPPORTED",
+  // Anything else, which is also the one that gets retried and dead-lettered.
+  "ERROR",
+] as const;
+export type BlockedReason = (typeof BLOCKED_REASONS)[number];
+
+export const clusterBlock = z.object({
+  // A string rather than the enum above, deliberately. The column is text so
+  // that adding a reason is a constant rather than a migration — and a reason
+  // written by a newer worker than the api reading it must render as itself
+  // rather than fail the whole cluster read, which is the failure this field
+  // exists to stop happening.
+  reason: z.string(),
+  // When it STARTED, not when it was last seen: "for six days" is the part that
+  // decides whether somebody acts.
+  since: z.string(),
+  // The sentence, usually the driver's own words.
+  detail: z.string(),
+});
+export type ClusterBlock = z.infer<typeof clusterBlock>;
+
 export const cluster = z.object({
   id: z.uuid(),
   name: z.string(),
   connectionMode,
   engine: clusterEngine,
   readOnly: z.boolean(),
+  // Which WireGuard tunnel reaches this cluster, null when it is dialled
+  // directly (#353). Orthogonal to connectionMode rather than a value in it:
+  // "over a tunnel" and "via a relay agent" are not mutually exclusive.
+  tunnelId: z.uuid().nullable(),
   // Set when Indexterity provisioned its own least-privilege user on the
   // cluster (admin-string onboarding); null for pasted-string clusters.
   provisionedUsername: z.string().nullable(),
+  // What removes that user, in the engine's own language, null alongside the
+  // username above. Sent with the cluster rather than composed in the dashboard
+  // (#338): the disconnect dialog shows it BEFORE the call that would return it,
+  // and the version it used to compose there was MongoDB's on every engine.
+  //
+  // May be several statements separated by newlines — PostgreSQL and SQL Server
+  // both have to visit each provisioned database before dropping the principal —
+  // so it is rendered pre-formatted, not inline.
+  revokeCommand: z.string().nullable(),
   // What the stored credentials COULD do, as against what `readOnly` allows
   // them to. Recorded when they were stored and re-evaluated on rotation.
   //
@@ -109,6 +160,9 @@ export const cluster = z.object({
   // Newest index snapshot, or null before the first collect. The dashboard
   // flags stale data so numbers from before an outage cannot read as current.
   lastCollectedAt: z.string().nullable(),
+  // Null when the pipeline is running. When it is not, this is the answer to
+  // "why are these numbers old", which staleness alone cannot give.
+  blocked: clusterBlock.nullable(),
   // Which TLS checks this cluster was connected with turned off. Read back, not
   // just written: a security concession the owner cannot see afterwards is one
   // nobody reviews.
@@ -783,6 +837,21 @@ export const SECURITY_EVENTS = [
   // much of somebody's cluster we look at, and an owner narrowing it wants that
   // recorded as much as an incident reader wants to see it widened.
   "CLUSTER_OBSERVED_DATABASES_CHANGED",
+  // The VPN peerings the control plane dials THROUGH (#353). Not cluster acts —
+  // one tunnel commonly reaches several — and the same class of decision as the
+  // cluster ones: registering one decides where we open sockets, replacing its
+  // config hands us a new key for somebody's private network, and removing one
+  // takes the route to every database behind it away.
+  "TUNNEL_REGISTERED",
+  "TUNNEL_UPDATED",
+  "TUNNEL_REMOVED",
+  // A reachability test, which changes nothing and is recorded anyway. It was
+  // left out at first for that reason — a row per button press buries the three
+  // acts above it. What changes the calculation is that a test is the one thing
+  // here that reaches OUT: it sends datagrams to a customer's gateway on demand,
+  // and "who probed whose network, when, and what came back" is a question an
+  // incident asks. The kind filter keeps it out of the way of the rest.
+  "TUNNEL_TESTED",
 ] as const;
 
 export type SecurityEventName = (typeof SECURITY_EVENTS)[number];
@@ -948,3 +1017,63 @@ export const orgInfo = z.object({
   policy: orgPolicyView,
 });
 export type OrgInfo = z.infer<typeof orgInfo>;
+
+// A WireGuard peering the control plane terminates, so a cluster with no public
+// endpoint can be reached (#353).
+//
+// The config's SECRET half never appears here. The [Interface] PrivateKey is a
+// credential of the same weight as a connection string, and the dashboard has
+// no use for it: what an owner needs to see is which network this reaches and
+// whether the handshake is current. Everything below is derived from the sealed
+// config server-side rather than stored twice.
+export const tunnelHealth = z.enum(["UP", "HANDSHAKING", "DOWN", "IDLE"]);
+export type TunnelHealth = z.infer<typeof tunnelHealth>;
+
+export const tunnelView = z.object({
+  id: z.uuid(),
+  name: z.string(),
+  // host:port of the customer's gateway. Not a secret — it is an address they
+  // published to their own VPN clients — and it is the field that identifies
+  // which network this is at a glance.
+  endpoint: z.string(),
+  allowedIps: z.array(z.string()),
+  // Whose resolver answers names inside the tunnel. Empty when the config
+  // carried no DNS, which is worth showing: a cluster addressed by name will
+  // not resolve, and that failure otherwise reads as "unreachable".
+  dns: z.array(z.string()),
+  // IDLE means the tunnel has never been asked for since this process started.
+  // It is not a fault — tunnels come up on first use — and it must not be drawn
+  // as one.
+  health: tunnelHealth,
+  // Seconds since the last completed handshake; null when there has not been
+  // one in this process. A stale handshake is a condition of the TUNNEL, not of
+  // the clusters behind it.
+  handshakeAgeSeconds: z.number().nullable(),
+  // How many clusters would break if this were deleted, which is why the delete
+  // is refused while it is non-zero.
+  clusterCount: z.number().int(),
+  createdAt: z.string(),
+});
+export type TunnelView = z.infer<typeof tunnelView>;
+
+// What a reachability test found. A tunnel is registered from a pasted file, so
+// until something dials through it the only thing that has been checked is that
+// the file parses — and a wrong PublicKey or an endpoint the gateway does not
+// listen on both parse perfectly. This is the answer to "would it work", asked
+// on purpose rather than discovered at the first collect.
+export const tunnelTestResult = z.object({
+  // Did a handshake complete inside the window? The whole verdict, in one
+  // field, because that is the only thing a yes/no answer can honestly claim:
+  // the gateway answered us, right now.
+  reachable: z.boolean(),
+  health: tunnelHealth,
+  handshakeAgeSeconds: z.number().nullable(),
+  // Why it did not come up, verbatim from the device — a refused gateway
+  // address, a name that does not resolve, a response that failed to verify.
+  // Null when it did come up, and also when it simply never answered: silence
+  // is what an unreachable endpoint or a wrong PublicKey both look like, and
+  // inventing a cause for it would send the owner somewhere specific for a
+  // reason we do not have.
+  error: z.string().nullable(),
+});
+export type TunnelTestResult = z.infer<typeof tunnelTestResult>;

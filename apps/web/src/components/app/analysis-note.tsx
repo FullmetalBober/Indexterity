@@ -1,6 +1,6 @@
 import type { AnalysisNote } from "@repo/contracts";
 import { Alert, AlertDescription, AlertTitle } from "~/components/ui/alert";
-import { LocalTime } from "~/lib/hydration";
+import { LocalTime } from "~/lib/local-time";
 
 // Why the recommendations list is as short as it is (#277).
 //

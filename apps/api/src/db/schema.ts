@@ -370,6 +370,46 @@ export const invites = pgTable(
 );
 
 // --- managed clusters ----------------------------------------------------
+// A WireGuard peering the control plane terminates in-process, so a cluster with
+// no public endpoint becomes reachable (#353).
+//
+// The whole wg0.conf is sealed as one blob rather than split into columns, and
+// that is deliberate. Only the [Interface] PrivateKey is a credential, so
+// storing the endpoint and AllowedIPs in the clear would be defensible — but
+// then two representations of one config exist and can drift, and the one that
+// drifts silently is the AllowedIPs the guard enforces against. Unsealing to
+// list them costs an AEAD decrypt.
+//
+// Orthogonal to connection_mode rather than a third value in it, which settles
+// #353's first open question. "Reached over a tunnel" and "reached via a relay
+// agent" are not mutually exclusive — an agent could itself sit behind a VPN —
+// and an enum forces a choice the domain does not.
+export const tunnels = pgTable(
+  "tunnels",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    // What the owner calls it, since one org may peer with several networks.
+    name: text("name").notNull(),
+    // The pasted wg0.conf, envelope-encrypted exactly as a connection string is
+    // (D8): it carries a private key of the same weight. keyVersion selects the
+    // master key that sealed it so the KEK can rotate without re-sealing.
+    sealedDek: bytea("sealed_dek").notNull(),
+    sealedData: bytea("sealed_data").notNull(),
+    keyVersion: integer("key_version").notNull().default(1),
+    createdAt,
+    updatedAt,
+  },
+  (table) => [
+    // One name per org, so the connect form can refer to a tunnel by something
+    // a person chose rather than by a uuid.
+    uniqueIndex("tunnels_org_name_key").on(table.orgId, table.name),
+    index("tunnels_org_idx").on(table.orgId),
+  ],
+);
+
 export const clusters = pgTable(
   "clusters",
   {
@@ -379,6 +419,15 @@ export const clusters = pgTable(
       .references(() => organizations.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
     connectionMode: connectionMode("connection_mode").notNull().default("HOSTED_DIRECT"),
+    // Which tunnel reaches this cluster, or null for the ordinary case of a
+    // cluster our egress can already open a socket to.
+    //
+    // RESTRICT rather than SET NULL on delete: a cluster silently losing its
+    // tunnel would keep its connection string and start being dialled directly,
+    // and the addresses in that string are private ones on somebody else's
+    // network. Refusing the delete makes the owner detach the clusters first,
+    // which is the decision they should be making anyway.
+    tunnelId: uuid("tunnel_id").references(() => tunnels.id, { onDelete: "restrict" }),
     // Which adapter dials this cluster (src/engine/registry.ts). Only MONGODB is
     // implemented today; the column makes the data model engine-ready.
     engine: clusterEngine("engine").notNull().default("MONGODB"),
@@ -408,9 +457,41 @@ export const clusters = pgTable(
     // The least-privilege user Indexterity created on the cluster during
     // admin-string onboarding; null when the customer pasted a ready-made string.
     provisionedUsername: text("provisioned_username"),
+    // Where that user was actually created, so the disconnect screen can name
+    // the databases its removal has to visit (#338). PostgreSQL and SQL Server
+    // both grant per database and both refuse a bare drop while those grants
+    // remain; MongoDB's user is server-scoped, so this is empty for it.
+    //
+    // Written once, at provisioning, and never refreshed — deliberately. It
+    // records what was DONE, not what exists now: provisioning runs from an
+    // admin string that is never stored, so a database created afterwards has
+    // no user of ours in it and needs no statement (the same gap the observe
+    // selection's unreadable-database refusal already explains). Null on every
+    // row that predates this column, and on rows with no provisioned user.
+    provisionedDatabases: text("provisioned_databases").array(),
     // Set at connect and re-evaluated on every rotation, because rotating is
     // exactly when it changes: swapping an admin string for a scoped one is a
     // narrowing somebody should be able to see happened.
+    // Why the pipeline is not running against this cluster, or null when it is.
+    //
+    // Stored rather than derived, which is the whole point. A cluster nobody can
+    // reach produces no snapshots, so the only evidence on the dashboard was
+    // `lastCollectedAt` going stale — and staleness has innocent causes (a paused
+    // schedule, a plan window, a cluster with nothing left to collect). The
+    // condition was known: `runClusterTask` records a metric, logs a line and
+    // mails the owners once a day. None of that reaches a screen somebody opens
+    // a week later, so the failure rendered as an absence, which reads as "all
+    // is well" (#24's rule, arrived at again).
+    //
+    // Text, not an enum, for the reason `security_events.event` is text: adding
+    // a reason should be a constant, not a migration.
+    blockedReason: text("blocked_reason"),
+    // When it STARTED, not when it was last seen — set on the first blocked pass
+    // and left alone while it stays blocked, because "for six days" is the part
+    // that decides whether somebody acts.
+    blockedSince: timestamp("blocked_since", { withTimezone: true }),
+    // The sentence, as the owner's own alert mail words it.
+    blockedDetail: text("blocked_detail"),
     credentialPosture: credentialPosture("credential_posture"),
     // Which TLS checks the owner turned off when connecting, as checkboxes on the
     // connect form. Held HERE and not inferred from the sealed string, for two
@@ -444,6 +525,11 @@ export const clusters = pgTable(
   // rename for looking like one that already exists, which is a rule nobody
   // asked for.
   (table) => [
+    // Every foreign key gets one, and the integration suite enforces it: without
+    // it the RESTRICT on delete sequentially scans clusters, and so does every
+    // lookup of what a tunnel reaches. A product about index hygiene shipping an
+    // unindexed foreign key would be its own counterexample.
+    index("clusters_tunnel_idx").on(table.tunnelId),
     index("clusters_org").on(table.orgId),
     unique("clusters_org_name").on(table.orgId, table.name),
   ],

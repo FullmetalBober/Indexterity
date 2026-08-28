@@ -9,6 +9,7 @@ import {
   type TlsOverrides,
 } from "@repo/contracts";
 import { type ReactNode, useState } from "react";
+import { ANY_CONNECTION_EXAMPLE } from "~/components/app/connection-dialect";
 import { usage } from "~/components/app/format";
 import {
   MIN_DATABASES_TO_CHOOSE,
@@ -36,6 +37,7 @@ import {
   useProvisionCluster,
 } from "~/lib/queries/mutations/cluster";
 import { useEngines } from "~/lib/queries/shell";
+import { useTunnels } from "~/lib/queries/tunnels";
 import { CLUSTER_USER_DOCS_HREF } from "~/lib/site";
 
 // The api's own rules for these two fields, so a string it will refuse for being
@@ -75,12 +77,6 @@ const ENGINE_LABEL: Record<ClusterEngine, string> = {
   POSTGRESQL: "PostgreSQL",
 };
 
-// A placeholder for each dialect, so the field itself stops implying that
-// MongoDB is all this takes (#239). Shortened from the api's own hints, which
-// are complete and too long to sit inside an input — the hints are printed in
-// full under the field, where they have the room.
-const PLACEHOLDER = "mongodb://user:pass@host:27017   or   Server=host;User Id=sa;Password=…";
-
 // What the scoped user IS, per engine — the offer is engine-neutral (it hangs
 // off `canProvision`), the words cannot be: "no read access to your documents"
 // and `db.dropUser` are the wrong sentence entirely in front of a SQL Server.
@@ -119,7 +115,11 @@ const SCOPED_USER_COPY: Record<
       </>
     ),
     withheld: "no permission to read a single row of your data",
-    revoke: <code>DROP LOGIN idx_…</code>,
+    revoke: (
+      <>
+        <code>DROP USER</code> in each database, then <code>DROP LOGIN indexterity</code>
+      </>
+    ),
   },
   // PostgreSQL withholds MORE than the other two, and saying so is the point:
   // the role cannot read the data AND cannot change an index either, because
@@ -136,11 +136,20 @@ const SCOPED_USER_COPY: Record<
     ),
     withheld: (
       <>
-        no permission to read a single row of your data — and none to change an index either, so
-        this role analyses only
+        no permission to read a single row of your data. It cannot change an index either — only a
+        table's owner may — so it analyses only, unless you install the <code>pg_cron</code> apply
+        function, which lets it ask for a build that runs as the owner without ever gaining read
+        access. The cluster's privileges panel carries the statements
       </>
     ),
-    revoke: <code>DROP ROLE idx_…</code>,
+    // Not a bare DROP ROLE: the CONNECT and USAGE grants above hold the role
+    // down until DROP OWNED BY has cleared them, and that runs per database.
+    revoke: (
+      <>
+        <code>DROP OWNED BY indexterity</code> in each database, then{" "}
+        <code>DROP ROLE indexterity</code>
+      </>
+    ),
   },
 };
 
@@ -283,6 +292,12 @@ export function ConnectClusterForm({
   // store deliberately: they are not validated fields, and the two buttons under
   // a diagnosis read them at click time the same way the credentials are read.
   const [tls, setTls] = useState<TlsOverrides>(NO_TLS_OVERRIDES);
+  // Which tunnel to reach this cluster through (#353). Part of the CHECK and
+  // not only of the connect: a database with no public endpoint cannot be
+  // reached by the preflight either, so attaching a tunnel afterwards would
+  // mean the check could never pass for the clusters this exists for.
+  const [tunnelId, setTunnelId] = useState<string | null>(null);
+  const tunnels = useTunnels();
   // What the typed string looks like, and — only when it looks like nothing —
   // which engine the reader said it is.
   const [hint, setHint] = useState<EngineHint>(null);
@@ -348,6 +363,11 @@ export function ConnectClusterForm({
         connectionString: value.connectionString,
         tlsOverrides: tls,
         engine: engineOverride(),
+        // Absent rather than null when dialling directly, the same way
+        // observedDatabases is absent when everything is observed: the api
+        // reads a missing field as "no tunnel", so sending one would only add a
+        // key to every ordinary connect.
+        ...(tunnelId === null ? {} : { tunnelId }),
       }),
   });
 
@@ -382,6 +402,7 @@ export function ConnectClusterForm({
     // api stores null for that, and null is what keeps a database added next month
     // observed as well.
     observedDatabases: observed === null ? undefined : [...observed],
+    ...(tunnelId === null ? {} : { tunnelId }),
   });
 
   // Whether the answer on screen was computed for the databases now ticked. Both
@@ -409,6 +430,7 @@ export function ConnectClusterForm({
       tlsOverrides: tls,
       engine: engineOverride(),
       observedDatabases: observed === null ? undefined : [...observed],
+      ...(tunnelId === null ? {} : { tunnelId }),
     });
   }
 
@@ -511,7 +533,7 @@ export function ConnectClusterForm({
               <field.TextField
                 label="Connection string"
                 className="font-mono"
-                placeholder={PLACEHOLDER}
+                placeholder={ANY_CONNECTION_EXAMPLE}
               />
             )}
           </form.AppField>
@@ -578,6 +600,37 @@ export function ConnectClusterForm({
             </div>
           ) : null}
         </div>
+
+        {/* Above the certificate boxes, because it decides whether the dial
+            happens at all rather than how it is verified. Hidden entirely when
+            the org has no tunnels: a picker with one option is a question
+            nobody needs to be asked. */}
+        {tunnels.data.length > 0 ? (
+          <fieldset className="space-y-2">
+            <legend className="font-medium text-sm">
+              How to reach it{" "}
+              <span className="font-normal text-muted-foreground">
+                — leave this alone unless the database has no public endpoint
+              </span>
+            </legend>
+            <Select
+              value={tunnelId ?? "__direct__"}
+              onValueChange={(value) => setTunnelId(value === "__direct__" ? null : value)}
+            >
+              <SelectTrigger className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__direct__">Directly, from our own network</SelectItem>
+                {tunnels.data.map((tunnel) => (
+                  <SelectItem key={tunnel.id} value={tunnel.id}>
+                    Through {tunnel.name} — {tunnel.endpoint}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </fieldset>
+        ) : null}
 
         {/* Under the string, not beside it: these describe the connection the
             string makes, and each one gives up a check that TLS is otherwise
@@ -721,11 +774,14 @@ export function ConnectClusterForm({
                     const copy = scopedUserCopy(diagnosis.engine);
                     return (
                       <>
-                        A dedicated {copy.subject} <code>idx_…</code> is created on your cluster{" "}
-                        {copy.grant}: exactly the privileges listed above and nothing else — notably{" "}
-                        <strong>{copy.withheld}</strong>. The admin string you pasted is used once
-                        and never stored; only the new {copy.subject}'s string is kept (encrypted).
-                        Revoke it any time with {copy.revoke}.
+                        A dedicated {copy.subject} <code>indexterity</code> is created on your
+                        cluster {copy.grant}: exactly the privileges listed above and nothing else —
+                        notably <strong>{copy.withheld}</strong>. The admin string you pasted is
+                        used once and never stored; only the new {copy.subject}'s string is kept
+                        (encrypted). Revoke it any time with {copy.revoke}. The name is fixed, so a
+                        cluster already carrying it is refused rather than given a second{" "}
+                        {copy.subject} — which is also what stops the same cluster being connected
+                        twice.
                       </>
                     );
                   })()}
@@ -744,6 +800,7 @@ export function ConnectClusterForm({
                         // databases that exist now, so the selection stays
                         // editable afterwards (#244).
                         observedDatabases: observed === null ? undefined : [...observed],
+                        ...(tunnelId === null ? {} : { tunnelId }),
                       });
                     }}
                   >

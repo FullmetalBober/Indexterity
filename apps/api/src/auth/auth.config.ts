@@ -5,14 +5,14 @@ import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { APIError, createAuthMiddleware, getSessionFromCtx } from "better-auth/api";
 import { expireCookie } from "better-auth/cookies";
 import { twoFactor } from "better-auth/plugins/two-factor";
-import { authTrailEntry, sessionEndedEntry, type TrailActor } from "../audit/auth-trail";
-import { authEventFor, recordSecurityEvent } from "../audit/security-events";
+import { AuditService } from "../audit/audit.service";
+import type { TrailActor } from "../audit/audit.types";
+import { AuditUtils } from "../audit/audit.utils";
 import { and, type Database, eq, members, schema, user as userTable } from "../db";
-import { mailEnabled, sendMailDetached } from "../mail/mailer";
+import { mailEnabled, sendMail, sendMailDetached } from "../mail/mailer";
+import { GatesService } from "./gates.service";
 import { organizationPlugin } from "./organization";
 import { authRateLimit } from "./rate-limit";
-import { evaluateSignup } from "./signup-gate";
-import { hasCredentialAccount } from "./two-factor-gate";
 
 export interface AuthConfig {
   // The control-plane database this instance reads and writes through, handed in
@@ -56,6 +56,64 @@ export interface AuthConfig {
 // sent and a code sitting in an inbox is a credential: long enough to switch
 // to a mail client and back, not long enough to matter tomorrow.
 const OTP_PERIOD_MINUTES = 5;
+
+// Whether this verification mail was ASKED for, rather than sent alongside
+// something else. better-auth hands the callback the request that caused it, and
+// only the resend button arrives on /send-verification-email — sign-up and a
+// refused sign-in arrive on their own paths.
+//
+// Matched on the pathname's end rather than the whole URL, because the base is
+// the deployment's (BETTER_AUTH_URL) and the api is mounted under /api/auth. An
+// absent request means better-auth called this outside a request, which nothing
+// does today; false is the safe answer either way, since it only means the send
+// is detached and the caller is told nothing it could act on.
+export function isResendRequest(request: Request | undefined): boolean {
+  if (request === undefined) return false;
+  try {
+    return new URL(request.url).pathname.endsWith("/send-verification-email");
+  } catch {
+    return false;
+  }
+}
+
+// The page the verification link puts the reader on once better-auth has
+// consumed the token (#324).
+//
+// better-auth builds the link with whatever `callbackURL` the caller passed and
+// falls back to "/" — and "/" is the marketing landing page, which is
+// deliberately static: no loader, no api call, nothing that could report an
+// outcome. Somebody whose address was confirmed and somebody whose link had
+// expired landed on the same page and were told the same nothing, and the second
+// one goes on clicking the dead link because nothing suggested otherwise.
+//
+// Rewritten HERE rather than at the callers, because there are three of them and
+// one cannot do it: sign-up and the resend button could each pass a callbackURL,
+// but the send that rides along with a sign-in refused for an unverified address
+// cannot — signIn.email uses that same field for where a SUCCESSFUL sign-in
+// lands, so setting it would send verified readers to the wrong page.
+//
+// Only the fallback is replaced. A caller that named a destination keeps it,
+// which is what leaves the change-email link on "/app/account" (the web's
+// mutations/account.ts): that one is opened by somebody already signed in and
+// belongs back on their account page, not here.
+//
+// Absolute, off webOrigin, for the reason the org invite mail is (organization.ts):
+// the api can answer on an origin of its own, and a relative redirect would then
+// land on the api rather than on the dashboard. webOrigin is a trusted origin, so
+// better-auth's own check on callbackURL accepts it.
+export function verificationLandingUrl(url: string, webOrigin: string): string {
+  try {
+    const parsed = new URL(url);
+    const callback = parsed.searchParams.get("callbackURL");
+    if (callback !== null && callback !== "/") return url;
+    parsed.searchParams.set("callbackURL", `${webOrigin.replace(/\/+$/, "")}/verified`);
+    return parsed.toString();
+  } catch {
+    // A link this cannot parse is still a link somebody is waiting for. Sending
+    // it unchanged is the pre-#324 behaviour, which is bad but not broken.
+    return url;
+  }
+}
 
 const OWNER_2FA_PATHS = new Set([
   "/organization/invite-member",
@@ -122,6 +180,14 @@ export function createAuth(config: AuthConfig) {
   // The email is stored alongside the id on every row (`actor_email`), because
   // `actor_user_id` is `set null` on user deletion and a trail whose actor column
   // empties when the account goes answers none of the questions it exists for.
+  // The trail's two providers, built here rather than injected: this function runs
+  // at import time (auth/index.ts), before any container exists, and over a pool of
+  // its own. AuditUtils holds no state and AuditService asks only for a Database,
+  // so both are ordinary classes — the Nest side injects the same two (#354).
+  const auditUtils = new AuditUtils();
+  const audit = new AuditService(db);
+  const gates = new GatesService(db);
+
   const emailOf = async (userId: string): Promise<string | null> => {
     const [row] = await db
       .select({ email: userTable.email })
@@ -369,7 +435,7 @@ export function createAuth(config: AuthConfig) {
           const resolved = await getSessionFromCtx(ctx);
           const newEmail = (ctx.body as { newEmail?: unknown } | undefined)?.newEmail;
           if (resolved === null || typeof newEmail !== "string") return; // its own checks answer
-          const decision = await evaluateSignup(db, newEmail);
+          const decision = await gates.evaluateSignup(newEmail);
           if (!decision.allowed) {
             throw new APIError("FORBIDDEN", { message: decision.reason });
           }
@@ -402,7 +468,7 @@ export function createAuth(config: AuthConfig) {
           .where(and(eq(members.userId, resolved.user.id), eq(members.role, "owner")))
           .limit(1);
         if (owns === undefined) return;
-        if (!(await hasCredentialAccount(db, resolved.user.id))) return;
+        if (!(await gates.hasCredentialAccount(resolved.user.id))) return;
         throw new APIError("FORBIDDEN", {
           message:
             "owners must add a second factor before changing who has access — Account → Two-factor",
@@ -410,7 +476,7 @@ export function createAuth(config: AuthConfig) {
         });
       }),
       after: createAuthMiddleware(async (ctx) => {
-        // The security trail (audit/auth-trail.ts). First, and never allowed to
+        // The security trail (audit/audit.utils.ts). First, and never allowed to
         // throw: whether the act is recorded must not decide whether it happened,
         // and a lost row is logged rather than escalated.
         //
@@ -424,10 +490,10 @@ export function createAuth(config: AuthConfig) {
         // is the point: resolving one costs a session lookup, and most traffic
         // through here is `/get-session` on ordinary navigation, which records
         // nothing. Only the dozen-odd acts pay for it.
-        if (authEventFor(ctx.path, !(ctx.context.returned instanceof Error)) !== null) {
-          const entry = authTrailEntry(ctx, await trailActor(ctx), config.trustProxy);
+        if (auditUtils.authEventFor(ctx.path, !(ctx.context.returned instanceof Error)) !== null) {
+          const entry = auditUtils.authTrailEntry(ctx, await trailActor(ctx), config.trustProxy);
           if (entry !== null) {
-            await recordSecurityEvent(db, entry, (message) => ctx.context.logger.warn(message));
+            await audit.record(entry, (message: string) => ctx.context.logger.warn(message));
           }
         }
         // /two-factor/ is in the same boat for the same reason: verify-totp
@@ -462,7 +528,7 @@ export function createAuth(config: AuthConfig) {
           // an act and gets nothing.
           after: async (endedSession, context) => {
             const userId = endedSession.userId;
-            const entry = sessionEndedEntry({
+            const entry = auditUtils.sessionEndedEntry({
               path: context?.path ?? null,
               actor:
                 typeof userId === "string"
@@ -479,9 +545,7 @@ export function createAuth(config: AuthConfig) {
               trustProxy: config.trustProxy,
             });
             if (entry === null) return;
-            await recordSecurityEvent(db, entry, (message) =>
-              context?.context.logger.warn(message),
-            );
+            await audit.record(entry, (message: string) => context?.context.logger.warn(message));
           },
         },
       },
@@ -491,7 +555,7 @@ export function createAuth(config: AuthConfig) {
           // control plane dials customer networks, so an open front door is
           // not a neutral default (SIGNUP_MODE, see auth/signup-gate.ts).
           before: async (newUser) => {
-            const decision = await evaluateSignup(db, newUser.email);
+            const decision = await gates.evaluateSignup(newUser.email);
             if (!decision.allowed) {
               throw new APIError("FORBIDDEN", { message: decision.reason });
             }
@@ -541,13 +605,50 @@ export function createAuth(config: AuthConfig) {
       // had (#306). It is now a real button, and this option is what keeps the
       // implicit path working on purpose instead of by accident.
       sendOnSignIn: true,
-      sendVerificationEmail: async ({ user, url }) => {
-        sendMailDetached(
-          user.email,
-          "Verify your email for Indexterity",
-          `Welcome to Indexterity!\n\nConfirm this address:\n${url}\n\n` +
-            `If you didn't create an account, ignore this email.`,
-        );
+      // The one sender that waits, and only on the one path where waiting buys
+      // the reader something.
+      //
+      // Three requests reach this callback and they are not the same act. A
+      // sign-up and a refused sign-in send the mail INCIDENTALLY — the reader
+      // asked for an account or a session, the mail rides along, and making
+      // them wait on SMTP is what cost a sign-up 122.5 seconds. The resend
+      // button is the opposite: sending the mail is the entire thing it does,
+      // so its answer is worthless if it cannot say whether that happened.
+      //
+      // D105 claims "the one path a reader can press is the one path on which a
+      // failure is visible to them", and it was true of a deployment that
+      // cannot send at all (`hooks.before` refuses with EMAIL_NOT_CONFIGURED).
+      // It was never true of one configured and broken — a blocked port, a
+      // revoked key, a provider refusing an unverified From — where the resend
+      // answered 200 into a void. Detaching every send made that structural
+      // rather than merely unexercised, so this is the other half of that
+      // change and not a separate idea.
+      //
+      // The throw is what the reader sees: `sendVerificationEmailFn` awaits
+      // this callback without catching, so an APIError becomes the endpoint's
+      // answer, and `useResendVerification` already puts `error.message`
+      // straight into the notice's alert. Nothing on the web side changes.
+      sendVerificationEmail: async ({ user, url }, request) => {
+        const subject = "Verify your email for Indexterity";
+        const link = verificationLandingUrl(url, config.webOrigin);
+        const body =
+          `Welcome to Indexterity!\n\nConfirm this address:\n${link}\n\n` +
+          `If you didn't create an account, ignore this email.`;
+        if (!isResendRequest(request)) {
+          sendMailDetached(user.email, subject, body);
+          return;
+        }
+        if (await sendMail(user.email, subject, body)) return;
+        // Deliberately blunt about whose problem it is. The reader cannot fix a
+        // transport and should not be left rereading their own address for a
+        // typo — the operator's log has the actual error (mail/mailer.ts logs
+        // it), and this is the sentence that tells them to go and ask.
+        throw new APIError("INTERNAL_SERVER_ERROR", {
+          message:
+            "the email could not be sent — this is a fault in this install's mail setup, " +
+            "not in your address. Whoever runs it will find the reason in the logs",
+          code: "EMAIL_SEND_FAILED",
+        });
       },
     },
     // Registered only when configured. better-auth warns on every boot about a

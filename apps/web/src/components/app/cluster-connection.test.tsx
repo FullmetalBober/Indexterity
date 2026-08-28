@@ -1,5 +1,5 @@
 import { ORPCError } from "@orpc/client";
-import { screen } from "@testing-library/react";
+import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { apiError, authOk, renderInApp } from "~/test-utils";
@@ -39,6 +39,7 @@ const cluster = {
   engine: "MONGODB",
   readOnly: true,
   provisionedUsername: null,
+  revokeCommand: null,
   credentialPosture: "SCOPED",
 } as const;
 
@@ -144,10 +145,42 @@ describe("ClusterConnection", () => {
 
   it("tells the reader how to revoke the scoped user it leaves behind", async () => {
     const user = userEvent.setup();
-    renderInApp(<ClusterConnection cluster={{ ...cluster, provisionedUsername: "idx_abc" }} />);
+    renderInApp(
+      <ClusterConnection
+        cluster={{
+          ...cluster,
+          provisionedUsername: "idx_abc",
+          revokeCommand: 'db.getSiblingDB("admin").dropUser("idx_abc")',
+        }}
+      />,
+    );
 
     await user.click(screen.getByRole("button", { name: "Disconnect" }));
     expect(await screen.findByText(/dropUser\("idx_abc"\)/)).toBeInTheDocument();
+  });
+
+  // #338: this dialog used to compose MongoDB's dropUser itself, so a PostgreSQL
+  // or SQL Server owner was told to run it against a server that has never heard
+  // of db.getSiblingDB. It now prints whatever the api's adapter answered.
+  it("shows the engine's own statements, not MongoDB's, on a PostgreSQL cluster", async () => {
+    const user = userEvent.setup();
+    const command = '\\c "appdb"\nDROP OWNED BY "indexterity";\nDROP ROLE "indexterity";';
+    renderInApp(
+      <ClusterConnection
+        cluster={{
+          ...cluster,
+          engine: "POSTGRESQL",
+          provisionedUsername: "indexterity",
+          revokeCommand: command,
+        }}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Disconnect" }));
+    const shown = await screen.findByText(/DROP OWNED BY/);
+    expect(shown).toBeInTheDocument();
+    expect(shown.textContent).toContain('DROP ROLE "indexterity";');
+    expect(screen.queryByText(/getSiblingDB/)).not.toBeInTheDocument();
   });
 
   it("reports restored indexes after a disconnect", async () => {
@@ -469,5 +502,88 @@ describe("ClusterConnection least-privilege policy", () => {
       screen.getByText("Posture unknown, and this organization requires least privilege"),
     ).toBeInTheDocument();
     expect(screen.queryByText("Out of policy for this organization")).not.toBeInTheDocument();
+  });
+
+  // The field said `mongodb://` on every cluster, including the ones that are
+  // not MongoDB — a credential field confidently naming the wrong dialect at the
+  // moment somebody is pasting a secret into it.
+  it("names the dialect of the cluster in front of the reader", async () => {
+    const user = userEvent.setup();
+
+    for (const [engine, expected] of [
+      ["MONGODB", "mongodb://"],
+      ["POSTGRESQL", "postgres://"],
+      ["MSSQL", "mssql:// or Server=…"],
+    ] as const) {
+      const { unmount } = renderInApp(<ClusterConnection cluster={{ ...cluster, engine }} />);
+      await user.click(screen.getByRole("button", { name: "Rotate string" }));
+
+      expect(screen.getByLabelText("New connection string")).toHaveAttribute(
+        "placeholder",
+        `new ${expected} connection string (verified before stored)`,
+      );
+      unmount();
+    }
+  });
+
+  // Every action on this card changes something on somebody's database, and none
+  // of them said anything while it was in flight: the button stayed live, so a
+  // second press was a second request. The rotation is the worst of them — it
+  // DIALS the customer's cluster to verify, which through a VPN is seconds.
+  describe("while an action is in flight", () => {
+    // A promise that never settles, so the mutation stays pending for the
+    // assertions rather than racing them.
+    const never = () => new Promise(() => {});
+
+    it("blocks the mode switch and says what it is doing", async () => {
+      setClusterMode.mockImplementation(never);
+      const user = userEvent.setup();
+      renderInApp(<ClusterConnection cluster={{ ...cluster, readOnly: false }} />);
+
+      await user.click(screen.getByRole("button", { name: "Make read-only" }));
+
+      const button = await screen.findByRole("button", { name: "Switching…" });
+      expect(button).toBeDisabled();
+      expect(setClusterMode).toHaveBeenCalledTimes(1);
+    });
+
+    it("blocks the rotation, which is the longest wait here", async () => {
+      rotateConnection.mockImplementation(never);
+      const user = userEvent.setup();
+      renderInApp(<ClusterConnection cluster={cluster} />);
+
+      await user.click(screen.getByRole("button", { name: "Rotate string" }));
+      await user.type(
+        screen.getByLabelText("New connection string"),
+        "mongodb://user:pass@host:27017",
+      );
+      await user.click(screen.getByRole("button", { name: "Save" }));
+
+      const button = await screen.findByRole("button", { name: "Verifying…" });
+      expect(button).toBeDisabled();
+      expect(rotateConnection).toHaveBeenCalledTimes(1);
+    });
+
+    // The irreversible one. A second confirm used to fire a second delete, and
+    // the second answers "no such cluster" — an error about the reader's own
+    // successful action.
+    it("blocks the disconnect trigger once it has been confirmed", async () => {
+      deleteCluster.mockImplementation(never);
+      const user = userEvent.setup();
+      renderInApp(<ClusterConnection cluster={cluster} />);
+
+      await user.click(screen.getByRole("button", { name: "Disconnect" }));
+      // Both the trigger and the dialog's action are called "Disconnect", so the
+      // confirm is taken from inside the dialog.
+      const dialog = await screen.findByRole("alertdialog");
+      await user.click(within(dialog).getByRole("button", { name: "Disconnect" }));
+
+      // The dialog is gone and the trigger is where the reader now looks.
+      const trigger = await screen.findByRole("button", { name: "Disconnecting…" });
+      expect(trigger).toBeDisabled();
+
+      await user.click(trigger);
+      expect(deleteCluster).toHaveBeenCalledTimes(1);
+    });
   });
 });

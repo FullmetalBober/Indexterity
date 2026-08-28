@@ -23,7 +23,7 @@
 //     dashboard serving 502s from a passthrough with nothing behind it.
 //
 // No dependencies and no build step: node strips the types on the way in, which is
-// the same deal `scripts/*.ts` have (tsconfig.scripts.json typechecks both). So
+// the same deal `scripts/*.ts` have (the root tsconfig.json typechecks both). So
 // nothing has to be compiled before PID 1 can start, and the file that runs is the
 // file in the repository — but it must stay ERASABLE TypeScript: an `enum`, a
 // parameter property or a `namespace` needs code generated for it and would fail

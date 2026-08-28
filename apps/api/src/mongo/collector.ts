@@ -1,20 +1,10 @@
 import { z } from "zod";
-import {
-  type ConstantValue,
-  classifyClient,
-  type IndexDirection,
-  type IndexKey,
-  type IndexSpec,
-  type LookupJoin,
-  type QueryClient,
-  type QueryShape,
-  type ServerHealth,
-  type SortKey,
-} from "../analysis";
+import { classifyClient } from "../analysis";
 import {
   type ClusterNode,
   type CollectionLatency,
   type CollectionStorage,
+  DatabaseInaccessibleError,
   type DeletePattern,
   type IndexCollector,
   type IndexUsageStat,
@@ -22,7 +12,19 @@ import {
   type WorkloadTarget,
   workloadKey,
 } from "../engine/ports";
+import type {
+  ConstantValue,
+  IndexDirection,
+  IndexKey,
+  IndexSpec,
+  LookupJoin,
+  QueryClient,
+  QueryShape,
+  ServerHealth,
+  SortKey,
+} from "../engine/types";
 import type { MongoConnection } from "./connection";
+import { isAuthorizationError } from "./errors";
 import type { MemberConnections } from "./members";
 
 // Normalize a sort spec's values into directed keys (anything odd → ascending).
@@ -61,18 +63,6 @@ export function lookupJoins(pipeline: readonly Record<string, unknown>[]): Looku
   }
   return joins;
 }
-
-// The collector CONTRACT lives in the engine-neutral ports (../engine/ports);
-// this file is the MongoDB implementation. Types re-exported for convenience.
-export type {
-  CollectionLatency,
-  CollectionStorage,
-  DeletePattern,
-  IndexCollector,
-  IndexUsageStat,
-  LatencyPair,
-  WorkloadTarget,
-} from "../engine/ports";
 
 // Parse driver output at the boundary so nothing downstream sees `any`.
 const indexDescription = z.object({
@@ -497,8 +487,27 @@ export class MongoIndexCollector implements IndexCollector {
     private readonly members?: MemberConnections,
   ) {}
 
+  // Also the accessibility probe for a database, the same way the SQL Server
+  // collector's is (#345). A credential that can list a cluster's databases and
+  // read only some of them is the ordinary shape of a scoped user, and until
+  // this raised DatabaseInaccessibleError the first unreadable database took the
+  // whole cluster's collect and suggest pass down with it — the callers branch on
+  // that type alone to mean "this database contributes nothing, keep walking".
+  //
+  // Reachable whenever the string holds the cluster `listDatabases` action
+  // without per-database grants to match: measured on 7.0, listDatabases then
+  // names every database and each read of an ungranted one is refused with code
+  // 13. Indexterity's OWN provisioned role never hits it — ENGINE_PRIVILEGES
+  // grants its metadata reads on `{db: "", collection: ""}`, which is every
+  // database — so this is about the connection strings customers paste.
   async listCollectionNames(database: string): Promise<string[]> {
-    const raw = await this.conn.db(database).listCollections().toArray();
+    let raw: unknown[];
+    try {
+      raw = await this.conn.db(database).listCollections().toArray();
+    } catch (error) {
+      if (isAuthorizationError(error)) throw new DatabaseInaccessibleError(database, error);
+      throw error;
+    }
     return collectionInfo
       .array()
       .parse(raw)

@@ -1,6 +1,10 @@
-import { randomBytes, randomInt } from "node:crypto";
-import type { ProvisionedUser, TlsOverrides } from "../engine/ports";
-import { ProvisionDeniedError } from "../mongo/provision";
+import { randomInt } from "node:crypto";
+import type { DialProxy, ProvisionedUser, TlsOverrides } from "../engine/ports";
+import {
+  alreadyProvisionedMessage,
+  ProvisionDeniedError,
+  SCOPED_USERNAME,
+} from "../engine/provision";
 import { parseMssqlConnString, withMssqlCredentials } from "./conn-string";
 import { MssqlConnection, quoteIdent, quoteString } from "./connection";
 
@@ -83,6 +87,26 @@ const DENIED_MESSAGE =
   "Grant those, or create a login yourself with VIEW SERVER STATE, VIEW DATABASE STATE " +
   "and ALTER on each schema, and connect with it instead";
 
+// Msg 15025 — "The server principal '…' already exists". The backstop behind
+// the sys.server_principals lookup below.
+function isDuplicateLoginError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /already exists/i.test(message);
+}
+
+// The statement that removes the scoped login, for the refusal below and the
+// disconnect screen. The database users mapped to it go first — SQL Server
+// refuses to drop a login while any of them remain — and every database is
+// named because provisioning created a user in each.
+export function dropLoginStatements(username: string, databases: readonly string[]): string {
+  return [
+    ...databases.map((database) =>
+      inDatabase(database, `DROP USER IF EXISTS ${quoteIdent(username)}`),
+    ),
+    `DROP LOGIN ${quoteIdent(username)};`,
+  ].join("\n");
+}
+
 // Schemas that own user tables, which are the only ones index DDL ever touches.
 // A schema with no tables is not granted: it would widen the login for nothing.
 async function schemasWithTables(conn: MssqlConnection, database: string): Promise<string[]> {
@@ -136,14 +160,30 @@ function inDatabase(database: string, statement: string): string {
 export async function provisionMssqlScopedUser(
   adminUri: string,
   overrides?: TlsOverrides,
+  // Route the admin dial through a tunnel when the cluster needs one (#353).
+  proxy?: DialProxy,
 ): Promise<ProvisionedUser> {
-  const username = `idx_${randomBytes(6).toString("hex")}`;
+  const username = SCOPED_USERNAME;
   const password = scopedPassword();
-  const admin = new MssqlConnection(adminUri, overrides);
+  const admin = new MssqlConnection(
+    adminUri,
+    overrides,
+    proxy === undefined ? undefined : { proxy },
+  );
   const created: string[] = [];
   try {
     await admin.connect();
     const databases = await admin.listDatabaseNames();
+    // Before the first CREATE, so an instance that is already connected is
+    // refused without a login half-granted across its databases.
+    const existing = await admin.query<{ name: string }>(
+      `SELECT name FROM sys.server_principals WHERE name = ${quoteString(username)}`,
+    );
+    if (existing.length > 0) {
+      throw new ProvisionDeniedError(
+        alreadyProvisionedMessage(dropLoginStatements(username, databases)),
+      );
+    }
     try {
       // Both in master, explicitly. A server-scoped GRANT is refused anywhere
       // else — "Permissions at the server scope can only be granted when the
@@ -180,6 +220,14 @@ export async function provisionMssqlScopedUser(
         }
       }
     } catch (error) {
+      // Ahead of the rollback, deliberately. A login that already exists is not
+      // ours to undo, and dropping it here would delete the credentials another
+      // connection is currently running on.
+      if (isDuplicateLoginError(error)) {
+        throw new ProvisionDeniedError(
+          alreadyProvisionedMessage(dropLoginStatements(username, databases)),
+        );
+      }
       await dropScopedLogin(admin, username, created);
       if (isPermissionError(error)) throw new ProvisionDeniedError(DENIED_MESSAGE);
       throw error;
@@ -188,7 +236,12 @@ export async function provisionMssqlScopedUser(
     // Prove the scoped credentials authenticate before anything is stored. A
     // login that cannot connect is worse than no provisioning at all: the admin
     // string is already gone by the time anyone would notice.
-    const probe = new MssqlConnection(connectionString, overrides);
+    // The probe verifies the user we just made, so it goes the same way.
+    const probe = new MssqlConnection(
+      connectionString,
+      overrides,
+      proxy === undefined ? undefined : { proxy },
+    );
     try {
       await probe.connect();
       await probe.ping();
@@ -198,7 +251,7 @@ export async function provisionMssqlScopedUser(
     } finally {
       await probe.close().catch(() => {});
     }
-    return { connectionString, username };
+    return { connectionString, username, databases: created };
   } finally {
     await admin.close().catch(() => {});
   }

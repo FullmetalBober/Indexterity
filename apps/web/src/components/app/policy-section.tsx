@@ -70,7 +70,7 @@ interface PolicyDraft {
 // form arrives (#72).
 export function PolicySectionSkeleton() {
   return (
-    <Card className="mt-8">
+    <Card>
       <CardHeader>
         <CardTitle className="text-base">Policy</CardTitle>
         <CardDescription>
@@ -116,7 +116,7 @@ export function PolicySection({ policy }: { policy: PolicyView }) {
   });
 
   return (
-    <Card className="mt-8">
+    <Card>
       <CardHeader>
         <CardTitle className="text-base">Policy</CardTitle>
         <CardDescription>

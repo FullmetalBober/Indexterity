@@ -1,4 +1,5 @@
 import type {
+  DialProxy,
   EngineAdapter,
   EngineSession,
   IndexCollector,
@@ -11,7 +12,7 @@ import { applyPgTlsOverrides, isPgConnString, pgConnStringUsername, pgHosts } fr
 import { PostgresConnection } from "./connection";
 import { diagnosePostgresConnection } from "./diagnose";
 import { PostgresIndexExecutor } from "./executor";
-import { provisionPostgresScopedUser } from "./provision";
+import { dropRoleStatements, provisionPostgresScopedUser } from "./provision";
 
 class PostgresEngineSession implements EngineSession {
   readonly collector: IndexCollector;
@@ -63,12 +64,17 @@ export const postgresAdapter: EngineAdapter = {
   hostsOf: pgHosts,
   assertSecureTransport: assertPgTlsEnforced,
   applySecureTransport: applyPgTlsOverrides,
-  open: async (connectionString: string, overrides?: TlsOverrides): Promise<EngineSession> => {
-    const conn = new PostgresConnection(connectionString, overrides);
+  open: async (
+    connectionString: string,
+    overrides?: TlsOverrides,
+    proxy?: DialProxy,
+  ): Promise<EngineSession> => {
+    const conn = new PostgresConnection(connectionString, overrides, proxy);
     await conn.connect();
     return new PostgresEngineSession(conn);
   },
   diagnose: diagnosePostgresConnection,
   provisionScopedUser: provisionPostgresScopedUser,
+  revokeStatements: dropRoleStatements,
   connStringUsername: pgConnStringUsername,
 };

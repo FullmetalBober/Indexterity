@@ -1,6 +1,6 @@
 import { XMLParser } from "fast-xml-parser";
-import type { ConstantValue, QueryShape, SortKey } from "../analysis/workload";
 import { type WorkloadTarget, workloadKey } from "../engine/ports";
+import type { ConstantValue, QueryShape, SortKey } from "../engine/types";
 import { PLAN_PARSE_CHUNK, yieldToEventLoop } from "./chunk";
 
 // Query Store plan XML → QueryShape (#201). The plan, not the statement text,

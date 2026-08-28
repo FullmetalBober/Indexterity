@@ -1,10 +1,16 @@
-import type { IndexSpec, QueryShape, ServerHealth } from "../analysis";
+import type { IndexSpec, QueryShape, ServerHealth } from "./types";
 
 // The engine-neutral boundary. Everything above this file — the analysis core,
 // the job pipeline, the API — speaks these ports; everything below implements
-// them per database engine. Today MongoDB is the only adapter; the PostgreSQL
-// and SQL Server mappings are documented on the wiki's Architecture page under
-// Engine ports (pg_stat_user_indexes / sys.dm_db_index_usage_stats etc.).
+// them per database engine. Three adapters implement them today (mongo/,
+// postgres/, mssql/); what each maps onto is documented on the wiki's
+// Architecture page under Engine ports (pg_stat_user_indexes /
+// sys.dm_db_index_usage_stats etc.).
+//
+// The SHAPES these signatures are written in — IndexSpec, QueryShape,
+// ServerHealth — are in ./types, and this file may not import from analysis/:
+// depending on the layer above would describe the boundary in terms of its own
+// consumer, and did, as a cycle (#330).
 //
 // Vocabulary is MongoDB-flavored on purpose ("collection", "database") — a
 // relational adapter maps them (table, schema/database) rather than the whole
@@ -19,6 +25,22 @@ export interface TlsOverrides {
   readonly allowInvalidCertificates: boolean;
   readonly allowInvalidHostnames: boolean;
   readonly insecure: boolean;
+}
+
+// Where a dial is routed, when the cluster is not reachable from our own egress.
+//
+// A SOCKS5 endpoint rather than "a tunnel", deliberately. A WireGuard peering
+// terminated in-process is one way to produce one (#353) and a relay agent the
+// customer runs would be another (#272); the adapters should not learn the
+// difference between them, and this way the second costs nothing here.
+//
+// Loopback in both cases — it addresses something inside this process — so it
+// is never itself a target the network guard has to vet.
+export interface DialProxy {
+  readonly host: string;
+  readonly port: number;
+  readonly username: string;
+  readonly password: string;
 }
 
 // The strict default, and the value an older client or a scripted connect means
@@ -39,6 +61,16 @@ export interface TlsOverrides {
 // with Msg 916 (verified on 2022: `SELECT … FROM [other].sys.tables` answers
 // "The server principal … is not able to access the database … under the current
 // security context").
+//
+// All three adapters raise it, from the signal their own engine answers with, so
+// the passes above need no engine in them (#345):
+//
+//   MongoDB     code 13 / Unauthorized on a per-database read, once the string
+//               holds the cluster `listDatabases` action without matching
+//               per-database grants (measured on 7.0)
+//   PostgreSQL  42501 (no CONNECT), 3D000 (gone), 28000/28P01 (auth) at the dial
+//               `poolFor(database)` makes for that database (measured on 18.6)
+//   SQL Server  Msg 916, as above
 export class DatabaseInaccessibleError extends Error {
   constructor(
     readonly database: string,
@@ -184,8 +216,42 @@ export interface IndexExecutor {
     collection: string,
     keys: Record<string, 1 | -1>,
     options: CreateIndexOptions,
-  ): Promise<void>;
+  ): Promise<IndexBuildOutcome>;
+  // What became of a build that create() reported as SCHEDULED, and the cleanup
+  // that goes with it (#332).
+  //
+  // Present exactly on an adapter whose create() can return SCHEDULED — so only
+  // PostgreSQL, and jobs/building.ts treats its absence as "this engine builds
+  // synchronously and there is nothing to settle". Called until it stops
+  // answering PENDING.
+  //
+  // Removing the scheduled job is this method's business, not the caller's: the
+  // mechanism that recurs is the adapter's own and nothing above the port knows
+  // a job exists.
+  settleBuild?(
+    database: string,
+    collection: string,
+    indexName: string,
+  ): Promise<IndexBuildSettlement>;
 }
+
+export type IndexBuildSettlement =
+  | { state: "PENDING" }
+  | { state: "READY" }
+  | { state: "FAILED"; message: string };
+
+// Whether the index EXISTS when create() returns, or has only been asked for.
+//
+// BUILT on every engine that builds synchronously, which is both other adapters
+// and PostgreSQL whenever the connected role owns the table. SCHEDULED is the
+// PostgreSQL pg_cron route (#332): the build runs in a background worker some
+// time after this returns, so the caller must not record it as done — it lands
+// in BUILDING and a later tick reads `indisvalid` to find out how it went.
+//
+// A return value rather than a capability flag, because it is a fact about THIS
+// build rather than about the adapter: the same PostgreSQL cluster builds
+// synchronously for a table its role owns and asynchronously for one it does not.
+export type IndexBuildOutcome = "BUILT" | "SCHEDULED";
 
 // One privilege the engine needs, and whether these credentials have it.
 // CORE = analysis is impossible without it; APPLY = the cluster can still be
@@ -278,7 +344,23 @@ export interface EngineCapabilities {
 export interface EngineSession {
   readonly collector: IndexCollector;
   executor(readOnly: boolean): IndexExecutor;
-  // User databases only — each adapter excludes its own system namespaces.
+  // User databases only. The rule, which "its own system namespaces" was too
+  // vague to keep the three adapters honest about (#347):
+  //
+  //   BY NAME. Each adapter excludes the databases its ENGINE owns and uses —
+  //   mongo's admin/local/config, SQL Server's master/tempdb/model/msdb — and
+  //   nothing else. A reader can predict the list from the engine's own
+  //   documentation, which is the property being bought.
+  //
+  // One exception, and it is not a system database: PostgreSQL's `postgres` is an
+  // ordinary database initdb creates so a client has somewhere to connect, empty
+  // on almost every install. It is reported only when it holds a user table.
+  //
+  // The count is load-bearing, which is why the difference was worth settling:
+  // the observe checkboxes are drawn at MIN_DATABASES_TO_CHOOSE (2) and up, so an
+  // adapter that reports one extra database offers a choice its peers do not, and
+  // the default selection — null, meaning all of them — walks whatever is in the
+  // list on every pass.
   listDatabaseNames(): Promise<string[]>;
   // Cheap liveness round-trip (rotation verifies new credentials with this).
   ping(): Promise<void>;
@@ -305,7 +387,11 @@ export interface EngineAdapter {
   // The owner's checkbox choices written into the string, so what is stored and
   // what was consented to cannot disagree.
   applySecureTransport(value: string, overrides: TlsOverrides): string;
-  open(connectionString: string, overrides?: TlsOverrides): Promise<EngineSession>;
+  open(
+    connectionString: string,
+    overrides?: TlsOverrides,
+    proxy?: DialProxy,
+  ): Promise<EngineSession>;
   // Report what these credentials may do, without writing anything.
   //
   // `observedDatabases` narrows what the answer is ABOUT (#244): both adapters
@@ -319,6 +405,7 @@ export interface EngineAdapter {
     connectionString: string,
     overrides?: TlsOverrides,
     observedDatabases?: readonly string[] | null,
+    proxy?: DialProxy,
   ): Promise<ConnectionDiagnosis>;
   // Use an admin string ONCE to create the least-privilege user this engine
   // would rather run as, and return that user's string. The admin string is
@@ -339,7 +426,21 @@ export interface EngineAdapter {
   provisionScopedUser?(
     adminConnectionString: string,
     overrides?: TlsOverrides,
+    proxy?: DialProxy,
   ): Promise<ProvisionedUser>;
+  // The statement(s) that remove the scoped user, for the disconnect screen and
+  // the already-provisioned refusal. Handed to the operator rather than run:
+  // dropping a user needs the admin credentials this product deliberately does
+  // not keep, so this is text, not an action.
+  //
+  // Engine-specific in a way a caller cannot fake (#338). MongoDB's user lives
+  // in `admin` and one statement removes it; the other two grant per database,
+  // and both refuse a bare drop while any of those grants remain — so they need
+  // the database list and emit several statements. `databases` is what
+  // provisioning actually created a user in, replayed from the row rather than
+  // discovered now: a database created since then has no user of ours in it,
+  // and one dropped since needs no statement.
+  revokeStatements(username: string, databases: readonly string[]): string;
   // The username a string authenticates as, so rotation can tell whether the
   // stored "this is a provisioned user" marker still describes the new one.
   connStringUsername(value: string): string | null;
@@ -348,4 +449,9 @@ export interface EngineAdapter {
 export interface ProvisionedUser {
   readonly connectionString: string;
   readonly username: string;
+  // Where a user was actually created. Empty for an engine whose scoped user is
+  // server-scoped, which is MongoDB's single user in `admin`. Stored on the row
+  // because provisioning runs once from an admin string that is never kept, so
+  // this is the only chance to record what has to be undone.
+  readonly databases: readonly string[];
 }

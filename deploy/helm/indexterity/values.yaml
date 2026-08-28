@@ -133,6 +133,38 @@ api:
   runCronjob: true
   # Extra environment variables (name/value pairs).
   extraEnv: []
+  # Extra containers in the api pod, and the volumes and mounts they need.
+  #
+  # These exist for ONE documented job: reaching a database that has no public
+  # endpoint, by running a VPN client — WireGuard, in the wiki's recipe — beside
+  # the api. A sidecar shares the pod's network namespace, so a route it creates
+  # is a route the api dials through, with no change to the api at all. It also
+  # keeps the privilege where it belongs: the tunnel container asks for
+  # NET_ADMIN (and /dev/net/tun only if it falls back to userspace WireGuard),
+  # and the app container keeps the chart's `drop: ALL` and non-root defaults
+  # untouched.
+  #
+  # Set config.allowPrivateClusterTargets alongside it — a cluster behind a VPN
+  # is an RFC1918 address by definition, and the network guard refuses those by
+  # default. That pairing is safe only because sign-up is invite-only here; on
+  # an install where strangers can register it hands them the same reach.
+  # See the wiki, "Connecting a cluster" → over a VPN.
+  extraContainers: []
+  extraVolumes: []
+  # Mounted into the api container itself, not into the sidecars — those carry
+  # their own volumeMounts in extraContainers.
+  extraVolumeMounts: []
+  # DNS for the api pod. A private replica set's member names mean something
+  # only on the customer's side of the tunnel, so pointing the pod at a resolver
+  # reachable through it is the difference between a connection string that
+  # resolves and one that does not.
+  #
+  # dnsPolicy must be "None" for dnsConfig.nameservers to be the whole list;
+  # leave it empty to keep kubernetes' default and have dnsConfig ADD to
+  # cluster DNS instead (dnsPolicy: ClusterFirst with a `nameservers` entry is
+  # a valid and often better middle ground — in-cluster names keep resolving).
+  dnsPolicy: ""
+  dnsConfig: {}
 
 web:
   image:
@@ -346,6 +378,9 @@ config:
   # install must leave it false, or any account can probe the internal network.
   # Cloud metadata and other never-a-database ranges stay blocked either way.
   allowPrivateClusterTargets: false
+  # Where the tunnel binary is, for an image that puts it somewhere other than
+  # /app/apps/tunnel/dist/indexterity-tunnel. Empty means the default.
+  tunnelBinary: ""
   # Allow connecting clusters that do not offer validated TLS. Every outbound
   # connection requires it by default, including the ones the pipeline makes from
   # stored credentials — so a cluster connected without it stops being collected

@@ -25,7 +25,7 @@ function SettingsLayout() {
     // worse the further its label is from its value.
     <div className="max-w-3xl">
       <h1 className="font-semibold text-2xl">Settings</h1>
-      <nav aria-label="Settings" className="mt-4 flex gap-4 border-b text-sm">
+      <nav aria-label="Settings" className="mt-4 mb-6 flex gap-4 border-b text-sm">
         <Link
           to="/app/settings"
           activeOptions={{ exact: true }}
@@ -42,6 +42,18 @@ function SettingsLayout() {
           className={TAB}
         >
           Organizations
+        </Link>
+        {/* Shown to members too, for the same reason as Security below: the
+            list is readable by anyone in the org and only the form is
+            owner-only, so a tab that vanished would read as "we do not do
+            VPNs". */}
+        <Link
+          to="/app/settings/tunnels"
+          activeProps={TAB_ACTIVE}
+          inactiveProps={TAB_INACTIVE}
+          className={TAB}
+        >
+          VPN tunnels
         </Link>
         <Link
           to="/app/settings/account"

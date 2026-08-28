@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  // Emit-only. The scrubber's tests are the point of the package, but they are not
+  // part of what the api and the dashboard import — emitting them puts a second
+  // copy of every case in dist/ for vitest to find and run twice.
+  //
+  // The exclusion lives here rather than in tsconfig.json because that is the
+  // config `tsc --noEmit` and every editor read: excluding a file from it does not
+  // keep the file out of dist/, it keeps the file out of every check. Which it did
+  // — scrub.test.ts was in no program at all.
+  "extends": "./tsconfig.json",
+  "exclude": ["src/**/*.test.ts"]
+}

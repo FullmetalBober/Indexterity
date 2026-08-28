@@ -1,4 +1,5 @@
 import type {
+  DialProxy,
   EngineAdapter,
   EngineSession,
   IndexCollector,
@@ -12,7 +13,11 @@ import { MssqlConnection } from "./connection";
 import { diagnoseMssqlConnection } from "./diagnose";
 import { MssqlIndexExecutor } from "./executor";
 import { MssqlMemberConnections } from "./members";
-import { mssqlConnStringUsername, provisionMssqlScopedUser } from "./provision";
+import {
+  dropLoginStatements,
+  mssqlConnStringUsername,
+  provisionMssqlScopedUser,
+} from "./provision";
 
 class MssqlEngineSession implements EngineSession {
   readonly collector: IndexCollector;
@@ -63,12 +68,21 @@ export const mssqlAdapter: EngineAdapter = {
   hostsOf: mssqlHosts,
   assertSecureTransport: assertMssqlTlsEnforced,
   applySecureTransport: applyMssqlTlsOverrides,
-  open: async (connectionString: string, overrides?: TlsOverrides): Promise<EngineSession> => {
-    const conn = new MssqlConnection(connectionString, overrides);
+  open: async (
+    connectionString: string,
+    overrides?: TlsOverrides,
+    proxy?: DialProxy,
+  ): Promise<EngineSession> => {
+    const conn = new MssqlConnection(
+      connectionString,
+      overrides,
+      proxy === undefined ? undefined : { proxy },
+    );
     await conn.connect();
     return new MssqlEngineSession(conn, connectionString, overrides);
   },
   diagnose: diagnoseMssqlConnection,
   provisionScopedUser: provisionMssqlScopedUser,
+  revokeStatements: dropLoginStatements,
   connStringUsername: mssqlConnStringUsername,
 };

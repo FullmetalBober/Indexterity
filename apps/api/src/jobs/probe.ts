@@ -8,6 +8,7 @@ import {
 } from "../analysis";
 import { type Database, desc, eq, latencySamples } from "../db";
 import type { ClusterEngine } from "../engine/ports";
+import type { TunnelRegistry } from "../tunnel/tunnel.registry";
 import { openClusterSession } from "./cluster-connection";
 
 // The five-minute check: is a collection suddenly much slower to read than it
@@ -71,7 +72,15 @@ export function latestBaselines(db: Database, clusterId: string) {
 
 // Returns the collections found under read pressure. The caller decides what to
 // do about it; this only measures.
-export async function probeCluster(db: Database, clusterId: string): Promise<PressureFinding[]> {
+export async function probeCluster(
+  db: Database,
+  clusterId: string,
+  // The live tunnels, when this cluster is reached over one (#353).
+  // Optional because most callers have none and every cluster before
+  // #353 needs none; a cluster WITH a tunnel_id and no registry is
+  // refused rather than dialled directly.
+  tunnels?: TunnelRegistry,
+): Promise<PressureFinding[]> {
   // The most recent stored sample per collection is the baseline, and `distinct
   // on` is the whole point here: this used to select EVERY latency_samples row for
   // the cluster and pick the newest per namespace in JS. That is one row per
@@ -100,7 +109,7 @@ export async function probeCluster(db: Database, clusterId: string): Promise<Pre
   // the leading ORDER BY, and by this point it is two hundred rows, not 292k.
   const busiest = [...baselines].sort((a, b) => b.readOps - a.readOps).slice(0, PROBE_COLLECTIONS);
 
-  const { session, engine, release } = await openClusterSession(db, clusterId);
+  const { session, engine, release } = await openClusterSession(db, clusterId, { tunnels });
   try {
     const findings: PressureFinding[] = [];
 

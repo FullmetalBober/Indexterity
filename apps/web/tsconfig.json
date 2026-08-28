@@ -4,7 +4,15 @@
     "paths": {
       "~/*": ["./src/*"]
     },
-    "types": ["vite/client", "@testing-library/jest-dom"]
+    // node is declared rather than inherited by accident (the mistake
+    // @repo/errors calls out): this app renders on the server, so src/lib/env.ts
+    // and api-origin.ts read process.env, and the e2e suite reads Buffer. It
+    // type-checked before only because a dependency's .d.ts happened to drag the
+    // node types in behind it.
+    "types": ["vite/client", "@testing-library/jest-dom", "node"]
   },
-  "include": ["src", "vite.config.ts", "vitest.config.ts", "vitest.setup.ts"]
+  // playwright.config.ts and e2e/ are here for the same reason as the rest: they
+  // are TypeScript that ships in the repo, and nothing checked them. `*.config.ts`
+  // is a glob so the next one is covered without a second edit.
+  "include": ["src", "*.config.ts", "*.setup.ts", "e2e"]
 }

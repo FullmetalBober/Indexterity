@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadEnv } from "../config/env";
 import type { DatabaseService } from "../db/database.service";
+import type { ClusterTasksService } from "./cluster-tasks.service";
 import { TICK_INTERVAL_MS, TickService } from "./tick.service";
 
 // The drain, as something the tests can hold open. Each runOnce call parks
@@ -44,6 +45,30 @@ vi.mock("./burst", () => ({
 vi.mock("./tasks", () => ({ createTaskList: vi.fn(() => ({})) }));
 vi.mock("./runner", () => ({ wireRunnerEvents: vi.fn() }));
 vi.mock("../errors/reporting", () => ({ captureError: vi.fn() }));
+// The stale-lock repair every tick performs reaches postgres twice — a watermark
+// claim and two statements — and this suite's database is a stub carrying
+// `execute` and nothing else. Unmocked, `claimWatermark` threw on the missing
+// `db.insert`, `drainOnce` caught it as designed, and the tick logged
+//
+//   ERROR [TickService] releasing stale locks failed: db.insert is not a function
+//
+// inside a PASSING test. Noise in a green run is worse than it looks: it is the
+// shape a real failure would arrive in, so it trains the reader to skim past one.
+//
+// Mocked rather than taught to the stub, because what this suite pins is the
+// overlap guard, the deadline and shutdown — whether the repair's SQL is right
+// belongs to locks.ts and watermark.ts. The claim is granted and there is nothing
+// to free, so `releaseLocks` runs end to end and reports nothing, which is the
+// ordinary case on every tick after the first.
+//
+// importOriginal, not a bare object: tick.service.ts also imports `passKey` from
+// this module and a factory that dropped it would break the import rather than
+// the test.
+vi.mock("./watermark", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./watermark")>()),
+  claimWatermark: vi.fn(async () => true),
+}));
+vi.mock("./locks", () => ({ releaseStaleLocks: vi.fn(async () => []) }));
 
 const BASE = {
   DATABASE_URL: "postgres://test:test@localhost:5432/test",
@@ -63,7 +88,11 @@ function load(flags: { runCronjob: boolean }, extra: Record<string, string> = {}
 function makeService() {
   const pool = { label: "the api pool" };
   const database = { db: { execute: vi.fn() }, pool } as unknown as DatabaseService;
-  return { service: new TickService(database), pool };
+  // The per-cluster passes are a provider now (#354) and this suite mocks the
+  // registry that reaches them, so what it hands over only has to satisfy the
+  // constructor.
+  const clusterTasks = {} as unknown as ClusterTasksService;
+  return { service: new TickService(database, clusterTasks), pool };
 }
 
 // Everything queued — microtasks and immediates — settled, without advancing

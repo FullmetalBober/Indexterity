@@ -12,6 +12,7 @@ import {
 } from "../db";
 import { type ClusterNode, workloadKey } from "../engine/ports";
 import { type CollectedLatency, type CollectedSnapshot, collectSnapshots } from "../mongo";
+import type { TunnelRegistry } from "../tunnel/tunnel.registry";
 import { openClusterSession } from "./cluster-connection";
 import { type CurrentRun, counterFingerprint, extendsRun, latencyFingerprint } from "./runs";
 import { watchKey } from "./watched";
@@ -331,8 +332,16 @@ async function recordRoster(
     });
 }
 
-export async function collectCluster(db: Database, clusterId: string): Promise<number> {
-  const { session, release } = await openClusterSession(db, clusterId);
+export async function collectCluster(
+  db: Database,
+  clusterId: string,
+  // The live tunnels, when this cluster is reached over one (#353).
+  // Optional because most callers have none and every cluster before
+  // #353 needs none; a cluster WITH a tunnel_id and no registry is
+  // refused rather than dialled directly.
+  tunnels?: TunnelRegistry,
+): Promise<number> {
+  const { session, release } = await openClusterSession(db, clusterId, { tunnels });
   try {
     // The roster costs one hello per member on connections the usage pass
     // opens anyway, so it rides the same session rather than its own dial.

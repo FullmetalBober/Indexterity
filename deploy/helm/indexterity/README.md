@@ -242,6 +242,7 @@ stays off by default — the dashboard does not need it.
 | `secrets.cronTriggerSecret` | The bearer token that endpoint demands, required when `api.runCronjob=false`. It authorises the whole pipeline and there is no user session behind it: `openssl rand -hex 32` |
 | `config.signupMode` | `invite` (default), `open` or `closed`. The first account always bootstraps the install; after that invite-only. `open` lets any stranger register — and every account can make the control plane dial hosts it names |
 | `config.allowPrivateClusterTargets` | Set `true` when the MongoDB you manage is on a private network (the normal self-hosted case). Leave `false` for anything strangers can reach, or accounts can probe your internal network. Cloud metadata stays blocked either way |
+| `api.extraContainers` / `api.extraVolumes` / `api.extraVolumeMounts` / `api.dnsPolicy` / `api.dnsConfig` | Run a VPN client beside the api so a database with no public endpoint becomes reachable — see **Reaching a database over a VPN** below. Generic extension points; that is the job they exist for |
 | `config.allowInsecureClusterTls` | Set `true` only when the MongoDB you manage genuinely serves no certificate and the network between is trusted. Every outbound connection requires validated TLS otherwise — including the ones the pipeline makes from stored credentials, so a cluster connected without it stops being collected and its owners are told why. Kept apart from `allowPrivateClusterTargets` on purpose: a VPC-peered or PrivateLink cluster is a private address that must still be forced to TLS |
 | `metrics.enabled` | Prometheus metrics on port `metrics.port` (9464) for all three workloads. **Off by default** — an exporter costs memory in every process, and an install with nothing scraping it was paying that for nobody. Turn it on if anything is; the endpoint is never routed by the ingress |
 | `metrics.serviceMonitor.enabled` | One Prometheus Operator ServiceMonitor per workload. Off by default — it needs the `monitoring.coreos.com` CRDs, and a chart that assumes them cannot install without them |
@@ -330,6 +331,88 @@ page, under Security):
   per-cluster checkbox on the connect form instead, and needs no chart setting.
 
 `helm install` prints a warning when the chosen combination is unsafe.
+
+## Reaching a database over a VPN
+
+A cluster is onboardable only if the api can open a socket to it. A database
+that lives behind the customer's VPN, with no public endpoint, cannot be
+connected at all — and those are often the installs with the worst index
+problems.
+
+For a **self-hosted** install this needs no feature, only values: run a
+WireGuard client as a sidecar in the api pod, and the route it creates is a
+route the api dials through. A sidecar shares the pod's network namespace, so
+nothing in the application changes.
+
+```yaml
+config:
+  # A cluster behind a VPN is an RFC1918 address by definition, and the network
+  # guard refuses those by default. Safe here only because sign-up is
+  # invite-only; on an install strangers can register on, this hands them the
+  # same reach into your network.
+  allowPrivateClusterTargets: true
+
+api:
+  extraContainers:
+    - name: wireguard
+      image: your-registry/wireguard:1
+      securityContext:
+        capabilities:
+          # Only this container. The api container keeps the chart's `drop: ALL`
+          # and its non-root defaults, which is the whole reason to use a
+          # sidecar rather than granting the app the capability.
+          add: ["NET_ADMIN"]
+      volumeMounts:
+        - name: wg-config
+          mountPath: /etc/wireguard
+          readOnly: true
+        # Only needed if the image falls back to userspace WireGuard — see
+        # below. Drop this mount and the volume on a node with the module.
+        - name: dev-net-tun
+          mountPath: /dev/net/tun
+  extraVolumes:
+    - name: wg-config
+      secret:
+        # wg0.conf — the peer's private key. Treat it as a credential.
+        secretName: wireguard-peer
+    - name: dev-net-tun
+      hostPath:
+        path: /dev/net/tun
+        type: CharDevice
+  # A private replica set's member names resolve only on the far side of the
+  # tunnel. Without this the connection string names hosts the pod cannot look
+  # up, which fails as "unreachable" and reads like a firewall problem.
+  dnsConfig:
+    nameservers: ["10.8.0.1"]
+    searches: ["internal.example.com"]
+```
+
+**`NET_ADMIN` is always required; `/dev/net/tun` usually is not.** Kernel
+WireGuard — the `wireguard` module, present on most current node images — needs
+only the capability: `ip link add wg0 type wireguard` succeeds in a container
+with `NET_ADMIN` and no `/dev/net/tun` at all, and fails without the capability.
+The device is for the *userspace* fallback (`wireguard-go`, `boringtun`) that
+images such as `linuxserver/wireguard` switch to when the node has no module.
+Mounting both makes the recipe portable across nodes; on a cluster where
+`hostPath` is refused by policy, check for the module and drop the device.
+
+Three things this does **not** change, each worth being explicit about:
+
+- **TLS is still required.** The tunnel carries ciphertext and adds a second
+  layer; it does not replace the first. `config.allowInsecureClusterTls` stays
+  `false`.
+- **Cloud metadata stays refused.** `169.254.169.254` and the other
+  never-a-database ranges are blocked whether or not a route reaches them. A
+  peer whose `AllowedIPs` covers them is a misconfiguration.
+- **Credentials still leave the customer's network.** The connection string is
+  stored here and opened here. A tunnel changes which addresses are reachable,
+  not where the secret lives.
+
+`allowPrivateClusterTargets` is a single global flag, which is why this recipe
+is documented for self-hosted installs and not offered on the hosted service:
+there, flipping it would give *every* tenant the ability to aim a connection
+string at our own private network. A per-cluster tunnel that closes that gap is
+[#353](https://github.com/FullmetalBober/Indexterity/issues/353).
 
 ## Notes on the workloads
 
