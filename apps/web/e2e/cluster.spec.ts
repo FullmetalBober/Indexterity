@@ -387,12 +387,23 @@ test.describe("cluster lifecycle", () => {
       await page.getByLabel("Name", { exact: true }).fill("E2E Refused");
       await page.getByLabel("Connection string").fill(MONGO_URL);
       await page.getByRole("button", { name: "Check access" }).click();
+      // Wait for the diagnosis before connecting, rather than racing it. Both
+      // clicks put a message on this page and both say "authentication
+      // disabled", so whether the second assertion below saw one element or two
+      // came down to which render landed first — which is a property of how fast
+      // the runner is, and it failed on CI against a version-bump PR where it
+      // could not have been anything but the test.
+      await expect(page.getByText(/every privilege is available/)).toBeVisible();
       await page.getByRole("button", { name: "Connect", exact: true }).click();
 
       // The api's own words, not "failed to connect cluster": the remedy is the
       // whole content of this refusal, and it is a 422 the form has to pass
-      // through verbatim.
-      await expect(page.getByText(/authentication disabled/)).toBeVisible();
+      // through verbatim. Matched on the refusal's OWN opening, which the
+      // diagnosis above cannot also match — with both now deterministically on
+      // the page, a shared substring would violate strict mode every time.
+      await expect(
+        page.getByText(/this organization requires least-privilege credentials/),
+      ).toBeVisible();
       // And nothing was stored — the gate runs after the dial and before the seal.
       await expect(page.getByRole("heading", { name: "E2E Refused", exact: true })).toHaveCount(0);
     });
