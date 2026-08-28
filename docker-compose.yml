@@ -97,7 +97,7 @@ services:
       postgres:
         condition: service_healthy
 
-  # WireGuard peerings, terminated in userspace (apps/tunnel, D112). Go rather
+  # WireGuard peerings, terminated in userspace (apps/tunnel, D113). Go rather
   # than node, so this one runs from source with the Go toolchain instead of
   # turbo — `go run` rebuilds on restart, which is as much dev loop as a service
   # with no UI needs.

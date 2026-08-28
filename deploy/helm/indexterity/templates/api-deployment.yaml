@@ -163,7 +163,7 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
 {{- /*
-The tunnel service (D112), in THIS pod because it listens on loopback: the api
+The tunnel service (D113), in THIS pod because it listens on loopback: the api
 reaches it at 127.0.0.1 and nothing outside the pod can reach it at all. That is
 what keeps a customer's private key off the network and the SOCKS5 proxy into
 their network unreachable — the same boundary that held when the api spawned it

@@ -5,7 +5,7 @@ import { assertDialableThroughTunnel, type Cidr, parseCidr } from "../engine/net
 import type { WireGuardConf } from "./conf";
 
 // The peering carried by apps/tunnel: wireguard-go for the protocol, gvisor's
-// netstack for IP and TCP, in a service the api connects to (D112, amending
+// netstack for IP and TCP, in a service the api connects to (D113, amending
 // D111's process per tunnel).
 //
 // This file is the api's half of that contract, and the whole of the difference

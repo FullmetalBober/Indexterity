@@ -76,7 +76,7 @@ jobs:
           cache-from: type=gha,scope=web
           cache-to: type=gha,scope=web,mode=max
 
-      # The tunnel service (D112), which runs as a sidecar in the api's pod. Its
+      # The tunnel service (D113), which runs as a sidecar in the api's pod. Its
       # own image because it is its own container — the api image stopped carrying
       # the binary when nothing there spawned it any more. Published from the same
       # tag as the rest, so a chart version names images it was tested against.

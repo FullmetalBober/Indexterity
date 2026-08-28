@@ -204,7 +204,7 @@ test and the port-forward in NOTES.txt all read the same number they did before.
   value: {{ .Values.config.logLevel | quote }}
 - name: ALLOW_PRIVATE_CLUSTER_TARGETS
   value: {{ .Values.config.allowPrivateClusterTargets | quote }}
-# The LOOPBACK port the tunnel service listens on (D112). A port and no host,
+# The LOOPBACK port the tunnel service listens on (D113). A port and no host,
 # because the service runs as a container IN THIS POD and therefore in this
 # network namespace — so a customer's private key never crosses a network, the
 # SOCKS5 proxy into their network is reachable from nowhere else, and there is no

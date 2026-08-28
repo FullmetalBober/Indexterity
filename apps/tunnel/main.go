@@ -25,7 +25,7 @@ import (
 // apart. It holds no policy either: the api decides every dial (see socks.go).
 //
 // It used to be spawned per tunnel and speak over stdin and stdout. It is now
-// one process holding many devices, and the pipe became a socket — see D112 for
+// one process holding many devices, and the pipe became a socket — see D113 for
 // why, and for what that costs. The protocol did not change.
 //
 // Two listeners:

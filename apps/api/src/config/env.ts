@@ -205,7 +205,7 @@ export function trustsProxy(): boolean {
   return trustProxySetting() !== false;
 }
 
-// The loopback port the tunnel service listens on (D112). Undefined means no
+// The loopback port the tunnel service listens on (D113). Undefined means no
 // service is configured, which is the VPN feature being off rather than a
 // misconfiguration — TunnelRegistry.enabled() is what the routes read.
 export function tunnelPort(): number | undefined {

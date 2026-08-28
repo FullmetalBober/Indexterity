@@ -206,7 +206,7 @@ const workerShape = {
   // — which is why this one has no default.
   RETENTION_DAYS: optionalPositive(),
   STORAGE_USD_PER_GB_MONTH: optionalPositive(),
-  // The LOOPBACK port the tunnel service listens on (#353, D112). The same
+  // The LOOPBACK port the tunnel service listens on (#353, D113). The same
   // variable the service itself reads, so the two cannot be configured into
   // disagreement — there is no host, because there is no deployment where the
   // service is anywhere but beside the api in one network namespace: the same

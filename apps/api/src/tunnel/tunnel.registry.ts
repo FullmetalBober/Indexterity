@@ -12,7 +12,7 @@ import { type Reachability, RemoteTunnel, type TunnelEndpoint, type TunnelHealth
 // three adapters are not.
 //
 // It holds the map and the lifecycle; a peering itself lives in the tunnel
-// service, and what this map holds is one control connection each (D112,
+// service, and what this map holds is one control connection each (D113,
 // amending D111's process per tunnel).
 
 /**

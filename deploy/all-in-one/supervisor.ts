@@ -219,7 +219,7 @@ for (const signal of FORWARDED) {
 // First, because it is the api that dials it and its boot is milliseconds. It
 // listens on loopback, which in this image is the same loopback the api is on —
 // one container is the tightest version of the "beside the api" the design wants
-// (D112).
+// (D113).
 const TUNNEL_PORT = process.env.TUNNEL_PORT;
 if (TUNNEL_PORT !== undefined && TUNNEL_PORT !== "") {
   spawnChild("tunnel", "/app/apps/tunnel/dist/indexterity-tunnel", [], "/app", { TUNNEL_PORT });

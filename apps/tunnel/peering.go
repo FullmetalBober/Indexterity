@@ -20,7 +20,7 @@ import (
 // netstack.CreateNetTUN, so two customers who both use 10.0.0.0/8 remain a
 // non-question rather than a routing conflict. What is genuinely given up by
 // holding them together — every private key in one address space, and one crash
-// taking every peering down — is on the record in D112.
+// taking every peering down — is on the record in D113.
 
 // A peering, from the moment its control connection is accepted to the moment it
 // closes.

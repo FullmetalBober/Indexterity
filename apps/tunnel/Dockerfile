@@ -1,4 +1,4 @@
-# The tunnel service (apps/tunnel, D112): WireGuard peerings terminated in
+# The tunnel service (apps/tunnel, D113): WireGuard peerings terminated in
 # userspace — wireguard-go for the protocol, gvisor's netstack for IP and TCP.
 # Build context = repo root, like the other three images.
 #
