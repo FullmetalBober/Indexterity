@@ -11,7 +11,18 @@ import {
   seal,
   user,
 } from "../src/db";
-import { api, authPost, databaseUrl, type Session, signUp, startApi, stopApi } from "./helpers";
+import {
+  api,
+  authPost,
+  databaseUrl,
+  type Session,
+  signUp,
+  startApi,
+  startTunnelService,
+  stopApi,
+  stopTunnelService,
+  tunnelUrl,
+} from "./helpers";
 
 // The tunnel routes end to end (#353): register, edit, test, remove — with the
 // tenancy and role refusals that make them safe to expose, and the trail row
@@ -81,6 +92,7 @@ async function trail(session: Session, event: string): Promise<Record<string, un
 }
 
 let server: ChildProcess;
+let tunnelService: ChildProcess;
 let db: ReturnType<typeof createDatabase>;
 let owner: Session;
 let member: Session;
@@ -91,7 +103,10 @@ const createdEmails: string[] = [];
 const createdOrgIds: string[] = [];
 
 beforeAll(async () => {
-  server = await startApi();
+  // The service first: the api is handed its URL, and a peering cannot come up
+  // without something answering on it.
+  tunnelService = await startTunnelService();
+  server = await startApi({ TUNNEL_URL: tunnelUrl() });
   db = createDatabase(databaseUrl(), 2);
 
   owner = await signUp("tunnel-owner");
@@ -132,6 +147,7 @@ afterAll(async () => {
   }
   await db.$client.end();
   await stopApi(server);
+  await stopTunnelService(tunnelService);
 });
 
 describe("registering a tunnel", () => {

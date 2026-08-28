@@ -45,6 +45,10 @@ services:
       # dial one on purpose. Never set this in a deployment that dials real
       # customer databases.
       ALLOW_INSECURE_CLUSTER_TLS: "true"
+      # The tunnel service, which this stack always starts. The token is shared
+      # with it below; absent this variable the VPN feature reports itself off,
+      # which is what a deployment without a tunnel container gets.
+      TUNNEL_URL: tcp://${TUNNEL_TOKEN:-dev-tunnel-token}@tunnel:9411
       SIGNUP_MODE: open
       # Off in dev so nothing demands an authenticator app of a test account;
       # a hosted install sets it (see .env.example, REQUIRE_OWNER_2FA).
@@ -92,6 +96,27 @@ services:
       postgres:
         condition: service_healthy
 
+  # WireGuard peerings, terminated in userspace (apps/tunnel, D112). Go rather
+  # than node, so this one runs from source with the Go toolchain instead of
+  # turbo — `go run` rebuilds on restart, which is as much dev loop as a service
+  # with no UI needs.
+  #
+  # It binds 0.0.0.0 because the api reaches it across the compose network. That
+  # is the whole difference from the child-process version, where the SOCKS5
+  # listener was on loopback and nothing outside the process could reach it.
+  tunnel:
+    image: docker.io/library/golang:1.27.0-alpine
+    working_dir: /app/apps/tunnel
+    command: sh -c "exec go run ."
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-dev-tunnel-token}
+      TUNNEL_LISTEN: "0.0.0.0:9411"
+      TUNNEL_SOCKS_LISTEN: "0.0.0.0:9412"
+    volumes:
+      - ./:/app
+      - tunnel_go_cache:/root/.cache/go-build
+      - tunnel_go_mod:/go/pkg/mod
+
   web:
     image: docker.io/library/node:26-slim
     working_dir: /app
@@ -133,3 +158,7 @@ volumes:
   pgdata18:
   api_node_modules:
   web_node_modules:
+  # The Go build and module caches, so `go run` on restart is a link rather than
+  # a rebuild of wireguard-go and gvisor.
+  tunnel_go_cache:
+  tunnel_go_mod:

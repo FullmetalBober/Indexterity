@@ -378,9 +378,6 @@ config:
   # install must leave it false, or any account can probe the internal network.
   # Cloud metadata and other never-a-database ranges stay blocked either way.
   allowPrivateClusterTargets: false
-  # Where the tunnel binary is, for an image that puts it somewhere other than
-  # /app/apps/tunnel/dist/indexterity-tunnel. Empty means the default.
-  tunnelBinary: ""
   # Allow connecting clusters that do not offer validated TLS. Every outbound
   # connection requires it by default, including the ones the pipeline makes from
   # stored credentials — so a cluster connected without it stops being collected
@@ -489,11 +486,31 @@ config:
   # it on anything a browser reaches over the network.
   allowInsecureAuthUrl: false
 
+# The tunnel service (apps/tunnel): WireGuard peerings terminated in userspace,
+# for reaching a database that has no public endpoint.
+#
+# This chart does not yet run the container for you — point this at one you run,
+# or at the sidecar you added with api.extraContainers below. Off means the api
+# reports the VPN feature as unavailable and the dashboard says so, which is a
+# supported state rather than a broken one.
+#
+# Set secrets.tunnelUrl alongside it, and config.allowPrivateClusterTargets: a
+# cluster behind a VPN is an RFC1918 address by definition.
+tunnel:
+  enabled: false
+
 secrets:
   # Bring your own Secret instead of the values below. It must contain:
   # DATABASE_URL, BETTER_AUTH_SECRET, MASTER_KEY (and optionally SMTP_PASS,
-  # GITHUB_CLIENT_SECRET).
+  # GITHUB_CLIENT_SECRET, TUNNEL_URL).
   existingSecret: ""
+  # Where the tunnel service is and the token to greet it with, as one URL:
+  # tcp://TOKEN@my-tunnel:9411, or tcps:// when it is not reached over a private
+  # network. Every peering's private key travels on that connection.
+  #
+  # Required when tunnel.enabled is on, and here rather than in config because it
+  # carries the token.
+  tunnelUrl: ""
   # postgres://user:pass@host:5432/indexterity
   #
   # The DIRECT endpoint, not a transaction-pooled one (Neon's `-pooler` host,

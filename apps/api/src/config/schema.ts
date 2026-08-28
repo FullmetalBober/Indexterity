@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { PLANS } from "../billing/plans";
+import { parseTunnelUrl } from "../tunnel/url";
 
 // What the environment must be, per process, as a schema rather than as
 // twenty-eight readers that each decide for themselves what a bad value means.
@@ -206,10 +207,32 @@ const workerShape = {
   // — which is why this one has no default.
   RETENTION_DAYS: optionalPositive(),
   STORAGE_USD_PER_GB_MONTH: optionalPositive(),
-  // Where the tunnel binary is (#353, D111). Defaults to the layout both the
-  // repo and the image have — apps/tunnel/dist beside apps/api — and is here for
-  // the deployments that put it somewhere else.
-  TUNNEL_BINARY: z.string().min(1).optional(),
+  // Where the tunnel service is AND the token to greet it with, as one URL
+  // (#353, D112): tcp://TOKEN@tunnel:9411, or tcps:// when it is not reached over
+  // a private network. One setting rather than two, because an address and a
+  // secret that can be configured apart can be configured inconsistently, and the
+  // failure then presents as a tunnel that will not come up for a reason no
+  // screen names.
+  //
+  // Absent means the VPN feature is OFF, which is a supported state the dashboard
+  // reports — not a missing setting with a default. There is deliberately no
+  // fallback to a local binary: two ways to reach the runtime is two code paths
+  // to keep correct, and the one that was a filesystem path is the one a
+  // container deployment cannot honour.
+  //
+  // Validated HERE so a typo fails at boot rather than at the first tunnel, using
+  // the same parser the runtime uses — see tunnel/url.ts.
+  TUNNEL_URL: z
+    .string()
+    .min(1)
+    .superRefine((value, ctx) => {
+      try {
+        parseTunnelUrl(value);
+      } catch (error) {
+        ctx.addIssue({ code: "custom", message: (error as Error).message });
+      }
+    })
+    .optional(),
   ALLOW_PRIVATE_CLUSTER_TARGETS: flag(false),
   ALLOW_INSECURE_CLUSTER_TLS: flag(false),
   // One flag for every engine rather than one per engine. The knob answers a

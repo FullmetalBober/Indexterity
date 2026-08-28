@@ -6,8 +6,8 @@ import { clusters, envKeyProvider, open as openSealed, seal, tunnels } from "../
 import { DatabaseService } from "../db/database.service";
 import type { TunnelRoute } from "../engine/net-guard";
 import type { DialProxy } from "../engine/ports";
-import type { TunnelState } from "./child";
 import { InvalidWireGuardConfError, parseWireGuardConf, type WireGuardConf } from "./conf";
+import type { TunnelState } from "./remote";
 import { TunnelRegistry } from "./tunnel.registry";
 
 // Reads and writes the tunnel rows, and derives what the dashboard shows.

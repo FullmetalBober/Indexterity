@@ -1,19 +1,31 @@
 import { promises as dns } from "node:dns";
 import { Injectable, Logger, type OnApplicationShutdown } from "@nestjs/common";
-import { tunnelBinary } from "../config/env";
+import { tunnelLink } from "../config/env";
 import { allowPrivateTargets, assertTargetsAllowed } from "../engine/net-guard";
-import { ChildTunnel, type Reachability, type TunnelEndpoint, type TunnelHealth } from "./child";
 import type { WireGuardConf } from "./conf";
+import { type Reachability, RemoteTunnel, type TunnelEndpoint, type TunnelHealth } from "./remote";
 
 // The one provider in this directory, and it earns that on two of the three
 // counts §5.1 names: lifecycle, and being a single instance the rest of the app
-// resolves against. Everything below it — the protocol, the netstack, the
-// parser — is pure or per-tunnel, so none of it is injectable, for the same
-// reason analysis/ and the three adapters are not.
+// resolves against. Everything below it — the protocol, the parser — is pure or
+// per-tunnel, so none of it is injectable, for the same reason analysis/ and the
+// three adapters are not.
 //
-// It holds the map and the lifecycle; a peering itself is carried by the process
-// child.ts supervises — wireguard-go and gvisor's netstack, one process per
-// tunnel (D111).
+// It holds the map and the lifecycle; a peering itself lives in the tunnel
+// service, and what this map holds is one control connection each (D112,
+// amending D111's process per tunnel).
+
+/**
+ * Thrown when there is no tunnel service configured, which is a supported state:
+ * the VPN feature is off, and the dashboard says so. Distinct from a service that
+ * is configured and unreachable, because the remedy is different — one is an
+ * operator setting a URL, the other is a container that is not answering.
+ */
+export class TunnelsDisabledError extends Error {
+  constructor() {
+    super("no tunnel service is configured, so VPN-reached clusters are unavailable");
+  }
+}
 
 // Re-exported because callers have imported them from here since #353, and where
 // the types live is not their business.
@@ -22,7 +34,18 @@ export type { TunnelEndpoint, TunnelHealth };
 @Injectable()
 export class TunnelRegistry implements OnApplicationShutdown {
   readonly #logger = new Logger(TunnelRegistry.name);
-  readonly #tunnels = new Map<string, ChildTunnel>();
+  readonly #tunnels = new Map<string, RemoteTunnel>();
+
+  /**
+   * Whether a tunnel service is configured at all.
+   *
+   * Read by the routes and reported to the dashboard, so a deployment without one
+   * says the feature is off instead of offering a form whose every submission
+   * fails at the last step.
+   */
+  enabled(): boolean {
+    return tunnelLink() !== undefined;
+  }
 
   /**
    * Bring a tunnel up, or replace one already up under the same id.
@@ -40,22 +63,36 @@ export class TunnelRegistry implements OnApplicationShutdown {
     };
     const onState = (state: string) => this.#logger.log(`tunnel ${id} is ${state}`);
 
-    const backend = await ChildTunnel.start({
+    const link = tunnelLink();
+    if (link === undefined) throw new TunnelsDisabledError();
+
+    let backend: RemoteTunnel | null = null;
+    backend = await RemoteTunnel.connect({
+      id,
+      service: link,
       conf,
       // Resolved and vetted HERE, because the guard is ours: a customer-supplied
-      // endpoint is an outbound dial we make. The binary refuses a hostname for
+      // endpoint is an outbound dial we make. The service refuses a hostname for
       // the same reason.
       gateway: await this.#resolveGateway(conf),
-      binary: tunnelBinary(),
       onError,
       onState,
-      onExit: (code) => {
-        // Not removed from the map: `endpoint()` still answers, so a dial fails
-        // fast against a dead listener rather than silently opening a second
-        // peering. The next open() replaces it.
-        this.#logger.warn(`tunnel ${id} process exited with ${code ?? "a signal"}`);
+      onClose: () => {
+        // REMOVED from the map, which is the opposite of what the child-process
+        // version did and is the fix for what that cost: it kept the dead entry so
+        // a dial would fail fast, but `endpoint()` then kept answering, and both
+        // the dial path and Test short-circuit on `endpoint() !== null` — so a
+        // peering whose process had died stayed dead until the row was edited or
+        // the api restarted. Pressing Test, the one thing an owner would try, did
+        // nothing. Gone from the map, the next openFor() reconnects.
+        //
+        // Only when this is still the tunnel under that id: open() replaces by
+        // building the new one first and shutting the old one down after, so an
+        // old connection's close arrives when the map already holds its
+        // replacement.
+        if (backend !== null && this.#tunnels.get(id) === backend) this.#tunnels.delete(id);
+        this.#logger.warn(`tunnel ${id} lost its connection to the tunnel service`);
       },
-      log: (line) => this.#logger.warn(`tunnel ${id}: ${line}`),
     });
 
     // The replacement is built before the old one is torn down, so a failed
@@ -80,8 +117,17 @@ export class TunnelRegistry implements OnApplicationShutdown {
     return tunnel.resolve(host);
   }
 
+  /**
+   * This peering's SOCKS5 endpoint, or null when there is no live connection.
+   *
+   * `live` as well as map membership, belt and braces: every caller treats null as
+   * "open it", so a stale answer here is a dial against a listener that is not
+   * there — which is exactly the failure the child-process version shipped with.
+   */
   endpoint(id: string): TunnelEndpoint | null {
-    return this.#tunnels.get(id)?.endpoint ?? null;
+    const tunnel = this.#tunnels.get(id);
+    if (tunnel === undefined || !tunnel.live) return null;
+    return tunnel.endpoint;
   }
 
   /**
@@ -121,7 +167,7 @@ export class TunnelRegistry implements OnApplicationShutdown {
     await Promise.all(tunnels.map((tunnel) => this.#shutdown(tunnel)));
   }
 
-  async #shutdown(tunnel: ChildTunnel): Promise<void> {
+  async #shutdown(tunnel: RemoteTunnel): Promise<void> {
     await tunnel.close().catch(() => {});
   }
 
