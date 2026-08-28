@@ -71,6 +71,30 @@ interface Window {
   readonly ops: number;
 }
 
+// Which pair of counters to difference. The read side asks whether HIDING an
+// index slowed the collection's reads; the write side asks whether BUILDING one
+// slowed its writes (jobs/finalize.ts). Same arithmetic over different columns,
+// and the write side matters more than a parameter suggests — most collections
+// take no writes at all, so "nothing happened" has to read as observation there
+// rather than as a window that never filled.
+export type LatencyMetric = "read" | "write";
+
+function deltaOf(
+  metric: LatencyMetric,
+  previous: LatencyReading,
+  next: LatencyReading,
+): { ops: number; micros: number } {
+  return metric === "read"
+    ? {
+        ops: next.readOps - previous.readOps,
+        micros: next.readLatencyMicros - previous.readLatencyMicros,
+      }
+    : {
+        ops: next.writeOps - previous.writeOps,
+        micros: next.writeLatencyMicros - previous.writeLatencyMicros,
+      };
+}
+
 // Consecutive readings, differenced, dropping only the pairs a RESET ate.
 //
 // A negative delta on a cumulative counter is the whole exclusion. A window with
@@ -81,15 +105,14 @@ interface Window {
 // eventually un-hidden and re-proposed: the same never-terminating cycle this
 // module exists to end, arrived at from the quiet side rather than the restarting
 // one. `minWindowOps` belongs to the RATIO, and is applied where that is computed.
-function readWindows(readings: readonly LatencyReading[]): Window[] {
+function windowsOf(readings: readonly LatencyReading[], metric: LatencyMetric): Window[] {
   const sorted = sortedRuns(readings);
   const windows: Window[] = [];
   for (let i = 1; i < sorted.length; i++) {
     const previous = sorted[i - 1];
     const next = sorted[i];
     if (previous === undefined || next === undefined) continue;
-    const ops = next.readOps - previous.readOps;
-    const micros = next.readLatencyMicros - previous.readLatencyMicros;
+    const { ops, micros } = deltaOf(metric, previous, next);
     if (ops < 0 || micros < 0) continue;
     windows.push({ startMs: spanEnd(previous), endMs: spanStart(next), micros, ops });
   }
@@ -130,9 +153,10 @@ export interface ObservedOptions {
   readonly recordedBaselineMicrosPerOp?: number | undefined;
 }
 
-// The pre-hide reference is drawn from the same length of history as the window
-// being judged, so a collection whose traffic changed shape months ago is not
-// compared against what it used to be.
+// `fromMs` is the moment the change landed — when the index was hidden, or when
+// it was built. The reference is drawn from the same length of history before it
+// as the window being judged, so a collection whose traffic changed shape months
+// ago is not compared against what it used to be.
 //
 // No `now`. Every term is a fold over stored readings, which is the property
 // that makes the answer the same on a re-run and lets a test state a history and
@@ -140,15 +164,16 @@ export interface ObservedOptions {
 // was is a different question, and `history-stale` upstream already asks it.
 export function observedWindow(
   readings: readonly LatencyReading[],
-  hiddenAtMs: number,
+  metric: LatencyMetric,
+  fromMs: number,
   observeDays: number,
   options: ObservedOptions,
 ): ObservedWindow {
-  const windows = readWindows(readings);
+  const windows = windowsOf(readings, metric);
   const observeMs = observeDays * DAY_MS;
-  const since = windows.filter((window) => window.startMs >= hiddenAtMs);
+  const since = windows.filter((window) => window.startMs >= fromMs);
   const before = windows.filter(
-    (window) => window.endMs <= hiddenAtMs && window.startMs >= hiddenAtMs - observeMs,
+    (window) => window.endMs <= fromMs && window.startMs >= fromMs - observeMs,
   );
   const observedMs = since.reduce((sum, window) => sum + (window.endMs - window.startMs), 0);
 
@@ -156,14 +181,14 @@ export function observedWindow(
   // conclusion that it was quiet.
   if (observedMs < observeMs) return { verdict: "INCOMPLETE", observedMs, ratio: null };
   // Too little traffic to have been hurt. Said before the baseline is consulted,
-  // and deliberately: a collection nobody reads has no rate on either side, and
+  // and deliberately: a collection nobody queries has no rate on either side, and
   // calling that "no baseline" would refuse the one case where the answer is
   // certain. The old cumulative gate reached the same verdict the same way round,
   // returning a null ratio before it ever divided by the baseline average.
   if (totalOps(since) < options.minWindowOps) return { verdict: "STABLE", observedMs, ratio: null };
 
   const baseline = averageMicrosPerOp(before) ?? options.recordedBaselineMicrosPerOp ?? null;
-  // Traffic on this side of the hide and none on the other: there is nothing to
+  // Traffic on this side of the change and none on the other: there is nothing to
   // compare against, and no amount of further observing creates readings from
   // before it. Never spelled STABLE — the caller acts irreversibly on the
   // difference.
@@ -191,9 +216,10 @@ export function outstayedWindow(hiddenAtMs: number, observeDays: number, nowMs: 
 // hide it at all rather than to start a cycle that cannot end.
 export function observationCanFinish(
   readings: readonly LatencyReading[],
+  metric: LatencyMetric,
   observeDays: number,
 ): boolean {
-  const windows = readWindows(readings);
+  const windows = windowsOf(readings, metric);
   const sorted = sortedRuns(readings);
   const first = sorted[0];
   const last = sorted.at(-1);

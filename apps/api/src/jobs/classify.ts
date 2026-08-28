@@ -340,6 +340,7 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
         DROP_CANDIDATES.has(candidate.type) &&
         !observationCanFinish(
           latencyByCollection.get(`${entry.database}\u0000${entry.collection}`) ?? [],
+          "read",
           observeDays,
         )
       ) {
