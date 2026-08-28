@@ -21,14 +21,13 @@ import (
 // of the protocol out of the compiler's reach on both sides of a connection that
 // is carrying a private key.
 
-// The first line of a control connection: who is asking, and what to bring up.
+// The first line of a control connection: what to bring up.
 //
-// The token is the whole of the control plane's authentication. It rides here
-// rather than in a header because there is no header — the transport is a socket
-// carrying JSON lines — and it is compared in constant time before the config is
-// so much as looked at (server.go).
+// There is no credential here, and that is a consequence of the listener being on
+// loopback in the api's own network namespace (main.go): a greeting can only come
+// from inside the pod, which is the same boundary that made a pipe from a parent
+// process safe. A token would be protecting a door that is not in a wall.
 type hello struct {
-	Token string `json:"token"`
 	// The api's own id for this peering, echoed into this service's log so a line
 	// about a failing peering names the tunnel an operator can look up. Never a
 	// secret and never used for routing: what selects a peering on the data path

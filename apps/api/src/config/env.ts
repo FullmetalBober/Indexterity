@@ -1,6 +1,5 @@
 import type { z } from "zod";
 import type { Plan } from "../billing/plans";
-import { parseTunnelUrl, type TunnelLink } from "../tunnel/url";
 import {
   type ApiEnv,
   decodeKey,
@@ -206,16 +205,11 @@ export function trustsProxy(): boolean {
   return trustProxySetting() !== false;
 }
 
-// Where the tunnel service is, and the token for it (D112). Undefined means no
+// The loopback port the tunnel service listens on (D112). Undefined means no
 // service is configured, which is the VPN feature being off rather than a
 // misconfiguration — TunnelRegistry.enabled() is what the routes read.
-//
-// Parsed per call rather than cached: the schema has already validated it at
-// boot, so this cannot throw, and a URL is a few dozen bytes of work against a
-// tunnel open that is about to cost a handshake.
-export function tunnelLink(): TunnelLink | undefined {
-  const url = workerEnv().TUNNEL_URL;
-  return url === undefined ? undefined : parseTunnelUrl(url);
+export function tunnelPort(): number | undefined {
+  return workerEnv().TUNNEL_PORT;
 }
 
 // Whether owners must have a second factor before any owner-only mutation (#55).

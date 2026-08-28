@@ -16,8 +16,6 @@ import (
 // is the point: a greeting being accepted, a listener being announced and a
 // closed connection taking the stack down are all decided on this side.
 
-const testToken = "a-shared-secret-the-api-was-given"
-
 func testControl(t *testing.T) (*controlServer, *registry) {
 	t.Helper()
 	peerings := newRegistry()
@@ -33,7 +31,7 @@ func testControl(t *testing.T) (*controlServer, *registry) {
 		t.Fatalf("port: %v", err)
 	}
 
-	control, err := startControl("127.0.0.1:0", testToken, peerings, port, stderrLogger(), func(message string) {
+	control, err := startControl("127.0.0.1:0", peerings, port, stderrLogger(), func(message string) {
 		t.Logf("control: %s", message)
 	})
 	if err != nil {
@@ -57,9 +55,9 @@ func dialControl(t *testing.T, control *controlServer) net.Conn {
 	return client
 }
 
-func greet(t *testing.T, client net.Conn, token string) {
+func greet(t *testing.T, client net.Conn, id string) {
 	t.Helper()
-	line, err := json.Marshal(hello{Token: token, ID: "tunnel-under-test", Config: testConfig()})
+	line, err := json.Marshal(hello{ID: id, Config: testConfig()})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -82,35 +80,62 @@ func waitForCount(t *testing.T, peerings *registry, want int) {
 	t.Fatalf("registry holds %d peerings, want %d", peerings.count(), want)
 }
 
-func TestControlRefusesAGreetingWithTheWrongToken(t *testing.T) {
+// There is no token to get wrong — the listener is loopback, so reaching it is
+// the credential. What a greeting still has to carry is an id and a config that
+// can come up, and neither being refused quietly is what these pin.
+func TestControlRefusesAGreetingThatNamesNoPeering(t *testing.T) {
 	control, peerings := testControl(t)
 	client := dialControl(t, control)
 
-	greet(t, client, "not-the-token")
+	greet(t, client, "")
 
-	// Refused by closing, with nothing written back: a caller that cannot
-	// authenticate is told nothing about what this service is or holds.
+	// Refused by closing: an unnamed peering would be a device whose log lines
+	// name nothing, which is worse than no device.
 	if _, err := bufio.NewReader(client).ReadString('\n'); err == nil {
-		t.Fatal("the service answered a greeting it should have refused")
+		t.Fatal("the service answered a greeting carrying no id")
 	}
 	if peerings.count() != 0 {
 		t.Fatalf("a refused greeting left %d peerings", peerings.count())
 	}
 }
 
-func TestControlRefusesAGreetingWithNoToken(t *testing.T) {
+func TestControlRefusesAnUnreadableGreeting(t *testing.T) {
 	control, peerings := testControl(t)
 	client := dialControl(t, control)
 
-	// The shape a caller that has found the port but not the secret would send.
-	if _, err := client.Write([]byte("{\"id\":\"x\",\"config\":{}}\n")); err != nil {
+	// Unknown fields are refused rather than ignored, so a build that disagrees
+	// with the api about the config's shape fails here instead of carrying an
+	// AllowedIPs nobody chose.
+	if _, err := client.Write([]byte("{\"id\":\"x\",\"nonsense\":true}\n")); err != nil {
 		t.Fatalf("greeting: %v", err)
 	}
 	if _, err := bufio.NewReader(client).ReadString('\n'); err == nil {
-		t.Fatal("the service answered a greeting carrying no token")
+		t.Fatal("the service answered a greeting it could not read")
 	}
 	if peerings.count() != 0 {
 		t.Fatalf("a refused greeting left %d peerings", peerings.count())
+	}
+}
+
+// Loopback, and the same port the api is told to look on. Both halves of the
+// design that replaced the shared secret, so both are pinned.
+func TestTheListenersAreLoopbackOnly(t *testing.T) {
+	t.Setenv("TUNNEL_PORT", "9999")
+	chosen, err := fromEnvironment()
+	if err != nil {
+		t.Fatalf("fromEnvironment: %v", err)
+	}
+	if chosen.control != "127.0.0.1:9999" {
+		t.Fatalf("control listens on %q", chosen.control)
+	}
+	// Port 0: ephemeral, announced per peering, nothing to configure.
+	if chosen.socks != "127.0.0.1:0" {
+		t.Fatalf("socks listens on %q", chosen.socks)
+	}
+
+	t.Setenv("TUNNEL_PORT", "not-a-port")
+	if _, err = fromEnvironment(); err == nil {
+		t.Fatal("a TUNNEL_PORT that is not a port was accepted")
 	}
 }
 
@@ -118,7 +143,7 @@ func TestControlAnnouncesTheSharedSocksPortAndThePeeringsOwnCredentials(t *testi
 	control, peerings := testControl(t)
 	client := dialControl(t, control)
 
-	greet(t, client, testToken)
+	greet(t, client, "tunnel-under-test")
 
 	line, err := bufio.NewReader(client).ReadString('\n')
 	if err != nil {
@@ -160,7 +185,7 @@ func TestClosingTheConnectionTakesThePeeringDown(t *testing.T) {
 	control, peerings := testControl(t)
 	client := dialControl(t, control)
 
-	greet(t, client, testToken)
+	greet(t, client, "tunnel-under-test")
 	if _, err := bufio.NewReader(client).ReadString('\n'); err != nil {
 		t.Fatalf("listening: %v", err)
 	}
@@ -179,13 +204,13 @@ func TestOnePeeringEndingLeavesTheOthersUp(t *testing.T) {
 	control, peerings := testControl(t)
 
 	first := dialControl(t, control)
-	greet(t, first, testToken)
+	greet(t, first, "first-peering")
 	if _, err := bufio.NewReader(first).ReadString('\n'); err != nil {
 		t.Fatalf("first listening: %v", err)
 	}
 
 	second := dialControl(t, control)
-	greet(t, second, testToken)
+	greet(t, second, "second-peering")
 	secondReader := bufio.NewReader(second)
 	if _, err := secondReader.ReadString('\n'); err != nil {
 		t.Fatalf("second listening: %v", err)

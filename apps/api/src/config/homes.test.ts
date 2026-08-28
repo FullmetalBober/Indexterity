@@ -119,13 +119,6 @@ const COMPOSE_INFRA = new Set(["POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_D
 // the two DSNs to be mapped from.
 const DEPLOYMENT_ONLY = new Set(["SENTRY_DSN_API", "SENTRY_DSN_WEB"]);
 
-// The tunnel service's OWN variables (apps/tunnel), read by a Go process and by
-// no node schema — TUNNEL_TOKEN is what the service demands of a greeting, and
-// the api never sees it: what the api reads is TUNNEL_URL, which carries the same
-// token in it. .env.example names the token because docker-compose hands it to
-// both sides from there, which is the whole reason one value appears twice.
-const TUNNEL_SERVICE_VARS = new Set(["TUNNEL_TOKEN", "TUNNEL_LISTEN", "TUNNEL_SOCKS_LISTEN"]);
-
 // Read by the all-in-one image's supervisor (deploy/all-in-one/supervisor.ts)
 // and by neither process. That image runs the api and the dashboard in one
 // container, so one environment has to describe two of them — and these are the
@@ -166,7 +159,6 @@ describe("nothing is set that no schema knows", () => {
     ...COMPOSE_INFRA,
     ...SUPERVISOR_VARS,
     ...NODE_RUNTIME_VARS,
-    ...TUNNEL_SERVICE_VARS,
   ]);
   // MASTER_KEY_V<n> is dynamically named by the rotation, so it is matched by
   // shape rather than listed.

@@ -3,7 +3,6 @@ import { createInterface } from "node:readline";
 import { afterEach, describe, expect, it } from "vitest";
 import { parseWireGuardConf } from "./conf";
 import { RemoteTunnel } from "./remote";
-import type { TunnelLink } from "./url";
 
 // The api's half of the protocol, against a stub service that speaks it and no
 // WireGuard at all.
@@ -35,7 +34,6 @@ const CONF = parseWireGuardConf(
 );
 
 const GATEWAY = { address: "203.0.113.7", port: 51_820 };
-const TOKEN = "the-token-the-service-was-given";
 const ANNOUNCED_PORT = 34_567;
 
 type Emit = (event: Record<string, unknown>) => void;
@@ -70,9 +68,9 @@ async function listen(stub: Stub, greetings: Record<string, unknown>[], commands
         greeted = true;
         const greeting = JSON.parse(line) as Record<string, unknown>;
         greetings.push(greeting);
-        // The real service refuses a greeting whose token does not match by
-        // dropping the connection, having said nothing.
-        if (greeting.token !== TOKEN) {
+        // The real service refuses a greeting that names no peering by dropping
+        // the connection, having said nothing.
+        if (greeting.id === undefined || greeting.id === "") {
           socket.destroy();
           return;
         }
@@ -102,18 +100,17 @@ async function listen(stub: Stub, greetings: Record<string, unknown>[], commands
   return address.port;
 }
 
-async function start(stub: Stub = {}, token = TOKEN): Promise<Started> {
+async function start(stub: Stub = {}, id = "tunnel-under-test"): Promise<Started> {
   const commands: string[] = [];
   const errors: string[] = [];
   const greetings: Record<string, unknown>[] = [];
   const counted = { closes: 0 };
 
   const port = await listen(stub, greetings, commands);
-  const link: TunnelLink = { host: "127.0.0.1", port, token, tls: false };
 
   const tunnel = await RemoteTunnel.connect({
-    id: "tunnel-under-test",
-    service: link,
+    id,
+    port,
     conf: CONF,
     gateway: GATEWAY,
     onError: (error) => errors.push(error.message),
@@ -156,11 +153,13 @@ afterEach(async () => {
 });
 
 describe("talking to the tunnel service", () => {
-  it("greets with the token, the id and the key, on the connection and nowhere else", async () => {
+  it("greets with the id and the key, on the connection and nowhere else", async () => {
     const { greetings } = await start();
 
     const greeting = greetings[0];
-    expect(greeting?.token).toBe(TOKEN);
+    // No credential: the service accepts a greeting because it arrived on
+    // loopback, inside the api's own network namespace.
+    expect(greeting?.token).toBeUndefined();
     expect(greeting?.id).toBe("tunnel-under-test");
     // The private key travels in the greeting: not on argv, which /proc exposes,
     // and not in a file that would outlive the peering.
@@ -185,10 +184,10 @@ describe("talking to the tunnel service", () => {
   });
 
   it("fails to connect when the service refuses the greeting", async () => {
-    // A token that does not match is dropped without an answer, so this side has
-    // nothing to report but the drop — which must be an error, not a tunnel that
-    // looks open.
-    await expect(start({}, "the-wrong-token")).rejects.toThrow(/closed the connection/);
+    // A refused greeting is dropped without an answer, so this side has nothing
+    // to report but the drop — which must be an error, not a tunnel that looks
+    // open.
+    await expect(start({}, "")).rejects.toThrow(/closed the connection/);
   });
 
   it("reports reachable once a handshake comes back", async () => {

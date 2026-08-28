@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,9 +25,9 @@ import (
 // it, exactly as stdin closing used to end the process.
 //
 // The api is always the initiator. This service therefore needs no address for
-// the api, no inbound callback and no credential of the api's to store — which
-// is what makes the whole control plane one shared secret rather than a mutual
-// trust arrangement.
+// the api and no inbound callback — and, because the listener is loopback inside
+// the api's own network namespace, no credential either. What authenticates a
+// greeting is that it could only have come from inside the pod.
 
 // How long a connection has to say who it is. A control port that lets an
 // unauthenticated caller hold a socket open is a port a scan accumulates on.
@@ -50,7 +49,6 @@ const (
 
 type controlServer struct {
 	listener *net.TCPListener
-	token    string
 	peerings *registry
 	// Announced to every peering: the shared SOCKS5 port. The api pairs it with
 	// the host it already dialled to reach this service.
@@ -61,7 +59,6 @@ type controlServer struct {
 
 func startControl(
 	address string,
-	token string,
 	peerings *registry,
 	socksPort uint16,
 	logger *device.Logger,
@@ -77,7 +74,6 @@ func startControl(
 	}
 	return &controlServer{
 		listener:  listener,
-		token:     token,
 		peerings:  peerings,
 		socksPort: socksPort,
 		logger:    logger,
@@ -121,9 +117,8 @@ func (c *controlServer) session(ctx context.Context, connection *net.TCPConn) {
 
 	greeting, err := c.hello(connection, input)
 	if err != nil {
-		// Nothing is emitted and nothing is attributed: a caller that failed to
-		// authenticate has no peering to log against, and a scan that reached the
-		// port would otherwise write a line per attempt.
+		// Nothing is emitted and nothing is attributed: a connection that never
+		// named a peering has none to log against.
 		c.log("control connection refused: " + err.Error())
 		return
 	}
@@ -223,12 +218,6 @@ func (c *controlServer) hello(connection *net.TCPConn, input *bufio.Reader) (*he
 		return nil, fmt.Errorf("the greeting is not the expected JSON: %w", err)
 	}
 
-	// Constant time, because the alternative is a byte-at-a-time oracle on the one
-	// secret that stands between a caller and standing up a peering with a key of
-	// its own choosing.
-	if subtle.ConstantTimeCompare([]byte(greeting.Token), []byte(c.token)) != 1 {
-		return nil, fmt.Errorf("the greeting's token does not match")
-	}
 	if greeting.ID == "" {
 		return nil, fmt.Errorf("the greeting carries no id")
 	}

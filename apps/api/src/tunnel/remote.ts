@@ -1,10 +1,8 @@
 import net, { isIP, type Socket } from "node:net";
 import { createInterface } from "node:readline";
-import tls from "node:tls";
 import { z } from "zod";
 import { assertDialableThroughTunnel, type Cidr, parseCidr } from "../engine/net-guard";
 import type { WireGuardConf } from "./conf";
-import type { TunnelLink } from "./url";
 
 // The peering carried by apps/tunnel: wireguard-go for the protocol, gvisor's
 // netstack for IP and TCP, in a service the api connects to (D112, amending
@@ -18,8 +16,15 @@ import type { TunnelLink } from "./url";
 // sent — a hostname reaching the service is refused by it, because resolving one
 // there would skip the guard.
 //
-// One CONNECTION per peering, and what it carries is the same line-delimited
-// JSON the pipe carried. Two round trips per dial, and none per packet.
+// One CONNECTION per peering, on LOOPBACK, and what it carries is the same
+// line-delimited JSON the pipe carried. Two round trips per dial, and none per
+// packet.
+//
+// Loopback is what keeps this as safe as the pipe it replaced. The service runs
+// in the api's own network namespace — one container in the all-in-one image, a
+// sidecar in the api's pod — so a customer's private key never crosses a network
+// and the SOCKS5 proxy into their network is reachable from nowhere else. There
+// is no token, because there is no listener a stranger could reach.
 //
 // The connection IS the peering: there is no handle to a peering that outlives
 // its socket, which is what makes a lost api the end of a live session rather
@@ -30,11 +35,10 @@ export type TunnelState = "down" | "handshaking" | "up";
 
 export interface TunnelEndpoint {
   /**
-   * Where the drivers dial SOCKS5 — the tunnel service's own host, which is the
-   * one the api was configured with. It was loopback when the peering was a child
-   * process; a service reachable only from itself would serve nobody.
+   * Loopback SOCKS5 the drivers dial. The service shares this network namespace,
+   * so the only thing that varies per peering is the port and the credentials.
    */
-  readonly host: string;
+  readonly host: "127.0.0.1";
   readonly port: number;
   readonly credentials: { readonly username: string; readonly password: string };
 }
@@ -80,6 +84,9 @@ const tunnelEvent = z.discriminatedUnion("type", [
   }),
   z.object({ type: z.literal("error"), message: z.string() }),
 ]);
+
+/** The service shares this network namespace; there is no other address it could be at. */
+const LOOPBACK = "127.0.0.1";
 
 /** How long the service gets to report its listener before the open is a failure. */
 const START_TIMEOUT_MS = 15_000;
@@ -145,17 +152,15 @@ export class RemoteTunnel {
    */
   static async connect(options: {
     readonly id: string;
-    readonly service: TunnelLink;
+    /** The loopback port the service's control listener is on. */
+    readonly port: number;
     readonly conf: WireGuardConf;
     readonly gateway: { readonly address: string; readonly port: number };
     readonly onError: (error: Error) => void;
     readonly onState: (state: string) => void;
     readonly onClose: () => void;
   }): Promise<RemoteTunnel> {
-    const { service } = options;
-    const socket = service.tls
-      ? tls.connect({ host: service.host, port: service.port, servername: service.host })
-      : net.connect({ host: service.host, port: service.port });
+    const socket = net.connect({ host: LOOPBACK, port: options.port });
     // Nagle off. Every write here is a whole command or a whole event, so holding
     // one back to coalesce it with the next only adds latency — and the thing
     // waiting on it is a dial verdict with a database driver behind it.
@@ -179,7 +184,7 @@ export class RemoteTunnel {
         clearTimeout(timer);
         reject(
           new Error(
-            `could not reach the tunnel service at ${service.host}:${service.port}: ${error.message}`,
+            `could not reach the tunnel service on ${LOOPBACK}:${options.port}: ${error.message}`,
           ),
         );
       });
@@ -203,10 +208,10 @@ export class RemoteTunnel {
         if (event.type === "listening") {
           clearTimeout(timer);
           resolve({
-            // The service's own host, and the port it announced. One shared SOCKS5
-            // port serves every peering there, so what makes this endpoint THIS
-            // peering's is the credentials, not the port.
-            host: service.host,
+            // The port the service announced. One shared SOCKS5 listener serves
+            // every peering it holds, so what makes this endpoint THIS peering's
+            // is the credentials, not the port.
+            host: LOOPBACK,
             port: event.port,
             credentials: { username: event.username, password: event.password },
           });
@@ -221,12 +226,9 @@ export class RemoteTunnel {
     });
 
     // The private key, on the connection and nowhere else: argv is world-readable
-    // through /proc and a file outlives the process that needed it. On tcp:// it
-    // is also on the wire, which is what tcps:// exists for and why the chart
-    // keeps this traffic inside the deployment.
-    socket.write(
-      `${JSON.stringify(helloFor(options.id, service.token, options.conf, options.gateway))}\n`,
-    );
+    // through /proc and a file outlives the process that needed it. The connection
+    // is loopback, so it does not leave the network namespace either.
+    socket.write(`${JSON.stringify(helloFor(options.id, options.conf, options.gateway))}\n`);
 
     socket.on("close", () => {
       tunnel?.markGone();
@@ -460,16 +462,15 @@ export class RemoteTunnel {
 // fields are refused on that side, so a mismatch here fails loudly at connect
 // rather than carrying an AllowedIPs nobody chose.
 //
-// The id is for the service's log, not for routing: what selects a peering on the
-// data path is the credential it is handed back, and an id a caller could name
-// would be an id a caller could name someone else's.
+// There is no credential in it: the service accepts a greeting because it arrived
+// on loopback. The id is for its log, not for routing — what selects a peering on
+// the data path is the credential handed back in `listening`.
 function helloFor(
   id: string,
-  token: string,
   conf: WireGuardConf,
   gateway: { readonly address: string; readonly port: number },
 ): Record<string, unknown> {
-  return { token, id, config: configFor(conf, gateway) };
+  return { id, config: configFor(conf, gateway) };
 }
 
 function configFor(

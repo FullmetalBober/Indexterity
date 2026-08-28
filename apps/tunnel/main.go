@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/netip"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -28,15 +30,26 @@ import (
 //
 // Two listeners:
 //
-//	control   one connection per peering. First line is the greeting (token, id,
+//	control   one connection per peering. First line is the greeting (id and
 //	          config, including the PrivateKey), then commands: handshake,
 //	          resolve, endpoint, dialAllow, dialDeny, shutdown. Events come back
 //	          on the same connection — listening, state, handshake, resolved,
 //	          failed, dialRequest, error — one JSON object per line. The
 //	          connection IS the peering's lifetime: closing it takes the device
 //	          down, and nothing else's.
-//	socks     SOCKS5, shared by every peering. The credentials announced to a
-//	          peering in its `listening` event are what select it.
+//	socks     SOCKS5 on an ephemeral port, shared by every peering. The
+//	          credentials announced to a peering in its `listening` event are what
+//	          select it.
+//
+// BOTH LISTEN ON LOOPBACK, and that is not a default — it is the design. This
+// service runs beside the api in one network namespace: the same container in the
+// all-in-one image, a sidecar in the api's pod, `network_mode: service:api` in
+// compose. So the trust boundary is the pod, exactly as it was when the api
+// spawned this as a child process, and the two properties that made a pipe safe
+// are preserved rather than traded away: a customer's private key never crosses a
+// network, and the SOCKS5 proxy into their network is not reachable from anywhere
+// else. There is consequently NO shared secret to configure, because there is no
+// listener a stranger could reach to need one.
 //
 // stderr carries wireguard-go's log and this service's own, and neither is ever
 // protocol. It exits 0 on SIGTERM, and 1 only when it could not start, having
@@ -44,9 +57,9 @@ import (
 //
 // Environment:
 //
-//	TUNNEL_TOKEN          required. The shared secret a greeting must carry.
-//	TUNNEL_LISTEN         control address, default :9411
-//	TUNNEL_SOCKS_LISTEN   socks address, default :9412
+//	TUNNEL_PORT   the loopback port the control listener binds, default 9411.
+//	              The SAME variable the api reads to find it, so the two cannot
+//	              be configured into disagreement.
 
 func main() {
 	if err := run(); err != nil {
@@ -55,40 +68,39 @@ func main() {
 	}
 }
 
-// Where the service listens and what it trusts.
+// Where the service listens.
 //
-// From the environment rather than argv, for the same reason the private key is
-// not on argv: /proc/<pid>/cmdline is readable by anything on the host, and the
-// token is the whole of the control plane's authentication.
+// One knob, and only the control port: the SOCKS5 listener takes an ephemeral
+// port and announces it to each peering, so there is nothing to configure and
+// nothing for a deployment to keep in step. The api learns it from the
+// `listening` event, which it already reads.
 type settings struct {
 	control string
 	socks   string
-	token   string
 }
 
 const (
-	defaultControlListen = ":9411"
-	defaultSocksListen   = ":9412"
+	defaultPort = 9411
+	// Not configurable, deliberately. A bindable address would be a way to put
+	// this service's control port — which accepts a peering, with a private key,
+	// from whoever asks — on a network, and the whole reason there is no token to
+	// configure is that there is no such way. See the header.
+	loopback = "127.0.0.1"
 )
 
 func fromEnvironment() (settings, error) {
-	token := os.Getenv("TUNNEL_TOKEN")
-	// Refused rather than defaulted to empty. An unauthenticated control port
-	// lets anything that can reach it stand up a peering with a key of its own
-	// choosing and be handed a proxy into whatever that peering allows — so a
-	// service that cannot authenticate its api must not start at all.
-	if token == "" {
-		return settings{}, fmt.Errorf("TUNNEL_TOKEN is empty, and an unauthenticated control port would serve any caller that can reach it")
+	port := defaultPort
+	if raw := os.Getenv("TUNNEL_PORT"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > 65535 {
+			return settings{}, fmt.Errorf("TUNNEL_PORT %q is not a port number", raw)
+		}
+		port = parsed
 	}
-
-	chosen := settings{control: defaultControlListen, socks: defaultSocksListen, token: token}
-	if listen := os.Getenv("TUNNEL_LISTEN"); listen != "" {
-		chosen.control = listen
-	}
-	if listen := os.Getenv("TUNNEL_SOCKS_LISTEN"); listen != "" {
-		chosen.socks = listen
-	}
-	return chosen, nil
+	return settings{
+		control: net.JoinHostPort(loopback, strconv.Itoa(port)),
+		socks:   net.JoinHostPort(loopback, "0"),
+	}, nil
 }
 
 func run() error {
@@ -123,7 +135,7 @@ func run() error {
 	// wireguard-go's NewLogger writes to STDOUT. Rebuilt onto stderr rather than
 	// configured, so the service's log and its peerings' protocol can never be the
 	// same stream.
-	control, err := startControl(chosen.control, chosen.token, peerings, port, stderrLogger(), log)
+	control, err := startControl(chosen.control, peerings, port, stderrLogger(), log)
 	if err != nil {
 		return err
 	}

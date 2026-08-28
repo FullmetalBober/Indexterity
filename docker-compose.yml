@@ -45,10 +45,11 @@ services:
       # dial one on purpose. Never set this in a deployment that dials real
       # customer databases.
       ALLOW_INSECURE_CLUSTER_TLS: "true"
-      # The tunnel service, which this stack always starts. The token is shared
-      # with it below; absent this variable the VPN feature reports itself off,
-      # which is what a deployment without a tunnel container gets.
-      TUNNEL_URL: tcp://${TUNNEL_TOKEN:-dev-tunnel-token}@tunnel:9411
+      # The tunnel service, which this stack always starts. It shares this
+      # container's network namespace, so the port is the whole address. Absent
+      # this variable the VPN feature reports itself off, which is what a
+      # deployment with no tunnel container gets.
+      TUNNEL_PORT: "9411"
       SIGNUP_MODE: open
       # Off in dev so nothing demands an authenticator app of a test account;
       # a hosted install sets it (see .env.example, REQUIRE_OWNER_2FA).
@@ -101,21 +102,29 @@ services:
   # turbo — `go run` rebuilds on restart, which is as much dev loop as a service
   # with no UI needs.
   #
-  # It binds 0.0.0.0 because the api reaches it across the compose network. That
-  # is the whole difference from the child-process version, where the SOCKS5
-  # listener was on loopback and nothing outside the process could reach it.
+  # `network_mode: service:api` puts it in the API's OWN network namespace, which
+  # is the whole design rather than a convenience: its listeners are on loopback,
+  # so the api reaches them at 127.0.0.1 and nothing else can reach them at all.
+  # That is the same boundary a child process had, and it is why there is no
+  # shared secret here — and it mirrors a kubernetes sidecar exactly, so dev and
+  # prod agree about what "beside the api" means.
+  #
+  # No `ports:` and no networks of its own: a container sharing another's
+  # namespace cannot have either, which is the constraint saying out loud that
+  # this service is not independently reachable.
   tunnel:
     image: docker.io/library/golang:1.27.0-alpine
     working_dir: /app/apps/tunnel
     command: sh -c "exec go run ."
+    network_mode: service:api
     environment:
-      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-dev-tunnel-token}
-      TUNNEL_LISTEN: "0.0.0.0:9411"
-      TUNNEL_SOCKS_LISTEN: "0.0.0.0:9412"
+      TUNNEL_PORT: "9411"
     volumes:
       - ./:/app
       - tunnel_go_cache:/root/.cache/go-build
       - tunnel_go_mod:/go/pkg/mod
+    depends_on:
+      - api
 
   web:
     image: docker.io/library/node:26-slim

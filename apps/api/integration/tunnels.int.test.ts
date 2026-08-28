@@ -21,7 +21,7 @@ import {
   startTunnelService,
   stopApi,
   stopTunnelService,
-  tunnelUrl,
+  TUNNEL_PORT,
 } from "./helpers";
 
 // The tunnel routes end to end (#353): register, edit, test, remove — with the
@@ -106,7 +106,7 @@ beforeAll(async () => {
   // The service first: the api is handed its URL, and a peering cannot come up
   // without something answering on it.
   tunnelService = await startTunnelService();
-  server = await startApi({ TUNNEL_URL: tunnelUrl() });
+  server = await startApi({ TUNNEL_PORT: String(TUNNEL_PORT) });
   db = createDatabase(databaseUrl(), 2);
 
   owner = await signUp("tunnel-owner");

@@ -1,6 +1,6 @@
 import { promises as dns } from "node:dns";
 import { Injectable, Logger, type OnApplicationShutdown } from "@nestjs/common";
-import { tunnelLink } from "../config/env";
+import { tunnelPort } from "../config/env";
 import { allowPrivateTargets, assertTargetsAllowed } from "../engine/net-guard";
 import type { WireGuardConf } from "./conf";
 import { type Reachability, RemoteTunnel, type TunnelEndpoint, type TunnelHealth } from "./remote";
@@ -44,7 +44,7 @@ export class TunnelRegistry implements OnApplicationShutdown {
    * fails at the last step.
    */
   enabled(): boolean {
-    return tunnelLink() !== undefined;
+    return tunnelPort() !== undefined;
   }
 
   /**
@@ -63,13 +63,13 @@ export class TunnelRegistry implements OnApplicationShutdown {
     };
     const onState = (state: string) => this.#logger.log(`tunnel ${id} is ${state}`);
 
-    const link = tunnelLink();
-    if (link === undefined) throw new TunnelsDisabledError();
+    const port = tunnelPort();
+    if (port === undefined) throw new TunnelsDisabledError();
 
     let backend: RemoteTunnel | null = null;
     backend = await RemoteTunnel.connect({
       id,
-      service: link,
+      port,
       conf,
       // Resolved and vetted HERE, because the guard is ours: a customer-supplied
       // endpoint is an outbound dial we make. The service refuses a hostname for

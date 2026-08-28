@@ -28,22 +28,13 @@ export function databaseUrl(): string {
   return url;
 }
 
-// The tunnel service the api dials (apps/tunnel, D112). Fixed ports rather than
-// ephemeral, because the api is handed a URL naming the control port before the
-// service has said anything — the same shape the deployment has, where a Service
-// name and port are known before any pod answers.
+// The tunnel service the api dials (apps/tunnel, D112). One fixed loopback port,
+// which is the same variable both sides read — the api to find it, the service to
+// bind it.
 //
 // 127.0.0.1 explicitly: podman publishes IPv4 only, so `localhost` can resolve to
 // ::1 and be refused.
-// Not overridable from the environment: two more variables would have to be
-// declared in turbo.json to change numbers no suite has ever needed to change.
-export const TUNNEL_CONTROL_PORT = 19_411;
-export const TUNNEL_SOCKS_PORT = 19_412;
-const TUNNEL_TOKEN = "integration-suite-tunnel-token";
-
-export function tunnelUrl(): string {
-  return `tcp://${TUNNEL_TOKEN}@127.0.0.1:${TUNNEL_CONTROL_PORT}`;
-}
+export const TUNNEL_PORT = 19_411;
 
 /**
  * Spawn the real tunnel service and wait for its control port to accept.
@@ -61,16 +52,11 @@ export async function startTunnelService(): Promise<ChildProcess> {
     );
   }
   const child = spawn(binary, [], {
-    env: {
-      ...process.env,
-      TUNNEL_TOKEN,
-      TUNNEL_LISTEN: `127.0.0.1:${TUNNEL_CONTROL_PORT}`,
-      TUNNEL_SOCKS_LISTEN: `127.0.0.1:${TUNNEL_SOCKS_PORT}`,
-    },
+    env: { ...process.env, TUNNEL_PORT: String(TUNNEL_PORT) },
     stdio: ["ignore", "pipe", "pipe"],
   });
   for (let i = 0; i < 60; i++) {
-    if (await accepts(TUNNEL_CONTROL_PORT)) return child;
+    if (await accepts(TUNNEL_PORT)) return child;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   child.kill("SIGKILL");

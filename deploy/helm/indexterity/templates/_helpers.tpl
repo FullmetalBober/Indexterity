@@ -200,19 +200,19 @@ test and the port-forward in NOTES.txt all read the same number they did before.
   value: {{ .Values.config.logLevel | quote }}
 - name: ALLOW_PRIVATE_CLUSTER_TARGETS
   value: {{ .Values.config.allowPrivateClusterTargets | quote }}
-# Where the tunnel service is, and the token to greet it with, as one URL
-# (D112). From the Secret rather than a value, because that URL carries the token
-# — and the token is what stands between anything on the cluster network and
-# standing up a peering with a key of its own.
+# The LOOPBACK port the tunnel service listens on (D112). A port and no host,
+# because the service runs as a container IN THIS POD and therefore in this
+# network namespace — so a customer's private key never crosses a network, the
+# SOCKS5 proxy into their network is reachable from nowhere else, and there is no
+# shared secret to carry here.
+#
+# Not a Secret for the same reason: a port number is not one.
 #
 # The service needs no capability and no /dev/net/tun, so nothing here touches a
 # securityContext. Absent, the api reports the VPN feature as off.
 {{- if .Values.tunnel.enabled }}
-- name: TUNNEL_URL
-  valueFrom:
-    secretKeyRef:
-      name: {{ include "indexterity.secretName" . }}
-      key: TUNNEL_URL
+- name: TUNNEL_PORT
+  value: {{ .Values.tunnel.port | quote }}
 {{- end }}
 # Sockets opened against ONE connected cluster. Held per cluster, so the worst
 # case multiplies by the fleet — and they are spent on the customer's mongod.
@@ -392,9 +392,6 @@ entries of one name in one container is a value that depends on ordering.
 {{- if not .Values.secrets.existingSecret -}}
 {{- if not .Values.secrets.databaseUrl -}}
 {{- fail "secrets.databaseUrl is required (or set secrets.existingSecret). Example: postgres://user:pass@host:5432/indexterity" -}}
-{{- end -}}
-{{- if and .Values.tunnel.enabled (not .Values.secrets.tunnelUrl) -}}
-{{- fail "tunnel.enabled is on but secrets.tunnelUrl is empty (or set secrets.existingSecret with a TUNNEL_URL key). Example: tcp://TOKEN@my-tunnel:9411" -}}
 {{- end -}}
 {{- if not .Values.secrets.betterAuthSecret -}}
 {{- fail "secrets.betterAuthSecret is required (or set secrets.existingSecret). Generate one: openssl rand -base64 32" -}}
