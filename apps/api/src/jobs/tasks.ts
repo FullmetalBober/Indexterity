@@ -90,12 +90,14 @@ export class PassBudgetExceededError extends Error {
  * tens of minutes — so a budget would be wrong twice over. What bounds them is
  * the per-statement timeout in each adapter, which is its own question (#410).
  */
-export const BUDGETED_PASSES: ReadonlySet<string> = new Set([
-  "collect",
-  "classify",
-  "suggest",
-  "probe",
-]);
+export const BUDGETED_PASSES: ReadonlySet<string> = new Set(["collect", "classify", "probe"]);
+
+// `suggest` is budgeted too, but NOT here — it budgets itself, because only part
+// of it may be. The analysis is bounded; the instant build it can approve (D7)
+// is not, for the same reason `apply` is not in this set at all. Getting that
+// wrong is easy and silent: `suggest` was in this set for one commit, and a
+// budget firing mid-build would have left the index being built while the pass
+// that records it was abandoned. See ClusterTasksService.suggest.
 
 /**
  * Run a pass against a wall clock, rejecting if it outlasts it.
@@ -111,7 +113,11 @@ export const BUDGETED_PASSES: ReadonlySet<string> = new Set([
  * The timer is cleared on both paths, so a fast pass leaves nothing pending that
  * would hold the event loop open for the rest of the budget.
  */
-async function withBudget<T>(task: string, budgetMs: number, run: Promise<T>): Promise<T> {
+export async function withPassBudget<T>(
+  task: string,
+  budgetMs: number,
+  run: Promise<T>,
+): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   const deadline = new Promise<never>((_, reject) => {
     timer = setTimeout(() => reject(new PassBudgetExceededError(task, budgetMs)), budgetMs);
@@ -132,7 +138,7 @@ export async function runClusterTask(
 ): Promise<void> {
   try {
     const pass = run(clusterId);
-    await (budgetMs === null ? pass : withBudget(task, budgetMs, pass));
+    await (budgetMs === null ? pass : withPassBudget(task, budgetMs, pass));
     recordClusterTask(task, clusterId, "ok");
     // A pass that got through clears whatever stopped the last one: the state is
     // "why the pipeline is not running", so it cannot outlive a run.

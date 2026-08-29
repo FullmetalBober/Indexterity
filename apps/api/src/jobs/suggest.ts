@@ -31,7 +31,6 @@ import {
   wouldBuildUnattended,
 } from "./collection-budget";
 import { activeCooldownKeys, collectionCooldownKey, cooldownKey } from "./cooldowns";
-import { applyCreatesForCluster } from "./create";
 import { planForCluster } from "./plan";
 import { BUILD_TYPES, standingRecommendationKeys, watchKey } from "./watched";
 
@@ -82,7 +81,7 @@ export async function suggestForCluster(
   // #353 needs none; a cluster WITH a tunnel_id and no registry is
   // refused rather than dialled directly.
   tunnels?: TunnelRegistry,
-): Promise<number> {
+): Promise<{ created: number; instantApproved: number }> {
   const [policy] = await db
     .select()
     .from(policies)
@@ -93,7 +92,7 @@ export async function suggestForCluster(
   // onboarding: the first collect's inferred window does, or the owner saving
   // the form. Reading absence as "off" is what kept this silent on exactly the
   // clusters it had the most to say about (#258).
-  if (policy?.workloadAnalysis === false) return 0;
+  if (policy?.workloadAnalysis === false) return { created: 0, instantApproved: 0 };
   const cooled = await activeCooldownKeys(db, clusterId);
   // Builds already on the record in a state the sweep below does not clear —
   // approved and waiting for the change window, or proposed by another
@@ -644,8 +643,14 @@ export async function suggestForCluster(
   } finally {
     release();
   }
-  // Build the auto-approved creates now rather than waiting for the scheduler.
-  // Anything not marked urgent still waits for the change window inside.
-  if (instantApproved > 0) await applyCreatesForCluster(db, clusterId);
-  return created;
+  // The build is NOT done here any more (#407).
+  //
+  // It still happens immediately rather than waiting for the scheduler — the
+  // caller does it the moment this returns, and anything not marked urgent still
+  // waits for the change window inside. What changed is only that it is outside
+  // the analysis's wall-clock budget, because this pass has one and a build must
+  // never be cut off by it: the index would go on being built while the pass that
+  // was supposed to record it, take its write-latency baseline and move it to
+  // ACTIVE was abandoned.
+  return { created, instantApproved };
 }
