@@ -19,11 +19,15 @@ import {
 // Fail fast on unreachable servers, same budget as the mongo client's 5s
 // server-selection timeout.
 const CONNECT_TIMEOUT_MS = 5000;
-// One budget for every statement — the driver has no per-request override.
-// Sized for the slowest legitimate statement, which is not a DMV read but the
-// unhide path's ALTER INDEX … REBUILD of a large index. Fifteen minutes is
-// generous for anything the collector runs and honest about what a rebuild on
-// a hundred-gigabyte table costs.
+// The budget every request gets unless it asks for another.
+//
+// The note here used to say the driver has no per-request override, and that is
+// not true of mssql 12: `new Request(pool, { requestTimeout })` is honoured, and
+// a build now uses it (#410). So this is no longer sized for the slowest
+// statement any adapter ever makes — it is what a DMV read may take, which is
+// what the collector actually runs. A REBUILD or a CREATE asks for the build
+// budget instead, because sizing one number for both is what made a genuinely
+// long build impossible.
 const REQUEST_TIMEOUT_MS = 900_000;
 // One session serves one collect at a time; a handful of sockets is plenty,
 // and the customer's connection budget is not ours to spend.

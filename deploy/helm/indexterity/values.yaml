@@ -429,6 +429,20 @@ config:
   # Raise it if a cluster reports "too slow to finish" on every tick and the host
   # will sit still for longer.
   clusterPassBudgetMs: 300000
+  # How long ONE index build may run before the engine cancels it. Milliseconds.
+  #
+  # Its own budget because a build is not like any other statement: a catalog
+  # read that has not answered in fifteen minutes is hung, while a CREATE INDEX
+  # that has run fifteen minutes may be half done and perfectly healthy. They
+  # shared one number until #410, sized for the read, so a build that genuinely
+  # took an hour could not finish.
+  #
+  # Keep it UNDER four hours. Past that the queue reclaims the job's lock while
+  # the build is still running, and another worker may start the same build.
+  #
+  # Postgres and SQL Server only. MongoDB's driver has no socket timeout here and
+  # is left that way.
+  clusterIndexBuildTimeoutMs: 7200000
   # Postgres connections PER POOL — and a process holds more than one. The api
   # has a request pool (the tick's drains share it) and better-auth's. They are
   # deliberately not merged: one shared pool would let a slow report starve a
