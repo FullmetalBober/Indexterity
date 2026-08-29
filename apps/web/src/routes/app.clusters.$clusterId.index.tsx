@@ -69,7 +69,7 @@ export const Route = createFileRoute("/app/clusters/$clusterId/")({
   // still right — it is failing SILENTLY that was not.
   loader: async ({ params, context }) => {
     const id = params.clusterId;
-    await Promise.allSettled([
+    const warm = Promise.allSettled([
       context.queryClient.ensureQueryData(recommendationsQuery(id)),
       context.queryClient.ensureQueryData(roiQuery(id)),
       context.queryClient.ensureQueryData(activityQuery(id)),
@@ -80,6 +80,29 @@ export const Route = createFileRoute("/app/clusters/$clusterId/")({
       context.queryClient.ensureQueryData(nodesQuery(id)),
       context.queryClient.ensureQueryData(cooldownsQuery(id)),
     ]);
+    // Awaited on the server, deliberately not in the browser.
+    //
+    // The router holds the PREVIOUS page mounted until a loader resolves, so an
+    // awaited one turns a click into nothing happening: nine reads went by with
+    // the reader still looking at the cluster they had just navigated away from,
+    // and no route in this app sets a pendingComponent, so the framework's own
+    // pending state never armed either (it is gated on one existing —
+    // setupPendingTimeout in router-core). Feedback of any kind, for any
+    // duration, was zero.
+    //
+    // Every panel below already draws its own skeleton off its own `pending`
+    // flag. Awaiting here is exactly what made those unreachable: the cache was
+    // full by the time the component mounted, so `pending` was never true on
+    // arrival. Handing the page over immediately lets each panel answer for
+    // itself — whatever the cache can serve paints at once, and only the cold
+    // ones outline. That is the per-panel version of the same argument #289
+    // made about failures, and it is why nothing here needs a page-shaped
+    // skeleton of its own.
+    //
+    // The server still waits, because its render IS the payload. Not awaiting
+    // there would flush a shell of nine skeletons and stream the data in behind
+    // it, which is a worse first paint than the one this page has today.
+    if (import.meta.env.SSR) await warm;
   },
   head: () => ({ meta: [{ title: "Overview — Indexterity" }] }),
   component: ClusterOverview,

@@ -77,7 +77,34 @@ export default defineConfig({
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
   },
-  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
+  projects: [
+    // The suite. `touch.spec.ts` is excluded rather than merely absent: it
+    // asserts things that are only true where no pointer exists, and running it
+    // here would assert them of a browser that has one.
+    {
+      name: "chromium",
+      use: { ...devices["Desktop Chrome"] },
+      testIgnore: /touch\.spec\.ts/,
+    },
+    // A phone, and the point is the INPUT rather than the width (#401).
+    //
+    // Touch is a genuinely different preload path and not merely a pointer-less
+    // one, which is the reverse of what the issue assumed. `Link` sends hover
+    // and keyboard focus through one timer (`enqueueIntentPreload`, gated on
+    // `defaultPreloadDelay`) and `onTouchStart` straight to `doPreload()` with
+    // no timer at all — measured here at 2 reads within 50ms of a touchstart,
+    // against 0 for a hover at the same point. Nothing else in the suite covers
+    // that branch.
+    //
+    // Deliberately a handful of specs and not the whole suite: it runs serially
+    // against one postgres, and what the rest of it tests does not change with
+    // the input device.
+    {
+      name: "touch",
+      use: { ...devices["Pixel 7"] },
+      testMatch: /touch\.spec\.ts/,
+    },
+  ],
   webServer: [
     {
       command: "node ../api/dist/main.js",
