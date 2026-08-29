@@ -50,4 +50,20 @@ test.describe("navigating between cluster tabs", () => {
     // And it resolves into the real section rather than staying an outline.
     await expect(page.getByLabel("Observe window (days)")).toBeVisible();
   });
+
+  // The navigation nothing can preload, whatever the input device: it is not an
+  // interaction with a link at all. `/app` reads the org and the cluster list to
+  // decide where the reader meant, so its loader blocks by design — which is
+  // what `defaultPendingComponent` is for, and the one path that still reaches
+  // it. Kept here rather than in touch.spec.ts because nothing about it is
+  // touch-specific; intent preloading never applied to it in the first place.
+  test("/app resolves to a cluster with nothing having been preloaded", async ({ page }) => {
+    await signUpAndLandOnDashboard(page, uniqueEmail("redirect"));
+    await connectCluster(page, "E2E Redirect");
+
+    await page.goto("/app");
+
+    await expect(page).toHaveURL(/\/app\/clusters\/[0-9a-f-]{36}$/);
+    await expect(page.getByRole("heading", { name: "E2E Redirect" })).toBeVisible();
+  });
 });
