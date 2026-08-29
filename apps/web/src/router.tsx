@@ -4,6 +4,7 @@
 import "./lib/style-nonce";
 import { createRouter, Link } from "@tanstack/react-router";
 import { setupRouterSsrQueryIntegration } from "@tanstack/react-router-ssr-query";
+import { Skeleton } from "./components/ui/skeleton";
 import { createAppQueryClient } from "./lib/queries/client";
 import { routeTree } from "./routeTree.gen";
 
@@ -36,6 +37,29 @@ function NotFound() {
         Back to Indexterity
       </Link>
     </main>
+  );
+}
+
+// Something is on its way and the reader has already been waiting a moment for
+// it. Only the loaders that MUST finish before a page can be chosen reach this:
+// /app and the cluster layout both read to decide where the reader is going, and
+// a page rendered before that decision is a page they did not ask for. Every
+// loader that merely warms what a page draws hands over immediately instead and
+// lets the panels outline themselves, which is the better shape when it is
+// available — this is the fallback for when it is not.
+function PendingPage() {
+  return (
+    <div className="space-y-4 p-8" aria-busy="true">
+      {/* The visual skeleton says nothing to a screen reader, and an aria-busy
+          region with no text says only that something is busy. */}
+      <span className="sr-only">Loading</span>
+      <Skeleton className="h-7 w-56" />
+      <Skeleton className="h-4 w-80" />
+      <div className="grid gap-4 sm:grid-cols-2">
+        <Skeleton className="h-28" />
+        <Skeleton className="h-28" />
+      </div>
+    </div>
   );
 }
 
@@ -74,6 +98,25 @@ export function getRouter() {
     defaultPreloadStaleTime: 30_000,
     defaultErrorComponent: AppError,
     defaultNotFoundComponent: NotFound,
+    // Nothing rendered this until now, and the absence was not a tuning choice:
+    // router-core arms the pending timeout only when a pendingComponent or this
+    // exists (setupPendingTimeout), so with neither set the pending state never
+    // ran at all. A blocking loader showed the reader the page they were
+    // leaving, for as long as it took, with no indication their click had landed.
+    defaultPendingComponent: PendingPage,
+    // 300ms rather than the framework's 1000. A navigation that resolves inside
+    // ~300ms reads as instant and is better left alone — swapping the page for
+    // an outline and back is a flash that reports a wait nobody had. Past it,
+    // silence starts reading as a click that missed.
+    //
+    // Stated together with defaultPendingMinMs because the pair is what decides
+    // the behaviour, and the framework's 500 is the half that surprises: once
+    // this component is shown it is held for that long whether or not the data
+    // arrives first. So the real cost of lowering the number above is not the
+    // extra skeletons, it is that each one commits the reader to 500ms. 300
+    // keeps that off the navigations that were never slow.
+    defaultPendingMs: 300,
+    defaultPendingMinMs: 500,
   });
 
   // The server's cache is a different object from the browser's, and nothing
