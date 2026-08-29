@@ -23,12 +23,26 @@ export const Route = createFileRoute("/app/clusters/$clusterId/settings")({
   // cannot be reached must still render a settings page. That is where the
   // connection string is rotated.
   loader: async ({ params, context }) => {
-    await Promise.all([
+    const warm = Promise.all([
       context.queryClient.ensureQueryData(policyQuery(params.clusterId)).catch(() => null),
       context.queryClient
         .ensureQueryData(clusterDatabasesQuery(params.clusterId))
         .catch(() => null),
     ]);
+    // Awaited on the server, deliberately not in the browser — the same change
+    // as the overview beside it, and this is the page it matters most on.
+    //
+    // The router holds the previous page mounted until a loader resolves, and
+    // the second read here dials the customer's cluster. So clicking the
+    // Settings tab sat on the overview for the length of a connection to
+    // somebody's production server, with nothing on screen having reacted to the
+    // click — and on a cluster that is unreachable, for the length of a timeout.
+    //
+    // PolicySectionSkeleton and ObserveSectionSkeleton below were written for
+    // precisely this wait and never once drew during it: awaiting here meant
+    // both queries had settled before the component mounted, so neither
+    // `pending` branch could be reached on arrival. They can be now.
+    if (import.meta.env.SSR) await warm;
   },
   head: () => ({ meta: [{ title: "Cluster settings — Indexterity" }] }),
   component: ClusterSettings,
