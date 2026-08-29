@@ -87,18 +87,25 @@ export interface MssqlReplica {
 // it with `req.setTimeout`), and MISSING from @types/mssql 12.3, whose three
 // constructor overloads all take one argument.
 //
-// So the cast is the types being behind the library rather than a claim about
-// what the library does — and because a cast cannot be checked by the compiler,
-// there is a test asserting the override actually lands on the request. If the
-// types catch up, delete the cast and the test keeps passing.
+// Declared as a type and ASSIGNED rather than asserted, which is not a
+// stylistic preference: a constructor taking fewer parameters is assignable to
+// one taking more, so this needs no cast at all — and unlike `as`, it still
+// checks that `mssql.Request` is constructible, that it accepts a
+// ConnectionPool, and that it returns a Request. The only thing the compiler
+// cannot know is whether the library READS the second argument, and that is
+// what the test asserts by reading the override back off the request.
+//
+// When the types catch up this whole block deletes and the call site is
+// unchanged.
 type RequestWithOverrides = new (
   pool: mssql.ConnectionPool,
   overrides: { requestTimeout: number },
 ) => mssql.Request;
 
+const RequestCtor: RequestWithOverrides = mssql.Request;
+
 export function buildRequest(pool: mssql.ConnectionPool): mssql.Request {
-  const Ctor = mssql.Request as unknown as RequestWithOverrides;
-  return new Ctor(pool, { requestTimeout: workerEnv().INDEX_BUILD_TIMEOUT_MS });
+  return new RequestCtor(pool, { requestTimeout: workerEnv().INDEX_BUILD_TIMEOUT_MS });
 }
 
 export class MssqlConnection {

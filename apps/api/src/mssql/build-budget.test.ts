@@ -17,16 +17,17 @@ import { buildRequest } from "./connection";
 describe("buildRequest", () => {
   it("puts the build budget on the request itself, not the pool's", () => {
     const pool = new mssql.ConnectionPool({ server: "unused", database: "unused" });
-    const request = buildRequest(pool) as unknown as {
-      overrides?: { requestTimeout?: number };
-    };
 
-    // Whatever INDEX_BUILD_TIMEOUT_MS resolves to, it must be ON the request —
-    // present and a number, rather than silently dropped by a library that
-    // ignored the second argument.
-    expect(typeof request.overrides?.requestTimeout).toBe("number");
+    // `Reflect.get` rather than a cast. The field is real and undeclared, so
+    // reading it is the point — but a cast would ALSO silence the case where it
+    // stops existing, which is exactly the regression this test is here to
+    // catch. Reflect.get returns unknown and the assertions below do the
+    // narrowing, so a missing field fails rather than reads as undefined.
+    const overrides = Reflect.get(buildRequest(pool), "overrides") as unknown;
+
+    expect(overrides).toMatchObject({ requestTimeout: expect.any(Number) });
     // And it must be the build budget rather than the pool's read budget, which
-    // is what would come back if the override were ignored.
-    expect(request.overrides?.requestTimeout).toBeGreaterThan(900_000);
+    // is what would come back if the library ignored the second argument.
+    expect((overrides as { requestTimeout: number }).requestTimeout).toBeGreaterThan(900_000);
   });
 });
