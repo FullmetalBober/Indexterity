@@ -20,12 +20,14 @@ async function state(): Promise<{
   reason: string | null;
   since: Date | null;
   detail: string | null;
+  task: string | null;
 }> {
   const [row] = await db
     .select({
       reason: clusters.blockedReason,
       since: clusters.blockedSince,
       detail: clusters.blockedDetail,
+      task: clusters.blockedTask,
     })
     .from(clusters)
     .where(eq(clusters.id, clusterId));
@@ -66,16 +68,23 @@ afterAll(async () => {
 
 describe("recording why a cluster's pipeline stopped", () => {
   it("starts clear", async () => {
-    expect(await state()).toEqual({ reason: null, since: null, detail: null });
+    expect(await state()).toEqual({ reason: null, since: null, detail: null, task: null });
   });
 
   it("records the reason, the sentence, and when it started", async () => {
-    await markBlocked(db, clusterId, "UNREACHABLE", "connect ECONNREFUSED 10.0.0.4:27017");
+    await markBlocked(
+      db,
+      clusterId,
+      "collect",
+      "UNREACHABLE",
+      "connect ECONNREFUSED 10.0.0.4:27017",
+    );
 
     const first = await state();
     expect(first.reason).toBe("UNREACHABLE");
     expect(first.detail).toBe("connect ECONNREFUSED 10.0.0.4:27017");
     expect(first.since).toBeInstanceOf(Date);
+    expect(first.task).toBe("collect");
   });
 
   it("keeps the start time while the same condition continues", async () => {
@@ -84,12 +93,28 @@ describe("recording why a cluster's pipeline stopped", () => {
 
     // The next tick, and the one after: an owner needs "for six days", so a
     // repeat must not reset the clock.
-    await markBlocked(db, clusterId, "UNREACHABLE", "connect ETIMEDOUT 10.0.0.4:27017");
+    await markBlocked(db, clusterId, "collect", "UNREACHABLE", "connect ETIMEDOUT 10.0.0.4:27017");
 
     const after = await state();
     expect(after.since?.getTime()).toBe(before.since?.getTime());
     // The sentence DOES move: it is the latest failure, not the first.
     expect(after.detail).toBe("connect ETIMEDOUT 10.0.0.4:27017");
+  });
+
+  // The pass follows the sentence rather than the clock (#408). A cluster
+  // nothing can dial fails every pass in turn, so the one worth naming is
+  // whichever just tried — while `since` still answers "for how long", which is
+  // a fact about the condition and not about the pass that noticed it.
+  it("moves the pass under an unchanged reason, without restarting the clock", async () => {
+    const before = await state();
+    expect(before.task).toBe("collect");
+
+    await markBlocked(db, clusterId, "suggest", "UNREACHABLE", "connect ETIMEDOUT 10.0.0.4:27017");
+
+    const after = await state();
+    expect(after.task).toBe("suggest");
+    expect(after.reason).toBe("UNREACHABLE");
+    expect(after.since?.getTime()).toBe(before.since?.getTime());
   });
 
   it("restarts the clock when the condition itself changes", async () => {
@@ -98,17 +123,24 @@ describe("recording why a cluster's pipeline stopped", () => {
 
     // A cluster that was unreachable and is now refusing TLS is a new condition,
     // not a continuation — "unreachable for six days" would be a lie about it.
-    await markBlocked(db, clusterId, "INSECURE", "the stored string would connect in plaintext");
+    await markBlocked(
+      db,
+      clusterId,
+      "suggest",
+      "INSECURE",
+      "the stored string would connect in plaintext",
+    );
 
     const after = await state();
     expect(after.reason).toBe("INSECURE");
+    expect(after.task).toBe("suggest");
     expect(after.since?.getTime() ?? 0).toBeGreaterThan(before.since?.getTime() ?? 0);
   });
 
   it("clears on a pass that got through", async () => {
     await markUnblocked(db, clusterId);
 
-    expect(await state()).toEqual({ reason: null, since: null, detail: null });
+    expect(await state()).toEqual({ reason: null, since: null, detail: null, task: null });
   });
 
   it("clearing a cluster that is not blocked writes nothing", async () => {
@@ -117,6 +149,6 @@ describe("recording why a cluster's pipeline stopped", () => {
     // and wakes every replica for it.
     await markUnblocked(db, clusterId);
 
-    expect(await state()).toEqual({ reason: null, since: null, detail: null });
+    expect(await state()).toEqual({ reason: null, since: null, detail: null, task: null });
   });
 });

@@ -134,7 +134,8 @@ export class ClusterTasksService {
       // Not best-effort: this is the only copy of why the pipeline stopped, and a
       // write that fails silently would put the dashboard back to inferring it
       // from staleness. A failure here fails the pass, which is retried.
-      markBlocked: (clusterId, reason, detail) => markBlocked(db, clusterId, reason, detail),
+      markBlocked: (clusterId, task, reason, detail) =>
+        markBlocked(db, clusterId, task, reason, detail),
       markUnblocked: (clusterId) => markUnblocked(db, clusterId),
     };
   }

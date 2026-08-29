@@ -17,7 +17,7 @@ import { and, clusters, type Database, eq, isNotNull, sql } from "../db";
 // them: one list, so a gauge and a badge cannot disagree about what stopped.
 
 /**
- * Record why the pipeline stopped, and when it started stopping.
+ * Record why the pipeline stopped, which pass stopped, and when it started.
  *
  * One statement, no read, because `blocked_since` has to answer "for how long"
  * without a race between two passes landing at once: the CASE keeps the existing
@@ -28,6 +28,7 @@ import { and, clusters, type Database, eq, isNotNull, sql } from "../db";
 export async function markBlocked(
   db: Database,
   clusterId: string,
+  task: string,
   reason: BlockedReason,
   detail: string,
 ): Promise<void> {
@@ -36,6 +37,11 @@ export async function markBlocked(
     .set({
       blockedReason: reason,
       blockedDetail: detail,
+      // Which pass stopped (#408). Overwritten on every blocked pass rather than
+      // kept like `blocked_since`, because it answers "what is failing now" — a
+      // cluster nobody can dial fails `collect` and `suggest` alike, and the one
+      // worth naming is the one that just tried.
+      blockedTask: task,
       blockedSince: sql`case when ${clusters.blockedReason} = ${reason} then coalesce(${clusters.blockedSince}, now()) else now() end`,
     })
     .where(eq(clusters.id, clusterId));
@@ -52,6 +58,6 @@ export async function markBlocked(
 export async function markUnblocked(db: Database, clusterId: string): Promise<void> {
   await db
     .update(clusters)
-    .set({ blockedReason: null, blockedSince: null, blockedDetail: null })
+    .set({ blockedReason: null, blockedSince: null, blockedDetail: null, blockedTask: null })
     .where(and(eq(clusters.id, clusterId), isNotNull(clusters.blockedReason)));
 }

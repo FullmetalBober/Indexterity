@@ -48,8 +48,11 @@ function recorder(): {
         emitted.push(`${clusterId}:${task}`);
         return Promise.resolve();
       },
-      markBlocked: (clusterId, reason, detail) => {
-        blocked.push(`${clusterId}:${reason}:${detail}`);
+      markBlocked: (clusterId, task, reason, detail) => {
+        // The pass is in the record because it is now part of what a block says
+        // (#408): every assertion below reads this string, so a pass that stopped
+        // being threaded through would fail them rather than pass quietly.
+        blocked.push(`${clusterId}:${task}:${reason}:${detail}`);
         return Promise.resolve();
       },
       markUnblocked: (clusterId) => {
@@ -268,8 +271,23 @@ describe("runClusterTask on a cluster we refuse to dial", () => {
 
     await runClusterTask("collect", CLUSTER, log.deps, () => Promise.reject(unreachable()));
 
-    expect(log.blocked).toEqual([`${CLUSTER}:UNREACHABLE:connect ECONNREFUSED 10.0.0.4:27017`]);
+    expect(log.blocked).toEqual([
+      `${CLUSTER}:collect:UNREACHABLE:connect ECONNREFUSED 10.0.0.4:27017`,
+    ]);
     expect(log.unblocked).toHaveLength(0);
+  });
+
+  // #408: the block records WHICH pass stopped, and the dashboard words itself
+  // from it. In production a failing `suggest` was reported to the owner as
+  // collection failing, because this was thrown away and the banner guessed.
+  it("records the pass that failed, not always collect", async () => {
+    const log = recorder();
+
+    await runClusterTask("suggest", CLUSTER, log.deps, () =>
+      Promise.reject(new Error("socket hang up")),
+    ).catch(() => {});
+
+    expect(log.blocked).toEqual([`${CLUSTER}:suggest:ERROR:socket hang up`]);
   });
 
   it("blames the tunnel rather than the database when the tunnel is down", async () => {
@@ -303,7 +321,7 @@ describe("runClusterTask on a cluster we refuse to dial", () => {
       throw new UnsupportedServerError("mongodb 4.4 is below the floor");
     });
 
-    expect(log.blocked[0]).toBe(`${CLUSTER}:UNSUPPORTED:mongodb 4.4 is below the floor`);
+    expect(log.blocked[0]).toBe(`${CLUSTER}:collect:UNSUPPORTED:mongodb 4.4 is below the floor`);
   });
 
   it("records credentials that cannot be opened, which needs an operator", async () => {
@@ -327,6 +345,6 @@ describe("runClusterTask on a cluster we refuse to dial", () => {
       }),
     ).rejects.toThrow("something nobody has classified");
 
-    expect(log.blocked).toEqual([`${CLUSTER}:ERROR:something nobody has classified`]);
+    expect(log.blocked).toEqual([`${CLUSTER}:collect:ERROR:something nobody has classified`]);
   });
 });

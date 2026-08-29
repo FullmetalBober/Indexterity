@@ -492,6 +492,21 @@ export const clusters = pgTable(
     blockedSince: timestamp("blocked_since", { withTimezone: true }),
     // The sentence, as the owner's own alert mail words it.
     blockedDetail: text("blocked_detail"),
+    // WHICH pass stopped, beside why it stopped (#408).
+    //
+    // `runClusterTask` is handed the task name and already labels the metric
+    // with it, and then dropped it here — so the dashboard could only guess, and
+    // it guessed `collect` for every reason. That is harmless for a dial failure,
+    // which stops every pass alike, and wrong for the ERROR reason, which is
+    // exactly the one a non-collect pass lands on: a `suggest` that could not
+    // finish was reported to the owner as collection failing, and sent the first
+    // hour of diagnosis at the wrong pass.
+    //
+    // Text and not an enum, for the same reason `blocked_reason` is: adding a
+    // pass should be a constant rather than a migration, which is only safe if
+    // the reader degrades — so the contract types it as a string and the banner
+    // renders a pass it does not know by name.
+    blockedTask: text("blocked_task"),
     credentialPosture: credentialPosture("credential_posture"),
     // Which TLS checks the owner turned off when connecting, as checkboxes on the
     // connect form. Held HERE and not inferred from the sealed string, for two

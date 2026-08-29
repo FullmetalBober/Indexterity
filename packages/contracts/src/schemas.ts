@@ -124,6 +124,14 @@ export const clusterBlock = z.object({
   since: z.string(),
   // The sentence, usually the driver's own words.
   detail: z.string(),
+  // WHICH pass stopped — `collect`, `suggest`, `apply` and so on (#408).
+  //
+  // A string for the same reason `reason` is one, and nullable for a second:
+  // rows written before this field existed have no pass, and a block that
+  // predates the upgrade must still render. The dashboard therefore has to have
+  // wording for "something in the pipeline" as well as for a named pass, which
+  // is the wording it used to use for everything.
+  task: z.string().nullable(),
 });
 export type ClusterBlock = z.infer<typeof clusterBlock>;
 
