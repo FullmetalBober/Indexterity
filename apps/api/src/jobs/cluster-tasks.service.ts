@@ -1,5 +1,6 @@
 import { Injectable } from "@nestjs/common";
 import type { JobHelpers } from "graphile-worker";
+import { workerEnv } from "../config/env";
 import { DatabaseService } from "../db/database.service";
 import { emitPassFinished } from "../events/emit";
 import { ALERT_COOLDOWN_MS, alertAllowed } from "../mail/notify";
@@ -16,7 +17,7 @@ import { finalizeCluster } from "./finalize";
 import { clusterIdFromPayload } from "./payload";
 import { probeCluster } from "./probe";
 import { suggestForCluster } from "./suggest";
-import { type ClusterTaskDeps, runClusterTask } from "./tasks";
+import { BUDGETED_PASSES, type ClusterTaskDeps, runClusterTask } from "./tasks";
 import { alertClaims } from "./watermark";
 
 // The per-cluster half of the graphile-worker task registry, as a provider
@@ -111,7 +112,17 @@ export class ClusterTasksService {
     helpers: JobHelpers,
     run: (clusterId: string) => Promise<unknown>,
   ): Promise<void> {
-    return runClusterTask(task, clusterIdFromPayload(payload), this.depsFor(helpers), run);
+    // The budget applies to the read-only passes only — see BUDGETED_PASSES for
+    // why `apply` and `finalize` are not among them. Resolved per call rather
+    // than cached, so an operator raising it does not need a restart to mean it.
+    const budgetMs = BUDGETED_PASSES.has(task) ? workerEnv().CLUSTER_PASS_BUDGET_MS : null;
+    return runClusterTask(
+      task,
+      clusterIdFromPayload(payload),
+      this.depsFor(helpers),
+      run,
+      budgetMs,
+    );
   }
 
   // The database is CLOSED OVER here, not exposed: these three functions need it

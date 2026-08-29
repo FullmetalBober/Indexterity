@@ -290,6 +290,69 @@ describe("runClusterTask on a cluster we refuse to dial", () => {
     expect(log.blocked).toEqual([`${CLUSTER}:suggest:ERROR:socket hang up`]);
   });
 
+  // #407. In production a `suggest` against a tunnelled MSSQL cluster with 13
+  // observed databases ran for HOURS: there was a 15-minute budget per query and
+  // none at all for the pass, so it could not finish inside the life of the
+  // process, and WORKER_CONCURRENCY is 1 — nothing else in the pipeline drained
+  // behind it.
+  it("abandons a read-only pass that runs past its budget", async () => {
+    const log = recorder();
+    // Never settles, which is what a pass that cannot finish looks like.
+    const forever = () => new Promise<void>(() => {});
+
+    await runClusterTask("suggest", CLUSTER, log.deps, forever, 20);
+
+    expect(log.blocked).toEqual([
+      `${CLUSTER}:suggest:TIMED_OUT:the suggest pass ran past its 20ms budget and was abandoned`,
+    ]);
+  });
+
+  // Skipped, not rethrown — the difference decides whether graphile-worker
+  // retries immediately. It must not: the retry gets the same budget against the
+  // same cluster, so five attempts later it is dead-lettered having spent five
+  // budgets of the only worker slot achieving nothing. The next tick starts
+  // clean instead.
+  it("skips a budget overrun rather than rethrowing it for an immediate retry", async () => {
+    const log = recorder();
+
+    await expect(
+      runClusterTask("collect", CLUSTER, log.deps, () => new Promise<void>(() => {}), 20),
+    ).resolves.toBeUndefined();
+  });
+
+  // Without a budget nothing changes, which is what `apply` and `finalize` get:
+  // a pass cut off between changing an index and recording it is a change we
+  // have half a record of, and a large build legitimately takes far longer than
+  // any budget a read would want.
+  it("lets a pass run unbounded when it has no budget", async () => {
+    const log = recorder();
+    let settle: (() => void) | undefined;
+    const slow = () =>
+      new Promise<void>((resolve) => {
+        settle = resolve;
+      });
+
+    const running = runClusterTask("apply", CLUSTER, log.deps, slow, null);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // Still going, where a budgeted pass would have been abandoned by now.
+    expect(log.blocked).toHaveLength(0);
+    settle?.();
+    await running;
+
+    expect(log.blocked).toHaveLength(0);
+    expect(log.unblocked).toEqual([CLUSTER]);
+  });
+
+  // A pass inside its budget must not be touched by the machinery at all.
+  it("leaves a pass that finishes in time alone", async () => {
+    const log = recorder();
+
+    await runClusterTask("collect", CLUSTER, log.deps, () => Promise.resolve(), 10_000);
+
+    expect(log.blocked).toHaveLength(0);
+    expect(log.unblocked).toEqual([CLUSTER]);
+  });
+
   it("blames the tunnel rather than the database when the tunnel is down", async () => {
     const log = recorder();
 

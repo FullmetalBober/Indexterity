@@ -45,14 +45,94 @@ export interface ClusterTaskDeps {
 // which would make graphile-worker burn five retries printing the same stack
 // trace every hour and drown the failures that do need a human. Owners still
 // hear about it, at most once a day.
+// The budget as an owner would say it, because this sentence is one they read:
+// it lands in `blocked_detail` and in the alert mail. "300s" is a setting;
+// "5 minutes" is a length of time.
+function humanBudget(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 120) return seconds === 1 ? "1 second" : `${seconds} seconds`;
+  const minutes = Math.round(seconds / 60);
+  return minutes === 1 ? "1 minute" : `${minutes} minutes`;
+}
+
+/**
+ * A read-only pass abandoned for running past its wall-clock budget (#407).
+ *
+ * Its own type rather than a plain Error so `runClusterTask` can tell it from a
+ * failure: nothing went wrong that a message could describe, and the answer is
+ * different — this one is skipped and retried on the next tick, like an
+ * unreachable cluster, rather than rethrown to be retried immediately and
+ * dead-lettered. Retrying a pass that just ran out of time, immediately, with
+ * the same budget, is the same pass running out of time again.
+ */
+export class PassBudgetExceededError extends Error {
+  constructor(
+    readonly task: string,
+    readonly budgetMs: number,
+  ) {
+    super(`the ${task} pass ran past its ${humanBudget(budgetMs)} budget and was abandoned`);
+    this.name = "PassBudgetExceededError";
+  }
+}
+
+/**
+ * The passes a budget may cut off.
+ *
+ * Read and analyse only: they dial the customer's database, read from it, and
+ * write to OUR tables. Abandoning one loses the work and nothing else, which is
+ * why they can be given a deadline at all.
+ *
+ * `apply` and `finalize` are deliberately absent. They change indexes on the
+ * customer's database and record audit rows with rollback tokens, and a pass cut
+ * off between the change and its record is a change we have half a record of.
+ * They also legitimately take a long time — a large index build is measured in
+ * tens of minutes — so a budget would be wrong twice over. What bounds them is
+ * the per-statement timeout in each adapter, which is its own question (#410).
+ */
+export const BUDGETED_PASSES: ReadonlySet<string> = new Set([
+  "collect",
+  "classify",
+  "suggest",
+  "probe",
+]);
+
+/**
+ * Run a pass against a wall clock, rejecting if it outlasts it.
+ *
+ * **This abandons the pass; it does not stop it.** The work carries on until
+ * whatever it is waiting on gives up on its own — the per-statement timeout, or
+ * the socket. What it frees immediately is the WORKER SLOT, and that is the
+ * failure being fixed: WORKER_CONCURRENCY is 1, so a pass that cannot finish
+ * kept `collect`, `apply`, `probe` and the dispatchers queued behind it for as
+ * long as it went on. Actually cancelling the query means threading an
+ * AbortSignal through all three drivers, which is worth doing and is not this.
+ *
+ * The timer is cleared on both paths, so a fast pass leaves nothing pending that
+ * would hold the event loop open for the rest of the budget.
+ */
+async function withBudget<T>(task: string, budgetMs: number, run: Promise<T>): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new PassBudgetExceededError(task, budgetMs)), budgetMs);
+  });
+  try {
+    return await Promise.race([run, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function runClusterTask(
   task: string,
   clusterId: string,
   deps: ClusterTaskDeps,
   run: (clusterId: string) => Promise<unknown>,
+  budgetMs: number | null = null,
 ): Promise<void> {
   try {
-    await run(clusterId);
+    const pass = run(clusterId);
+    await (budgetMs === null ? pass : withBudget(task, budgetMs, pass));
     recordClusterTask(task, clusterId, "ok");
     // A pass that got through clears whatever stopped the last one: the state is
     // "why the pipeline is not running", so it cannot outlive a run.
@@ -150,6 +230,29 @@ export async function runClusterTask(
       recordClusterTask(task, clusterId, "credentials");
       await deps.markBlocked(clusterId, task, "CREDENTIALS", error.message);
       deps.logger.error(`${task}: ${error.message}`);
+      return;
+    }
+    // Ran past its budget (#407). Skipped rather than rethrown, exactly like an
+    // unreachable cluster and for the same reason: graphile-worker would retry
+    // immediately, the retry gets the same budget against the same cluster, and
+    // five attempts later it is dead-lettered having achieved nothing but five
+    // budgets of the only worker slot. The next tick tries again from a clean
+    // start, which is the behaviour that lets the fleet keep moving.
+    if (error instanceof PassBudgetExceededError) {
+      recordClusterTask(task, clusterId, "timed-out");
+      await deps.markBlocked(clusterId, task, "TIMED_OUT", error.message);
+      deps.logger.warn(`${task}: cluster ${clusterId} — ${error.message}`);
+      if (!(await deps.alertAllowed(`${clusterId}:timed-out`))) return;
+      await deps.alertOwners(
+        clusterId,
+        `${task} is taking longer than Indexterity will wait`,
+        `The ${task} step against this cluster ran for longer than its budget and was ` +
+          `abandoned, so it did nothing. Nothing was executed and nothing was lost.\n\n` +
+          `This usually means the cluster is very large, very busy, or reached over a slow ` +
+          `link — the step is not failing so much as not fitting. Whoever runs this ` +
+          `Indexterity can raise the budget (CLUSTER_PASS_BUDGET_MS) if the cluster genuinely ` +
+          `needs longer.`,
+      );
       return;
     }
     if (!isUnreachableError(error)) {

@@ -414,6 +414,21 @@ config:
   # concurrent use of a single connection is five reads. Raise it only if a
   # cluster's collect pass is visibly waiting on connections.
   mongoMaxPoolSize: 10
+  # How long one READ-ONLY pass (collect, classify, suggest, probe) may run
+  # before it is abandoned. Milliseconds.
+  #
+  # Five minutes matches the schedule tick, so a pass cannot outlive the tick
+  # that dispatched it and let the queue pile up behind one cluster. Healthy
+  # passes finish in seconds; this only bites a cluster too large, too busy or
+  # too distant to finish inside the schedule.
+  #
+  # Applying a change is NEVER cut off by this — `apply` and `finalize` are
+  # excluded, so a long index build runs to completion. What bounds those is the
+  # per-statement timeout in each engine adapter.
+  #
+  # Raise it if a cluster reports "too slow to finish" on every tick and the host
+  # will sit still for longer.
+  clusterPassBudgetMs: 300000
   # Postgres connections PER POOL — and a process holds more than one. The api
   # has a request pool (the tick's drains share it) and better-auth's. They are
   # deliberately not merged: one shared pool would let a slow report starve a
