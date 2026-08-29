@@ -1,14 +1,28 @@
-import type { ChildProcess } from "node:child_process";
+import { type ChildProcess, spawnSync } from "node:child_process";
+import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createDatabase, inArray, sql, workerWatermarks } from "../src/db";
+import { createDatabase, sql } from "../src/db";
 import { API_PORT, databaseUrl, startApi, stopApi } from "./helpers";
 
 // The externally-driven schedule, end to end against a real Postgres: what the
 // tick claims, what it stamps into worker_watermarks, and — since #232 made the
 // endpoint drain as well as enqueue — that the queue is actually EMPTY again
-// once the drain the response reports has settled. With no clusters connected
-// the scheduler passes fan out to nothing, so the drain is cheap and the
-// assertions stay about the mechanism rather than about a fleet.
+// once the drain the response reports has settled.
+//
+// **On a database of its own**, created and dropped around the run. With no
+// clusters connected the scheduler passes fan out to nothing, so the drain is
+// cheap and the assertions stay about the mechanism rather than about a fleet —
+// and that sentence used to be a PRECONDITION this file assumed rather than one
+// it enforced. True in CI, which gets a fresh postgres per job. False on any
+// development machine that has ever connected a cluster: the dispatchers fan out
+// a collect per cluster that exists, those dial hosts that no longer answer, the
+// 25s drain budget goes on them, and `settledDispatchers` returns the seven
+// dispatchers still queued. Which reads as "the tick endpoint is broken" and is
+// not — it is the leftover fleet, exactly as the note on the first test says.
+//
+// Diagnosed from scratch three times before this, so the fix is to stop
+// depending on the shared database rather than to explain it a fourth. The cost
+// is one CREATE DATABASE and one migration per run, about three seconds.
 const PORT = API_PORT + 6;
 const SECRET = "t".repeat(48);
 const PASSES = [
@@ -94,32 +108,77 @@ async function settledDispatchers(budgetMs = 5_000): Promise<DispatcherRow[]> {
   }
 }
 
-async function clearQueue(): Promise<void> {
-  await db.execute(sql`
-    delete from graphile_worker._private_jobs j
-    using graphile_worker._private_tasks t
-    where t.id = j.task_id
-      and t.identifier = any(string_to_array(${PASSES.join(",")}, ','))`);
+// One fixed name rather than a unique one per run: the suite is sequential
+// (`fileParallelism: false`), and a fixed name is one a person can drop by hand
+// after a SIGKILL. Dropped on the way IN as well as out for the same reason —
+// a run that died before its afterAll must not hand its leftovers to the next.
+const SCRATCH_DB = "indexterity_tick_int";
+
+// Same server, same credentials, different database. `postgres` for the admin
+// connection because CREATE DATABASE cannot run from inside the database it is
+// creating, and it is the one database every postgres has.
+function urlFor(database: string): string {
+  const url = new URL(databaseUrl());
+  url.pathname = `/${database}`;
+  return url.toString();
+}
+
+// DDL on its own connection, opened and closed around the statement: a pool
+// held open against `postgres` would be a connection this suite does not need,
+// and DROP DATABASE refuses while anything is attached to the target anyway.
+async function admin(statement: string): Promise<void> {
+  const connection = createDatabase(urlFor("postgres"), 1);
+  try {
+    await connection.execute(sql.raw(statement));
+  } finally {
+    await connection.$client.end();
+  }
+}
+
+// The built migrator, not drizzle-kit: it is what `turbo run build` produces and
+// what this suite already requires, and it installs BOTH schemas — drizzle's
+// `public` and graphile-worker's own, which the tick's queue reads live in. A
+// scratch database with only the first would fail every assertion here for a
+// reason that has nothing to do with the endpoint. DATABASE_URL is all it needs
+// (see the note in src/migrate.ts).
+function migrateScratch(): void {
+  const entry = path.resolve(__dirname, "../dist/migrate.js");
+  const result = spawnSync("node", [entry], {
+    env: { ...process.env, DATABASE_URL: urlFor(SCRATCH_DB) },
+    encoding: "utf8",
+  });
+  if (result.status !== 0) {
+    throw new Error(
+      `migrating ${SCRATCH_DB} failed (run \`turbo run build\` first?): ${
+        result.stderr || result.stdout
+      }`,
+    );
+  }
 }
 
 beforeAll(async () => {
-  db = createDatabase(databaseUrl(), 2);
-  // A clean slate: watermarks decide what is due, so a previous run's rows
-  // would make the first tick dispatch nothing.
-  await db.delete(workerWatermarks).where(
-    inArray(
-      workerWatermarks.key,
-      PASSES.map((task) => `pass:${task}`),
-    ),
+  // FORCE, because a previous run killed mid-test leaves its api attached and a
+  // plain DROP would refuse. Postgres 13+; the compose image and CI are both 18.
+  await admin(`drop database if exists ${SCRATCH_DB} with (force)`);
+  await admin(`create database ${SCRATCH_DB}`);
+  migrateScratch();
+  db = createDatabase(urlFor(SCRATCH_DB), 2);
+  // No watermarks to clear and no queue to empty: the database is seconds old.
+  // Both used to be here, and neither was ever the thing that made this suite
+  // reproducible — the clusters table was, and it could not be cleared without
+  // deleting somebody's dev data.
+  server = await startApi(
+    { RUN_CRONJOB: "false", CRON_TRIGGER_SECRET: SECRET, DATABASE_URL: urlFor(SCRATCH_DB) },
+    PORT,
   );
-  await clearQueue();
-  server = await startApi({ RUN_CRONJOB: "false", CRON_TRIGGER_SECRET: SECRET }, PORT);
 }, 120_000);
 
 afterAll(async () => {
+  // Order matters: both hold connections, and DROP DATABASE will not run while
+  // either is attached. FORCE covers a child that did not exit cleanly.
   await stopApi(server);
-  await clearQueue();
   await db.$client.end();
+  await admin(`drop database if exists ${SCRATCH_DB} with (force)`);
 });
 
 describe("GET /api/internal/tick", () => {
