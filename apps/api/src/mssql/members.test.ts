@@ -25,7 +25,7 @@ function baseWith(replicas: MssqlReplica[] | Error) {
   return {
     availabilityReplicas: () =>
       replicas instanceof Error ? Promise.reject(replicas) : Promise.resolve(replicas),
-  } as unknown as MssqlConnection;
+  } as MssqlConnection;
 }
 
 function replica(overrides: Partial<MssqlReplica> = {}): MssqlReplica {
@@ -87,7 +87,7 @@ describe("MssqlMemberConnections", () => {
         reads += 1;
         return Promise.resolve([replica({ secondaryAllows: 0 })]);
       },
-    } as unknown as MssqlConnection;
+    } as MssqlConnection;
     const members = new MssqlMemberConnections(base, CONN);
     await members.dials();
     await members.dials();

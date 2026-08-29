@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadEnv } from "../config/env";
 import type { DatabaseService } from "../db/database.service";
+import { stub } from "../test-utils";
 import type { ClusterTasksService } from "./cluster-tasks.service";
 import { TICK_INTERVAL_MS, TickService } from "./tick.service";
 
@@ -87,11 +88,11 @@ function load(flags: { runCronjob: boolean }, extra: Record<string, string> = {}
 
 function makeService() {
   const pool = { label: "the api pool" };
-  const database = { db: { execute: vi.fn() }, pool } as unknown as DatabaseService;
+  const database = stub<DatabaseService>({ db: { execute: vi.fn() }, pool });
   // The per-cluster passes are a provider now (#354) and this suite mocks the
   // registry that reaches them, so what it hands over only has to satisfy the
   // constructor.
-  const clusterTasks = {} as unknown as ClusterTasksService;
+  const clusterTasks = {} as ClusterTasksService;
   return { service: new TickService(database, clusterTasks), pool };
 }
 

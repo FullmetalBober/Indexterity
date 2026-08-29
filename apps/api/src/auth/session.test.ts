@@ -9,7 +9,7 @@ vi.mock("./index", () => ({ auth: { api: { getSession } } }));
 // Only `headers` is read from the request, and identity is what the cache is
 // keyed on — two calls to this are two requests.
 function request(): FastifyRequest {
-  return { headers: { cookie: "better-auth.session_token=tok" } } as unknown as FastifyRequest;
+  return { headers: { cookie: "better-auth.session_token=tok" } } as FastifyRequest;
 }
 
 const SIGNED_IN_AT = new Date("2026-08-01T10:00:00Z");

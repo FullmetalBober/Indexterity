@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
+import { stub } from "../test-utils";
 import { derivedName, HideUnsupportedError, PostgresIndexExecutor, quoteIdent } from "./executor";
 
 // The connection is never reached by any of these: every one is refused before a
 // statement is built, which is the property being asserted.
-const unreachable = null as unknown as ConstructorParameters<typeof PostgresIndexExecutor>[0];
+const unreachable = stub<ConstructorParameters<typeof PostgresIndexExecutor>[0]>({});
 
 describe("quoteIdent", () => {
   // Not about trust — every name here comes from the catalog. An index called

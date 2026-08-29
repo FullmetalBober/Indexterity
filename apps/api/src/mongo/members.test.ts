@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { stub } from "../test-utils";
 import type { MongoConnection } from "./connection";
 import { MemberConnections } from "./members";
 
@@ -31,10 +32,10 @@ const CONN = "mongodb://user:pw@primary.internal:27017/?tls=true";
 // resolved (an SRV string's tls and authSource, which a retargeted string would
 // otherwise lose).
 function primaryWith(hosts: string[]) {
-  return {
+  return stub<MongoConnection>({
     replicaMembers: () => Promise.resolve(hosts),
     resolved: () => undefined,
-  } as unknown as MongoConnection;
+  });
 }
 
 describe("MemberConnections", () => {

@@ -1,6 +1,7 @@
 import { ORPCError } from "@orpc/server";
 import { describe, expect, it } from "vitest";
 import type { DatabaseService } from "../db/database.service";
+import { stub } from "../test-utils";
 import { DIAL_BUDGET_CODE, DialBudgetService } from "./dial-budget.service";
 
 // The upsert is one statement and its arithmetic is the database's (the
@@ -12,9 +13,11 @@ import { DIAL_BUDGET_CODE, DialBudgetService } from "./dial-budget.service";
 // Constructed over a fake pool, not booted: the service holds the Database and
 // nothing else, so the container has nothing to contribute here.
 function budgetAt(count: number, secondsLeft: number): DialBudgetService {
-  return new DialBudgetService({
-    db: { execute: async () => ({ rows: [{ count, seconds_left: secondsLeft }] }) },
-  } as unknown as DatabaseService);
+  return new DialBudgetService(
+    stub<DatabaseService>({
+      db: { execute: async () => ({ rows: [{ count, seconds_left: secondsLeft }] }) },
+    }),
+  );
 }
 
 describe("the dial budget", () => {
@@ -54,9 +57,11 @@ describe("the dial budget", () => {
   // A budget row that did not come back is not evidence of a spent budget. The
   // guard behind this one is the network guard, not this count.
   it("lets the dial through when the upsert returned nothing", async () => {
-    const empty = new DialBudgetService({
-      db: { execute: async () => ({ rows: [] }) },
-    } as unknown as DatabaseService);
+    const empty = new DialBudgetService(
+      stub<DatabaseService>({
+        db: { execute: async () => ({ rows: [] }) },
+      }),
+    );
     await expect(empty.consume("user-1")).resolves.toBeUndefined();
   });
 });

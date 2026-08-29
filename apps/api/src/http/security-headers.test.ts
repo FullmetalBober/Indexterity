@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { describe, expect, it } from "vitest";
+import { stub } from "../test-utils";
 import { securityHeaders } from "./security-headers";
 
 // A reply with just the four methods the hook uses. Cheaper than a Fastify
@@ -22,13 +23,13 @@ function send(initial?: Record<string, string>): Map<string, string> {
     addHook: (_event: string, handler: (...args: unknown[]) => void) => {
       hook = handler;
     },
-  } as unknown as FastifyInstance;
+  } as FastifyInstance;
   securityHeaders(fastify);
   if (hook === null) throw new Error("the hook was never registered");
   const reply = replyWith(initial);
   (hook as (...args: unknown[]) => void)(
     {} as FastifyRequest,
-    reply as unknown as FastifyReply,
+    stub<FastifyReply>(reply),
     "payload",
     () => {},
   );

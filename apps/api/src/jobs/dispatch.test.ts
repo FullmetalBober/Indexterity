@@ -1,6 +1,7 @@
 import type { JobHelpers } from "graphile-worker";
 import { describe, expect, it, vi } from "vitest";
 import type { Database } from "../db";
+import { stub } from "../test-utils";
 import { dispatchToAllClusters } from "./dispatch";
 
 const CLUSTERS = [{ id: "cluster-a" }, { id: "cluster-b" }];
@@ -9,16 +10,16 @@ const CLUSTERS = [{ id: "cluster-a" }, { id: "cluster-b" }];
 // module-level jobDb() the function reached for; now the database is an argument,
 // so the fake is a value in the test rather than a rewritten import — which is
 // the whole point of the change that moved it there.
-const db = {
+const db = stub<Database>({
   select: () => ({ from: () => Promise.resolve(CLUSTERS) }),
-} as unknown as Database;
+});
 vi.mock("../metrics", () => ({ observeClusterFleet: () => undefined }));
 
 function helpers() {
   const addJob = vi.fn(() => Promise.resolve());
   return {
     spy: addJob,
-    helpers: { addJob, logger: { info: () => undefined } } as unknown as JobHelpers,
+    helpers: stub<JobHelpers>({ addJob, logger: { info: () => undefined } }),
   };
 }
 

@@ -38,8 +38,25 @@ export function mongoProxyOptions(proxy: DialProxy): {
  */
 export function mssqlConnector(
   proxy: DialProxy,
-): (options: { host: string; port: number }) => Promise<net.Socket> {
-  return async ({ host, port }) => {
+  // OPTIONAL, and that is what removes a cast at the call site rather than a
+  // convenience: tedious declares `connector?: () => Promise<net.Socket>` and
+  // calls it with the destination anyway (connection.js:1259 passes host, port
+  // and localAddress). A function REQUIRING an argument is not assignable to a
+  // no-argument type, so mssql/client.ts used to assert past it; a function
+  // whose argument is optional is, because it can honestly be called with none.
+  //
+  // Which means the undefined case has to be real rather than papered over, and
+  // it is: no destination is a bug in the caller, not a dial to somewhere
+  // default, so it throws instead of guessing. Nothing in tedious reaches it —
+  // verified against a live SQL Server 2022 — but a future version that called
+  // the connector bare would get a sentence rather than a TypeError on
+  // destructuring `undefined`.
+): (options?: { host: string; port: number }) => Promise<net.Socket> {
+  return async (options) => {
+    if (options === undefined) {
+      throw new Error("the SQL Server connector was called with no destination to dial");
+    }
+    const { host, port } = options;
     const { socket } = await SocksClient.createConnection({
       proxy: {
         host: proxy.host,

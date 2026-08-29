@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DatabaseInaccessibleError } from "../engine/ports";
+import { stub } from "../test-utils";
 import {
   indexNamesFromForcedPlan,
   indexNamesFromHintText,
@@ -126,9 +127,9 @@ describe("indexNamesFromForcedPlan", () => {
 // itself, which is why both are walked.
 describe("listCollectionNames on an inaccessible database", () => {
   function refusing(error: unknown) {
-    return {
+    return stub<MssqlConnection>({
       query: () => Promise.reject(error),
-    } as unknown as MssqlConnection;
+    });
   }
 
   it("raises DatabaseInaccessibleError for Msg 916 on the error itself", async () => {
@@ -172,7 +173,7 @@ describe("listCollectionNames on an inaccessible database", () => {
 // proven here is that every member is asked, tagged with its own name and its
 // own counter start, and that one member falling over loses only itself.
 function stubMember(name: string, options: { ops?: number; fails?: boolean; role?: string } = {}) {
-  return {
+  return stub<MssqlConnection>({
     serverIdentity: () =>
       Promise.resolve({
         serverName: name,
@@ -185,14 +186,14 @@ function stubMember(name: string, options: { ops?: number; fails?: boolean; role
         ? Promise.reject(new Error("connection lost"))
         : Promise.resolve([{ indexName: "ix_customer", ops: options.ops ?? 0 }]),
     localReplicaRole: () => Promise.resolve(options.role ?? null),
-  } as unknown as MssqlConnection;
+  });
 }
 
 function stubMembers(dials: { host: string; state: string; connection: MssqlConnection | null }[]) {
-  return {
+  return stub<MssqlMemberConnections>({
     dials: () => Promise.resolve(dials),
     all: () => Promise.resolve(dials.flatMap((dial) => (dial.connection ? [dial.connection] : []))),
-  } as unknown as MssqlMemberConnections;
+  });
 }
 
 describe("MssqlIndexCollector across availability replicas", () => {

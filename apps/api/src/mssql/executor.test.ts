@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { stub } from "../test-utils";
 import type { MssqlConnection } from "./connection";
 import { MssqlIndexExecutor } from "./executor";
 
@@ -24,7 +25,7 @@ function stubConnection(state: IndexStateRow | null, online = true) {
     serverVersion: () => Promise.resolve({ major: 16, minor: 0, text: "16.0.4250.1" }),
     supportsOnlineRebuild: () => Promise.resolve(online),
   };
-  return { conn: conn as unknown as MssqlConnection, executed };
+  return { conn: stub<MssqlConnection>(conn), executed };
 }
 
 const plain: IndexStateRow = {

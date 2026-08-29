@@ -29,12 +29,10 @@ class Fake extends PostgresConnection {
     database = "",
   ): Promise<T[]> {
     this.statements.push(text);
-    if (text.includes("pg_database")) return this.catalog as unknown as T[];
+    if (text.includes("pg_database")) return this.catalog as T[];
     if (text.includes("pg_class")) {
       this.probed.push(database);
-      return [
-        { present: this.tablesIn.has(database === "" ? "postgres" : database) },
-      ] as unknown as T[];
+      return [{ present: this.tablesIn.has(database === "" ? "postgres" : database) }] as T[];
     }
     throw new Error(`unexpected query: ${text}`);
   }

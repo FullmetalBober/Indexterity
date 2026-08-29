@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Database } from "../db";
+import { stub } from "../test-utils";
 import { parseClusterEventNotification, toClusterEvent } from "./channel";
 import { emitClusterEvent, emitPassFinished } from "./emit";
 
@@ -45,7 +46,7 @@ describe("parseClusterEventNotification", () => {
 describe("emitClusterEvent", () => {
   it("sends pg_notify on the shared channel", async () => {
     const execute = vi.fn().mockResolvedValue(undefined);
-    const db = { execute } as unknown as Database;
+    const db = stub<Database>({ execute });
     await emitClusterEvent(db, { clusterId: CLUSTER, kind: "BUILD_GRADUATED", task: null });
     expect(execute).toHaveBeenCalledOnce();
   });
@@ -53,9 +54,9 @@ describe("emitClusterEvent", () => {
   // An emission is a nudge, never part of the pass: a failure here must not
   // turn a landed apply into a retried one that re-runs executor.hide.
   it("swallows a failed send", async () => {
-    const db = {
+    const db = stub<Database>({
       execute: vi.fn().mockRejectedValue(new Error("connection refused")),
-    } as unknown as Database;
+    });
     await expect(
       emitClusterEvent(db, { clusterId: CLUSTER, kind: "DROP_HIDDEN", task: null }),
     ).resolves.toBeUndefined();
@@ -65,7 +66,7 @@ describe("emitClusterEvent", () => {
 describe("emitPassFinished", () => {
   it("names the pass on the event", async () => {
     const execute = vi.fn().mockResolvedValue(undefined);
-    const db = { execute } as unknown as Database;
+    const db = stub<Database>({ execute });
     await emitPassFinished(db, CLUSTER, "finalize");
     expect(execute).toHaveBeenCalledOnce();
   });
@@ -75,7 +76,7 @@ describe("emitPassFinished", () => {
   // contract does.
   it("skips a task the contract does not know", async () => {
     const execute = vi.fn().mockResolvedValue(undefined);
-    const db = { execute } as unknown as Database;
+    const db = stub<Database>({ execute });
     await emitPassFinished(db, CLUSTER, "retention");
     expect(execute).not.toHaveBeenCalled();
   });

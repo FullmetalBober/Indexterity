@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { stub as fake } from "../test-utils";
 import type { PostgresConnection } from "./connection";
 import { collectPostgresNodes } from "./members";
 
@@ -9,7 +10,7 @@ function stub(options: {
   replicas?: { host: string | null; state: string | null }[];
   throws?: boolean;
 }): PostgresConnection {
-  return {
+  return fake<PostgresConnection>({
     serverIdentity: async () => {
       if (options.throws === true) throw new Error("unreachable");
       return {
@@ -21,7 +22,7 @@ function stub(options: {
       };
     },
     query: async () => options.replicas ?? [],
-  } as unknown as PostgresConnection;
+  });
 }
 
 describe("collectPostgresNodes", () => {

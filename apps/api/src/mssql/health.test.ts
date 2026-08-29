@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { assessHealth, MSSQL_HEALTH } from "../analysis";
+import { stub } from "../test-utils";
 import type { MssqlConnection } from "./connection";
 import { collectMssqlServerHealth, toServerHealth } from "./health";
 
@@ -21,9 +22,9 @@ function counters(overrides: Record<string, unknown> = {}) {
 }
 
 function stubConn(rows: unknown[] | Error) {
-  return {
+  return stub<MssqlConnection>({
     query: () => (rows instanceof Error ? Promise.reject(rows) : Promise.resolve(rows)),
-  } as unknown as MssqlConnection;
+  });
 }
 
 describe("toServerHealth", () => {
