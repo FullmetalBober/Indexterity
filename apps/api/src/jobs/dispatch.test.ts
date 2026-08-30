@@ -1,7 +1,7 @@
-import type { JobHelpers } from "graphile-worker";
+import type { Job, JobHelpers } from "graphile-worker";
 import { describe, expect, it, vi } from "vitest";
-import type { Database } from "../db";
-import { dispatchToAllClusters } from "./dispatch";
+import { stub } from "../test-utils";
+import { type ClusterRoster, dispatchToAllClusters } from "./dispatch";
 
 const CLUSTERS = [{ id: "cluster-a" }, { id: "cluster-b" }];
 
@@ -9,23 +9,31 @@ const CLUSTERS = [{ id: "cluster-a" }, { id: "cluster-b" }];
 // module-level jobDb() the function reached for; now the database is an argument,
 // so the fake is a value in the test rather than a rewritten import — which is
 // the whole point of the change that moved it there.
-const db = {
-  select: () => ({ from: () => Promise.resolve(CLUSTERS) }),
-} as unknown as Database;
+// A roster, not a database. What the dispatcher needs is a list of ids, and
+// saying so is what makes this fake plain enough to write without asserting
+// past anything.
+const roster: ClusterRoster = { ids: async () => CLUSTERS.map((cluster) => cluster.id) };
 vi.mock("../metrics", () => ({ observeClusterFleet: () => undefined }));
 
 function helpers() {
-  const addJob = vi.fn(() => Promise.resolve());
+  // Returns a Job, because AddJobFunction does. The old fake resolved to void,
+  // which is a different function and was only assignable while nothing checked.
+  const addJob = vi.fn(async () => stub<Job>({}));
   return {
     spy: addJob,
-    helpers: { addJob, logger: { info: () => undefined } } as unknown as JobHelpers,
+    // Nested, because `logger` is a graphile-worker Logger rather than an
+    // object that happens to have `info` on it.
+    helpers: stub<JobHelpers>({
+      addJob,
+      logger: stub<JobHelpers["logger"]>({ info: () => undefined }),
+    }),
   };
 }
 
 describe("dispatchToAllClusters", () => {
   it("enqueues the task once per cluster", async () => {
     const { spy, helpers: h } = helpers();
-    await expect(dispatchToAllClusters(db, "collect", h)).resolves.toBe(2);
+    await expect(dispatchToAllClusters(roster, "collect", h)).resolves.toBe(2);
     expect(spy).toHaveBeenCalledTimes(2);
     expect(spy.mock.calls.map((call) => (call as unknown[])[1])).toEqual([
       { clusterId: "cluster-a" },
@@ -42,7 +50,7 @@ describe("dispatchToAllClusters", () => {
   // cluster and task is what makes graphile-worker run them one at a time.
   it("gives each cluster its own queue so a task cannot overlap itself", async () => {
     const { spy, helpers: h } = helpers();
-    await dispatchToAllClusters(db, "collect", h);
+    await dispatchToAllClusters(roster, "collect", h);
 
     const options = spy.mock.calls.map((call) => (call as unknown[])[2] as Record<string, unknown>);
     expect(options.map((o) => o.queueName)).toEqual(["collect:cluster-a", "collect:cluster-b"]);
@@ -53,8 +61,8 @@ describe("dispatchToAllClusters", () => {
   it("keys the queue by task as well, so a probe never waits behind a collect", async () => {
     const collect = helpers();
     const probe = helpers();
-    await dispatchToAllClusters(db, "collect", collect.helpers);
-    await dispatchToAllClusters(db, "probe", probe.helpers);
+    await dispatchToAllClusters(roster, "collect", collect.helpers);
+    await dispatchToAllClusters(roster, "probe", probe.helpers);
 
     const queueOf = (spy: ReturnType<typeof helpers>["spy"]) =>
       (spy.mock.calls[0] as unknown[])[2] as Record<string, unknown>;
@@ -67,7 +75,7 @@ describe("dispatchToAllClusters", () => {
 
   it("still dedupes a pending job rather than piling them up", async () => {
     const { spy, helpers: h } = helpers();
-    await dispatchToAllClusters(db, "collect", h);
+    await dispatchToAllClusters(roster, "collect", h);
     const options = (spy.mock.calls[0] as unknown[])[2] as Record<string, unknown>;
     expect(options.jobKey).toBe("collect:cluster-a");
     expect(options.jobKeyMode).toBe("replace");

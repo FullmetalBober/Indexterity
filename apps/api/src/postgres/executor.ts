@@ -343,7 +343,10 @@ export class PostgresIndexExecutor implements IndexExecutor {
       `IF NOT EXISTS ${quoteIdent(name)} ON ${quoteIdent(schema)}.${quoteIdent(table)} ` +
       `(${columns})${include}${where}`;
     try {
-      await this.conn.execute(statement, database);
+      // A build, so it gets the build budget rather than the pool's read budget
+      // (#410). At the pool's 900s a build on a genuinely large table could not
+      // finish, and the carcass below is what it left behind every time.
+      await this.conn.execute(statement, database, { build: true });
     } catch (error) {
       await this.dropInvalidLeftover(database, schema, name);
       throw error;

@@ -235,6 +235,45 @@ const workerShape = {
   // limit raised alongside. The name survives the worker process it was named
   // for (#232): it is how many jobs one drain runs at once.
   WORKER_CONCURRENCY: positiveInteger(1),
+  // How long one read-only pass may run before it is abandoned (#407).
+  //
+  // Five minutes because that is the tick interval: a pass that cannot outlive
+  // the schedule that dispatched it cannot let ticks pile up behind one cluster.
+  // Healthy passes finish in seconds, so this only ever bites the pathological
+  // case — which, measured in the hosted deployment, was a `suggest` against a
+  // tunnelled MSSQL cluster with 13 observed databases running for HOURS: the
+  // per-query budget is 15 minutes and there was no budget for the pass at all,
+  // so it could not finish inside the life of the process running it. It died
+  // mid-pass instead, orphaning its job lock for the ~4 hours graphile-worker
+  // waits before reclaiming one, and WORKER_CONCURRENCY is 1, so nothing else in
+  // the pipeline drained meanwhile.
+  //
+  // Raise it for a self-hosted install with genuinely large clusters and a host
+  // that will sit still for it. The failure it prevents is not slowness; it is a
+  // pass that can never finish holding the only slot while it fails to.
+  CLUSTER_PASS_BUDGET_MS: positiveInteger(300_000),
+  // How long ONE index build may run before the engine cancels it (#410).
+  //
+  // Separate from every other statement budget because a build is not like any
+  // other statement this makes. A catalog or DMV read that has not answered in
+  // fifteen minutes is hung and waiting longer is waste; a `CREATE INDEX
+  // CONCURRENTLY` that has run fifteen minutes may be perfectly healthy and half
+  // done. Both used to share one number, sized at 900_000 and explicitly reasoned
+  // about as "what a concurrent build on a hundred-gigabyte table costs" — which
+  // is a fair estimate and simply does not cover every real table. A build that
+  // genuinely takes an hour could not succeed at all.
+  //
+  // Two hours, and the ceiling is not arbitrary: it must stay UNDER
+  // graphile-worker's four-hour job expiry. Past that, the lock on the job doing
+  // the building is reclaimed while the build is still running and another worker
+  // may start the same build beside it. So this number is bounded by one that
+  // lives in somebody else's SQL, and raising it past about three hours needs
+  // that understood first (#412).
+  //
+  // MongoDB is deliberately NOT given this ceiling. Its driver socket timeout is
+  // unlimited today and always has been, so imposing one here would be a new way
+  // for a working install to fail, against a problem nobody has reported on it.
+  INDEX_BUILD_TIMEOUT_MS: positiveInteger(7_200_000),
   // Sockets the driver may open against ONE connected cluster. The driver's own
   // default is 100, and it is the wrong default twice over here: a session is
   // held per cluster (jobs/connection-pool.ts), so the worst case multiplies by

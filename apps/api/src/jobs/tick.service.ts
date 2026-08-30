@@ -156,7 +156,7 @@ export class TickService implements BeforeApplicationShutdown {
     return claimDuePasses(
       this.database.db,
       (task) =>
-        this.database.db.execute(
+        this.database.rows(
           sql`select graphile_worker.add_job(
                 ${task}::text,
                 job_key => ${`tick:${task}`}::text,

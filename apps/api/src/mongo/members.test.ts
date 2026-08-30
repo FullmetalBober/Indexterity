@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { stub } from "../test-utils";
 import type { MongoConnection } from "./connection";
 import { MemberConnections } from "./members";
 
@@ -31,10 +32,13 @@ const CONN = "mongodb://user:pw@primary.internal:27017/?tls=true";
 // resolved (an SRV string's tls and authSource, which a retargeted string would
 // otherwise lose).
 function primaryWith(hosts: string[]) {
-  return {
+  return stub<MongoConnection>({
     replicaMembers: () => Promise.resolve(hosts),
-    resolved: () => undefined,
-  } as unknown as MongoConnection;
+    // A real ResolvedConnection, because members.ts genuinely calls this — it
+    // reads tls and authSource off it to build each member's direct string. The
+    // fake used to answer `undefined`, which no MongoConnection ever does.
+    resolved: () => ({ tls: false, authSource: null }),
+  });
 }
 
 describe("MemberConnections", () => {

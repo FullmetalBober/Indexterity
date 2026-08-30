@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { stub as fake } from "../test-utils";
 import type { PostgresConnection } from "./connection";
 import { collectPostgresNodes } from "./members";
 
@@ -9,7 +10,7 @@ function stub(options: {
   replicas?: { host: string | null; state: string | null }[];
   throws?: boolean;
 }): PostgresConnection {
-  return {
+  return fake<PostgresConnection>({
     serverIdentity: async () => {
       if (options.throws === true) throw new Error("unreachable");
       return {
@@ -20,8 +21,11 @@ function stub(options: {
         version: null,
       };
     },
-    query: async () => options.replicas ?? [],
-  } as unknown as PostgresConnection;
+    // Generic, like the real `query<T>`: a fake declaring `async () => Row[]`
+    // is a different method from the one the collector calls, and until this was
+    // checked the difference was invisible.
+    query: async <T>() => (options.replicas ?? []) as T[],
+  });
 }
 
 describe("collectPostgresNodes", () => {

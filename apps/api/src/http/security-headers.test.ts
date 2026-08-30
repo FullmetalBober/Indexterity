@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { describe, expect, it } from "vitest";
+import { stub } from "../test-utils";
 import { securityHeaders } from "./security-headers";
 
 // A reply with just the four methods the hook uses. Cheaper than a Fastify
@@ -7,12 +8,24 @@ import { securityHeaders } from "./security-headers";
 // whether a server started.
 function replyWith(initial: Record<string, string> = {}) {
   const headers = new Map(Object.entries(initial));
-  return {
-    headers,
+  // `header` and `removeHeader` return the reply, because Fastify's do — they
+  // chain, and returning the Map was invisible until the fake had to match.
+  //
+  // The map is handed back BESIDE the reply rather than hung on it: FastifyReply
+  // has a `headers` of its own with a different meaning, and a fake that
+  // redefines it is describing a reply nothing sends.
+  const reply: Partial<FastifyReply> = {
     getHeader: (name: string) => headers.get(name),
-    header: (name: string, value: string) => headers.set(name, value),
-    removeHeader: (name: string) => headers.delete(name),
+    header: (name: string, value: string) => {
+      headers.set(name, value);
+      return reply as FastifyReply;
+    },
+    removeHeader: (name: string) => {
+      headers.delete(name);
+      return reply as FastifyReply;
+    },
   };
+  return { reply, headers };
 }
 
 // Register the hook, then run it the way Fastify would.
@@ -22,17 +35,17 @@ function send(initial?: Record<string, string>): Map<string, string> {
     addHook: (_event: string, handler: (...args: unknown[]) => void) => {
       hook = handler;
     },
-  } as unknown as FastifyInstance;
+  } as FastifyInstance;
   securityHeaders(fastify);
   if (hook === null) throw new Error("the hook was never registered");
-  const reply = replyWith(initial);
+  const { reply, headers } = replyWith(initial);
   (hook as (...args: unknown[]) => void)(
     {} as FastifyRequest,
-    reply as unknown as FastifyReply,
+    stub<FastifyReply>(reply),
     "payload",
     () => {},
   );
-  return reply.headers;
+  return headers;
 }
 
 describe("securityHeaders", () => {

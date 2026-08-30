@@ -144,6 +144,7 @@ describe("ClusterHeader certificate concessions", () => {
             reason: "UNREACHABLE",
             since: new Date(NOW.getTime() - 7 * 24 * 3_600_000).toISOString(),
             detail: "connect ECONNREFUSED 10.0.0.4:27017",
+            task: null,
           },
         }}
       />,
@@ -161,7 +162,7 @@ describe("ClusterHeader certificate concessions", () => {
       <ClusterHeader
         cluster={{
           ...cluster,
-          blocked: { reason: "QUOTA_EXHAUSTED", since: NOW.toISOString(), detail: "" },
+          blocked: { reason: "QUOTA_EXHAUSTED", since: NOW.toISOString(), detail: "", task: null },
         }}
       />,
     );

@@ -107,6 +107,12 @@ export const BLOCKED_REASONS = [
   "CREDENTIALS",
   // A major series this release has not been probed against.
   "UNSUPPORTED",
+  // A read-only pass ran past its wall-clock budget and was abandoned (#407).
+  // Its own reason rather than ERROR: nothing went wrong that a message could
+  // describe, and the answer is not the same — an owner reading this needs to
+  // know their cluster is too slow to finish inside the schedule, not that the
+  // pipeline hit something it has no name for.
+  "TIMED_OUT",
   // Anything else, which is also the one that gets retried and dead-lettered.
   "ERROR",
 ] as const;
@@ -124,6 +130,14 @@ export const clusterBlock = z.object({
   since: z.string(),
   // The sentence, usually the driver's own words.
   detail: z.string(),
+  // WHICH pass stopped — `collect`, `suggest`, `apply` and so on (#408).
+  //
+  // A string for the same reason `reason` is one, and nullable for a second:
+  // rows written before this field existed have no pass, and a block that
+  // predates the upgrade must still render. The dashboard therefore has to have
+  // wording for "something in the pipeline" as well as for a named pass, which
+  // is the wording it used to use for everything.
+  task: z.string().nullable(),
 });
 export type ClusterBlock = z.infer<typeof clusterBlock>;
 

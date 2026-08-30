@@ -4,7 +4,6 @@
 // transport enforcement has to live where the pool is built or existing
 // clusters keep dialling plaintext forever.
 
-import type net from "node:net";
 import mssql from "mssql";
 import { type DialProxy, NO_TLS_OVERRIDES, type TlsOverrides } from "../engine/ports";
 import { mssqlConnector } from "../engine/socks-dial";
@@ -19,11 +18,15 @@ import {
 // Fail fast on unreachable servers, same budget as the mongo client's 5s
 // server-selection timeout.
 const CONNECT_TIMEOUT_MS = 5000;
-// One budget for every statement — the driver has no per-request override.
-// Sized for the slowest legitimate statement, which is not a DMV read but the
-// unhide path's ALTER INDEX … REBUILD of a large index. Fifteen minutes is
-// generous for anything the collector runs and honest about what a rebuild on
-// a hundred-gigabyte table costs.
+// The budget every request gets unless it asks for another.
+//
+// The note here used to say the driver has no per-request override, and that is
+// not true of mssql 12: `new Request(pool, { requestTimeout })` is honoured, and
+// a build now uses it (#410). So this is no longer sized for the slowest
+// statement any adapter ever makes — it is what a DMV read may take, which is
+// what the collector actually runs. A REBUILD or a CREATE asks for the build
+// budget instead, because sizing one number for both is what made a genuinely
+// long build impossible.
 const REQUEST_TIMEOUT_MS = 900_000;
 // One session serves one collect at a time; a handful of sockets is plenty,
 // and the customer's connection budget is not ours to spend.
@@ -102,7 +105,7 @@ export function mssqlConfig(
     pool: { max: POOL_MAX, min: 0 },
     options: {
       // "strict" is TDS 8.0 and the driver accepts it verbatim.
-      encrypt: mode === "strict" ? ("strict" as unknown as boolean) : mode === "on",
+      encrypt: mode === "strict" ? "strict" : mode === "on",
       trustServerCertificate:
         trustsServerCertificate(parsed) && (overrides?.allowInvalidCertificates ?? false),
       // A cluster's read-only MODE is enforced structurally in the executor,
@@ -111,14 +114,14 @@ export function mssqlConfig(
       // all, which is why only the member dials set it.
       readOnlyIntent: dial?.readOnlyIntent ?? false,
       appName: "indexterity",
-      // Cast because @types/mssql declares `connector` as taking no arguments,
-      // and tedious 20 calls it with the destination: connection.js:1259 passes
-      // `connectOpts` (host, port, localAddress) into whatever custom connector
-      // it was given. Verified against a live SQL Server 2022 — a connector
-      // written to the declared signature would have nowhere to dial.
-      ...(dial?.proxy === undefined
-        ? {}
-        : { connector: mssqlConnector(dial.proxy) as unknown as () => Promise<net.Socket> }),
+      // No cast. tedious declares `connector` as taking no arguments and calls
+      // it with the destination anyway (connection.js:1259 passes host, port and
+      // localAddress), which used to be asserted past here. `mssqlConnector`
+      // declares its argument OPTIONAL instead, which IS assignable to a
+      // no-argument type and keeps the compiler checking the rest of the
+      // signature — the return type especially, which is the half that would
+      // actually break a dial. Verified against a live SQL Server 2022.
+      ...(dial?.proxy === undefined ? {} : { connector: mssqlConnector(dial.proxy) }),
     },
   };
 }

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Database } from "../db";
+import { stub } from "../test-utils";
 import type { ClusterTasksService } from "./cluster-tasks.service";
 import { BURST_SCHEDULE, duePasses } from "./schedule";
 import { createTaskList } from "./tasks";
@@ -14,9 +15,7 @@ describe("BURST_SCHEDULE", () => {
   // only closes over its db, so a null stands in fine for reading the keys.
   it("schedules only tasks the task list registers", () => {
     const registered = new Set(
-      Object.keys(
-        createTaskList(null as unknown as Database, null as unknown as ClusterTasksService),
-      ),
+      Object.keys(createTaskList(stub<Database>({}), stub<ClusterTasksService>({}))),
     );
     for (const pass of BURST_SCHEDULE) expect(registered).toContain(pass.task);
   });

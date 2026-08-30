@@ -12,6 +12,16 @@ import { test as base, expect, type Page } from "@playwright/test";
 // button that "does nothing", which reads as a slow app rather than a broken
 // header. So the refusal itself is the assertion, and it is made on EVERY test
 // rather than on a page or two.
+// `page.exposeFunction` really does put this on the page's window, so it is
+// declared rather than asserted at the use site: a declaration says what is
+// true of the runtime, where a cast only says the compiler should stop asking.
+// The name is the one passed to exposeFunction below and the two must agree.
+declare global {
+  interface Window {
+    __cspRefusal: (detail: string) => void;
+  }
+}
+
 export const test = base.extend<{ cspRefusals: string[] }>({
   cspRefusals: [
     async ({ page }, use) => {
@@ -31,8 +41,9 @@ export const test = base.extend<{ cspRefusals: string[] }>({
           const where = event.sourceFile
             ? `${event.sourceFile}:${event.lineNumber}:${event.columnNumber}`
             : event.documentURI;
-          const report = (window as unknown as { __cspRefusal: (d: string) => void }).__cspRefusal;
-          report(`${event.effectiveDirective} refused ${event.blockedURI} at ${where}`);
+          window.__cspRefusal(
+            `${event.effectiveDirective} refused ${event.blockedURI} at ${where}`,
+          );
         });
       });
       await use([...refusals]);

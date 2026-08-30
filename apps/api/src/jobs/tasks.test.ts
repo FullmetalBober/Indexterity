@@ -48,8 +48,11 @@ function recorder(): {
         emitted.push(`${clusterId}:${task}`);
         return Promise.resolve();
       },
-      markBlocked: (clusterId, reason, detail) => {
-        blocked.push(`${clusterId}:${reason}:${detail}`);
+      markBlocked: (clusterId, task, reason, detail) => {
+        // The pass is in the record because it is now part of what a block says
+        // (#408): every assertion below reads this string, so a pass that stopped
+        // being threaded through would fail them rather than pass quietly.
+        blocked.push(`${clusterId}:${task}:${reason}:${detail}`);
         return Promise.resolve();
       },
       markUnblocked: (clusterId) => {
@@ -268,8 +271,86 @@ describe("runClusterTask on a cluster we refuse to dial", () => {
 
     await runClusterTask("collect", CLUSTER, log.deps, () => Promise.reject(unreachable()));
 
-    expect(log.blocked).toEqual([`${CLUSTER}:UNREACHABLE:connect ECONNREFUSED 10.0.0.4:27017`]);
+    expect(log.blocked).toEqual([
+      `${CLUSTER}:collect:UNREACHABLE:connect ECONNREFUSED 10.0.0.4:27017`,
+    ]);
     expect(log.unblocked).toHaveLength(0);
+  });
+
+  // #408: the block records WHICH pass stopped, and the dashboard words itself
+  // from it. In production a failing `suggest` was reported to the owner as
+  // collection failing, because this was thrown away and the banner guessed.
+  it("records the pass that failed, not always collect", async () => {
+    const log = recorder();
+
+    await runClusterTask("suggest", CLUSTER, log.deps, () =>
+      Promise.reject(new Error("socket hang up")),
+    ).catch(() => {});
+
+    expect(log.blocked).toEqual([`${CLUSTER}:suggest:ERROR:socket hang up`]);
+  });
+
+  // #407. In production a `suggest` against a tunnelled MSSQL cluster with 13
+  // observed databases ran for HOURS: there was a 15-minute budget per query and
+  // none at all for the pass, so it could not finish inside the life of the
+  // process, and WORKER_CONCURRENCY is 1 — nothing else in the pipeline drained
+  // behind it.
+  it("abandons a read-only pass that runs past its budget", async () => {
+    const log = recorder();
+    // Never settles, which is what a pass that cannot finish looks like.
+    const forever = () => new Promise<void>(() => {});
+
+    await runClusterTask("suggest", CLUSTER, log.deps, forever, 20);
+
+    expect(log.blocked).toEqual([
+      `${CLUSTER}:suggest:TIMED_OUT:the suggest pass ran past its 20ms budget and was abandoned`,
+    ]);
+  });
+
+  // Skipped, not rethrown — the difference decides whether graphile-worker
+  // retries immediately. It must not: the retry gets the same budget against the
+  // same cluster, so five attempts later it is dead-lettered having spent five
+  // budgets of the only worker slot achieving nothing. The next tick starts
+  // clean instead.
+  it("skips a budget overrun rather than rethrowing it for an immediate retry", async () => {
+    const log = recorder();
+
+    await expect(
+      runClusterTask("collect", CLUSTER, log.deps, () => new Promise<void>(() => {}), 20),
+    ).resolves.toBeUndefined();
+  });
+
+  // Without a budget nothing changes, which is what `apply` and `finalize` get:
+  // a pass cut off between changing an index and recording it is a change we
+  // have half a record of, and a large build legitimately takes far longer than
+  // any budget a read would want.
+  it("lets a pass run unbounded when it has no budget", async () => {
+    const log = recorder();
+    let settle: (() => void) | undefined;
+    const slow = () =>
+      new Promise<void>((resolve) => {
+        settle = resolve;
+      });
+
+    const running = runClusterTask("apply", CLUSTER, log.deps, slow, null);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // Still going, where a budgeted pass would have been abandoned by now.
+    expect(log.blocked).toHaveLength(0);
+    settle?.();
+    await running;
+
+    expect(log.blocked).toHaveLength(0);
+    expect(log.unblocked).toEqual([CLUSTER]);
+  });
+
+  // A pass inside its budget must not be touched by the machinery at all.
+  it("leaves a pass that finishes in time alone", async () => {
+    const log = recorder();
+
+    await runClusterTask("collect", CLUSTER, log.deps, () => Promise.resolve(), 10_000);
+
+    expect(log.blocked).toHaveLength(0);
+    expect(log.unblocked).toEqual([CLUSTER]);
   });
 
   it("blames the tunnel rather than the database when the tunnel is down", async () => {
@@ -303,7 +384,7 @@ describe("runClusterTask on a cluster we refuse to dial", () => {
       throw new UnsupportedServerError("mongodb 4.4 is below the floor");
     });
 
-    expect(log.blocked[0]).toBe(`${CLUSTER}:UNSUPPORTED:mongodb 4.4 is below the floor`);
+    expect(log.blocked[0]).toBe(`${CLUSTER}:collect:UNSUPPORTED:mongodb 4.4 is below the floor`);
   });
 
   it("records credentials that cannot be opened, which needs an operator", async () => {
@@ -327,6 +408,6 @@ describe("runClusterTask on a cluster we refuse to dial", () => {
       }),
     ).rejects.toThrow("something nobody has classified");
 
-    expect(log.blocked).toEqual([`${CLUSTER}:ERROR:something nobody has classified`]);
+    expect(log.blocked).toEqual([`${CLUSTER}:collect:ERROR:something nobody has classified`]);
   });
 });

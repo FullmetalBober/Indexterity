@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from "pg";
+import { workerEnv } from "../config/env";
 import type { DialProxy, TlsOverrides } from "../engine/ports";
 import { pgPool } from "./client";
 import { parsePgConnString, pgHosts, withPgDatabase } from "./conn-string";
@@ -95,12 +96,36 @@ export class PostgresConnection {
   // transaction, which is fine — what this exists for is holding ONE connection
   // across a build so the session's statement_timeout and its `pg_stat_activity`
   // row belong to the statement a reader would go looking for.
-  async execute(text: string, database = ""): Promise<void> {
+  /**
+   * Run one DDL statement.
+   *
+   * `build` raises the budget for this statement alone (#410). The pool-wide
+   * `statement_timeout` is sized for a catalog read; a `CREATE INDEX
+   * CONCURRENTLY` on a large table legitimately outruns it, and at 900s a build
+   * that takes an hour could not finish at all.
+   *
+   * Set on the client that will run the statement and reset in the same
+   * `finally` that releases it, because node-pg hands the connection to whoever
+   * asks next and a session-level `SET` would otherwise leak a two-hour budget
+   * onto every subsequent read through it. Three separate `query` calls rather
+   * than one semicolon-joined string on purpose: the simple query protocol wraps
+   * a multi-statement string in an implicit transaction, and `CREATE INDEX
+   * CONCURRENTLY` cannot run inside one.
+   */
+  async execute(text: string, database = "", opts: { build?: boolean } = {}): Promise<void> {
     const pool = await this.poolFor(database);
     const client: PoolClient = await pool.connect();
     try {
+      if (opts.build === true) {
+        await client.query(`SET statement_timeout = ${workerEnv().INDEX_BUILD_TIMEOUT_MS}`);
+      }
       await client.query(text);
     } finally {
+      if (opts.build === true) {
+        // Best effort: a client whose session is wedged is about to be discarded
+        // by the pool anyway, and throwing here would mask the real failure.
+        await client.query("RESET statement_timeout").catch(() => {});
+      }
       client.release();
     }
   }

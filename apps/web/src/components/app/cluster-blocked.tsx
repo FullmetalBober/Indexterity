@@ -77,23 +77,69 @@ const COPY: Record<string, Copy> = {
       "than reporting numbers it cannot stand behind.",
     next: "No retry fixes a version. Upgrading the server resumes collection on the next tick.",
   },
-  ERROR: {
-    badge: "collection failed",
-    title: "Collection against this cluster is failing",
+  TIMED_OUT: {
+    badge: "too slow to finish",
+    title: "Reading this cluster takes longer than Indexterity will wait",
+    what:
+      "A step ran past the time it is allowed and was abandoned, so it did nothing. This is " +
+      "not a failure so much as a step that does not fit: usually a very large or very busy " +
+      "cluster, or one reached over a slow link.",
+    next:
+      "Nothing was executed and nothing was lost, and it tries again on the next tick. If this " +
+      "cluster genuinely needs longer, whoever runs this Indexterity can raise the budget — " +
+      "the setting is CLUSTER_PASS_BUDGET_MS. Applying a change is never cut off this way.",
+  },
+  // No ERROR entry: it is the one reason whose wording depends on WHICH pass
+  // failed, and that is built below.
+};
+
+// The passes, in the reader's words rather than the queue's (#408).
+//
+// Only ERROR needs these. Every other reason is a dial failure — unreachable,
+// no tunnel, refused for TLS, unreadable credentials, unsupported version — and
+// those stop every pass alike, so "nothing has been collected" is true whichever
+// one happened to notice. ERROR is the opposite: it is what a pass lands on when
+// the dial worked and the pass itself did not, so naming collection there is
+// wrong exactly when it matters.
+const PASS: Record<string, string> = {
+  collect: "Collecting from this cluster",
+  classify: "Classifying this cluster's index usage",
+  suggest: "Working out recommendations for this cluster",
+  apply: "Applying an approved change to this cluster",
+  finalize: "Finishing an applied change on this cluster",
+  probe: "Measuring this cluster after a change",
+};
+
+// A pass this build has no wording for still has to render, for the reason a
+// reason it does not know does: the field is text so that adding a pass is a
+// constant rather than a migration, and that is only safe if the reader
+// degrades. So an unknown pass is quoted as itself, and a block written before
+// the column existed (task === null) gets the general wording — which is what
+// every block used to get.
+function errorCopy(task: string | null): Copy {
+  const known = task === null ? undefined : PASS[task];
+  const subject = known ?? (task === null ? "A step in the pipeline" : `The ${task} step`);
+  return {
+    badge: task === null ? "a step is failing" : `${task} failing`,
+    title: `${subject} is failing`,
     what:
       "Something the pipeline does not have a name for went wrong, and it has been retrying. " +
-      "Nothing has been collected since then.",
+      (task === "collect"
+        ? "Nothing has been collected since then."
+        : "Other steps may still be running, so some figures on this page can be newer than " +
+          "others."),
     next:
       "The message below is the failure itself. If it means nothing to you, it will mean " +
       "something to whoever runs this Indexterity — the same line is in the logs.",
-  },
-};
+  };
+}
 
 // A reason this build does not know still has to render. The column is text so
 // that adding one is a constant rather than a migration, which is only safe if
 // an older reader degrades instead of breaking — the same rule the security
 // trail's labels follow.
-function copyFor(reason: string): Copy {
+function copyFor(reason: string, task: string | null = null): Copy {
+  if (reason === "ERROR") return errorCopy(task);
   return (
     COPY[reason] ?? {
       badge: "collection stopped",
@@ -104,8 +150,8 @@ function copyFor(reason: string): Copy {
   );
 }
 
-export function blockedBadge(reason: string): string {
-  return copyFor(reason).badge;
+export function blockedBadge(reason: string, task: string | null = null): string {
+  return copyFor(reason, task).badge;
 }
 
 /**
@@ -130,7 +176,7 @@ export function ClusterBlockedBanner({
   clusterId: string;
   block: ClusterBlock;
 }) {
-  const copy = copyFor(block.reason);
+  const copy = copyFor(block.reason, block.task);
   // The duration is the reader's clock against a stored timestamp, so it waits
   // for hydration rather than differing between the two renders. The rest of the
   // banner does not — the warning itself must be in the server's HTML, or a

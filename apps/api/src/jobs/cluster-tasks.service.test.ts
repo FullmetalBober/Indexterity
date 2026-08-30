@@ -1,6 +1,8 @@
+import type { Job } from "graphile-worker";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DatabaseService } from "../db/database.service";
 import type { NotifyService } from "../mail/notify.service";
+import { stub } from "../test-utils";
 import { TunnelRegistry } from "../tunnel/tunnel.registry";
 import { applyCluster } from "./apply";
 import { settleBuildsForCluster } from "./building";
@@ -11,6 +13,7 @@ import { ClusterTasksService } from "./cluster-tasks.service";
 import { collectCluster } from "./collect";
 import { applyCreatesForCluster } from "./create";
 import { probeCluster } from "./probe";
+import { suggestForCluster } from "./suggest";
 
 // The passes themselves are tested where they live. What is untested — and what a
 // registry refactor can silently break — is which pass each queue name runs and
@@ -39,22 +42,32 @@ const CLUSTER = "11111111-1111-1111-1111-111111111111";
 function service() {
   const db = {} as DatabaseService["db"];
   return new ClusterTasksService(
-    { db } as unknown as DatabaseService,
-    { notifyClusterOwners: vi.fn() } as unknown as NotifyService,
+    { db } as DatabaseService,
+    stub<NotifyService>({ notifyClusterOwners: vi.fn() }),
     // A real registry with no tunnels in it: these tests are about what a task
     // does with a failure, and no cluster here has a tunnel_id.
     new TunnelRegistry(),
   );
 }
 
-function helpers() {
-  return {
-    addJob: vi.fn(async () => undefined),
-    logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-  } as unknown as Parameters<ClusterTasksService["collect"]>[1] & {
-    addJob: ReturnType<typeof vi.fn>;
-    logger: { info: ReturnType<typeof vi.fn> };
-  };
+// The real JobHelpers, plus the two members the assertions reach for. Named
+// rather than inline so `stub` has something to check the literal against.
+type Helpers = Parameters<ClusterTasksService["collect"]>[1] & {
+  addJob: ReturnType<typeof vi.fn>;
+  logger: { info: ReturnType<typeof vi.fn> };
+};
+
+function helpers(): Helpers {
+  return stub<Helpers>({
+    addJob: vi.fn(async () => stub<Job>({})),
+    // Typed mocks, not bare `vi.fn()`: the Logger's methods take a message, and
+    // an untyped mock is `Mock<Procedure | Constructable>`, which is not one.
+    logger: stub<Helpers["logger"]>({
+      info: vi.fn((_message: string) => undefined),
+      warn: vi.fn((_message: string) => undefined),
+      error: vi.fn((_message: string) => undefined),
+    }),
+  });
 }
 
 afterEach(() => {
@@ -110,6 +123,32 @@ describe("the per-cluster passes", () => {
     });
     await service().apply({ clusterId: CLUSTER }, helpers());
     expect(order).toEqual(["settle", "apply", "create"]);
+  });
+
+  // #407, and the bug that fix nearly shipped with.
+  //
+  // `suggest` can build an index — instant apply (D7) — and it also has a
+  // wall-clock budget, which no build may ever be cut off by. Abandoning the
+  // pass does not stop the index being built; it only stops us recording it,
+  // taking its write-latency baseline and moving it to ACTIVE. So the budget
+  // covers the analysis and the build sits outside it.
+  it("still builds the instant-approved creates after the analysis", async () => {
+    vi.mocked(suggestForCluster).mockResolvedValue({ created: 2, instantApproved: 2 });
+
+    await service().suggest({ clusterId: CLUSTER }, helpers());
+
+    expect(applyCreatesForCluster).toHaveBeenCalledWith(expect.anything(), CLUSTER);
+  });
+
+  // And it must not run one when nothing was auto-approved, which is the
+  // ordinary case: a build is a write to somebody's production database, so it
+  // happens because something asked for it and never just in passing.
+  it("builds nothing when the analysis approved nothing instantly", async () => {
+    vi.mocked(suggestForCluster).mockResolvedValue({ created: 5, instantApproved: 0 });
+
+    await service().suggest({ clusterId: CLUSTER }, helpers());
+
+    expect(applyCreatesForCluster).not.toHaveBeenCalled();
   });
 
   it("asks for a suggest only when the probe found something", async () => {

@@ -1,6 +1,7 @@
 // Nest's route decorators write metadata at class-definition time, and this
 // file constructs the controller directly rather than through Nest — the
 // polyfill still has to exist before the class does.
+import { stub } from "../test-utils";
 import "reflect-metadata";
 import { describe, expect, it, vi } from "vitest";
 import { loadEnv } from "../config/env";
@@ -34,7 +35,7 @@ function makeController(drained = false) {
       drained,
     })),
   };
-  return { controller: new TickController(service as unknown as TickService), service };
+  return { controller: new TickController(stub<TickService>(service)), service };
 }
 
 describe("GET /api/internal/tick", () => {

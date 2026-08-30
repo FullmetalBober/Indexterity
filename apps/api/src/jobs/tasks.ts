@@ -9,7 +9,7 @@ import { TunnelUnavailableError } from "../tunnel/resolve";
 import { ClusterCredentialsError, ClusterGoneError } from "./cluster-connection";
 import type { ClusterTasksService } from "./cluster-tasks.service";
 import { runDigest } from "./digest";
-import { dispatchToAllClusters } from "./dispatch";
+import { clusterRoster, dispatchToAllClusters } from "./dispatch";
 import { pruneOldSamples } from "./retention";
 
 // What a cluster task needs from the outside world, narrowed to three
@@ -28,7 +28,12 @@ export interface ClusterTaskDeps {
    * metric beside every call to this answers an operator watching a gauge; this
    * answers the owner who opens the cluster and finds week-old numbers.
    */
-  readonly markBlocked: (clusterId: string, reason: BlockedReason, detail: string) => Promise<void>;
+  readonly markBlocked: (
+    clusterId: string,
+    task: string,
+    reason: BlockedReason,
+    detail: string,
+  ) => Promise<void>;
   readonly markUnblocked: (clusterId: string) => Promise<void>;
 }
 
@@ -40,14 +45,100 @@ export interface ClusterTaskDeps {
 // which would make graphile-worker burn five retries printing the same stack
 // trace every hour and drown the failures that do need a human. Owners still
 // hear about it, at most once a day.
+// The budget as an owner would say it, because this sentence is one they read:
+// it lands in `blocked_detail` and in the alert mail. "300s" is a setting;
+// "5 minutes" is a length of time.
+function humanBudget(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 120) return seconds === 1 ? "1 second" : `${seconds} seconds`;
+  const minutes = Math.round(seconds / 60);
+  return minutes === 1 ? "1 minute" : `${minutes} minutes`;
+}
+
+/**
+ * A read-only pass abandoned for running past its wall-clock budget (#407).
+ *
+ * Its own type rather than a plain Error so `runClusterTask` can tell it from a
+ * failure: nothing went wrong that a message could describe, and the answer is
+ * different — this one is skipped and retried on the next tick, like an
+ * unreachable cluster, rather than rethrown to be retried immediately and
+ * dead-lettered. Retrying a pass that just ran out of time, immediately, with
+ * the same budget, is the same pass running out of time again.
+ */
+export class PassBudgetExceededError extends Error {
+  constructor(
+    readonly task: string,
+    readonly budgetMs: number,
+  ) {
+    super(`the ${task} pass ran past its ${humanBudget(budgetMs)} budget and was abandoned`);
+    this.name = "PassBudgetExceededError";
+  }
+}
+
+/**
+ * The passes a budget may cut off.
+ *
+ * Read and analyse only: they dial the customer's database, read from it, and
+ * write to OUR tables. Abandoning one loses the work and nothing else, which is
+ * why they can be given a deadline at all.
+ *
+ * `apply` and `finalize` are deliberately absent. They change indexes on the
+ * customer's database and record audit rows with rollback tokens, and a pass cut
+ * off between the change and its record is a change we have half a record of.
+ * They also legitimately take a long time — a large index build is measured in
+ * tens of minutes — so a budget would be wrong twice over. What bounds them is
+ * the per-statement timeout in each adapter, which is its own question (#410).
+ */
+export const BUDGETED_PASSES: ReadonlySet<string> = new Set(["collect", "classify", "probe"]);
+
+// `suggest` is budgeted too, but NOT here — it budgets itself, because only part
+// of it may be. The analysis is bounded; the instant build it can approve (D7)
+// is not, for the same reason `apply` is not in this set at all. Getting that
+// wrong is easy and silent: `suggest` was in this set for one commit, and a
+// budget firing mid-build would have left the index being built while the pass
+// that records it was abandoned. See ClusterTasksService.suggest.
+
+/**
+ * Run a pass against a wall clock, rejecting if it outlasts it.
+ *
+ * **This abandons the pass; it does not stop it.** The work carries on until
+ * whatever it is waiting on gives up on its own — the per-statement timeout, or
+ * the socket. What it frees immediately is the WORKER SLOT, and that is the
+ * failure being fixed: WORKER_CONCURRENCY is 1, so a pass that cannot finish
+ * kept `collect`, `apply`, `probe` and the dispatchers queued behind it for as
+ * long as it went on. Actually cancelling the query means threading an
+ * AbortSignal through all three drivers, which is worth doing and is not this.
+ *
+ * The timer is cleared on both paths, so a fast pass leaves nothing pending that
+ * would hold the event loop open for the rest of the budget.
+ */
+export async function withPassBudget<T>(
+  task: string,
+  budgetMs: number,
+  run: Promise<T>,
+): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new PassBudgetExceededError(task, budgetMs)), budgetMs);
+  });
+  try {
+    return await Promise.race([run, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function runClusterTask(
   task: string,
   clusterId: string,
   deps: ClusterTaskDeps,
   run: (clusterId: string) => Promise<unknown>,
+  budgetMs: number | null = null,
 ): Promise<void> {
   try {
-    await run(clusterId);
+    const pass = run(clusterId);
+    await (budgetMs === null ? pass : withPassBudget(task, budgetMs, pass));
     recordClusterTask(task, clusterId, "ok");
     // A pass that got through clears whatever stopped the last one: the state is
     // "why the pipeline is not running", so it cannot outlive a run.
@@ -68,7 +159,7 @@ export async function runClusterTask(
     // cluster, for the same reason.
     if (error instanceof UnsupportedServerError) {
       recordClusterTask(task, clusterId, "unsupported");
-      await deps.markBlocked(clusterId, "UNSUPPORTED", error.message);
+      await deps.markBlocked(clusterId, task, "UNSUPPORTED", error.message);
       deps.logger.warn(`${task}: cluster ${clusterId} — ${error.message}`);
       if (!(await deps.alertAllowed(`${clusterId}:unsupported`))) return;
       await deps.alertOwners(clusterId, "cluster version not supported", error.message);
@@ -82,7 +173,7 @@ export async function runClusterTask(
     // hunting a firewall that is not the problem.
     if (error instanceof InsecureConnectionError) {
       recordClusterTask(task, clusterId, "insecure");
-      await deps.markBlocked(clusterId, "INSECURE", error.message);
+      await deps.markBlocked(clusterId, task, "INSECURE", error.message);
       deps.logger.warn(`${task}: cluster ${clusterId} — ${error.message}`);
       if (!(await deps.alertAllowed(`${clusterId}:insecure`))) return;
       await deps.alertOwners(
@@ -114,6 +205,7 @@ export async function runClusterTask(
       recordClusterTask(task, clusterId, "tunnel-down");
       await deps.markBlocked(
         clusterId,
+        task,
         "TUNNEL_DOWN",
         "The VPN tunnel this cluster is reached through is not up. The database itself may be " +
           "answering fine; what is not is the gateway.",
@@ -142,8 +234,31 @@ export async function runClusterTask(
     // customer email — log it every tick so it stays visible, and move on.
     if (error instanceof ClusterCredentialsError) {
       recordClusterTask(task, clusterId, "credentials");
-      await deps.markBlocked(clusterId, "CREDENTIALS", error.message);
+      await deps.markBlocked(clusterId, task, "CREDENTIALS", error.message);
       deps.logger.error(`${task}: ${error.message}`);
+      return;
+    }
+    // Ran past its budget (#407). Skipped rather than rethrown, exactly like an
+    // unreachable cluster and for the same reason: graphile-worker would retry
+    // immediately, the retry gets the same budget against the same cluster, and
+    // five attempts later it is dead-lettered having achieved nothing but five
+    // budgets of the only worker slot. The next tick tries again from a clean
+    // start, which is the behaviour that lets the fleet keep moving.
+    if (error instanceof PassBudgetExceededError) {
+      recordClusterTask(task, clusterId, "timed-out");
+      await deps.markBlocked(clusterId, task, "TIMED_OUT", error.message);
+      deps.logger.warn(`${task}: cluster ${clusterId} — ${error.message}`);
+      if (!(await deps.alertAllowed(`${clusterId}:timed-out`))) return;
+      await deps.alertOwners(
+        clusterId,
+        `${task} is taking longer than Indexterity will wait`,
+        `The ${task} step against this cluster ran for longer than its budget and was ` +
+          `abandoned, so it did nothing. Nothing was executed and nothing was lost.\n\n` +
+          `This usually means the cluster is very large, very busy, or reached over a slow ` +
+          `link — the step is not failing so much as not fitting. Whoever runs this ` +
+          `Indexterity can raise the budget (CLUSTER_PASS_BUDGET_MS) if the cluster genuinely ` +
+          `needs longer.`,
+      );
       return;
     }
     if (!isUnreachableError(error)) {
@@ -153,11 +268,11 @@ export async function runClusterTask(
       // Recorded before the rethrow: graphile-worker will retry and eventually
       // dead-letter this, and the owner should not have to wait for that to find
       // out their cluster stopped.
-      await deps.markBlocked(clusterId, "ERROR", messageOf(error));
+      await deps.markBlocked(clusterId, task, "ERROR", messageOf(error));
       throw error;
     }
     recordClusterTask(task, clusterId, "unreachable");
-    await deps.markBlocked(clusterId, "UNREACHABLE", messageOf(error));
+    await deps.markBlocked(clusterId, task, "UNREACHABLE", messageOf(error));
     deps.logger.warn(
       `${task}: cluster ${clusterId} unreachable — skipped, retrying on the next tick`,
     );
@@ -201,19 +316,19 @@ export function createTaskList(db: Database, cluster: ClusterTasksService) {
     probe: (payload: unknown, helpers: JobHelpers): Promise<void> =>
       cluster.probe(payload, helpers),
     scheduleProbe: async (_payload: unknown, helpers: JobHelpers): Promise<void> => {
-      await dispatchToAllClusters(db, "probe", helpers);
+      await dispatchToAllClusters(clusterRoster(db), "probe", helpers);
     },
     scheduleCollect: async (_payload: unknown, helpers: JobHelpers): Promise<void> => {
-      await dispatchToAllClusters(db, "collect", helpers);
+      await dispatchToAllClusters(clusterRoster(db), "collect", helpers);
     },
     scheduleSuggest: async (_payload: unknown, helpers: JobHelpers): Promise<void> => {
-      await dispatchToAllClusters(db, "suggest", helpers);
+      await dispatchToAllClusters(clusterRoster(db), "suggest", helpers);
     },
     scheduleApply: async (_payload: unknown, helpers: JobHelpers): Promise<void> => {
-      await dispatchToAllClusters(db, "apply", helpers);
+      await dispatchToAllClusters(clusterRoster(db), "apply", helpers);
     },
     scheduleFinalize: async (_payload: unknown, helpers: JobHelpers): Promise<void> => {
-      await dispatchToAllClusters(db, "finalize", helpers);
+      await dispatchToAllClusters(clusterRoster(db), "finalize", helpers);
     },
     retention: async (): Promise<void> => {
       await pruneOldSamples(db);

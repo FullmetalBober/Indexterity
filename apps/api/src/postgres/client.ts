@@ -24,10 +24,13 @@ import {
 // Fail fast on unreachable servers, the same budget as the mongo client's
 // server-selection timeout and the mssql connect timeout.
 const CONNECT_TIMEOUT_MS = 5000;
-// One budget per statement. Sized for the slowest thing this adapter runs, which
-// is `CREATE INDEX CONCURRENTLY` on a large table — the undo path for a drop,
-// since PostgreSQL has no reversible hide (#35). Generous for a catalog read and
-// honest about what a concurrent build on a hundred-gigabyte table costs.
+// The budget every statement gets unless it asks for another. NO LONGER sized
+// for a build (#410): a build now raises it for itself through
+// `execute(..., { build: true })`, because one number could not be right for
+// both. This one is what a catalog read, a `pg_stat_statements` sweep or a drop
+// may take — generous for all three, and deliberately not stretched to cover
+// `CREATE INDEX CONCURRENTLY` on a hundred-gigabyte table, which is what it used
+// to be reasoned about as and what made a genuinely long build impossible.
 const STATEMENT_TIMEOUT_MS = 900_000;
 // One session serves one collect at a time, and a pool is opened PER DATABASE
 // here rather than one for the cluster, so this number is multiplied by however

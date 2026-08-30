@@ -32,6 +32,13 @@ export type ClusterTaskOutcome =
   // that is down.
   | "insecure"
   | "gone"
+  // A read-only pass ran past its wall-clock budget and was abandoned (#407).
+  // Its own label rather than "error" for the reason "insecure" has one: the
+  // pass did not fail, it did not fit, and the operator's answer is a budget
+  // rather than a bug. It is also the gauge that says whether the budget is set
+  // somewhere sensible — a cluster reporting this every tick is one whose owner
+  // is getting no recommendations at all.
+  | "timed-out"
   | "error";
 
 // Clusters whose last tick could not reach them. In memory and PER REPLICA,
