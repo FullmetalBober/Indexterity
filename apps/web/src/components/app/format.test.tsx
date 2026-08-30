@@ -1,6 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
+import { present } from "~/lib/at";
 import { renderInApp } from "~/test-utils";
 import {
   badgeVariant,
@@ -116,7 +117,9 @@ describe("dropsOn", () => {
     const answer = dropsOn({ state: "HIDDEN", hiddenAt, observeDays: 7 });
     expect(answer).not.toBeNull();
     // Same millisecond arithmetic, allowing for the clock moving during the test.
-    expect(Math.abs(new Date(answer as string).getTime() - due.getTime())).toBeLessThan(5_000);
+    expect(
+      Math.abs(new Date(present(answer, "the formatted date")).getTime() - due.getTime()),
+    ).toBeLessThan(5_000);
   });
 
   // Only HIDDEN has a due date: a proposal has not started its window, and a

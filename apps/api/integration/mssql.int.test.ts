@@ -1,3 +1,4 @@
+import { present } from "../src/errors/at";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { isRedundantPrefix, parseStoredSpec, rebuildKeys, rebuildOptions } from "../src/analysis";
 import { DatabaseInaccessibleError, type EngineSession, workloadKey } from "../src/engine/ports";
@@ -34,7 +35,7 @@ describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", 
   let session: EngineSession;
 
   beforeAll(async () => {
-    seed = new MssqlConnection(MSSQL_URL as string, OVERRIDES);
+    seed = new MssqlConnection(present(MSSQL_URL, "MSSQL_URL"), OVERRIDES);
     await seed.connect();
     await seed.execute(`IF DB_ID('${DB}') IS NOT NULL DROP DATABASE [${DB}]`);
     await seed.execute(`CREATE DATABASE [${DB}]`);
@@ -114,7 +115,7 @@ describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", 
       await seedWorkload();
       if ((await capturedShapes()) >= 2) break;
     }
-    session = await mssqlAdapter.open(MSSQL_URL as string, OVERRIDES);
+    session = await mssqlAdapter.open(present(MSSQL_URL, "MSSQL_URL"), OVERRIDES);
   }, 120_000);
 
   afterAll(async () => {
@@ -126,11 +127,11 @@ describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", 
   });
 
   it("is detected from the connection string alone", () => {
-    expect(detectEngine(MSSQL_URL as string)).toBe("MSSQL");
+    expect(detectEngine(present(MSSQL_URL, "MSSQL_URL"))).toBe("MSSQL");
   });
 
   it("diagnoses sa as ready and able to apply", async () => {
-    const diagnosis = await mssqlAdapter.diagnose(MSSQL_URL as string, OVERRIDES);
+    const diagnosis = await mssqlAdapter.diagnose(present(MSSQL_URL, "MSSQL_URL"), OVERRIDES);
     expect(diagnosis.reachable).toBe(true);
     expect(diagnosis.ready).toBe(true);
     expect(diagnosis.canApply).toBe(true);
@@ -257,7 +258,7 @@ describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", 
   // diagnose probes, so a cluster we provisioned always diagnoses clean — and
   // the login it creates cannot read a single customer row.
   it("provisions a scoped login that diagnoses clean and cannot read rows", async () => {
-    const admin = await mssqlAdapter.diagnose(MSSQL_URL as string, OVERRIDES);
+    const admin = await mssqlAdapter.diagnose(present(MSSQL_URL, "MSSQL_URL"), OVERRIDES);
     expect(admin.canProvision).toBe(true);
 
     const provision = mssqlAdapter.provisionScopedUser;
@@ -265,8 +266,8 @@ describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", 
     // Deliberately through a string that NAMES an initial database: a
     // server-scoped GRANT is refused outside master (Msg 4621), so provisioning
     // has to reach master itself rather than inherit the caller's context.
-    const scoped = await (provision as NonNullable<typeof provision>)(
-      (MSSQL_URL as string).replace("localhost:1433", `localhost:1433/${DB}`),
+    const scoped = await (present(provision, "provisionScopedUser"))(
+      (present(MSSQL_URL, "MSSQL_URL")).replace("localhost:1433", `localhost:1433/${DB}`),
       OVERRIDES,
     );
     try {
@@ -317,12 +318,10 @@ describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", 
   // refused BY THE SERVER, which is what stops one database being connected
   // twice under two display names.
   it("refuses a second provision against an instance it already provisioned", async () => {
-    const provision = mssqlAdapter.provisionScopedUser as NonNullable<
-      typeof mssqlAdapter.provisionScopedUser
-    >;
-    const first = await provision(MSSQL_URL as string, OVERRIDES);
+    const provision = present(mssqlAdapter.provisionScopedUser, "provisionScopedUser");
+    const first = await provision(present(MSSQL_URL, "MSSQL_URL"), OVERRIDES);
     try {
-      await expect(provision(MSSQL_URL as string, OVERRIDES)).rejects.toThrow(
+      await expect(provision(present(MSSQL_URL, "MSSQL_URL"), OVERRIDES)).rejects.toThrow(
         /already has an Indexterity user/i,
       );
       // And the refusal left the first login alone. This is the half that would
@@ -362,10 +361,8 @@ describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", 
       `CREATE TABLE [${before}].dbo.widgets(id int CONSTRAINT pk_widgets PRIMARY KEY)`,
     );
 
-    const provision = mssqlAdapter.provisionScopedUser as NonNullable<
-      typeof mssqlAdapter.provisionScopedUser
-    >;
-    const scoped = await provision(MSSQL_URL as string, OVERRIDES);
+    const provision = present(mssqlAdapter.provisionScopedUser, "provisionScopedUser");
+    const scoped = await provision(present(MSSQL_URL, "MSSQL_URL"), OVERRIDES);
     const scopedConn = new MssqlConnection(scoped.connectionString, OVERRIDES);
     try {
       await scopedConn.connect();
@@ -416,7 +413,7 @@ describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", 
          GRANT ALTER ANY LOGIN TO [${weak}];
          GRANT VIEW SERVER STATE TO [${weak}]'`,
     );
-    const weakUrl = withMssqlCredentials(MSSQL_URL as string, weak, "W3ak!Pass");
+    const weakUrl = withMssqlCredentials(present(MSSQL_URL, "MSSQL_URL"), weak, "W3ak!Pass");
     try {
       const diagnosis = await mssqlAdapter.diagnose(weakUrl, OVERRIDES);
       expect(diagnosis.canProvision).toBe(false);
@@ -425,7 +422,7 @@ describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", 
       expect(provisionChecks.find((check) => check.key === "controlServer")?.granted).toBe(false);
 
       await expect(
-        (mssqlAdapter.provisionScopedUser as NonNullable<typeof mssqlAdapter.provisionScopedUser>)(
+        (present(mssqlAdapter.provisionScopedUser, "provisionScopedUser"))(
           weakUrl,
           OVERRIDES,
         ),
@@ -533,11 +530,11 @@ describe.skipIf(AG_URL === undefined || AG_SECONDARY_URL === undefined)(
     let agDatabase: string;
 
     beforeAll(async () => {
-      primarySeed = new MssqlConnection(AG_URL as string, OVERRIDES);
+      primarySeed = new MssqlConnection(present(AG_URL, "AG_URL"), OVERRIDES);
       await primarySeed.connect();
       // Read intent: a replica configured ALLOW_CONNECTIONS = READ_ONLY refuses
       // a plain connection outright (Msg 978).
-      secondarySeed = new MssqlConnection(AG_SECONDARY_URL as string, OVERRIDES, {
+      secondarySeed = new MssqlConnection(present(AG_SECONDARY_URL, "AG_SECONDARY_URL"), OVERRIDES, {
         readOnlyIntent: true,
       });
       await secondarySeed.connect();
@@ -554,7 +551,7 @@ describe.skipIf(AG_URL === undefined || AG_SECONDARY_URL === undefined)(
         );
       }
       agDatabase = found;
-      agSession = await mssqlAdapter.open(AG_URL as string, OVERRIDES);
+      agSession = await mssqlAdapter.open(present(AG_URL, "AG_URL"), OVERRIDES);
     }, 120_000);
 
     afterAll(async () => {

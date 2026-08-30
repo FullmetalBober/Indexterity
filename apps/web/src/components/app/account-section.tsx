@@ -56,8 +56,10 @@ export function describeAgent(userAgent: string | null | undefined): string {
           : agent.includes("Linux")
             ? "Linux"
             : null;
-  if (browser === null && platform === null) return "Unknown device";
-  if (browser === null) return platform as string;
+  // Ordered so the compiler can narrow rather than being told to. The old first
+  // line handled both-null and the second then asserted `platform` non-null —
+  // true, and unprovable from where it stood.
+  if (browser === null) return platform ?? "Unknown device";
   if (platform === null) return browser;
   return `${browser} on ${platform}`;
 }

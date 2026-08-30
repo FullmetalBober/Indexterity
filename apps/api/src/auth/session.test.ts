@@ -1,6 +1,7 @@
 import { ORPCError } from "@orpc/server";
 import type { FastifyRequest } from "fastify";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { orpcCode } from "../errors/message";
 import { requireSession, requireUserId, sessionCookiesFor } from "./session";
 
 const getSession = vi.hoisted(() => vi.fn());
@@ -77,7 +78,7 @@ describe("requireSession", () => {
         (error: unknown) => error,
       );
       expect(refused).toBeInstanceOf(ORPCError);
-      expect((refused as ORPCError<string, unknown>).code).toBe("UNAUTHORIZED");
+      expect(orpcCode(refused)).toBe("UNAUTHORIZED");
     }
     expect(getSession).toHaveBeenCalledTimes(1);
   });

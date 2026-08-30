@@ -25,10 +25,11 @@ test.describe("two-factor authentication", () => {
 
     // The manual-entry key doubles as the test's authenticator secret.
     await expect(page.getByText("Can't scan it?")).toBeVisible();
-    const secret = (await page
-      .locator("code", { hasText: /^[A-Z2-7]{16,}$/ })
-      .first()
-      .textContent()) as string;
+    const secret =
+      (await page
+        .locator("code", { hasText: /^[A-Z2-7]{16,}$/ })
+        .first()
+        .textContent()) ?? "";
 
     await page.getByLabel("Authenticator code").fill(totpCode(secret));
     await page.getByRole("button", { name: "Verify" }).click();
@@ -36,10 +37,11 @@ test.describe("two-factor authentication", () => {
 
     // Backup codes appear exactly once; keep one before dismissing them.
     await expect(page.getByText(/only time they are shown/)).toBeVisible();
-    const backupCode = (await page
-      .locator("code", { hasText: /^[a-zA-Z0-9]{5}-[a-zA-Z0-9]{5}$/ })
-      .first()
-      .textContent()) as string;
+    const backupCode =
+      (await page
+        .locator("code", { hasText: /^[a-zA-Z0-9]{5}-[a-zA-Z0-9]{5}$/ })
+        .first()
+        .textContent()) ?? "";
     await page.getByRole("button", { name: "I saved them" }).click();
     await expect(page.getByRole("button", { name: "Turn off two-factor" })).toBeVisible();
 

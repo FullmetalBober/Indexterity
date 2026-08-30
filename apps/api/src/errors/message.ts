@@ -1,3 +1,5 @@
+import { ORPCError } from "@orpc/server";
+
 /**
  * A sentence out of whatever was thrown.
  *
@@ -12,4 +14,21 @@
  */
 export function messageOf(error: unknown): string {
   return error instanceof Error && error.message !== "" ? error.message : String(error);
+}
+
+/**
+ * An oRPC error's code and status, read off a caught `unknown`.
+ *
+ * `(error as ORPCError<string, unknown>).code` compiles and then reads
+ * `undefined` off anything else that was thrown — including the plain Error a
+ * failing assertion is most likely to produce, which is exactly when a test is
+ * trying to tell you something. These check first, so a wrong throw fails as a
+ * wrong throw.
+ */
+export function orpcCode(error: unknown): string | undefined {
+  return error instanceof ORPCError ? error.code : undefined;
+}
+
+export function orpcStatus(error: unknown): number | undefined {
+  return error instanceof ORPCError ? error.status : undefined;
 }

@@ -1,7 +1,7 @@
 import { ORPCError } from "@orpc/server";
 import { describe, expect, it } from "vitest";
 import { DIAL_BUDGET_CODE, DialBudgetService } from "./dial-budget.service";
-import { messageOf } from "./message";
+import { messageOf, orpcCode, orpcStatus } from "./message";
 
 // The upsert is one statement and its arithmetic is the database's (the
 // integration suite exercises that against real postgres, "rate-limits dialing so
@@ -28,8 +28,8 @@ describe("the dial budget", () => {
       .consume("user-1")
       .catch((thrown: unknown) => thrown);
     expect(error).toBeInstanceOf(ORPCError);
-    expect((error as ORPCError<string, unknown>).code).toBe(DIAL_BUDGET_CODE);
-    expect((error as ORPCError<string, unknown>).status).toBe(429);
+    expect(orpcCode(error)).toBe(DIAL_BUDGET_CODE);
+    expect(orpcStatus(error)).toBe(429);
   });
 
   // The whole of #162: "too many connection attempts" left a reader with no way

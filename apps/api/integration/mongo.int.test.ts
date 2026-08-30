@@ -1,3 +1,4 @@
+import { present } from "../src/errors/at";
 import { MongoClient } from "mongodb";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DatabaseInaccessibleError } from "../src/engine/ports";
@@ -31,7 +32,7 @@ describe.skipIf(MONGO_ADMIN_URL === undefined)(
     let collector: MongoIndexCollector;
 
     beforeAll(async () => {
-      admin = new MongoClient(MONGO_ADMIN_URL as string);
+      admin = new MongoClient(present(MONGO_ADMIN_URL, "MONGO_ADMIN_URL"));
       await admin.connect();
       await cleanup();
       // Something to read in each, so an empty list can never be mistaken for a
@@ -56,7 +57,7 @@ describe.skipIf(MONGO_ADMIN_URL === undefined)(
           { role: "readWrite", db: READABLE },
         ],
       });
-      partial = new MongoConnection(scopedConnString(MONGO_ADMIN_URL as string, USER, "probe"));
+      partial = new MongoConnection(scopedConnString(present(MONGO_ADMIN_URL, "MONGO_ADMIN_URL"), USER, "probe"));
       await partial.connect();
       collector = new MongoIndexCollector(partial);
     }, 60_000);

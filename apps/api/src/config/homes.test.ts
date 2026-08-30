@@ -82,7 +82,7 @@ function composeEnv(service: string): Set<string> {
   const end = rest.search(/\n {2}\w[\w-]*:\n/);
   const block = end === -1 ? rest : rest.slice(0, end);
   const names = new Set<string>();
-  for (const match of block.matchAll(/^ {6}([A-Z][A-Z0-9_]*):/gm)) names.add(match[1] as string);
+  for (const match of block.matchAll(/^ {6}([A-Z][A-Z0-9_]*):/gm)) names.add(at(match, 1));
   return names;
 }
 
