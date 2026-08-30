@@ -3498,6 +3498,73 @@ describe("a worker that died holding a queue", () => {
           where queue_name in (${stuckQueue}, ${liveQueue})`,
     );
   });
+
+  // #412: a pass with a wall clock does not need the library's four hours.
+  //
+  // Four hours was right while any pass might legitimately be hours long. Since
+  // #407 a read-only pass gives up after five minutes, so a `collect` lock older
+  // than three budgets is abandoned by definition — and waiting four hours to
+  // say so is what let a day of duplicates pile up in production, because
+  // `add_job`'s dedup silently declines to replace a LOCKED job.
+  //
+  // `apply` keeps the four hours, and must: it has no budget precisely because a
+  // build legitimately runs for tens of minutes (#410).
+  it("frees a budgeted pass sooner than an unbudgeted one", async () => {
+    const utils = await makeWorkerUtils({ connectionString: databaseUrl() });
+    const budgetedQueue = `collect:${clusterId}:budgeted`;
+    const buildQueue = `apply:${clusterId}:build`;
+    let budgetedId: string;
+    let buildId: string;
+    try {
+      budgetedId = (await utils.addJob("collect", { clusterId }, { queueName: budgetedQueue })).id;
+      buildId = (await utils.addJob("apply", { clusterId }, { queueName: buildQueue })).id;
+    } finally {
+      await utils.release();
+    }
+
+    // Twenty minutes: past three five-minute budgets, nowhere near four hours.
+    // The whole point of the change is that these two are now treated apart.
+    const hold = (queue: string, jobId: string) =>
+      db
+        .execute(
+          sql`update graphile_worker._private_job_queues
+              set locked_at = now() - interval '20 minutes', locked_by = 'gone'
+              where queue_name = ${queue}`,
+        )
+        .then(() =>
+          db.execute(
+            sql`update graphile_worker._private_jobs
+                set locked_at = now() - interval '20 minutes', locked_by = 'gone'
+                where id::text = ${jobId}`,
+          ),
+        );
+    await hold(budgetedQueue, budgetedId);
+    await hold(buildQueue, buildId);
+
+    const freed = await releaseStaleLocks(db);
+
+    expect(freed).toContain(budgetedQueue);
+    // The one that would be a real bug to free: a build twenty minutes in is
+    // working, and taking its queue away starts a second one beside it.
+    expect(freed).not.toContain(buildQueue);
+
+    // The job's lock has to follow the queue's, or freeing the queue buys
+    // nothing — the job stays unclaimable on a queue that is now available.
+    const jobs = await db.execute<{ id: string; locked_at: Date | null }>(
+      sql`select id::text as id, locked_at from graphile_worker._private_jobs
+          where id::text in (${budgetedId}, ${buildId})`,
+    );
+    expect(jobs.rows.find((row) => row.id === budgetedId)?.locked_at).toBeNull();
+    expect(jobs.rows.find((row) => row.id === buildId)?.locked_at).not.toBeNull();
+
+    await db.execute(
+      sql`delete from graphile_worker._private_jobs where id::text in (${budgetedId}, ${buildId})`,
+    );
+    await db.execute(
+      sql`delete from graphile_worker._private_job_queues
+          where queue_name in (${budgetedQueue}, ${buildQueue})`,
+    );
+  });
 });
 
 // Which source answers depends on the server, and CI runs the whole matrix.
