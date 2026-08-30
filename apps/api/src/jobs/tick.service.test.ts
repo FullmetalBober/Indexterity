@@ -90,7 +90,16 @@ function makeService() {
   // The pool is only ever compared by identity — the service hands it to
   // runOnce and the assertions check it got THAT one — so a stub of the real Pool
   // says that more honestly than an object with a label on it.
+  // The pool is compared by identity — the service hands it to runOnce and the
+  // assertions check it got THAT one — so a real Pool is not needed and a stub
+  // of the vendor type is the honest way to say "an opaque handle". It is the
+  // one member here that cannot be narrowed: graphile-worker takes a pg Pool.
   const pool = stub<DatabaseService["pool"]>({});
+  // `stub` stays here, and it is the right call rather than a leftover.
+  // TickService uses THREE of DatabaseService's four members (db, pool, rows),
+  // so a port would exclude only onApplicationShutdown — no seam, just a second
+  // name for the same thing. The two implemented below are the two this path
+  // touches; `db` is passed through to claimDuePasses and never reached.
   const database = stub<DatabaseService>({ rows: async <TRow>() => [] as TRow[], pool });
   // The per-cluster passes are a provider now (#354) and this suite mocks the
   // registry that reaches them, so what it hands over only has to satisfy the

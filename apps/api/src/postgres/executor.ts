@@ -6,7 +6,7 @@ import type {
 } from "../engine/ports";
 import { allowUntestedVersions, UnsupportedServerError } from "../engine/version";
 import { splitTableRef } from "./collector";
-import type { PostgresConnection } from "./connection";
+import type { PostgresWriter } from "./connection";
 import {
   CRON_APPLY_CALL_SQL,
   CRON_APPLY_PROBE_PARAMS,
@@ -63,7 +63,7 @@ export function quoteIdent(name: string): string {
 // matters more on this engine than on the other two.
 export class PostgresIndexExecutor implements IndexExecutor {
   constructor(
-    private readonly conn: PostgresConnection,
+    private readonly conn: PostgresWriter,
     private readonly readOnly: boolean,
   ) {}
 

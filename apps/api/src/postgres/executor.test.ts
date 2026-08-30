@@ -1,10 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { stub } from "../test-utils";
+import type { PostgresWriter } from "./connection";
 import { derivedName, HideUnsupportedError, PostgresIndexExecutor, quoteIdent } from "./executor";
 
 // The connection is never reached by any of these: every one is refused before a
 // statement is built, which is the property being asserted.
-const unreachable = stub<ConstructorParameters<typeof PostgresIndexExecutor>[0]>({});
+// Never reached: every call below is refused before a statement is built,
+// which is the property being asserted. So the four methods say so rather than
+// answering — a silent stub would let a refusal that stopped refusing pass.
+const unreachable: PostgresWriter = {
+  query: () => Promise.reject(new Error("no statement should have been built")),
+  execute: () => Promise.reject(new Error("no statement should have been built")),
+  serverIdentity: () => Promise.reject(new Error("no statement should have been built")),
+  serverVersion: () => Promise.reject(new Error("no statement should have been built")),
+};
 
 describe("quoteIdent", () => {
   // Not about trust — every name here comes from the catalog. An index called

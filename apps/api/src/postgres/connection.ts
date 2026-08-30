@@ -51,6 +51,21 @@ const DEFAULT_DATABASE = "postgres";
 // held for the session's life — the same bargain members.ts makes for replicas,
 // for the same reason: a three-database cluster costs three connections rather
 // than three per collect.
+/**
+ * What the executor needs of a Postgres connection: four members.
+ *
+ * The twin of `MssqlWriter`, and separate from the class for the same reason —
+ * a test hands over a complete object rather than claiming a literal IS a
+ * connection. `execute` carries the build flag because the build budget is
+ * asked for per statement (#410).
+ */
+export interface PostgresWriter {
+  query<T>(text: string, params?: readonly unknown[], database?: string): Promise<T[]>;
+  execute(text: string, database?: string, opts?: { build?: boolean }): Promise<void>;
+  serverIdentity(): Promise<PostgresServerIdentity>;
+  serverVersion(): Promise<PostgresServerVersion | null>;
+}
+
 export class PostgresConnection {
   private readonly pools = new Map<string, Pool>();
   private identity: PostgresServerIdentity | null = null;
