@@ -7,7 +7,7 @@ import { isUnreachableError } from "../errors/unreachable";
 import { recordClusterTask } from "../metrics";
 import { TunnelUnavailableError } from "../tunnel/resolve";
 import { ClusterCredentialsError, ClusterGoneError } from "./cluster-connection";
-import type { ClusterTasksService } from "./cluster-tasks.service";
+import type { ClusterPasses } from "./cluster-tasks.service";
 import { runDigest } from "./digest";
 import { clusterRoster, dispatchToAllClusters } from "./dispatch";
 import { pruneOldSamples } from "./retention";
@@ -335,7 +335,7 @@ type TaskHandler = (payload: unknown, helpers: JobHelpers) => Promise<void>;
 
 export function createTaskList(
   db: Database,
-  cluster: ClusterTasksService,
+  cluster: ClusterPasses,
 ): Record<TaskName, TaskHandler> {
   return {
     collect: (payload: unknown, helpers: JobHelpers): Promise<void> =>

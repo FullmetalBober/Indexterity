@@ -6,7 +6,7 @@ import { sql } from "../db";
 import { DatabaseService } from "../db/database.service";
 import { captureError } from "../errors/reporting";
 import { type BurstResult, claimDuePasses } from "./burst";
-import { ClusterTasksService } from "./cluster-tasks.service";
+import { type ClusterPasses, ClusterTasksService } from "./cluster-tasks.service";
 import { releaseStaleLocks } from "./locks";
 import { wireRunnerEvents } from "./runner";
 import { everyMinutes } from "./schedule";
@@ -105,7 +105,7 @@ export class TickService implements BeforeApplicationShutdown {
 
   constructor(
     @Inject(DatabaseService) private readonly database: TickDatabase,
-    clusterTasks: ClusterTasksService,
+    @Inject(ClusterTasksService) clusterTasks: ClusterPasses,
   ) {
     this.taskList = createTaskList(database.db, clusterTasks);
     this.events.on("pool:create", ({ workerPool }) => {

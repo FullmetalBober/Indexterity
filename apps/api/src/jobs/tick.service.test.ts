@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadEnv } from "../config/env";
 import { createDatabase } from "../db/client";
-import type { ClusterTasksService } from "./cluster-tasks.service";
+import type { ClusterPasses } from "./cluster-tasks.service";
 import type { TickDatabase } from "./tick.service";
 import { TICK_INTERVAL_MS, TickService } from "./tick.service";
 
@@ -109,10 +109,28 @@ function makeService() {
     pool,
     rows: async <TRow>() => [] as TRow[],
   };
-  // The per-cluster passes are a provider now (#354) and this suite mocks the
-  // registry that reaches them, so what it hands over only has to satisfy the
-  // constructor.
-  const clusterTasks = {} as ClusterTasksService;
+  // All six passes, implemented — not `{} as ClusterTasksService`, which is a
+  // claim an empty object is a service and was the last one of those left here.
+  //
+  // `ClusterPasses` rather than the class: the service also carries five private
+  // members, and a private field makes a class NOMINALLY typed — no object
+  // literal can satisfy it however complete. The interface is both narrower and
+  // the only one of the two a test can actually implement.
+  //
+  // What implementing it buys is the failure message. This suite never
+  // runs a pass — it drives the tick's claim/drain arithmetic — so each of these
+  // SAYS it was not expected rather than being absent, and a test that starts
+  // reaching one gets a sentence instead of `undefined is not a function`.
+  const notRun = (pass: string) => () =>
+    Promise.reject(new Error(`the ${pass} pass is not exercised by this suite`));
+  const clusterTasks: ClusterPasses = {
+    collect: notRun("collect"),
+    classify: notRun("classify"),
+    suggest: notRun("suggest"),
+    apply: notRun("apply"),
+    finalize: notRun("finalize"),
+    probe: notRun("probe"),
+  };
   return { service: new TickService(database, clusterTasks), pool };
 }
 

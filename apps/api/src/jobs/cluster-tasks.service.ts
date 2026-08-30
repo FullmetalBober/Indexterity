@@ -34,6 +34,24 @@ import { alertClaims } from "./watermark";
 // where "which failures does a pass survive" lives, it is pure, and its own tests
 // need neither a queue nor a database — this class is the wiring that decides
 // WHICH database and WHICH pass, and nothing else.
+/**
+ * The six per-cluster passes, as an interface.
+ *
+ * Narrower than the class in the way that matters: `ClusterTasksService` also
+ * carries five private members, and a private field makes a class NOMINALLY
+ * typed — no object literal can ever satisfy it, however complete. So a test
+ * either constructs the real service and its three dependencies, or asserts
+ * past the compiler. This is the third option.
+ */
+export interface ClusterPasses {
+  collect(payload: unknown, helpers: JobQueue): Promise<void>;
+  classify(payload: unknown, helpers: JobQueue): Promise<void>;
+  suggest(payload: unknown, helpers: JobQueue): Promise<void>;
+  apply(payload: unknown, helpers: JobQueue): Promise<void>;
+  finalize(payload: unknown, helpers: JobQueue): Promise<void>;
+  probe(payload: unknown, helpers: JobQueue): Promise<void>;
+}
+
 /** The one thing the passes ask of the mailer. */
 export interface OwnerAlerts {
   notifyClusterOwners: NotifyService["notifyClusterOwners"];
