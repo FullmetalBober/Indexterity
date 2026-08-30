@@ -1,5 +1,5 @@
 import type { ServerHealth } from "../engine/types";
-import { asNumber, type MssqlConnection } from "./connection";
+import { asNumber } from "./connection";
 
 // The ServerHealth port, mapped onto SQL Server (#205).
 //
@@ -122,9 +122,19 @@ export function toServerHealth(row: HealthRow | undefined): ServerHealth | null 
 // Null when the credentials cannot read the DMVs — the port's "could not read",
 // and every other collector call still works. Not an error path: VIEW SERVER
 // STATE is a grant an operator may reasonably have withheld.
-export async function collectMssqlServerHealth(
-  conn: MssqlConnection,
-): Promise<ServerHealth | null> {
+/**
+ * What this needs of a connection: one read.
+ *
+ * `MssqlConnection` has 22 members and this uses one, so taking the whole class
+ * meant the test had to fake 21 members it never called — and could only do that
+ * by claiming an object with `query` on it WAS a connection. Naming the one
+ * member makes the test's object a complete implementation instead.
+ */
+export interface MssqlReader {
+  query<T>(text: string): Promise<T[]>;
+}
+
+export async function collectMssqlServerHealth(conn: MssqlReader): Promise<ServerHealth | null> {
   try {
     const rows = await conn.query<HealthRow>(HEALTH_SQL);
     return toServerHealth(rows[0]);

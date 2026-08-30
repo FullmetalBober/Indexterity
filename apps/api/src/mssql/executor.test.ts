@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { stub } from "../test-utils";
-import type { MssqlConnection } from "./connection";
+import type { MssqlWriter } from "./connection";
 import { MssqlIndexExecutor } from "./executor";
 
 interface IndexStateRow {
@@ -15,7 +14,7 @@ interface IndexStateRow {
 // statements are recorded so a refusal can assert nothing reached the server.
 function stubConnection(state: IndexStateRow | null, online = true) {
   const executed: string[] = [];
-  const conn = {
+  const conn: MssqlWriter = {
     // Generic, like the real `query<T>`.
     query: <T>() => Promise.resolve((state === null ? [] : [state]) as T[]),
     execute: (text: string) => {
@@ -25,7 +24,7 @@ function stubConnection(state: IndexStateRow | null, online = true) {
     serverVersion: () => Promise.resolve({ major: 16, minor: 0, text: "16.0.4250.1" }),
     supportsOnlineRebuild: () => Promise.resolve(online),
   };
-  return { conn: stub<MssqlConnection>(conn), executed };
+  return { conn, executed };
 }
 
 const plain: IndexStateRow = {

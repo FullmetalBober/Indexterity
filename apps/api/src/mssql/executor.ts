@@ -1,6 +1,6 @@
 import type { CreateIndexOptions, IndexBuildOutcome, IndexExecutor } from "../engine/ports";
 import { UnsupportedServerError } from "../engine/version";
-import { MssqlConnection, qualifiedTable, quoteIdent } from "./connection";
+import { type MssqlWriter, qualifiedTable, quoteIdent } from "./connection";
 import { mssqlVersionRefusal } from "./version";
 
 // The SQL Server write surface. hide/unhide are ALTER INDEX DISABLE/REBUILD —
@@ -21,7 +21,7 @@ import { mssqlVersionRefusal } from "./version";
 //   reach one.
 export class MssqlIndexExecutor implements IndexExecutor {
   constructor(
-    private readonly conn: MssqlConnection,
+    private readonly conn: MssqlWriter,
     private readonly readOnly: boolean,
   ) {}
 

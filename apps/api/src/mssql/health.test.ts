@@ -1,8 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { assessHealth, MSSQL_HEALTH } from "../analysis";
-import { stub } from "../test-utils";
-import type { MssqlConnection } from "./connection";
-import { collectMssqlServerHealth, toServerHealth } from "./health";
+import { collectMssqlServerHealth, type MssqlReader, toServerHealth } from "./health";
 
 // Whatever the counter query returns, as one row. bigint columns arrive from
 // tedious as STRINGS, which is the boundary asNumber exists for and the one way
@@ -21,14 +19,16 @@ function counters(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function stubConn(rows: unknown[] | Error) {
-  return stub<MssqlConnection>({
-    // Generic, like the real `query<T>`. A mock cannot know T, so the rows it
-    // was handed are narrowed to it — the one assertion mocking a generic method
-    // needs, and the reason this fake has to declare the shape at all rather
-    // than `() => Promise<unknown[]>`, which silently is not the same method.
-    query: <T>() => (rows instanceof Error ? Promise.reject(rows) : Promise.resolve(rows as T[])),
-  });
+// A complete MssqlReader, not a fake of a connection. One method, implemented —
+// so there is no `stub`, nothing asserted away, and the only narrowing left is
+// the one any mock of a generic method needs: it cannot know T.
+function reader(rows: unknown[] | Error): MssqlReader {
+  return {
+    query: async <T>() => {
+      if (rows instanceof Error) throw rows;
+      return rows as T[];
+    },
+  };
 }
 
 describe("toServerHealth", () => {
@@ -63,13 +63,13 @@ describe("toServerHealth", () => {
 describe("collectMssqlServerHealth", () => {
   it("returns null rather than throwing when VIEW SERVER STATE is withheld", async () => {
     const health = await collectMssqlServerHealth(
-      stubConn(new Error("The user does not have permission to perform this action.")),
+      reader(new Error("The user does not have permission to perform this action.")),
     );
     expect(health).toBeNull();
   });
 
   it("reads the first row", async () => {
-    const health = await collectMssqlServerHealth(stubConn([counters()]));
+    const health = await collectMssqlServerHealth(reader([counters()]));
     expect(health?.collectionScans).toBe(482);
   });
 });

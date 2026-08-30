@@ -12,14 +12,14 @@ import { DatabaseInaccessibleError } from "../engine/ports";
 import type { IndexKey, IndexSpec, QueryShape, ServerHealth } from "../engine/types";
 import {
   asNumber,
-  MssqlConnection,
+  type MssqlSource,
   qualifiedTable,
   quoteIdent,
   splitCollectionName,
 } from "./connection";
 import { deletePatternsFromPlans } from "./delete-patterns";
 import { collectMssqlServerHealth } from "./health";
-import type { MssqlMemberConnections } from "./members";
+import type { MssqlRoster } from "./members";
 import { type PlanRow, shapesFromPlans } from "./workload";
 
 // Plans read per database and collect. Query Store defaults to a 1GB store —
@@ -186,11 +186,11 @@ function isInaccessibleDatabase(error: unknown): boolean {
 
 export class MssqlIndexCollector implements IndexCollector {
   constructor(
-    private readonly conn: MssqlConnection,
+    private readonly conn: MssqlSource,
     // Absent for a plain connection (diagnose, tests). Present from the
     // session, where an Availability Group's readable secondaries are dialled
     // as members — see mssql/members.ts.
-    private readonly members?: MssqlMemberConnections,
+    private readonly members?: MssqlRoster,
   ) {}
 
   // Also the accessibility probe for a database, which is why it raises
@@ -314,7 +314,7 @@ export class MssqlIndexCollector implements IndexCollector {
   }
 
   private async usageFrom(
-    conn: MssqlConnection,
+    conn: MssqlSource,
     database: string,
     collection: string,
   ): Promise<IndexUsageStat[]> {

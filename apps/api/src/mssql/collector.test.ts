@@ -1,14 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { DatabaseInaccessibleError } from "../engine/ports";
-import { stub } from "../test-utils";
 import {
   indexNamesFromForcedPlan,
   indexNamesFromHintText,
   MssqlIndexCollector,
   toMssqlIndexSpec,
 } from "./collector";
-import type { MssqlConnection } from "./connection";
-import type { MssqlMemberConnections, MssqlMemberDial } from "./members";
+import type { MssqlMemberSource, MssqlSource } from "./connection";
+import type { MssqlMemberDial, MssqlRoster } from "./members";
 
 function row(overrides: Partial<Parameters<typeof toMssqlIndexSpec>[0][number]> = {}) {
   return {
@@ -126,10 +125,15 @@ describe("indexNamesFromForcedPlan", () => {
 // number arrives on the driver's nested `originalError` as often as on the error
 // itself, which is why both are walked.
 describe("listCollectionNames on an inaccessible database", () => {
-  function refusing(error: unknown) {
-    return stub<MssqlConnection>({
+  // A complete MssqlSource. `serverIdentity` and `localReplicaRole` are never
+  // reached on this path and say so by throwing, which is more honest than
+  // asserting them away: if the path changes, the test names what it hit.
+  function refusing(error: unknown): MssqlSource {
+    return {
       query: () => Promise.reject(error),
-    });
+      serverIdentity: () => Promise.reject(new Error("not reached in this test")),
+      localReplicaRole: () => Promise.reject(new Error("not reached in this test")),
+    };
   }
 
   it("raises DatabaseInaccessibleError for Msg 916 on the error itself", async () => {
@@ -178,8 +182,8 @@ function stubMember(
   // could answer "primary " or "PRIMARY" is a fake the collector would never
   // see, and the compiler now says so.
   options: { ops?: number; fails?: boolean; role?: "primary" | "secondary" } = {},
-) {
-  return stub<MssqlConnection>({
+): MssqlMemberSource {
+  return {
     serverIdentity: () =>
       Promise.resolve({
         serverName: name,
@@ -194,14 +198,19 @@ function stubMember(
         ? Promise.reject(new Error("connection lost"))
         : Promise.resolve([{ indexName: "ix_customer", ops: options.ops ?? 0 }] as T[]),
     localReplicaRole: () => Promise.resolve(options.role ?? null),
-  });
+    // The roster owns closing its members; nothing in these tests reaches it.
+    close: async () => {},
+  };
 }
 
-function stubMembers(dials: readonly MssqlMemberDial[]) {
-  return stub<MssqlMemberConnections>({
+// Complete: the collector reads `dials()` and nothing else, and `all()` is here
+// because the interface has it — both implemented, none asserted away.
+// Complete: both methods the collector can reach, neither asserted away.
+function stubMembers(dials: readonly MssqlMemberDial[]): MssqlRoster {
+  return {
     dials: () => Promise.resolve(dials),
-    all: () => Promise.resolve(dials.flatMap((dial) => (dial.connection ? [dial.connection] : []))),
-  });
+    all: async () => dials.flatMap((dial) => (dial.connection ? [dial.connection] : [])),
+  };
 }
 
 describe("MssqlIndexCollector across availability replicas", () => {

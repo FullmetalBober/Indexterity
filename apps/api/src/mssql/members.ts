@@ -5,6 +5,7 @@ import {
 } from "../engine/net-guard";
 import type { DialProxy, TlsOverrides } from "../engine/ports";
 import { parseMssqlConnString, parseRoutingUrl, retargetMssqlConnString } from "./conn-string";
+import type { MssqlMemberSource } from "./connection";
 import { MssqlConnection } from "./connection";
 
 // One replica's dial, kept whether or not it worked — the mssql twin of
@@ -25,7 +26,8 @@ export interface MssqlMemberDial {
   // entry and its usage readings line up.
   readonly host: string;
   readonly state: MssqlMemberState;
-  readonly connection: MssqlConnection | null;
+  // The PORT, not the class: everything downstream only reads from a member.
+  readonly connection: MssqlMemberSource | null;
 }
 
 // Per-replica connections for usage collection.
@@ -41,6 +43,17 @@ export interface MssqlMemberDial {
 //
 // So: ask the instance for its group's replicas and open a direct connection to
 // each of the others. A standalone names none, and costs one cheap query.
+/**
+ * What a collector needs of the roster: the dials, and nothing else.
+ *
+ * `MssqlMemberConnections` is a class that also owns dialling and closing them.
+ * A collector reads the list; saying so lets a test write the whole thing.
+ */
+export interface MssqlRoster {
+  dials(): Promise<readonly MssqlMemberDial[]>;
+  all(): Promise<MssqlMemberSource[]>;
+}
+
 export class MssqlMemberConnections {
   private dialled: MssqlMemberDial[] | null = null;
 
@@ -54,7 +67,7 @@ export class MssqlMemberConnections {
     private readonly route?: TunnelRoute,
   ) {}
 
-  async all(): Promise<MssqlConnection[]> {
+  async all(): Promise<MssqlMemberSource[]> {
     return (await this.dials())
       .map((dial) => dial.connection)
       .filter((conn): conn is MssqlConnection => conn !== null);
