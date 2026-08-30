@@ -34,7 +34,10 @@ const CONN = "mongodb://user:pw@primary.internal:27017/?tls=true";
 function primaryWith(hosts: string[]) {
   return stub<MongoConnection>({
     replicaMembers: () => Promise.resolve(hosts),
-    resolved: () => undefined,
+    // A real ResolvedConnection, because members.ts genuinely calls this — it
+    // reads tls and authSource off it to build each member's direct string. The
+    // fake used to answer `undefined`, which no MongoConnection ever does.
+    resolved: () => ({ tls: false, authSource: null }),
   });
 }
 

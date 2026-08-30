@@ -8,7 +8,7 @@ import {
   toMssqlIndexSpec,
 } from "./collector";
 import type { MssqlConnection } from "./connection";
-import type { MssqlMemberConnections } from "./members";
+import type { MssqlMemberConnections, MssqlMemberDial } from "./members";
 
 function row(overrides: Partial<Parameters<typeof toMssqlIndexSpec>[0][number]> = {}) {
   return {
@@ -172,7 +172,13 @@ describe("listCollectionNames on an inaccessible database", () => {
 // member REPORTS is proven live (integration/mssql.int.test.ts); what is
 // proven here is that every member is asked, tagged with its own name and its
 // own counter start, and that one member falling over loses only itself.
-function stubMember(name: string, options: { ops?: number; fails?: boolean; role?: string } = {}) {
+function stubMember(
+  name: string,
+  // `role` typed as the real method's union rather than `string`: a fake that
+  // could answer "primary " or "PRIMARY" is a fake the collector would never
+  // see, and the compiler now says so.
+  options: { ops?: number; fails?: boolean; role?: "primary" | "secondary" } = {},
+) {
   return stub<MssqlConnection>({
     serverIdentity: () =>
       Promise.resolve({
@@ -181,15 +187,17 @@ function stubMember(name: string, options: { ops?: number; fails?: boolean; role
         engineEdition: 3,
         version: null,
       }),
-    query: () =>
+    // Generic, like the real `query<T>` — a mock cannot know T, so the row it
+    // answers with is narrowed to it.
+    query: <T>() =>
       options.fails === true
         ? Promise.reject(new Error("connection lost"))
-        : Promise.resolve([{ indexName: "ix_customer", ops: options.ops ?? 0 }]),
+        : Promise.resolve([{ indexName: "ix_customer", ops: options.ops ?? 0 }] as T[]),
     localReplicaRole: () => Promise.resolve(options.role ?? null),
   });
 }
 
-function stubMembers(dials: { host: string; state: string; connection: MssqlConnection | null }[]) {
+function stubMembers(dials: readonly MssqlMemberDial[]) {
   return stub<MssqlMemberConnections>({
     dials: () => Promise.resolve(dials),
     all: () => Promise.resolve(dials.flatMap((dial) => (dial.connection ? [dial.connection] : []))),

@@ -1,7 +1,7 @@
 import { ORPCError } from "@orpc/server";
 import { describe, expect, it } from "vitest";
 import type { DatabaseService } from "../db/database.service";
-import { stub } from "../test-utils";
+import { executesRows, stub } from "../test-utils";
 import { DIAL_BUDGET_CODE, DialBudgetService } from "./dial-budget.service";
 
 // The upsert is one statement and its arithmetic is the database's (the
@@ -15,7 +15,9 @@ import { DIAL_BUDGET_CODE, DialBudgetService } from "./dial-budget.service";
 function budgetAt(count: number, secondsLeft: number): DialBudgetService {
   return new DialBudgetService(
     stub<DatabaseService>({
-      db: { execute: async () => ({ rows: [{ count, seconds_left: secondsLeft }] }) },
+      db: stub<DatabaseService["db"]>({
+        execute: executesRows([{ count, seconds_left: secondsLeft }]),
+      }),
     }),
   );
 }
@@ -59,7 +61,7 @@ describe("the dial budget", () => {
   it("lets the dial through when the upsert returned nothing", async () => {
     const empty = new DialBudgetService(
       stub<DatabaseService>({
-        db: { execute: async () => ({ rows: [] }) },
+        db: stub<DatabaseService["db"]>({ execute: executesRows([]) }),
       }),
     );
     await expect(empty.consume("user-1")).resolves.toBeUndefined();

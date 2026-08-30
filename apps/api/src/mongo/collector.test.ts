@@ -1,3 +1,4 @@
+import type { Db, ListCollectionsCursor } from "mongodb";
 import { MongoServerError } from "mongodb";
 import { describe, expect, it } from "vitest";
 import { DatabaseInaccessibleError } from "../engine/ports";
@@ -175,7 +176,14 @@ describe("sumLatencyStats", () => {
 describe("listCollectionNames on an inaccessible database", () => {
   function refusing(error: unknown) {
     return stub<MongoConnection>({
-      db: () => ({ listCollections: () => ({ toArray: () => Promise.reject(error) }) }),
+      // Stubbed at each level rather than one lookalike object: `db` returns a
+      // Db and `listCollections` a cursor, and saying so is what makes the fake
+      // fail if either signature moves.
+      db: () =>
+        stub<Db>({
+          listCollections: () =>
+            stub<ListCollectionsCursor>({ toArray: () => Promise.reject(error) }),
+        }),
     });
   }
 

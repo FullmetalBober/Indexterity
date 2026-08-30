@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadEnv } from "../config/env";
 import type { DatabaseService } from "../db/database.service";
-import { stub } from "../test-utils";
+import { executesRows, stub } from "../test-utils";
 import type { ClusterTasksService } from "./cluster-tasks.service";
 import { TICK_INTERVAL_MS, TickService } from "./tick.service";
 
@@ -87,8 +87,14 @@ function load(flags: { runCronjob: boolean }, extra: Record<string, string> = {}
 }
 
 function makeService() {
-  const pool = { label: "the api pool" };
-  const database = stub<DatabaseService>({ db: { execute: vi.fn() }, pool });
+  // The pool is only ever compared by identity — the service hands it to
+  // runOnce and the assertions check it got THAT one — so a stub of the real Pool
+  // says that more honestly than an object with a label on it.
+  const pool = stub<DatabaseService["pool"]>({});
+  const database = stub<DatabaseService>({
+    db: stub<DatabaseService["db"]>({ execute: executesRows([]) }),
+    pool,
+  });
   // The per-cluster passes are a provider now (#354) and this suite mocks the
   // registry that reaches them, so what it hands over only has to satisfy the
   // constructor.

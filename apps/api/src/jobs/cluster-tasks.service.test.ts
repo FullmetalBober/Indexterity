@@ -1,3 +1,4 @@
+import type { Job } from "graphile-worker";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DatabaseService } from "../db/database.service";
 import type { NotifyService } from "../mail/notify.service";
@@ -58,8 +59,14 @@ type Helpers = Parameters<ClusterTasksService["collect"]>[1] & {
 
 function helpers(): Helpers {
   return stub<Helpers>({
-    addJob: vi.fn(async () => undefined),
-    logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    addJob: vi.fn(async () => stub<Job>({})),
+    // Typed mocks, not bare `vi.fn()`: the Logger's methods take a message, and
+    // an untyped mock is `Mock<Procedure | Constructable>`, which is not one.
+    logger: stub<Helpers["logger"]>({
+      info: vi.fn((_message: string) => undefined),
+      warn: vi.fn((_message: string) => undefined),
+      error: vi.fn((_message: string) => undefined),
+    }),
   });
 }
 

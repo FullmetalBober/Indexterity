@@ -44,10 +44,21 @@ const ROOTS = ["apps", "packages", "scripts", "deploy"];
 const EXTENSIONS = [".ts", ".tsx"];
 const SKIP = new Set(["node_modules", ".git", "dist", ".output", ".turbo", "graphify-out"]);
 
-// Files allowed to say it, and why. **Empty on purpose**: nothing in the repo
-// needed one. An entry here is a decision, not a suppression — see the note
-// above for what it has to come with.
-const ALLOWED = new Set<string>([]);
+// Files allowed to say it, and why. One entry, and it is the shape the rule
+// anticipates: a library whose types cannot express what it does.
+//
+// apps/api/src/test-utils.ts holds two drizzle helpers. `execute` is declared to
+// return `PgRaw<…>` and `select()` a `PgSelectBuilder` — classes with phantom
+// generics, not promises — so a fake resolving to `{ rows }`, which is what
+// every caller awaits, is assignable to neither and does not overlap enough for
+// even a single assertion. Seven test files needed it. Putting it behind two
+// named helpers in one file makes it one reviewed decision instead of seven
+// unexamined ones, and the comment there carries the justification.
+//
+// The real fix is a seam: nothing wants a whole `Database`, only "give me these
+// rows", and a narrow interface would be honestly fakeable. That is a production
+// change and is why this entry is expected to be temporary.
+const ALLOWED = new Set<string>(["apps/api/src/test-utils.ts"]);
 
 // This file, which quotes the form in order to ban it. Kept apart from ALLOWED
 // so that list stays a record of real exceptions rather than of bookkeeping.

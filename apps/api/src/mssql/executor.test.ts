@@ -16,8 +16,8 @@ interface IndexStateRow {
 function stubConnection(state: IndexStateRow | null, online = true) {
   const executed: string[] = [];
   const conn = {
-    executed,
-    query: () => Promise.resolve(state === null ? [] : [state]),
+    // Generic, like the real `query<T>`.
+    query: <T>() => Promise.resolve((state === null ? [] : [state]) as T[]),
     execute: (text: string) => {
       executed.push(text);
       return Promise.resolve();

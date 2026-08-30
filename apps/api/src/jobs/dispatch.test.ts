@@ -1,7 +1,7 @@
-import type { JobHelpers } from "graphile-worker";
+import type { Job, JobHelpers } from "graphile-worker";
 import { describe, expect, it, vi } from "vitest";
 import type { Database } from "../db";
-import { stub } from "../test-utils";
+import { selectsRows, stub } from "../test-utils";
 import { dispatchToAllClusters } from "./dispatch";
 
 const CLUSTERS = [{ id: "cluster-a" }, { id: "cluster-b" }];
@@ -10,16 +10,24 @@ const CLUSTERS = [{ id: "cluster-a" }, { id: "cluster-b" }];
 // module-level jobDb() the function reached for; now the database is an argument,
 // so the fake is a value in the test rather than a rewritten import — which is
 // the whole point of the change that moved it there.
-const db = stub<Database>({
-  select: () => ({ from: () => Promise.resolve(CLUSTERS) }),
-});
+// `from` resolves to the rows, which is what drizzle's builder does when awaited
+// and all `dispatchToAllClusters` uses. Stubbed at both levels so each says what
+// it stands in for.
+const db = stub<Database>({ select: selectsRows(CLUSTERS) });
 vi.mock("../metrics", () => ({ observeClusterFleet: () => undefined }));
 
 function helpers() {
-  const addJob = vi.fn(() => Promise.resolve());
+  // Returns a Job, because AddJobFunction does. The old fake resolved to void,
+  // which is a different function and was only assignable while nothing checked.
+  const addJob = vi.fn(async () => stub<Job>({}));
   return {
     spy: addJob,
-    helpers: stub<JobHelpers>({ addJob, logger: { info: () => undefined } }),
+    // Nested, because `logger` is a graphile-worker Logger rather than an
+    // object that happens to have `info` on it.
+    helpers: stub<JobHelpers>({
+      addJob,
+      logger: stub<JobHelpers["logger"]>({ info: () => undefined }),
+    }),
   };
 }
 

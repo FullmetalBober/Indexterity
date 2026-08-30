@@ -21,7 +21,10 @@ function stub(options: {
         version: null,
       };
     },
-    query: async () => options.replicas ?? [],
+    // Generic, like the real `query<T>`: a fake declaring `async () => Row[]`
+    // is a different method from the one the collector calls, and until this was
+    // checked the difference was invisible.
+    query: async <T>() => (options.replicas ?? []) as T[],
   });
 }
 
