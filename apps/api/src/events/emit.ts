@@ -13,12 +13,33 @@ import { CLUSTER_EVENTS_CHANNEL, type ClusterEventNotification } from "./channel
 // spliced into SQL. Delivery is at commit, and these run in autocommit right
 // after the state they announce, so a listener acting on one always finds the
 // row already changed.
+/**
+ * Somewhere to announce an event.
+ *
+ * One method, and it is what this module actually depends on — not a database.
+ * Stated as a type because that makes the difference testable without pretending:
+ * an object with a `notify` on it IS an EventNotifier, completely, so a test
+ * writes one rather than faking a `Database` it implements four members of.
+ */
+export interface EventNotifier {
+  notify(payload: string): Promise<void>;
+}
+
+/** The real one: postgres, over the shared channel. */
+export function pgNotifier(db: Database): EventNotifier {
+  return {
+    notify: async (payload) => {
+      await db.execute(sql`select pg_notify(${CLUSTER_EVENTS_CHANNEL}, ${payload})`);
+    },
+  };
+}
+
 export async function emitClusterEvent(
-  db: Database,
+  notifier: EventNotifier,
   event: ClusterEventNotification,
 ): Promise<void> {
   try {
-    await db.execute(sql`select pg_notify(${CLUSTER_EVENTS_CHANNEL}, ${JSON.stringify(event)})`);
+    await notifier.notify(JSON.stringify(event));
   } catch {
     // Deliberately silent — see above. The dashboard's staleTime still
     // refetches on its own schedule, so a lost nudge delays freshness rather
@@ -32,11 +53,11 @@ export async function emitClusterEvent(
 // before the contract) is skipped rather than sent as an event no client can
 // interpret.
 export async function emitPassFinished(
-  db: Database,
+  notifier: EventNotifier,
   clusterId: string,
   task: string,
 ): Promise<void> {
   const known = clusterTask.safeParse(task);
   if (!known.success) return;
-  await emitClusterEvent(db, { clusterId, kind: "PASS_FINISHED", task: known.data });
+  await emitClusterEvent(notifier, { clusterId, kind: "PASS_FINISHED", task: known.data });
 }
