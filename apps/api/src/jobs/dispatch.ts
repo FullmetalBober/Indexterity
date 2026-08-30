@@ -25,10 +25,23 @@ export function clusterRoster(db: Database): ClusterRoster {
 }
 
 // Fan a per-cluster data-plane task out to every connected cluster.
+/**
+ * The two things a dispatcher does with graphile-worker's helpers.
+ *
+ * `JobHelpers` is the vendor's whole surface and this uses `addJob` and one
+ * logger method. Naming them is what lets a test hand over a complete object
+ * instead of claiming a two-member literal is a JobHelpers — and the real
+ * helpers satisfy it structurally, so no call site changes.
+ */
+export interface JobQueue {
+  addJob: JobHelpers["addJob"];
+  logger: { info(message: string): void };
+}
+
 export async function dispatchToAllClusters(
   roster: ClusterRoster,
   task: string,
-  helpers: JobHelpers,
+  helpers: JobQueue,
 ): Promise<number> {
   const ids = await roster.ids();
   // The fleet as it stands, so the unreachable gauge forgets a cluster that was

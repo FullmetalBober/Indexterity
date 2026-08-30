@@ -59,8 +59,16 @@ export function enforcesTheSame(original: IndexSpec, replacement: IndexSpec): bo
 // Re-check live Mongo state right before executing a drop (the wiki's
 // Architecture page, Apply pipeline) — the world may have changed since the
 // recommendation was proposed.
+/**
+ * Two of `IndexCollector`'s thirteen members — what a pre-flight actually reads.
+ */
+export interface PreflightSource {
+  listIndexes: IndexCollector["listIndexes"];
+  collectUsage: IndexCollector["collectUsage"];
+}
+
 export async function preflightDrop(
-  collector: IndexCollector,
+  collector: PreflightSource,
   target: DropTarget,
 ): Promise<PreflightResult> {
   const specs = await collector.listIndexes(target.database, target.collection);

@@ -1,4 +1,4 @@
-import { Injectable } from "@nestjs/common";
+import { Inject, Injectable } from "@nestjs/common";
 import type { JobHelpers } from "graphile-worker";
 import { workerEnv } from "../config/env";
 import { DatabaseService } from "../db/database.service";
@@ -34,11 +34,16 @@ import { alertClaims } from "./watermark";
 // where "which failures does a pass survive" lives, it is pure, and its own tests
 // need neither a queue nor a database — this class is the wiring that decides
 // WHICH database and WHICH pass, and nothing else.
+/** The one thing the passes ask of the mailer. */
+export interface OwnerAlerts {
+  notifyClusterOwners: NotifyService["notifyClusterOwners"];
+}
+
 @Injectable()
 export class ClusterTasksService {
   constructor(
     private readonly database: DatabaseService,
-    private readonly notify: NotifyService,
+    @Inject(NotifyService) private readonly notify: OwnerAlerts,
     // Injected and handed down rather than reached for through a module
     // global: this is the one place in the pipeline the container reaches, so
     // it is the one place the dependency can be declared honestly (#353).

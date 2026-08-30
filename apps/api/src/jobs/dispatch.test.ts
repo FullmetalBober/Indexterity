@@ -1,4 +1,4 @@
-import type { Job, JobHelpers } from "graphile-worker";
+import type { Job } from "graphile-worker";
 import { describe, expect, it, vi } from "vitest";
 import { stub } from "../test-utils";
 import { type ClusterRoster, dispatchToAllClusters } from "./dispatch";
@@ -21,12 +21,8 @@ function helpers() {
   const addJob = vi.fn(async () => stub<Job>({}));
   return {
     spy: addJob,
-    // Nested, because `logger` is a graphile-worker Logger rather than an
-    // object that happens to have `info` on it.
-    helpers: stub<JobHelpers>({
-      addJob,
-      logger: stub<JobHelpers["logger"]>({ info: () => undefined }),
-    }),
+    // A complete JobQueue: both members implemented, nothing asserted away.
+    helpers: { addJob, logger: { info: () => undefined } },
   };
 }
 

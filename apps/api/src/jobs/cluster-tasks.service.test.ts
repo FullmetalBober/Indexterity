@@ -1,7 +1,6 @@
 import type { Job } from "graphile-worker";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DatabaseService } from "../db/database.service";
-import type { NotifyService } from "../mail/notify.service";
 import { stub } from "../test-utils";
 import { TunnelRegistry } from "../tunnel/tunnel.registry";
 import { applyCluster } from "./apply";
@@ -43,7 +42,8 @@ function service() {
   const db = {} as DatabaseService["db"];
   return new ClusterTasksService(
     { db } as DatabaseService,
-    stub<NotifyService>({ notifyClusterOwners: vi.fn() }),
+    // A complete OwnerAlerts: one method, implemented.
+    { notifyClusterOwners: vi.fn() },
     // A real registry with no tunnels in it: these tests are about what a task
     // does with a failure, and no cluster here has a tunnel_id.
     new TunnelRegistry(),

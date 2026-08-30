@@ -1,4 +1,4 @@
-import { Injectable } from "@nestjs/common";
+import { Inject, Injectable } from "@nestjs/common";
 import { ORPCError } from "@orpc/server";
 import { sql } from "../db";
 import { DatabaseService } from "../db/database.service";
@@ -34,9 +34,18 @@ export const DIAL_BUDGET_CODE = "DIAL_BUDGET";
 
 // The budget, as a provider (#354). It holds the pool because the count lives in
 // postgres — see the note above for why it is not in memory.
+/**
+ * The one thing the budget asks of the database: rows from one statement.
+ */
+export interface RowReader {
+  rows: DatabaseService["rows"];
+}
+
 @Injectable()
 export class DialBudgetService {
-  constructor(private readonly database: DatabaseService) {}
+  // Token is the class, type is the port — see tick.controller.ts for what a
+  // bare interface costs here (Nest resolves from runtime metadata).
+  constructor(@Inject(DatabaseService) private readonly database: RowReader) {}
 
   // Atomic in a single statement: the window either rolls over or increments, so
   // concurrent requests across replicas cannot both read a stale count.

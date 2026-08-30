@@ -1,8 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { IndexCollector } from "../engine/ports";
 import type { IndexKey, IndexSpec } from "../engine/types";
-import { stub } from "../test-utils";
-import { enforcesTheSame, preflightDrop } from "./preflight";
+import { enforcesTheSame, type PreflightSource, preflightDrop } from "./preflight";
 
 function index(name: string, keys: IndexKey[], overrides: Partial<IndexSpec> = {}): IndexSpec {
   return {
@@ -38,11 +36,12 @@ const DESC = index(
   { unique: true },
 );
 
-function collector(specs: IndexSpec[]): IndexCollector {
-  return stub<IndexCollector>({
+// A complete PreflightSource: both members implemented, nothing asserted away.
+function collector(specs: IndexSpec[]): PreflightSource {
+  return {
     listIndexes: () => Promise.resolve(specs),
     collectUsage: () => Promise.resolve([]),
-  });
+  };
 }
 
 const REORDERED = {
