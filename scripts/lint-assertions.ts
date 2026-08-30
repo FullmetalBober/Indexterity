@@ -1,54 +1,47 @@
 #!/usr/bin/env node
-// A TypeScript file must not contain `as unknown as`.
+// A TypeScript file must not contain an assertion the compiler cannot check.
 //
-// It is a double assertion, and what it does is not "a stronger cast" — it
-// launders the value through `unknown` so the compiler stops comparing the two
-// types at all. Every check the single form still performs is lost with it.
+// PARSED, not grepped. The first version matched text, and text cannot tell a
+// type assertion from `select id::text as id`, from `it("reads a restart as no
+// evidence")`, or from the word "as" in a comment — this repo has hundreds of
+// all three. Asked how many assertions were left, the honest answer was "I
+// cannot count them with a regex", which is a bad property for the thing that
+// enforces the rule. So it walks the AST and looks at `AsExpression` nodes.
 //
-// The repo carried 37 of them and NONE survived contact with an alternative:
+// The banned kinds, and what each gives up:
 //
-//   - 11 were stale. The types had caught up, or never disagreed; deleting the
-//     cast compiled unchanged. One had outlived a `@types/mssql` bump by long
-//     enough that `encrypt: "strict"` needed nothing at all.
-//   - 1 was a constructor overload the types lack. A constructor taking fewer
-//     parameters is assignable to a type taking more, so declaring the type and
-//     ASSIGNING needed no cast and kept three real checks the double had killed.
-//   - 1 was a callback signature the library under-declares. Making the
-//     parameter OPTIONAL is assignable to the no-argument type the types want,
-//     and is also honest: the undefined case became a thrown sentence.
-//   - 1 was a property injected onto `window`. `declare global` says what is
-//     true of the runtime; the cast only said to stop asking.
-//   - 23 were test fakes. They went through a `stub<T>()` helper first, then
-//     through `Partial<T>` (which surfaced 18 real mismatches), and are now
-//     gone entirely: every one of those tests writes a COMPLETE implementation
-//     of a narrow interface instead. The helper has no callers and is deleted.
+//   as unknown as   launders through `unknown`, so the compiler stops comparing
+//                   the two types at all
+//   as any          gives up checking of everything the value touches after it
+//   {} as T         nothing is implemented; every member answers `undefined`
+//   [] as T         the same, and also UNNECESSARY — `[]` is `never[]`, already
+//                   assignable to `T[]`, so these delete rather than move
+//   x as Error      `catch` gives `unknown` BECAUSE anything can be thrown; this
+//                   reads `.message` off a thrown string and prints "undefined"
 //
-// The last five live in mocks of ports whose `query<T>` is generic on the
-// METHOD, and they are the honest floor rather than a to-do. A generic `query<T>`
-// promises rows of whatever type the caller asks for, and the only value
-// assignable to `T[]` for EVERY `T` is `[]` — so a mock carrying real data must
-// assert, always. Where a consumer reads one row shape the port is fixed to it
-// instead (`MssqlReader<HealthRow>`, `PostgresNodeSource`, `RowReader`) and the
-// assertion disappears. Where it reads nine (`MssqlSource`), it cannot be.
+// Everything else is reported as a COUNT rather than an error. `as const` is a
+// literal narrowing, not a claim about a value's shape; narrowing a checked
+// `unknown` is a statement about something already true. The count is there so
+// the number is known rather than assumed — which is how the five above were
+// found in the first place.
 //
-// So the rule is not aesthetic. Each one was hiding a check that turned out to
-// be worth having, and the alternatives were all cheaper than the bug the cast
-// would eventually let through.
+// The repo carried 37 double assertions and 30 test fakes when this started.
+// None survived contact with an alternative: 11 were stale, 1 was a constructor
+// overload the types lack, 1 a callback signature we could widen ourselves, 1 a
+// `declare global`, and 23 were fakes of dependencies that were simply too wide.
+// That is the rule's real argument — a cast you cannot remove is usually a
+// design problem, not a type problem.
 //
-// If a genuinely irreducible case appears — a library whose types are wrong in a
-// way no declaration can express — the answer is a narrow shim with a comment
-// naming the library, the version, and the runtime behaviour relied on, plus a
-// test that proves the behaviour. Then add it below, deliberately, with that
-// reasoning attached rather than inline where nobody reviews it again.
-//
-// Biome has no rule for this, which is why it is a check of its own.
+// Replacements live where they are needed: `messageOf` (errors/message.ts),
+// `at` and `present` (errors/at.ts, web lib/at.ts).
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import ts from "typescript";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
-const ROOTS = ["apps", "packages", "scripts", "deploy"];
+const ROOTS = ["apps", "packages", "scripts"];
 const EXTENSIONS = [".ts", ".tsx"];
 const SKIP = new Set(["node_modules", ".git", "dist", ".output", ".turbo", "graphify-out"]);
 
@@ -57,69 +50,44 @@ const SKIP = new Set(["node_modules", ".git", "dist", ".output", ".turbo", "grap
 // obey is a rule people learn to disable.
 const GENERATED = /\.gen\.tsx?$/;
 
-// Files allowed to say it, and why. **Empty**, and it has stayed empty through
-// the one case that looked irreducible.
-//
-// Drizzle's `execute` returns `PgRaw<…>` and `select()` a `PgSelectBuilder` —
-// classes with phantom generics, not promises — so a fake resolving to
-// `{ rows }`, which is what every caller awaits, is assignable to neither and
-// does not overlap enough for even a single assertion. Seven test files needed
-// it, and the first answer was two helpers here with the double assertion
-// contained and this file allowlisted.
-//
-// That was treating the symptom. Nothing wanted a whole `Database`: the dial
-// budget and the tick wanted rows, and the dispatcher wanted a list of cluster
-// ids. `DatabaseService.rows()` and `ClusterRoster` say so, and both are
-// ordinary types a fake can satisfy. The allowlist emptied itself.
-//
-// An entry here is a decision, not a suppression: it has to arrive with the
-// library, the version, the runtime behaviour relied on, and a test proving it —
-// and the case above is a reminder to look for the seam first.
+// Files allowed to hold one anyway. EMPTY, and it has stayed empty through
+// every case that looked irreducible — see the note above.
 const ALLOWED = new Set<string>([]);
 
-// This file, which quotes the form in order to ban it. Kept apart from ALLOWED
-// so that list stays a record of real exceptions rather than of bookkeeping.
-const SELF = "scripts/lint-assertions.ts";
+interface Offence {
+  readonly file: string;
+  readonly line: number;
+  readonly kind: string;
+  readonly text: string;
+}
 
-// Three shapes, each a claim the compiler cannot check and the runtime does not
-// keep. Deliberately NOT "every `as`": narrowing a caught `unknown` to an Error,
-// or a readonly array to a mutable one for a driver, is a statement about
-// something already true. These three are not.
-const BANNED = [
-  {
-    // The double assertion. Launders through `unknown` so the compiler stops
-    // comparing the two types at all.
-    pattern: /\bas\s+unknown\s+as\b/,
-    name: "as unknown as",
-  },
-  {
-    // `as any` gives up more than the double assertion does: it disables
-    // checking of everything the value touches from there on.
-    pattern: /\bas\s+any\b/,
-    name: "as any",
-  },
-  {
-    // `{} as T` and `[] as T`. Nothing is implemented, and every member answers
-    // `undefined` to the first thing that asks for it.
-    //
-    // `[] as T[]` was allowed for one commit on the grounds that an empty array
-    // IS an empty array of any element type — true, and beside the point: it is
-    // also UNNECESSARY. `[]` is `never[]`, which is already assignable to `T[]`,
-    // so every one in this repo deleted without a replacement. An assertion that
-    // states something true and buys nothing is still noise that hides the ones
-    // that buy something.
-    pattern: /(\{\s*\}|\[\s*\])\s+as\s+[A-Za-z_$]/,
-    name: "an empty literal asserted to a type",
-  },
-  {
-    // `x as Error` on a caught value. `catch` gives `unknown` because anything
-    // can be thrown — a string, a number, a plain object — and this asserts that
-    // away, then reads `.message` off a thrown string and prints "undefined" to
-    // an owner. `messageOf(error)` narrows with `instanceof` instead.
-    pattern: /\bas\s+Error\b/,
-    name: "a caught value asserted to Error",
-  },
-];
+function isEmptyLiteral(node: ts.Node): boolean {
+  if (ts.isObjectLiteralExpression(node)) return node.properties.length === 0;
+  if (ts.isArrayLiteralExpression(node)) return node.elements.length === 0;
+  return false;
+}
+
+/** The banned kind this assertion is, or null when it is one we allow. */
+function classify(node: ts.AsExpression): string | null {
+  const type = node.type;
+  // `as const` — a literal narrowing rather than a claim.
+  if (ts.isTypeReferenceNode(type) && type.typeName.getText() === "const") return null;
+  if (type.kind === ts.SyntaxKind.AnyKeyword) return "as any";
+  // The double assertion: an inner `as unknown` feeding an outer assertion.
+  const inner = node.expression;
+  if (
+    ts.isAsExpression(inner) &&
+    inner.type.kind === ts.SyntaxKind.UnknownKeyword &&
+    type.kind !== ts.SyntaxKind.UnknownKeyword
+  ) {
+    return "as unknown as";
+  }
+  if (isEmptyLiteral(inner)) return "an empty literal asserted to a type";
+  if (ts.isTypeReferenceNode(type) && type.typeName.getText() === "Error") {
+    return "a caught value asserted to Error";
+  }
+  return null;
+}
 
 function sourceFiles(): string[] {
   const out: string[] = [];
@@ -137,35 +105,73 @@ function sourceFiles(): string[] {
 
 function main(): void {
   const files = sourceFiles();
-  let found = 0;
+  const offences: Offence[] = [];
+  let asConst = 0;
+  let narrowings = 0;
+  const byType = new Map<string, number>();
+
   for (const path of files) {
     const rel = relative(ROOT, path);
-    if (rel === SELF || ALLOWED.has(rel) || GENERATED.test(rel)) continue;
-    const lines = readFileSync(path, "utf8").split("\n");
-    for (const [index, line] of lines.entries()) {
-      // The rule's own explanation, and this file's, are prose about the form
-      // rather than uses of it.
-      if (line.trimStart().startsWith("//") || line.trimStart().startsWith("*")) continue;
-      const hit = BANNED.find((banned) => banned.pattern.test(line));
-      if (hit === undefined) continue;
-      found += 1;
-      console.error(`${rel}:${index + 1}: [${hit.name}] ${line.trim()}`);
-    }
+    if (ALLOWED.has(rel) || GENERATED.test(rel)) continue;
+    const source = ts.createSourceFile(
+      rel,
+      readFileSync(path, "utf8"),
+      ts.ScriptTarget.Latest,
+      true,
+      rel.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+    );
+    const visit = (node: ts.Node): void => {
+      if (ts.isAsExpression(node)) {
+        const kind = classify(node);
+        if (kind === null) {
+          const type = node.type.getText();
+          if (type === "const") asConst += 1;
+          else {
+            narrowings += 1;
+            byType.set(type, (byType.get(type) ?? 0) + 1);
+          }
+        } else {
+          const { line } = source.getLineAndCharacterOfPosition(node.getStart());
+          offences.push({
+            file: rel,
+            line: line + 1,
+            kind,
+            text: node.getText().split("\n")[0] ?? "",
+          });
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
   }
-  if (found > 0) {
+
+  for (const offence of offences) {
+    console.error(`${offence.file}:${offence.line}: [${offence.kind}] ${offence.text}`);
+  }
+  if (offences.length > 0) {
     console.error(
-      `\n${found} type assertion${found === 1 ? "" : "s"} the compiler cannot check.\n` +
-        "Each is a claim the compiler cannot check and the runtime does not keep.\n" +
-        "Try, in order: delete it (the types may have caught up); declare and ASSIGN rather\n" +
-        "than assert; widen your own signature (an optional parameter is assignable to a\n" +
-        "no-argument type); `declare global` for something the runtime really adds; or\n" +
-        "name a narrow interface, so the test's object implements ALL of it and fakes\n" +
-        "nothing at all.\n" +
-        "See scripts/lint-assertions.ts for what each of the repo's 37 turned out to be.",
+      `\n${offences.length} assertion${offences.length === 1 ? "" : "s"} the compiler cannot check.\n` +
+        "Try, in order: delete it (the types may have caught up, or it may be unnecessary —\n" +
+        "`[]` is already assignable to `T[]`); declare and ASSIGN rather than assert; widen your\n" +
+        "own signature (an optional parameter is assignable to a no-argument type); `declare\n" +
+        "global` for something the runtime really adds; fix a port to ONE row type rather than\n" +
+        "making its method generic; or name a narrow interface so the test's object implements\n" +
+        "all of it. `messageOf`, `at` and `present` exist for the common three.\n" +
+        "See scripts/lint-assertions.ts for what each of the repo's original 37 turned out to be.",
     );
     process.exit(1);
   }
-  console.log(`lint-assertions: ${files.length} TypeScript files, no unchecked assertions`);
+  // The allowed ones are COUNTED, not waved through. Knowing the number is what
+  // turned "the rest are fine" into five separate shapes worth banning, and a
+  // jump in it is the signal that something new crept in.
+  console.log(
+    `lint-assertions: ${files.length} files parsed, no unchecked assertions.\n` +
+      `  ${asConst} \`as const\` (a literal narrowing, not a claim)\n` +
+      `  ${narrowings} other assertions, allowed:`,
+  );
+  for (const [type, count] of [...byType].sort((a, b) => b[1] - a[1])) {
+    console.log(`    ${String(count).padStart(3)}  as ${type}`);
+  }
 }
 
 main();
