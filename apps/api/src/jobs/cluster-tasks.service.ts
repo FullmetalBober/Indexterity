@@ -2,7 +2,7 @@ import { Injectable } from "@nestjs/common";
 import type { JobHelpers } from "graphile-worker";
 import { workerEnv } from "../config/env";
 import { DatabaseService } from "../db/database.service";
-import { emitPassFinished } from "../events/emit";
+import { emitPassFinished, pgNotifier } from "../events/emit";
 import { ALERT_COOLDOWN_MS, alertAllowed } from "../mail/notify";
 import { NotifyService } from "../mail/notify.service";
 import { TunnelRegistry } from "../tunnel/tunnel.registry";
@@ -165,7 +165,7 @@ export class ClusterTasksService {
         }
       },
       alertAllowed: (scope) => alertAllowed(alertClaims(db), scope, ALERT_COOLDOWN_MS),
-      emitPassFinished: (clusterId, task) => emitPassFinished(db, clusterId, task),
+      emitPassFinished: (clusterId, task) => emitPassFinished(pgNotifier(db), clusterId, task),
       // Not best-effort: this is the only copy of why the pipeline stopped, and a
       // write that fails silently would put the dashboard back to inferring it
       // from staleness. A failure here fails the pass, which is retried.

@@ -31,7 +31,7 @@ vi.mock("./probe", () => ({ probeCluster: vi.fn(async () => []) }));
 // an empty object: what it pins is which pass each queue name runs, not what a
 // pass records about itself (tasks.test.ts owns that).
 vi.mock("./blocked", () => ({ markBlocked: vi.fn(), markUnblocked: vi.fn() }));
-vi.mock("../events/emit", () => ({ emitPassFinished: vi.fn() }));
+vi.mock("../events/emit", () => ({ emitPassFinished: vi.fn(), pgNotifier: vi.fn() }));
 vi.mock("../mail/notify", () => ({
   ALERT_COOLDOWN_MS: 1,
   alertAllowed: vi.fn(async () => false),
