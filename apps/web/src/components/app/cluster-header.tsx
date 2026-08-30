@@ -104,7 +104,9 @@ export function ClusterHeader({ cluster }: { cluster: ClusterIdentity }) {
         // schedule, a quiet cluster and a broken one.
         <Tooltip>
           <TooltipTrigger asChild>
-            <Badge variant="destructive">⚠ {blockedBadge(cluster.blocked.reason)}</Badge>
+            <Badge variant="destructive">
+              ⚠ {blockedBadge(cluster.blocked.reason, cluster.blocked.task)}
+            </Badge>
           </TooltipTrigger>
           <TooltipContent>
             Collection stopped{blocked === null ? "" : ` ${blocked}`}. The banner under this heading

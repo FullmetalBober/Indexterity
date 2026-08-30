@@ -54,6 +54,7 @@ describe("ClusterBlockedBanner", () => {
           reason: "UNREACHABLE",
           since: ago(24 * 7),
           detail: "connect ECONNREFUSED 10.0.0.4:27017",
+          task: null,
         }}
       />,
     );
@@ -69,7 +70,7 @@ describe("ClusterBlockedBanner", () => {
     renderInApp(
       <ClusterBlockedBanner
         clusterId={CLUSTER}
-        block={{ reason: "TUNNEL_DOWN", since: ago(3), detail: "" }}
+        block={{ reason: "TUNNEL_DOWN", since: ago(3), detail: "", task: null }}
       />,
     );
 
@@ -83,7 +84,7 @@ describe("ClusterBlockedBanner", () => {
     renderInApp(
       <ClusterBlockedBanner
         clusterId={CLUSTER}
-        block={{ reason: "INSECURE", since: ago(3), detail: "" }}
+        block={{ reason: "INSECURE", since: ago(3), detail: "", task: null }}
       />,
     );
 
@@ -95,7 +96,7 @@ describe("ClusterBlockedBanner", () => {
     renderInApp(
       <ClusterBlockedBanner
         clusterId={CLUSTER}
-        block={{ reason: "CREDENTIALS", since: ago(3), detail: "" }}
+        block={{ reason: "CREDENTIALS", since: ago(3), detail: "", task: null }}
       />,
     );
 
@@ -106,7 +107,7 @@ describe("ClusterBlockedBanner", () => {
     renderInApp(
       <ClusterBlockedBanner
         clusterId={CLUSTER}
-        block={{ reason: "QUOTA_EXHAUSTED", since: ago(3), detail: "" }}
+        block={{ reason: "QUOTA_EXHAUSTED", since: ago(3), detail: "", task: null }}
       />,
     );
 
@@ -116,11 +117,69 @@ describe("ClusterBlockedBanner", () => {
     expect(screen.getByText(/"QUOTA_EXHAUSTED"/)).toBeInTheDocument();
   });
 
+  // #408: ERROR is the reason a pass lands on when the dial WORKED and the pass
+  // itself did not, so it is the one where naming collection is wrong exactly
+  // when it matters. In production a failing `suggest` was reported as
+  // collection failing and sent the first hour of diagnosis at the wrong pass.
+  it("names the pass that failed rather than assuming collection", () => {
+    renderInApp(
+      <ClusterBlockedBanner
+        clusterId={CLUSTER}
+        block={{ reason: "ERROR", since: ago(3), detail: "socket hang up", task: "suggest" }}
+      />,
+    );
+
+    expect(
+      screen.getByText(/Working out recommendations for this cluster is failing/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Collection against this cluster/)).not.toBeInTheDocument();
+    // And it must not claim collection stopped, because it did not.
+    expect(screen.queryByText(/Nothing has been collected since then/)).not.toBeInTheDocument();
+  });
+
+  it("does say nothing has been collected when collect is the pass that failed", () => {
+    renderInApp(
+      <ClusterBlockedBanner
+        clusterId={CLUSTER}
+        block={{ reason: "ERROR", since: ago(3), detail: "socket hang up", task: "collect" }}
+      />,
+    );
+
+    expect(screen.getByText(/Collecting from this cluster is failing/)).toBeInTheDocument();
+    expect(screen.getByText(/Nothing has been collected since then/)).toBeInTheDocument();
+  });
+
+  // Text, not an enum, so a pass written by a newer worker than this dashboard
+  // has to render as itself — the same rule the unknown REASON follows.
+  it("quotes a pass it has no wording for", () => {
+    renderInApp(
+      <ClusterBlockedBanner
+        clusterId={CLUSTER}
+        block={{ reason: "ERROR", since: ago(3), detail: "boom", task: "reticulate" }}
+      />,
+    );
+
+    expect(screen.getByText(/The reticulate step is failing/)).toBeInTheDocument();
+  });
+
+  // A block written before the column existed. It is still a perfectly good
+  // block and must still render; what it loses is the ability to name the pass.
+  it("falls back to general wording when the block predates the pass column", () => {
+    renderInApp(
+      <ClusterBlockedBanner
+        clusterId={CLUSTER}
+        block={{ reason: "ERROR", since: ago(3), detail: "boom", task: null }}
+      />,
+    );
+
+    expect(screen.getByText(/A step in the pipeline is failing/)).toBeInTheDocument();
+  });
+
   it("omits the detail line when there is nothing in it", () => {
     renderInApp(
       <ClusterBlockedBanner
         clusterId={CLUSTER}
-        block={{ reason: "UNREACHABLE", since: ago(3), detail: "" }}
+        block={{ reason: "UNREACHABLE", since: ago(3), detail: "", task: null }}
       />,
     );
 

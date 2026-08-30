@@ -28,7 +28,12 @@ export interface ClusterTaskDeps {
    * metric beside every call to this answers an operator watching a gauge; this
    * answers the owner who opens the cluster and finds week-old numbers.
    */
-  readonly markBlocked: (clusterId: string, reason: BlockedReason, detail: string) => Promise<void>;
+  readonly markBlocked: (
+    clusterId: string,
+    task: string,
+    reason: BlockedReason,
+    detail: string,
+  ) => Promise<void>;
   readonly markUnblocked: (clusterId: string) => Promise<void>;
 }
 
@@ -68,7 +73,7 @@ export async function runClusterTask(
     // cluster, for the same reason.
     if (error instanceof UnsupportedServerError) {
       recordClusterTask(task, clusterId, "unsupported");
-      await deps.markBlocked(clusterId, "UNSUPPORTED", error.message);
+      await deps.markBlocked(clusterId, task, "UNSUPPORTED", error.message);
       deps.logger.warn(`${task}: cluster ${clusterId} — ${error.message}`);
       if (!(await deps.alertAllowed(`${clusterId}:unsupported`))) return;
       await deps.alertOwners(clusterId, "cluster version not supported", error.message);
@@ -82,7 +87,7 @@ export async function runClusterTask(
     // hunting a firewall that is not the problem.
     if (error instanceof InsecureConnectionError) {
       recordClusterTask(task, clusterId, "insecure");
-      await deps.markBlocked(clusterId, "INSECURE", error.message);
+      await deps.markBlocked(clusterId, task, "INSECURE", error.message);
       deps.logger.warn(`${task}: cluster ${clusterId} — ${error.message}`);
       if (!(await deps.alertAllowed(`${clusterId}:insecure`))) return;
       await deps.alertOwners(
@@ -114,6 +119,7 @@ export async function runClusterTask(
       recordClusterTask(task, clusterId, "tunnel-down");
       await deps.markBlocked(
         clusterId,
+        task,
         "TUNNEL_DOWN",
         "The VPN tunnel this cluster is reached through is not up. The database itself may be " +
           "answering fine; what is not is the gateway.",
@@ -142,7 +148,7 @@ export async function runClusterTask(
     // customer email — log it every tick so it stays visible, and move on.
     if (error instanceof ClusterCredentialsError) {
       recordClusterTask(task, clusterId, "credentials");
-      await deps.markBlocked(clusterId, "CREDENTIALS", error.message);
+      await deps.markBlocked(clusterId, task, "CREDENTIALS", error.message);
       deps.logger.error(`${task}: ${error.message}`);
       return;
     }
@@ -153,11 +159,11 @@ export async function runClusterTask(
       // Recorded before the rethrow: graphile-worker will retry and eventually
       // dead-letter this, and the owner should not have to wait for that to find
       // out their cluster stopped.
-      await deps.markBlocked(clusterId, "ERROR", messageOf(error));
+      await deps.markBlocked(clusterId, task, "ERROR", messageOf(error));
       throw error;
     }
     recordClusterTask(task, clusterId, "unreachable");
-    await deps.markBlocked(clusterId, "UNREACHABLE", messageOf(error));
+    await deps.markBlocked(clusterId, task, "UNREACHABLE", messageOf(error));
     deps.logger.warn(
       `${task}: cluster ${clusterId} unreachable — skipped, retrying on the next tick`,
     );
