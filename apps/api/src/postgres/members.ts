@@ -1,5 +1,5 @@
 import type { ClusterNode } from "../engine/ports";
-import type { PostgresConnection } from "./connection";
+import type { PostgresServerIdentity } from "./connection";
 
 // Every node this collect could see, and how each answered (#100).
 //
@@ -20,8 +20,16 @@ import type { PostgresConnection } from "./connection";
 // that its counters were not included — which is the honest version of #202 on
 // this engine, and better than a roster of one that implies the whole cluster was
 // read.
+/**
+ * Two of a Postgres connection's members: who this node is, and one read.
+ */
+export interface PostgresNodeSource {
+  query<T>(text: string, params?: readonly unknown[], database?: string): Promise<T[]>;
+  serverIdentity(): Promise<PostgresServerIdentity>;
+}
+
 export async function collectPostgresNodes(
-  conn: PostgresConnection,
+  conn: PostgresNodeSource,
 ): Promise<readonly ClusterNode[] | null> {
   try {
     const identity = await conn.serverIdentity();

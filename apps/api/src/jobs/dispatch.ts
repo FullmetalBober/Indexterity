@@ -1,4 +1,4 @@
-import type { JobHelpers } from "graphile-worker";
+import type { TaskSpec } from "graphile-worker";
 import type { Database } from "../db";
 import { clusters } from "../db";
 import { observeClusterFleet } from "../metrics";
@@ -34,8 +34,17 @@ export function clusterRoster(db: Database): ClusterRoster {
  * helpers satisfy it structurally, so no call site changes.
  */
 export interface JobQueue {
-  addJob: JobHelpers["addJob"];
-  logger: { info(message: string): void };
+  // `Promise<unknown>`, not the vendor's `Promise<Job>`: nothing in this repo
+  // reads what addJob returns, and saying so is what lets a test answer with
+  // anything rather than fake a Job it never looks at.
+  addJob(identifier: string, payload?: unknown, options?: TaskSpec): Promise<unknown>;
+  // The three the pipeline calls, and only those. graphile-worker's Logger also
+  // carries `debug` and `scope`, which nothing here uses.
+  logger: {
+    info(message: string): void;
+    warn(message: string): void;
+    error(message: string): void;
+  };
 }
 
 export async function dispatchToAllClusters(

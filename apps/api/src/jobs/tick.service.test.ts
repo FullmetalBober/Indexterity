@@ -1,9 +1,9 @@
 import { EventEmitter } from "node:events";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadEnv } from "../config/env";
-import type { DatabaseService } from "../db/database.service";
-import { stub } from "../test-utils";
+import { createDatabase } from "../db/client";
 import type { ClusterTasksService } from "./cluster-tasks.service";
+import type { TickDatabase } from "./tick.service";
 import { TICK_INTERVAL_MS, TickService } from "./tick.service";
 
 // The drain, as something the tests can hold open. Each runOnce call parks
@@ -86,21 +86,29 @@ function load(flags: { runCronjob: boolean }, extra: Record<string, string> = {}
   });
 }
 
+// A syntactically valid URL nothing dials: the pool is never asked to connect.
+const UNUSED_URL = "postgres://unused:unused@127.0.0.1:1/unused";
+
 function makeService() {
   // The pool is only ever compared by identity — the service hands it to
   // runOnce and the assertions check it got THAT one — so a stub of the real Pool
   // says that more honestly than an object with a label on it.
-  // The pool is compared by identity — the service hands it to runOnce and the
-  // assertions check it got THAT one — so a real Pool is not needed and a stub
-  // of the vendor type is the honest way to say "an opaque handle". It is the
-  // one member here that cannot be narrowed: graphile-worker takes a pg Pool.
-  const pool = stub<DatabaseService["pool"]>({});
-  // `stub` stays here, and it is the right call rather than a leftover.
-  // TickService uses THREE of DatabaseService's four members (db, pool, rows),
-  // so a port would exclude only onApplicationShutdown — no seam, just a second
-  // name for the same thing. The two implemented below are the two this path
-  // touches; `db` is passed through to claimDuePasses and never reached.
-  const database = stub<DatabaseService>({ rows: async <TRow>() => [] as TRow[], pool });
+  // Real objects, not stubs of them, and the reason is the same for both:
+  // neither a pg Pool nor a drizzle client opens a connection until something
+  // queries it. Verified rather than assumed — `new Pool(...)` and
+  // `createDatabase(...)` both return with `totalCount` 0 and no socket — so
+  // constructing them costs nothing and claims nothing.
+  //
+  // Which means this object is a whole DatabaseService rather than a partial
+  // one: `db` and `pool` are the real things, and `rows` is the one member the
+  // tested path answers for. Nothing here is asserted away.
+  const db = createDatabase(UNUSED_URL, 1);
+  const pool = db.$client;
+  const database: TickDatabase = {
+    db,
+    pool,
+    rows: async <TRow>() => [] as TRow[],
+  };
   // The per-cluster passes are a provider now (#354) and this suite mocks the
   // registry that reaches them, so what it hands over only has to satisfy the
   // constructor.

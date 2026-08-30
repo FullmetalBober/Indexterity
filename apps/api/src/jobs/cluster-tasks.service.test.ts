@@ -1,7 +1,5 @@
-import type { Job } from "graphile-worker";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DatabaseService } from "../db/database.service";
-import { stub } from "../test-utils";
 import { TunnelRegistry } from "../tunnel/tunnel.registry";
 import { applyCluster } from "./apply";
 import { settleBuildsForCluster } from "./building";
@@ -11,6 +9,7 @@ import { ClusterGoneError } from "./cluster-connection";
 import { ClusterTasksService } from "./cluster-tasks.service";
 import { collectCluster } from "./collect";
 import { applyCreatesForCluster } from "./create";
+import type { JobQueue } from "./dispatch";
 import { probeCluster } from "./probe";
 import { suggestForCluster } from "./suggest";
 
@@ -52,22 +51,23 @@ function service() {
 
 // The real JobHelpers, plus the two members the assertions reach for. Named
 // rather than inline so `stub` has something to check the literal against.
-type Helpers = Parameters<ClusterTasksService["collect"]>[1] & {
+// A complete JobQueue, plus the mock handles the assertions read back off it.
+// No `stub` and no fake Job: nothing reads what addJob returns, and the port
+// says so.
+type Helpers = JobQueue & {
   addJob: ReturnType<typeof vi.fn>;
   logger: { info: ReturnType<typeof vi.fn> };
 };
 
 function helpers(): Helpers {
-  return stub<Helpers>({
-    addJob: vi.fn(async () => stub<Job>({})),
-    // Typed mocks, not bare `vi.fn()`: the Logger's methods take a message, and
-    // an untyped mock is `Mock<Procedure | Constructable>`, which is not one.
-    logger: stub<Helpers["logger"]>({
+  return {
+    addJob: vi.fn(async () => undefined),
+    logger: {
       info: vi.fn((_message: string) => undefined),
       warn: vi.fn((_message: string) => undefined),
       error: vi.fn((_message: string) => undefined),
-    }),
-  });
+    },
+  };
 }
 
 afterEach(() => {
@@ -83,7 +83,10 @@ describe("the per-cluster passes", () => {
     // DOWN from the one place the container reaches, rather than the pipeline
     // reaching sideways for a module global.
     expect(collectCluster).toHaveBeenCalledWith({}, CLUSTER, expect.any(TunnelRegistry));
-    expect(help.addJob.mock.calls.map((call) => call[0])).toEqual(["classify", "suggest"]);
+    expect(help.addJob.mock.calls.map((call: unknown[]) => call[0])).toEqual([
+      "classify",
+      "suggest",
+    ]);
   });
 
   // Nothing is chased when the collect itself did not land: the enqueue happens

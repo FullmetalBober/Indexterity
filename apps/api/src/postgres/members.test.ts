@@ -1,16 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { stub as fake } from "../test-utils";
-import type { PostgresConnection } from "./connection";
-import { collectPostgresNodes } from "./members";
+import { collectPostgresNodes, type PostgresNodeSource } from "./members";
 
-// A connection stub, because what is being asserted is the roster this file
+// A complete PostgresNodeSource, because what is being asserted is the roster
 // builds from two answers — not the SQL, which the live probe covers.
 function stub(options: {
   inRecovery?: boolean;
   replicas?: { host: string | null; state: string | null }[];
   throws?: boolean;
-}): PostgresConnection {
-  return fake<PostgresConnection>({
+}): PostgresNodeSource {
+  return {
     serverIdentity: async () => {
       if (options.throws === true) throw new Error("unreachable");
       return {
@@ -25,7 +23,7 @@ function stub(options: {
     // is a different method from the one the collector calls, and until this was
     // checked the difference was invisible.
     query: async <T>() => (options.replicas ?? []) as T[],
-  });
+  };
 }
 
 describe("collectPostgresNodes", () => {

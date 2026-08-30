@@ -18,10 +18,10 @@
 //     and is also honest: the undefined case became a thrown sentence.
 //   - 1 was a property injected onto `window`. `declare global` says what is
 //     true of the runtime; the cast only said to stop asking.
-//   - 23 were test fakes, now `stub<T>()` (apps/api/src/test-utils.ts), which
-//     checks the member NAMES against the real type — so a renamed method stops
-//     compiling instead of leaving every fake asserting against a shape nothing
-//     has any more.
+//   - 23 were test fakes. They went through a `stub<T>()` helper first, then
+//     through `Partial<T>` (which surfaced 18 real mismatches), and are now
+//     gone entirely: every one of those tests writes a COMPLETE implementation
+//     of a narrow interface instead. The helper has no callers and is deleted.
 //
 // So the rule is not aesthetic. Each one was hiding a check that turned out to
 // be worth having, and the alternatives were all cheaper than the bug the cast
@@ -107,7 +107,8 @@ function main(): void {
         "Try, in order: delete it (the types may have caught up); declare and ASSIGN rather\n" +
         "than assert; widen your own signature (an optional parameter is assignable to a\n" +
         "no-argument type); `declare global` for something the runtime really adds; or\n" +
-        "`stub<T>()` from apps/api/src/test-utils.ts for a test fake.\n" +
+        "name a narrow interface, so the test's object implements ALL of it and fakes\n" +
+        "nothing at all.\n" +
         "See scripts/lint-assertions.ts for what each of the repo's 37 turned out to be.",
     );
     process.exit(1);

@@ -1,6 +1,4 @@
-import type { Job } from "graphile-worker";
 import { describe, expect, it, vi } from "vitest";
-import { stub } from "../test-utils";
 import { type ClusterRoster, dispatchToAllClusters } from "./dispatch";
 
 const CLUSTERS = [{ id: "cluster-a" }, { id: "cluster-b" }];
@@ -16,13 +14,16 @@ const roster: ClusterRoster = { ids: async () => CLUSTERS.map((cluster) => clust
 vi.mock("../metrics", () => ({ observeClusterFleet: () => undefined }));
 
 function helpers() {
-  // Returns a Job, because AddJobFunction does. The old fake resolved to void,
-  // which is a different function and was only assignable while nothing checked.
-  const addJob = vi.fn(async () => stub<Job>({}));
+  // Nothing reads what addJob returns, and JobQueue says so, so this answers
+  // undefined — no Job to fake.
+  const addJob = vi.fn(async () => undefined);
   return {
     spy: addJob,
     // A complete JobQueue: both members implemented, nothing asserted away.
-    helpers: { addJob, logger: { info: () => undefined } },
+    helpers: {
+      addJob,
+      logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+    },
   };
 }
 
