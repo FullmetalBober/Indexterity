@@ -1,5 +1,6 @@
 import { Injectable, type OnApplicationShutdown } from "@nestjs/common";
-import type { Pool } from "pg";
+import type { SQL } from "drizzle-orm";
+import type { Pool, QueryResultRow } from "pg";
 import { coreEnv, workerEnv } from "../config/env";
 import { drainPool } from "../jobs/connection-pool";
 import { closeDatabase, createDatabase, type Database } from "./client";
@@ -29,6 +30,31 @@ export class DatabaseService implements OnApplicationShutdown {
   // a fresh pool — a connection churn on a 30-second schedule (#229, risk 5).
   get pool(): Pool {
     return this.db.$client;
+  }
+
+  /**
+   * One raw statement, as rows.
+   *
+   * A seam, and a narrow one on purpose. Drizzle's `execute` is declared to
+   * return `PgRaw<…>` — a class with phantom generics, not a promise — so a test
+   * fake resolving to `{ rows }`, which is what every caller here awaits, is
+   * assignable to none of it and does not overlap enough for even a single
+   * assertion. Seven test files were reaching for `as unknown as` to get past
+   * that, and one shared helper to contain it.
+   *
+   * Awaiting inside is what removes the need: `await` unwraps the thenable and
+   * the result is typed, so callers depend on `Promise<TRow[]>` — something a
+   * fake can honestly be. Nothing here wanted a whole Database; it wanted rows.
+   */
+  // `TRow[]`, not drizzle's `Assume<TRow, QueryResultRow>[]`. The two are the
+  // same type — `Assume<T, U>` is `T extends U ? T : U` and TRow is constrained
+  // to QueryResultRow — but TypeScript defers the conditional while TRow is
+  // still a type variable and cannot see it. Returning drizzle's version instead
+  // would compile with no assertion and cost every caller its row types, which
+  // is a worse trade than one narrowing the constraint above already proves.
+  async rows<TRow extends QueryResultRow>(query: SQL): Promise<TRow[]> {
+    const result = await this.db.execute<TRow>(query);
+    return result.rows as TRow[];
   }
 
   async onApplicationShutdown(): Promise<void> {

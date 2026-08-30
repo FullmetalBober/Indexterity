@@ -1,4 +1,5 @@
-import type mssql from "mssql";
+import mssql from "mssql";
+import { workerEnv } from "../config/env";
 import type { TlsOverrides } from "../engine/ports";
 import { type MssqlDialOptions, mssqlPool } from "./client";
 import { type MssqlServerVersion, parseMssqlVersion } from "./version";
@@ -81,6 +82,32 @@ export interface MssqlReplica {
 
 // Owns a driver pool — the mssql twin of MongoConnection. Every query is
 // three-part qualified, so one pool serves every database the login can see.
+// `new Request(parent, { requestTimeout })` — supported by mssql 12.7 at runtime
+// (lib/base/request.js reads the second argument; lib/tedious/request.js applies
+// it with `req.setTimeout`), and MISSING from @types/mssql 12.3, whose three
+// constructor overloads all take one argument.
+//
+// Declared as a type and ASSIGNED rather than asserted, which is not a
+// stylistic preference: a constructor taking fewer parameters is assignable to
+// one taking more, so this needs no cast at all — and unlike `as`, it still
+// checks that `mssql.Request` is constructible, that it accepts a
+// ConnectionPool, and that it returns a Request. The only thing the compiler
+// cannot know is whether the library READS the second argument, and that is
+// what the test asserts by reading the override back off the request.
+//
+// When the types catch up this whole block deletes and the call site is
+// unchanged.
+type RequestWithOverrides = new (
+  pool: mssql.ConnectionPool,
+  overrides: { requestTimeout: number },
+) => mssql.Request;
+
+const RequestCtor: RequestWithOverrides = mssql.Request;
+
+export function buildRequest(pool: mssql.ConnectionPool): mssql.Request {
+  return new RequestCtor(pool, { requestTimeout: workerEnv().INDEX_BUILD_TIMEOUT_MS });
+}
+
 export class MssqlConnection {
   private pool: mssql.ConnectionPool | null = null;
   private identity: MssqlServerIdentity | null = null;
@@ -109,12 +136,22 @@ export class MssqlConnection {
     return result.recordset ?? [];
   }
 
-  // DDL statements (DISABLE/REBUILD/CREATE/DROP INDEX) — no recordset. The
-  // driver has no per-request timeout, so the pool-wide budget in
-  // mssql/client.ts is sized for the slowest legitimate statement (a REBUILD
-  // of a large index), not for a DMV read.
-  async execute(text: string): Promise<void> {
-    await this.livePool().request().query(text);
+  /**
+   * DDL statements (DISABLE/REBUILD/CREATE/DROP INDEX) — no recordset.
+   *
+   * `build` raises the budget for this statement alone (#410). The note that
+   * used to be here said the driver has no per-request timeout, and that is not
+   * true of mssql v12: `new Request(parent, { requestTimeout })` is honoured
+   * (lib/base/request.js, applied in lib/tedious/request.js). So the pool-wide
+   * budget no longer has to be sized for the slowest statement any adapter ever
+   * makes — it can be sized for a DMV read, and a build can ask for what a build
+   * needs.
+   *
+   * A fresh Request per statement either way, which is what the pool is for.
+   */
+  async execute(text: string, opts: { build?: boolean } = {}): Promise<void> {
+    const request = opts.build === true ? buildRequest(this.livePool()) : this.livePool().request();
+    await request.query(text);
   }
 
   // The server describing itself, cached: none of it can change under a live

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { assessHealth, MSSQL_HEALTH } from "../analysis";
+import { stub } from "../test-utils";
 import type { MssqlConnection } from "./connection";
 import { collectMssqlServerHealth, toServerHealth } from "./health";
 
@@ -21,9 +22,13 @@ function counters(overrides: Record<string, unknown> = {}) {
 }
 
 function stubConn(rows: unknown[] | Error) {
-  return {
-    query: () => (rows instanceof Error ? Promise.reject(rows) : Promise.resolve(rows)),
-  } as unknown as MssqlConnection;
+  return stub<MssqlConnection>({
+    // Generic, like the real `query<T>`. A mock cannot know T, so the rows it
+    // was handed are narrowed to it — the one assertion mocking a generic method
+    // needs, and the reason this fake has to declare the shape at all rather
+    // than `() => Promise<unknown[]>`, which silently is not the same method.
+    query: <T>() => (rows instanceof Error ? Promise.reject(rows) : Promise.resolve(rows as T[])),
+  });
 }
 
 describe("toServerHealth", () => {

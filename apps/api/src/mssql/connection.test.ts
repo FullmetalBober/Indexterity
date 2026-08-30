@@ -14,7 +14,7 @@ class Fake extends MssqlConnection {
 
   override async query<T>(text: string): Promise<T[]> {
     this.statements.push(text);
-    return this.rows as unknown as T[];
+    return this.rows as T[];
   }
 }
 

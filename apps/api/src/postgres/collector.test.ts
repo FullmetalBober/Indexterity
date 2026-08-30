@@ -78,7 +78,7 @@ describe("the workload store on an inaccessible database", () => {
   function conn(answer: (database: string) => Promise<unknown[]>) {
     return {
       query: (_text: string, _params: readonly unknown[], database = "") => answer(database),
-    } as unknown as PostgresConnection;
+    } as PostgresConnection;
   }
   const refusal = (code: string) => Object.assign(new Error(`refused ${code}`), { code });
 

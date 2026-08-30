@@ -118,14 +118,14 @@ export class MssqlIndexExecutor implements IndexExecutor {
     const statement = `ALTER INDEX ${quoteIdent(indexName)} ON ${qualifiedTable(database, collection)} REBUILD`;
     if (await this.conn.supportsOnlineRebuild()) {
       try {
-        await this.conn.execute(`${statement} WITH (ONLINE = ON)`);
+        await this.conn.execute(`${statement} WITH (ONLINE = ON)`, { build: true });
         return;
       } catch {
         // Fall through to the offline rebuild — better a blocking unhide than
         // no unhide at all.
       }
     }
-    await this.conn.execute(statement);
+    await this.conn.execute(statement, { build: true });
   }
 
   async drop(database: string, collection: string, indexName: string): Promise<void> {
@@ -187,6 +187,8 @@ export class MssqlIndexExecutor implements IndexExecutor {
     await this.conn.execute(
       `CREATE ${options.unique === true ? "UNIQUE " : ""}NONCLUSTERED INDEX ${quoteIdent(name)} ` +
         `ON ${qualifiedTable(database, collection)} (${keyList})${include}${where}`,
+      // A build, so it gets the build budget rather than the pool's read budget.
+      { build: true },
     );
     // CREATE INDEX returns when the index exists — ONLINE builds included.
     return "BUILT";

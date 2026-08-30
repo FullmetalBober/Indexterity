@@ -1,6 +1,8 @@
+import type { Db, ListCollectionsCursor } from "mongodb";
 import { MongoServerError } from "mongodb";
 import { describe, expect, it } from "vitest";
 import { DatabaseInaccessibleError } from "../engine/ports";
+import { stub } from "../test-utils";
 import {
   dateRangeCutoff,
   equalityConstants,
@@ -173,9 +175,16 @@ describe("sumLatencyStats", () => {
 // read of an ungranted one comes back code 13 / Unauthorized.
 describe("listCollectionNames on an inaccessible database", () => {
   function refusing(error: unknown) {
-    return {
-      db: () => ({ listCollections: () => ({ toArray: () => Promise.reject(error) }) }),
-    } as unknown as MongoConnection;
+    return stub<MongoConnection>({
+      // Stubbed at each level rather than one lookalike object: `db` returns a
+      // Db and `listCollections` a cursor, and saying so is what makes the fake
+      // fail if either signature moves.
+      db: () =>
+        stub<Db>({
+          listCollections: () =>
+            stub<ListCollectionsCursor>({ toArray: () => Promise.reject(error) }),
+        }),
+    });
   }
 
   it("raises DatabaseInaccessibleError for code 13", async () => {
