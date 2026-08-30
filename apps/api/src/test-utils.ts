@@ -1,5 +1,3 @@
-import type { Database } from "./db";
-
 /**
  * A partial object standing in for a whole one, in tests.
  *
@@ -32,35 +30,4 @@ import type { Database } from "./db";
  */
 export function stub<T>(partial: Partial<T>): T {
   return partial as T;
-}
-
-/**
- * Drizzle's own return types, which cannot be faked by shape.
- *
- * `execute` is declared to return `PgRaw<…>` and `select()` a `PgSelectBuilder`
- * whose `.from()` gives a `PgSelectBase` — classes with dozens of members and
- * phantom generics, not promises. A fake that resolves to `{ rows }` is what
- * every caller actually awaits and is assignable to none of it, and there is no
- * declaration that makes it so: the two do not overlap enough for even a single
- * assertion.
- *
- * So the double assertion lives HERE, twice, behind a name — rather than in the
- * seven test files that need it, where each would be an unexamined `as unknown
- * as` and the rule against them would mean nothing. This file is the only entry
- * in `scripts/lint-assertions.ts`'s allowlist, and this comment is the
- * justification that entry is supposed to come with.
- *
- * The real fix is a seam: nothing in `dispatchToAllClusters` or
- * `DialBudgetService` wants a whole `Database`, only "give me these rows", and
- * a narrow interface would be both honestly fakeable and better design. That is
- * a production change and is not this one.
- */
-export function executesRows<T extends Record<string, unknown>>(rows: T[]): Database["execute"] {
-  const result = { rows, rowCount: rows.length, command: "SELECT", oid: 0, fields: [] };
-  return (() => Promise.resolve(result)) as unknown as Database["execute"];
-}
-
-/** The `select().from()` chain, resolving to `rows`. See executesRows. */
-export function selectsRows<T>(rows: T[]): Database["select"] {
-  return (() => ({ from: () => Promise.resolve(rows) })) as unknown as Database["select"];
 }

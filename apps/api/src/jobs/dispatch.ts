@@ -3,17 +3,38 @@ import type { Database } from "../db";
 import { clusters } from "../db";
 import { observeClusterFleet } from "../metrics";
 
+/**
+ * Every connected cluster's id, as a dependency rather than a query.
+ *
+ * A seam, and a narrow one: this function wanted a list of ids and took a whole
+ * `Database` to get one. Drizzle's `select()` returns a `PgSelectBuilder` whose
+ * `.from()` gives a `PgSelectBase` — classes with phantom generics, not
+ * promises — so the only way to fake that argument was to assert past the
+ * compiler entirely. An interface with one method is both honestly fakeable and
+ * a truer statement of what the dispatcher needs.
+ */
+export interface ClusterRoster {
+  ids(): Promise<string[]>;
+}
+
+/** The real one, reading the control plane. */
+export function clusterRoster(db: Database): ClusterRoster {
+  return {
+    ids: async () => (await db.select({ id: clusters.id }).from(clusters)).map((row) => row.id),
+  };
+}
+
 // Fan a per-cluster data-plane task out to every connected cluster.
 export async function dispatchToAllClusters(
-  db: Database,
+  roster: ClusterRoster,
   task: string,
   helpers: JobHelpers,
 ): Promise<number> {
-  const rows = await db.select({ id: clusters.id }).from(clusters);
+  const ids = await roster.ids();
   // The fleet as it stands, so the unreachable gauge forgets a cluster that was
   // offboarded while we could not reach it.
-  observeClusterFleet(rows.map((row) => row.id));
-  for (const row of rows) {
+  observeClusterFleet(ids);
+  for (const id of ids) {
     // Cap retries (5, exponential backoff) and dedup per cluster+task: a slow
     // or failing cluster replaces its pending job instead of piling new ones.
     //
@@ -36,15 +57,15 @@ export async function dispatchToAllClusters(
     // queue behind a collect that walks ten thousand collections.
     await helpers.addJob(
       task,
-      { clusterId: row.id },
+      { clusterId: id },
       {
         maxAttempts: 5,
-        jobKey: `${task}:${row.id}`,
+        jobKey: `${task}:${id}`,
         jobKeyMode: "replace",
-        queueName: `${task}:${row.id}`,
+        queueName: `${task}:${id}`,
       },
     );
   }
-  helpers.logger.info(`scheduler: dispatched ${task} to ${rows.length} cluster(s)`);
-  return rows.length;
+  helpers.logger.info(`scheduler: dispatched ${task} to ${ids.length} cluster(s)`);
+  return ids.length;
 }

@@ -44,21 +44,25 @@ const ROOTS = ["apps", "packages", "scripts", "deploy"];
 const EXTENSIONS = [".ts", ".tsx"];
 const SKIP = new Set(["node_modules", ".git", "dist", ".output", ".turbo", "graphify-out"]);
 
-// Files allowed to say it, and why. One entry, and it is the shape the rule
-// anticipates: a library whose types cannot express what it does.
+// Files allowed to say it, and why. **Empty**, and it has stayed empty through
+// the one case that looked irreducible.
 //
-// apps/api/src/test-utils.ts holds two drizzle helpers. `execute` is declared to
-// return `PgRaw<…>` and `select()` a `PgSelectBuilder` — classes with phantom
-// generics, not promises — so a fake resolving to `{ rows }`, which is what
-// every caller awaits, is assignable to neither and does not overlap enough for
-// even a single assertion. Seven test files needed it. Putting it behind two
-// named helpers in one file makes it one reviewed decision instead of seven
-// unexamined ones, and the comment there carries the justification.
+// Drizzle's `execute` returns `PgRaw<…>` and `select()` a `PgSelectBuilder` —
+// classes with phantom generics, not promises — so a fake resolving to
+// `{ rows }`, which is what every caller awaits, is assignable to neither and
+// does not overlap enough for even a single assertion. Seven test files needed
+// it, and the first answer was two helpers here with the double assertion
+// contained and this file allowlisted.
 //
-// The real fix is a seam: nothing wants a whole `Database`, only "give me these
-// rows", and a narrow interface would be honestly fakeable. That is a production
-// change and is why this entry is expected to be temporary.
-const ALLOWED = new Set<string>(["apps/api/src/test-utils.ts"]);
+// That was treating the symptom. Nothing wanted a whole `Database`: the dial
+// budget and the tick wanted rows, and the dispatcher wanted a list of cluster
+// ids. `DatabaseService.rows()` and `ClusterRoster` say so, and both are
+// ordinary types a fake can satisfy. The allowlist emptied itself.
+//
+// An entry here is a decision, not a suppression: it has to arrive with the
+// library, the version, the runtime behaviour relied on, and a test proving it —
+// and the case above is a reminder to look for the seam first.
+const ALLOWED = new Set<string>([]);
 
 // This file, which quotes the form in order to ban it. Kept apart from ALLOWED
 // so that list stays a record of real exceptions rather than of bookkeeping.

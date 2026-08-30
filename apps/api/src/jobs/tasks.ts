@@ -9,7 +9,7 @@ import { TunnelUnavailableError } from "../tunnel/resolve";
 import { ClusterCredentialsError, ClusterGoneError } from "./cluster-connection";
 import type { ClusterTasksService } from "./cluster-tasks.service";
 import { runDigest } from "./digest";
-import { dispatchToAllClusters } from "./dispatch";
+import { clusterRoster, dispatchToAllClusters } from "./dispatch";
 import { pruneOldSamples } from "./retention";
 
 // What a cluster task needs from the outside world, narrowed to three
@@ -316,19 +316,19 @@ export function createTaskList(db: Database, cluster: ClusterTasksService) {
     probe: (payload: unknown, helpers: JobHelpers): Promise<void> =>
       cluster.probe(payload, helpers),
     scheduleProbe: async (_payload: unknown, helpers: JobHelpers): Promise<void> => {
-      await dispatchToAllClusters(db, "probe", helpers);
+      await dispatchToAllClusters(clusterRoster(db), "probe", helpers);
     },
     scheduleCollect: async (_payload: unknown, helpers: JobHelpers): Promise<void> => {
-      await dispatchToAllClusters(db, "collect", helpers);
+      await dispatchToAllClusters(clusterRoster(db), "collect", helpers);
     },
     scheduleSuggest: async (_payload: unknown, helpers: JobHelpers): Promise<void> => {
-      await dispatchToAllClusters(db, "suggest", helpers);
+      await dispatchToAllClusters(clusterRoster(db), "suggest", helpers);
     },
     scheduleApply: async (_payload: unknown, helpers: JobHelpers): Promise<void> => {
-      await dispatchToAllClusters(db, "apply", helpers);
+      await dispatchToAllClusters(clusterRoster(db), "apply", helpers);
     },
     scheduleFinalize: async (_payload: unknown, helpers: JobHelpers): Promise<void> => {
-      await dispatchToAllClusters(db, "finalize", helpers);
+      await dispatchToAllClusters(clusterRoster(db), "finalize", helpers);
     },
     retention: async (): Promise<void> => {
       await pruneOldSamples(db);

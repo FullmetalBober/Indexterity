@@ -41,7 +41,7 @@ export class DialBudgetService {
   // Atomic in a single statement: the window either rolls over or increments, so
   // concurrent requests across replicas cannot both read a stale count.
   async consume(userId: string): Promise<void> {
-    const result = await this.database.db.execute<{ count: number; seconds_left: number }>(sql`
+    const rows = await this.database.rows<{ count: number; seconds_left: number }>(sql`
       insert into dial_budgets (user_id, count, reset_at)
       values (${userId}, 1, now() + make_interval(secs => ${WINDOW_SECONDS}))
       on conflict (user_id) do update set
@@ -52,7 +52,7 @@ export class DialBudgetService {
         end
       returning count, ceil(extract(epoch from (reset_at - now())))::int as seconds_left
     `);
-    const row = result.rows[0];
+    const row = rows[0];
     if (row === undefined) return;
     if (Number(row.count) > MAX_DIALS) {
       const seconds = Math.max(1, Number(row.seconds_left));
@@ -73,6 +73,6 @@ export class DialBudgetService {
   // reach for raw SQL, but it is dead weight and worth deleting if it stays that
   // way.
   async reset(): Promise<void> {
-    await this.database.db.execute(sql`delete from dial_budgets`);
+    await this.database.rows(sql`delete from dial_budgets`);
   }
 }
