@@ -1,6 +1,7 @@
 import { ORPCError } from "@orpc/server";
 import { describe, expect, it } from "vitest";
 import { DIAL_BUDGET_CODE, DialBudgetService } from "./dial-budget.service";
+import { messageOf } from "./message";
 
 // The upsert is one statement and its arithmetic is the database's (the
 // integration suite exercises that against real postgres, "rate-limits dialing so
@@ -37,7 +38,7 @@ describe("the dial budget", () => {
     const error = await budgetAt(11, 41)
       .consume("user-1")
       .catch((thrown: unknown) => thrown);
-    expect((error as Error).message).toBe(
+    expect(messageOf(error)).toBe(
       "connection attempts are limited to 10 every 60s per account — try again in 41s",
     );
   });
@@ -48,13 +49,13 @@ describe("the dial budget", () => {
     const error = await budgetAt(11, 0)
       .consume("user-1")
       .catch((thrown: unknown) => thrown);
-    expect((error as Error).message).toContain("try again in 1s");
+    expect(messageOf(error)).toContain("try again in 1s");
   });
 
   // A budget row that did not come back is not evidence of a spent budget. The
   // guard behind this one is the network guard, not this count.
   it("lets the dial through when the upsert returned nothing", async () => {
-    const empty = new DialBudgetService({ rows: async <TRow>() => [] as TRow[] });
+    const empty = new DialBudgetService({ rows: async <TRow>(): Promise<TRow[]> => [] });
     await expect(empty.consume("user-1")).resolves.toBeUndefined();
   });
 });

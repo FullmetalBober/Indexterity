@@ -11,6 +11,7 @@ import type { TunnelRoute } from "../engine/net-guard";
 import { type DialProxy, NO_TLS_OVERRIDES, type ProvisionedUser } from "../engine/ports";
 import { ProvisionDeniedError } from "../engine/provision";
 import { adapterFor, detectEngine, supportedEngineOptions } from "../engine/registry";
+import { messageOf } from "../errors/message";
 import { mapClusterError, toCluster, toDiagnosis } from "../http/mappers";
 import { TenancyService } from "../http/tenancy.service";
 import { ClusterGoneError, unsealCluster } from "../jobs/cluster-connection";
@@ -814,7 +815,7 @@ export class ClustersController {
       // which one beats "unreachable" — the owner would otherwise go looking at
       // the database.
       throw errors.BAD_REQUEST({
-        message: `the tunnel could not be brought up: ${(error as Error).message}`,
+        message: `the tunnel could not be brought up: ${messageOf(error)}`,
       });
     }
   }

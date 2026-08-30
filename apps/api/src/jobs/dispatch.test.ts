@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { type ClusterRoster, dispatchToAllClusters } from "./dispatch";
+import { at, present } from "../errors/at";
+import { type ClusterRoster, dispatchToAllClusters, type JobQueue } from "./dispatch";
 
 const CLUSTERS = [{ id: "cluster-a" }, { id: "cluster-b" }];
 
@@ -14,9 +15,11 @@ const roster: ClusterRoster = { ids: async () => CLUSTERS.map((cluster) => clust
 vi.mock("../metrics", () => ({ observeClusterFleet: () => undefined }));
 
 function helpers() {
-  // Nothing reads what addJob returns, and JobQueue says so, so this answers
-  // undefined — no Job to fake.
-  const addJob = vi.fn(async () => undefined);
+  // Typed to the port's own signature, so `spy.mock.calls` is a typed tuple and
+  // the assertions below read `call[2]` without asserting anything about it.
+  // Nothing reads what addJob RETURNS, and JobQueue says so, so it answers
+  // undefined — there is no Job to fake either.
+  const addJob = vi.fn<JobQueue["addJob"]>(async () => undefined);
   return {
     spy: addJob,
     // A complete JobQueue: both members implemented, nothing asserted away.
@@ -32,7 +35,7 @@ describe("dispatchToAllClusters", () => {
     const { spy, helpers: h } = helpers();
     await expect(dispatchToAllClusters(roster, "collect", h)).resolves.toBe(2);
     expect(spy).toHaveBeenCalledTimes(2);
-    expect(spy.mock.calls.map((call) => (call as unknown[])[1])).toEqual([
+    expect(spy.mock.calls.map((call) => call[1])).toEqual([
       { clusterId: "cluster-a" },
       { clusterId: "cluster-b" },
     ]);
@@ -49,7 +52,7 @@ describe("dispatchToAllClusters", () => {
     const { spy, helpers: h } = helpers();
     await dispatchToAllClusters(roster, "collect", h);
 
-    const options = spy.mock.calls.map((call) => (call as unknown[])[2] as Record<string, unknown>);
+    const options = spy.mock.calls.map((call) => present(call[2], "the job options"));
     expect(options.map((o) => o.queueName)).toEqual(["collect:cluster-a", "collect:cluster-b"]);
     // Two clusters must NOT share a queue, or one slow cluster stalls the fleet.
     expect(new Set(options.map((o) => o.queueName)).size).toBe(2);
@@ -62,7 +65,7 @@ describe("dispatchToAllClusters", () => {
     await dispatchToAllClusters(roster, "probe", probe.helpers);
 
     const queueOf = (spy: ReturnType<typeof helpers>["spy"]) =>
-      (spy.mock.calls[0] as unknown[])[2] as Record<string, unknown>;
+      present(at(spy.mock.calls)[2], "the job options");
     expect(queueOf(collect.spy).queueName).toBe("collect:cluster-a");
     expect(queueOf(probe.spy).queueName).toBe("probe:cluster-a");
     // The five-minute probe must not queue behind a collect walking ten thousand
@@ -73,7 +76,7 @@ describe("dispatchToAllClusters", () => {
   it("still dedupes a pending job rather than piling them up", async () => {
     const { spy, helpers: h } = helpers();
     await dispatchToAllClusters(roster, "collect", h);
-    const options = (spy.mock.calls[0] as unknown[])[2] as Record<string, unknown>;
+    const options = present(at(spy.mock.calls)[2], "the job options");
     expect(options.jobKey).toBe("collect:cluster-a");
     expect(options.jobKeyMode).toBe("replace");
     expect(options.maxAttempts).toBe(5);

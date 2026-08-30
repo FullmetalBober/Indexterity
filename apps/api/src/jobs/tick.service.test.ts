@@ -107,7 +107,7 @@ function makeService() {
   const database: TickDatabase = {
     db,
     pool,
-    rows: async <TRow>() => [] as TRow[],
+    rows: async <TRow>(): Promise<TRow[]> => [],
   };
   // All six passes, implemented — not `{} as ClusterTasksService`, which is a
   // claim an empty object is a service and was the last one of those left here.

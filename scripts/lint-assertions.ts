@@ -91,14 +91,25 @@ const BANNED = [
     name: "as any",
   },
   {
-    // `{} as T`. The purest form: nothing is implemented, and every member
-    // answers `undefined` to the first thing that asks for it.
+    // `{} as T` and `[] as T`. Nothing is implemented, and every member answers
+    // `undefined` to the first thing that asks for it.
     //
-    // `[] as T[]` is deliberately NOT here. An empty array IS an empty array of
-    // any element type, so that assertion states something true — the rule is
-    // about claims the runtime does not keep, not about the `as` keyword.
-    pattern: /\{\s*\}\s+as\s+[A-Za-z_$]/,
-    name: "an empty object asserted to a type",
+    // `[] as T[]` was allowed for one commit on the grounds that an empty array
+    // IS an empty array of any element type — true, and beside the point: it is
+    // also UNNECESSARY. `[]` is `never[]`, which is already assignable to `T[]`,
+    // so every one in this repo deleted without a replacement. An assertion that
+    // states something true and buys nothing is still noise that hides the ones
+    // that buy something.
+    pattern: /(\{\s*\}|\[\s*\])\s+as\s+[A-Za-z_$]/,
+    name: "an empty literal asserted to a type",
+  },
+  {
+    // `x as Error` on a caught value. `catch` gives `unknown` because anything
+    // can be thrown — a string, a number, a plain object — and this asserts that
+    // away, then reads `.message` off a thrown string and prints "undefined" to
+    // an owner. `messageOf(error)` narrows with `instanceof` instead.
+    pattern: /\bas\s+Error\b/,
+    name: "a caught value asserted to Error",
   },
 ];
 

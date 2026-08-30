@@ -1,6 +1,7 @@
 import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { at } from "~/lib/at";
 import { authOk, renderInApp } from "~/test-utils";
 import { AccountSection, describeAgent } from "./account-section";
 
@@ -290,14 +291,14 @@ describe("two-factor", () => {
     renderSection({ me: { ...me, user: { ...me.user, twoFactorEnabled: true } } });
 
     const gates = screen.getAllByLabelText("Your password");
-    await user.type(gates[0] as HTMLElement, "hunter2-ok");
+    await user.type(at(gates), "hunter2-ok");
     await user.click(screen.getByRole("button", { name: "Regenerate backup codes" }));
     expect(generateBackupCodes).toHaveBeenCalledWith({ password: "hunter2-ok" });
     expect(await screen.findByText("aaaaa11111")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "I saved them" }));
 
     const gatesAgain = screen.getAllByLabelText("Your password");
-    await user.type(gatesAgain[1] as HTMLElement, "hunter2-ok");
+    await user.type(at(gatesAgain, 1), "hunter2-ok");
     await user.click(screen.getByRole("button", { name: "Turn off two-factor" }));
     expect(disableTwoFactor).toHaveBeenCalledWith({ password: "hunter2-ok" });
   });

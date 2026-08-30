@@ -4,6 +4,7 @@ import type { FastifyRequest } from "fastify";
 import { AuditService } from "../audit/audit.service";
 import type { SecurityEventDetails } from "../audit/audit.types";
 import { RequestActorService } from "../audit/request-actor.service";
+import { messageOf } from "../errors/message";
 import { TenancyService } from "../http/tenancy.service";
 import { Implement, route } from "../orpc/implement";
 import { InvalidWireGuardConfError } from "./conf";
@@ -176,7 +177,7 @@ export class TunnelController {
           // gateway address the network guard refuses outright. Both are facts
           // about the config, so neither is dressed up as "unreachable".
           throw errors.BAD_REQUEST({
-            message: `this tunnel could not be brought up: ${(error as Error).message}`,
+            message: `this tunnel could not be brought up: ${messageOf(error)}`,
           });
         }
       },

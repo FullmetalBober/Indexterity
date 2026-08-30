@@ -2,6 +2,7 @@ import type { ClusterNodes, IndexUsage, Recommendation } from "@repo/contracts";
 import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { at } from "~/lib/at";
 import { renderInApp } from "~/test-utils";
 import { RecommendationsTable } from "./recommendations-table";
 
@@ -410,8 +411,8 @@ describe("RecommendationsTable, the per-node usage split", () => {
         roster={{
           ...ROSTER,
           nodes: [
-            ROSTER.nodes[0] as ClusterNodes["nodes"][number],
-            ROSTER.nodes[1] as ClusterNodes["nodes"][number],
+            at(ROSTER.nodes) as ClusterNodes["nodes"][number],
+            at(ROSTER.nodes, 1) as ClusterNodes["nodes"][number],
             { host: "c:27017", role: "unknown", state: "unreachable" },
           ],
         }}

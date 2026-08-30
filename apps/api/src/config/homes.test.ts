@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { at } from "../errors/at";
 import { declaredVars, type ProcessName, requiredVars } from "./schema";
 
 // A new variable has four homes, and nothing checks any of them. `.env.example`
@@ -59,7 +60,7 @@ function envNamesIn(text: string): Set<string> {
   for (const match of text.matchAll(
     /^[\t ]*-[\t ]*name:[\t ]*([A-Z][A-Z0-9_]*)(\{\{[^}]*\}\})?/gm,
   )) {
-    names.add(match[2] === undefined ? (match[1] as string) : `${match[1]}1`);
+    names.add(match[2] === undefined ? at(match, 1) : `${match[1]}1`);
   }
   return names;
 }
@@ -90,7 +91,7 @@ function exampleEnv(): Set<string> {
   // Commented-out entries count: `# RATE_LIMIT_MAX=300` under a paragraph
   // explaining it is how this file documents an optional knob.
   for (const match of read(ROOT, ".env.example").matchAll(/^#?\s*([A-Z][A-Z0-9_]*)=/gm)) {
-    names.add(match[1] as string);
+    names.add(at(match, 1));
   }
   return names;
 }

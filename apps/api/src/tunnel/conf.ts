@@ -1,4 +1,5 @@
 import { isIP } from "node:net";
+import { at } from "../errors/at";
 
 // The wg0.conf a customer exports from their VPN admin, parsed into something
 // the tunnel can be built from.
@@ -181,7 +182,7 @@ export function parseWireGuardConf(text: string): WireGuardConf {
       `the config has ${peers.length} [Peer] sections; a cluster tunnel reaches exactly one gateway`,
     );
   }
-  const peerFields = peers[0] as Map<string, string>;
+  const peerFields = at(peers);
 
   const peerKeyRaw = peerFields.get("publickey");
   if (peerKeyRaw === undefined) fail("[Peer] has no PublicKey");

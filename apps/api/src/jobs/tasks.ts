@@ -3,6 +3,7 @@ import type { JobHelpers } from "graphile-worker";
 import type { Database } from "../db";
 import { InsecureConnectionError } from "../engine/tls";
 import { UnsupportedServerError } from "../engine/version";
+import { messageOf } from "../errors/message";
 import { isUnreachableError } from "../errors/unreachable";
 import { recordClusterTask } from "../metrics";
 import { TunnelUnavailableError } from "../tunnel/resolve";
@@ -372,11 +373,4 @@ export function createTaskList(
       await runDigest(db);
     },
   };
-}
-
-// A sentence for the badge, from whatever was thrown. The driver's own words are
-// usually the useful ones — "connect ETIMEDOUT 10.0.0.5:27017" tells an owner
-// more than any wording of ours — and the address in them is their own.
-function messageOf(error: unknown): string {
-  return error instanceof Error && error.message !== "" ? error.message : String(error);
 }

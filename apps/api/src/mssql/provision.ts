@@ -5,6 +5,7 @@ import {
   ProvisionDeniedError,
   SCOPED_USERNAME,
 } from "../engine/provision";
+import { at } from "../errors/at";
 import { parseMssqlConnString, withMssqlCredentials } from "./conn-string";
 import { MssqlConnection, quoteIdent, quoteString } from "./connection";
 
@@ -57,7 +58,7 @@ function scopedPassword(): string {
   while (chars.length < 32) chars.push(alphabet[randomInt(alphabet.length)] ?? "x");
   for (let i = chars.length - 1; i > 0; i -= 1) {
     const j = randomInt(i + 1);
-    [chars[i], chars[j]] = [chars[j] as string, chars[i] as string];
+    [chars[i], chars[j]] = [at(chars, j), at(chars, i)];
   }
   return chars.join("");
 }

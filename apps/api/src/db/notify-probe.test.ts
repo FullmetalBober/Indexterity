@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { messageOf } from "../errors/message";
 import {
   looksPooled,
   NotifyProbeError,
@@ -98,7 +99,7 @@ async function refusal(promise: Promise<void>): Promise<string> {
     await promise;
   } catch (error) {
     expect(error).toBeInstanceOf(NotifyProbeError);
-    return (error as NotifyProbeError).message;
+    return messageOf(error);
   }
   throw new Error("expected the probe to refuse, and it passed");
 }

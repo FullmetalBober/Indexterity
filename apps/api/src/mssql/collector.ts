@@ -302,7 +302,7 @@ export class MssqlIndexCollector implements IndexCollector {
         // One replica failing mid-collect must not lose the others' readings:
         // a member that answered the dial and then went away contributes
         // nothing, which is what an unreachable member has always meant here.
-        this.usageFrom(conn, database, collection).catch(() => [] as IndexUsageStat[]),
+        this.usageFrom(conn, database, collection).catch(() => []),
       ),
     );
     // Keyed by index AND host, NUL-separated because an index name and a server

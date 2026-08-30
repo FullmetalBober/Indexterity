@@ -1,4 +1,5 @@
 import type { ConnectionDiagnosis, DialProxy, PrivilegeCheck, TlsOverrides } from "../engine/ports";
+import { messageOf } from "../errors/message";
 import { pgConnStringUsername } from "./conn-string";
 import { PostgresConnection } from "./connection";
 import {
@@ -200,7 +201,7 @@ export async function diagnosePostgresConnection(
   } catch (error) {
     return {
       reachable: false,
-      message: (error as Error).message,
+      message: messageOf(error),
       username,
       authEnabled: true,
       canProvision: false,
