@@ -2602,7 +2602,10 @@ describe("workload collection is batched", () => {
     // now (#258). The pass used to need a policy row saying `true`, and a new
     // cluster has no policy row at all, which is precisely the cluster the
     // create side had the most to say about and said nothing on.
-    expect(await suggestForCluster(db, clusterId)).toBeGreaterThanOrEqual(0);
+    // Returns { created, instantApproved } since the analysis got a wall clock:
+    // the build it can auto-approve moved out to the caller so a budget can never
+    // cut one off. `created` is the number this line has always been about.
+    expect((await suggestForCluster(db, clusterId)).created).toBeGreaterThanOrEqual(0);
 
     // Off is still off, and now it is a decision the data records rather than
     // the absence of one. Asserted through the api so the round trip that stores
@@ -2621,7 +2624,7 @@ describe("workload collection is batched", () => {
     });
     // Zero without dialling: the guard is the first thing the pass does, so a
     // cluster switched off costs one row read and no connection.
-    expect(await suggestForCluster(db, clusterId)).toBe(0);
+    expect((await suggestForCluster(db, clusterId)).created).toBe(0);
   });
 });
 
