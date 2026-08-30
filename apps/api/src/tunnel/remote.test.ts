@@ -66,7 +66,7 @@ async function listen(stub: Stub, greetings: Record<string, unknown>[], commands
     createInterface({ input: socket }).on("line", (line) => {
       if (!greeted) {
         greeted = true;
-        const greeting = JSON.parse(line) as Record<string, unknown>;
+        const greeting: Record<string, unknown> = JSON.parse(line);
         greetings.push(greeting);
         // The real service refuses a greeting that names no peering by dropping
         // the connection, having said nothing.
@@ -79,7 +79,7 @@ async function listen(stub: Stub, greetings: Record<string, unknown>[], commands
         return;
       }
       commands.push(line);
-      const command = JSON.parse(line) as Record<string, string>;
+      const command: Record<string, string> = JSON.parse(line);
       if (command.cmd === "shutdown") {
         socket.end();
         return;

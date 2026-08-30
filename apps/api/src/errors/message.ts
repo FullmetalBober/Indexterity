@@ -32,3 +32,16 @@ export function orpcCode(error: unknown): string | undefined {
 export function orpcStatus(error: unknown): number | undefined {
   return error instanceof ORPCError ? error.status : undefined;
 }
+
+/**
+ * A driver's error code, read off a caught `unknown`.
+ *
+ * Postgres puts a SQLSTATE on `code`; the assertion this replaces
+ * (`error as { code?: unknown } | null`) claims the caught value has that shape
+ * and then reads `undefined` off anything that does not — a thrown string, or
+ * the plain Error a bug produces. Checking first means an unexpected throw is
+ * not silently classified as "some other SQLSTATE".
+ */
+export function errorCode(error: unknown): unknown {
+  return typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
+}

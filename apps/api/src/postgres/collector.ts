@@ -10,6 +10,7 @@ import {
   workloadKey,
 } from "../engine/ports";
 import type { IndexKey, IndexSpec, QueryShape, ServerHealth } from "../engine/types";
+import { errorCode } from "../errors/message";
 import { type PostgresConnection, SYSTEM_SCHEMAS } from "./connection";
 import { collectPostgresHealth } from "./health";
 import { collectPostgresNodes } from "./members";
@@ -471,7 +472,7 @@ function escapeRegex(value: string): string {
 const INACCESSIBLE_CODES = new Set(["3D000", "28000", "28P01", "42501"]);
 
 function isDatabaseInaccessible(error: unknown): boolean {
-  const code = (error as { code?: unknown } | null)?.code;
+  const code = errorCode(error);
   return typeof code === "string" && INACCESSIBLE_CODES.has(code);
 }
 

@@ -1,7 +1,7 @@
-import { present } from "../src/errors/at";
 import { MongoClient } from "mongodb";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DatabaseInaccessibleError } from "../src/engine/ports";
+import { present } from "../src/errors/at";
 import { MongoIndexCollector } from "../src/mongo/collector";
 import { MongoConnection } from "../src/mongo/connection";
 import { scopedConnString } from "../src/mongo/provision";
@@ -57,7 +57,9 @@ describe.skipIf(MONGO_ADMIN_URL === undefined)(
           { role: "readWrite", db: READABLE },
         ],
       });
-      partial = new MongoConnection(scopedConnString(present(MONGO_ADMIN_URL, "MONGO_ADMIN_URL"), USER, "probe"));
+      partial = new MongoConnection(
+        scopedConnString(present(MONGO_ADMIN_URL, "MONGO_ADMIN_URL"), USER, "probe"),
+      );
       await partial.connect();
       collector = new MongoIndexCollector(partial);
     }, 60_000);

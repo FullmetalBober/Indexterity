@@ -1,10 +1,10 @@
-import { present } from "../src/errors/at";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { isRedundantPrefix, parseStoredSpec, rebuildKeys, rebuildOptions } from "../src/analysis";
 import { DatabaseInaccessibleError, type EngineSession, workloadKey } from "../src/engine/ports";
 import { ProvisionDeniedError, SCOPED_USERNAME } from "../src/engine/provision";
 import { detectEngine } from "../src/engine/registry";
 import type { IndexSpec } from "../src/engine/types";
+import { present } from "../src/errors/at";
 import { collectSnapshots, serializeSpec } from "../src/mongo/snapshots";
 import { mssqlAdapter } from "../src/mssql/adapter";
 import { MssqlIndexCollector } from "../src/mssql/collector";
@@ -266,8 +266,8 @@ describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", 
     // Deliberately through a string that NAMES an initial database: a
     // server-scoped GRANT is refused outside master (Msg 4621), so provisioning
     // has to reach master itself rather than inherit the caller's context.
-    const scoped = await (present(provision, "provisionScopedUser"))(
-      (present(MSSQL_URL, "MSSQL_URL")).replace("localhost:1433", `localhost:1433/${DB}`),
+    const scoped = await present(provision, "provisionScopedUser")(
+      present(MSSQL_URL, "MSSQL_URL").replace("localhost:1433", `localhost:1433/${DB}`),
       OVERRIDES,
     );
     try {
@@ -422,10 +422,7 @@ describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", 
       expect(provisionChecks.find((check) => check.key === "controlServer")?.granted).toBe(false);
 
       await expect(
-        (present(mssqlAdapter.provisionScopedUser, "provisionScopedUser"))(
-          weakUrl,
-          OVERRIDES,
-        ),
+        present(mssqlAdapter.provisionScopedUser, "provisionScopedUser")(weakUrl, OVERRIDES),
       ).rejects.toBeInstanceOf(ProvisionDeniedError);
       // …and it left nothing behind: the half-created login is dropped on the
       // way out. Load-bearing now that the name is fixed — a leftover would not
@@ -534,9 +531,13 @@ describe.skipIf(AG_URL === undefined || AG_SECONDARY_URL === undefined)(
       await primarySeed.connect();
       // Read intent: a replica configured ALLOW_CONNECTIONS = READ_ONLY refuses
       // a plain connection outright (Msg 978).
-      secondarySeed = new MssqlConnection(present(AG_SECONDARY_URL, "AG_SECONDARY_URL"), OVERRIDES, {
-        readOnlyIntent: true,
-      });
+      secondarySeed = new MssqlConnection(
+        present(AG_SECONDARY_URL, "AG_SECONDARY_URL"),
+        OVERRIDES,
+        {
+          readOnlyIntent: true,
+        },
+      );
       await secondarySeed.connect();
       secondaryName = (await secondarySeed.serverIdentity()).serverName;
       const replicated = await primarySeed.query<{ name: string }>(

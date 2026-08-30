@@ -64,12 +64,12 @@ describe("enforcesTheSame", () => {
   // original forbade and answers fewer queries from its own leaves. The
   // post-build watch is a WRITE-latency gate, so nothing downstream sees it.
   it("refuses a replacement that dropped the original's covering columns", () => {
-    const original = index("a_1_b_1", ASC.keys as IndexKey[], {
+    const original = index("a_1_b_1", [...ASC.keys], {
       unique: true,
       include: ["total"],
     });
     expect(enforcesTheSame(original, DESC)).toBe(false);
-    const carried = index("a_1_b_-1", DESC.keys as IndexKey[], {
+    const carried = index("a_1_b_-1", [...DESC.keys], {
       unique: true,
       include: ["total"],
     });
@@ -77,8 +77,8 @@ describe("enforcesTheSame", () => {
   });
 
   it("accepts a replacement that covers MORE than the original", () => {
-    const original = index("a_1_b_1", ASC.keys as IndexKey[], { unique: true, include: ["total"] });
-    const wider = index("a_1_b_-1", DESC.keys as IndexKey[], {
+    const original = index("a_1_b_1", [...ASC.keys], { unique: true, include: ["total"] });
+    const wider = index("a_1_b_-1", [...DESC.keys], {
       unique: true,
       include: ["total", "email"],
     });
