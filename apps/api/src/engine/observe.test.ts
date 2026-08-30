@@ -3,10 +3,29 @@ import { ObservedSession, scopeForDiagnosis, unobservedDatabases } from "./obser
 import type { EngineSession, IndexCollector, IndexExecutor } from "./ports";
 import { DatabaseInaccessibleError } from "./ports";
 
+// Required by EngineSession and never called: ObservedSession forwards both
+// straight through and these tests only drive the database scoping. So they are
+// present and REFUSE, rather than `{} as IndexCollector`, which claims an empty
+// object is a thirteen-member port and answers `undefined` to anything asked.
+//
+// A Proxy rather than thirteen stubbed methods: what is being said is "no member
+// of this is expected", and a Proxy says exactly that for every member at once —
+// including any added later, which a hand-written list would silently not cover.
+function neverAsked<T extends object>(what: string): T {
+  return new Proxy(
+    {},
+    {
+      get(_target, property) {
+        throw new Error(`${what}.${String(property)} is not used by these tests`);
+      },
+    },
+  ) as T;
+}
+
 function session(names: string[]): EngineSession {
   return {
-    collector: {} as IndexCollector,
-    executor: () => ({}) as IndexExecutor,
+    collector: neverAsked<IndexCollector>("collector"),
+    executor: () => neverAsked<IndexExecutor>("executor"),
     listDatabaseNames: vi.fn(async () => names),
     ping: vi.fn(async () => undefined),
     close: vi.fn(async () => undefined),

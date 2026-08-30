@@ -44,6 +44,11 @@ const ROOTS = ["apps", "packages", "scripts", "deploy"];
 const EXTENSIONS = [".ts", ".tsx"];
 const SKIP = new Set(["node_modules", ".git", "dist", ".output", ".turbo", "graphify-out"]);
 
+// Generated files. `routeTree.gen.ts` is written by TanStack Router's plugin and
+// carries fifteen `as any` that regenerate on every build — a rule nobody can
+// obey is a rule people learn to disable.
+const GENERATED = /\.gen\.tsx?$/;
+
 // Files allowed to say it, and why. **Empty**, and it has stayed empty through
 // the one case that looked irreducible.
 //
@@ -68,7 +73,34 @@ const ALLOWED = new Set<string>([]);
 // so that list stays a record of real exceptions rather than of bookkeeping.
 const SELF = "scripts/lint-assertions.ts";
 
-const PATTERN = /\bas\s+unknown\s+as\b/;
+// Three shapes, each a claim the compiler cannot check and the runtime does not
+// keep. Deliberately NOT "every `as`": narrowing a caught `unknown` to an Error,
+// or a readonly array to a mutable one for a driver, is a statement about
+// something already true. These three are not.
+const BANNED = [
+  {
+    // The double assertion. Launders through `unknown` so the compiler stops
+    // comparing the two types at all.
+    pattern: /\bas\s+unknown\s+as\b/,
+    name: "as unknown as",
+  },
+  {
+    // `as any` gives up more than the double assertion does: it disables
+    // checking of everything the value touches from there on.
+    pattern: /\bas\s+any\b/,
+    name: "as any",
+  },
+  {
+    // `{} as T`. The purest form: nothing is implemented, and every member
+    // answers `undefined` to the first thing that asks for it.
+    //
+    // `[] as T[]` is deliberately NOT here. An empty array IS an empty array of
+    // any element type, so that assertion states something true — the rule is
+    // about claims the runtime does not keep, not about the `as` keyword.
+    pattern: /\{\s*\}\s+as\s+[A-Za-z_$]/,
+    name: "an empty object asserted to a type",
+  },
+];
 
 function sourceFiles(): string[] {
   const out: string[] = [];
@@ -89,21 +121,22 @@ function main(): void {
   let found = 0;
   for (const path of files) {
     const rel = relative(ROOT, path);
-    if (rel === SELF || ALLOWED.has(rel)) continue;
+    if (rel === SELF || ALLOWED.has(rel) || GENERATED.test(rel)) continue;
     const lines = readFileSync(path, "utf8").split("\n");
     for (const [index, line] of lines.entries()) {
       // The rule's own explanation, and this file's, are prose about the form
       // rather than uses of it.
       if (line.trimStart().startsWith("//") || line.trimStart().startsWith("*")) continue;
-      if (!PATTERN.test(line)) continue;
+      const hit = BANNED.find((banned) => banned.pattern.test(line));
+      if (hit === undefined) continue;
       found += 1;
-      console.error(`${rel}:${index + 1}: ${line.trim()}`);
+      console.error(`${rel}:${index + 1}: [${hit.name}] ${line.trim()}`);
     }
   }
   if (found > 0) {
     console.error(
-      `\n${found} double assertion${found === 1 ? "" : "s"} (\`as unknown as\`).\n` +
-        "It launders the value through `unknown`, so the compiler stops checking entirely.\n" +
+      `\n${found} type assertion${found === 1 ? "" : "s"} the compiler cannot check.\n` +
+        "Each is a claim the compiler cannot check and the runtime does not keep.\n" +
         "Try, in order: delete it (the types may have caught up); declare and ASSIGN rather\n" +
         "than assert; widen your own signature (an optional parameter is assignable to a\n" +
         "no-argument type); `declare global` for something the runtime really adds; or\n" +
@@ -113,7 +146,7 @@ function main(): void {
     );
     process.exit(1);
   }
-  console.log(`lint-assertions: ${files.length} TypeScript files, no double assertions`);
+  console.log(`lint-assertions: ${files.length} TypeScript files, no unchecked assertions`);
 }
 
 main();

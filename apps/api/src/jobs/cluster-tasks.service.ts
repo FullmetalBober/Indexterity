@@ -52,6 +52,11 @@ export interface ClusterPasses {
   probe(payload: unknown, helpers: JobQueue): Promise<void>;
 }
 
+/** The one thing the passes ask of the database service. */
+export interface PassDatabase {
+  db: DatabaseService["db"];
+}
+
 /** The one thing the passes ask of the mailer. */
 export interface OwnerAlerts {
   notifyClusterOwners: NotifyService["notifyClusterOwners"];
@@ -60,7 +65,7 @@ export interface OwnerAlerts {
 @Injectable()
 export class ClusterTasksService {
   constructor(
-    private readonly database: DatabaseService,
+    @Inject(DatabaseService) private readonly database: PassDatabase,
     @Inject(NotifyService) private readonly notify: OwnerAlerts,
     // Injected and handed down rather than reached for through a module
     // global: this is the one place in the pipeline the container reaches, so

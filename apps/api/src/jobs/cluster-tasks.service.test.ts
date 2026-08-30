@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { DatabaseService } from "../db/database.service";
+import { createDatabase } from "../db/client";
 import { TunnelRegistry } from "../tunnel/tunnel.registry";
 import { applyCluster } from "./apply";
 import { settleBuildsForCluster } from "./building";
@@ -37,10 +37,15 @@ vi.mock("../mail/notify", () => ({
 
 const CLUSTER = "11111111-1111-1111-1111-111111111111";
 
+// A REAL drizzle client, not `{} as DatabaseService["db"]`. It opens no
+// connection until something queries it — measured: `totalCount` 0 and no
+// socket — and every pass below is mocked, so nothing ever does. Shared, so the
+// assertions can name the object the service was actually handed.
+const db = createDatabase("postgres://unused:unused@127.0.0.1:1/unused", 1);
+
 function service() {
-  const db = {} as DatabaseService["db"];
   return new ClusterTasksService(
-    { db } as DatabaseService,
+    { db },
     // A complete OwnerAlerts: one method, implemented.
     { notifyClusterOwners: vi.fn() },
     // A real registry with no tunnels in it: these tests are about what a task
@@ -82,7 +87,7 @@ describe("the per-cluster passes", () => {
     // The third argument is the point of the change: the registry is handed
     // DOWN from the one place the container reaches, rather than the pipeline
     // reaching sideways for a module global.
-    expect(collectCluster).toHaveBeenCalledWith({}, CLUSTER, expect.any(TunnelRegistry));
+    expect(collectCluster).toHaveBeenCalledWith(db, CLUSTER, expect.any(TunnelRegistry));
     expect(help.addJob.mock.calls.map((call: unknown[]) => call[0])).toEqual([
       "classify",
       "suggest",
@@ -101,8 +106,8 @@ describe("the per-cluster passes", () => {
 
   it("re-derives the change window in the same pass as the classify", async () => {
     await service().classify({ clusterId: CLUSTER }, helpers());
-    expect(classifyCluster).toHaveBeenCalledWith({}, CLUSTER);
-    expect(refreshInferredWindow).toHaveBeenCalledWith({}, CLUSTER);
+    expect(classifyCluster).toHaveBeenCalledWith(db, CLUSTER);
+    expect(refreshInferredWindow).toHaveBeenCalledWith(db, CLUSTER);
   });
 
   // Order is the assertion, not just the calls: a build asked for on an earlier
