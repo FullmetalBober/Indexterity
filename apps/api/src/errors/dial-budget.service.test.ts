@@ -13,8 +13,8 @@ import { messageOf } from "./message";
 // nothing else, so the container has nothing to contribute here.
 function budgetAt(count: number, secondsLeft: number): DialBudgetService {
   return new DialBudgetService(
-    // A complete RowReader — one method, implemented. No stub.
-    { rows: async <TRow>() => [{ count, seconds_left: secondsLeft }] as TRow[] },
+    // A complete RowReader, and nothing asserted: the port fixes the row.
+    { rows: async () => [{ count, seconds_left: secondsLeft }] },
   );
 }
 

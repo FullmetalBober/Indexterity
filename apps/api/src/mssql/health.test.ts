@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { assessHealth, MSSQL_HEALTH } from "../analysis";
-import { collectMssqlServerHealth, type MssqlReader, toServerHealth } from "./health";
+import {
+  collectMssqlServerHealth,
+  type HealthRow,
+  type MssqlReader,
+  toServerHealth,
+} from "./health";
 
 // Whatever the counter query returns, as one row. bigint columns arrive from
 // tedious as STRINGS, which is the boundary asNumber exists for and the one way
@@ -19,14 +24,14 @@ function counters(overrides: Record<string, unknown> = {}) {
   };
 }
 
-// A complete MssqlReader, not a fake of a connection. One method, implemented —
-// so there is no `stub`, nothing asserted away, and the only narrowing left is
-// the one any mock of a generic method needs: it cannot know T.
-function reader(rows: unknown[] | Error): MssqlReader {
+// A complete MssqlReader<HealthRow>, and now with nothing asserted at all: the
+// port fixes the row type, so the fake answers HealthRows rather than claiming
+// its data is whatever the caller asked for.
+function reader(rows: HealthRow[] | Error): MssqlReader<HealthRow> {
   return {
-    query: async <T>() => {
+    query: async () => {
       if (rows instanceof Error) throw rows;
-      return rows as T[];
+      return rows;
     },
   };
 }

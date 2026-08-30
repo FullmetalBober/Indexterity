@@ -1,3 +1,4 @@
+import type { QueryResultRow } from "pg";
 import type { ClusterNode } from "../engine/ports";
 import type { PostgresServerIdentity } from "./connection";
 
@@ -20,11 +21,23 @@ import type { PostgresServerIdentity } from "./connection";
 // that its counters were not included — which is the honest version of #202 on
 // this engine, and better than a roster of one that implies the whole cluster was
 // read.
+/** The one row this file reads, named so the port can be fixed to it. */
+export interface ReplicaRow extends QueryResultRow {
+  host: string | null;
+  state: string | null;
+}
+
 /**
  * Two of a Postgres connection's members: who this node is, and one read.
+ *
+ * `query` is fixed to the row rather than generic on the method. A generic
+ * `query<T>` promises rows of whatever type the caller asks for, and the only
+ * value assignable to `T[]` for every `T` is `[]` — so any fake carrying real
+ * data has to assert. Fixed here, the fake just answers ReplicaRows, and the
+ * real connection's generic `query` still satisfies it.
  */
 export interface PostgresNodeSource {
-  query<T>(text: string, params?: readonly unknown[], database?: string): Promise<T[]>;
+  query(text: string, params?: readonly unknown[], database?: string): Promise<ReplicaRow[]>;
   serverIdentity(): Promise<PostgresServerIdentity>;
 }
 
@@ -45,7 +58,7 @@ export async function collectPostgresNodes(
     // the one being replicated to), so the roster from there is just itself.
     if (identity.inRecovery) return [self];
 
-    const replicas = await conn.query<{ host: string | null; state: string | null }>(
+    const replicas = await conn.query(
       `SELECT COALESCE(host(client_addr)::text, application_name) AS host, state
          FROM pg_stat_replication`,
     );

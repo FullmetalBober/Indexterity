@@ -19,10 +19,8 @@ function stub(options: {
         version: null,
       };
     },
-    // Generic, like the real `query<T>`: a fake declaring `async () => Row[]`
-    // is a different method from the one the collector calls, and until this was
-    // checked the difference was invisible.
-    query: async <T>() => (options.replicas ?? []) as T[],
+    // No assertion: the port fixes the row, so this answers ReplicaRows.
+    query: async () => options.replicas ?? [],
   };
 }
 

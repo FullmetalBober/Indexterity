@@ -1,3 +1,4 @@
+import type { QueryResultRow } from "pg";
 import {
   type ClusterNode,
   DatabaseInaccessibleError,
@@ -439,7 +440,7 @@ export class PostgresIndexCollector implements IndexCollector {
   // Run against one database, turning the driver's "cannot connect" into the one
   // per-database failure the passes above must survive: an inaccessible database
   // contributes nothing and the rest of the cluster is still worth walking.
-  private async query<T>(
+  private async query<T extends QueryResultRow>(
     database: string,
     text: string,
     params: readonly unknown[] = [],

@@ -1,4 +1,4 @@
-import type { Pool, PoolClient } from "pg";
+import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { workerEnv } from "../config/env";
 import type { DialProxy, TlsOverrides } from "../engine/ports";
 import { pgPool } from "./client";
@@ -60,7 +60,11 @@ const DEFAULT_DATABASE = "postgres";
  * asked for per statement (#410).
  */
 export interface PostgresWriter {
-  query<T>(text: string, params?: readonly unknown[], database?: string): Promise<T[]>;
+  query<T extends QueryResultRow>(
+    text: string,
+    params?: readonly unknown[],
+    database?: string,
+  ): Promise<T[]>;
   execute(text: string, database?: string, opts?: { build?: boolean }): Promise<void>;
   serverIdentity(): Promise<PostgresServerIdentity>;
   serverVersion(): Promise<PostgresServerVersion | null>;
@@ -99,10 +103,17 @@ export class PostgresConnection {
   }
 
   // Run against one database. `database` empty means the connection's own.
-  async query<T>(text: string, params: readonly unknown[] = [], database = ""): Promise<T[]> {
+  // `pool.query<T>` is generic itself, so the row type is carried by node-pg
+  // rather than asserted back onto its result — which is what the `as T[]` here
+  // used to do, at the one place raw rows enter the program.
+  async query<T extends QueryResultRow>(
+    text: string,
+    params: readonly unknown[] = [],
+    database = "",
+  ): Promise<T[]> {
     const pool = await this.poolFor(database);
-    const result = await pool.query(text, params as unknown[]);
-    return result.rows as T[];
+    const result = await pool.query<T>(text, params as unknown[]);
+    return result.rows;
   }
 
   // DDL that must NOT run inside a transaction: `CREATE INDEX CONCURRENTLY` and

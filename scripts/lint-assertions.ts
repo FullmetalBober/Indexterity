@@ -23,6 +23,14 @@
 //     gone entirely: every one of those tests writes a COMPLETE implementation
 //     of a narrow interface instead. The helper has no callers and is deleted.
 //
+// The last five live in mocks of ports whose `query<T>` is generic on the
+// METHOD, and they are the honest floor rather than a to-do. A generic `query<T>`
+// promises rows of whatever type the caller asks for, and the only value
+// assignable to `T[]` for EVERY `T` is `[]` — so a mock carrying real data must
+// assert, always. Where a consumer reads one row shape the port is fixed to it
+// instead (`MssqlReader<HealthRow>`, `PostgresNodeSource`, `RowReader`) and the
+// assertion disappears. Where it reads nine (`MssqlSource`), it cannot be.
+//
 // So the rule is not aesthetic. Each one was hiding a check that turned out to
 // be worth having, and the alternatives were all cheaper than the bug the cast
 // would eventually let through.

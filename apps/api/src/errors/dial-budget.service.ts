@@ -1,5 +1,7 @@
 import { Inject, Injectable } from "@nestjs/common";
 import { ORPCError } from "@orpc/server";
+import type { SQL } from "drizzle-orm";
+import type { QueryResultRow } from "pg";
 import { sql } from "../db";
 import { DatabaseService } from "../db/database.service";
 
@@ -34,11 +36,23 @@ export const DIAL_BUDGET_CODE = "DIAL_BUDGET";
 
 // The budget, as a provider (#354). It holds the pool because the count lives in
 // postgres — see the note above for why it is not in memory.
+/** The one row this service reads back. */
+export interface BudgetRow extends QueryResultRow {
+  count: number;
+  seconds_left: number;
+}
+
 /**
  * The one thing the budget asks of the database: rows from one statement.
+ *
+ * Fixed to `BudgetRow` rather than generic on the method. A generic `rows<T>`
+ * promises rows of whatever type the caller asks for, and the only value
+ * assignable to `T[]` for every `T` is `[]` — so a fake carrying real data has
+ * to assert. Fixed here, the fake just answers BudgetRows, and
+ * `DatabaseService.rows` still satisfies it.
  */
 export interface RowReader {
-  rows: DatabaseService["rows"];
+  rows(query: SQL): Promise<BudgetRow[]>;
 }
 
 @Injectable()
@@ -50,7 +64,7 @@ export class DialBudgetService {
   // Atomic in a single statement: the window either rolls over or increments, so
   // concurrent requests across replicas cannot both read a stale count.
   async consume(userId: string): Promise<void> {
-    const rows = await this.database.rows<{ count: number; seconds_left: number }>(sql`
+    const rows = await this.database.rows(sql`
       insert into dial_budgets (user_id, count, reset_at)
       values (${userId}, 1, now() + make_interval(secs => ${WINDOW_SECONDS}))
       on conflict (user_id) do update set

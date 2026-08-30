@@ -67,7 +67,7 @@ const WRITER_WAITS = `
   OR wt.wait_type LIKE 'LCK[_]M[_]U%' OR wt.wait_type LIKE 'LCK[_]M[_]SIX%'
   OR wt.wait_type IN ('PAGEIOLATCH_EX', 'PAGEIOLATCH_UP', 'WRITELOG')`;
 
-interface HealthRow {
+export interface HealthRow {
   readonly fullScans: unknown;
   readonly indexSearches: unknown;
   readonly pageLookups: unknown;
@@ -126,17 +126,24 @@ export function toServerHealth(row: HealthRow | undefined): ServerHealth | null 
  * What this needs of a connection: one read.
  *
  * `MssqlConnection` has 22 members and this uses one, so taking the whole class
- * meant the test had to fake 21 members it never called — and could only do that
- * by claiming an object with `query` on it WAS a connection. Naming the one
- * member makes the test's object a complete implementation instead.
+ * meant the test had to fake 21 members it never called.
+ *
+ * Parameterised on the ROW rather than generic on the method, which is what
+ * makes the fake assertion-free. `query<T>()` promises "rows of whatever type
+ * you ask for", and the only value assignable to `T[]` for every `T` is `[]` —
+ * so any mock with real data in it has to assert. Fixing the row at the port
+ * says what this call actually returns, the real connection's generic `query`
+ * satisfies it, and the fake just answers HealthRows.
  */
-export interface MssqlReader {
-  query<T>(text: string): Promise<T[]>;
+export interface MssqlReader<Row> {
+  query(text: string): Promise<Row[]>;
 }
 
-export async function collectMssqlServerHealth(conn: MssqlReader): Promise<ServerHealth | null> {
+export async function collectMssqlServerHealth(
+  conn: MssqlReader<HealthRow>,
+): Promise<ServerHealth | null> {
   try {
-    const rows = await conn.query<HealthRow>(HEALTH_SQL);
+    const rows = await conn.query(HEALTH_SQL);
     return toServerHealth(rows[0]);
   } catch {
     return null;
