@@ -301,7 +301,42 @@ export async function runClusterTask(
 // it (jobs/runner.ts). Before this, each task reached for a module-level singleton
 // instead — which worked, and meant the pool's lifetime belonged to whichever
 // module was imported first rather than to whoever composed the worker.
-export function createTaskList(db: Database, cluster: ClusterTasksService) {
+/**
+ * Every task name the queue knows, as data.
+ *
+ * Declared rather than derived, so a schedule can be checked against it without
+ * constructing the registry — which used to mean handing `createTaskList` two
+ * fake dependencies purely to read the keys back off the object it returned.
+ * The arguments are only ever used when a task RUNS, so the fakes were never
+ * called; they existed to satisfy a signature.
+ *
+ * The registry below is typed as a record over this, so the two cannot drift:
+ * a task added to one and forgotten in the other does not compile.
+ */
+export const TASK_NAMES = [
+  "collect",
+  "classify",
+  "suggest",
+  "apply",
+  "finalize",
+  "probe",
+  "scheduleProbe",
+  "scheduleCollect",
+  "scheduleSuggest",
+  "scheduleApply",
+  "scheduleFinalize",
+  "retention",
+  "digest",
+] as const;
+
+export type TaskName = (typeof TASK_NAMES)[number];
+
+type TaskHandler = (payload: unknown, helpers: JobHelpers) => Promise<void>;
+
+export function createTaskList(
+  db: Database,
+  cluster: ClusterTasksService,
+): Record<TaskName, TaskHandler> {
   return {
     collect: (payload: unknown, helpers: JobHelpers): Promise<void> =>
       cluster.collect(payload, helpers),

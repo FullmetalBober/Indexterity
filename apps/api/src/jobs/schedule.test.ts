@@ -1,9 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { Database } from "../db";
-import { stub } from "../test-utils";
-import type { ClusterTasksService } from "./cluster-tasks.service";
 import { BURST_SCHEDULE, duePasses } from "./schedule";
-import { createTaskList } from "./tasks";
+import { TASK_NAMES } from "./tasks";
 
 const at = (iso: string): Date => new Date(iso);
 
@@ -11,12 +8,17 @@ describe("BURST_SCHEDULE", () => {
   // This list used to be held to the resident runner's CRONTAB; #232 removed
   // that runner, so this is the only schedule and the drift that can still rot
   // silently is the pairing with the task list itself: a pass naming a task
-  // nobody registered is enqueued forever and executed never. createTaskList
-  // only closes over its db, so a null stands in fine for reading the keys.
+  // nobody registered is enqueued forever and executed never.
+  //
+  // Read off TASK_NAMES rather than off `Object.keys(createTaskList(…))`, which
+  // meant handing it two fake dependencies purely to satisfy a signature — they
+  // were never called, because a task's arguments are only used when it RUNS.
+  // The registry is typed as a record over TASK_NAMES, so the two cannot drift:
+  // a task in one and not the other does not compile (verified by deleting one
+  // and watching it fail), which makes this assertion about the SCHEDULE, which
+  // is what it was always for.
   it("schedules only tasks the task list registers", () => {
-    const registered = new Set(
-      Object.keys(createTaskList(stub<Database>({}), stub<ClusterTasksService>({}))),
-    );
+    const registered = new Set<string>(TASK_NAMES);
     for (const pass of BURST_SCHEDULE) expect(registered).toContain(pass.task);
   });
 
