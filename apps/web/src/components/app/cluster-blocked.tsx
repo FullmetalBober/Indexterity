@@ -77,6 +77,18 @@ const COPY: Record<string, Copy> = {
       "than reporting numbers it cannot stand behind.",
     next: "No retry fixes a version. Upgrading the server resumes collection on the next tick.",
   },
+  TIMED_OUT: {
+    badge: "too slow to finish",
+    title: "Reading this cluster takes longer than Indexterity will wait",
+    what:
+      "A step ran past the time it is allowed and was abandoned, so it did nothing. This is " +
+      "not a failure so much as a step that does not fit: usually a very large or very busy " +
+      "cluster, or one reached over a slow link.",
+    next:
+      "Nothing was executed and nothing was lost, and it tries again on the next tick. If this " +
+      "cluster genuinely needs longer, whoever runs this Indexterity can raise the budget — " +
+      "the setting is CLUSTER_PASS_BUDGET_MS. Applying a change is never cut off this way.",
+  },
   // No ERROR entry: it is the one reason whose wording depends on WHICH pass
   // failed, and that is built below.
 };

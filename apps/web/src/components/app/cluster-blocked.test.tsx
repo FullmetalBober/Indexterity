@@ -175,6 +175,28 @@ describe("ClusterBlockedBanner", () => {
     expect(screen.getByText(/A step in the pipeline is failing/)).toBeInTheDocument();
   });
 
+  // #407: a pass abandoned for running past its budget. Deliberately not ERROR —
+  // nothing went wrong that a message can describe, and the answer is a setting
+  // rather than a bug report.
+  it("says a step did not fit rather than that it failed", () => {
+    renderInApp(
+      <ClusterBlockedBanner
+        clusterId={CLUSTER}
+        block={{
+          reason: "TIMED_OUT",
+          since: ago(3),
+          detail: "the suggest pass ran past its 300s budget and was abandoned",
+          task: "suggest",
+        }}
+      />,
+    );
+
+    expect(screen.getByText(/takes longer than Indexterity will wait/)).toBeInTheDocument();
+    // The reassurance that matters most: a build is never cut off this way.
+    expect(screen.getByText(/Applying a change is never cut off this way/)).toBeInTheDocument();
+    expect(screen.queryByText(/does not have a name for/)).not.toBeInTheDocument();
+  });
+
   it("omits the detail line when there is nothing in it", () => {
     renderInApp(
       <ClusterBlockedBanner

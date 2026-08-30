@@ -11,6 +11,7 @@ import { ClusterTasksService } from "./cluster-tasks.service";
 import { collectCluster } from "./collect";
 import { applyCreatesForCluster } from "./create";
 import { probeCluster } from "./probe";
+import { suggestForCluster } from "./suggest";
 
 // The passes themselves are tested where they live. What is untested — and what a
 // registry refactor can silently break — is which pass each queue name runs and
@@ -110,6 +111,32 @@ describe("the per-cluster passes", () => {
     });
     await service().apply({ clusterId: CLUSTER }, helpers());
     expect(order).toEqual(["settle", "apply", "create"]);
+  });
+
+  // #407, and the bug that fix nearly shipped with.
+  //
+  // `suggest` can build an index — instant apply (D7) — and it also has a
+  // wall-clock budget, which no build may ever be cut off by. Abandoning the
+  // pass does not stop the index being built; it only stops us recording it,
+  // taking its write-latency baseline and moving it to ACTIVE. So the budget
+  // covers the analysis and the build sits outside it.
+  it("still builds the instant-approved creates after the analysis", async () => {
+    vi.mocked(suggestForCluster).mockResolvedValue({ created: 2, instantApproved: 2 });
+
+    await service().suggest({ clusterId: CLUSTER }, helpers());
+
+    expect(applyCreatesForCluster).toHaveBeenCalledWith(expect.anything(), CLUSTER);
+  });
+
+  // And it must not run one when nothing was auto-approved, which is the
+  // ordinary case: a build is a write to somebody's production database, so it
+  // happens because something asked for it and never just in passing.
+  it("builds nothing when the analysis approved nothing instantly", async () => {
+    vi.mocked(suggestForCluster).mockResolvedValue({ created: 5, instantApproved: 0 });
+
+    await service().suggest({ clusterId: CLUSTER }, helpers());
+
+    expect(applyCreatesForCluster).not.toHaveBeenCalled();
   });
 
   it("asks for a suggest only when the probe found something", async () => {

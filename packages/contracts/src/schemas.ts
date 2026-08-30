@@ -107,6 +107,12 @@ export const BLOCKED_REASONS = [
   "CREDENTIALS",
   // A major series this release has not been probed against.
   "UNSUPPORTED",
+  // A read-only pass ran past its wall-clock budget and was abandoned (#407).
+  // Its own reason rather than ERROR: nothing went wrong that a message could
+  // describe, and the answer is not the same — an owner reading this needs to
+  // know their cluster is too slow to finish inside the schedule, not that the
+  // pipeline hit something it has no name for.
+  "TIMED_OUT",
   // Anything else, which is also the one that gets retried and dead-lettered.
   "ERROR",
 ] as const;

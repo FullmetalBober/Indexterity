@@ -1,5 +1,6 @@
 import { Injectable } from "@nestjs/common";
 import type { JobHelpers } from "graphile-worker";
+import { workerEnv } from "../config/env";
 import { DatabaseService } from "../db/database.service";
 import { emitPassFinished } from "../events/emit";
 import { ALERT_COOLDOWN_MS, alertAllowed } from "../mail/notify";
@@ -16,7 +17,7 @@ import { finalizeCluster } from "./finalize";
 import { clusterIdFromPayload } from "./payload";
 import { probeCluster } from "./probe";
 import { suggestForCluster } from "./suggest";
-import { type ClusterTaskDeps, runClusterTask } from "./tasks";
+import { BUDGETED_PASSES, type ClusterTaskDeps, runClusterTask, withPassBudget } from "./tasks";
 import { alertClaims } from "./watermark";
 
 // The per-cluster half of the graphile-worker task registry, as a provider
@@ -66,10 +67,34 @@ export class ClusterTasksService {
   // suggest builds its own auto-approved creates inline rather than waiting for
   // the next apply tick; create.ts decides which may run outside the change
   // window.
+  // The one pass that budgets itself, because only half of it may be (#407).
+  //
+  // The analysis reads the customer's database and writes recommendations to
+  // ours, so a wall clock on it is safe — that is the half that ran for hours on
+  // a 13-database cluster. The build it can auto-approve (D7, instant apply) is
+  // the same kind of work `apply` does, and a budget must never cut one off:
+  // abandoning the pass does not stop the index being built, it only stops us
+  // recording it, taking its write-latency baseline and moving it to ACTIVE.
+  //
+  // So the budget wraps the analysis explicitly and `suggest` stays out of
+  // BUDGETED_PASSES, rather than the pass-level budget covering both.
   async suggest(payload: unknown, helpers: JobHelpers): Promise<void> {
-    await this.onCluster("suggest", payload, helpers, (clusterId) =>
-      suggestForCluster(this.database.db, clusterId, this.tunnels),
-    );
+    await this.onCluster("suggest", payload, helpers, async (clusterId) => {
+      const { instantApproved } = await withPassBudget(
+        "suggest",
+        workerEnv().CLUSTER_PASS_BUDGET_MS,
+        suggestForCluster(this.database.db, clusterId, this.tunnels),
+      );
+      // Immediately, as before — the scheduler is not waited for. Deliberately
+      // WITHOUT the tunnel registry, which is how this call has always been made
+      // from here: create.ts refuses a tunnelled cluster it has no registry for,
+      // so a tunnelled cluster has never had an instant build. That looks like a
+      // bug and is not this one's to change — enabling instant builds on
+      // tunnelled clusters is a behaviour change, and it is filed separately.
+      if (instantApproved > 0) {
+        await applyCreatesForCluster(this.database.db, clusterId);
+      }
+    });
   }
 
   async apply(payload: unknown, helpers: JobHelpers): Promise<void> {
@@ -111,7 +136,17 @@ export class ClusterTasksService {
     helpers: JobHelpers,
     run: (clusterId: string) => Promise<unknown>,
   ): Promise<void> {
-    return runClusterTask(task, clusterIdFromPayload(payload), this.depsFor(helpers), run);
+    // The budget applies to the read-only passes only — see BUDGETED_PASSES for
+    // why `apply` and `finalize` are not among them. Resolved per call rather
+    // than cached, so an operator raising it does not need a restart to mean it.
+    const budgetMs = BUDGETED_PASSES.has(task) ? workerEnv().CLUSTER_PASS_BUDGET_MS : null;
+    return runClusterTask(
+      task,
+      clusterIdFromPayload(payload),
+      this.depsFor(helpers),
+      run,
+      budgetMs,
+    );
   }
 
   // The database is CLOSED OVER here, not exposed: these three functions need it

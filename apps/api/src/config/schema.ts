@@ -235,6 +235,23 @@ const workerShape = {
   // limit raised alongside. The name survives the worker process it was named
   // for (#232): it is how many jobs one drain runs at once.
   WORKER_CONCURRENCY: positiveInteger(1),
+  // How long one read-only pass may run before it is abandoned (#407).
+  //
+  // Five minutes because that is the tick interval: a pass that cannot outlive
+  // the schedule that dispatched it cannot let ticks pile up behind one cluster.
+  // Healthy passes finish in seconds, so this only ever bites the pathological
+  // case — which, measured in the hosted deployment, was a `suggest` against a
+  // tunnelled MSSQL cluster with 13 observed databases running for HOURS: the
+  // per-query budget is 15 minutes and there was no budget for the pass at all,
+  // so it could not finish inside the life of the process running it. It died
+  // mid-pass instead, orphaning its job lock for the ~4 hours graphile-worker
+  // waits before reclaiming one, and WORKER_CONCURRENCY is 1, so nothing else in
+  // the pipeline drained meanwhile.
+  //
+  // Raise it for a self-hosted install with genuinely large clusters and a host
+  // that will sit still for it. The failure it prevents is not slowness; it is a
+  // pass that can never finish holding the only slot while it fails to.
+  CLUSTER_PASS_BUDGET_MS: positiveInteger(300_000),
   // Sockets the driver may open against ONE connected cluster. The driver's own
   // default is 100, and it is the wrong default twice over here: a session is
   // held per cluster (jobs/connection-pool.ts), so the worst case multiplies by

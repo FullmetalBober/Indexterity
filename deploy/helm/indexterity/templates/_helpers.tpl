@@ -222,6 +222,10 @@ test and the port-forward in NOTES.txt all read the same number they did before.
 # case multiplies by the fleet — and they are spent on the customer's mongod.
 - name: MONGO_MAX_POOL_SIZE
   value: {{ .Values.config.mongoMaxPoolSize | quote }}
+# Wall clock for ONE read-only pass. Applying a change is not bounded by it —
+# a long index build runs to completion.
+- name: CLUSTER_PASS_BUDGET_MS
+  value: {{ .Values.config.clusterPassBudgetMs | quote }}
 # Postgres connections PER POOL. The api holds two (requests — the tick's drains
 # share that one — and auth), kept apart so a slow read cannot starve a sign-in;
 # size postgres for this times the pools.
