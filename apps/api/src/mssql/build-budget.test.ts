@@ -23,11 +23,17 @@ describe("buildRequest", () => {
     // stops existing, which is exactly the regression this test is here to
     // catch. Reflect.get returns unknown and the assertions below do the
     // narrowing, so a missing field fails rather than reads as undefined.
-    const overrides = Reflect.get(buildRequest(pool), "overrides") as unknown;
+    const overrides: unknown = Reflect.get(buildRequest(pool), "overrides");
 
     expect(overrides).toMatchObject({ requestTimeout: expect.any(Number) });
     // And it must be the build budget rather than the pool's read budget, which
-    // is what would come back if the library ignored the second argument.
-    expect((overrides as { requestTimeout: number }).requestTimeout).toBeGreaterThan(900_000);
+    // is what would come back if the library ignored the second argument. Read
+    // through Reflect again rather than narrowed with a cast: the assertion is
+    // what says the number is there, and a cast would answer `undefined` for a
+    // field that had gone.
+    if (typeof overrides !== "object" || overrides === null) {
+      throw new Error("the request carries no overrides at all");
+    }
+    expect(Reflect.get(overrides, "requestTimeout")).toBeGreaterThan(900_000);
   });
 });

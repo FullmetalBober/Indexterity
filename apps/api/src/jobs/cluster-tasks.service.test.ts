@@ -164,9 +164,10 @@ describe("the per-cluster passes", () => {
     await service().probe({ clusterId: CLUSTER }, quiet);
     expect(quiet.addJob).not.toHaveBeenCalled();
 
-    vi.mocked(probeCluster).mockResolvedValueOnce([
+    const found: Awaited<ReturnType<typeof probeCluster>> = [
       { database: "app", collection: "orders", reason: "reads up 4x" },
-    ] as Awaited<ReturnType<typeof probeCluster>>);
+    ];
+    vi.mocked(probeCluster).mockResolvedValueOnce(found);
     const loud = helpers();
     await service().probe({ clusterId: CLUSTER }, loud);
     expect(loud.addJob).toHaveBeenCalledWith("suggest", { clusterId: CLUSTER });

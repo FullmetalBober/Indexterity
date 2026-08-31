@@ -19,6 +19,33 @@ export interface BurstResult {
   readonly alreadyClaimed: readonly string[];
 }
 
+/**
+ * The two statements a tick runs against the watermark table.
+ *
+ * A port rather than `Database`, because the rule under test here — which
+ * occurrence is due, and what a won or lost claim means — is not a rule about
+ * drizzle. Passing the client meant the test had to fake a query builder it
+ * could not construct and mock the claim module out from under the function;
+ * both are gone, and the double below is now an object with two methods.
+ */
+export interface PassClaims {
+  watermarks(keys: string[]): Promise<{ key: string; at: Date }[]>;
+  // Claim unless something claimed this key at or after `notBefore`. That is the
+  // postgres statement's rule, stated here so a double can hold it honestly.
+  claim(key: string, notBefore: Date, now: Date): Promise<boolean>;
+}
+
+export function dbPassClaims(db: Database): PassClaims {
+  return {
+    watermarks: (keys) =>
+      db
+        .select({ key: workerWatermarks.key, at: workerWatermarks.at })
+        .from(workerWatermarks)
+        .where(inArray(workerWatermarks.key, keys)),
+    claim: (key, notBefore, now) => claimWatermark(db, key, notBefore, now),
+  };
+}
+
 // Enqueue every pass whose occurrence has not been claimed yet.
 //
 // Deliberately NOT wrapped in one transaction. Each claim is its own atomic
@@ -27,20 +54,12 @@ export interface BurstResult {
 // from. A transaction would instead hold a write lock across a fan-out that can
 // take minutes, and roll back work that had already been enqueued.
 export async function claimDuePasses(
-  db: Database,
+  claims: PassClaims,
   addJob: (task: string) => Promise<unknown>,
   now: Date = new Date(),
 ): Promise<BurstResult> {
   const tasks = BURST_SCHEDULE.map((pass) => pass.task);
-  const rows = await db
-    .select({ key: workerWatermarks.key, at: workerWatermarks.at })
-    .from(workerWatermarks)
-    .where(
-      inArray(
-        workerWatermarks.key,
-        tasks.map((task) => passKey(task)),
-      ),
-    );
+  const rows = await claims.watermarks(tasks.map((task) => passKey(task)));
   const lastDispatchedAt = new Map<string, Date>();
   for (const row of rows) lastDispatchedAt.set(row.key.slice("pass:".length), row.at);
 
@@ -52,7 +71,7 @@ export async function claimDuePasses(
     // that succeeds and then fails to enqueue loses ONE occurrence of a pass
     // that recurs anyway, while a double dispatch runs the whole fleet twice
     // and spends a real dial budget doing it.
-    if (!(await claimWatermark(db, passKey(pass.task), occurrence, now))) {
+    if (!(await claims.claim(passKey(pass.task), occurrence, now))) {
       alreadyClaimed.push(pass.task);
       continue;
     }

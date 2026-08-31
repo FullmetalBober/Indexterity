@@ -5,7 +5,7 @@ import { apiEnv, workerEnv } from "../config/env";
 import { sql } from "../db";
 import { DatabaseService } from "../db/database.service";
 import { captureError } from "../errors/reporting";
-import { type BurstResult, claimDuePasses } from "./burst";
+import { type BurstResult, claimDuePasses, dbPassClaims } from "./burst";
 import { type ClusterPasses, ClusterTasksService } from "./cluster-tasks.service";
 import { releaseStaleLocks } from "./locks";
 import { wireRunnerEvents } from "./runner";
@@ -168,7 +168,7 @@ export class TickService implements BeforeApplicationShutdown {
   // duplicate — and preserve_run_at keeps a re-key from bumping the schedule.
   private async enqueueDue(now: Date = new Date()): Promise<BurstResult> {
     return claimDuePasses(
-      this.database.db,
+      dbPassClaims(this.database.db),
       (task) =>
         this.database.rows(
           sql`select graphile_worker.add_job(

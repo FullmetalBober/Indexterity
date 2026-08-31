@@ -42,6 +42,13 @@ vi.mock("graphile-worker", () => ({ runOnce: worker.runOnce }));
 // what it dispatched so the outcome passthrough is observable.
 vi.mock("./burst", () => ({
   claimDuePasses: vi.fn(async () => ({ dispatched: ["scheduleApply"], alreadyClaimed: [] })),
+  // The adapter that turns the database into the two statements a claim needs.
+  // Mocked with the module because claimDuePasses is: what it returns is only
+  // ever handed to the mock above.
+  dbPassClaims: vi.fn(() => ({
+    watermarks: async () => [],
+    claim: async () => true,
+  })),
 }));
 vi.mock("./tasks", () => ({ createTaskList: vi.fn(() => ({})) }));
 vi.mock("./runner", () => ({ wireRunnerEvents: vi.fn() }));

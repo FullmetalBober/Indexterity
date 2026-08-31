@@ -5,7 +5,7 @@ import {
 } from "../engine/net-guard";
 import type { DialProxy, TlsOverrides } from "../engine/ports";
 import { parseMssqlConnString, parseRoutingUrl, retargetMssqlConnString } from "./conn-string";
-import type { MssqlMemberSource } from "./connection";
+import type { MssqlMemberSource, MssqlReplica } from "./connection";
 import { MssqlConnection } from "./connection";
 
 // One replica's dial, kept whether or not it worked — the mssql twin of
@@ -54,11 +54,22 @@ export interface MssqlRoster {
   all(): Promise<MssqlMemberSource[]>;
 }
 
+/**
+ * The one thing this needs of the base connection: the replica catalog.
+ *
+ * Taking `MssqlConnection` meant a test had to assert a one-method object into a
+ * 22-member class. Dialling is not part of it — that is what this class does
+ * with the answer, and it needs two live servers to exercise (#202).
+ */
+export interface MssqlReplicaCatalog {
+  availabilityReplicas(): Promise<MssqlReplica[]>;
+}
+
 export class MssqlMemberConnections {
   private dialled: MssqlMemberDial[] | null = null;
 
   constructor(
-    private readonly base: MssqlConnection,
+    private readonly base: MssqlReplicaCatalog,
     private readonly connString: string,
     private readonly overrides?: TlsOverrides,
     // Where a replica's socket goes, and what its address is judged against.

@@ -3,29 +3,47 @@ import { ObservedSession, scopeForDiagnosis, unobservedDatabases } from "./obser
 import type { EngineSession, IndexCollector, IndexExecutor } from "./ports";
 import { DatabaseInaccessibleError } from "./ports";
 
-// Required by EngineSession and never called: ObservedSession forwards both
-// straight through and these tests only drive the database scoping. So they are
-// present and REFUSE, rather than `{} as IndexCollector`, which claims an empty
-// object is a thirteen-member port and answers `undefined` to anything asked.
-//
-// A Proxy rather than thirteen stubbed methods: what is being said is "no member
-// of this is expected", and a Proxy says exactly that for every member at once —
-// including any added later, which a hand-written list would silently not cover.
-function neverAsked<T extends object>(what: string): T {
-  return new Proxy(
-    {},
-    {
-      get(_target, property) {
-        throw new Error(`${what}.${String(property)} is not used by these tests`);
-      },
-    },
-  ) as T;
+// Required by EngineSession and only ever forwarded: ObservedSession hands both
+// straight through, and these tests drive the database scoping. So every member
+// REFUSES rather than `{} as IndexCollector`, which claims an empty object is a
+// thirteen-member port and answers `undefined` to anything asked — and unlike a
+// Proxy asserted into the port, nothing here is claimed.
+function neverAsked(what: string): never {
+  throw new Error(`${what} is not used by these tests`);
 }
+
+// Written out rather than proxied into shape, so the compiler is what keeps the
+// double complete: a member added to either port fails here instead of being
+// silently uncovered. Each body returns `never`, which satisfies whatever the
+// port says the member returns.
+const REFUSING_COLLECTOR: IndexCollector = {
+  listCollectionNames: () => neverAsked("collector.listCollectionNames"),
+  listIndexes: () => neverAsked("collector.listIndexes"),
+  collectUsage: () => neverAsked("collector.collectUsage"),
+  indexSizes: () => neverAsked("collector.indexSizes"),
+  collectionStorage: () => neverAsked("collector.collectionStorage"),
+  readLatency: () => neverAsked("collector.readLatency"),
+  collectionLatency: () => neverAsked("collector.collectionLatency"),
+  collectSlowQueries: () => neverAsked("collector.collectSlowQueries"),
+  collectWorkload: () => neverAsked("collector.collectWorkload"),
+  collectDeletePatterns: () => neverAsked("collector.collectDeletePatterns"),
+  collectServerHealth: () => neverAsked("collector.collectServerHealth"),
+  collectNodes: () => neverAsked("collector.collectNodes"),
+  collectHintedIndexes: () => neverAsked("collector.collectHintedIndexes"),
+};
+
+const REFUSING_EXECUTOR: IndexExecutor = {
+  hide: () => neverAsked("executor.hide"),
+  unhide: () => neverAsked("executor.unhide"),
+  drop: () => neverAsked("executor.drop"),
+  create: () => neverAsked("executor.create"),
+  settleBuild: () => neverAsked("executor.settleBuild"),
+};
 
 function session(names: string[]): EngineSession {
   return {
-    collector: neverAsked<IndexCollector>("collector"),
-    executor: () => neverAsked<IndexExecutor>("executor"),
+    collector: REFUSING_COLLECTOR,
+    executor: () => REFUSING_EXECUTOR,
     listDatabaseNames: vi.fn(async () => names),
     ping: vi.fn(async () => undefined),
     close: vi.fn(async () => undefined),
