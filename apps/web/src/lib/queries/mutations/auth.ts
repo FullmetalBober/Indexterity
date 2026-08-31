@@ -7,7 +7,9 @@
 // The calls go straight to better-auth on the api, same origin, so the session
 // cookie it sets is this app's cookie. They used to go through server functions
 // that relayed the request and every Set-Cookie back — see lib/auth-client.ts.
+
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { field } from "~/lib/at";
 import { authClient } from "../../auth-client";
 import { invalidateSession } from "../client";
 import { queryKeys } from "../keys";
@@ -29,11 +31,7 @@ interface Answer {
 
 // A sign-in that answered "now the code" instead of a session (#55).
 function wantsSecondFactor(data: unknown): boolean {
-  return (
-    typeof data === "object" &&
-    data !== null &&
-    (data as { twoFactorRedirect?: unknown }).twoFactorRedirect === true
-  );
+  return typeof data === "object" && data !== null && field(data, "twoFactorRedirect") === true;
 }
 
 // Did this answer actually carry a session? better-auth returns a token with one
@@ -42,11 +40,7 @@ function wantsSecondFactor(data: unknown): boolean {
 // (#306). Read as a guard for the same reason wantsSecondFactor is: the shape is
 // a runtime answer, not a per-endpoint type.
 function hasSession(data: unknown): boolean {
-  return (
-    typeof data === "object" &&
-    data !== null &&
-    typeof (data as { token?: unknown }).token === "string"
-  );
+  return typeof data === "object" && data !== null && typeof field(data, "token") === "string";
 }
 
 // better-auth's refusal for an unverified address, which rides on 403. Matched by

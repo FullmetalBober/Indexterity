@@ -185,7 +185,7 @@ export function organizationPlugin(db: Database, config: OrganizationPluginConfi
       // walked past by whoever happens to click a week-old link.
       beforeAcceptInvitation: async ({ invitation, organization: org }) => {
         const verdict = withinLimit(
-          planFrom(org.plan as string | null | undefined),
+          planFrom(org.plan),
           "members",
           await new UsageService(db).seatsUsed(org.id, invitation.id),
         );
@@ -196,7 +196,7 @@ export function organizationPlugin(db: Database, config: OrganizationPluginConfi
       beforeAddMember: async ({ member, organization: org }) => {
         assertRole(member.role);
         const verdict = withinLimit(
-          planFrom(org.plan as string | null | undefined),
+          planFrom(org.plan),
           "members",
           await new UsageService(db).seatsUsed(org.id),
         );

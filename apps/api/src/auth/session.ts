@@ -1,5 +1,6 @@
 import { ORPCError } from "@orpc/server";
 import type { FastifyRequest } from "fastify";
+import { field } from "../errors/message";
 import { auth } from ".";
 import { toWebHeaders } from "./http";
 
@@ -49,8 +50,7 @@ function resolveSession(req: FastifyRequest): Promise<CallerSession | null> {
             // A Date from postgres, an ISO string when the cookie cache
             // answered — the constructor takes both.
             signedInAt: new Date(response.session.createdAt),
-            twoFactorEnabled:
-              (response.user as { twoFactorEnabled?: unknown }).twoFactorEnabled === true,
+            twoFactorEnabled: field(response.user, "twoFactorEnabled") === true,
           };
     });
   resolvedByRequest.set(req, fresh);

@@ -29,3 +29,17 @@ export function present<T>(value: T | undefined | null, what: string): T {
   if (value === undefined || value === null) throw new Error(`expected ${what} to be present`);
   return value;
 }
+
+/**
+ * One field off a value that may not be an object, without asserting a shape.
+ *
+ * `ctx.body as { newEmail?: unknown }` claims the value HAS that shape and then
+ * reads `undefined` off anything that does not — a string body, null, a number.
+ * `in` narrowing asks instead, so absence and wrong-type are the same answer
+ * and neither is mistaken for a present value.
+ */
+export function field(value: unknown, name: string): unknown {
+  return typeof value === "object" && value !== null && name in value
+    ? Reflect.get(value, name)
+    : undefined;
+}
