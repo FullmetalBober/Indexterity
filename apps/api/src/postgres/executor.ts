@@ -5,6 +5,7 @@ import type {
   IndexExecutor,
 } from "../engine/ports";
 import { allowUntestedVersions, UnsupportedServerError } from "../engine/version";
+import { fieldOf } from "../errors/message";
 import { splitTableRef } from "./collector";
 import type { PostgresWriter } from "./connection";
 import {
@@ -391,7 +392,7 @@ export class PostgresIndexExecutor implements IndexExecutor {
 function partialPredicate(options: CreateIndexOptions): string {
   const filter = options.partialFilterExpression;
   if (filter === undefined) return "";
-  const sql = (filter as { sql?: unknown }).sql;
+  const sql = fieldOf(filter, "sql");
   return typeof sql === "string" && sql.trim().length > 0 ? ` WHERE ${sql}` : "";
 }
 

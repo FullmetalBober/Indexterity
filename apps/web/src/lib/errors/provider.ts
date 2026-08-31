@@ -40,14 +40,16 @@ import pkg from "../../../package.json" with { type: "json" };
 // Sentry.init would replace the client the first one's handlers were bound to.
 // Same reason, same shape, as the metrics boot guard in src/server.ts.
 const BOOTED: unique symbol = Symbol.for("indexterity.web.sentry-booted");
-const bootState = globalThis as { [BOOTED]?: true };
+// Read and written through Reflect rather than asserting a shape onto
+// globalThis: the symbol is deliberately not part of its type, and pretending
+// otherwise is a claim about an object this module does not own.
 
 export async function initErrorReporting(): Promise<void> {
   if (!errorReportingEnabled()) return;
-  if (bootState[BOOTED] === true) return;
+  if (Reflect.get(globalThis, BOOTED) === true) return;
   // Set before the await, not after: two evaluations racing here is a dev-only
   // condition, but it is exactly the one this guard exists for.
-  bootState[BOOTED] = true;
+  Reflect.set(globalThis, BOOTED, true);
 
   const Sentry = await import("@sentry/tanstackstart-react");
   Sentry.init(sentryDefaults({ service: "web", release: pkg.version }));

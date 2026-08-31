@@ -79,11 +79,19 @@ export function metricsPort(): number {
 // with already lives, and Symbol.for is what makes the key survive the module
 // being re-evaluated too.
 const INSTANCE: unique symbol = Symbol.for("indexterity.metrics.instance");
-type InstanceStore = { [INSTANCE]?: Metrics };
+
+// `Reflect.get` returns `any`, which an annotation accepts without an
+// assertion — the declaration says what is expected where `globalThis as
+// InstanceStore` said to stop asking.
+function instanceOf(scope: object): Metrics | undefined {
+  const found: Metrics | undefined = Reflect.get(scope, INSTANCE);
+  return found;
+}
 
 export function createMetrics(options: MetricsOptions): Metrics {
-  const store = globalThis as InstanceStore;
-  const existing = store[INSTANCE];
+  // Reflect rather than asserting a shape onto globalThis: the symbol is not
+  // part of its type, and this module does not own that object.
+  const existing = instanceOf(globalThis);
   if (existing !== undefined) return existing;
 
   const resource = resourceFromAttributes({
@@ -135,6 +143,6 @@ export function createMetrics(options: MetricsOptions): Metrics {
     },
   };
 
-  store[INSTANCE] = instance;
+  Reflect.set(globalThis, INSTANCE, instance);
   return instance;
 }

@@ -59,3 +59,19 @@ export function field(value: unknown, name: string): unknown {
     ? Reflect.get(value, name)
     : undefined;
 }
+
+/**
+ * A named field off a caught `unknown`, or undefined.
+ *
+ * The generic form of `errorCode`. `error as { cause?: { code?: string } }` and
+ * friends claim a shape for something that can be anything at all, then read
+ * `undefined` off whatever it actually was — which is indistinguishable from the
+ * field being absent, so a surprising throw gets classified as an ordinary one.
+ */
+export function fieldOf(value: unknown, field: string): unknown {
+  // `Reflect.get` rather than an index into an asserted Record: it takes an
+  // object and a key and returns `any`, which lands in `unknown` here — so the
+  // whole function contains no assertion, which a helper for removing them had
+  // better not.
+  return typeof value === "object" && value !== null ? Reflect.get(value, field) : undefined;
+}

@@ -4,7 +4,7 @@ import type { FastifyRequest } from "fastify";
 import { AuditService } from "../audit/audit.service";
 import type { SecurityEventDetails } from "../audit/audit.types";
 import { RequestActorService } from "../audit/request-actor.service";
-import { messageOf } from "../errors/message";
+import { fieldOf, messageOf } from "../errors/message";
 import { TenancyService } from "../http/tenancy.service";
 import { Implement, route } from "../orpc/implement";
 import { InvalidWireGuardConfError } from "./conf";
@@ -217,6 +217,5 @@ export class TunnelController {
 
 // 23505 lives on the CAUSE, not on the error drizzle throws.
 function isUniqueViolation(error: unknown): boolean {
-  const cause = (error as { cause?: { code?: string } } | undefined)?.cause;
-  return cause?.code === "23505";
+  return fieldOf(fieldOf(error, "cause"), "code") === "23505";
 }

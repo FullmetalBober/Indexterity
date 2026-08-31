@@ -5,7 +5,7 @@ import {
   ProvisionDeniedError,
   SCOPED_USERNAME,
 } from "../engine/provision";
-import { errorCode } from "../errors/message";
+import { errorCode, messageOf } from "../errors/message";
 import { pgConnStringUsername, withPgCredentials } from "./conn-string";
 import { PostgresConnection } from "./connection";
 import { quoteIdent } from "./executor";
@@ -61,7 +61,7 @@ function isAuthorizationError(error: unknown): boolean {
   const code = errorCode(error);
   if (code === "42501") return true;
   return /permission denied|must be (?:owner|superuser)|insufficient privilege/i.test(
-    String((error as { message?: unknown } | null)?.message ?? ""),
+    messageOf(error),
   );
 }
 
