@@ -5,7 +5,12 @@ import {
 } from "../engine/net-guard";
 import type { DialProxy, TlsOverrides } from "../engine/ports";
 import { parseMssqlConnString, parseRoutingUrl, retargetMssqlConnString } from "./conn-string";
-import type { MssqlMemberSource, MssqlReplica } from "./connection";
+import type {
+  MssqlMemberSource,
+  MssqlReplica,
+  MssqlServerIdentity,
+  QueryParams,
+} from "./connection";
 import { MssqlConnection } from "./connection";
 
 // One replica's dial, kept whether or not it worked — the mssql twin of
@@ -50,8 +55,37 @@ export interface MssqlMemberDial {
  * A collector reads the list; saying so lets a test write the whole thing.
  */
 export interface MssqlRoster {
-  dials(): Promise<readonly MssqlMemberDial[]>;
-  all(): Promise<MssqlMemberSource[]>;
+  dials(): Promise<readonly MssqlMemberRead[]>;
+  all(): Promise<MssqlUsageMember[]>;
+}
+
+// One index's counter on one instance, which is the only row a collector reads
+// through a member.
+export interface MssqlUsageRow {
+  indexName: string;
+  ops: number;
+}
+
+/**
+ * A member as the collector sees it: identity, role, and that one read.
+ *
+ * Narrower than `MssqlMemberSource` in both directions. It has no `close` —
+ * the roster owns the connections it dialled and a borrower must not be able to
+ * shut one — and its `query` names the row instead of promising rows of
+ * whatever type the caller asks for, which is what lets a test double answer
+ * with readings rather than assert an array into shape. The real connection's
+ * generic `query` satisfies it.
+ */
+export interface MssqlUsageMember {
+  query(text: string, params?: QueryParams): Promise<MssqlUsageRow[]>;
+  serverIdentity(): Promise<MssqlServerIdentity>;
+  localReplicaRole(): Promise<"primary" | "secondary" | null>;
+}
+
+export interface MssqlMemberRead {
+  readonly host: string;
+  readonly state: MssqlMemberState;
+  readonly connection: MssqlUsageMember | null;
 }
 
 /**

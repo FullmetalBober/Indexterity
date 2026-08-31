@@ -19,7 +19,7 @@ import {
 } from "./connection";
 import { deletePatternsFromPlans } from "./delete-patterns";
 import { collectMssqlServerHealth } from "./health";
-import type { MssqlRoster } from "./members";
+import type { MssqlRoster, MssqlUsageMember } from "./members";
 import { type PlanRow, shapesFromPlans } from "./workload";
 
 // Plans read per database and collect. Query Store defaults to a 1GB store —
@@ -191,6 +191,12 @@ export class MssqlIndexCollector implements IndexCollector {
     // session, where an Availability Group's readable secondaries are dialled
     // as members — see mssql/members.ts.
     private readonly members?: MssqlRoster,
+    // The instance this connection landed on, seen as a member of its own group.
+    // It IS the connection — that is the default, and the only thing production
+    // passes — but the two replica-facing reads below need nothing wider than a
+    // member, and saying so is what lets their tests hand over a complete
+    // object instead of claiming one is a `query<T>`-shaped source.
+    private readonly local: MssqlUsageMember = conn,
   ) {}
 
   // Also the accessibility probe for a database, which is why it raises
@@ -271,10 +277,10 @@ export class MssqlIndexCollector implements IndexCollector {
   async collectNodes(): Promise<readonly ClusterNode[] | null> {
     let local: ClusterNode;
     try {
-      const identity = await this.conn.serverIdentity();
+      const identity = await this.local.serverIdentity();
       // Its own role, not the group's view of it. A standalone belongs to no
       // group and is honestly a standalone.
-      const role = await this.conn.localReplicaRole().catch(() => null);
+      const role = await this.local.localReplicaRole().catch(() => null);
       local = { host: identity.serverName, role: role ?? "standalone", state: "answered" };
     } catch {
       return null;
@@ -296,7 +302,7 @@ export class MssqlIndexCollector implements IndexCollector {
     // Every replica, not only the one the connection string reaches: the usage
     // DMV counts what THIS instance served, so a readable secondary's reads are
     // invisible from the primary (mssql/members.ts has the measurement).
-    const connections = [this.conn, ...(await (this.members?.all() ?? Promise.resolve([])))];
+    const connections = [this.local, ...(await (this.members?.all() ?? Promise.resolve([])))];
     const perMember = await Promise.all(
       connections.map((conn) =>
         // One replica failing mid-collect must not lose the others' readings:
@@ -314,12 +320,12 @@ export class MssqlIndexCollector implements IndexCollector {
   }
 
   private async usageFrom(
-    conn: MssqlSource,
+    conn: MssqlUsageMember,
     database: string,
     collection: string,
   ): Promise<IndexUsageStat[]> {
     const identity = await conn.serverIdentity();
-    const rows = await conn.query<{ indexName: string; ops: number }>(
+    const rows = await conn.query(
       // LEFT JOIN: an index with no row has served nothing since the counters
       // started, and that absence is a reading of zero, not a gap. The usage
       // DMV is server-wide with a database_id column — no retargeting needed.
