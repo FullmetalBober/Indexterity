@@ -112,7 +112,7 @@ export class PostgresConnection {
     database = "",
   ): Promise<T[]> {
     const pool = await this.poolFor(database);
-    const result = await pool.query<T>(text, params as unknown[]);
+    const result = await pool.query<T>(text, [...params]);
     return result.rows;
   }
 

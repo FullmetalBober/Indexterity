@@ -35,7 +35,11 @@ const MODULE = path.join(import.meta.dirname, "..", "apps", "tunnel");
 // whatever else arrives — which is exactly when this script should say so.
 function asSpawnFailure(error: unknown): { code?: string; stderr?: string; status?: number } {
   if (typeof error !== "object" || error === null) return {};
-  const { code, stderr, status } = error as Record<string, unknown>;
+  // Reflect.get rather than a cast: it reads a property off an object without
+  // claiming the object has one.
+  const code = Reflect.get(error, "code");
+  const stderr = Reflect.get(error, "stderr");
+  const status = Reflect.get(error, "status");
   return {
     ...(typeof code === "string" ? { code } : {}),
     ...(typeof stderr === "string" ? { stderr } : {}),

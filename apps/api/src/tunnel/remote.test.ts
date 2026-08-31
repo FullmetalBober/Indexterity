@@ -152,6 +152,18 @@ afterEach(async () => {
   );
 });
 
+// One level down a parsed greeting, checked. These were
+// `greeting?.config as Record<string, unknown> | undefined`, which claimed a
+// shape for JSON the service sent — so a greeting that carried no config at all
+// compared `undefined` to a key and reported a missing section as a wrong value.
+function nested(parent: Record<string, unknown> | undefined, key: string): Record<string, unknown> {
+  const value = parent?.[key];
+  if (typeof value !== "object" || value === null) {
+    throw new Error(`expected ${key} to be an object, got ${JSON.stringify(value)}`);
+  }
+  return { ...value };
+}
+
 describe("talking to the tunnel service", () => {
   it("greets with the id and the key, on the connection and nowhere else", async () => {
     const { greetings } = await start();
@@ -163,10 +175,10 @@ describe("talking to the tunnel service", () => {
     expect(greeting?.id).toBe("tunnel-under-test");
     // The private key travels in the greeting: not on argv, which /proc exposes,
     // and not in a file that would outlive the peering.
-    const config = greeting?.config as Record<string, unknown> | undefined;
+    const config = nested(greeting, "config");
     expect(config?.privateKey).toBe("6JPr8SWK9dFrjLwOWvGxJvVwt1nJKvXNTKLkS3LPvW8=");
     // Already resolved and vetted by the caller — the service refuses a hostname.
-    const peer = config?.peer as Record<string, unknown> | undefined;
+    const peer = nested(config, "peer");
     expect(peer?.endpoint).toBe("203.0.113.7:51820");
   });
 
