@@ -5,7 +5,9 @@
 // function any more: the client throws ORPCError in the same process as the
 // mutation hook, so the hook's onError does what the envelope did — and these
 // are the rules it applies.
+
 import { ORPCError } from "@orpc/client";
+import { present } from "~/lib/at";
 
 // Statuses whose message is written FOR the reader and can be shown as-is.
 // 402 is here because a plan refusal names the plan, the limit and what to do;
@@ -55,7 +57,11 @@ export async function unwrap<T>(
   if (error !== null && error !== undefined) {
     throw new AuthApiError(error.message ?? "request failed", error.status, error.code);
   }
-  return data as T;
+  // `data` is `T | null` and the contract says it is non-null once `error` is
+  // null — which the compiler cannot see and this used to assert. Checking says
+  // the same thing, and a response that broke that contract fails here rather
+  // than as a null reaching a component.
+  return present(data, "the response data");
 }
 
 // Exported for the shell's unreachable/down distinction (lib/queries/shell.ts):

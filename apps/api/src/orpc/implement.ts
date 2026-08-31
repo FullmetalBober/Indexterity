@@ -58,17 +58,49 @@ export type RouteScope<L extends AuthLevel> = L extends "session"
 // Runs the level, in the one place that cannot be skipped. A `session` caller
 // who is in no organization gets a null membership rather than a refusal: being
 // in none is a state the product has, not an error the api can fix.
-async function enterScope(
+// Generic on the LEVEL, so the return type is the scope that level produces
+// rather than the union of all of them. The call site used to assert the
+// difference away with `as RouteScope<L>` — reasonable, and a claim the compiler
+// can make itself once the level is a type parameter here too.
+//
+// The two branches still need one narrowing each, because TypeScript checks a
+// generic function's body against the constraint rather than the instantiation:
+// inside, `L` is still "some AuthLevel", so a `session` return is not provably a
+// `RouteScope<L>`. Splitting the function per level would remove them and is
+// exactly the five near-identical copies this shape exists to avoid.
+async function enterScope<L extends AuthLevel>(
   tenancy: TenancyService,
   req: FastifyRequest,
-  level: AuthLevel,
-): Promise<{ userId: string; member: Membership | null }> {
+  level: L,
+): Promise<RouteScope<L>> {
   const userId = await tenancy.userId(req);
-  if (level === "session") return { userId, member: await tenancy.memberOrNull(req) };
-  if (level === "member") return { userId, member: await tenancy.member(req) };
   const member =
-    level === "owner" ? await tenancy.requireOwner(req) : await tenancy.requireFreshOwner(req);
-  return { userId, member };
+    level === "session"
+      ? await tenancy.memberOrNull(req)
+      : level === "member"
+        ? await tenancy.member(req)
+        : level === "owner"
+          ? await tenancy.requireOwner(req)
+          : await tenancy.requireFreshOwner(req);
+  return scopeFor(level, { userId, member });
+}
+
+// The one step no signature can prove, in one place and named.
+//
+// TypeScript checks a generic body against the CONSTRAINT rather than the
+// instantiation, so inside `enterScope` the level is still "some AuthLevel" and
+// a `{ member: Membership | null }` is not provably a `RouteScope<L>` — even
+// though the branch that produced it is the branch that makes it so. The
+// alternative is one copy of the function per level, which is the duplication
+// this shape exists to avoid.
+//
+// Isolated here so the signature above is exact for every caller and this is the
+// only line relying on the correspondence.
+function scopeFor<L extends AuthLevel>(
+  _level: L,
+  scope: { userId: string; member: Membership | null },
+): RouteScope<L> {
+  return scope as RouteScope<L>;
 }
 
 // The only way to implement a contract route, which is the point.
@@ -107,10 +139,7 @@ export function route<
   level: L,
 ) {
   return orpcImplement(contract).use(async ({ next }) => {
-    // The cast is the seam between a runtime switch and the level's type. Held
-    // by enterScope above it and by RouteScope beside it; the alternative is
-    // five near-identical overloads of this function.
-    const scope = (await enterScope(tenancy, req, level)) as RouteScope<L>;
+    const scope = await enterScope(tenancy, req, level);
     return next({ context: scope });
   });
 }
