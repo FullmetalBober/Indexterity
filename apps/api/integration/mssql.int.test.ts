@@ -3,7 +3,6 @@ import { isRedundantPrefix, parseStoredSpec, rebuildKeys, rebuildOptions } from 
 import { DatabaseInaccessibleError, type EngineSession, workloadKey } from "../src/engine/ports";
 import { ProvisionDeniedError, SCOPED_USERNAME } from "../src/engine/provision";
 import { detectEngine } from "../src/engine/registry";
-import type { IndexSpec } from "../src/engine/types";
 import { present } from "../src/errors/at";
 import { collectSnapshots, serializeSpec } from "../src/mongo/snapshots";
 import { mssqlAdapter } from "../src/mssql/adapter";
@@ -29,6 +28,25 @@ const MSSQL_URL = process.env.MSSQL_URL;
 // serves a self-signed certificate.
 const OVERRIDES = { allowInvalidCertificates: true, allowInvalidHostnames: false, insecure: false };
 const DB = "indexterity_int";
+
+// One stored spec out of a collect result, by index name — checked at both
+// steps. `snapshots.find(...)?.spec as { unique: boolean }` claimed a shape for
+// a value that is JSON off the wire, and a snapshot that was simply missing
+// compared `undefined` to `true`, reporting an absent index as a wrong one.
+function specOf(
+  snapshots: readonly { database: string; indexName: string; spec: unknown }[],
+  indexName: string,
+): Record<string, unknown> {
+  const found = snapshots.find(
+    (snapshot) => snapshot.database === DB && snapshot.indexName === indexName,
+  );
+  if (found === undefined) throw new Error(`no snapshot for ${indexName}`);
+  const { spec } = found;
+  if (typeof spec !== "object" || spec === null) {
+    throw new Error(`expected a stored spec for ${indexName}, got ${JSON.stringify(spec)}`);
+  }
+  return { ...spec };
+}
 
 describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", () => {
   let seed: MssqlConnection;
@@ -157,17 +175,16 @@ describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", 
     expect(typeof member?.ops).toBe("number"); // bigint columns must not arrive as strings
     expect(Date.parse(member?.since ?? "")).toBeGreaterThan(0);
 
-    const pk = result.snapshots.find(
-      (snapshot) => snapshot.database === DB && snapshot.indexName === "pk_orders",
-    )?.spec as { unique: boolean; isShardKey: boolean } | undefined;
-    expect(pk?.unique).toBe(true);
-    expect(pk?.isShardKey).toBe(true); // clustered = never-drop
+    // The stored spec is JSON, so its fields are read rather than asserted: a
+    // spec that came back without them would otherwise compare `undefined` to
+    // `true` and report a missing field as a wrong one.
+    const pk = specOf(result.snapshots, "pk_orders");
+    expect(pk.unique).toBe(true);
+    expect(pk.isShardKey).toBe(true); // clustered = never-drop
 
-    const unique = result.snapshots.find(
-      (snapshot) => snapshot.database === DB && snapshot.indexName === "ux_email",
-    )?.spec as { unique: boolean; partial: boolean } | undefined;
-    expect(unique?.unique).toBe(true);
-    expect(unique?.partial).toBe(true); // filtered index
+    const unique = specOf(result.snapshots, "ux_email");
+    expect(unique.unique).toBe(true);
+    expect(unique.partial).toBe(true); // filtered index
   });
 
   it("runs the full hide lifecycle and honours the guards", async () => {
@@ -235,13 +252,13 @@ describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", 
     ).toBe(true);
 
     // The undo path: drop, then rebuild from exactly what was persisted.
-    const stored = parseStoredSpec(serializeSpec(pair.covering as IndexSpec));
+    const stored = parseStoredSpec(serializeSpec(present(pair.covering, "the covering index")));
     expect(stored.include).toEqual(["status", "email"]);
     await executor.drop(DB, "dbo.orders", "ix_covering");
     await executor.create(
       DB,
       "dbo.orders",
-      rebuildKeys(stored) as Record<string, 1 | -1>,
+      present(rebuildKeys(stored), "the rebuilt keys"),
       rebuildOptions(stored),
     );
     const rebuilt = (await session.collector.listIndexes(DB, "dbo.orders")).find(

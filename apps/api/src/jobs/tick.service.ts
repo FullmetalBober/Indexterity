@@ -87,7 +87,7 @@ export class TickService implements BeforeApplicationShutdown {
   // the dead-letter capture, the owner alerts and the job counters survive the
   // resident runner's removal. Re-wiring per drain would stack handlers and
   // report every failure N times.
-  private readonly events = new EventEmitter() as WorkerEvents;
+  private readonly events: WorkerEvents = new EventEmitter();
   private readonly taskList: ReturnType<typeof createTaskList>;
   // The overlap guard (#231, must-not-get-wrong 1). The watermark claims
   // protect DISPATCH only — two concurrent runOnce calls are otherwise legal

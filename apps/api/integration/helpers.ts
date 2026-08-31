@@ -12,6 +12,16 @@ import {
   sql,
 } from "../src/db";
 
+/** A body with an id on it, checked rather than claimed. */
+function asIdentified(body: unknown): { id: string } {
+  if (typeof body !== "object" || body === null || !("id" in body)) {
+    throw new Error(`expected a body with an id, got ${JSON.stringify(body)}`);
+  }
+  const { id } = body;
+  if (typeof id !== "string") throw new Error(`expected a string id, got ${JSON.stringify(id)}`);
+  return { id };
+}
+
 export const API_PORT = Number(process.env.INT_API_PORT ?? 3099);
 // The api serves everything under /api (main.ts setGlobalPrefix), so this is
 // the base every call hangs off — including better-auth at /api/auth.
@@ -232,7 +242,7 @@ export async function createOrg(
     base,
   );
   if (res.status !== 200) throw new Error(`create org failed: ${res.status} ${await res.text()}`);
-  return ((await res.json()) as { id: string }).id;
+  return asIdentified(await res.json()).id;
 }
 
 // Sign up AND make an organization, because signing up no longer makes one.
