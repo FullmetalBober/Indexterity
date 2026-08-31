@@ -17,17 +17,29 @@ import { Route as SettingsRoute } from "./app.clusters.$clusterId.settings";
 // branch. The server's is the other half of the same line and deliberately DOES
 // await — its render is the SSR payload.
 
-type Loader = (opts: {
+interface LoaderContext {
   params: { clusterId: string };
   context: { queryClient: { ensureQueryData: (options: unknown) => Promise<unknown> } };
-}) => Promise<unknown>;
+}
 
 // Off the route the app actually registers, not a copy of its body — a copy
 // would keep passing while the real loader grew an await.
-function loaderOf(route: { options: { loader?: unknown } }): Loader {
+/**
+ * Run the loader the app really registers.
+ *
+ * `route.options.loader` is TanStack's own type, which is not worth restating —
+ * a hand-written signature was close enough to compile and not the same
+ * function, so calling it took an assertion. Narrowing with `typeof` gives a
+ * callable, and the arguments are checked against LoaderContext on the way in,
+ * which is the half that matters here.
+ */
+async function runLoader(
+  route: { options: { loader?: unknown } },
+  context: LoaderContext,
+): Promise<unknown> {
   const loader = route.options.loader;
   if (typeof loader !== "function") throw new Error("expected a loader");
-  return loader as Loader;
+  return loader(context);
 }
 
 // Every read accepted and none of them answered, which is what a slow cluster
@@ -40,7 +52,7 @@ describe("cluster route loaders", () => {
   // Nine reads, none of which the reader has to wait on to see the page.
   it("hands over the overview before its reads answer", async () => {
     const queryClient = stalledClient();
-    await loaderOf(OverviewRoute)({ params: { clusterId: "c1" }, context: { queryClient } });
+    await runLoader(OverviewRoute, { params: { clusterId: "c1" }, context: { queryClient } });
     // Returning early is only half of it — a loader that warmed nothing would
     // also return early, and every panel would then fetch on mount instead.
     expect(queryClient.ensureQueryData).toHaveBeenCalledTimes(9);
@@ -51,7 +63,7 @@ describe("cluster route loaders", () => {
   // production server — and on an unreachable one, on a timeout.
   it("hands over the settings page before the cluster dial answers", async () => {
     const queryClient = stalledClient();
-    await loaderOf(SettingsRoute)({ params: { clusterId: "c1" }, context: { queryClient } });
+    await runLoader(SettingsRoute, { params: { clusterId: "c1" }, context: { queryClient } });
     expect(queryClient.ensureQueryData).toHaveBeenCalledTimes(2);
   });
 });

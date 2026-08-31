@@ -26,7 +26,7 @@ function ctx(over: Partial<AuthHookContext> & { context?: object } = {}): AuthHo
     headers: new Headers({ "user-agent": "Firefox/1" }),
     ...over,
     context: { ...over.context },
-  } as AuthHookContext;
+  };
 }
 
 describe("authEventFor", () => {
