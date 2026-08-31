@@ -1,11 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { assessHealth, MSSQL_HEALTH } from "../analysis";
-import {
-  collectMssqlServerHealth,
-  type HealthRow,
-  type MssqlReader,
-  toServerHealth,
-} from "./health";
+import type { MssqlReader } from "./connection";
+import { collectMssqlServerHealth, type HealthRow, toServerHealth } from "./health";
 
 // Whatever the counter query returns, as one row. bigint columns arrive from
 // tedious as STRINGS, which is the boundary asNumber exists for and the one way
@@ -83,17 +79,20 @@ describe("collectMssqlServerHealth", () => {
 // what they encode is what a reading MEANS. Each case is one of the measured
 // numbers from the probe.
 describe("MSSQL_HEALTH against readings taken from a live 2022", () => {
-  const at = (over: Partial<ReturnType<typeof toServerHealth>> & object) =>
-    ({
-      collectionScans: 0,
-      scannedObjects: 0,
-      scannedKeys: 0,
-      scanAndOrder: 0,
-      queuedReaders: 0,
-      queuedWriters: 0,
-      residentMb: 756,
-      ...over,
-    }) as NonNullable<ReturnType<typeof toServerHealth>>;
+  // The return is annotated rather than the literal asserted: a missing or
+  // misspelled field is then a compile error here instead of a claim.
+  const at = (
+    over: Partial<ReturnType<typeof toServerHealth>> & object,
+  ): NonNullable<ReturnType<typeof toServerHealth>> => ({
+    collectionScans: 0,
+    scannedObjects: 0,
+    scannedKeys: 0,
+    scanAndOrder: 0,
+    queuedReaders: 0,
+    queuedWriters: 0,
+    residentMb: 756,
+    ...over,
+  });
 
   // 3000 seeks moved Index Searches by 3019 and Page lookups by 9076 — a ratio
   // of 3.01, which is just the b-tree descent and does not grow with the table.

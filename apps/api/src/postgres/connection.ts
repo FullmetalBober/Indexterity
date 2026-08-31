@@ -226,12 +226,7 @@ export class PostgresConnection {
   // probe is one catalog read on the database in question, against a pool this
   // session would otherwise have opened to walk it anyway.
   async listDatabaseNames(): Promise<string[]> {
-    const rows = await this.query<{ datname: string }>(
-      `SELECT datname FROM pg_database
-        WHERE datallowconn AND NOT datistemplate
-        ORDER BY datname`,
-    );
-    const names = rows.map((row) => row.datname);
+    const names = (await this.catalogRows()).map((row) => row.datname);
     if (!names.includes(DEFAULT_DATABASE)) return names;
     if (await this.holdsUserTables(this.keyFor(DEFAULT_DATABASE))) return names;
     return names.filter((name) => name !== DEFAULT_DATABASE);
@@ -257,20 +252,24 @@ export class PostgresConnection {
   // collects nothing.
   private async holdsUserTables(database: string): Promise<boolean> {
     try {
-      const rows = await this.query<{ present: boolean }>(
-        `SELECT EXISTS (
-           SELECT 1 FROM pg_class c
-             JOIN pg_namespace n ON n.oid = c.relnamespace
-            WHERE c.relkind IN ('r', 'p')
-              AND n.nspname <> ALL($1::text[])
-         ) AS present`,
-        [SYSTEM_SCHEMAS],
-        database,
-      );
-      return rows[0]?.present === true;
+      return (await this.tableRows(database))[0]?.present === true;
     } catch {
       return false;
     }
+  }
+
+  // The two catalog reads, each naming the row it comes back with.
+  //
+  // Separate from `query<T>` because that method promises rows of whatever type
+  // the caller asks for, and the only value assignable to `T[]` for every `T` is
+  // `[]` — so a test double standing in for it has to assert its data into
+  // shape. These say what the server answers, and a double just answers rows.
+  protected async catalogRows(): Promise<{ datname: string }[]> {
+    return this.query<{ datname: string }>(DATABASE_LISTING_SQL);
+  }
+
+  protected async tableRows(database: string): Promise<{ present: boolean }[]> {
+    return this.query<{ present: boolean }>(USER_TABLES_SQL, [SYSTEM_SCHEMAS], database);
   }
 
   async ping(): Promise<void> {
@@ -285,3 +284,19 @@ export class PostgresConnection {
     await Promise.allSettled(pools.map((pool) => pool.end()));
   }
 }
+
+// Templates and undiallable databases are left to the statement's own filter:
+// one cannot be dialled, so it never reaches the decision above.
+export const DATABASE_LISTING_SQL = `SELECT datname FROM pg_database
+        WHERE datallowconn AND NOT datistemplate
+        ORDER BY datname`;
+
+// Ordinary and partitioned tables only, the same relkind pair the collector
+// walks: a database holding nothing but views has no index to have an opinion
+// about.
+export const USER_TABLES_SQL = `SELECT EXISTS (
+           SELECT 1 FROM pg_class c
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE c.relkind IN ('r', 'p')
+              AND n.nspname <> ALL($1::text[])
+         ) AS present`;

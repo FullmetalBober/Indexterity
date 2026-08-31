@@ -1,22 +1,15 @@
 import { describe, expect, it } from "vitest";
 import type { MssqlWriter } from "./connection";
-import { MssqlIndexExecutor } from "./executor";
-
-interface IndexStateRow {
-  type: number;
-  isUnique: boolean;
-  isPrimaryKey: boolean;
-  isUniqueConstraint: boolean;
-  isDisabled: boolean;
-}
+import { type IndexStateRow, MssqlIndexExecutor } from "./executor";
 
 // A stub standing in for the one method surface the executor touches. Executed
 // statements are recorded so a refusal can assert nothing reached the server.
 function stubConnection(state: IndexStateRow | null, online = true) {
   const executed: string[] = [];
-  const conn: MssqlWriter = {
-    // Generic, like the real `query<T>`.
-    query: <T>() => Promise.resolve((state === null ? [] : [state]) as T[]),
+  const conn: MssqlWriter<IndexStateRow> = {
+    // The port names the row, so this answers index states rather than claiming
+    // its data is whatever the caller asked for.
+    query: () => Promise.resolve(state === null ? [] : [state]),
     execute: (text: string) => {
       executed.push(text);
       return Promise.resolve();

@@ -70,12 +70,16 @@ function fakeClients(options: FakeOptions = {}) {
       return Promise.resolve(undefined);
     }
 
-    on(event: string, handler: unknown): unknown {
-      // A guard rather than a claim: pg's `on` takes `unknown`, and a handler
-      // that is not callable must fail here rather than at delivery.
-      if (event === "notification" && typeof handler === "function") {
-        this.notify = handler as (m: ProbeNotification) => void;
-      }
+    // Taken as a discriminated tuple rather than `(event: string, handler:
+    // unknown)`: destructuring one narrows the handler along with the event, so
+    // the notification branch has a notification handler without asserting it.
+    on(
+      ...args:
+        | ["notification", (message: ProbeNotification) => void]
+        | ["error", (error: Error) => void]
+    ): unknown {
+      const [event, handler] = args;
+      if (event === "notification") this.notify = handler;
       return this;
     }
 

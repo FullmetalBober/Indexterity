@@ -1,5 +1,5 @@
 import type { ServerHealth } from "../engine/types";
-import { asNumber } from "./connection";
+import { asNumber, type MssqlReader } from "./connection";
 
 // The ServerHealth port, mapped onto SQL Server (#205).
 //
@@ -122,23 +122,6 @@ export function toServerHealth(row: HealthRow | undefined): ServerHealth | null 
 // Null when the credentials cannot read the DMVs — the port's "could not read",
 // and every other collector call still works. Not an error path: VIEW SERVER
 // STATE is a grant an operator may reasonably have withheld.
-/**
- * What this needs of a connection: one read.
- *
- * `MssqlConnection` has 22 members and this uses one, so taking the whole class
- * meant the test had to fake 21 members it never called.
- *
- * Parameterised on the ROW rather than generic on the method, which is what
- * makes the fake assertion-free. `query<T>()` promises "rows of whatever type
- * you ask for", and the only value assignable to `T[]` for every `T` is `[]` —
- * so any mock with real data in it has to assert. Fixing the row at the port
- * says what this call actually returns, the real connection's generic `query`
- * satisfies it, and the fake just answers HealthRows.
- */
-export interface MssqlReader<Row> {
-  query(text: string): Promise<Row[]>;
-}
-
 export async function collectMssqlServerHealth(
   conn: MssqlReader<HealthRow>,
 ): Promise<ServerHealth | null> {
