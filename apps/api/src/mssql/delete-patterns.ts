@@ -61,6 +61,12 @@ const SECONDS_PER_UNIT: Record<string, number> = {
   year: 31_536_000,
 };
 
+// The same test the array branch used inline, as a predicate so the single-child
+// branch can narrow with it instead of asserting the result.
+function isXmlNode(value: unknown): value is XmlNode {
+  return typeof value === "object" && value !== null;
+}
+
 export function retentionSecondsFrom(scalarString: string): number | null {
   const match = /\bdateadd\((\w+),\s*\((-?\d+)\)/i.exec(scalarString);
   if (match === null) return null;
@@ -83,10 +89,8 @@ export interface DeletePlanRow {
 // operator with a comparison nested three levels below it.
 function childrenOf(node: XmlNode, key: string): XmlNode[] {
   const child = node[key];
-  if (Array.isArray(child)) {
-    return child.filter((entry): entry is XmlNode => typeof entry === "object" && entry !== null);
-  }
-  return typeof child === "object" && child !== null ? [child as XmlNode] : [];
+  if (Array.isArray(child)) return child.filter(isXmlNode);
+  return isXmlNode(child) ? [child] : [];
 }
 
 // The column this element compares, when it is a column of the target table.

@@ -1,3 +1,4 @@
+import { keysOf } from "../errors/at";
 import { mongoAdapter } from "../mongo/adapter";
 import { mssqlAdapter } from "../mssql/adapter";
 import { postgresAdapter } from "../postgres/adapter";
@@ -21,7 +22,7 @@ export function engineSupported(engine: ClusterEngine): boolean {
 }
 
 export function supportedEngines(): ClusterEngine[] {
-  return (Object.keys(adapters) as ClusterEngine[]).filter(engineSupported);
+  return keysOf(adapters).filter(engineSupported);
 }
 
 // The same list, carrying each adapter's own string hint, for the connect form
