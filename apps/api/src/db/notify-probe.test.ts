@@ -58,7 +58,12 @@ function fakeClients(options: FakeOptions = {}) {
         listeners.set(channel, [...(listeners.get(channel) ?? []), this.notify]);
         return Promise.resolve(undefined);
       }
-      const [channel, payload] = (values ?? []) as [string, string];
+      // Checked: pg hands these through as unknown, and a wrong arity here
+      // would otherwise deliver `undefined` to every listener.
+      const [channel, payload] = values ?? [];
+      if (typeof channel !== "string" || typeof payload !== "string") {
+        throw new Error(`expected a channel and payload, got ${JSON.stringify(values)}`);
+      }
       if (delivers) {
         for (const handler of listeners.get(channel) ?? []) handler({ channel, payload });
       }
@@ -66,7 +71,11 @@ function fakeClients(options: FakeOptions = {}) {
     }
 
     on(event: string, handler: unknown): unknown {
-      if (event === "notification") this.notify = handler as (m: ProbeNotification) => void;
+      // A guard rather than a claim: pg's `on` takes `unknown`, and a handler
+      // that is not callable must fail here rather than at delivery.
+      if (event === "notification" && typeof handler === "function") {
+        this.notify = handler as (m: ProbeNotification) => void;
+      }
       return this;
     }
 

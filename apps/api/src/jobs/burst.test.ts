@@ -5,7 +5,14 @@ import { passKey } from "./watermark";
 
 vi.mock("./watermark", async (importOriginal) => {
   const original = await importOriginal<typeof import("./watermark")>();
-  return { ...original, claimWatermark: (...args: unknown[]) => claimSpy(...args) };
+  // The wrapper stays — the factory is hoisted, so naming `claimSpy` eagerly
+  // fails — but its parameters are declared rather than spread as `unknown[]`
+  // and unpacked with an assertion on the other side.
+  return {
+    ...original,
+    claimWatermark: (db: unknown, key: string, notBefore: Date, now: Date) =>
+      claimSpy(db, key, notBefore, now),
+  };
 });
 
 // Stands in for the conditional upsert: claim unless something claimed this key
@@ -13,8 +20,9 @@ vi.mock("./watermark", async (importOriginal) => {
 // below are about what the tick does with a won or lost claim rather than about
 // drizzle.
 let claimed = new Map<string, Date>();
-const claimSpy = (...args: unknown[]): Promise<boolean> => {
-  const [, key, notBefore, now] = args as [unknown, string, Date, Date];
+// Parameters declared rather than unpacked out of `unknown[]` and asserted:
+// the shape was always known, it just was not written down.
+const claimSpy = (_db: unknown, key: string, notBefore: Date, now: Date): Promise<boolean> => {
   const previous = claimed.get(key);
   if (previous !== undefined && previous >= notBefore) return Promise.resolve(false);
   claimed.set(key, now);

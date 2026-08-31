@@ -27,14 +27,16 @@ export interface CallerSession {
 // ask was its own round trip (#77). The request is the cache boundary: the
 // caller cannot change mid-request, so the first resolution answers them all,
 // including concurrent ones, which share the promise rather than the result.
-const resolvedByRequest = new WeakMap<FastifyRequest, Promise<CallerSession | null>>();
+// Keyed on the port, not on FastifyRequest: identity is what the cache is
+// about, and the port is what every function here now takes.
+const resolvedByRequest = new WeakMap<RequestHeaders, Promise<CallerSession | null>>();
 // Cookies better-auth asked to set while resolving — the refreshed session
 // cache (auth.config.ts). Stashed beside the resolution, not inside it, so the
 // onSend hook can read them without awaiting anything: by the time a response
 // is being sent, every resolution the handler awaited has settled.
-const setCookiesByRequest = new WeakMap<FastifyRequest, readonly string[]>();
+const setCookiesByRequest = new WeakMap<RequestHeaders, readonly string[]>();
 
-function resolveSession(req: FastifyRequest): Promise<CallerSession | null> {
+function resolveSession(req: RequestHeaders): Promise<CallerSession | null> {
   const pending = resolvedByRequest.get(req);
   if (pending !== undefined) return pending;
   const fresh = auth.api
@@ -64,17 +66,28 @@ function resolveSession(req: FastifyRequest): Promise<CallerSession | null> {
 // when resolving it failed (that failure already failed the request itself).
 // Synchronous on purpose: an async onSend hook holds the send open and races
 // any handler that called reply.send() without returning the reply.
-export function sessionCookiesFor(req: FastifyRequest): readonly string[] {
+/**
+ * What this module reads of a request: its headers.
+ *
+ * A real `FastifyRequest` satisfies it, so nothing at a call site changes — and
+ * a test writes the one member instead of asserting a whole request onto an
+ * object with a cookie in it.
+ */
+export interface RequestHeaders {
+  readonly headers: FastifyRequest["headers"];
+}
+
+export function sessionCookiesFor(req: RequestHeaders): readonly string[] {
   return setCookiesByRequest.get(req) ?? [];
 }
 
 // Authn: the caller's session, or 401. Tenancy scoping is layered on top.
-export async function requireSession(req: FastifyRequest): Promise<CallerSession> {
+export async function requireSession(req: RequestHeaders): Promise<CallerSession> {
   const session = await resolveSession(req);
   if (session === null) throw new ORPCError("UNAUTHORIZED", { message: "sign in required" });
   return session;
 }
 
-export async function requireUserId(req: FastifyRequest): Promise<string> {
+export async function requireUserId(req: RequestHeaders): Promise<string> {
   return (await requireSession(req)).userId;
 }

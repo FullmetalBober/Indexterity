@@ -1,16 +1,16 @@
 import { ORPCError } from "@orpc/server";
-import type { FastifyRequest } from "fastify";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { orpcCode } from "../errors/message";
-import { requireSession, requireUserId, sessionCookiesFor } from "./session";
+import { type RequestHeaders, requireSession, requireUserId, sessionCookiesFor } from "./session";
 
 const getSession = vi.hoisted(() => vi.fn());
 vi.mock("./index", () => ({ auth: { api: { getSession } } }));
 
 // Only `headers` is read from the request, and identity is what the cache is
 // keyed on — two calls to this are two requests.
-function request(): FastifyRequest {
-  return { headers: { cookie: "better-auth.session_token=tok" } } as FastifyRequest;
+// A complete RequestHeaders — the one member this module reads.
+function request(): RequestHeaders {
+  return { headers: { cookie: "better-auth.session_token=tok" } };
 }
 
 const SIGNED_IN_AT = new Date("2026-08-01T10:00:00Z");
