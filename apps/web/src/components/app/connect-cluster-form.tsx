@@ -1,6 +1,7 @@
 import {
   type ClusterEngine,
   type ConnectionDiagnosis,
+  clusterEngine,
   createClusterInput,
   engineFromScheme,
   NO_TLS_OVERRIDES,
@@ -584,7 +585,12 @@ export function ConnectClusterForm({
               </span>
               <Select
                 value={chosen ?? ""}
-                onValueChange={(value) => chooseEngine(value as ClusterEngine)}
+                onValueChange={(value) => {
+                  // Radix hands back a string; the options are ours, so this only
+                  // fires for a real engine — and says so rather than asserting.
+                  const engine = clusterEngine.safeParse(value);
+                  if (engine.success) chooseEngine(engine.data);
+                }}
               >
                 <SelectTrigger className="h-8 w-44" aria-label="Which engine is this">
                   <SelectValue placeholder="Choose the engine" />

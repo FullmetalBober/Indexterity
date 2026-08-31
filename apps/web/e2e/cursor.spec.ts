@@ -44,8 +44,10 @@ test.describe("the pointer says what is clickable", () => {
   test("a utility class still outranks the base rule", async ({ page }) => {
     await signUpAndLandOnDashboard(page, uniqueEmail("cursor-layer"));
     const probes = await page.evaluate(() => {
-      const make = (tag: string, className: string, disabled: boolean) => {
-        const el = document.createElement(tag) as HTMLButtonElement;
+      // Only ever "button", and saying so is what lets `createElement` return an
+      // HTMLButtonElement — which has `disabled` — instead of being asserted into one.
+      const make = (tag: "button", className: string, disabled: boolean) => {
+        const el = document.createElement(tag);
         el.className = className;
         el.disabled = disabled;
         document.body.append(el);

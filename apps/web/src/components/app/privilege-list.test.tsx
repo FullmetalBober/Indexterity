@@ -75,10 +75,10 @@ describe("PrivilegeList", () => {
   // moment the web reloads and the api has not, and in prod for the length of a
   // rolling deploy.
   it("survives a response from an api that has never heard of the field", () => {
-    const older = privilege();
-    // Delete the key rather than setting undefined: this is the wire shape, and a
-    // present-but-undefined property is not the same object an older api sends.
-    delete (older as { command?: string | null }).command;
+    // Built without `command` rather than built-then-deleted: this is the wire
+    // shape an older api sends, and describing it is more honest than asserting
+    // the field optional so it can be removed.
+    const { command: _dropped, ...older } = privilege();
 
     render(<PrivilegeList privileges={[older]} />);
 

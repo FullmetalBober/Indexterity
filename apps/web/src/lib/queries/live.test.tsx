@@ -1,6 +1,7 @@
 import type { ClusterEvent } from "@repo/contracts";
 import { waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { present } from "~/lib/at";
 import { apiError, renderInApp } from "~/test-utils";
 import { queryKeys } from "./keys";
 import { invalidationKeys, useLiveClusterEvents } from "./live";
@@ -30,7 +31,7 @@ function stream() {
     },
     async *[Symbol.asyncIterator]() {
       while (true) {
-        while (queue.length > 0) yield queue.shift() as ClusterEvent;
+        while (queue.length > 0) yield present(queue.shift(), "a queued event");
         if (closed) return;
         await new Promise<void>((resolve) => {
           wake = resolve;

@@ -64,7 +64,12 @@ export type TimeFormat = (at: unknown) => string;
 // rather than as nothing — which is the wrong answer a pixel offset was giving.
 function instantOf(at: unknown): Date | null {
   if (at === null || at === undefined) return null;
-  const date = at instanceof Date ? at : new Date(at as string | number);
+  // Checked rather than claimed: a Date is used as-is, a string or number is
+  // parsed, and anything else is not a timestamp — which is the answer the
+  // caller already handles, since an unparseable value falls out below as null.
+  if (at instanceof Date) return Number.isNaN(at.getTime()) ? null : at;
+  if (typeof at !== "string" && typeof at !== "number") return null;
+  const date = new Date(at);
   return Number.isNaN(date.getTime()) ? null : date;
 }
 

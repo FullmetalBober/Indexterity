@@ -411,8 +411,8 @@ describe("RecommendationsTable, the per-node usage split", () => {
         roster={{
           ...ROSTER,
           nodes: [
-            at(ROSTER.nodes) as ClusterNodes["nodes"][number],
-            at(ROSTER.nodes, 1) as ClusterNodes["nodes"][number],
+            at(ROSTER.nodes),
+            at(ROSTER.nodes, 1),
             { host: "c:27017", role: "unknown", state: "unreachable" },
           ],
         }}
