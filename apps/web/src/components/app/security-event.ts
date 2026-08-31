@@ -93,7 +93,8 @@ export function eventLabel(event: string): string {
 // something. Read from the contract's list rather than spelled here, so the
 // writer's rule and the screen's rule are one rule.
 export function isUnprovenActor(event: string): boolean {
-  return (UNPROVEN_ACTOR_EVENTS as readonly string[]).includes(event);
+  // See organization.ts: `.some` compares without widening the receiver.
+  return UNPROVEN_ACTOR_EVENTS.some((unproven) => unproven === event);
 }
 
 // The specifics, worded per act. Only the acts whose metadata says something a

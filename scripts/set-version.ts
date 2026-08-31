@@ -58,7 +58,11 @@ const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 type PackageJson = { version?: string } & Record<string, unknown>;
 
 function readJson(rel: string): PackageJson {
-  return JSON.parse(readFileSync(join(ROOT, rel), "utf8")) as PackageJson;
+  // Annotated rather than asserted. `JSON.parse` returns `any`, so neither
+  // form checks anything at runtime — but a declaration states what is
+  // expected, where an assertion tells the compiler to stop asking.
+  const parsed: PackageJson = JSON.parse(readFileSync(join(ROOT, rel), "utf8"));
+  return parsed;
 }
 
 function writeJson(rel: string, value: object): void {
@@ -86,8 +90,9 @@ function lockKey(rel: string): string {
 }
 
 function readLockfile(): Lockfile {
-  const raw: unknown = JSON.parse(readFileSync(join(ROOT, LOCKFILE), "utf8"));
-  const lock = raw as Lockfile;
+  // Annotated at the parse rather than asserted afterwards. The shape check
+  // below is what actually establishes it — see the note there.
+  const lock: Lockfile = JSON.parse(readFileSync(join(ROOT, LOCKFILE), "utf8"));
   // Refuse a shape this does not recognise rather than quietly touch nothing in
   // it. Updating no fields and reporting success is the exact failure #186 was,
   // and a lockfileVersion bump is the likeliest way to reintroduce it.

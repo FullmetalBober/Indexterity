@@ -193,11 +193,16 @@ function audit(): AuditReport {
       maxBuffer: 64 * 1024 * 1024,
     });
   } catch (error) {
-    const stdout = (error as { stdout?: unknown }).stdout;
+    // `in` narrows without asserting: execFileSync attaches stdout to the
+    // error it throws, and anything else thrown here genuinely has none.
+    const stdout =
+      typeof error === "object" && error !== null && "stdout" in error ? error.stdout : undefined;
     if (typeof stdout !== "string" || stdout === "") throw error;
     raw = stdout;
   }
-  return JSON.parse(raw) as AuditReport;
+  // Annotated rather than asserted — see set-version.ts.
+  const parsed: AuditReport = JSON.parse(raw);
+  return parsed;
 }
 
 // One advisory can be reported against several packages (the vulnerable one and
@@ -385,9 +390,9 @@ function assertReportIsParsable(report: AuditReport): void {
 function main(): void {
   selfCheck();
 
-  const lock = JSON.parse(readFileSync(resolve(ROOT, "package-lock.json"), "utf8")) as {
-    packages?: LockPackages;
-  };
+  const lock: { packages?: LockPackages } = JSON.parse(
+    readFileSync(resolve(ROOT, "package-lock.json"), "utf8"),
+  );
   if (lock.packages === undefined) {
     console.error("package-lock.json has no `packages` map — nothing to walk.");
     process.exit(2);

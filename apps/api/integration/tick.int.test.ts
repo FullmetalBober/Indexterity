@@ -40,6 +40,28 @@ let db: ReturnType<typeof createDatabase>;
 
 const TICK_URL = `http://localhost:${PORT}/api/internal/tick`;
 
+/**
+ * The tick's own answer, checked rather than asserted.
+ *
+ * `body as { dispatched: string[] }` claimed the shape of the very thing under
+ * test, so a response that came back as an error object asserted just as
+ * happily and failed later on `.dispatched` being undefined — several lines
+ * from the request that was actually wrong.
+ */
+function asDispatch(body: unknown): { dispatched: string[]; drained: boolean } {
+  if (typeof body !== "object" || body === null) {
+    throw new Error(`expected a tick body, got ${JSON.stringify(body)}`);
+  }
+  // `in` narrows without asserting — the first draft of this helper reached for
+  // a cast to read two fields, which is the thing it exists to remove.
+  const dispatched = "dispatched" in body ? body.dispatched : undefined;
+  const drained = "drained" in body ? body.drained : undefined;
+  if (!Array.isArray(dispatched) || dispatched.some((task) => typeof task !== "string")) {
+    throw new Error(`expected dispatched task names, got ${JSON.stringify(dispatched)}`);
+  }
+  return { dispatched, drained: drained === true };
+}
+
 async function tick(
   token: string | null,
 ): Promise<{ status: number; body: unknown; cacheControl: string | null }> {
@@ -234,7 +256,7 @@ describe("GET /api/internal/tick", () => {
   it("dispatches every due pass on the first tick, and runs the dispatchers", async () => {
     const { status, body } = await tick(SECRET);
     expect(status).toBe(200);
-    const outcome = body as { dispatched: string[]; drained: boolean };
+    const outcome = asDispatch(body);
     expect(outcome.dispatched.sort()).toEqual([...PASSES].sort());
     expect(typeof outcome.drained).toBe("boolean");
     expect(await settledDispatchers()).toEqual([]);
@@ -254,7 +276,7 @@ describe("GET /api/internal/tick", () => {
   // unit-tested in burst.test.ts, where `now` is injected.
   it("re-dispatches nothing whose bucket has not rolled, on a second tick", async () => {
     const { body } = await tick(SECRET);
-    const dispatched = (body as { dispatched: string[] }).dispatched;
+    const dispatched = asDispatch(body).dispatched;
     const fiveMinute = ["scheduleApply", "scheduleProbe"];
     expect(dispatched.filter((task) => !fiveMinute.includes(task))).toEqual([]);
     expect(await settledDispatchers()).toEqual([]);
@@ -267,9 +289,6 @@ describe("GET /api/internal/tick", () => {
           where key in ('pass:scheduleApply', 'pass:scheduleProbe')`,
     );
     const { body } = await tick(SECRET);
-    expect((body as { dispatched: string[] }).dispatched.sort()).toEqual([
-      "scheduleApply",
-      "scheduleProbe",
-    ]);
+    expect(asDispatch(body).dispatched.sort()).toEqual(["scheduleApply", "scheduleProbe"]);
   });
 });
