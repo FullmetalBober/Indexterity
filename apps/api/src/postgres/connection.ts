@@ -59,15 +59,31 @@ const DEFAULT_DATABASE = "postgres";
  * connection. `execute` carries the build flag because the build budget is
  * asked for per statement (#410).
  */
-export interface PostgresWriter {
+export interface PostgresReader {
   query<T extends QueryResultRow>(
     text: string,
     params?: readonly unknown[],
     database?: string,
   ): Promise<T[]>;
-  execute(text: string, database?: string, opts?: { build?: boolean }): Promise<void>;
   serverIdentity(): Promise<PostgresServerIdentity>;
   serverVersion(): Promise<PostgresServerVersion | null>;
+}
+
+export interface PostgresWriter extends PostgresReader {
+  execute(text: string, database?: string, opts?: { build?: boolean }): Promise<void>;
+}
+
+// The one row `pg_stat_statements` answers with, and a port that names it.
+//
+// Split from the reader above because `query<T>` promises rows of whatever type
+// the caller asks for: the only value assignable to `T[]` for every `T` is `[]`,
+// so a test double for the workload read had to assert its statements into
+// shape. Every field is `unknown` because that is what the driver hands back —
+// `calls` and `rows` are bigint columns and arrive as STRINGS.
+export type PgStatementRow = { query: unknown; calls: unknown; rows: unknown };
+
+export interface PostgresStatementSource {
+  query(text: string, params?: readonly unknown[], database?: string): Promise<PgStatementRow[]>;
 }
 
 export class PostgresConnection {
