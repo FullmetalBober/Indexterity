@@ -109,17 +109,22 @@ export function scrubString(value: string): string {
 // to be JSON-serialised.
 const MAX_DEPTH = 12;
 
-// The one assertion left in this package, and it is the shape TypeScript cannot
-// express: `scrubValue` walks an arbitrary value and rebuilds it, so the result
-// has the same STRUCTURE as its input and the compiler has no way to say so — a
-// recursive `unknown -> unknown` walk cannot carry T through it.
+// Declared over the walk rather than asserted onto its result.
 //
-// The alternative is returning `unknown` and making every caller assert instead,
-// which is the same claim made in more places by people with less context. Kept
-// here, where the walk is, and bounded by the tests below that check the shape
-// survives.
-export function scrub<T>(value: T): T {
-  return scrubValue(value, 0, new WeakSet()) as T;
+// `scrubValue` takes an arbitrary value and rebuilds it, so what comes back has
+// the same STRUCTURE as what went in — every branch either returns the value
+// untouched or replaces a string with a string. TypeScript cannot derive that: a
+// recursive `unknown -> unknown` walk has nowhere to carry T, and narrowing
+// `value` to `T & string` does not make `scrubString`'s `string` assignable back.
+//
+// So the correspondence is stated as an overload signature. The body below is
+// checked as `unknown -> unknown` and claims nothing — there is no cast in it,
+// and no caller has to make one either, which is where returning `unknown` would
+// have put them. What holds it honest is the suite: the round-trip tests assert
+// the shape survives, not just that the secrets are gone.
+export function scrub<T>(value: T): T;
+export function scrub(value: unknown): unknown {
+  return scrubValue(value, 0, new WeakSet());
 }
 
 function scrubValue(value: unknown, depth: number, seen: WeakSet<object>): unknown {
