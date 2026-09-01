@@ -25,6 +25,10 @@
     // parse here and then fail at runtime — this turns that into a type error
     // instead of a stack trace in CI.
     "erasableSyntaxOnly": true,
+    // These run as `node <file>.ts`, so an import between two of them has to
+    // name the real file — `./source-files.ts`, not `./source-files.js`, which
+    // does not exist. Safe because nothing here is emitted.
+    "allowImportingTsExtensions": true,
     // Nothing emitted, so nothing to declare or map.
     "declaration": false,
     "declarationMap": false,

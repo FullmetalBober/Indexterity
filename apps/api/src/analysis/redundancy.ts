@@ -53,7 +53,7 @@ export function coversIncludes(candidate: IndexSpec, other: IndexSpec): boolean 
 // A direction that describes an ORDER, and therefore has a reverse. `text`,
 // `hashed` and `2dsphere` do not — nothing walks them backwards to produce a
 // different sequence — so they are only ever covered by an identical key.
-function ordered(direction: IndexDirection): direction is 1 | -1 {
+function ordered(direction: IndexDirection) {
   return direction === 1 || direction === -1;
 }
 

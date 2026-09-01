@@ -32,6 +32,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { z } from "zod";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -55,10 +56,15 @@ const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 // The one field this script reads, plus everything else it must write back
 // untouched. `version` is optional because a package.json that has lost it is
 // exactly the state `check` exists to report, not to crash on.
-type PackageJson = { version?: string } & Record<string, unknown>;
+const PACKAGE_JSON = z.looseObject({ version: z.string().optional() });
+type PackageJson = z.infer<typeof PACKAGE_JSON>;
 
+// `JSON.parse` returns `any`, so an annotation on it checks exactly as much as
+// an assertion would: nothing. Narrowed instead — the object-ness and the one
+// field this script reads are both tested, and a file that is neither says so
+// here rather than several lines later on a property access.
 function readJson(rel: string): PackageJson {
-  return JSON.parse(readFileSync(join(ROOT, rel), "utf8")) as PackageJson;
+  return PACKAGE_JSON.parse(JSON.parse(readFileSync(join(ROOT, rel), "utf8")));
 }
 
 function writeJson(rel: string, value: object): void {
@@ -67,12 +73,19 @@ function writeJson(rel: string, value: object): void {
 
 // The lockfile, as far as this file is concerned: a version at the document root
 // and one per entry in `packages`, keyed by directory.
-type LockEntry = { version?: string } & Record<string, unknown>;
-type Lockfile = {
-  lockfileVersion: number;
-  version?: string;
-  packages: Record<string, LockEntry>;
-} & Record<string, unknown>;
+// Schemas rather than types, because `JSON.parse` returns `any` and a
+// declaration over it establishes nothing. Everything this script does not read
+// is kept — the file is written back — so both are loose about extra keys and
+// exact about the three fields it touches.
+const LOCK_ENTRY = z.looseObject({ version: z.string().optional() });
+type LockEntry = z.infer<typeof LOCK_ENTRY>;
+
+const LOCKFILE_SCHEMA = z.looseObject({
+  lockfileVersion: z.number(),
+  version: z.string().optional(),
+  packages: z.record(z.string(), LOCK_ENTRY),
+});
+type Lockfile = z.infer<typeof LOCKFILE_SCHEMA>;
 
 // Where the lockfile states the version of the manifest at `rel`: a workspace is
 // keyed by its directory, the root by the empty string.
@@ -86,11 +99,12 @@ function lockKey(rel: string): string {
 }
 
 function readLockfile(): Lockfile {
-  const raw: unknown = JSON.parse(readFileSync(join(ROOT, LOCKFILE), "utf8"));
-  const lock = raw as Lockfile;
-  // Refuse a shape this does not recognise rather than quietly touch nothing in
-  // it. Updating no fields and reporting success is the exact failure #186 was,
-  // and a lockfileVersion bump is the likeliest way to reintroduce it.
+  // Narrowed, not annotated: `JSON.parse` returns `any`, so a declaration on it
+  // establishes nothing at all. Refuse a shape this does not recognise rather
+  // than quietly touch nothing in it — updating no fields and reporting success
+  // is the exact failure #186 was, and a lockfileVersion bump is the likeliest
+  // way to reintroduce it.
+  const lock = LOCKFILE_SCHEMA.parse(JSON.parse(readFileSync(join(ROOT, LOCKFILE), "utf8")));
   if (lock.lockfileVersion !== 3) {
     console.error(
       `${LOCKFILE} is lockfileVersion ${JSON.stringify(lock.lockfileVersion)}, and this ` +
@@ -105,7 +119,11 @@ function readLockfile(): Lockfile {
   return lock;
 }
 
-type ChartVersions = { text: string; version?: string; appVersion?: string };
+// Present and possibly undefined, rather than optional: the reader always sets
+// both keys, and a chart missing a `version:` line is a state this REPORTS on.
+// `exactOptionalPropertyTypes` makes those two spellings mean different things,
+// and this is the one that is true.
+type ChartVersions = { text: string; version: string | undefined; appVersion: string | undefined };
 
 // A trailing comment on either line is read past here and preserved on write
 // below, rather than tolerated: a regex that swallowed one would report the

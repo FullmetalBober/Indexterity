@@ -15,5 +15,17 @@ export default defineConfig({
       BETTER_AUTH_SECRET: "unit-test-secret",
     },
     setupFiles: ["./vitest.setup.ts"],
+    // Type-level assertions, run as tests (`npm run test:types`).
+    //
+    // The reason they exist: several properties this codebase relies on hold at
+    // the TYPE level and nowhere else, so no runtime test can fail when one
+    // breaks — an owner-level route seeing a resolved membership, a schedule
+    // entry keeping its literal task name, a port refusing a member it does not
+    // have. Those were checked by reading, which is the same standard the
+    // assertion ban exists to replace.
+    typecheck: {
+      include: ["src/**/*.test-d.ts"],
+      tsconfig: "./tsconfig.json",
+    },
   },
 });

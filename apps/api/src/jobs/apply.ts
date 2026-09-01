@@ -14,7 +14,7 @@ import {
   recommendations,
   sql,
 } from "../db";
-import { emitClusterEvent } from "../events/emit";
+import { emitClusterEvent, pgNotifier } from "../events/emit";
 import { serializeSpec } from "../mongo";
 import type { TunnelRegistry } from "../tunnel/tunnel.registry";
 import { effectiveChangeWindow } from "./change-window";
@@ -245,7 +245,7 @@ export async function applyCluster(
       });
       // At the transition, not at the end of the pass: a pass hiding several
       // indexes can hold a dashboard's stale row for the length of the loop.
-      await emitClusterEvent(db, { clusterId, kind: "DROP_HIDDEN", task: null });
+      await emitClusterEvent(pgNotifier(db), { clusterId, kind: "DROP_HIDDEN", task: null });
       hidden += 1;
     }
     return hidden;

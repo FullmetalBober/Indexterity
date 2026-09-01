@@ -29,7 +29,7 @@ export function totpCode(secret: string, at: number = Date.now()): string {
   const message = Buffer.alloc(8);
   message.writeBigUInt64BE(BigInt(counter));
   const digest = createHmac("sha1", base32Decode(secret)).update(message).digest();
-  const offset = (digest[digest.length - 1] as number) & 0x0f;
+  const offset = digest.readUInt8(digest.length - 1) & 0x0f;
   const code = (digest.readUInt32BE(offset) & 0x7fffffff) % 1_000_000;
   return code.toString().padStart(6, "0");
 }

@@ -7,7 +7,9 @@
 // The calls go straight to better-auth on the api, same origin, so the session
 // cookie it sets is this app's cookie. They used to go through server functions
 // that relayed the request and every Set-Cookie back — see lib/auth-client.ts.
+
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { field } from "~/lib/narrow";
 import { authClient } from "../../auth-client";
 import { invalidateSession } from "../client";
 import { queryKeys } from "../keys";
@@ -15,25 +17,27 @@ import { queryKeys } from "../keys";
 // better-auth answers with { data, error } rather than throwing, so a refusal
 // arrives as a resolved promise and is branched on here. onError underneath is
 // what catches the request that got no answer at all.
+//
+// Every optional member is `?: X | undefined`, matching the library's own
+// spelling. Under exactOptionalPropertyTypes a narrower declaration here refuses
+// better-auth's actual return value at all ten call sites: it declares
+// `Error$1<{ code?: string | undefined; message?: string | undefined }>`, and
+// "present and undefined" is not assignable to "absent".
 interface Answer {
   // Unknown on purpose: better-auth types each endpoint's data individually
   // and the twoFactorClient's `twoFactorRedirect` marker is not on any of
   // them — it is a runtime answer, so it is read by a guard rather than a type.
   readonly data?: unknown;
   readonly error: {
-    readonly message?: string;
-    readonly code?: string;
-    readonly status?: number;
+    readonly message?: string | undefined;
+    readonly code?: string | undefined;
+    readonly status?: number | undefined;
   } | null;
 }
 
 // A sign-in that answered "now the code" instead of a session (#55).
 function wantsSecondFactor(data: unknown): boolean {
-  return (
-    typeof data === "object" &&
-    data !== null &&
-    (data as { twoFactorRedirect?: unknown }).twoFactorRedirect === true
-  );
+  return typeof data === "object" && data !== null && field(data, "twoFactorRedirect") === true;
 }
 
 // Did this answer actually carry a session? better-auth returns a token with one
@@ -42,11 +46,7 @@ function wantsSecondFactor(data: unknown): boolean {
 // (#306). Read as a guard for the same reason wantsSecondFactor is: the shape is
 // a runtime answer, not a per-endpoint type.
 function hasSession(data: unknown): boolean {
-  return (
-    typeof data === "object" &&
-    data !== null &&
-    typeof (data as { token?: unknown }).token === "string"
-  );
+  return typeof data === "object" && data !== null && typeof field(data, "token") === "string";
 }
 
 // better-auth's refusal for an unverified address, which rides on 403. Matched by

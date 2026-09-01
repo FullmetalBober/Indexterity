@@ -10,7 +10,7 @@ import { UNPROVEN_ACTOR_EVENTS } from "@repo/contracts";
 // turns that into an accusation against the account holder — who, in the row
 // worth reading, is the victim of it.
 
-export type EventTone = "neutral" | "attempt" | "severe";
+type EventTone = "neutral" | "attempt" | "severe";
 
 export interface EventLine {
   // The act, in words. Falls back to the stored name for a row written under an
@@ -93,7 +93,8 @@ export function eventLabel(event: string): string {
 // something. Read from the contract's list rather than spelled here, so the
 // writer's rule and the screen's rule are one rule.
 export function isUnprovenActor(event: string): boolean {
-  return (UNPROVEN_ACTOR_EVENTS as readonly string[]).includes(event);
+  // See organization.ts: `.some` compares without widening the receiver.
+  return UNPROVEN_ACTOR_EVENTS.some((unproven) => unproven === event);
 }
 
 // The specifics, worded per act. Only the acts whose metadata says something a

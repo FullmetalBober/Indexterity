@@ -73,6 +73,17 @@ export function forwardedResponseHeaders(upstream: Headers): Headers {
   return headers;
 }
 
+// `duplex` is required by undici whenever a request carries a stream body, and
+// the DOM's `RequestInit` does not declare it — the spec has it, the lib types
+// lag. Declared rather than asserted at the call site: a declaration says what
+// is true of the runtime, where the cast only said to stop asking, and this way
+// the rest of the init object is still checked.
+declare global {
+  interface RequestInit {
+    duplex?: "half";
+  }
+}
+
 export async function passThroughToApi(request: Request): Promise<Response> {
   const incoming = new URL(request.url);
   // Built from the pathname rather than by string-joining the raw URL: the
@@ -88,10 +99,13 @@ export async function passThroughToApi(request: Request): Promise<Response> {
       // Streamed, not buffered: a buffered proxy would have to be rewritten
       // before SSE could go through it (#22), and it would hold every upload in
       // the dashboard server's memory.
-      body: hasBody ? request.body : undefined,
+      //
+      // Spread, because RequestInit's `body` is `BodyInit` and undefined is not
+      // one — a GET carries no body rather than an empty one.
+      ...(hasBody ? { body: request.body } : {}),
       duplex: "half",
       redirect: "manual",
-    } as RequestInit & { duplex: "half" });
+    });
   } catch (error) {
     // The api did not answer. 502 rather than a 500 from an unhandled throw,
     // because this server is fine — the one behind it is not, and the reader

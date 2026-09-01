@@ -1,32 +1,28 @@
 /**
  * A partial object standing in for a whole one, in tests.
  *
- * This exists to kill `as unknown as T`, which was how ~30 test fakes used to
- * introduce themselves. That form is a double assertion: it launders the value
- * through `unknown` so the compiler stops comparing types at all, and what it
- * costs is the thing a fake most needs checked — that the properties it does
- * define are spelled right and shaped right. A renamed method on the real type
- * left every fake of it compiling and every test still green, asserting against
- * a shape nothing has any more.
+ * The one assertion this repo allows, and the only entry in
+ * `scripts/lint-assertions.ts`'s allowlist. What it buys over a raw `{…} as T`
+ * is the half that matters: `Partial<T>` checks every member you DO write, name
+ * and type, against the real thing. A renamed or re-signatured method stops
+ * compiling here instead of leaving a double asserting against a shape nothing
+ * has. Only the ABSENCE of the rest is claimed.
  *
- * `Partial<T>` restores exactly that. The literal is checked member by member
- * against the real type; only the ABSENCE of the rest is asserted away, which is
- * the one thing a fake genuinely needs and the compiler genuinely cannot know.
+ * That absence is a real cost and worth stating plainly: a member this double
+ * omits is `undefined` at runtime while the type says it is there, so a test
+ * that starts reaching for one gets `undefined is not a function` rather than a
+ * compile error. Prefer, in order:
  *
- * `Partial<T>` checks each member it is given, name AND type. It shipped for one
- * commit as `{ [K in keyof T]?: unknown }` — names only — and that weaker form
- * was already enough to catch a renamed method; tightening it here surfaced 21
- * real mismatches across 13 files, every one a fake promising less than the
- * thing it stands in for. Mostly mocks returning a trimmed row where the driver
- * returns a richer one, which is exactly the shape that makes a test pass
- * against a payload production never sees.
+ *   1. the real object, if it constructs cheaply — measured, not assumed: a pg
+ *      `Pool` and a drizzle client both build with `totalCount` 0 and no socket
+ *   2. a complete implementation of a narrow port, which is not a fake at all
+ *      but a second implementation (see `EventNotifier`, `MssqlReader<Row>`)
+ *   3. this
  *
- * Only the ABSENCE of the remaining members is asserted away, which is the one
- * thing a fake genuinely needs and the compiler genuinely cannot know.
- *
- * A single assertion, never `as unknown as`: `T` is assignable to `Partial<T>`,
- * so this narrows from a shape already checked rather than laundering through
- * `unknown` so nothing is checked at all.
+ * Reaching for it is not a failure — a vendor type with eighteen members, four
+ * of which are internal, is not worth writing out to call one. But if it is a
+ * type this repo owns, the cast is usually pointing at a dependency that is
+ * wider than the thing using it.
  */
 export function stub<T>(partial: Partial<T>): T {
   return partial as T;

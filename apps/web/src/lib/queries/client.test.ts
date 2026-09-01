@@ -7,7 +7,9 @@ import { createAppQueryClient } from "./client";
 function retryFor(error: Error, failureCount = 0): boolean {
   const retry = createAppQueryClient().getDefaultOptions().queries?.retry;
   if (typeof retry !== "function") throw new Error("expected a retry predicate");
-  return retry(failureCount, error) as boolean;
+  const verdict = retry(failureCount, error);
+  if (typeof verdict !== "boolean") throw new Error("expected a boolean verdict");
+  return verdict;
 }
 
 describe("createAppQueryClient retry", () => {

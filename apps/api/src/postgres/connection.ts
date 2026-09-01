@@ -1,6 +1,7 @@
-import type { Pool, PoolClient } from "pg";
+import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { workerEnv } from "../config/env";
 import type { DialProxy, TlsOverrides } from "../engine/ports";
+import { asClusterUnreachable } from "../errors/unreachable";
 import { pgPool } from "./client";
 import { parsePgConnString, pgHosts, withPgDatabase } from "./conn-string";
 import { type PostgresServerVersion, parsePostgresVersion } from "./version";
@@ -51,6 +52,41 @@ const DEFAULT_DATABASE = "postgres";
 // held for the session's life — the same bargain members.ts makes for replicas,
 // for the same reason: a three-database cluster costs three connections rather
 // than three per collect.
+/**
+ * What the executor needs of a Postgres connection: four members.
+ *
+ * The twin of `MssqlWriter`, and separate from the class for the same reason —
+ * a test hands over a complete object rather than claiming a literal IS a
+ * connection. `execute` carries the build flag because the build budget is
+ * asked for per statement (#410).
+ */
+export interface PostgresReader {
+  query<T extends QueryResultRow>(
+    text: string,
+    params?: readonly unknown[],
+    database?: string,
+  ): Promise<T[]>;
+  serverIdentity(): Promise<PostgresServerIdentity>;
+  serverVersion(): Promise<PostgresServerVersion | null>;
+}
+
+export interface PostgresWriter extends PostgresReader {
+  execute(text: string, database?: string, opts?: { build?: boolean }): Promise<void>;
+}
+
+// The one row `pg_stat_statements` answers with, and a port that names it.
+//
+// Split from the reader above because `query<T>` promises rows of whatever type
+// the caller asks for: the only value assignable to `T[]` for every `T` is `[]`,
+// so a test double for the workload read had to assert its statements into
+// shape. Every field is `unknown` because that is what the driver hands back —
+// `calls` and `rows` are bigint columns and arrive as STRINGS.
+export type PgStatementRow = { query: unknown; calls: unknown; rows: unknown };
+
+export interface PostgresStatementSource {
+  query(text: string, params?: readonly unknown[], database?: string): Promise<PgStatementRow[]>;
+}
+
 export class PostgresConnection {
   private readonly pools = new Map<string, Pool>();
   private identity: PostgresServerIdentity | null = null;
@@ -70,6 +106,42 @@ export class PostgresConnection {
     await this.poolFor("");
   }
 
+  /**
+   * The customer boundary (#420).
+   *
+   * Every dial and every statement this class makes passes through here, so a
+   * transport failure from the CUSTOMER's server arrives as a typed
+   * `ClusterUnreachableError` instead of as a bare Node error that
+   * `isUnreachableError` had to guess about. It had to guess because both sides
+   * of this process speak `pg`: measured on postgres 17, a pool whose server goes
+   * away re-raises `Error: read ECONNRESET` from the next query, and our own
+   * control plane produces exactly that when it flaps. One of those is the
+   * customer's cluster being unreachable and one is our own database failing, and
+   * the old predicate called them both the first.
+   *
+   * Here rather than in `pgPool`, which is where the pool is BUILT: a pool hands
+   * out connections lazily and lives for the length of the session, so its dial
+   * is only the first of the failures it can have. The mid-pass ones are the
+   * expensive ones — a pass is postgres-heavy on both sides at once — and they
+   * come out of `query` and `execute`, not out of construction.
+   *
+   * The mongo and SQL Server adapters need no equivalent: their drivers NAME
+   * every transport failure (`MongoNetworkError`, tedious's `ConnectionError`),
+   * and this process speaks neither driver to anything but a customer's database.
+   * Verified against mongodb 7.0 — see errors/unreachable.ts for the one mongo
+   * case that arrives unnamed and how it is covered.
+   */
+  private async throughCustomerDriver<T>(run: () => Promise<T>): Promise<T> {
+    try {
+      return await run();
+    } catch (error) {
+      // Not every failure in here is a transport one — a bad password, a refused
+      // TLS posture and a syntax error in our own SQL all come through this
+      // catch, and `asClusterUnreachable` hands each of them back untouched.
+      throw asClusterUnreachable(error);
+    }
+  }
+
   private async poolFor(database: string): Promise<Pool> {
     const existing = this.pools.get(database);
     if (existing !== undefined) return existing;
@@ -78,24 +150,27 @@ export class PostgresConnection {
     // into a different keyword-form string for no reason.
     const target =
       database === "" ? this.connectionString : withPgDatabase(this.connectionString, database);
-    const pool = await pgPool(target, this.overrides, undefined, this.proxy);
+    const pool = await this.throughCustomerDriver(() =>
+      pgPool(target, this.overrides, undefined, this.proxy),
+    );
     this.pools.set(database, pool);
     return pool;
   }
 
   // Run against one database. `database` empty means the connection's own.
-  async query<T>(text: string, params: readonly unknown[] = [], database = ""): Promise<T[]> {
+  // `pool.query<T>` is generic itself, so the row type is carried by node-pg
+  // rather than asserted back onto its result — which is what the `as T[]` here
+  // used to do, at the one place raw rows enter the program.
+  async query<T extends QueryResultRow>(
+    text: string,
+    params: readonly unknown[] = [],
+    database = "",
+  ): Promise<T[]> {
     const pool = await this.poolFor(database);
-    const result = await pool.query(text, params as unknown[]);
-    return result.rows as T[];
+    const result = await this.throughCustomerDriver(() => pool.query<T>(text, [...params]));
+    return result.rows;
   }
 
-  // DDL that must NOT run inside a transaction: `CREATE INDEX CONCURRENTLY` and
-  // `DROP INDEX CONCURRENTLY` both refuse with "cannot run inside a transaction
-  // block" (verified on 17.11). A pooled `query` is already implicitly its own
-  // transaction, which is fine — what this exists for is holding ONE connection
-  // across a build so the session's statement_timeout and its `pg_stat_activity`
-  // row belong to the statement a reader would go looking for.
   /**
    * Run one DDL statement.
    *
@@ -103,17 +178,30 @@ export class PostgresConnection {
    * `statement_timeout` is sized for a catalog read; a `CREATE INDEX
    * CONCURRENTLY` on a large table legitimately outruns it, and at 900s a build
    * that takes an hour could not finish at all.
-   *
-   * Set on the client that will run the statement and reset in the same
-   * `finally` that releases it, because node-pg hands the connection to whoever
-   * asks next and a session-level `SET` would otherwise leak a two-hour budget
-   * onto every subsequent read through it. Three separate `query` calls rather
-   * than one semicolon-joined string on purpose: the simple query protocol wraps
-   * a multi-statement string in an implicit transaction, and `CREATE INDEX
-   * CONCURRENTLY` cannot run inside one.
    */
   async execute(text: string, database = "", opts: { build?: boolean } = {}): Promise<void> {
     const pool = await this.poolFor(database);
+    await this.throughCustomerDriver(() => this.executeOn(pool, text, opts));
+  }
+
+  // The body of `execute`, split out so the customer boundary above wraps the
+  // whole of it — the checkout, the budget SET and the statement itself.
+  //
+  // DDL that must NOT run inside a transaction: `CREATE INDEX CONCURRENTLY` and
+  // `DROP INDEX CONCURRENTLY` both refuse with "cannot run inside a transaction
+  // block" (verified on 17.11). A pooled `query` is already implicitly its own
+  // transaction, which is fine — what this exists for is holding ONE connection
+  // across a build so the session's statement_timeout and its `pg_stat_activity`
+  // row belong to the statement a reader would go looking for.
+  //
+  // The build budget is set on the client that will run the statement and reset
+  // in the same `finally` that releases it, because node-pg hands the connection
+  // to whoever asks next and a session-level `SET` would otherwise leak a
+  // two-hour budget onto every subsequent read through it. Three separate
+  // `query` calls rather than one semicolon-joined string on purpose: the simple
+  // query protocol wraps a multi-statement string in an implicit transaction, and
+  // `CREATE INDEX CONCURRENTLY` cannot run inside one.
+  private async executeOn(pool: Pool, text: string, opts: { build?: boolean }): Promise<void> {
     const client: PoolClient = await pool.connect();
     try {
       if (opts.build === true) {
@@ -200,12 +288,7 @@ export class PostgresConnection {
   // probe is one catalog read on the database in question, against a pool this
   // session would otherwise have opened to walk it anyway.
   async listDatabaseNames(): Promise<string[]> {
-    const rows = await this.query<{ datname: string }>(
-      `SELECT datname FROM pg_database
-        WHERE datallowconn AND NOT datistemplate
-        ORDER BY datname`,
-    );
-    const names = rows.map((row) => row.datname);
+    const names = (await this.catalogRows()).map((row) => row.datname);
     if (!names.includes(DEFAULT_DATABASE)) return names;
     if (await this.holdsUserTables(this.keyFor(DEFAULT_DATABASE))) return names;
     return names.filter((name) => name !== DEFAULT_DATABASE);
@@ -231,20 +314,24 @@ export class PostgresConnection {
   // collects nothing.
   private async holdsUserTables(database: string): Promise<boolean> {
     try {
-      const rows = await this.query<{ present: boolean }>(
-        `SELECT EXISTS (
-           SELECT 1 FROM pg_class c
-             JOIN pg_namespace n ON n.oid = c.relnamespace
-            WHERE c.relkind IN ('r', 'p')
-              AND n.nspname <> ALL($1::text[])
-         ) AS present`,
-        [SYSTEM_SCHEMAS],
-        database,
-      );
-      return rows[0]?.present === true;
+      return (await this.tableRows(database))[0]?.present === true;
     } catch {
       return false;
     }
+  }
+
+  // The two catalog reads, each naming the row it comes back with.
+  //
+  // Separate from `query<T>` because that method promises rows of whatever type
+  // the caller asks for, and the only value assignable to `T[]` for every `T` is
+  // `[]` — so a test double standing in for it has to assert its data into
+  // shape. These say what the server answers, and a double just answers rows.
+  protected async catalogRows(): Promise<{ datname: string }[]> {
+    return this.query<{ datname: string }>(DATABASE_LISTING_SQL);
+  }
+
+  protected async tableRows(database: string): Promise<{ present: boolean }[]> {
+    return this.query<{ present: boolean }>(USER_TABLES_SQL, [SYSTEM_SCHEMAS], database);
   }
 
   async ping(): Promise<void> {
@@ -259,3 +346,19 @@ export class PostgresConnection {
     await Promise.allSettled(pools.map((pool) => pool.end()));
   }
 }
+
+// Templates and undiallable databases are left to the statement's own filter:
+// one cannot be dialled, so it never reaches the decision above.
+export const DATABASE_LISTING_SQL = `SELECT datname FROM pg_database
+        WHERE datallowconn AND NOT datistemplate
+        ORDER BY datname`;
+
+// Ordinary and partitioned tables only, the same relkind pair the collector
+// walks: a database holding nothing but views has no index to have an opinion
+// about.
+export const USER_TABLES_SQL = `SELECT EXISTS (
+           SELECT 1 FROM pg_class c
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE c.relkind IN ('r', 'p')
+              AND n.nspname <> ALL($1::text[])
+         ) AS present`;

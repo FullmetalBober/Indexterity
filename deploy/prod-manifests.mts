@@ -78,7 +78,15 @@ const root = positional[0] ?? ".";
 const found = new Set<string>();
 let stripped = 0;
 for (const path of manifests(root)) {
-  const manifest: Record<string, unknown> = JSON.parse(readFileSync(path, "utf8"));
+  // `JSON.parse` is `any`, so the `Record<string, unknown>` this carried checked
+  // nothing — it is the same claim an assertion makes, and this file rewrites
+  // every manifest in the tree, so a file that is not an object at all should
+  // stop it rather than be silently written back.
+  const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`${path} is not a JSON object`);
+  }
+  const manifest: Record<string, unknown> = { ...parsed };
   const name = manifest.name;
   if (typeof name === "string") found.add(name);
 

@@ -22,7 +22,7 @@ import {
   recommendations,
   roiMetrics,
 } from "../db";
-import { emitClusterEvent } from "../events/emit";
+import { emitClusterEvent, pgNotifier } from "../events/emit";
 import { NotifyService } from "../mail/notify.service";
 import { recordDrop, recordRegressionVerdict } from "../metrics";
 import { serializeSpec } from "../mongo";
@@ -237,7 +237,7 @@ export async function finalizeCluster(
           .set({ baselineWriteOps: null, baselineWriteLatency: null, updatedAt: new Date() })
           .where(eq(recommendations.id, rec.id));
         await retireSuperseded(db, clusterId, rec);
-        await emitClusterEvent(db, { clusterId, kind: "BUILD_GRADUATED", task: null });
+        await emitClusterEvent(pgNotifier(db), { clusterId, kind: "BUILD_GRADUATED", task: null });
         continue;
       }
       await executor.drop(rec.database, rec.collection, rec.indexName);
@@ -268,7 +268,7 @@ export async function finalizeCluster(
         `rolled back ${rec.indexName}`,
         `The index ${rec.indexName} on ${rec.database}.${rec.collection} slowed writes after being built, so it was dropped automatically. It is cooling down until ${day}.`,
       );
-      await emitClusterEvent(db, { clusterId, kind: "REGRESSION_FIRED", task: null });
+      await emitClusterEvent(pgNotifier(db), { clusterId, kind: "REGRESSION_FIRED", task: null });
     }
     for (const rec of due) {
       // Regression gate: did hiding this index slow the collection's reads
@@ -373,7 +373,11 @@ export async function finalizeCluster(
               ? `Hiding ${rec.indexName} on ${rec.database}.${rec.collection} slowed reads during the observe window, so the drop was aborted and the index un-hidden. It is cooling down until ${day}.`
               : `Reads on ${rec.database}.${rec.collection} slowed during ${rec.indexName}'s observe window, so the drop was aborted. The index was never hidden, so nothing had to be restored. It is cooling down until ${day}.`,
           );
-          await emitClusterEvent(db, { clusterId, kind: "REGRESSION_FIRED", task: null });
+          await emitClusterEvent(pgNotifier(db), {
+            clusterId,
+            kind: "REGRESSION_FIRED",
+            task: null,
+          });
           continue;
         }
       } else if (
@@ -495,7 +499,7 @@ async function retireSuperseded(
   if (typeof target !== "object" || target === null) return;
   const retire: unknown = Reflect.get(target, "retire");
   if (!Array.isArray(retire)) return;
-  const names = retire.filter((name): name is string => typeof name === "string");
+  const names = retire.filter((name) => typeof name === "string");
   if (names.length === 0) return;
   // A REORDER retires a PROTECTED index, which every other drop path refuses on
   // sight. The row therefore names what replaced it, and preflightDrop re-checks
@@ -688,5 +692,5 @@ async function judgeCumulative(
       `not build on this collection unattended until ${day}; recommendations for it keep ` +
       `arriving and you can approve them yourself.`,
   );
-  await emitClusterEvent(db, { clusterId, kind: "REGRESSION_FIRED", task: null });
+  await emitClusterEvent(pgNotifier(db), { clusterId, kind: "REGRESSION_FIRED", task: null });
 }

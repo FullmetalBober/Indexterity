@@ -1,8 +1,7 @@
 import { ORPCError } from "@orpc/server";
 import { describe, expect, it } from "vitest";
-import type { DatabaseService } from "../db/database.service";
-import { stub } from "../test-utils";
 import { DIAL_BUDGET_CODE, DialBudgetService } from "./dial-budget.service";
+import { messageOf, orpcCode, orpcStatus } from "./message";
 
 // The upsert is one statement and its arithmetic is the database's (the
 // integration suite exercises that against real postgres, "rate-limits dialing so
@@ -14,9 +13,8 @@ import { DIAL_BUDGET_CODE, DialBudgetService } from "./dial-budget.service";
 // nothing else, so the container has nothing to contribute here.
 function budgetAt(count: number, secondsLeft: number): DialBudgetService {
   return new DialBudgetService(
-    stub<DatabaseService>({
-      rows: async <TRow>() => [{ count, seconds_left: secondsLeft }] as TRow[],
-    }),
+    // A complete RowReader, and nothing asserted: the port fixes the row.
+    { rows: async () => [{ count, seconds_left: secondsLeft }] },
   );
 }
 
@@ -30,8 +28,8 @@ describe("the dial budget", () => {
       .consume("user-1")
       .catch((thrown: unknown) => thrown);
     expect(error).toBeInstanceOf(ORPCError);
-    expect((error as ORPCError<string, unknown>).code).toBe(DIAL_BUDGET_CODE);
-    expect((error as ORPCError<string, unknown>).status).toBe(429);
+    expect(orpcCode(error)).toBe(DIAL_BUDGET_CODE);
+    expect(orpcStatus(error)).toBe(429);
   });
 
   // The whole of #162: "too many connection attempts" left a reader with no way
@@ -40,7 +38,7 @@ describe("the dial budget", () => {
     const error = await budgetAt(11, 41)
       .consume("user-1")
       .catch((thrown: unknown) => thrown);
-    expect((error as Error).message).toBe(
+    expect(messageOf(error)).toBe(
       "connection attempts are limited to 10 every 60s per account — try again in 41s",
     );
   });
@@ -51,17 +49,13 @@ describe("the dial budget", () => {
     const error = await budgetAt(11, 0)
       .consume("user-1")
       .catch((thrown: unknown) => thrown);
-    expect((error as Error).message).toContain("try again in 1s");
+    expect(messageOf(error)).toContain("try again in 1s");
   });
 
   // A budget row that did not come back is not evidence of a spent budget. The
   // guard behind this one is the network guard, not this count.
   it("lets the dial through when the upsert returned nothing", async () => {
-    const empty = new DialBudgetService(
-      stub<DatabaseService>({
-        rows: async <TRow>() => [] as TRow[],
-      }),
-    );
+    const empty = new DialBudgetService({ rows: async <TRow>(): Promise<TRow[]> => [] });
     await expect(empty.consume("user-1")).resolves.toBeUndefined();
   });
 });

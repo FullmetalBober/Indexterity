@@ -1,20 +1,20 @@
 import { describe, expect, it } from "vitest";
-import { PostgresConnection } from "./connection";
+import { ClusterUnreachableError } from "../errors/unreachable";
+import { DATABASE_LISTING_SQL, PostgresConnection, USER_TABLES_SQL } from "./connection";
 
 // What a fresh install answers with once the statement's own WHERE has run:
 // `template0` (connections disabled) and `template1` (a template) are excluded by
 // the server, so the only row left is the database initdb made.
-const FRESH = [{ datname: "postgres" }];
+const FRESH: { datname: string }[] = [{ datname: "postgres" }];
 
 // The real class with only its query boundary replaced, so the rule under test is
 // the one the adapter runs — `listDatabaseNames` decides on top of `query`, and
 // what it decides is the whole point of #347.
 class Fake extends PostgresConnection {
-  readonly statements: string[] = [];
   readonly probed: string[] = [];
 
   constructor(
-    private readonly catalog: readonly { datname: string }[],
+    private readonly catalog: { datname: string }[],
     private readonly tablesIn: ReadonlySet<string>,
     // The database the string names, which decides whether the probe needs a
     // pool of its own.
@@ -23,18 +23,16 @@ class Fake extends PostgresConnection {
     super(`postgresql://u:p@h:5432/${named}?sslmode=disable`);
   }
 
-  override async query<T>(
-    text: string,
-    _params: readonly unknown[] = [],
-    database = "",
-  ): Promise<T[]> {
-    this.statements.push(text);
-    if (text.includes("pg_database")) return this.catalog as T[];
-    if (text.includes("pg_class")) {
-      this.probed.push(database);
-      return [{ present: this.tablesIn.has(database === "" ? "postgres" : database) }] as T[];
-    }
-    throw new Error(`unexpected query: ${text}`);
+  // The two row reads rather than the generic `query<T>` underneath them, which
+  // is what lets this answer with data instead of asserting one into shape. The
+  // statements are constants, so they are read directly below.
+  override async catalogRows(): Promise<{ datname: string }[]> {
+    return this.catalog;
+  }
+
+  override async tableRows(database: string): Promise<{ present: boolean }[]> {
+    this.probed.push(database);
+    return [{ present: this.tablesIn.has(database === "" ? "postgres" : database) }];
   }
 }
 
@@ -87,38 +85,48 @@ describe("listDatabaseNames", () => {
   // Ordinary and partitioned tables only, the same relkind pair the collector
   // walks: a database holding nothing but views has no index to have an opinion
   // about. Asserted on the statement because the server is where this runs.
-  it("asks about tables outside the system schemas", async () => {
-    const conn = new Fake([...FRESH, { datname: "app" }], new Set());
-    await conn.listDatabaseNames();
-    const probe = conn.statements.find((text) => text.includes("pg_class")) ?? "";
-    expect(probe).toMatch(/relkind IN \('r', 'p'\)/);
-    expect(probe).toMatch(/nspname <> ALL/);
+  it("asks about tables outside the system schemas", () => {
+    expect(USER_TABLES_SQL).toMatch(/relkind IN \('r', 'p'\)/);
+    expect(USER_TABLES_SQL).toMatch(/nspname <> ALL/);
   });
 
   // The server-side half of the rule, and the only place it lives: a template or
   // a database with connections disabled cannot be dialled, so it never reaches
   // the decision above.
-  it("leaves templates and undiallable databases to the statement's own filter", async () => {
-    const conn = new Fake(FRESH, new Set());
-    await conn.listDatabaseNames();
-    const listing = conn.statements.find((text) => text.includes("pg_database")) ?? "";
-    expect(listing).toMatch(/datallowconn AND NOT datistemplate/);
+  it("leaves templates and undiallable databases to the statement's own filter", () => {
+    expect(DATABASE_LISTING_SQL).toMatch(/datallowconn AND NOT datistemplate/);
   });
 
   // Unreachable reads as empty: a database we cannot enter cannot be walked
   // either, so offering it would only produce a tick that collects nothing.
   it("drops a postgres it cannot read at all", async () => {
     class Refusing extends Fake {
-      override async query<T>(
-        text: string,
-        params: readonly unknown[] = [],
-        database = "",
-      ): Promise<T[]> {
-        if (text.includes("pg_class")) throw Object.assign(new Error("denied"), { code: "42501" });
-        return super.query<T>(text, params, database);
+      override async tableRows(): Promise<{ present: boolean }[]> {
+        throw Object.assign(new Error("denied"), { code: "42501" });
       }
     }
     const conn = new Refusing([...FRESH, { datname: "app" }], new Set(["postgres"]));
     expect(await conn.listDatabaseNames()).toEqual(["app"]);
+  });
+});
+
+// The customer boundary, on the one failure a unit test can produce for real
+// (#420).
+//
+// A closed port on the loopback address: no server, no container, and the answer
+// is immediate — node-pg raises `Error: connect ECONNREFUSED 127.0.0.1:1`, name
+// "Error", which is precisely the shape our OWN control-plane pool produces when
+// it flaps. What makes it classifiable is where it was raised, so this asserts
+// the wiring rather than the pattern: that a dial made through
+// `PostgresConnection` comes back typed.
+//
+// `sslmode=verify-full` so the TLS gate passes and the dial is what fails; the
+// refusal happens at the socket, long before any certificate.
+describe("a failed dial", () => {
+  it("arrives typed, so the worker classifies it without guessing", async () => {
+    const conn = new PostgresConnection("postgresql://u:p@127.0.0.1:1/db?sslmode=verify-full");
+    await expect(conn.connect()).rejects.toBeInstanceOf(ClusterUnreachableError);
+    // And the driver's own words survive, addresses and all (D112).
+    await expect(conn.connect()).rejects.toThrow(/ECONNREFUSED 127\.0\.0\.1:1/);
   });
 });

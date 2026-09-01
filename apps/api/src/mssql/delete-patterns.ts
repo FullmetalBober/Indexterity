@@ -1,7 +1,7 @@
 import { XMLParser } from "fast-xml-parser";
 import type { DeletePattern } from "../engine/ports";
 import { PLAN_PARSE_CHUNK, yieldToEventLoop } from "./chunk";
-import { attr, collect, tableOf, type XmlNode } from "./workload";
+import { attr, collect, isNode, tableOf, type XmlNode } from "./workload";
 
 // Recurring age-based DELETEs, from Query Store plans (#206).
 //
@@ -83,10 +83,8 @@ export interface DeletePlanRow {
 // operator with a comparison nested three levels below it.
 function childrenOf(node: XmlNode, key: string): XmlNode[] {
   const child = node[key];
-  if (Array.isArray(child)) {
-    return child.filter((entry): entry is XmlNode => typeof entry === "object" && entry !== null);
-  }
-  return typeof child === "object" && child !== null ? [child as XmlNode] : [];
+  if (Array.isArray(child)) return child.filter(isNode);
+  return isNode(child) ? [child] : [];
 }
 
 // The column this element compares, when it is a column of the target table.

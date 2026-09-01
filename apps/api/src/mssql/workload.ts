@@ -1,6 +1,7 @@
 import { XMLParser } from "fast-xml-parser";
 import { type WorkloadTarget, workloadKey } from "../engine/ports";
 import type { ConstantValue, QueryShape, SortKey } from "../engine/types";
+import { isRecord } from "../errors/message";
 import { PLAN_PARSE_CHUNK, yieldToEventLoop } from "./chunk";
 
 // Query Store plan XML → QueryShape (#201). The plan, not the statement text,
@@ -35,12 +36,12 @@ const parser = new XMLParser({
 export type XmlNode = Record<string, unknown>;
 
 function asArray(value: unknown): XmlNode[] {
-  if (Array.isArray(value)) return value.filter((entry): entry is XmlNode => isNode(entry));
+  if (Array.isArray(value)) return value.filter((entry) => isNode(entry));
   return isNode(value) ? [value] : [];
 }
 
 export function isNode(value: unknown): value is XmlNode {
-  return typeof value === "object" && value !== null;
+  return isRecord(value);
 }
 
 export function attr(node: XmlNode, name: string): string | null {
@@ -104,7 +105,7 @@ interface TableShape {
   constants: Record<string, ConstantValue>;
 }
 
-export interface MissingIndexSuggestion {
+interface MissingIndexSuggestion {
   readonly table: string;
   readonly equality: string[];
   readonly range: string[];

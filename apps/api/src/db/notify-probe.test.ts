@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { messageOf } from "../errors/message";
 import {
   looksPooled,
   NotifyProbeError,
@@ -57,15 +58,28 @@ function fakeClients(options: FakeOptions = {}) {
         listeners.set(channel, [...(listeners.get(channel) ?? []), this.notify]);
         return Promise.resolve(undefined);
       }
-      const [channel, payload] = (values ?? []) as [string, string];
+      // Checked: pg hands these through as unknown, and a wrong arity here
+      // would otherwise deliver `undefined` to every listener.
+      const [channel, payload] = values ?? [];
+      if (typeof channel !== "string" || typeof payload !== "string") {
+        throw new Error(`expected a channel and payload, got ${JSON.stringify(values)}`);
+      }
       if (delivers) {
         for (const handler of listeners.get(channel) ?? []) handler({ channel, payload });
       }
       return Promise.resolve(undefined);
     }
 
-    on(event: string, handler: unknown): unknown {
-      if (event === "notification") this.notify = handler as (m: ProbeNotification) => void;
+    // Taken as a discriminated tuple rather than `(event: string, handler:
+    // unknown)`: destructuring one narrows the handler along with the event, so
+    // the notification branch has a notification handler without asserting it.
+    on(
+      ...args:
+        | ["notification", (message: ProbeNotification) => void]
+        | ["error", (error: Error) => void]
+    ): unknown {
+      const [event, handler] = args;
+      if (event === "notification") this.notify = handler;
       return this;
     }
 
@@ -98,7 +112,7 @@ async function refusal(promise: Promise<void>): Promise<string> {
     await promise;
   } catch (error) {
     expect(error).toBeInstanceOf(NotifyProbeError);
-    return (error as NotifyProbeError).message;
+    return messageOf(error);
   }
   throw new Error("expected the probe to refuse, and it passed");
 }

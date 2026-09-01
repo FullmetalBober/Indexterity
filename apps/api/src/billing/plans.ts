@@ -12,7 +12,7 @@ export type Plan = (typeof PLANS)[number];
 
 export const DEFAULT_PLAN: Plan = "FREE";
 
-export function isPlan(value: string): value is Plan {
+export function isPlan(value: unknown): value is Plan {
   return PLANS.some((plan) => plan === value);
 }
 
@@ -123,8 +123,16 @@ export function entitlementsFor(plan: Plan): Entitlements {
 
 // An unrecognised stored value must not silently grant everything. Falls back
 // to the most restrictive plan, which fails visibly rather than expensively.
-export function planFrom(value: string | null | undefined): Plan {
-  return value !== null && value !== undefined && isPlan(value) ? value : DEFAULT_PLAN;
+/**
+ * A plan out of whatever the column held.
+ *
+ * `unknown`, not `string | null | undefined`, because that is what a plan read
+ * off a row or a plugin's organization object actually is — callers were
+ * asserting it into shape and this function was already going to check it with
+ * `isPlan` anyway. Taking the truth removes the assertion AND the second guard.
+ */
+export function planFrom(value: unknown): Plan {
+  return isPlan(value) ? value : DEFAULT_PLAN;
 }
 
 export interface LimitVerdict {

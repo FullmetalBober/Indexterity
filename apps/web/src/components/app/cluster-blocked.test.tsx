@@ -1,5 +1,4 @@
 import { screen } from "@testing-library/react";
-import type React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderInApp } from "~/test-utils";
 import { blockedFor, ClusterBlockedBanner } from "./cluster-blocked";
@@ -7,11 +6,11 @@ import { blockedFor, ClusterBlockedBanner } from "./cluster-blocked";
 // A Link outside a router throws on `isServer` rather than rendering, and what
 // this file is about is the wording — so the anchor stands in for it, the way
 // verification-outcome.test.tsx does.
-vi.mock("@tanstack/react-router", () => ({
-  Link: ({ children, to }: { children: React.ReactNode; to: string }) => (
-    <a href={to}>{children}</a>
-  ),
-}));
+vi.mock("@tanstack/react-router", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@tanstack/react-router")>();
+  const { anchorLink, overriding } = await import("~/lib/overriding");
+  return overriding(actual, { Link: anchorLink });
+});
 
 const NOW = new Date("2026-08-27T12:00:00.000Z");
 const CLUSTER = "11111111-1111-4111-8111-111111111111";

@@ -1,5 +1,5 @@
 import type { ServerHealth } from "../engine/types";
-import { asNumber, type MssqlConnection } from "./connection";
+import { asNumber, type MssqlReader } from "./connection";
 
 // The ServerHealth port, mapped onto SQL Server (#205).
 //
@@ -67,7 +67,7 @@ const WRITER_WAITS = `
   OR wt.wait_type LIKE 'LCK[_]M[_]U%' OR wt.wait_type LIKE 'LCK[_]M[_]SIX%'
   OR wt.wait_type IN ('PAGEIOLATCH_EX', 'PAGEIOLATCH_UP', 'WRITELOG')`;
 
-interface HealthRow {
+export interface HealthRow {
   readonly fullScans: unknown;
   readonly indexSearches: unknown;
   readonly pageLookups: unknown;
@@ -123,10 +123,10 @@ export function toServerHealth(row: HealthRow | undefined): ServerHealth | null 
 // and every other collector call still works. Not an error path: VIEW SERVER
 // STATE is a grant an operator may reasonably have withheld.
 export async function collectMssqlServerHealth(
-  conn: MssqlConnection,
+  conn: MssqlReader<HealthRow>,
 ): Promise<ServerHealth | null> {
   try {
-    const rows = await conn.query<HealthRow>(HEALTH_SQL);
+    const rows = await conn.query(HEALTH_SQL);
     return toServerHealth(rows[0]);
   } catch {
     return null;

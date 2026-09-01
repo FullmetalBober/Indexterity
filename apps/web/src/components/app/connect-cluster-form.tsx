@@ -1,6 +1,7 @@
 import {
   type ClusterEngine,
   type ConnectionDiagnosis,
+  clusterEngine,
   createClusterInput,
   engineFromScheme,
   NO_TLS_OVERRIDES,
@@ -362,7 +363,7 @@ export function ConnectClusterForm({
       check.mutate({
         connectionString: value.connectionString,
         tlsOverrides: tls,
-        engine: engineOverride(),
+        ...engineKey(),
         // Absent rather than null when dialling directly, the same way
         // observedDatabases is absent when everything is observed: the api
         // reads a missing field as "no tunnel", so sending one would only add a
@@ -380,6 +381,14 @@ export function ConnectClusterForm({
     return hint === "UNKNOWN" && chosen !== null ? chosen : undefined;
   }
 
+  // The same answer as an object to spread, because the contract's `engine` is
+  // `.optional()` — an override for a string nobody's guard recognised, never a
+  // key carrying undefined on every ordinary connect.
+  function engineKey(): { engine?: ClusterEngine } {
+    const engine = engineOverride();
+    return engine === undefined ? {} : { engine };
+  }
+
   // Which engine to SAY, which is a different question: the api's verdict when
   // there is one, the scheme's guess while the reader is still typing, and the
   // override in the gap where neither has an answer. Null draws no badge at all —
@@ -394,16 +403,25 @@ export function ConnectClusterForm({
   // Read at click time rather than at render: the two buttons under a diagnosis
   // are not the form's submit, and the form store deliberately does not re-render
   // this component when a field changes.
-  const credentials = () => ({
-    ...form.state.values,
-    tlsOverrides: tls,
-    engine: engineOverride(),
-    // Absent when everything is observed, rather than a list of every name: the
-    // api stores null for that, and null is what keeps a database added next month
-    // observed as well.
-    observedDatabases: observed === null ? undefined : [...observed],
-    ...(tunnelId === null ? {} : { tunnelId }),
-  });
+  const credentials = () => {
+    const engine = engineOverride();
+    return {
+      ...form.state.values,
+      tlsOverrides: tls,
+      // Spread, not `engine: … : undefined`, and the same for the scope below —
+      // the way `tunnelId` was already written. `.optional()` on the contract means
+      // absent, and under exactOptionalPropertyTypes a key holding undefined is a
+      // different value from no key: the api reads a MISSING observedDatabases as
+      // "observe every database", so the narrow behaviour must stay the one you
+      // ask for rather than the one an undefined slips into.
+      ...(engine === undefined ? {} : { engine }),
+      // Absent when everything is observed, rather than a list of every name: the
+      // api stores null for that, and null is what keeps a database added next month
+      // observed as well.
+      ...(observed === null ? {} : { observedDatabases: [...observed] }),
+      ...(tunnelId === null ? {} : { tunnelId }),
+    };
+  };
 
   // Whether the answer on screen was computed for the databases now ticked. Both
   // spellings of "all of them" count as the same scope, or ticking the last box
@@ -428,8 +446,8 @@ export function ConnectClusterForm({
     check.mutate({
       connectionString: form.state.values.connectionString,
       tlsOverrides: tls,
-      engine: engineOverride(),
-      observedDatabases: observed === null ? undefined : [...observed],
+      ...engineKey(),
+      ...(observed === null ? {} : { observedDatabases: [...observed] }),
       ...(tunnelId === null ? {} : { tunnelId }),
     });
   }
@@ -584,7 +602,12 @@ export function ConnectClusterForm({
               </span>
               <Select
                 value={chosen ?? ""}
-                onValueChange={(value) => chooseEngine(value as ClusterEngine)}
+                onValueChange={(value) => {
+                  // Radix hands back a string; the options are ours, so this only
+                  // fires for a real engine — and says so rather than asserting.
+                  const engine = clusterEngine.safeParse(value);
+                  if (engine.success) chooseEngine(engine.data);
+                }}
               >
                 <SelectTrigger className="h-8 w-44" aria-label="Which engine is this">
                   <SelectValue placeholder="Choose the engine" />
@@ -805,7 +828,7 @@ export function ConnectClusterForm({
                         // creates: the provisioned user is granted across the
                         // databases that exist now, so the selection stays
                         // editable afterwards (#244).
-                        observedDatabases: observed === null ? undefined : [...observed],
+                        ...(observed === null ? {} : { observedDatabases: [...observed] }),
                         ...(tunnelId === null ? {} : { tunnelId }),
                       });
                     }}

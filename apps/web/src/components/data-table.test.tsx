@@ -79,6 +79,12 @@ function dataRows(): HTMLElement[] {
   return screen.getAllByRole("row").slice(1);
 }
 
+// `col as HTMLElement` claimed every queried node was one. `instanceof` asks.
+function asElement(node: unknown): HTMLElement {
+  if (!(node instanceof HTMLElement)) throw new Error(`expected an element, got ${String(node)}`);
+  return node;
+}
+
 describe("DataTable", () => {
   it("starts in the order the caller asked for, not the api's", () => {
     render();
@@ -311,7 +317,7 @@ describe("DataTable, column widths", () => {
     // table, which is the only place a width can be stated once and be believed by
     // rows that are not currently rendered.
     const cols = [...container.querySelectorAll("colgroup col")];
-    expect(cols.map((col) => (col as HTMLElement).style.width)).toEqual(["300px", "96px"]);
+    expect(cols.map((col) => asElement(col).style.width)).toEqual(["300px", "96px"]);
     // And a floor, so narrow viewports scroll the columns instead of crushing them.
     expect(table?.style.minWidth).toBe("396px");
   });
@@ -353,7 +359,7 @@ describe("DataTable, column widths", () => {
     // The flexible column states no width, which is what makes `fixed` hand it
     // the remainder rather than sharing it out in proportion.
     const cols = [...container.querySelectorAll("colgroup col")];
-    expect(cols.map((col) => (col as HTMLElement).style.width)).toEqual(["", "96px"]);
+    expect(cols.map((col) => asElement(col).style.width)).toEqual(["", "96px"]);
     expect(
       container.querySelector("[data-slot=table-container]")?.parentElement?.className,
     ).toContain("w-full");

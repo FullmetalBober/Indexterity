@@ -16,15 +16,30 @@ const sendVerificationEmail = vi.hoisted(() => vi.fn());
 // better-auth's own client, which is what the form now talks to — no relay in
 // between. It answers with { data, error } rather than throwing, so a refusal
 // is a resolved promise carrying the api's message.
-vi.mock("~/lib/auth-client", () => ({
-  authClient: {
-    signIn: { email: signIn },
-    signUp: { email: signUp },
-    requestPasswordReset,
-    twoFactor: { verifyTotp, verifyBackupCode, verifyOtp, sendOtp },
-    sendVerificationEmail,
-  },
-}));
+// The real client with only the calls these tests make replaced. A factory
+// returning a bare `{ authClient: { … } }` swaps the WHOLE module and leaves the
+// rest of better-auth's client undefined, and nothing checked the replacements
+// against the methods they stand in for.
+vi.mock("~/lib/auth-client", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/lib/auth-client")>();
+  return {
+    ...actual,
+    authClient: {
+      ...actual.authClient,
+      signIn: { ...actual.authClient.signIn, email: signIn },
+      signUp: { ...actual.authClient.signUp, email: signUp },
+      requestPasswordReset,
+      twoFactor: {
+        ...actual.authClient.twoFactor,
+        verifyTotp,
+        verifyBackupCode,
+        verifyOtp,
+        sendOtp,
+      },
+      sendVerificationEmail,
+    },
+  };
+});
 
 // A token, because that is what a real success carries — and its ABSENCE is
 // better-auth's answer for an account that must confirm its address first, which

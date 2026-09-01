@@ -30,6 +30,23 @@ const GOPLS = "golang.org/x/tools/gopls@v0.23.0";
 
 const MODULE = path.join(import.meta.dirname, "..", "apps", "tunnel");
 
+// A spawn failure's fields, read off a caught `unknown`. `catch` gives unknown
+// because anything can be thrown, and asserting the shape reads `undefined` off
+// whatever else arrives — which is exactly when this script should say so.
+function asSpawnFailure(error: unknown): { code?: string; stderr?: string; status?: number } {
+  if (typeof error !== "object" || error === null) return {};
+  // Reflect.get rather than a cast: it reads a property off an object without
+  // claiming the object has one.
+  const code = Reflect.get(error, "code");
+  const stderr = Reflect.get(error, "stderr");
+  const status = Reflect.get(error, "status");
+  return {
+    ...(typeof code === "string" ? { code } : {}),
+    ...(typeof stderr === "string" ? { stderr } : {}),
+    ...(typeof status === "number" ? { status } : {}),
+  };
+}
+
 function goFiles(): string[] {
   // One flat package today. Recursed anyway: a subdirectory added later must not
   // silently stop being checked, which is how a gate rots.
@@ -61,7 +78,7 @@ try {
     stdio: ["ignore", "pipe", "pipe"],
   });
 } catch (error) {
-  const failure = error as { code?: string; stderr?: string; status?: number };
+  const failure = asSpawnFailure(error);
   if (failure.code === "ENOENT") {
     console.error(
       `lint-gopls: gopls is not on PATH. mise has no plugin for it, so:\n\n  go install ${GOPLS}\n\n` +

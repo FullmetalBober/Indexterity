@@ -118,6 +118,31 @@ export const BLOCKED_REASONS = [
 ] as const;
 export type BlockedReason = (typeof BLOCKED_REASONS)[number];
 
+// An instant on the wire: ISO-8601, UTC, which is exactly what
+// `Date.prototype.toISOString` produces and what every producer of every field
+// below already calls.
+//
+// `z.string()` for nineteen fields was the same unchecked claim this repo bans
+// with `as`. The type said `string`; thirteen places in the dashboard called
+// `new Date()` on it and acted on a stronger claim nobody verified, and only
+// three of them checked the result. An unparseable value did not fail — it
+// spread. `new Date(bad).getTime() > Date.now()` is `false`, so a pending drop
+// read as not pending; `(Date.now() - NaN) / 3_600_000 > 48` is `false`, so the
+// staleness badge that exists to stop old numbers reading as current never drew;
+// two more rendered the literal string "Invalid Date"; and
+// `formatTimestamp` called `.toISOString()` on it, which THROWS — during SSR.
+//
+// A problem that renders as an absence reads as "nothing is obviously wrong",
+// which is the failure BLOCKED_REASONS above exists to stop. So the boundary
+// says what it means and oRPC's output validation enforces it: a bad instant is
+// now a failed read, which the dashboard already knows how to draw, instead of
+// nine screens quietly disagreeing about what a timestamp is.
+//
+// UTC only, deliberately — no offset form. `toISOString` never emits one, so
+// accepting `+02:00` would only widen what the api may send without widening
+// what any reader was written for.
+export const instant = z.iso.datetime();
+
 export const clusterBlock = z.object({
   // A string rather than the enum above, deliberately. The column is text so
   // that adding a reason is a constant rather than a migration — and a reason
@@ -127,7 +152,7 @@ export const clusterBlock = z.object({
   reason: z.string(),
   // When it STARTED, not when it was last seen: "for six days" is the part that
   // decides whether somebody acts.
-  since: z.string(),
+  since: instant,
   // The sentence, usually the driver's own words.
   detail: z.string(),
   // WHICH pass stopped — `collect`, `suggest`, `apply` and so on (#408).
@@ -173,7 +198,7 @@ export const cluster = z.object({
   credentialPosture: z.enum(["PROVISIONED", "ADMIN", "SCOPED"]).nullable(),
   // Newest index snapshot, or null before the first collect. The dashboard
   // flags stale data so numbers from before an outage cannot read as current.
-  lastCollectedAt: z.string().nullable(),
+  lastCollectedAt: instant.nullable(),
   // Null when the pipeline is running. When it is not, this is the answer to
   // "why are these numbers old", which staleness alone cannot give.
   blocked: clusterBlock.nullable(),
@@ -187,7 +212,7 @@ export const cluster = z.object({
   // and "why is there nothing for staging" has to be answerable from the screen
   // rather than from the connect form six months ago.
   observedDatabases: z.array(z.string()).nullable(),
-  createdAt: z.string(),
+  createdAt: instant,
 });
 export type Cluster = z.infer<typeof cluster>;
 
@@ -303,7 +328,7 @@ export const clusterPrivileges = z.object({
   engine: clusterEngine,
   // When the dial below happened. Always now for a fresh read; carried so the
   // card can label the figures rather than implying they are live.
-  checkedAt: z.string(),
+  checkedAt: instant,
   // False when the cluster could not be dialled at all, with `message` saying
   // why. Not an error response: a cluster that is down still has a connection
   // card, and that card is where its credentials are rotated.
@@ -374,13 +399,13 @@ export const recommendation = z.object({
   // Exposed because the score cannot answer the question anyone actually has
   // in front of a hidden index: when does this get dropped? "82" does not say.
   // A date does.
-  hiddenAt: z.string().nullable(),
+  hiddenAt: instant.nullable(),
   observeDays: z.number().int().positive().nullable(),
   // And why that window, when it differs from the policy baseline. The number
   // alone reads as arbitrary next to another row with a different one; this is
   // the sentence the engine already wrote to explain it.
   observeReason: z.string().nullable(),
-  createdAt: z.string(),
+  createdAt: instant,
 });
 export type Recommendation = z.infer<typeof recommendation>;
 
@@ -437,7 +462,7 @@ export type ClusterNodeView = z.infer<typeof clusterNode>;
 // which is what makes "as of six hours ago" sayable.
 export const clusterNodes = z.object({
   clusterId: z.uuid(),
-  collectedAt: z.string().nullable(),
+  collectedAt: instant.nullable(),
   nodes: z.array(clusterNode),
 });
 export type ClusterNodes = z.infer<typeof clusterNodes>;
@@ -472,8 +497,8 @@ export const parkedIndex = z.object({
   // unattended. `indexName` is empty on these rows — the storage sentinel —
   // and this is the flag, so the sentinel does not have to be understood twice.
   wholeCollection: z.boolean(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
+  createdAt: instant,
+  updatedAt: instant,
 });
 export type ParkedIndex = z.infer<typeof parkedIndex>;
 
@@ -492,7 +517,7 @@ export const clusterCooldowns = z.object({
   activeCount: z.int().nonnegative(),
   // The soonest `until` still in the future — "next eligible" — or null when
   // nothing is parked.
-  nextEligibleAt: z.string().nullable(),
+  nextEligibleAt: instant.nullable(),
   parked: z.array(parkedIndex),
 });
 export type ClusterCooldowns = z.infer<typeof clusterCooldowns>;
@@ -539,7 +564,7 @@ export type ClusterLatency = z.infer<typeof clusterLatency>;
 
 // One windowed µs/op point per collect interval — the chart series.
 export const latencySeriesPoint = z.object({
-  capturedAt: z.string(),
+  capturedAt: instant,
   readMicros: z.number().nullable(),
   writeMicros: z.number().nullable(),
 });
@@ -609,7 +634,7 @@ export const indexUsage = z.object({
   perMember: z.array(memberOps),
   // When this reading was last confirmed. A per-node split from a collect that
   // failed three days ago is a claim about three days ago.
-  observedAt: z.string(),
+  observedAt: instant,
 });
 export type IndexUsage = z.infer<typeof indexUsage>;
 
@@ -705,7 +730,7 @@ export const analysisNote = z.object({
   // When the pass that wrote this ran. Stale by at most one classify cadence,
   // which is the trade: the alternative is recomputing the whole usage history on
   // every dashboard load.
-  decidedAt: z.string(),
+  decidedAt: instant,
   consideredIndexes: z.int().nonnegative(),
   trustedIndexes: z.int().nonnegative(),
   // True only when NOTHING cleared the usage gate. One trusted index means the
@@ -750,7 +775,7 @@ export const auditAction = z.object({
   database: z.string(),
   collection: z.string(),
   indexName: z.string(),
-  createdAt: z.string(),
+  createdAt: instant,
 });
 export type AuditAction = z.infer<typeof auditAction>;
 
@@ -925,7 +950,7 @@ export const securityEvent = z.object({
   metadata: z.record(z.string(), z.unknown()).nullable(),
   ipAddress: z.string().nullable(),
   userAgent: z.string().nullable(),
-  createdAt: z.string(),
+  createdAt: instant,
 });
 export type SecurityEvent = z.infer<typeof securityEvent>;
 
@@ -944,7 +969,7 @@ export const securityTrail = z.object({
   // A compound key, not a timestamp: two acts can land in the same microsecond
   // (an invite accepted is a membership row and a session), and a cursor that
   // is only a time would skip whichever one sorted second.
-  nextCreatedAt: z.string().nullable(),
+  nextCreatedAt: instant.nullable(),
   nextId: z.uuid().nullable(),
 });
 export type SecurityTrail = z.infer<typeof securityTrail>;
@@ -1005,7 +1030,7 @@ export const myInvite = z.object({
   id: z.uuid(),
   orgName: z.string(),
   role: z.string(),
-  expiresAt: z.string(),
+  expiresAt: instant,
 });
 export type MyInvite = z.infer<typeof myInvite>;
 
@@ -1022,7 +1047,7 @@ export const orgPolicyView = z.object({
   requireLeastPrivilege: z.boolean(),
   // Null until somebody saves one, which is what distinguishes "off" from "never
   // configured" — the distinction #258 found the per-cluster toggle was missing.
-  updatedAt: z.string().nullable(),
+  updatedAt: instant.nullable(),
 });
 export type OrgPolicyView = z.infer<typeof orgPolicyView>;
 
@@ -1036,7 +1061,7 @@ export const orgInfo = z.object({
   role: z.string(),
   members: z.array(orgMember),
   pendingInvites: z.array(
-    z.object({ id: z.uuid(), email: z.string(), role: z.string(), expiresAt: z.string() }),
+    z.object({ id: z.uuid(), email: z.string(), role: z.string(), expiresAt: instant }),
   ),
   provisionedUsers: z.array(provisionedUser),
   // The org's policy, on the payload the whole dashboard already reads. It is
@@ -1082,7 +1107,7 @@ export const tunnelView = z.object({
   // How many clusters would break if this were deleted, which is why the delete
   // is refused while it is non-zero.
   clusterCount: z.number().int(),
-  createdAt: z.string(),
+  createdAt: instant,
 });
 export type TunnelView = z.infer<typeof tunnelView>;
 

@@ -1,14 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { DatabaseInaccessibleError } from "../engine/ports";
-import { stub } from "../test-utils";
 import {
   indexNamesFromForcedPlan,
   indexNamesFromHintText,
   MssqlIndexCollector,
   toMssqlIndexSpec,
 } from "./collector";
-import type { MssqlConnection } from "./connection";
-import type { MssqlMemberConnections, MssqlMemberDial } from "./members";
+import type { MssqlSource } from "./connection";
+import type { MssqlMemberRead, MssqlRoster, MssqlUsageMember } from "./members";
 
 function row(overrides: Partial<Parameters<typeof toMssqlIndexSpec>[0][number]> = {}) {
   return {
@@ -126,10 +125,15 @@ describe("indexNamesFromForcedPlan", () => {
 // number arrives on the driver's nested `originalError` as often as on the error
 // itself, which is why both are walked.
 describe("listCollectionNames on an inaccessible database", () => {
-  function refusing(error: unknown) {
-    return stub<MssqlConnection>({
+  // A complete MssqlSource. `serverIdentity` and `localReplicaRole` are never
+  // reached on this path and say so by throwing, which is more honest than
+  // asserting them away: if the path changes, the test names what it hit.
+  function refusing(error: unknown): MssqlSource {
+    return {
       query: () => Promise.reject(error),
-    });
+      serverIdentity: () => Promise.reject(new Error("not reached in this test")),
+      localReplicaRole: () => Promise.reject(new Error("not reached in this test")),
+    };
   }
 
   it("raises DatabaseInaccessibleError for Msg 916 on the error itself", async () => {
@@ -178,8 +182,8 @@ function stubMember(
   // could answer "primary " or "PRIMARY" is a fake the collector would never
   // see, and the compiler now says so.
   options: { ops?: number; fails?: boolean; role?: "primary" | "secondary" } = {},
-) {
-  return stub<MssqlConnection>({
+): MssqlUsageMember {
+  return {
     serverIdentity: () =>
       Promise.resolve({
         serverName: name,
@@ -187,29 +191,44 @@ function stubMember(
         engineEdition: 3,
         version: null,
       }),
-    // Generic, like the real `query<T>` — a mock cannot know T, so the row it
-    // answers with is narrowed to it.
-    query: <T>() =>
+    // The port names the row, so this answers a usage reading rather than
+    // claiming its data is whatever the caller asked for.
+    query: () =>
       options.fails === true
         ? Promise.reject(new Error("connection lost"))
-        : Promise.resolve([{ indexName: "ix_customer", ops: options.ops ?? 0 }] as T[]),
+        : Promise.resolve([{ indexName: "ix_customer", ops: options.ops ?? 0 }]),
     localReplicaRole: () => Promise.resolve(options.role ?? null),
-  });
+  };
 }
 
-function stubMembers(dials: readonly MssqlMemberDial[]) {
-  return stub<MssqlMemberConnections>({
+// Complete: the collector reads `dials()` and nothing else, and `all()` is here
+// because the interface has it — both implemented, none asserted away.
+// Complete: both methods the collector can reach, neither asserted away.
+function stubMembers(dials: readonly MssqlMemberRead[]): MssqlRoster {
+  return {
     dials: () => Promise.resolve(dials),
-    all: () => Promise.resolve(dials.flatMap((dial) => (dial.connection ? [dial.connection] : []))),
-  });
+    all: async () => dials.flatMap((dial) => (dial.connection ? [dial.connection] : [])),
+  };
 }
+
+// The catalog reads are not on the replica path, and a source whose query
+// rejects is a COMPLETE MssqlSource: `Promise<never>` is honestly a `Promise<T[]>`
+// for every T, which is the one thing a double can say about a generic method.
+// The local instance arrives as a member instead, which is all these two reads
+// need of it.
+const NO_CATALOG: MssqlSource = {
+  query: () => Promise.reject(new Error("no catalog read is expected on this path")),
+  serverIdentity: () => Promise.reject(new Error("the local member answers this")),
+  localReplicaRole: () => Promise.reject(new Error("the local member answers this")),
+};
 
 describe("MssqlIndexCollector across availability replicas", () => {
   it("reports one reading per replica, each with its own name and counter start", async () => {
     const secondary = stubMember("ag2", { ops: 7, role: "secondary" });
     const collector = new MssqlIndexCollector(
-      stubMember("ag1", { ops: 0, role: "primary" }),
+      NO_CATALOG,
       stubMembers([{ host: "ag2", state: "answered", connection: secondary }]),
+      stubMember("ag1", { ops: 0, role: "primary" }),
     );
     const usage = await collector.collectUsage("shop", "dbo.orders");
     expect(usage).toEqual([
@@ -230,10 +249,11 @@ describe("MssqlIndexCollector across availability replicas", () => {
 
   it("keeps the other members' readings when one dies mid-collect", async () => {
     const collector = new MssqlIndexCollector(
-      stubMember("ag1", { ops: 2, role: "primary" }),
+      NO_CATALOG,
       stubMembers([
         { host: "ag2", state: "answered", connection: stubMember("ag2", { fails: true }) },
       ]),
+      stubMember("ag1", { ops: 2, role: "primary" }),
     );
     const usage = await collector.collectUsage("shop", "dbo.orders");
     expect(usage.map((stat) => stat.host)).toEqual(["ag1"]);
@@ -241,7 +261,7 @@ describe("MssqlIndexCollector across availability replicas", () => {
 
   it("names every replica in the roster, dialled or not", async () => {
     const collector = new MssqlIndexCollector(
-      stubMember("ag1", { role: "primary" }),
+      NO_CATALOG,
       stubMembers([
         {
           host: "ag2",
@@ -251,6 +271,7 @@ describe("MssqlIndexCollector across availability replicas", () => {
         { host: "ag3", state: "unreachable", connection: null },
         { host: "ag4", state: "refused", connection: null },
       ]),
+      stubMember("ag1", { role: "primary" }),
     );
     expect(await collector.collectNodes()).toEqual([
       { host: "ag1", role: "primary", state: "answered" },
@@ -261,7 +282,7 @@ describe("MssqlIndexCollector across availability replicas", () => {
   });
 
   it("a standalone is still a roster of one standalone", async () => {
-    const collector = new MssqlIndexCollector(stubMember("solo"));
+    const collector = new MssqlIndexCollector(NO_CATALOG, undefined, stubMember("solo"));
     expect(await collector.collectNodes()).toEqual([
       { host: "solo", role: "standalone", state: "answered" },
     ]);

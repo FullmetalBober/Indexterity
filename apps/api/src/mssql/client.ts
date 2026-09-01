@@ -126,6 +126,63 @@ export function mssqlConfig(
   };
 }
 
+// The pool, configured and guarded but NOT yet dialled.
+//
+// Split out from `mssqlPool` so the listener below can be asserted without a
+// server: `connect()` needs one, building the pool does not. Exported for
+// client.test.ts and for nothing else.
+export function buildMssqlPool(
+  parsed: ParsedMssqlConnString,
+  overrides?: TlsOverrides,
+  dial?: MssqlDialOptions,
+): mssql.ConnectionPool {
+  const pool = new mssql.ConnectionPool(mssqlConfig(parsed, overrides, dial));
+  // A mssql.ConnectionPool is an EventEmitter, and an 'error' with no listener is
+  // an uncaught exception — so this took the process down. #420 fixed the same
+  // CLASS of crash on the pg pools; #424 asked whether this pool shared it, and
+  // the answer is yes with a different mechanism, so the shape of the fix differs
+  // too. Measured against SQL Server 2022 (mssql 12, tedious 19), driving this
+  // module's own `mssqlConfig` and pool construction:
+  //
+  //   IDLE, server gone       stop the server with one connection sitting idle in
+  //                           the pool: nothing. Survived 30s, and instrumenting
+  //                           `pool.emit` showed tedious emitted NO events at all.
+  //   IDLE, session killed     the exact analogue of #420's `pg_terminate_backend`
+  //                           — `KILL <spid>` from a second connection, with the
+  //                           victim verified present in `sys.dm_exec_sessions`
+  //                           before and GONE after: again nothing, and the pool's
+  //                           next query succeeded.
+  //   REQUEST IN FLIGHT        the one that kills the process. The query itself
+  //                           rejects cleanly (`RequestError: socket hang up`,
+  //                           ECONNRESET) and then, ~1ms later, tedious dispatches
+  //                           a late `socketError` into a connection already in
+  //                           state 'Final', emits `Error: No event 'socketError'
+  //                           in state 'Final'` on the Connection, and node-mssql
+  //                           re-emits it on THIS pool (connection-pool.js:112).
+  //                           Unhandled, the process exits.
+  //
+  // Which is worse than the pg one to find by reading: the failure arrives AFTER a
+  // clean, correctly-handled rejection, so the caller's error handling looks like
+  // it worked and the process dies anyway.
+  //
+  // ONE listener, not the two postgres/client.ts carries. Both of those exist
+  // because pg splits the cases — the pool emits for idle clients and a
+  // checked-out client emits on itself — whereas node-mssql funnels the tedious
+  // Connection's error onto the pool, so the pool is the only emitter there is.
+  // Verified in both directions: without this line the probe exits 1, with it the
+  // same probe handles the error and survives. The idle half pg needs has nothing
+  // to attach to here and is deliberately absent rather than added for symmetry.
+  //
+  // Nothing to repair, so the handler only records: tedious has already failed the
+  // request and the connection is in its terminal state, and the pass that touches
+  // this cluster next reports it through the ordinary unreachable path. The cluster
+  // is not named because this function is not told which one it is.
+  pool.on("error", (error) => {
+    console.error(`cluster mssql pool: ${String(error)}`);
+  });
+  return pool;
+}
+
 export async function mssqlPool(
   connectionString: string,
   overrides?: TlsOverrides,
@@ -136,7 +193,7 @@ export async function mssqlPool(
   if (parsed === null) {
     throw new Error("not a SQL Server connection string");
   }
-  const pool = new mssql.ConnectionPool(mssqlConfig(parsed, overrides, dial));
+  const pool = buildMssqlPool(parsed, overrides, dial);
   await pool.connect();
   return pool;
 }

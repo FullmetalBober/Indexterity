@@ -1,54 +1,27 @@
-import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { describe, expect, it } from "vitest";
-import { stub } from "../test-utils";
-import { securityHeaders } from "./security-headers";
+import { applySecurityHeaders } from "./security-headers";
 
-// A reply with just the four methods the hook uses. Cheaper than a Fastify
-// instance and it makes the assertions about the headers rather than about
-// whether a server started.
-function replyWith(initial: Record<string, string> = {}) {
+// A complete HeaderSink, and nothing else.
+//
+// This used to register the hook into a fake FastifyInstance, capture the
+// handler, and invoke it with a fake FastifyRequest and a stubbed FastifyReply —
+// three vendor fakes to reach a rule about which headers get set. The rule is
+// its own function now, so the test calls it.
+//
+// What was lost by not going through the hook is `onSend` ordering, which is a
+// Fastify fact rather than ours, and the e2e suite asserts these headers on real
+// responses (csp.spec.ts).
+function send(initial: Record<string, string> = {}): Map<string, string> {
   const headers = new Map(Object.entries(initial));
-  // `header` and `removeHeader` return the reply, because Fastify's do — they
-  // chain, and returning the Map was invisible until the fake had to match.
-  //
-  // The map is handed back BESIDE the reply rather than hung on it: FastifyReply
-  // has a `headers` of its own with a different meaning, and a fake that
-  // redefines it is describing a reply nothing sends.
-  const reply: Partial<FastifyReply> = {
-    getHeader: (name: string) => headers.get(name),
-    header: (name: string, value: string) => {
-      headers.set(name, value);
-      return reply as FastifyReply;
-    },
-    removeHeader: (name: string) => {
-      headers.delete(name);
-      return reply as FastifyReply;
-    },
-  };
-  return { reply, headers };
-}
-
-// Register the hook, then run it the way Fastify would.
-function send(initial?: Record<string, string>): Map<string, string> {
-  let hook: ((...args: unknown[]) => void) | null = null;
-  const fastify = {
-    addHook: (_event: string, handler: (...args: unknown[]) => void) => {
-      hook = handler;
-    },
-  } as FastifyInstance;
-  securityHeaders(fastify);
-  if (hook === null) throw new Error("the hook was never registered");
-  const { reply, headers } = replyWith(initial);
-  (hook as (...args: unknown[]) => void)(
-    {} as FastifyRequest,
-    stub<FastifyReply>(reply),
-    "payload",
-    () => {},
-  );
+  applySecurityHeaders({
+    getHeader: (name) => headers.get(name),
+    header: (name, value) => headers.set(name, value),
+    removeHeader: (name) => headers.delete(name),
+  });
   return headers;
 }
 
-describe("securityHeaders", () => {
+describe("applySecurityHeaders", () => {
   it.each([
     ["x-content-type-options", "nosniff"],
     ["x-frame-options", "DENY"],

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { DatabaseInaccessibleError, workloadKey } from "../engine/ports";
 import { attributesTo, joinTableRef, PostgresIndexCollector, splitTableRef } from "./collector";
-import type { PostgresConnection } from "./connection";
+import type { PgStatementRow, PostgresReader, PostgresStatementSource } from "./connection";
 
 // `collection` is a schema-qualified table here, because Postgres has a level
 // MongoDB does not and folding it away would make two tables of the same name in
@@ -75,22 +75,36 @@ describe("table attribution in normalized SQL", () => {
 // The codes are node-pg's, measured on 18.6: 42501 is a role without CONNECT,
 // 3D000 a database that is gone, 42P01 the extension not installed.
 describe("the workload store on an inaccessible database", () => {
-  function conn(answer: (database: string) => Promise<unknown[]>) {
-    return {
-      query: (_text: string, _params: readonly unknown[], database = "") => answer(database),
-    } as PostgresConnection;
+  // The catalog reads are not on this path, and a reader whose query rejects is
+  // a COMPLETE PostgresReader: `Promise<never>` is honestly a `Promise<T[]>` for
+  // every T, which is the one thing a double can say about a generic method.
+  const NO_CATALOG: PostgresReader = {
+    query: () => Promise.reject(new Error("no catalog read is expected on this path")),
+    serverIdentity: () => Promise.reject(new Error("not reached in this test")),
+    serverVersion: () => Promise.reject(new Error("not reached in this test")),
+  };
+
+  // The workload read, which the port names — so this answers statements rather
+  // than claiming its rows are whatever the caller asked for.
+  function workload(
+    answer: (database: string) => Promise<PgStatementRow[]>,
+  ): PostgresStatementSource {
+    return { query: (_text, _params, database = "") => answer(database) };
   }
+
+  const collectorOver = (answer: (database: string) => Promise<PgStatementRow[]>) =>
+    new PostgresIndexCollector(NO_CATALOG, workload(answer));
   const refusal = (code: string) => Object.assign(new Error(`refused ${code}`), { code });
 
   it("raises DatabaseInaccessibleError rather than reporting an empty workload", async () => {
-    const collector = new PostgresIndexCollector(conn(() => Promise.reject(refusal("42501"))));
+    const collector = collectorOver(() => Promise.reject(refusal("42501")));
     await expect(collector.collectDeletePatterns("gone", "public.orders")).rejects.toBeInstanceOf(
       DatabaseInaccessibleError,
     );
   });
 
   it("names the database it could not reach", async () => {
-    const collector = new PostgresIndexCollector(conn(() => Promise.reject(refusal("3D000"))));
+    const collector = collectorOver(() => Promise.reject(refusal("3D000")));
     await expect(collector.collectDeletePatterns("gone", "public.orders")).rejects.toMatchObject({
       database: "gone",
     });
@@ -99,21 +113,19 @@ describe("the workload store on an inaccessible database", () => {
   // The extension is optional (WORKLOAD tier in diagnose.ts) and its absence is
   // not an access problem, so it still reads as no statements.
   it("still reads a missing pg_stat_statements as no statements", async () => {
-    const collector = new PostgresIndexCollector(conn(() => Promise.reject(refusal("42P01"))));
+    const collector = collectorOver(() => Promise.reject(refusal("42P01")));
     await expect(collector.collectDeletePatterns("app", "public.orders")).resolves.toEqual([]);
   });
 
   // One database of many. The batched read has a partial answer to give, so it
   // gives it — the reachable database's shapes survive the unreachable one.
   it("keeps the other databases when one is unreachable", async () => {
-    const collector = new PostgresIndexCollector(
-      conn((database) =>
-        database === "locked"
-          ? Promise.reject(refusal("42501"))
-          : Promise.resolve([
-              { query: "SELECT * FROM public.orders WHERE id = $1", calls: "12", rows: "12" },
-            ]),
-      ),
+    const collector = collectorOver((database) =>
+      database === "locked"
+        ? Promise.reject(refusal("42501"))
+        : Promise.resolve([
+            { query: "SELECT * FROM public.orders WHERE id = $1", calls: "12", rows: "12" },
+          ]),
     );
     const shapes = await collector.collectWorkload([
       { database: "locked", collection: "public.orders" },

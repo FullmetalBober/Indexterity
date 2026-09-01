@@ -25,6 +25,7 @@ import {
 } from "~/components/ui/field";
 import { Input } from "~/components/ui/input";
 import { Textarea } from "~/components/ui/textarea";
+import { field } from "~/lib/narrow";
 import { cn } from "~/lib/utils";
 
 const { fieldContext, formContext, useFieldContext, useFormContext } = createFormHookContexts();
@@ -50,14 +51,17 @@ function invalidState(meta: { isTouched: boolean; isValid: boolean }): boolean {
 // A zod validator reports issue objects; a hand-written one (the two cross-field
 // rules in this app) reports a plain string. FieldError only reads `.message`, so
 // it would silently render nothing for the second kind.
+//
+// The key is omitted rather than set to undefined for anything that is not a
+// string, because FieldError's own prop type is `{ message?: string }` — narrow,
+// and not ours to widen. Which is the honest shape anyway: an issue object whose
+// `message` is a number has no message, and that is the same answer as an issue
+// object with no `message` at all.
 function asMessages(errors: readonly unknown[]): Array<{ message?: string }> {
   return errors.map((error) => {
     if (typeof error === "string") return { message: error };
-    if (typeof error === "object" && error !== null && "message" in error) {
-      const { message } = error;
-      return { message: typeof message === "string" ? message : undefined };
-    }
-    return {};
+    const message = field(error, "message");
+    return typeof message === "string" ? { message } : {};
   });
 }
 

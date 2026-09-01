@@ -153,6 +153,18 @@ export function mongoClient(
   proxy?: DialProxy,
 ): MongoClient {
   assertTlsEnforced(uri, overrides);
+  // No 'error' listener here, and that is a measured decision rather than an
+  // oversight — #424 asked the question of all three drivers. A MongoClient is
+  // an EventEmitter like the pg Pool (#420) and the mssql ConnectionPool, so it
+  // could in principle share the crash where an unlistened 'error' takes the
+  // process down. It does not. Probed against mongodb 7.0 (driver 6.x) with
+  // nothing attached: stopping mongod under an idle client, and stopping it with
+  // a 15-second server-side `sleep` in flight, both left the process alive.
+  // Instrumenting `emit` showed why — the driver reports transport faults as
+  // MONITORING events (`serverHeartbeatFailed`, `connectionPoolCleared`,
+  // `connectionClosed`) and surfaces the fault to the caller by rejecting the
+  // operation (`MongoNetworkError: connection … closed`). It never emits a bare
+  // 'error' on the client, so there is nothing here for a listener to catch.
   return new MongoClient(uri, {
     serverSelectionTimeoutMS: SERVER_SELECTION_TIMEOUT_MS,
     // The driver takes SOCKS natively, and hands the proxy the HOSTNAME from

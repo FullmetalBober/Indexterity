@@ -28,10 +28,10 @@ import { DatabaseService } from "../db/database.service";
 // neither — a time without its tiebreak would skip a row that shares the
 // microsecond, and an invitation being accepted writes two rows in one request.
 export interface SecurityTrailQuery {
-  readonly event?: string;
-  readonly actorUserId?: string;
-  readonly beforeCreatedAt?: string;
-  readonly beforeId?: string;
+  readonly event?: string | undefined;
+  readonly actorUserId?: string | undefined;
+  readonly beforeCreatedAt?: string | undefined;
+  readonly beforeId?: string | undefined;
 }
 
 // The org reads better-auth's organization plugin cannot answer, as use cases

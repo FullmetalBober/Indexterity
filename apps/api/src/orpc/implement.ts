@@ -58,17 +58,41 @@ export type RouteScope<L extends AuthLevel> = L extends "session"
 // Runs the level, in the one place that cannot be skipped. A `session` caller
 // who is in no organization gets a null membership rather than a refusal: being
 // in none is a state the product has, not an error the api can fix.
-async function enterScope(
+//
+// A record keyed by the level rather than a chain of ternaries, and that is what
+// makes the signature provable. Indexing it with the generic `L` gives back the
+// resolver declared for THAT level, so what it returns is a `RouteScope<L>` by
+// construction — where the ternary chain produced the union of all four scopes
+// and the difference had to be asserted away (`scope as RouteScope<L>`), which
+// silenced the one thing worth checking: that an owner-level route really does
+// get a resolved membership.
+const RESOLVERS: {
+  [K in AuthLevel]: (tenancy: TenancyService, req: FastifyRequest) => Promise<RouteScope<K>>;
+} = {
+  session: async (tenancy, req) => ({
+    userId: await tenancy.userId(req),
+    member: await tenancy.memberOrNull(req),
+  }),
+  member: async (tenancy, req) => ({
+    userId: await tenancy.userId(req),
+    member: await tenancy.member(req),
+  }),
+  owner: async (tenancy, req) => ({
+    userId: await tenancy.userId(req),
+    member: await tenancy.requireOwner(req),
+  }),
+  freshOwner: async (tenancy, req) => ({
+    userId: await tenancy.userId(req),
+    member: await tenancy.requireFreshOwner(req),
+  }),
+};
+
+function enterScope<L extends AuthLevel>(
   tenancy: TenancyService,
   req: FastifyRequest,
-  level: AuthLevel,
-): Promise<{ userId: string; member: Membership | null }> {
-  const userId = await tenancy.userId(req);
-  if (level === "session") return { userId, member: await tenancy.memberOrNull(req) };
-  if (level === "member") return { userId, member: await tenancy.member(req) };
-  const member =
-    level === "owner" ? await tenancy.requireOwner(req) : await tenancy.requireFreshOwner(req);
-  return { userId, member };
+  level: L,
+): Promise<RouteScope<L>> {
+  return RESOLVERS[level](tenancy, req);
 }
 
 // The only way to implement a contract route, which is the point.
@@ -107,10 +131,7 @@ export function route<
   level: L,
 ) {
   return orpcImplement(contract).use(async ({ next }) => {
-    // The cast is the seam between a runtime switch and the level's type. Held
-    // by enterScope above it and by RouteScope beside it; the alternative is
-    // five near-identical overloads of this function.
-    const scope = (await enterScope(tenancy, req, level)) as RouteScope<L>;
+    const scope = await enterScope(tenancy, req, level);
     return next({ context: scope });
   });
 }

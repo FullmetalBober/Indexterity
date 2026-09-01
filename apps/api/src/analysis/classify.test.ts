@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { at } from "../errors/at";
 import {
   classifyUsage,
   counterEpochs,
@@ -646,7 +647,7 @@ describe("an idle index and an unwatched index", () => {
   it("counts looks rather than rows for minHistory", () => {
     // One row. Three collects behind it, so it clears a floor of three; two, and
     // it does not.
-    const twoLooks: UsageSnapshot[] = [{ ...idle[0], observations: 2 } as UsageSnapshot];
+    const twoLooks: UsageSnapshot[] = [{ ...at(idle), observations: 2 }];
     expect(usageHistoryIsTrustworthy(twoLooks, opts, now)).toBe(false);
     expect(usageHistoryIsTrustworthy(idle, opts, now)).toBe(true);
   });

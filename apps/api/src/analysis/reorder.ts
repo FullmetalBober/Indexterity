@@ -44,6 +44,13 @@ import { esrKeys, isRecurring, type WorkloadOptions } from "./workload";
 // from the index and `find({}).sort({a:1,b:-1})` does not. esrKeys already drops
 // a sort key that equality has claimed; this walks the same order and reports
 // only the positions that genuinely constrain a direction.
+// Negating a `1 | -1` widens it to `number` — TypeScript does not track the
+// arithmetic — so this says the flip as a choice between the two values it can
+// be, which needs no assertion and reads as what it means.
+function flip(direction: 1 | -1): 1 | -1 {
+  return direction === 1 ? -1 : 1;
+}
+
 export function orderingPositions(shape: QueryShape): { position: number; direction: 1 | -1 }[] {
   const out: { position: number; direction: 1 | -1 }[] = [];
   const seen = new Set<string>();
@@ -146,7 +153,7 @@ function targetDirections(index: IndexSpec, shape: QueryShape): SortKey[] {
             ? -1
             : 1
           : invert
-            ? (-want.direction as 1 | -1)
+            ? flip(want.direction)
             : want.direction;
       return { field: key.field, direction };
     });

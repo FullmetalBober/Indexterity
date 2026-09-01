@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { MAX_GAP_HOURS } from "../analysis";
+import { keysOf } from "../errors/message";
 import { counterFingerprint, extendsRun, latencyFingerprint } from "./runs";
 
 const HOUR_MS = 3_600_000;
@@ -59,7 +60,7 @@ describe("latencyFingerprint", () => {
   const base = { readOps: 1, readLatencyMicros: 2, writeOps: 3, writeLatencyMicros: 4 };
 
   it("changes when any one of the four counters moves", () => {
-    for (const key of Object.keys(base) as (keyof typeof base)[]) {
+    for (const key of keysOf(base)) {
       expect(latencyFingerprint({ ...base, [key]: base[key] + 1 })).not.toBe(
         latencyFingerprint(base),
       );

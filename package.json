@@ -1,6 +1,6 @@
 {
+  "version": "0.16.1",
   "name": "indexterity",
-  "version": "0.16.0",
   "private": true,
   "type": "module",
   "packageManager": "npm@11.6.2",
@@ -18,12 +18,13 @@
     "typecheck:scripts": "tsc -p tsconfig.json",
     "test": "turbo run test",
     "audit:gate": "node scripts/audit-gate.ts",
-    "lint": "biome check . && node scripts/lint-tailwind.ts && node scripts/lint-migrations.ts && node scripts/lint-source-bytes.ts && node scripts/lint-assertions.ts && npm run lint -w @repo/tunnel && node scripts/lint-gopls.ts",
-    "lint:fix": "biome check --write . && node scripts/lint-tailwind.ts && node scripts/lint-migrations.ts && node scripts/lint-source-bytes.ts && node scripts/lint-assertions.ts && npm run lint -w @repo/tunnel && node scripts/lint-gopls.ts",
+    "lint": "biome check . && node scripts/lint-tailwind.ts && node scripts/lint-migrations.ts && node scripts/lint-source-bytes.ts && node scripts/lint-assertions.ts && node scripts/lint-twins.ts && npm run lint -w @repo/tunnel && node scripts/lint-gopls.ts",
+    "lint:fix": "biome check --write . && node scripts/lint-tailwind.ts && node scripts/lint-migrations.ts && node scripts/lint-source-bytes.ts && node scripts/lint-assertions.ts && node scripts/lint-twins.ts && npm run lint -w @repo/tunnel && node scripts/lint-gopls.ts",
     "lint:tailwind": "node scripts/lint-tailwind.ts",
     "lint:migrations": "node scripts/lint-migrations.ts",
     "lint:source-bytes": "node scripts/lint-source-bytes.ts",
     "lint:assertions": "node scripts/lint-assertions.ts",
+    "lint:twins": "node scripts/lint-twins.ts",
     "format": "biome format --write .",
     "db:generate": "npm run db:generate -w @repo/api",
     "db:migrate": "npm run db:migrate -w @repo/api",
@@ -38,8 +39,11 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.5",
+    "@total-typescript/ts-reset": "^0.6.1",
+    "mongodb": "^6.21.0",
     "@types/node": "^26.1.1",
     "turbo": "^2.10.5",
+    "zod": "^4.4.3",
     "typescript": "^6.0.3"
   },
   "allowScripts": {

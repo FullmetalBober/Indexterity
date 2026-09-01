@@ -3,7 +3,7 @@ import { isRedundantPrefix, parseStoredSpec, rebuildKeys, rebuildOptions } from 
 import { DatabaseInaccessibleError, type EngineSession, workloadKey } from "../src/engine/ports";
 import { ProvisionDeniedError, SCOPED_USERNAME } from "../src/engine/provision";
 import { detectEngine } from "../src/engine/registry";
-import type { IndexSpec } from "../src/engine/types";
+import { present } from "../src/errors/at";
 import { collectSnapshots, serializeSpec } from "../src/mongo/snapshots";
 import { mssqlAdapter } from "../src/mssql/adapter";
 import { MssqlIndexCollector } from "../src/mssql/collector";
@@ -29,12 +29,31 @@ const MSSQL_URL = process.env.MSSQL_URL;
 const OVERRIDES = { allowInvalidCertificates: true, allowInvalidHostnames: false, insecure: false };
 const DB = "indexterity_int";
 
+// One stored spec out of a collect result, by index name — checked at both
+// steps. `snapshots.find(...)?.spec as { unique: boolean }` claimed a shape for
+// a value that is JSON off the wire, and a snapshot that was simply missing
+// compared `undefined` to `true`, reporting an absent index as a wrong one.
+function specOf(
+  snapshots: readonly { database: string; indexName: string; spec: unknown }[],
+  indexName: string,
+): Record<string, unknown> {
+  const found = snapshots.find(
+    (snapshot) => snapshot.database === DB && snapshot.indexName === indexName,
+  );
+  if (found === undefined) throw new Error(`no snapshot for ${indexName}`);
+  const { spec } = found;
+  if (typeof spec !== "object" || spec === null) {
+    throw new Error(`expected a stored spec for ${indexName}, got ${JSON.stringify(spec)}`);
+  }
+  return { ...spec };
+}
+
 describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", () => {
   let seed: MssqlConnection;
   let session: EngineSession;
 
   beforeAll(async () => {
-    seed = new MssqlConnection(MSSQL_URL as string, OVERRIDES);
+    seed = new MssqlConnection(present(MSSQL_URL, "MSSQL_URL"), OVERRIDES);
     await seed.connect();
     await seed.execute(`IF DB_ID('${DB}') IS NOT NULL DROP DATABASE [${DB}]`);
     await seed.execute(`CREATE DATABASE [${DB}]`);
@@ -114,7 +133,7 @@ describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", 
       await seedWorkload();
       if ((await capturedShapes()) >= 2) break;
     }
-    session = await mssqlAdapter.open(MSSQL_URL as string, OVERRIDES);
+    session = await mssqlAdapter.open(present(MSSQL_URL, "MSSQL_URL"), OVERRIDES);
   }, 120_000);
 
   afterAll(async () => {
@@ -126,11 +145,11 @@ describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", 
   });
 
   it("is detected from the connection string alone", () => {
-    expect(detectEngine(MSSQL_URL as string)).toBe("MSSQL");
+    expect(detectEngine(present(MSSQL_URL, "MSSQL_URL"))).toBe("MSSQL");
   });
 
   it("diagnoses sa as ready and able to apply", async () => {
-    const diagnosis = await mssqlAdapter.diagnose(MSSQL_URL as string, OVERRIDES);
+    const diagnosis = await mssqlAdapter.diagnose(present(MSSQL_URL, "MSSQL_URL"), OVERRIDES);
     expect(diagnosis.reachable).toBe(true);
     expect(diagnosis.ready).toBe(true);
     expect(diagnosis.canApply).toBe(true);
@@ -156,17 +175,16 @@ describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", 
     expect(typeof member?.ops).toBe("number"); // bigint columns must not arrive as strings
     expect(Date.parse(member?.since ?? "")).toBeGreaterThan(0);
 
-    const pk = result.snapshots.find(
-      (snapshot) => snapshot.database === DB && snapshot.indexName === "pk_orders",
-    )?.spec as { unique: boolean; isShardKey: boolean } | undefined;
-    expect(pk?.unique).toBe(true);
-    expect(pk?.isShardKey).toBe(true); // clustered = never-drop
+    // The stored spec is JSON, so its fields are read rather than asserted: a
+    // spec that came back without them would otherwise compare `undefined` to
+    // `true` and report a missing field as a wrong one.
+    const pk = specOf(result.snapshots, "pk_orders");
+    expect(pk.unique).toBe(true);
+    expect(pk.isShardKey).toBe(true); // clustered = never-drop
 
-    const unique = result.snapshots.find(
-      (snapshot) => snapshot.database === DB && snapshot.indexName === "ux_email",
-    )?.spec as { unique: boolean; partial: boolean } | undefined;
-    expect(unique?.unique).toBe(true);
-    expect(unique?.partial).toBe(true); // filtered index
+    const unique = specOf(result.snapshots, "ux_email");
+    expect(unique.unique).toBe(true);
+    expect(unique.partial).toBe(true); // filtered index
   });
 
   it("runs the full hide lifecycle and honours the guards", async () => {
@@ -234,13 +252,13 @@ describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", 
     ).toBe(true);
 
     // The undo path: drop, then rebuild from exactly what was persisted.
-    const stored = parseStoredSpec(serializeSpec(pair.covering as IndexSpec));
+    const stored = parseStoredSpec(serializeSpec(present(pair.covering, "the covering index")));
     expect(stored.include).toEqual(["status", "email"]);
     await executor.drop(DB, "dbo.orders", "ix_covering");
     await executor.create(
       DB,
       "dbo.orders",
-      rebuildKeys(stored) as Record<string, 1 | -1>,
+      present(rebuildKeys(stored), "the rebuilt keys"),
       rebuildOptions(stored),
     );
     const rebuilt = (await session.collector.listIndexes(DB, "dbo.orders")).find(
@@ -257,7 +275,7 @@ describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", 
   // diagnose probes, so a cluster we provisioned always diagnoses clean — and
   // the login it creates cannot read a single customer row.
   it("provisions a scoped login that diagnoses clean and cannot read rows", async () => {
-    const admin = await mssqlAdapter.diagnose(MSSQL_URL as string, OVERRIDES);
+    const admin = await mssqlAdapter.diagnose(present(MSSQL_URL, "MSSQL_URL"), OVERRIDES);
     expect(admin.canProvision).toBe(true);
 
     const provision = mssqlAdapter.provisionScopedUser;
@@ -265,8 +283,8 @@ describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", 
     // Deliberately through a string that NAMES an initial database: a
     // server-scoped GRANT is refused outside master (Msg 4621), so provisioning
     // has to reach master itself rather than inherit the caller's context.
-    const scoped = await (provision as NonNullable<typeof provision>)(
-      (MSSQL_URL as string).replace("localhost:1433", `localhost:1433/${DB}`),
+    const scoped = await present(provision, "provisionScopedUser")(
+      present(MSSQL_URL, "MSSQL_URL").replace("localhost:1433", `localhost:1433/${DB}`),
       OVERRIDES,
     );
     try {
@@ -317,12 +335,10 @@ describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", 
   // refused BY THE SERVER, which is what stops one database being connected
   // twice under two display names.
   it("refuses a second provision against an instance it already provisioned", async () => {
-    const provision = mssqlAdapter.provisionScopedUser as NonNullable<
-      typeof mssqlAdapter.provisionScopedUser
-    >;
-    const first = await provision(MSSQL_URL as string, OVERRIDES);
+    const provision = present(mssqlAdapter.provisionScopedUser, "provisionScopedUser");
+    const first = await provision(present(MSSQL_URL, "MSSQL_URL"), OVERRIDES);
     try {
-      await expect(provision(MSSQL_URL as string, OVERRIDES)).rejects.toThrow(
+      await expect(provision(present(MSSQL_URL, "MSSQL_URL"), OVERRIDES)).rejects.toThrow(
         /already has an Indexterity user/i,
       );
       // And the refusal left the first login alone. This is the half that would
@@ -362,10 +378,8 @@ describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", 
       `CREATE TABLE [${before}].dbo.widgets(id int CONSTRAINT pk_widgets PRIMARY KEY)`,
     );
 
-    const provision = mssqlAdapter.provisionScopedUser as NonNullable<
-      typeof mssqlAdapter.provisionScopedUser
-    >;
-    const scoped = await provision(MSSQL_URL as string, OVERRIDES);
+    const provision = present(mssqlAdapter.provisionScopedUser, "provisionScopedUser");
+    const scoped = await provision(present(MSSQL_URL, "MSSQL_URL"), OVERRIDES);
     const scopedConn = new MssqlConnection(scoped.connectionString, OVERRIDES);
     try {
       await scopedConn.connect();
@@ -416,7 +430,7 @@ describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", 
          GRANT ALTER ANY LOGIN TO [${weak}];
          GRANT VIEW SERVER STATE TO [${weak}]'`,
     );
-    const weakUrl = withMssqlCredentials(MSSQL_URL as string, weak, "W3ak!Pass");
+    const weakUrl = withMssqlCredentials(present(MSSQL_URL, "MSSQL_URL"), weak, "W3ak!Pass");
     try {
       const diagnosis = await mssqlAdapter.diagnose(weakUrl, OVERRIDES);
       expect(diagnosis.canProvision).toBe(false);
@@ -425,10 +439,7 @@ describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", 
       expect(provisionChecks.find((check) => check.key === "controlServer")?.granted).toBe(false);
 
       await expect(
-        (mssqlAdapter.provisionScopedUser as NonNullable<typeof mssqlAdapter.provisionScopedUser>)(
-          weakUrl,
-          OVERRIDES,
-        ),
+        present(mssqlAdapter.provisionScopedUser, "provisionScopedUser")(weakUrl, OVERRIDES),
       ).rejects.toBeInstanceOf(ProvisionDeniedError);
       // …and it left nothing behind: the half-created login is dropped on the
       // way out. Load-bearing now that the name is fixed — a leftover would not
@@ -533,13 +544,17 @@ describe.skipIf(AG_URL === undefined || AG_SECONDARY_URL === undefined)(
     let agDatabase: string;
 
     beforeAll(async () => {
-      primarySeed = new MssqlConnection(AG_URL as string, OVERRIDES);
+      primarySeed = new MssqlConnection(present(AG_URL, "AG_URL"), OVERRIDES);
       await primarySeed.connect();
       // Read intent: a replica configured ALLOW_CONNECTIONS = READ_ONLY refuses
       // a plain connection outright (Msg 978).
-      secondarySeed = new MssqlConnection(AG_SECONDARY_URL as string, OVERRIDES, {
-        readOnlyIntent: true,
-      });
+      secondarySeed = new MssqlConnection(
+        present(AG_SECONDARY_URL, "AG_SECONDARY_URL"),
+        OVERRIDES,
+        {
+          readOnlyIntent: true,
+        },
+      );
       await secondarySeed.connect();
       secondaryName = (await secondarySeed.serverIdentity()).serverName;
       const replicated = await primarySeed.query<{ name: string }>(
@@ -554,7 +569,7 @@ describe.skipIf(AG_URL === undefined || AG_SECONDARY_URL === undefined)(
         );
       }
       agDatabase = found;
-      agSession = await mssqlAdapter.open(AG_URL as string, OVERRIDES);
+      agSession = await mssqlAdapter.open(present(AG_URL, "AG_URL"), OVERRIDES);
     }, 120_000);
 
     afterAll(async () => {

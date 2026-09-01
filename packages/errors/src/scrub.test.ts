@@ -157,6 +157,22 @@ describe("scrub", () => {
     expect(scrub(event)).toEqual(event);
   });
 
+  // The copy is `{ ...event }`, which is what makes the return type checked
+  // rather than asserted — and spreading an ARRAY that way would hand back an
+  // object keyed by index. No hook passes one, so it is refused loudly instead
+  // of corrupted quietly. Nested arrays are walked, which the case above covers.
+  it("refuses a top-level array rather than returning it keyed by index", () => {
+    expect(() => scrub([CONNECTION_STRING])).toThrow(TypeError);
+  });
+
+  // Every key survives, which is the property the old `as T` only claimed: the
+  // copy starts from the event rather than from an empty object, so a field
+  // cannot go missing on the way through.
+  it("keeps every key it was given", () => {
+    const event = { message: CONNECTION_STRING, level: "error", tags: { a: "b" } };
+    expect(Object.keys(scrub(event))).toEqual(["message", "level", "tags"]);
+  });
+
   it("survives a cycle rather than throwing on the way to the wire", () => {
     const event: Record<string, unknown> = { message: CONNECTION_STRING };
     event.self = event;

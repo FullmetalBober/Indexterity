@@ -1,5 +1,5 @@
 import type { ServerHealth } from "../engine/types";
-import type { PostgresConnection } from "./connection";
+import type { PostgresReader } from "./connection";
 
 // The server-wide query-engine counters behind the health probe.
 //
@@ -12,9 +12,7 @@ import type { PostgresConnection } from "./connection";
 // Returns null when the credentials cannot read these views at all — the
 // privilege is optional and everything else still works. `pg_monitor` grants it,
 // and the provisioned role has it.
-export async function collectPostgresHealth(
-  conn: PostgresConnection,
-): Promise<ServerHealth | null> {
+export async function collectPostgresHealth(conn: PostgresReader): Promise<ServerHealth | null> {
   try {
     const rows = await conn.query<{
       seq_scans: string | number | null;

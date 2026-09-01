@@ -42,7 +42,7 @@ const SSL_MODES: readonly PgSslMode[] = [
   "verify-full",
 ];
 
-export interface PgHost {
+interface PgHost {
   readonly host: string;
   readonly port: number;
 }

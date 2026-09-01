@@ -109,8 +109,41 @@ export function scrubString(value: string): string {
 // to be JSON-serialised.
 const MAX_DEPTH = 12;
 
-export function scrub<T>(value: T): T {
-  return scrubValue(value, 0, new WeakSet()) as T;
+/**
+ * The public entry, and the shape it returns is CHECKED rather than claimed.
+ *
+ * Two earlier versions of this line were the same claim in different clothes.
+ * `scrubValue(...) as T` asserted the whole result. Replacing it with an
+ * overload — `scrub<T>(value: T): T` declared over an `unknown -> unknown` body
+ * — only moved the claim into a signature TypeScript does not check against its
+ * implementation: an overload promising `T[]` over a body returning a scalar
+ * compiles just as happily.
+ *
+ * What is checked here: `{ ...value }` of a `T` IS a `T`, so the copy carries
+ * every key the input had and comes back as the type it went in as. Nothing is
+ * rebuilt from an empty object, so a field cannot silently go missing.
+ *
+ * What is NOT, and it is one line rather than the whole result: `Reflect.set`
+ * writes a scrubbed value back without checking it against that field's declared
+ * type. That is the operation itself — a `password: string` becomes
+ * "[redacted]", and a field typed as a string LITERAL genuinely does not survive
+ * — so it is the part that could not be true, stated where it happens instead of
+ * covering for the rest.
+ *
+ * `T extends object` because all three callers are Sentry hooks and an event, a
+ * transaction and a breadcrumb are objects. A top-level array is refused rather
+ * than quietly returned keyed by index; nested ones are walked below.
+ */
+export function scrub<T extends object>(value: T): T {
+  if (Array.isArray(value)) {
+    throw new TypeError("scrub takes an event-shaped object, not an array");
+  }
+  const seen = new WeakSet<object>([value]);
+  const copy = { ...value };
+  for (const [key, item] of Object.entries(copy)) {
+    Reflect.set(copy, key, isSecretKey(key) ? REDACTED : scrubValue(item, 1, seen));
+  }
+  return copy;
 }
 
 function scrubValue(value: unknown, depth: number, seen: WeakSet<object>): unknown {
@@ -144,9 +177,8 @@ function scrubValue(value: unknown, depth: number, seen: WeakSet<object>): unkno
 //
 // Breadcrumbs keep using `scrub` alone: a console line is worth reading, and it
 // has no equivalent single field to remove.
-export function scrubEvent<T>(event: T): T {
+export function scrubEvent<T extends object>(event: T): T {
   const scrubbed = scrub(event);
-  if (typeof scrubbed !== "object" || scrubbed === null) return scrubbed;
   const request: unknown = Reflect.get(scrubbed, "request");
   if (typeof request === "object" && request !== null && "data" in request) {
     Reflect.set(request, "data", REDACTED);

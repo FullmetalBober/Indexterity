@@ -4,6 +4,7 @@ import { Chart } from "@tanstack/react-charts/tooltip";
 import { scaleLinear, scaleUtc } from "d3-scale";
 import { useEffect, useState } from "react";
 import { Skeleton } from "~/components/ui/skeleton";
+import { instantOf } from "~/lib/instant";
 
 // The chart's own height, in px. Named because the placeholder below has to
 // reserve exactly it — a box of a different size would move the page when the
@@ -17,7 +18,7 @@ const CHART_HEIGHT = 200;
 // a legend, direct labels and the summary table.
 export const SERIES_PALETTE = ["#00A35C", "#016BF8", "#C77F00", "#B45AF2"];
 
-export interface ChartPoint {
+interface ChartPoint {
   readonly t: string; // ISO-8601
   readonly v: number | null;
 }
@@ -58,15 +59,6 @@ function toSamples(series: readonly ChartSeries[]): Sample[] {
 // of them, because the two series this chart draws are sampled at different
 // rates and a label that suits one lies about the other — see `dayLabel`.
 export type TimeFormat = (at: unknown) => string;
-
-// Null and unreadable values first, and not as a formality: `new Date(null)` is
-// the epoch, so without this an absent value reads as a real instant in 1970
-// rather than as nothing — which is the wrong answer a pixel offset was giving.
-function instantOf(at: unknown): Date | null {
-  if (at === null || at === undefined) return null;
-  const date = at instanceof Date ? at : new Date(at as string | number);
-  return Number.isNaN(date.getTime()) ? null : date;
-}
 
 // Day and time, in the reader's own zone. For the latency series, whose points
 // are one collect apart.

@@ -9,6 +9,7 @@ import { FieldGroup } from "~/components/ui/field";
 import { Input } from "~/components/ui/input";
 import { Label } from "~/components/ui/label";
 import { Separator } from "~/components/ui/separator";
+import { millisOf } from "~/lib/instant";
 import { LocalTime } from "~/lib/local-time";
 import type { Me, ProviderAccount, SessionEntry } from "~/lib/queries/account";
 import {
@@ -56,8 +57,10 @@ export function describeAgent(userAgent: string | null | undefined): string {
           : agent.includes("Linux")
             ? "Linux"
             : null;
-  if (browser === null && platform === null) return "Unknown device";
-  if (browser === null) return platform as string;
+  // Ordered so the compiler can narrow rather than being told to. The old first
+  // line handled both-null and the second then asserted `platform` non-null —
+  // true, and unprovable from where it stood.
+  if (browser === null) return platform ?? "Unknown device";
   if (platform === null) return browser;
   return `${browser} on ${platform}`;
 }
@@ -473,7 +476,7 @@ function SessionsCard({
   const ordered = [...sessions].sort((a, b) => {
     if (a.token === currentToken) return -1;
     if (b.token === currentToken) return 1;
-    return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
+    return (millisOf(b.updatedAt) ?? 0) - (millisOf(a.updatedAt) ?? 0);
   });
 
   return (

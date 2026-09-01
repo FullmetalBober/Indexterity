@@ -1,3 +1,4 @@
+import type { ClusterEngine } from "../engine/ports";
 import type { IndexSpec } from "../engine/types";
 
 // What to SAY about a recurring age-based purge.
@@ -21,9 +22,15 @@ import type { IndexSpec } from "../engine/types";
 // SQL Server's is advisory because "partition this table" is a schema change no
 // index tool should make on its own. Same trust tier, different argument.
 
-// Engines this has an opinion for. Anything else takes the mongo wording, which
-// is also what a new adapter would want reviewed before it ships.
-export type PurgeEngine = "MONGODB" | "POSTGRESQL" | "MSSQL";
+// Engines this has an opinion for, which is every engine there is: the branch
+// below is MSSQL versus everything else, and "everything else" takes the mongo
+// wording. An alias rather than the three names written out again — spelled
+// independently it was a FOURTH copy of the engine list (contracts' `z.enum`,
+// db/schema.ts's `pgEnum`, ../engine/ports.ts's union, this) that looked like a
+// narrower set and was not. A new adapter now arrives here as a type error's
+// worth of thought instead of silently collecting the mongo sentence, which is
+// what the old wording asked for and could not enforce.
+export type PurgeEngine = ClusterEngine;
 
 export interface PurgePattern {
   readonly field: string;

@@ -1,5 +1,5 @@
 import { createHash, timingSafeEqual } from "node:crypto";
-import { Controller, Get, Headers } from "@nestjs/common";
+import { Controller, Get, Headers, Inject } from "@nestjs/common";
 import { apiEnv } from "../config/env";
 import { TickService } from "./tick.service";
 
@@ -55,9 +55,24 @@ const TICK_REQUEST_DEADLINE_MS = 25_000;
 // scheduleApply. Under that, dispatchToAllClusters dedups again per cluster and
 // task, and concurrent drains are serialised inside TickService. Nothing here
 // needs a lock.
+/**
+ * The one thing the controller asks of the tick: run one, within a deadline.
+ *
+ * Nest injects the real `TickService`, which satisfies this structurally, so the
+ * module wiring is unchanged — and a test hands over a complete object instead
+ * of a class it implements one method of.
+ */
+export interface Ticker {
+  tickWithin: TickService["tickWithin"];
+}
+
 @Controller("internal")
 export class TickController {
-  constructor(private readonly tickService: TickService) {}
+  // The TOKEN is the class and the TYPE is the port. Nest resolves injection
+  // from runtime metadata and an interface erases to Object, so a bare
+  // `tickService: Ticker` compiles and then fails to boot — which no typecheck
+  // and no unit test in this repo would have caught.
+  constructor(@Inject(TickService) private readonly tickService: Ticker) {}
 
   // No @HttpCode, because GET already answers 200 — which is what @HttpCode(200)
   // was saying under POST, so the status of every arm is unchanged by the move.

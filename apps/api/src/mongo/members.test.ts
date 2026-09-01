@@ -1,7 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { stub } from "../test-utils";
-import type { MongoConnection } from "./connection";
-import { MemberConnections } from "./members";
+import { MemberConnections, type MongoPrimary } from "./members";
 
 // Which members get dialled at all, which is a guard question before it is a
 // networking one.
@@ -31,14 +29,16 @@ const CONN = "mongodb://user:pw@primary.internal:27017/?tls=true";
 // Answers only what the dialer asks: the member list, and what the live client
 // resolved (an SRV string's tls and authSource, which a retargeted string would
 // otherwise lose).
-function primaryWith(hosts: string[]) {
-  return stub<MongoConnection>({
+// A complete MongoPrimary — two methods, both implemented. No `stub`, nothing
+// asserted away.
+function primaryWith(hosts: string[]): MongoPrimary {
+  return {
     replicaMembers: () => Promise.resolve(hosts),
     // A real ResolvedConnection, because members.ts genuinely calls this — it
     // reads tls and authSource off it to build each member's direct string. The
     // fake used to answer `undefined`, which no MongoConnection ever does.
     resolved: () => ({ tls: false, authSource: null }),
-  });
+  };
 }
 
 describe("MemberConnections", () => {

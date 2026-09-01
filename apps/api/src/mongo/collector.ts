@@ -23,6 +23,7 @@ import type {
   ServerHealth,
   SortKey,
 } from "../engine/types";
+import { isRecord } from "../errors/message";
 import type { MongoConnection } from "./connection";
 import { isAuthorizationError } from "./errors";
 import type { MemberConnections } from "./members";
@@ -259,10 +260,6 @@ const RANGE_OPS = new Set([
   "$exists",
   "$regex",
 ]);
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function isRangePredicate(value: unknown): boolean {
   if (!isRecord(value)) return false;

@@ -66,7 +66,11 @@ export class NotifyProbeError extends Error {
 // pg's own Notification, so the fakes in the unit tests can produce one.
 export interface ProbeNotification {
   readonly channel: string;
-  readonly payload?: string;
+  // `| undefined` to match @types/pg exactly: a NOTIFY with no payload is
+  // reported as the property present and undefined, not as the property
+  // missing, and under exactOptionalPropertyTypes those are different types —
+  // narrow enough to reject `new Client()`, which is the one value that must fit.
+  readonly payload?: string | undefined;
 }
 
 // What the probe needs of a pg Client. `new Client()` satisfies it, and so does a
@@ -83,7 +87,7 @@ export interface ProbeClient {
   end(): Promise<void>;
 }
 
-export type ProbeClientFactory = (connectionString: string) => ProbeClient;
+type ProbeClientFactory = (connectionString: string) => ProbeClient;
 
 export interface NotifyProbeOptions {
   // Defaults to the validated DATABASE_URL. Passed explicitly by the tests, and by

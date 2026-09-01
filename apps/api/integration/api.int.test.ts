@@ -58,6 +58,10 @@ import {
   API_BASE,
   API_PORT,
   api,
+  asRecord,
+  asRecords,
+  asString,
+  asStrings,
   authPost,
   createOrg,
   databaseUrl,
@@ -75,18 +79,6 @@ import {
 import { secretFromTotpUri, totpCode } from "./totp";
 
 // fetch().json() is unknown — narrow at the boundary, no `as`.
-function asRecord(value: unknown): Record<string, unknown> {
-  if (typeof value === "object" && value !== null && !Array.isArray(value)) {
-    return { ...value };
-  }
-  throw new Error(`expected an object body, got ${JSON.stringify(value)}`);
-}
-
-function asString(value: unknown): string {
-  if (typeof value !== "string") throw new Error(`expected a string, got ${typeof value}`);
-  return value;
-}
-
 let server: ChildProcess;
 let db: ReturnType<typeof createDatabase>;
 let mongo: MongoConnection;
@@ -283,7 +275,7 @@ describe("cluster lifecycle", () => {
     expect(res.status).toBe(200);
     const body = asRecord(await res.json());
     expect(body.collectedAt).not.toBeNull();
-    const nodes = body.nodes as { host: string; role: string; state: string }[];
+    const nodes = asRecords(body.nodes, "body.nodes");
     expect(nodes).toHaveLength(1);
     expect(nodes[0]?.role).toBe("standalone");
     expect(nodes[0]?.state).toBe("answered");
@@ -2315,13 +2307,7 @@ describe("cancelling a pending drop", () => {
     // about the order of the whole suite. The two totals are checked as
     // invariants against the list instead, which is what they have to be.
     const parked = asRecord(await (await api(`/clusters/${clusterId}/cooldowns`, owner)).json());
-    const entries = parked.parked as {
-      indexName: string;
-      reason: string;
-      regressionCount: number;
-      active: boolean;
-      until: string;
-    }[];
+    const entries = asRecords(parked.parked, "parked.parked");
     const kept = entries.find((entry) => entry.indexName === "keep_1");
     expect(kept?.reason).toBe("drop cancelled by an owner");
     expect(kept?.regressionCount).toBe(0);
@@ -2333,7 +2319,9 @@ describe("cancelling a pending drop", () => {
     // The SOONEST one still in force, which is what "next eligible" means.
     expect(parked.nextEligibleAt).toBe(stillParked.map((entry) => entry.until).sort()[0] ?? null);
     // Newest expiry first, so the panel reads top-down from the longest park.
-    expect([...entries].sort((a, b) => b.until.localeCompare(a.until))).toEqual(entries);
+    expect([...entries].sort((a, b) => String(b.until).localeCompare(String(a.until)))).toEqual(
+      entries,
+    );
 
     // Another tenant sees an empty set, not a refusal — the same shape as a
     // cluster that has never parked anything.
@@ -2362,7 +2350,7 @@ describe("cancelling a pending drop", () => {
     const orphaned = asRecord(await (await api(`/clusters/${clusterId}/cooldowns`, owner)).json());
     expect(orphaned.activeCount).toBe(parked.activeCount);
     expect(
-      (orphaned.parked as { indexName: string }[]).some((entry) => entry.indexName === "keep_1"),
+      asRecords(orphaned.parked, "orphaned.parked").some((entry) => entry.indexName === "keep_1"),
     ).toBe(true);
 
     await coll.drop().catch(() => {});
@@ -3149,24 +3137,24 @@ describe("security trail", () => {
     const res = await api("/security-events", owner);
     expect(res.status).toBe(200);
     const body = asRecord(await res.json());
-    const events = body.events as { id: string; event: string; createdAt: string }[];
+    const events = asRecords(body.events, "body.events");
     expect(events.length).toBeGreaterThan(0);
     expect(events.length).toBeLessThanOrEqual(SECURITY_TRAIL_PAGE);
     // Against the table, so the count is the org's trail and not the page.
     expect(body.total).toBe((await eventsFor(ownerOrgId)).length);
-    const stamps = events.map((row) => Date.parse(row.createdAt));
+    const stamps = events.map((row) => Date.parse(String(row.createdAt)));
     expect([...stamps].sort((a, b) => b - a)).toEqual(stamps);
     // Scoped to the caller's org. The actor index crosses orgs on purpose; a
     // tenant's read must not.
     const ids = new Set((await eventsFor(ownerOrgId)).map((row) => row.id));
-    expect(events.every((row) => ids.has(row.id))).toBe(true);
+    expect(events.every((row) => ids.has(String(row.id)))).toBe(true);
   });
 
   it("filters by kind and by actor, at the api rather than in the browser", async () => {
     const byKind = asRecord(
       await (await api("/security-events?event=CLUSTER_MODE_CHANGED", owner)).json(),
     );
-    const kinds = (byKind.events as { event: string }[]).map((row) => row.event);
+    const kinds = asRecords(byKind.events, "byKind.events").map((row) => row.event);
     expect(kinds.length).toBeGreaterThan(0);
     expect(new Set(kinds)).toEqual(new Set(["CLUSTER_MODE_CHANGED"]));
     // The total is of what MATCHES, so a filtered page cannot report the whole
@@ -3180,9 +3168,7 @@ describe("security trail", () => {
     const byActor = asRecord(
       await (await api(`/security-events?actorUserId=${ownerId}`, owner)).json(),
     );
-    const actors = (byActor.events as { actorUserId: string | null }[]).map(
-      (row) => row.actorUserId,
-    );
+    const actors = asRecords(byActor.events, "byActor.events").map((row) => row.actorUserId);
     expect(actors.length).toBeGreaterThan(0);
     expect(new Set(actors)).toEqual(new Set([ownerId]));
 
@@ -3201,7 +3187,7 @@ describe("security trail", () => {
     const all = await eventsFor(ownerOrgId);
     if (all.length < 3) throw new Error("not enough trail to page through");
     const first = asRecord(await (await api("/security-events", owner)).json());
-    const firstIds = (first.events as { id: string }[]).map((row) => row.id);
+    const firstIds = asRecords(first.events, "first.events").map((row) => row.id);
     expect(firstIds[0]).toBe(all[0]?.id);
 
     const cursor = all[0];
@@ -3214,7 +3200,7 @@ describe("security trail", () => {
         )
       ).json(),
     );
-    const secondIds = (second.events as { id: string }[]).map((row) => row.id);
+    const secondIds = asRecords(second.events, "second.events").map((row) => row.id);
     // The cursor row itself is excluded, and the next one is the row after it.
     expect(secondIds).not.toContain(cursor.id);
     expect(secondIds[0]).toBe(all[1]?.id);
@@ -4932,7 +4918,7 @@ describe("owner two-factor requirement (second api with REQUIRE_OWNER_2FA)", () 
     );
     const enabled = asRecord(await enable.json());
     const secret = secretFromTotpUri(asString(enabled.totpURI));
-    const codes = enabled.backupCodes as string[];
+    const codes = asStrings(enabled.backupCodes, "enabled.backupCodes");
     await authPost("/two-factor/verify-totp", enrolled, { code: totpCode(secret) }, BASE);
 
     // The password alone no longer signs in: better-auth answers a redirect
@@ -5069,12 +5055,8 @@ describe("per-node index usage reaches the reader", () => {
     ]);
 
     const body = asRecord(await (await api(`/clusters/${splitId}/recommendations`, owner)).json());
-    const rows = body.recommendations as { id: string; indexName: string }[];
-    const usage = body.usage as {
-      recommendationId: string;
-      totalOps: number;
-      perMember: { member: string; ops: number }[];
-    }[];
+    const rows = asRecords(body.recommendations, "body.recommendations");
+    const usage = asRecords(body.usage, "body.usage");
     const idOf = (name: string) => rows.find((row) => row.indexName === name)?.id;
     const usageOf = (name: string) => usage.find((entry) => entry.recommendationId === idOf(name));
 
@@ -5134,7 +5116,7 @@ describe("bounded per-cluster reads", () => {
     const body = asRecord(
       await (await api(`/clusters/${boundedId}/recommendations`, owner)).json(),
     );
-    const sent = body.recommendations as { score: number }[];
+    const sent = asRecords(body.recommendations, "body.recommendations");
     expect(body.total).toBe(RECOMMENDATIONS_CAP + OVERSHOOT);
     expect(sent).toHaveLength(RECOMMENDATIONS_CAP);
     // The cut is by score, not by whatever order postgres felt like.
@@ -5203,7 +5185,7 @@ describe("bounded per-cluster reads", () => {
     await insertLatency(db, fixtures);
 
     const body = asRecord(await (await api(`/clusters/${seriesId}/latency-series`, owner)).json());
-    const collections = body.collections as { collection: string }[];
+    const collections = asRecords(body.collections, "body.collections");
     // The denominator counts what had readings IN the window, so the panel can
     // say how many it is not drawing.
     expect(body.totalCollections).toBe(LATENCY_SERIES_MAX_COLLECTIONS + 4);
@@ -5216,7 +5198,7 @@ describe("bounded per-cluster reads", () => {
     // The long-term view is still whole: the before/after table reads the same
     // rows without the series' tighter window.
     const summary = asRecord(await (await api(`/clusters/${seriesId}/latency`, owner)).json());
-    const summarized = summary.collections as { collection: string }[];
+    const summarized = asRecords(summary.collections, "summary.collections");
     expect(summarized.map((entry) => entry.collection)).toContain("ancient");
   });
 
@@ -5309,11 +5291,11 @@ describe("bounded per-cluster reads", () => {
     ]);
 
     const body = asRecord(await (await api(`/clusters/${sizeId}/index-size-series`, owner)).json());
-    const points = body.points as { day: string; totalBytes: number | null; indexCount: number }[];
+    const points = asRecords(body.points, "body.points");
     const bucketOf = (when: Date) =>
-      points.filter((point) => new Date(point.day).getTime() <= when.getTime()).at(-1);
+      points.filter((point) => new Date(String(point.day)).getTime() <= when.getTime()).at(-1);
     const indexOf = (when: Date) =>
-      points.findLastIndex((point) => new Date(point.day).getTime() <= when.getTime());
+      points.findLastIndex((point) => new Date(String(point.day)).getTime() <= when.getTime());
 
     // Both indexes, summed, at the size the newest run of that day reported.
     expect(bucketOf(at(4, -1))).toMatchObject({ totalBytes: 1_500, indexCount: 2 });

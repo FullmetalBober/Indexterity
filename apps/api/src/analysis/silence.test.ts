@@ -39,9 +39,12 @@ describe("dominantRefusal", () => {
   // them. Skipped rather than surfaced, the same way an unknown suppression
   // guard is: the alternative is a dashboard explaining a rule that is gone.
   it("ignores a stored kind it no longer knows", () => {
-    expect(dominantRefusal({ "counters-reset": 99, "span-too-short": 1 } as RefusalCounts)).toBe(
-      "span-too-short",
-    );
+    // The stored kind is deliberately one `RefusalCounts` does not list — that
+    // is what the test is about — so it goes in through the index signature the
+    // real stored value has, rather than by asserting a shape the type forbids.
+    const stored: RefusalCounts = { "span-too-short": 1 };
+    Reflect.set(stored, "counters-reset", 99);
+    expect(dominantRefusal(stored)).toBe("span-too-short");
   });
 
   // The whole point of a fixed precedence: two passes that measure the same

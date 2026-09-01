@@ -1,6 +1,7 @@
 import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { at } from "~/lib/at";
 import { authOk, renderInApp } from "~/test-utils";
 import { AccountSection, describeAgent } from "./account-section";
 
@@ -18,22 +19,47 @@ const toastError = vi.hoisted(() => vi.fn());
 
 // The mutations call better-auth's client; the reads arrive as props from the
 // route, so only the writes need a double.
-vi.mock("~/lib/auth-client", () => ({
-  authClient: {
-    updateUser,
-    changeEmail,
-    changePassword,
-    revokeSession,
-    revokeOtherSessions,
-    twoFactor: {
-      enable: enableTwoFactor,
-      disable: disableTwoFactor,
-      verifyTotp,
-      generateBackupCodes,
+// The real client with only the calls these tests make replaced. A factory
+// returning a bare `{ authClient: { … } }` swaps the WHOLE module and leaves the
+// rest of better-auth's client undefined, and nothing checked the replacements
+// against the methods they stand in for.
+vi.mock("~/lib/auth-client", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/lib/auth-client")>();
+  return {
+    ...actual,
+    authClient: {
+      ...actual.authClient,
+      updateUser,
+      changeEmail,
+      changePassword,
+      revokeSession,
+      revokeOtherSessions,
+      twoFactor: {
+        ...actual.authClient.twoFactor,
+        enable: enableTwoFactor,
+        disable: disableTwoFactor,
+        verifyTotp,
+        generateBackupCodes,
+      },
     },
-  },
-}));
-vi.mock("sonner", () => ({ toast: { success: toastSuccess, error: toastError } }));
+  };
+});
+
+// The real sonner with two of `toast`'s methods replaced, rather than an object
+// named `toast`. A factory returning `{ toast: { success, error } }` swaps the
+// WHOLE module — `Toaster` and every other export become undefined — and the
+// two functions were checked against nothing. Built on a copy so sonner's own
+// object is not mutated for whatever else imports it.
+vi.mock("sonner", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("sonner")>();
+  return {
+    ...actual,
+    toast: Object.assign(vi.fn(actual.toast), actual.toast, {
+      success: toastSuccess,
+      error: toastError,
+    }),
+  };
+});
 
 const CHROME_LINUX =
   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
@@ -290,14 +316,14 @@ describe("two-factor", () => {
     renderSection({ me: { ...me, user: { ...me.user, twoFactorEnabled: true } } });
 
     const gates = screen.getAllByLabelText("Your password");
-    await user.type(gates[0] as HTMLElement, "hunter2-ok");
+    await user.type(at(gates), "hunter2-ok");
     await user.click(screen.getByRole("button", { name: "Regenerate backup codes" }));
     expect(generateBackupCodes).toHaveBeenCalledWith({ password: "hunter2-ok" });
     expect(await screen.findByText("aaaaa11111")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "I saved them" }));
 
     const gatesAgain = screen.getAllByLabelText("Your password");
-    await user.type(gatesAgain[1] as HTMLElement, "hunter2-ok");
+    await user.type(at(gatesAgain, 1), "hunter2-ok");
     await user.click(screen.getByRole("button", { name: "Turn off two-factor" }));
     expect(disableTwoFactor).toHaveBeenCalledWith({ password: "hunter2-ok" });
   });

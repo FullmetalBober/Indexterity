@@ -1,12 +1,40 @@
 import { describe, expect, it, vi } from "vitest";
+import { stub } from "../test-utils";
 import { ObservedSession, scopeForDiagnosis, unobservedDatabases } from "./observe";
 import type { EngineSession, IndexCollector, IndexExecutor } from "./ports";
 import { DatabaseInaccessibleError } from "./ports";
 
+// Required by EngineSession and only ever forwarded: ObservedSession hands both
+// straight through, and these tests drive the database scoping.
+//
+// A Proxy through `stub`, which is the shape that was unavailable while every
+// assertion was banned. `new Proxy({}, …)` IS a `{}`, so it satisfies
+// `Partial<T>` honestly and `stub` claims only the absence of the members — and
+// what the trap does is REFUSE. That is the statement worth keeping: no member
+// of either is expected here, and a test that starts using one fails naming it
+// rather than reading `undefined` out of a hollow object. Checked by reaching
+// for `executor.drop` and watching it fail. Eighteen hand-written refusals said
+// the same thing in thirty-six lines.
+function neverAsked<T extends object>(what: string): T {
+  return stub<T>(
+    new Proxy(
+      {},
+      {
+        get(_target, property) {
+          throw new Error(`${what}.${String(property)} is not used by these tests`);
+        },
+      },
+    ),
+  );
+}
+
+const REFUSING_COLLECTOR = neverAsked<IndexCollector>("collector");
+const REFUSING_EXECUTOR = neverAsked<IndexExecutor>("executor");
+
 function session(names: string[]): EngineSession {
   return {
-    collector: {} as IndexCollector,
-    executor: () => ({}) as IndexExecutor,
+    collector: REFUSING_COLLECTOR,
+    executor: () => REFUSING_EXECUTOR,
     listDatabaseNames: vi.fn(async () => names),
     ping: vi.fn(async () => undefined),
     close: vi.fn(async () => undefined),

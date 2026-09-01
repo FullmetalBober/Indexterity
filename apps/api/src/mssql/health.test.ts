@@ -1,8 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { assessHealth, MSSQL_HEALTH } from "../analysis";
-import { stub } from "../test-utils";
-import type { MssqlConnection } from "./connection";
-import { collectMssqlServerHealth, toServerHealth } from "./health";
+import type { MssqlReader } from "./connection";
+import { collectMssqlServerHealth, type HealthRow, toServerHealth } from "./health";
 
 // Whatever the counter query returns, as one row. bigint columns arrive from
 // tedious as STRINGS, which is the boundary asNumber exists for and the one way
@@ -21,14 +20,16 @@ function counters(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function stubConn(rows: unknown[] | Error) {
-  return stub<MssqlConnection>({
-    // Generic, like the real `query<T>`. A mock cannot know T, so the rows it
-    // was handed are narrowed to it — the one assertion mocking a generic method
-    // needs, and the reason this fake has to declare the shape at all rather
-    // than `() => Promise<unknown[]>`, which silently is not the same method.
-    query: <T>() => (rows instanceof Error ? Promise.reject(rows) : Promise.resolve(rows as T[])),
-  });
+// A complete MssqlReader<HealthRow>, and now with nothing asserted at all: the
+// port fixes the row type, so the fake answers HealthRows rather than claiming
+// its data is whatever the caller asked for.
+function reader(rows: HealthRow[] | Error): MssqlReader<HealthRow> {
+  return {
+    query: async () => {
+      if (rows instanceof Error) throw rows;
+      return rows;
+    },
+  };
 }
 
 describe("toServerHealth", () => {
@@ -63,13 +64,13 @@ describe("toServerHealth", () => {
 describe("collectMssqlServerHealth", () => {
   it("returns null rather than throwing when VIEW SERVER STATE is withheld", async () => {
     const health = await collectMssqlServerHealth(
-      stubConn(new Error("The user does not have permission to perform this action.")),
+      reader(new Error("The user does not have permission to perform this action.")),
     );
     expect(health).toBeNull();
   });
 
   it("reads the first row", async () => {
-    const health = await collectMssqlServerHealth(stubConn([counters()]));
+    const health = await collectMssqlServerHealth(reader([counters()]));
     expect(health?.collectionScans).toBe(482);
   });
 });
@@ -78,17 +79,20 @@ describe("collectMssqlServerHealth", () => {
 // what they encode is what a reading MEANS. Each case is one of the measured
 // numbers from the probe.
 describe("MSSQL_HEALTH against readings taken from a live 2022", () => {
-  const at = (over: Partial<ReturnType<typeof toServerHealth>> & object) =>
-    ({
-      collectionScans: 0,
-      scannedObjects: 0,
-      scannedKeys: 0,
-      scanAndOrder: 0,
-      queuedReaders: 0,
-      queuedWriters: 0,
-      residentMb: 756,
-      ...over,
-    }) as NonNullable<ReturnType<typeof toServerHealth>>;
+  // The return is annotated rather than the literal asserted: a missing or
+  // misspelled field is then a compile error here instead of a claim.
+  const at = (
+    over: Partial<ReturnType<typeof toServerHealth>> & object,
+  ): NonNullable<ReturnType<typeof toServerHealth>> => ({
+    collectionScans: 0,
+    scannedObjects: 0,
+    scannedKeys: 0,
+    scanAndOrder: 0,
+    queuedReaders: 0,
+    queuedWriters: 0,
+    residentMb: 756,
+    ...over,
+  });
 
   // 3000 seeks moved Index Searches by 3019 and Page lookups by 9076 — a ratio
   // of 3.01, which is just the b-tree descent and does not grow with the table.

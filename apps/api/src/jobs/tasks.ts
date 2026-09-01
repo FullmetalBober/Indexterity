@@ -3,11 +3,12 @@ import type { JobHelpers } from "graphile-worker";
 import type { Database } from "../db";
 import { InsecureConnectionError } from "../engine/tls";
 import { UnsupportedServerError } from "../engine/version";
+import { messageOf } from "../errors/message";
 import { isUnreachableError } from "../errors/unreachable";
 import { recordClusterTask } from "../metrics";
 import { TunnelUnavailableError } from "../tunnel/resolve";
 import { ClusterCredentialsError, ClusterGoneError } from "./cluster-connection";
-import type { ClusterTasksService } from "./cluster-tasks.service";
+import type { ClusterPasses } from "./cluster-tasks.service";
 import { runDigest } from "./digest";
 import { clusterRoster, dispatchToAllClusters } from "./dispatch";
 import { pruneOldSamples } from "./retention";
@@ -17,11 +18,31 @@ import { pruneOldSamples } from "./retention";
 // The logger is structurally satisfied by graphile-worker's own.
 export interface ClusterTaskDeps {
   readonly logger: { warn(message: string): void; error(message: string): void };
-  readonly alertOwners: (clusterId: string, subject: string, body: string) => Promise<void>;
-  // Whether this alert is outside its cooldown window. A function rather than
-  // the store itself for the same reason the other three are: this interface's
-  // value is that a task can be tested without a queue or a database.
-  readonly alertAllowed: (scope: string) => Promise<boolean>;
+  /**
+   * Mail the cluster's owners about this failure, at most once per `scope` per
+   * cooldown window.
+   *
+   * ONE function rather than the `alertAllowed` / `alertOwners` pair it replaces
+   * (#419). The pair had to be used in sequence — claim the window, then send —
+   * and every one of the five call sites below dropped what the send reported,
+   * so an SMTP fault spent the day's alert on a mail that never left the
+   * process. Nothing here can make that mistake, because the claim and the send
+   * are no longer two things a caller holds.
+   *
+   * `scope` is the cooldown key and is NOT always the cluster: the tunnel arm
+   * keys on the gateway, because one gateway reaches several clusters and a
+   * customer whose VPN is down should get one mail rather than one per database
+   * behind it. `clusterId` is who to mail, and stays its own argument for that
+   * reason.
+   *
+   * Best-effort, like everything else that mails from a job: it never throws.
+   */
+  readonly alert: (
+    scope: string,
+    clusterId: string,
+    subject: string,
+    body: string,
+  ) => Promise<void>;
   readonly emitPassFinished: (clusterId: string, task: string) => Promise<void>;
   /**
    * Why the pipeline is not running, for a screen to read a week later. The
@@ -161,8 +182,12 @@ export async function runClusterTask(
       recordClusterTask(task, clusterId, "unsupported");
       await deps.markBlocked(clusterId, task, "UNSUPPORTED", error.message);
       deps.logger.warn(`${task}: cluster ${clusterId} — ${error.message}`);
-      if (!(await deps.alertAllowed(`${clusterId}:unsupported`))) return;
-      await deps.alertOwners(clusterId, "cluster version not supported", error.message);
+      await deps.alert(
+        `${clusterId}:unsupported`,
+        clusterId,
+        "cluster version not supported",
+        error.message,
+      );
       return;
     }
     // The stored string would not connect over validated TLS. Same shape as an
@@ -175,8 +200,8 @@ export async function runClusterTask(
       recordClusterTask(task, clusterId, "insecure");
       await deps.markBlocked(clusterId, task, "INSECURE", error.message);
       deps.logger.warn(`${task}: cluster ${clusterId} — ${error.message}`);
-      if (!(await deps.alertAllowed(`${clusterId}:insecure`))) return;
-      await deps.alertOwners(
+      await deps.alert(
+        `${clusterId}:insecure`,
         clusterId,
         `${task} skipped — this cluster's connection string is not using TLS`,
         `Indexterity now requires TLS on every connection it makes to a customer database, ` +
@@ -216,8 +241,8 @@ export async function runClusterTask(
       // Keyed on the TUNNEL, not the cluster: one gateway commonly reaches
       // several clusters, and a customer whose VPN is down should get one mail
       // rather than one per database behind it.
-      if (!(await deps.alertAllowed(`tunnel:${error.tunnelId}`))) return;
-      await deps.alertOwners(
+      await deps.alert(
+        `tunnel:${error.tunnelId}`,
         clusterId,
         `${task} skipped — the VPN tunnel to this cluster is down`,
         `Indexterity reaches this cluster over a WireGuard tunnel, and that tunnel is not ` +
@@ -248,8 +273,8 @@ export async function runClusterTask(
       recordClusterTask(task, clusterId, "timed-out");
       await deps.markBlocked(clusterId, task, "TIMED_OUT", error.message);
       deps.logger.warn(`${task}: cluster ${clusterId} — ${error.message}`);
-      if (!(await deps.alertAllowed(`${clusterId}:timed-out`))) return;
-      await deps.alertOwners(
+      await deps.alert(
+        `${clusterId}:timed-out`,
         clusterId,
         `${task} is taking longer than Indexterity will wait`,
         `The ${task} step against this cluster ran for longer than its budget and was ` +
@@ -276,8 +301,8 @@ export async function runClusterTask(
     deps.logger.warn(
       `${task}: cluster ${clusterId} unreachable — skipped, retrying on the next tick`,
     );
-    if (!(await deps.alertAllowed(`${clusterId}:${task}`))) return;
-    await deps.alertOwners(
+    await deps.alert(
+      `${clusterId}:${task}`,
       clusterId,
       `${task} skipped — cluster unreachable`,
       `Indexterity could not reach this cluster, so the ${task} step did nothing and will ` +
@@ -301,7 +326,42 @@ export async function runClusterTask(
 // it (jobs/runner.ts). Before this, each task reached for a module-level singleton
 // instead — which worked, and meant the pool's lifetime belonged to whichever
 // module was imported first rather than to whoever composed the worker.
-export function createTaskList(db: Database, cluster: ClusterTasksService) {
+/**
+ * Every task name the queue knows, as data.
+ *
+ * Declared rather than derived, so a schedule can be checked against it without
+ * constructing the registry — which used to mean handing `createTaskList` two
+ * fake dependencies purely to read the keys back off the object it returned.
+ * The arguments are only ever used when a task RUNS, so the fakes were never
+ * called; they existed to satisfy a signature.
+ *
+ * The registry below is typed as a record over this, so the two cannot drift:
+ * a task added to one and forgotten in the other does not compile.
+ */
+export const TASK_NAMES = [
+  "collect",
+  "classify",
+  "suggest",
+  "apply",
+  "finalize",
+  "probe",
+  "scheduleProbe",
+  "scheduleCollect",
+  "scheduleSuggest",
+  "scheduleApply",
+  "scheduleFinalize",
+  "retention",
+  "digest",
+] as const;
+
+export type TaskName = (typeof TASK_NAMES)[number];
+
+type TaskHandler = (payload: unknown, helpers: JobHelpers) => Promise<void>;
+
+export function createTaskList(
+  db: Database,
+  cluster: ClusterPasses,
+): Record<TaskName, TaskHandler> {
   return {
     collect: (payload: unknown, helpers: JobHelpers): Promise<void> =>
       cluster.collect(payload, helpers),
@@ -337,11 +397,4 @@ export function createTaskList(db: Database, cluster: ClusterTasksService) {
       await runDigest(db);
     },
   };
-}
-
-// A sentence for the badge, from whatever was thrown. The driver's own words are
-// usually the useful ones — "connect ETIMEDOUT 10.0.0.5:27017" tells an owner
-// more than any wording of ours — and the address in them is their own.
-function messageOf(error: unknown): string {
-  return error instanceof Error && error.message !== "" ? error.message : String(error);
 }

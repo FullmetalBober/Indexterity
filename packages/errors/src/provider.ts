@@ -61,9 +61,13 @@ export interface SentryDefaults {
     stackFrameVariables: boolean;
     databaseQueryData: boolean;
   };
-  beforeSend: <T>(event: T) => T;
-  beforeSendTransaction: <T>(event: T) => T;
-  beforeBreadcrumb: <T>(breadcrumb: T) => T;
+  // `T extends object` because that is what the three hooks are handed — an
+  // event, a transaction and a breadcrumb — and it is what lets the scrubber
+  // prove the shape it returns rather than assert it. Each app's own
+  // `Sentry.init` still typechecks these against the SDK's real option types.
+  beforeSend: <T extends object>(event: T) => T;
+  beforeSendTransaction: <T extends object>(event: T) => T;
+  beforeBreadcrumb: <T extends object>(breadcrumb: T) => T;
 }
 
 // dataCollection is set AND the body still arrives; scrubEvent is what removes

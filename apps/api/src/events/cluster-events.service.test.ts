@@ -59,7 +59,14 @@ const pg = vi.hoisted(() => {
   };
 });
 
-vi.mock("pg", () => ({ Client: pg.FakeClient }));
+// The real pg module with only its Client replaced. Spread rather than
+// returned bare: `vi.mock` swaps the WHOLE module, so a factory naming one
+// export leaves Pool, types and everything else undefined — and the module type
+// is what says so.
+vi.mock("pg", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("pg")>()),
+  Client: pg.FakeClient,
+}));
 
 const clients = pg.clients;
 

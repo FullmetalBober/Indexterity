@@ -6,14 +6,27 @@ import { VerificationOutcome } from "./verification-outcome";
 
 const sendVerificationEmail = vi.hoisted(() => vi.fn());
 
-vi.mock("~/lib/auth-client", () => ({ authClient: { sendVerificationEmail } }));
+// The real client with only the calls these tests make replaced. A factory
+// returning a bare `{ authClient: { … } }` swaps the WHOLE module and leaves the
+// rest of better-auth's client undefined, and nothing checked the replacements
+// against the methods they stand in for.
+vi.mock("~/lib/auth-client", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/lib/auth-client")>();
+  return {
+    ...actual,
+    authClient: {
+      ...actual.authClient,
+      sendVerificationEmail,
+    },
+  };
+});
 // Only Link is used here, and rendering it needs a router this test has no
 // reason to stand up — the same shortcut every other component test takes.
-vi.mock("@tanstack/react-router", () => ({
-  Link: ({ children, to }: { children: React.ReactNode; to: string }) => (
-    <a href={to}>{children}</a>
-  ),
-}));
+vi.mock("@tanstack/react-router", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@tanstack/react-router")>();
+  const { anchorLink, overriding } = await import("~/lib/overriding");
+  return overriding(actual, { Link: anchorLink });
+});
 
 beforeEach(() => {
   vi.clearAllMocks();

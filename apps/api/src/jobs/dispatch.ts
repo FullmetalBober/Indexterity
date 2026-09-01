@@ -1,4 +1,4 @@
-import type { JobHelpers } from "graphile-worker";
+import type { TaskSpec } from "graphile-worker";
 import type { Database } from "../db";
 import { clusters } from "../db";
 import { observeClusterFleet } from "../metrics";
@@ -25,10 +25,32 @@ export function clusterRoster(db: Database): ClusterRoster {
 }
 
 // Fan a per-cluster data-plane task out to every connected cluster.
+/**
+ * The two things a dispatcher does with graphile-worker's helpers.
+ *
+ * `JobHelpers` is the vendor's whole surface and this uses `addJob` and one
+ * logger method. Naming them is what lets a test hand over a complete object
+ * instead of claiming a two-member literal is a JobHelpers — and the real
+ * helpers satisfy it structurally, so no call site changes.
+ */
+export interface JobQueue {
+  // `Promise<unknown>`, not the vendor's `Promise<Job>`: nothing in this repo
+  // reads what addJob returns, and saying so is what lets a test answer with
+  // anything rather than fake a Job it never looks at.
+  addJob(identifier: string, payload?: unknown, options?: TaskSpec): Promise<unknown>;
+  // The three the pipeline calls, and only those. graphile-worker's Logger also
+  // carries `debug` and `scope`, which nothing here uses.
+  logger: {
+    info(message: string): void;
+    warn(message: string): void;
+    error(message: string): void;
+  };
+}
+
 export async function dispatchToAllClusters(
   roster: ClusterRoster,
   task: string,
-  helpers: JobHelpers,
+  helpers: JobQueue,
 ): Promise<number> {
   const ids = await roster.ids();
   // The fleet as it stands, so the unreachable gauge forgets a cluster that was

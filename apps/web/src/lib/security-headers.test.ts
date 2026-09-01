@@ -9,6 +9,13 @@ function html(): Response {
   return new Response("<!doctype html>", { headers: { "content-type": "text/html" } });
 }
 
+// JSON.parse returns `any`; this says what is expected and checks it.
+function parsedString(text: string): string {
+  const value: unknown = JSON.parse(text);
+  if (typeof value !== "string") throw new Error(`expected a string, got ${text}`);
+  return value;
+}
+
 describe("withSecurityHeaders", () => {
   it.each([
     ["x-content-type-options", "nosniff"],
@@ -168,7 +175,7 @@ describe("documentCsp", () => {
     expect(
       directive("style-src"),
       "sonner's stylesheet changed — update INJECTED_STYLE_HASHES",
-    ).toContain(hashOf(JSON.parse(`"${literal}"`) as string));
+    ).toContain(hashOf(parsedString(`"${literal}"`)));
   });
 
   it("carries the hash of the radix select viewport rule actually installed", () => {
