@@ -1,3 +1,6 @@
+import type { Link } from "@tanstack/react-router";
+import { createElement } from "react";
+
 // A real object with named members replaced, for the module doubles in the test
 // suite.
 //
@@ -19,3 +22,24 @@ export function overriding<T extends object>(real: T, overrides: Partial<T>): T 
       property in overrides ? Reflect.get(overrides, property) : Reflect.get(target, property),
   });
 }
+
+// A `<Link>` that renders a plain anchor, for a component test with no router.
+//
+// Two test files carried this and a copy-paste detector found it. What is worth
+// keeping is not the four lines of JSX but the two things that were got wrong
+// first: `props` is left to the CONTEXTUAL type, because TanStack's Link is a
+// generic component and a double declaring its own narrower props is not the
+// component it stands in for; and a Link's children may be a render FUNCTION,
+// which the first version dropped on the floor.
+// Annotated as `typeof Link` rather than taking a props parameter of its own:
+// that is what hands the body the contextual type, and it is the whole reason
+// this compiles. Naming the props directly instantiates the generic at its
+// defaults, which is a DIFFERENT component from the one it stands in for.
+export const anchorLink: typeof Link = (props) =>
+  createElement(
+    "a",
+    { href: String(props.to) },
+    typeof props.children === "function"
+      ? props.children({ isActive: false, isTransitioning: false })
+      : props.children,
+  );

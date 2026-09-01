@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadEnv } from "../config/env";
 import { createDatabase } from "../db/client";
 import { present } from "../errors/at";
+import { stub } from "../test-utils";
 import type { BurstResult } from "./burst";
 import type { ClusterPasses } from "./cluster-tasks.service";
 import { TASK_NAMES } from "./tasks";
@@ -168,35 +169,16 @@ function makeService() {
 
 // Everything queued — microtasks and immediates — settled, without advancing
 // any timer a test is holding.
-// Everything a WorkerPool is, so the emit below states the vendor's own payload
-// rather than a fragment of it. Only `gracefulShutdown` is reachable from this
-// test; the others say so by throwing, and the compiler keeps the list complete
-// across a graphile-worker upgrade.
-function workerPool(gracefulShutdown: WorkerPool["gracefulShutdown"]): WorkerPool {
-  const unused = (member: string): never => {
-    throw new Error(`WorkerPool.${member} is not used by these tests`);
-  };
-  // Built ON a resolved promise rather than declaring `then`/`catch`/`finally`:
-  // a WorkerPool is awaitable, and a hand-written `then` that throws would be a
-  // hostile thenable for anything that awaited it (biome says so too).
-  return Object.assign(Promise.resolve(), {
-    gracefulShutdown,
-    id: "test-pool",
-    nudge: () => unused("nudge"),
-    release: () => unused("release"),
-    forcefulShutdown: () => unused("forcefulShutdown"),
-    promise: Promise.resolve(),
-    abortSignal: AbortSignal.abort(),
-    abortPromise: Promise.resolve(),
-    _shuttingDown: false,
-    _forcefulShuttingDown: false,
-    _active: true,
-    _workers: [],
-    _withPgClient: () => unused("_withPgClient"),
-    _start: null,
-    worker: null,
-  });
-}
+// A WorkerPool, of which this test reads one member.
+//
+// Written out in full until now — eighteen members, four of them graphile-worker
+// internals, built on a resolved promise so `then` was not a hostile thenable.
+// That was cost with no reader: nothing here inspects `_workers` or `abortSignal`
+// and nothing ever will, and a vendor type is not one this repo can narrow.
+// `stub` still checks `gracefulShutdown` against the real signature, which is the
+// member the shutdown path actually calls.
+const workerPool = (gracefulShutdown: WorkerPool["gracefulShutdown"]): WorkerPool =>
+  stub<WorkerPool>({ gracefulShutdown });
 
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 

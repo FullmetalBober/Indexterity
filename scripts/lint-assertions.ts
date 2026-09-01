@@ -61,28 +61,33 @@
 //
 // Replacements live where they are needed: `messageOf` (errors/message.ts),
 // `at` and `present` (errors/at.ts, web lib/at.ts).
-import { readdirSync, readFileSync } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { readFileSync } from "node:fs";
+import { relative } from "node:path";
 import ts from "typescript";
-
-const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+import { ROOT, sourceFiles } from "./source-files.ts";
 
 // `deploy` is in the list because leaving it out was a hole: it is typechecked
 // by the scripts project and holds the manifest rewriter and the all-in-one
 // supervisor, and nothing had ever linted it.
 const ROOTS = ["apps", "packages", "scripts", "deploy"];
 const EXTENSIONS = [".ts", ".tsx", ".mts"];
-const SKIP = new Set(["node_modules", ".git", "dist", ".output", ".turbo", "graphify-out"]);
 
 // Generated files. `routeTree.gen.ts` is written by TanStack Router's plugin and
 // carries fifteen `as any` that regenerate on every build — a rule nobody can
 // obey is a rule people learn to disable.
 const GENERATED = /\.gen\.tsx?$/;
 
-// Files allowed to hold one anyway. EMPTY, and it has stayed empty through
-// every case that looked irreducible — see the note above.
-const ALLOWED = new Set<string>([]);
+// Files allowed to hold one anyway, and an entry is a decision rather than a
+// convenience: it has to arrive with the reason, in the file.
+//
+// `test-utils.ts` holds `stub<T>(partial: Partial<T>): T` — a deliberate
+// re-introduction. The allowlist emptied itself once, when every fake turned out
+// to have a narrower dependency behind it, and most of those narrowings were
+// worth keeping on their own account. What they did not cover is a VENDOR type
+// with eighteen members that a test touches one of, and writing those out is
+// cost with no reader. `Partial<T>` still checks every member the double does
+// define, so what is asserted is the absence of the rest and nothing else.
+const ALLOWED = new Set<string>(["apps/api/src/test-utils.ts"]);
 
 interface Offence {
   readonly file: string;
@@ -175,22 +180,8 @@ function parseOffences(source: ts.SourceFile, rel: string): Offence[] {
   return out;
 }
 
-function sourceFiles(): string[] {
-  const out: string[] = [];
-  const walk = (dir: string): void => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (SKIP.has(entry.name)) continue;
-      const path = join(dir, entry.name);
-      if (entry.isDirectory()) walk(path);
-      else if (EXTENSIONS.some((extension) => entry.name.endsWith(extension))) out.push(path);
-    }
-  };
-  for (const root of ROOTS) walk(join(ROOT, root));
-  return out;
-}
-
 function main(): void {
-  const files = sourceFiles();
+  const files = sourceFiles(ROOTS, EXTENSIONS);
   const offences: Offence[] = [];
   let asConst = 0;
 

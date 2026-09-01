@@ -1,3 +1,11 @@
+// `at` and `present` were briefly shared out of `@repo/errors` — both apps hold
+// the same 30 lines and a copy-paste detector said so. It is back, because the
+// package exports `"types": "./src/index.ts"` and `"default": "./dist/index.js"`:
+// the typecheck passes with no build and the RUNTIME does not, and the mssql and
+// postgres integration jobs run `npm ci` and the suite with no build between
+// them. Four of them went red. Thirty duplicated lines of pure function are a
+// cheaper thing to carry than a build step in every job that touches them.
+
 /**
  * The element at an index, or a thrown sentence.
  *
