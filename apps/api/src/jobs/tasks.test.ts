@@ -35,15 +35,17 @@ function recorder(): {
         warn: (message) => void warns.push(message),
         error: (message) => void errors.push(message),
       },
-      alertOwners: (clusterId, subject) => {
+      // The claim and the send are one dep now (#419), so the recorder stands in
+      // for both with the same rule inside one test: first claim per scope wins,
+      // and a claimed scope records nothing. What the WINDOW is, and what a
+      // failed SEND does to the claim, belong to mail/notify.test.ts; what a
+      // task alerts about belongs here.
+      alert: (scope, clusterId, subject) => {
+        if (claimed.has(scope)) return Promise.resolve();
+        claimed.add(scope);
         alerts.push(`${clusterId}:${subject}`);
         return Promise.resolve();
       },
-      // The cooldown is a postgres claim now (#212), so the recorder stands in
-      // for it with the same rule inside one test: first claim per scope wins.
-      // What the WINDOW is belongs to mail/notify.test.ts; what a task does
-      // with a suppressed alert belongs here.
-      alertAllowed: (scope) => Promise.resolve(claimed.has(scope) ? false : !!claimed.add(scope)),
       emitPassFinished: (clusterId, task) => {
         emitted.push(`${clusterId}:${task}`);
         return Promise.resolve();

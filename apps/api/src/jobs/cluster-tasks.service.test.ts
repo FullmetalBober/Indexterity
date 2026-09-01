@@ -49,9 +49,12 @@ vi.mock("../events/emit", async (importOriginal) => ({
   emitPassFinished: vi.fn(),
   pgNotifier: vi.fn(),
 }));
-vi.mock("../mail/notify", (): typeof import("../mail/notify") => ({
-  ALERT_COOLDOWN_MS: 1,
-  alertAllowed: vi.fn(async () => false),
+// The alert path, mocked whole: `raiseAlert` claims the cooldown against a real
+// table, and this suite's db never opens a socket. A no-op leaves the assertions
+// about which pass each queue name runs, which is what this file is for.
+vi.mock("../mail/notify", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../mail/notify")>()),
+  raiseAlert: vi.fn(),
 }));
 
 const CLUSTER = "11111111-1111-1111-1111-111111111111";

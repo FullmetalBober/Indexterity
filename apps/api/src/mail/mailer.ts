@@ -86,6 +86,13 @@ export function closeMailTransport(): void {
 }
 
 // Best-effort send: alerts and invite mails must never fail the caller.
+//
+// The boolean is READ now, by one caller: NotifyService.notifyClusterOwners
+// folds it into whether an alert is settled, because a claim taken for a mail
+// that never left the process is a day of silence (#419). It was documented for
+// years as a return nobody reads, and `sendMailDetached` below is still built on
+// the fact that nothing is learned by AWAITING one — which is a different
+// statement, and still true.
 export async function sendMail(to: string, subject: string, text: string): Promise<boolean> {
   const transport = getTransporter();
   if (transport === null) {
@@ -113,11 +120,11 @@ export async function sendMail(to: string, subject: string, text: string): Promi
 // seconds; this takes it out of the request altogether, so the account is
 // created and the page is drawn while the transport is still dialling.
 //
-// Nothing is given up by not waiting, because there was never anything to wait
-// FOR: `sendMail` swallows its own failures and resolves to a boolean that no
-// caller has ever read — the contract at the top of this file, older than this
-// function. What the caller learns by awaiting is nothing, at the price of
-// everything the transport spends.
+// Nothing is given up by not waiting, because there was never anything HERE to
+// wait for: `sendMail` swallows its own failures, and the boolean it resolves to
+// is only useful to a caller that can act on it — which the alert path now does
+// and a request cannot. What a REQUEST learns by awaiting is nothing, at the
+// price of everything the transport spends.
 //
 // A JOB that mails still awaits, and the difference is real: a task must not
 // report success with its mail in flight, because the queue may have nothing

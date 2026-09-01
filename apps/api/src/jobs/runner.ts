@@ -1,7 +1,7 @@
 import type { WorkerEvents } from "graphile-worker";
 import type { Database } from "../db";
 import { captureError } from "../errors/reporting";
-import { ALERT_COOLDOWN_MS, alertAllowed } from "../mail/notify";
+import { raiseAlert } from "../mail/notify";
 import { NotifyService } from "../mail/notify.service";
 import { instrumentRunner } from "../metrics";
 import { clusterIdOf, finalClusterFailure } from "./failure";
@@ -60,25 +60,21 @@ export function wireRunnerEvents(db: Database, events: WorkerEvents): void {
     // The cooldown is a postgres claim rather than an in-memory Map (#212), so
     // this arm is async — still fire-and-forget, because a mail failure must
     // not turn a dead-lettered job into an unhandled rejection.
-    void (async () => {
-      if (
-        !(await alertAllowed(
-          alertClaims(db),
-          `${clusterId}:${job.task_identifier}`,
-          ALERT_COOLDOWN_MS,
-        ))
-      ) {
-        return;
-      }
-      await new NotifyService(db).notifyClusterOwners(
+    //
+    // Through `raiseAlert` rather than claim-then-send, so a dead-letter alert
+    // the SMTP server refused is retried in minutes instead of lost for a day
+    // (#419). This is the arm where losing it costs most: it is the one mail
+    // that says a task has stopped retrying.
+    void raiseAlert(alertClaims(db), `${clusterId}:${job.task_identifier}`, () =>
+      new NotifyService(db).notifyClusterOwners(
         clusterId,
         `${job.task_identifier} keeps failing`,
         `The background ${job.task_identifier} task gave up after ${job.attempts} attempts.\n\n` +
           `Last error: ${String(error)}\n\n` +
           `Usual causes: the cluster is unreachable, the connection string changed, or the ` +
           `Indexterity user was removed. It will be retried on the next schedule tick.`,
-      );
-    })().catch((failure: unknown) => {
+      ),
+    ).catch((failure: unknown) => {
       captureError(failure, { task: job.task_identifier, clusterId });
     });
   });

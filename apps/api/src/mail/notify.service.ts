@@ -1,6 +1,7 @@
 import { Injectable } from "@nestjs/common";
 import { clusters, type Database, eq, members, user } from "../db";
-import { sendMail } from "./mailer";
+import { mailEnabled, sendMail } from "./mailer";
+import { alertSettled } from "./notify";
 
 // Who to tell, which needs the pool (#354).
 //
@@ -21,8 +22,17 @@ export class NotifyService {
   constructor(private readonly db: Database) {}
 
   // Email every owner of the cluster's org — the audience for engine alerts
-  // (drops executed, regressions rolled back). Best-effort.
-  async notifyClusterOwners(clusterId: string, subject: string, text: string): Promise<void> {
+  // (drops executed, regressions rolled back). Best-effort: it never throws.
+  //
+  // Returns whether the alert is SETTLED — whether there is anything a later
+  // attempt could improve — which is what the cooldown claim needs to know
+  // (mail/notify.ts, raiseAlert). Not "was a mail sent": the two differ on the
+  // cases where no mail was ever going to be sent, and treating those as a
+  // failure would re-run the same no-op every five minutes forever.
+  //
+  // Which of the four cases mean what is `alertSettled`'s own comment; this
+  // method's job is to count the sends it made and ask.
+  async notifyClusterOwners(clusterId: string, subject: string, text: string): Promise<boolean> {
     const rows = await this.db
       .select({ email: user.email, role: members.role, clusterName: clusters.name })
       .from(clusters)
@@ -30,9 +40,11 @@ export class NotifyService {
       .innerJoin(user, eq(user.id, members.userId))
       .where(eq(clusters.id, clusterId));
     const clusterName = rows[0]?.clusterName ?? clusterId;
-    for (const row of rows) {
-      if (row.role !== "owner") continue;
-      await sendMail(row.email, `[Indexterity] ${clusterName}: ${subject}`, text);
+    const owners = rows.filter((row) => row.role === "owner");
+    let delivered = 0;
+    for (const row of owners) {
+      if (await sendMail(row.email, `[Indexterity] ${clusterName}: ${subject}`, text)) delivered++;
     }
+    return alertSettled(owners.length, delivered, mailEnabled());
   }
 }

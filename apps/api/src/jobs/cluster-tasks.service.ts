@@ -2,7 +2,7 @@ import { Inject, Injectable } from "@nestjs/common";
 import { workerEnv } from "../config/env";
 import { DatabaseService } from "../db/database.service";
 import { emitPassFinished, pgNotifier } from "../events/emit";
-import { ALERT_COOLDOWN_MS, alertAllowed } from "../mail/notify";
+import { raiseAlert } from "../mail/notify";
 import { NotifyService } from "../mail/notify.service";
 import { TunnelRegistry } from "../tunnel/tunnel.registry";
 import { applyCluster } from "./apply";
@@ -185,14 +185,24 @@ export class ClusterTasksService {
     return {
       logger: helpers.logger,
       // Best-effort: a mail failure must not turn a skipped tick into a hard one.
-      alertOwners: async (clusterId, subject, body) => {
+      //
+      // "Best-effort" no longer means "unnoticed", which is the #419 fix. A send
+      // that reaches no owner hands most of the cooldown back through
+      // `raiseAlert`, so the next occurrence of the same failure alerts again
+      // instead of the fault silently spending the day's claim. A THROW from the
+      // notifier — a control-plane read that failed, not a refused mail — is
+      // still swallowed here and still burns the claim: it is a fault on our
+      // side, it is logged, and the alternative is failing a tick that skipped
+      // for an unrelated reason.
+      alert: async (scope, clusterId, subject, body) => {
         try {
-          await this.notify.notifyClusterOwners(clusterId, subject, body);
+          await raiseAlert(alertClaims(db), scope, () =>
+            this.notify.notifyClusterOwners(clusterId, subject, body),
+          );
         } catch (error) {
           helpers.logger.error(`alert for cluster ${clusterId} failed: ${String(error)}`);
         }
       },
-      alertAllowed: (scope) => alertAllowed(alertClaims(db), scope, ALERT_COOLDOWN_MS),
       emitPassFinished: (clusterId, task) => emitPassFinished(pgNotifier(db), clusterId, task),
       // Not best-effort: this is the only copy of why the pipeline stopped, and a
       // write that fails silently would put the dashboard back to inferring it
