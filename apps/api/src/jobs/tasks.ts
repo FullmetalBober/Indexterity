@@ -18,11 +18,31 @@ import { pruneOldSamples } from "./retention";
 // The logger is structurally satisfied by graphile-worker's own.
 export interface ClusterTaskDeps {
   readonly logger: { warn(message: string): void; error(message: string): void };
-  readonly alertOwners: (clusterId: string, subject: string, body: string) => Promise<void>;
-  // Whether this alert is outside its cooldown window. A function rather than
-  // the store itself for the same reason the other three are: this interface's
-  // value is that a task can be tested without a queue or a database.
-  readonly alertAllowed: (scope: string) => Promise<boolean>;
+  /**
+   * Mail the cluster's owners about this failure, at most once per `scope` per
+   * cooldown window.
+   *
+   * ONE function rather than the `alertAllowed` / `alertOwners` pair it replaces
+   * (#419). The pair had to be used in sequence — claim the window, then send —
+   * and every one of the five call sites below dropped what the send reported,
+   * so an SMTP fault spent the day's alert on a mail that never left the
+   * process. Nothing here can make that mistake, because the claim and the send
+   * are no longer two things a caller holds.
+   *
+   * `scope` is the cooldown key and is NOT always the cluster: the tunnel arm
+   * keys on the gateway, because one gateway reaches several clusters and a
+   * customer whose VPN is down should get one mail rather than one per database
+   * behind it. `clusterId` is who to mail, and stays its own argument for that
+   * reason.
+   *
+   * Best-effort, like everything else that mails from a job: it never throws.
+   */
+  readonly alert: (
+    scope: string,
+    clusterId: string,
+    subject: string,
+    body: string,
+  ) => Promise<void>;
   readonly emitPassFinished: (clusterId: string, task: string) => Promise<void>;
   /**
    * Why the pipeline is not running, for a screen to read a week later. The
@@ -162,8 +182,12 @@ export async function runClusterTask(
       recordClusterTask(task, clusterId, "unsupported");
       await deps.markBlocked(clusterId, task, "UNSUPPORTED", error.message);
       deps.logger.warn(`${task}: cluster ${clusterId} — ${error.message}`);
-      if (!(await deps.alertAllowed(`${clusterId}:unsupported`))) return;
-      await deps.alertOwners(clusterId, "cluster version not supported", error.message);
+      await deps.alert(
+        `${clusterId}:unsupported`,
+        clusterId,
+        "cluster version not supported",
+        error.message,
+      );
       return;
     }
     // The stored string would not connect over validated TLS. Same shape as an
@@ -176,8 +200,8 @@ export async function runClusterTask(
       recordClusterTask(task, clusterId, "insecure");
       await deps.markBlocked(clusterId, task, "INSECURE", error.message);
       deps.logger.warn(`${task}: cluster ${clusterId} — ${error.message}`);
-      if (!(await deps.alertAllowed(`${clusterId}:insecure`))) return;
-      await deps.alertOwners(
+      await deps.alert(
+        `${clusterId}:insecure`,
         clusterId,
         `${task} skipped — this cluster's connection string is not using TLS`,
         `Indexterity now requires TLS on every connection it makes to a customer database, ` +
@@ -217,8 +241,8 @@ export async function runClusterTask(
       // Keyed on the TUNNEL, not the cluster: one gateway commonly reaches
       // several clusters, and a customer whose VPN is down should get one mail
       // rather than one per database behind it.
-      if (!(await deps.alertAllowed(`tunnel:${error.tunnelId}`))) return;
-      await deps.alertOwners(
+      await deps.alert(
+        `tunnel:${error.tunnelId}`,
         clusterId,
         `${task} skipped — the VPN tunnel to this cluster is down`,
         `Indexterity reaches this cluster over a WireGuard tunnel, and that tunnel is not ` +
@@ -249,8 +273,8 @@ export async function runClusterTask(
       recordClusterTask(task, clusterId, "timed-out");
       await deps.markBlocked(clusterId, task, "TIMED_OUT", error.message);
       deps.logger.warn(`${task}: cluster ${clusterId} — ${error.message}`);
-      if (!(await deps.alertAllowed(`${clusterId}:timed-out`))) return;
-      await deps.alertOwners(
+      await deps.alert(
+        `${clusterId}:timed-out`,
         clusterId,
         `${task} is taking longer than Indexterity will wait`,
         `The ${task} step against this cluster ran for longer than its budget and was ` +
@@ -277,8 +301,8 @@ export async function runClusterTask(
     deps.logger.warn(
       `${task}: cluster ${clusterId} unreachable — skipped, retrying on the next tick`,
     );
-    if (!(await deps.alertAllowed(`${clusterId}:${task}`))) return;
-    await deps.alertOwners(
+    await deps.alert(
+      `${clusterId}:${task}`,
       clusterId,
       `${task} skipped — cluster unreachable`,
       `Indexterity could not reach this cluster, so the ${task} step did nothing and will ` +

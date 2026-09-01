@@ -1,4 +1,5 @@
 import { type Database, sql, workerWatermarks } from "../db";
+import type { AlertClaims } from "../mail/notify";
 
 // "Claim this key, but only if nothing has claimed it since `notBefore`."
 //
@@ -34,6 +35,28 @@ export async function claimWatermark(
   return rows.length > 0;
 }
 
+// Move a claim BACKWARD, so the next attempt at the same key is due sooner than
+// the full cooldown would make it.
+//
+// The half of the claim story `claimWatermark` cannot express. That one is a
+// compare-and-set forward — the guard that makes two ticks agree on who
+// dispatches — and taking a claim is what makes the caller responsible for the
+// work. When the work then fails in a way nothing retries (an alert mail the
+// transport refused, #419), the claim has to be handed back or the failure has
+// consumed the whole window and nobody hears about it.
+//
+// Unconditional, unlike the claim: there is no compare-and-set to make, because
+// the only writer that reaches here is the tick that just won the claim, and no
+// other tick can write this key until the stamp expires. What it writes is
+// strictly older than what it is replacing, so a stray forward stamp cannot be
+// clobbered by it either.
+export async function deferWatermark(db: Database, key: string, at: Date): Promise<void> {
+  await db
+    .insert(workerWatermarks)
+    .values({ key, at })
+    .onConflictDoUpdate({ target: workerWatermarks.key, set: { at } });
+}
+
 // What the key looks like, in one place, so a typo cannot silently create a
 // second watermark that never collides with the first.
 export function passKey(pass: string): string {
@@ -44,11 +67,13 @@ export function alertKey(scope: string): string {
   return `alert:${scope}`;
 }
 
-// The alert cooldown's store, as the one function mail/notify.ts asks for. Its
+// The alert cooldown's store, as the one pair mail/notify.ts asks for. Its
 // own namespace in the same table: a pass and an alert are the same operation
 // over different keys, and giving each a second table would have been two
 // migrations to say one thing.
-export function alertClaims(db: Database) {
-  return (key: string, notBefore: Date, now: Date): Promise<boolean> =>
-    claimWatermark(db, alertKey(key), notBefore, now);
+export function alertClaims(db: Database): AlertClaims {
+  return {
+    claim: (key, notBefore, now) => claimWatermark(db, alertKey(key), notBefore, now),
+    defer: (key, at) => deferWatermark(db, alertKey(key), at),
+  };
 }
