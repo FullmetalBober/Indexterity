@@ -40,6 +40,24 @@ jobs:
           echo "owner=$owner" >> "$GITHUB_OUTPUT"
           echo "publishing $version to ghcr.io/$owner"
 
+      # `version:check` runs `scripts/set-version.ts`, which imports zod — so this
+      # job needs node_modules, and until v0.16.1 it did not have them. It went
+      # unnoticed because the script had no imports at all until #418 gave it a
+      # schema instead of an unchecked `JSON.parse`, and #418 shipped after
+      # v0.16.0 was cut: the first tag that could ever hit it was the first one
+      # that did. Nothing published, because the check below is the first step
+      # after checkout and the ghcr login never ran — which is the gate working.
+      #
+      # Node is pinned for the same reason ci.yml pins it. The failed run used
+      # the runner's default 22.23, under this repo's `engines.node: >=24`, and
+      # the whole point of building the images here is that they are built the
+      # way the repo is tested.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "26"
+          cache: npm
+      - run: npm ci
+
       # A tag that names a version the tree does not carry would publish images
       # and a chart whose own metadata contradicts them.
       - name: Version in the tag must match the version in the tree
