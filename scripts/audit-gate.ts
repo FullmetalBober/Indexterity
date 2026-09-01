@@ -46,18 +46,24 @@ const BLOCKING = new Set<Severity>(["high", "critical"]);
 const SEVERITY = z.enum(["info", "low", "moderate", "high", "critical"]);
 type Severity = z.infer<typeof SEVERITY>;
 
-/** An entry in `package-lock.json`'s `packages` map. */
+/**
+ * An entry in `package-lock.json`'s `packages` map.
+ *
+ * Each field is `| undefined` as well as optional because `exactOptionalPropertyTypes`
+ * makes those two different things, and the schema below produces the pair: a
+ * key npm omitted, and a key npm wrote as null, are both states this walks past.
+ */
 type LockNode = {
   /** A workspace: the real entry is the directory named by `resolved`. */
-  link?: boolean;
-  resolved?: string;
-  dependencies?: Record<string, string>;
-  optionalDependencies?: Record<string, string>;
+  link?: boolean | undefined;
+  resolved?: string | undefined;
+  dependencies?: Record<string, string> | undefined;
+  optionalDependencies?: Record<string, string> | undefined;
   /**
    * Declared so the fixtures below can state one, and deliberately never read:
    * a workspace's dev tree is exactly what this gate is meant to leave out.
    */
-  devDependencies?: Record<string, string>;
+  devDependencies?: Record<string, string> | undefined;
 };
 
 type LockPackages = Record<string, LockNode>;

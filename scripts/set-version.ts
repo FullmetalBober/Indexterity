@@ -119,7 +119,11 @@ function readLockfile(): Lockfile {
   return lock;
 }
 
-type ChartVersions = { text: string; version?: string; appVersion?: string };
+// Present and possibly undefined, rather than optional: the reader always sets
+// both keys, and a chart missing a `version:` line is a state this REPORTS on.
+// `exactOptionalPropertyTypes` makes those two spellings mean different things,
+// and this is the one that is true.
+type ChartVersions = { text: string; version: string | undefined; appVersion: string | undefined };
 
 // A trailing comment on either line is read past here and preserved on write
 // below, rather than tolerated: a regex that swallowed one would report the

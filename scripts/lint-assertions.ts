@@ -68,8 +68,11 @@ import ts from "typescript";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
-const ROOTS = ["apps", "packages", "scripts"];
-const EXTENSIONS = [".ts", ".tsx"];
+// `deploy` is in the list because leaving it out was a hole: it is typechecked
+// by the scripts project and holds the manifest rewriter and the all-in-one
+// supervisor, and nothing had ever linted it.
+const ROOTS = ["apps", "packages", "scripts", "deploy"];
+const EXTENSIONS = [".ts", ".tsx", ".mts"];
 const SKIP = new Set(["node_modules", ".git", "dist", ".output", ".turbo", "graphify-out"]);
 
 // Generated files. `routeTree.gen.ts` is written by TanStack Router's plugin and

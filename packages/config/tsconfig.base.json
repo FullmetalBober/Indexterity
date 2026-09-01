@@ -10,6 +10,12 @@
     "sourceMap": true,
     "strict": true,
     "noUncheckedIndexedAccess": true,
+    // A branch that falls off the end of a function returning a value.
+    "noImplicitReturns": true,
+    // `import "./x"` for a module that is not there.
+    "noUncheckedSideEffectImports": true,
+    // Code after a return. Free here, and the way a refactor leaves a stub.
+    "allowUnreachableCode": false,
     "noImplicitOverride": true,
     "noFallthroughCasesInSwitch": true,
     "noUnusedLocals": true,
