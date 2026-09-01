@@ -43,11 +43,11 @@ export function initErrorReporting(service: Service): void {
 // rather than a Sentry idiom. Tags are chosen to be the things you would filter
 // an issue stream by at 3am: which workload, which cluster, which task.
 export interface ErrorContext {
-  readonly requestId?: string;
-  readonly clusterId?: string;
-  readonly task?: string;
-  readonly attempt?: number;
-  readonly route?: string;
+  readonly requestId?: string | undefined;
+  readonly clusterId?: string | undefined;
+  readonly task?: string | undefined;
+  readonly attempt?: number | undefined;
+  readonly route?: string | undefined;
 }
 
 export function captureError(error: unknown, context: ErrorContext = {}): void {

@@ -11,6 +11,8 @@
 // the result against the real tree: if the shape ever changes, that fails rather
 // than every label quietly becoming "unmatched".
 
+import { isRecord } from "~/lib/narrow";
+
 interface RouteLike {
   readonly path?: string;
   readonly options?: { readonly path?: string };
@@ -32,7 +34,7 @@ function pathOf(route: RouteLike): string | undefined {
  * route.
  */
 function isRoute(value: unknown): value is RouteLike {
-  return typeof value === "object" && value !== null;
+  return isRecord(value);
 }
 
 function childrenOf(route: RouteLike): Array<RouteLike> {

@@ -1,7 +1,7 @@
 import { XMLParser } from "fast-xml-parser";
 import type { DeletePattern } from "../engine/ports";
 import { PLAN_PARSE_CHUNK, yieldToEventLoop } from "./chunk";
-import { attr, collect, tableOf, type XmlNode } from "./workload";
+import { attr, collect, isNode, tableOf, type XmlNode } from "./workload";
 
 // Recurring age-based DELETEs, from Query Store plans (#206).
 //
@@ -61,12 +61,6 @@ const SECONDS_PER_UNIT: Record<string, number> = {
   year: 31_536_000,
 };
 
-// The same test the array branch used inline, as a predicate so the single-child
-// branch can narrow with it instead of asserting the result.
-function isXmlNode(value: unknown): value is XmlNode {
-  return typeof value === "object" && value !== null;
-}
-
 export function retentionSecondsFrom(scalarString: string): number | null {
   const match = /\bdateadd\((\w+),\s*\((-?\d+)\)/i.exec(scalarString);
   if (match === null) return null;
@@ -89,8 +83,8 @@ export interface DeletePlanRow {
 // operator with a comparison nested three levels below it.
 function childrenOf(node: XmlNode, key: string): XmlNode[] {
   const child = node[key];
-  if (Array.isArray(child)) return child.filter(isXmlNode);
-  return isXmlNode(child) ? [child] : [];
+  if (Array.isArray(child)) return child.filter(isNode);
+  return isNode(child) ? [child] : [];
 }
 
 // The column this element compares, when it is a column of the target table.

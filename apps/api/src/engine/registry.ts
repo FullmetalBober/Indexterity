@@ -1,4 +1,4 @@
-import { keysOf } from "../errors/at";
+import { keysOf } from "../errors/message";
 import { mongoAdapter } from "../mongo/adapter";
 import { mssqlAdapter } from "../mssql/adapter";
 import { postgresAdapter } from "../postgres/adapter";

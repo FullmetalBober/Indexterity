@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { MAX_GAP_HOURS } from "../analysis";
-import { keysOf } from "../errors/at";
+import { keysOf } from "../errors/message";
 import { counterFingerprint, extendsRun, latencyFingerprint } from "./runs";
 
 const HOUR_MS = 3_600_000;

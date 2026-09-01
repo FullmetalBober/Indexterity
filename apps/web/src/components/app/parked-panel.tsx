@@ -3,6 +3,7 @@ import { Truncated } from "~/components/truncated";
 import { Badge } from "~/components/ui/badge";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "~/components/ui/empty";
 import { Skeleton } from "~/components/ui/skeleton";
+import { instantOf } from "~/lib/instant";
 import { LocalTime } from "~/lib/local-time";
 
 // Indexes the engine has agreed not to propose again (#159).
@@ -19,7 +20,8 @@ import { LocalTime } from "~/lib/local-time";
 // The year test reads the UTC year on both sides so it cannot be the thing that
 // differs — the DRAWING is what varies by reader, and LocalTime owns that.
 function dayOptions(iso: string): Intl.DateTimeFormatOptions {
-  const sameYear = new Date(iso).getUTCFullYear() === new Date().getUTCFullYear();
+  const parsed = instantOf(iso);
+  const sameYear = parsed !== null && parsed.getUTCFullYear() === new Date().getUTCFullYear();
   return { day: "numeric", month: "short", ...(sameYear ? {} : { year: "numeric" }) };
 }
 

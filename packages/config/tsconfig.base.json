@@ -10,6 +10,18 @@
     "sourceMap": true,
     "strict": true,
     "noUncheckedIndexedAccess": true,
+    // `{ x?: string }` stops accepting `{ x: undefined }`. On in a repo that
+    // already bans `as`, `any` and `!`: thirteen `optional()` inputs in
+    // @repo/contracts exist precisely because absent and present-and-undefined
+    // are different sentences there — `observedDatabasesInput` says so in as
+    // many words — and without this the compiler could not tell them apart.
+    //
+    // A property that genuinely means the same either way declares
+    // `?: T | undefined`, which is the honest signature and says a caller may
+    // omit it OR pass undefined. Vendor types that cannot be changed get the
+    // field built conditionally instead, which is also the more truthful call:
+    // not sending a field and sending undefined are different requests.
+    "exactOptionalPropertyTypes": true,
     // A branch that falls off the end of a function returning a value.
     "noImplicitReturns": true,
     // `import "./x"` for a module that is not there.

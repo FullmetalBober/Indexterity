@@ -49,7 +49,7 @@ export interface IndexSpec {
   // they name and nothing else), which is why it is optional rather than an
   // empty array everywhere: a spec that never had includes and one whose
   // includes were not captured are the same thing to every reader here.
-  readonly include?: readonly string[];
+  readonly include?: readonly string[] | undefined;
 }
 
 // One client as the workload source describes it.
@@ -99,18 +99,18 @@ export interface QueryShape {
   // missing index is costing — see analysis/severity.ts. Reported by the
   // profiler, and by `$queryStats` from mongo 8.0 (earlier stores carry
   // execution counts only).
-  readonly docsExamined?: number;
+  readonly docsExamined?: number | undefined;
   // How long this shape has been watchable, in hours — the denominator that
   // turns `count` into a rate. $queryStats reports when it first saw each shape;
   // the profiler's capped ring reports how far back it still holds entries.
   // Absent when the source cannot say, which is not the same as zero.
-  readonly observedForHours?: number;
+  readonly observedForHours?: number | undefined;
   // Who issued this shape. $queryStats groups by client as well as by shape,
   // so a query run from a shell and the same query from an app arrive as
   // separate entries; merged shapes accumulate every client seen. The profiler
   // reports `appName`, which lands here the same way.
   readonly clients?: readonly QueryClient[];
-  readonly constants?: Readonly<Record<string, ConstantValue>>;
+  readonly constants?: Readonly<Record<string, ConstantValue>> | undefined;
   // $lookup joins anywhere in the pipeline (indexed on the FOREIGN collection).
   readonly lookups?: readonly LookupJoin[];
 }

@@ -9,6 +9,7 @@ import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
 import { Separator } from "~/components/ui/separator";
+import { instantOf } from "~/lib/instant";
 import {
   useCancelInvite,
   useCreateInvite,
@@ -123,8 +124,9 @@ function CredentialPolicyCard({ org, isOwner }: { org: OrgDetail; isOwner: boole
           <p className="text-muted-foreground text-xs">Never configured — this is the default.</p>
         ) : (
           <p className="text-muted-foreground text-xs">
-            Last changed {new Date(org.policy.updatedAt).toLocaleDateString()}. Every change is in
-            the security trail.
+            Last changed{" "}
+            {instantOf(org.policy.updatedAt)?.toLocaleDateString() ?? "at an unknown time"}. Every
+            change is in the security trail.
           </p>
         )}
       </CardContent>

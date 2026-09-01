@@ -1,6 +1,7 @@
 import { type ArgumentsHost, Catch, type ExceptionFilter, HttpException } from "@nestjs/common";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { ClusterGoneError } from "../jobs/cluster-connection";
+import { isRecord } from "./message";
 import { captureError } from "./reporting";
 import { isUnreachableError } from "./unreachable";
 
@@ -17,10 +18,6 @@ import { isUnreachableError } from "./unreachable";
 // large, a cluster whose owner's firewall is doing its job, and a 404. Three of
 // those are this service working correctly, and the unreachable one is a handled
 // condition by §7.4.1 — it would page us about a customer's network.
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
 
 @Catch()
 export class AppExceptionFilter implements ExceptionFilter {

@@ -68,8 +68,18 @@ export class MongoIndexExecutor implements IndexExecutor {
     // createIndexes refuses an index specification field it does not recognise,
     // so it is dropped here rather than forwarded. Nothing is lost: no mongo
     // spec ever carries one.
-    const { include: _include, ...mongoOptions } = options;
-    await this.conn.db(database).collection(collection).createIndex(keys, mongoOptions);
+    // `partialFilterExpression` comes off separately for a second reason: the
+    // port declares it optional-or-undefined, and the driver's own option type
+    // does not accept undefined — so an absent predicate is an absent KEY here,
+    // never a present one holding nothing.
+    const { include: _include, partialFilterExpression, ...mongoOptions } = options;
+    await this.conn
+      .db(database)
+      .collection(collection)
+      .createIndex(keys, {
+        ...mongoOptions,
+        ...(partialFilterExpression === undefined ? {} : { partialFilterExpression }),
+      });
     // createIndexes does not return until the index is usable, so there is
     // nothing for a later tick to finish.
     return "BUILT";

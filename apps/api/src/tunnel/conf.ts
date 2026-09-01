@@ -17,10 +17,10 @@ import { at } from "../errors/at";
 
 interface WireGuardPeerConf {
   readonly publicKey: Buffer;
-  readonly presharedKey?: Buffer;
+  readonly presharedKey?: Buffer | undefined;
   readonly endpoint: { readonly host: string; readonly port: number };
   readonly allowedIps: readonly string[];
-  readonly persistentKeepalive?: number;
+  readonly persistentKeepalive?: number | undefined;
 }
 
 export interface WireGuardConf {

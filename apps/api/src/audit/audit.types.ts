@@ -232,11 +232,15 @@ export interface TrailActor {
 // The little of better-auth's hook context this reads, declared structurally so
 // the mapping is testable with plain objects and a library upgrade that moves an
 // unrelated field cannot break the build here for no reason.
+// `| undefined` throughout, not just `?`. This shape is better-auth's hook
+// argument as WE need to read it, and the library's own type declares its
+// members `?: X | undefined` — so under exactOptionalPropertyTypes a narrower
+// declaration here would refuse the very value it exists to describe.
 export interface AuthHookContext {
-  readonly path?: string;
-  readonly body?: unknown;
-  readonly headers?: Headers;
+  readonly path?: string | undefined;
+  readonly body?: unknown | undefined;
+  readonly headers?: Headers | undefined;
   readonly context: {
-    readonly returned?: unknown;
+    readonly returned?: unknown | undefined;
   };
 }

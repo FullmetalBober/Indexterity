@@ -99,7 +99,10 @@ export async function passThroughToApi(request: Request): Promise<Response> {
       // Streamed, not buffered: a buffered proxy would have to be rewritten
       // before SSE could go through it (#22), and it would hold every upload in
       // the dashboard server's memory.
-      body: hasBody ? request.body : undefined,
+      //
+      // Spread, because RequestInit's `body` is `BodyInit` and undefined is not
+      // one — a GET carries no body rather than an empty one.
+      ...(hasBody ? { body: request.body } : {}),
       duplex: "half",
       redirect: "manual",
     });

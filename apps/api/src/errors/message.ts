@@ -34,44 +34,59 @@ export function orpcStatus(error: unknown): number | undefined {
 }
 
 /**
- * A driver's error code, read off a caught `unknown`.
- *
- * Postgres puts a SQLSTATE on `code`; the assertion this replaces
- * (`error as { code?: unknown } | null`) claims the caught value has that shape
- * and then reads `undefined` off anything that does not — a thrown string, or
- * the plain Error a bug produces. Checking first means an unexpected throw is
- * not silently classified as "some other SQLSTATE".
- */
-export function errorCode(error: unknown): unknown {
-  return typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
-}
-
-/**
  * One field off a value that may not be an object, without asserting a shape.
  *
  * `ctx.body as { newEmail?: unknown }` claims the value HAS that shape and then
  * reads `undefined` off anything that does not — a string body, null, a number.
- * `in` narrowing asks instead, so absence and wrong-type are the same answer
- * and neither is mistaken for a present value.
+ * Asking instead means absence and wrong-type are the same answer, and neither
+ * is mistaken for a present value. Which is the whole job: `error as { cause?:
+ * { code?: string } }` reads `undefined` off whatever the value actually was,
+ * and that is indistinguishable from the field being absent — so a surprising
+ * throw gets classified as an ordinary one.
+ *
+ * This was three functions for one behaviour. `fieldOf` differed only by
+ * dropping a `name in value` guard that changed no answer — `Reflect.get`
+ * returns `undefined` for a key that is not there, so the guard was the same
+ * test twice — and `errorCode` was this called with `"code"`. Both are gone;
+ * a driver's SQLSTATE is `field(error, "code")`, and postgres putting it on
+ * `cause` is `field(field(error, "cause"), "code")`.
+ *
+ * `Reflect.get` rather than an index into an asserted Record: it takes an object
+ * and a key and returns `any`, which lands in `unknown` here — so the whole
+ * function contains no assertion, which a helper for removing them had better
+ * not.
  */
 export function field(value: unknown, name: string): unknown {
-  return typeof value === "object" && value !== null && name in value
-    ? Reflect.get(value, name)
-    : undefined;
+  return typeof value === "object" && value !== null ? Reflect.get(value, name) : undefined;
 }
 
 /**
- * A named field off a caught `unknown`, or undefined.
+ * A value that is an object and not an array.
  *
- * The generic form of `errorCode`. `error as { cause?: { code?: string } }` and
- * friends claim a shape for something that can be anything at all, then read
- * `undefined` off whatever it actually was — which is indistinguishable from the
- * field being absent, so a surprising throw gets classified as an ordinary one.
+ * The array half is not a formality. `typeof v === "object" && v !== null` is
+ * true of `[1, 2, 3]`, so a predicate written that way narrows an array to
+ * `Record<string, unknown>` and every reader downstream treats its indices as
+ * field names. That is `as Record<string, unknown>` with `is` for syntax — the
+ * body does not prove what the signature claims — and `lint-assertions.ts`
+ * cannot see it, which is why five copies of it had accumulated.
  */
-export function fieldOf(value: unknown, field: string): unknown {
-  // `Reflect.get` rather than an index into an asserted Record: it takes an
-  // object and a key and returns `any`, which lands in `unknown` here — so the
-  // whole function contains no assertion, which a helper for removing them had
-  // better not.
-  return typeof value === "object" && value !== null ? Reflect.get(value, field) : undefined;
+export function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * `Object.keys` narrowed to the record's own keys, without a claim.
+ *
+ * TypeScript declares `Object.keys` as `string[]` on purpose — a value can carry
+ * more keys than its type lists — so `Object.keys(x) as K[]` is a real claim.
+ * `for…in` over a generic is typed `Extract<keyof T, string>` by the compiler
+ * itself, so writing the loop out asks for nothing the compiler is not already
+ * willing to say, and `hasOwn` keeps the answer to own keys the way `Object.keys`
+ * does. The residual claim — that the value carries no keys its type omits — is
+ * now TypeScript's, made in its own rules, rather than ours made with `as`.
+ */
+export function keysOf<T extends Record<string, unknown>>(record: T): (keyof T & string)[] {
+  const keys: (keyof T & string)[] = [];
+  for (const key in record) if (Object.hasOwn(record, key)) keys.push(key);
+  return keys;
 }

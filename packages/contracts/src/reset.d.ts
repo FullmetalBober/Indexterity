@@ -1,6 +1,10 @@
 // `@total-typescript/ts-reset`, which replaces the standard-library types that
 // hand back `any`.
 //
+// THE CANONICAL COPY. Every project needs its own file — a tsconfig only sees
+// what its own `include` covers — but the argument does not need repeating five
+// times, so the other four are two lines and a pointer here.
+//
 // The reason it is here rather than in a lint rule: `JSON.parse` returning `any`
 // meant an ANNOTATION on its result checked exactly as much as an assertion
 // would — nothing — and four of those were in this repo, two of them in the
