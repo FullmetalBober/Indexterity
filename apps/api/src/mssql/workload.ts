@@ -1,6 +1,7 @@
 import { XMLParser } from "fast-xml-parser";
 import { type WorkloadTarget, workloadKey } from "../engine/ports";
 import type { ConstantValue, QueryShape, SortKey } from "../engine/types";
+import { isRecord } from "../errors/message";
 import { PLAN_PARSE_CHUNK, yieldToEventLoop } from "./chunk";
 
 // Query Store plan XML → QueryShape (#201). The plan, not the statement text,
@@ -40,7 +41,7 @@ function asArray(value: unknown): XmlNode[] {
 }
 
 export function isNode(value: unknown): value is XmlNode {
-  return typeof value === "object" && value !== null;
+  return isRecord(value);
 }
 
 export function attr(node: XmlNode, name: string): string | null {

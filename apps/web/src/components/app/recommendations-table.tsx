@@ -7,6 +7,7 @@ import { type DashboardColumns, DataTable, dashboardColumns } from "~/components
 import { Truncated } from "~/components/truncated";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
+import { millisOf } from "~/lib/instant";
 import {
   useApproveRecommendation,
   useRollbackRecommendation,
@@ -114,7 +115,7 @@ function action(rec: Recommendation, actions: Actions, readOnly: boolean) {
           confirmLabel="Un-hide"
           onConfirm={() => actions.unhide(rec.id)}
         />
-        {waiting !== null && new Date(waiting).getTime() > Date.now() ? (
+        {waiting !== null && (millisOf(waiting) ?? 0) > Date.now() ? (
           <ConfirmButton
             trigger={
               <Button size="sm" variant="ghost">

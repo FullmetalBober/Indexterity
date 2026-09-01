@@ -15,7 +15,7 @@
 // `assertionStyle: "never"`, which this repo cannot use — it lints with biome,
 // and biome 2.5 has no equivalent (`useAsConstAssertion` is about PREFERRING
 // `as const`, and the three `NonNullAssertion` rules are about `!`). Writing it
-// here rather than adding eslint for one rule also bought the two checks below,
+// here rather than adding eslint for one rule also bought the three checks below,
 // which no published rule performs. The ban started as five named shapes with the
 // rest merely counted, and it widened as each remaining group turned out to be
 // removable — the count reached zero, so the rule is now what the codebase
@@ -52,6 +52,13 @@
 // `scrub<T>` was written that way for exactly one commit. Banned here because it
 // is otherwise invisible: it passes the compiler, the linter and every test.
 //
+// And a third, found by auditing this file's own premise. A GENERIC function can
+// declare a return type narrower than its body produces and compile, because
+// inside the generic the narrow type reduces to the wide one — `keysOf` promised
+// `(keyof T & string)[]` over `Object.keys`, which is `string[]`, and every call
+// site got the literal key union out of it. No `as`, no overload, no `any`, and
+// so nothing above could see it. See `stdlibOffences`.
+//
 // The repo carried 37 double assertions and 30 test fakes when this started.
 // None survived contact with an alternative: 11 were stale, 1 was a constructor
 // overload the types lack, 1 a callback signature we could widen ourselves, 1 a
@@ -59,8 +66,12 @@
 // That is the rule's real argument — a cast you cannot remove is usually a
 // design problem, not a type problem.
 //
-// Replacements live where they are needed: `messageOf` (errors/message.ts),
-// `at` and `present` (errors/at.ts, web lib/at.ts).
+// Replacements live where they are needed, all in the api's errors/ directory:
+// `messageOf`, `field`, `isRecord` and `keysOf` in message.ts, and `at` and
+// `present` in at.ts — which is duplicated verbatim as web lib/at.ts, because
+// both apps need those two and neither can import them (scripts/lint-twins.ts
+// holds the copies identical). The dashboard's own narrowing helpers are in
+// web lib/narrow.ts.
 import { readFileSync } from "node:fs";
 import { relative } from "node:path";
 import ts from "typescript";
@@ -180,6 +191,91 @@ function parseOffences(source: ts.SourceFile, rel: string): Offence[] {
   return out;
 }
 
+// `return Object.keys(x)` under a return type that is not `string[]`.
+//
+// The shape that got through, and the reason this check exists at all: `keysOf`
+// was declared `<T extends Record<string, unknown>>(record: T): (keyof T & string)[]`
+// over a body returning `Object.keys(record)`, which is `string[]`. It compiled
+// — inside the generic, `keyof T & string` reduces to `string`, so tsc had
+// nothing to object to — and at every call site it handed back the literal key
+// union from a body that had only ever produced `string[]`. TypeScript declares
+// `Object.keys` as `string[]` ON PURPOSE, because a value can carry keys its type
+// does not list, so narrowing the result is the same claim `as K[]` makes, with a
+// signature for syntax instead of an operator.
+//
+// Invisible to everything above: no `as`, no overload, no `any`. It is now
+// `for…in` plus `Object.hasOwn`, where the key type is the compiler's own
+// judgement rather than ours (errors/message.ts).
+//
+// `Object.entries` and `Object.values` are here for the same reason and neither
+// has ever appeared in this form — a rule with a door in it is the thing the
+// angle-bracket check above is about.
+const WIDE_RETURNS: Readonly<Record<string, string>> = {
+  keys: "string[]",
+  entries: "[string, unknown][]",
+};
+
+// `Promise<X>` off an async function's annotation, so `return Object.keys(x)`
+// inside `async …(): Promise<string[] | null>` is read as the `string[] | null`
+// it actually produces. Without this the first run of this check reported that
+// method — a real shape, honestly declared — which is how a new rule teaches
+// people to switch it off.
+function returned(declared: string): string {
+  const promise = /^Promise<(.*)>$/s.exec(declared.trim());
+  return (promise?.[1] ?? declared).trim();
+}
+
+function stdlibOffences(source: ts.SourceFile, rel: string): Offence[] {
+  const out: Offence[] = [];
+  // The enclosing function's declared return type, innermost last.
+  const returns: (string | undefined)[] = [];
+
+  const visit = (node: ts.Node): void => {
+    const isFunction =
+      ts.isFunctionDeclaration(node) ||
+      ts.isMethodDeclaration(node) ||
+      ts.isFunctionExpression(node) ||
+      ts.isArrowFunction(node);
+    if (isFunction) returns.push(node.type?.getText());
+
+    if (ts.isReturnStatement(node) && node.expression !== undefined) {
+      const declared = returns[returns.length - 1];
+      const call = node.expression;
+      if (declared !== undefined && ts.isCallExpression(call)) {
+        const target = call.expression;
+        if (
+          ts.isPropertyAccessExpression(target) &&
+          target.expression.getText() === "Object" &&
+          Object.hasOwn(WIDE_RETURNS, target.name.getText())
+        ) {
+          const method = target.name.getText();
+          const honest = WIDE_RETURNS[method] ?? "";
+          // `keyof` is the tell, and the whole rule: the standard library answers
+          // about the VALUE and a `keyof` answers about the TYPE, so a signature
+          // that promises the second over a body that produced the first is the
+          // claim. `string[]`, `string[] | null`, `Promise<string[]>` and an
+          // unannotated function are all honest and none of them mention it.
+          if (returned(declared).includes("keyof")) {
+            const { line } = source.getLineAndCharacterOfPosition(node.getStart());
+            out.push({
+              file: rel,
+              line: line + 1,
+              kind: "a narrowed standard-library return",
+              text: `Object.${method}() returns ${honest}, declared as ${declared}`,
+            });
+          }
+        }
+      }
+    }
+
+    ts.forEachChild(node, visit);
+    if (isFunction) returns.pop();
+  };
+
+  visit(source);
+  return out;
+}
+
 function main(): void {
   const files = sourceFiles(ROOTS, EXTENSIONS);
   const offences: Offence[] = [];
@@ -228,6 +324,7 @@ function main(): void {
     visit(source);
     offences.push(...overloadOffences(source, rel));
     offences.push(...parseOffences(source, rel));
+    offences.push(...stdlibOffences(source, rel));
   }
 
   for (const offence of offences) {

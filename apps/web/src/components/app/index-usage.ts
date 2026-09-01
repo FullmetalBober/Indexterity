@@ -1,4 +1,5 @@
 import type { ClusterNodes, IndexUsage } from "@repo/contracts";
+import { instantOf } from "~/lib/instant";
 
 // Reading a per-node usage split honestly (#161).
 //
@@ -82,6 +83,7 @@ export function usageDetail(split: UsageSplit, observedAt: string): string[] {
     (entry) => `${entry.member} — ${entry.ops.toLocaleString()} ops`,
   );
   for (const host of split.blindSpots) lines.push(`${host} — not reported by the last collect`);
-  lines.push(`as of ${new Date(observedAt).toLocaleString()}`);
+  const observed = instantOf(observedAt);
+  lines.push(observed === null ? "as of an unknown time" : `as of ${observed.toLocaleString()}`);
   return lines;
 }

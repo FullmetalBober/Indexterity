@@ -9,7 +9,7 @@
 // that relayed the request and every Set-Cookie back — see lib/auth-client.ts.
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { field } from "~/lib/at";
+import { field } from "~/lib/narrow";
 import { authClient } from "../../auth-client";
 import { invalidateSession } from "../client";
 import { queryKeys } from "../keys";

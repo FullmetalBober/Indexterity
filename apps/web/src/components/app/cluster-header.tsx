@@ -3,6 +3,7 @@ import { blockedBadge, blockedFor } from "~/components/app/cluster-blocked";
 import { Badge } from "~/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "~/components/ui/tooltip";
 import { useMounted } from "~/lib/hydration";
+import { millisOf } from "~/lib/instant";
 
 interface ClusterIdentity {
   readonly name: string;
@@ -39,8 +40,14 @@ export function tlsConcessions(overrides: TlsOverrides): string[] {
 
 export function staleness(lastCollectedAt: string | null): string | null {
   if (lastCollectedAt === null) return "never collected";
-  const hours = (Date.now() - new Date(lastCollectedAt).getTime()) / 3_600_000;
-  if (!Number.isFinite(hours) || hours < STALE_AFTER_HOURS) return null;
+  // null means "believe what is underneath", so an instant we cannot read must
+  // NOT take that branch: the badge exists to stop old numbers reading as
+  // current, and a NaN comparison is false, which is how it silently stopped
+  // drawing. Says unknown instead of says fine.
+  const collected = millisOf(lastCollectedAt);
+  if (collected === null) return "last collected at an unreadable time";
+  const hours = (Date.now() - collected) / 3_600_000;
+  if (hours < STALE_AFTER_HOURS) return null;
   const days = Math.floor(hours / 24);
   return days >= 1
     ? `last collected ${days} day${days === 1 ? "" : "s"} ago`

@@ -1,5 +1,7 @@
+import type * as contract from "@repo/contracts";
 import { describe, expectTypeOf, it } from "vitest";
 import type { Membership } from "./auth/tenancy";
+import type * as ports from "./engine/ports";
 import { BURST_SCHEDULE } from "./jobs/schedule";
 import type { TaskName } from "./jobs/tasks";
 import type { MssqlReader } from "./mssql/connection";
@@ -66,5 +68,61 @@ describe("the ports that replaced the fakes", () => {
   // A borrower must not be able to close a connection the roster dialled.
   it("gives a collector no way to close a member it borrowed", () => {
     expectTypeOf<MssqlUsageMember>().not.toHaveProperty("close");
+  });
+});
+
+// Structural equality modulo `readonly`, which the two spellings below differ in
+// deliberately: the ports carry readonly domain types and the contract's output
+// schemas want plain ones, so http/mappers.ts copies at the boundary. What must
+// NOT differ is the member names and their value types.
+type Mutable<T> = T extends readonly (infer E)[]
+  ? Mutable<E>[]
+  : T extends object
+    ? { -readonly [K in keyof T]: Mutable<T[K]> }
+    : T;
+
+describe("the shapes that exist twice", () => {
+  // Four types are spelled once as a zod schema in @repo/contracts and once as an
+  // interface in engine/ports.ts, and the duplication is the layering working:
+  // the adapters must not depend on the wire format, and the browser cannot
+  // import an adapter. What was NOT working is that nothing held the pairs
+  // together — a comment on db/schema.ts's `pgEnum` said "must match
+  // ClusterEngine in src/engine/ports.ts" and that comment was the entire
+  // mechanism.
+  //
+  // `EngineCapabilities.hideIndexes` already had this problem AND already had
+  // the answer: engine/registry.test.ts compares contracts' table against every
+  // adapter's own capability, with a comment saying this is exactly the kind of
+  // pair that drifts silently. These are the other four pairs, held the same way.
+  //
+  // Drift in one direction was already caught: add a field to a contract schema
+  // and http/mappers.ts stops compiling. The other direction is the silent one —
+  // add a field to a port and oRPC's output validation strips it on the way out,
+  // so the dashboard simply never sees it.
+
+  it("spells the engine list the same in the contract and the ports", () => {
+    expectTypeOf<ports.ClusterEngine>().toEqualTypeOf<contract.ClusterEngine>();
+  });
+
+  it("spells the privilege tiers the same", () => {
+    expectTypeOf<ports.PrivilegeTier>().toEqualTypeOf<contract.PrivilegeTier>();
+  });
+
+  it("agrees on which TLS checks a cluster can turn off", () => {
+    expectTypeOf<Mutable<ports.TlsOverrides>>().toEqualTypeOf<contract.TlsOverrides>();
+  });
+
+  it("agrees on what a privilege check carries", () => {
+    expectTypeOf<Mutable<ports.PrivilegeCheck>>().toEqualTypeOf<contract.PrivilegeCheck>();
+  });
+
+  // `engine` is on the contract and not on the port on purpose: the adapters
+  // answer about the CONNECTION, and which adapter was asked is the caller's
+  // decision, so toDiagnosis() adds it at the boundary (#239). Every other field
+  // has to match.
+  it("agrees on what a connection diagnosis carries, apart from the engine", () => {
+    expectTypeOf<Mutable<ports.ConnectionDiagnosis>>().toEqualTypeOf<
+      Omit<contract.ConnectionDiagnosis, "engine">
+    >();
   });
 });

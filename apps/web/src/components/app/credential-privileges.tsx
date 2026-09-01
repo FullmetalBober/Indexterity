@@ -2,6 +2,7 @@ import type { ClusterPrivileges, PrivilegeCheck } from "@repo/contracts";
 import { FixCommand, Row } from "~/components/app/privilege-list";
 import { Alert, AlertDescription, AlertTitle } from "~/components/ui/alert";
 import { Button } from "~/components/ui/button";
+import { millisOf } from "~/lib/instant";
 
 // What the credentials a cluster is stored on actually hold, in three groups
 // (#313).
@@ -31,7 +32,9 @@ import { Button } from "~/components/ui/button";
 // that matters, a panel left open while somebody rotated the string in another
 // tab.
 function ageOf(checkedAt: string, now: number): string {
-  const seconds = Math.max(0, Math.round((now - new Date(checkedAt).getTime()) / 1000));
+  const checked = millisOf(checkedAt);
+  if (checked === null) return "at an unknown time";
+  const seconds = Math.max(0, Math.round((now - checked) / 1000));
   if (seconds < 60) return "just now";
   const minutes = Math.round(seconds / 60);
   if (minutes < 60) return `${minutes} ${minutes === 1 ? "minute" : "minutes"} ago`;

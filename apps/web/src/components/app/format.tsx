@@ -1,6 +1,7 @@
 // Presentation helpers shared by the dashboard's sections.
 import { Tooltip, TooltipContent, TooltipTrigger } from "~/components/ui/tooltip";
 import { useMounted } from "~/lib/hydration";
+import { millisOf } from "~/lib/instant";
 import { LocalTime } from "~/lib/local-time";
 
 export function badgeVariant(type: string): "secondary" | "destructive" | "default" | "outline" {
@@ -68,9 +69,9 @@ export function dropsOn(rec: {
   observeDays: number | null;
 }): string | null {
   if (rec.state !== "HIDDEN" || rec.hiddenAt === null || rec.observeDays === null) return null;
-  const due = new Date(new Date(rec.hiddenAt).getTime() + rec.observeDays * 86_400_000);
-  if (Number.isNaN(due.getTime())) return null;
-  return due.toISOString();
+  const hidden = millisOf(rec.hiddenAt);
+  if (hidden === null) return null;
+  return new Date(hidden + rec.observeDays * 86_400_000).toISOString();
 }
 
 // Day and month: the observe window is weeks, not months, so the year would be

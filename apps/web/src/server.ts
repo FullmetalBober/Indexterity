@@ -13,6 +13,7 @@ import { createServerEntry } from "@tanstack/react-start/server-entry";
 import { isApiRequest, passThroughToApi } from "~/lib/api-passthrough";
 import { startMetricsServer } from "~/lib/metrics/provider";
 import { measureRequest } from "~/lib/metrics/requests";
+import { isRecord } from "~/lib/narrow";
 import { documentCsp, newNonce, withSecurityHeaders } from "~/lib/security-headers";
 
 // The dashboard's server entry. It replaces the framework's default (which is
@@ -114,7 +115,7 @@ if (Reflect.get(globalThis, BOOTED) !== true) {
 // it is CHECKED for being one rather than asserted to be: anything else was
 // never a RequestInit and is dropped instead of handed on as if it were.
 const requestInit = (opts: unknown): Parameters<typeof fetch>[1] =>
-  typeof opts === "object" && opts !== null ? opts : undefined;
+  isRecord(opts) ? opts : undefined;
 
 const handleRequest = (request: Request, opts?: unknown): Response | Promise<Response> =>
   measureRequest(request, async () =>

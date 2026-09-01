@@ -1,6 +1,8 @@
 // The component half of the hydration gate. `useMounted` and `formatTimestamp`
 // next door are the primitives a caller drives itself; this is the one that
 // drives them for the caller, which is the difference the comment below is about.
+
+import { instantOf } from "~/lib/instant";
 import { useMounted } from "./hydration";
 
 // One timestamp, drawn the only way a server can draw one honestly.
@@ -30,8 +32,8 @@ export function LocalTime({
   readonly dateOnly?: boolean;
 }) {
   const mounted = useMounted();
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return <>—</>;
+  const date = instantOf(iso);
+  if (date === null) return <>—</>;
   if (!mounted) {
     const utc = date.toISOString();
     return <>{dateOnly ? utc.slice(0, 10) : `${utc.slice(0, 16).replace("T", " ")} UTC`}</>;

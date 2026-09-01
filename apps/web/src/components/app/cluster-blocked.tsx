@@ -2,6 +2,7 @@ import type { ClusterBlock } from "@repo/contracts";
 import { Link } from "@tanstack/react-router";
 import { Alert, AlertDescription, AlertTitle } from "~/components/ui/alert";
 import { useMounted } from "~/lib/hydration";
+import { millisOf } from "~/lib/instant";
 
 // Why the numbers below are old, said out loud.
 //
@@ -159,8 +160,12 @@ export function blockedBadge(reason: string, task: string | null = null): string
  * acts. Clock-dependent, so callers resolve it after hydration.
  */
 export function blockedFor(since: string): string {
-  const ms = Date.now() - new Date(since).getTime();
-  if (!Number.isFinite(ms) || ms < 0) return "just now";
+  // "just now" was the answer for an unreadable instant as well as for a fresh
+  // one, which reads as reassurance about a block that may be six days old.
+  const started = millisOf(since);
+  if (started === null) return "for an unknown time";
+  const ms = Date.now() - started;
+  if (ms < 0) return "just now";
   const minutes = Math.floor(ms / 60_000);
   if (minutes < 60) return minutes <= 1 ? "for a minute or so" : `for ${minutes} minutes`;
   const hours = Math.floor(minutes / 60);
