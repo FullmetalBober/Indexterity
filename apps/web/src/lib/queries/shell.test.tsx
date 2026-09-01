@@ -8,9 +8,17 @@ const getOrg = vi.hoisted(() => vi.fn());
 const listOrgs = vi.hoisted(() => vi.fn());
 const listMyInvites = vi.hoisted(() => vi.fn());
 
-vi.mock("~/lib/api", () => ({
-  api: () => ({ listClusters, getOrg, listOrgs, listMyInvites }),
-}));
+// The real client with these calls replaced, through a forwarding Proxy: the
+// oRPC client is itself a Proxy over fetch, so spreading it yields `{}` and a
+// call this test never set up would answer `undefined` instead of failing.
+vi.mock("~/lib/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/lib/api")>();
+  const { overriding } = await import("~/lib/overriding");
+  return {
+    ...actual,
+    api: () => overriding(actual.api(), { listClusters, getOrg, listOrgs, listMyInvites }),
+  };
+});
 
 const CLUSTER = {
   id: "c1",

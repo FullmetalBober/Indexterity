@@ -8,7 +8,9 @@ import { TickController } from "./tick.controller";
 
 // The controller's job is routing between the refusals and the bounded drain —
 // the tick itself is TickService's and tested there, so a fake stands in.
-vi.mock("./tick.service", () => ({ TickService: class {} }));
+vi.mock("./tick.service", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./tick.service")>()),
+}));
 
 const SECRET = "s".repeat(48);
 const BASE = {

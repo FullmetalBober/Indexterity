@@ -4,7 +4,10 @@ import { orpcCode } from "../errors/message";
 import { type RequestHeaders, requireSession, requireUserId, sessionCookiesFor } from "./session";
 
 const getSession = vi.hoisted(() => vi.fn());
-vi.mock("./index", () => ({ auth: { api: { getSession } } }));
+vi.mock("./index", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./index")>()),
+  auth: { api: { getSession } },
+}));
 
 // Only `headers` is read from the request, and identity is what the cache is
 // keyed on — two calls to this are two requests.

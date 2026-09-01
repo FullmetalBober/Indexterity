@@ -7,7 +7,10 @@ const client = {
 };
 const pool = { connect: vi.fn(async () => client) };
 
-vi.mock("./client", () => ({ pgPool: vi.fn(async () => pool) }));
+vi.mock("./client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./client")>()),
+  pgPool: vi.fn(async () => pool),
+}));
 
 // The index build budget (#410), tested HERE rather than against a live server.
 //

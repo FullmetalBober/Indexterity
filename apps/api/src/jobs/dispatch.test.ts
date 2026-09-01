@@ -12,7 +12,10 @@ const CLUSTERS = [{ id: "cluster-a" }, { id: "cluster-b" }];
 // saying so is what makes this fake plain enough to write without asserting
 // past anything.
 const roster: ClusterRoster = { ids: async () => CLUSTERS.map((cluster) => cluster.id) };
-vi.mock("../metrics", () => ({ observeClusterFleet: () => undefined }));
+vi.mock("../metrics", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../metrics")>()),
+  observeClusterFleet: () => undefined,
+}));
 
 function helpers() {
   // Typed to the port's own signature, so `spy.mock.calls` is a typed tuple and

@@ -13,10 +13,32 @@ const testTunnel = vi.hoisted(() => vi.fn());
 const toastSuccess = vi.hoisted(() => vi.fn());
 const toastError = vi.hoisted(() => vi.fn());
 
-vi.mock("~/lib/api", () => ({
-  api: () => ({ createTunnel, updateTunnel, deleteTunnel, testTunnel }),
-}));
-vi.mock("sonner", () => ({ toast: { success: toastSuccess, error: toastError } }));
+// The real client with these calls replaced, through a forwarding Proxy: the
+// oRPC client is itself a Proxy over fetch, so spreading it yields `{}` and a
+// call this test never set up would answer `undefined` instead of failing.
+vi.mock("~/lib/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/lib/api")>();
+  const { overriding } = await import("~/lib/overriding");
+  return {
+    ...actual,
+    api: () => overriding(actual.api(), { createTunnel, updateTunnel, deleteTunnel, testTunnel }),
+  };
+});
+// The real sonner with two of `toast`'s methods replaced, rather than an object
+// named `toast`. A factory returning `{ toast: { success, error } }` swaps the
+// WHOLE module — `Toaster` and every other export become undefined — and the two
+// functions were checked against nothing. Built on a copy so sonner's own object
+// is not mutated for whatever else imports it.
+vi.mock("sonner", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("sonner")>();
+  return {
+    ...actual,
+    toast: Object.assign(vi.fn(actual.toast), actual.toast, {
+      success: toastSuccess,
+      error: toastError,
+    }),
+  };
+});
 
 const CONFIG = [
   "[Interface]",

@@ -18,20 +18,63 @@ const setActiveOrg = vi.hoisted(() => vi.fn());
 
 // The api client, called straight from the mutation hooks. A refusal is a throw
 // with a status on it, not an { ok: false } a server function handed back.
-vi.mock("~/lib/api", () => ({
-  api: () => ({ setClusterMode, rotateConnection, deleteCluster, getClusterPrivileges }),
-}));
-vi.mock("@tanstack/react-router", () => ({ useNavigate: () => navigate }));
-vi.mock("sonner", () => ({ toast: { success: toastSuccess, error: toastError } }));
+// The real client with these calls replaced, through a forwarding Proxy: the
+// oRPC client is itself a Proxy over fetch, so spreading it yields `{}` and a
+// call this test never set up would answer `undefined` instead of failing.
+vi.mock("~/lib/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/lib/api")>();
+  const { overriding } = await import("~/lib/overriding");
+  return {
+    ...actual,
+    api: () =>
+      overriding(actual.api(), {
+        setClusterMode,
+        rotateConnection,
+        deleteCluster,
+        getClusterPrivileges,
+      }),
+  };
+});
+vi.mock("@tanstack/react-router", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@tanstack/react-router")>();
+  const { overriding } = await import("~/lib/overriding");
+  return overriding(actual, {
+    useNavigate: () => navigate,
+  });
+});
+// The real sonner with two of `toast`'s methods replaced, rather than an object
+// named `toast`. A factory returning `{ toast: { success, error } }` swaps the
+// WHOLE module — `Toaster` and every other export become undefined — and the two
+// functions were checked against nothing. Built on a copy so sonner's own object
+// is not mutated for whatever else imports it.
+vi.mock("sonner", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("sonner")>();
+  return {
+    ...actual,
+    toast: Object.assign(vi.fn(actual.toast), actual.toast, {
+      success: toastSuccess,
+      error: toastError,
+    }),
+  };
+});
 // The re-auth dialog's half of the fresh-session flow (#52) goes through
 // better-auth's client, not the api.
-vi.mock("~/lib/auth-client", () => ({
-  authClient: {
-    getSession,
-    signIn: { email: signInEmail },
-    organization: { setActive: setActiveOrg },
-  },
-}));
+// The real client with only the calls these tests make replaced. A factory
+// returning a bare `{ authClient: { … } }` swaps the WHOLE module and leaves the
+// rest of better-auth's client undefined, and nothing checked the replacements
+// against the methods they stand in for.
+vi.mock("~/lib/auth-client", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/lib/auth-client")>();
+  return {
+    ...actual,
+    authClient: {
+      ...actual.authClient,
+      getSession,
+      signIn: { ...actual.authClient.signIn, email: signInEmail },
+      organization: { ...actual.authClient.organization, setActive: setActiveOrg },
+    },
+  };
+});
 
 const cluster = {
   id: "c1",

@@ -26,6 +26,13 @@
 //   x as T          anything else: state it in a signature and let the compiler
 //                   check the body, or narrow the value and let it prove itself
 //
+// And one shape that is not an `as` at all. TypeScript does NOT check an overload
+// signature against its implementation — `function f<T>(x: T): T[]` declared over
+// a body returning a scalar compiles — so an overload whose implementation
+// returns `unknown` or `any` is the same unchecked claim with different syntax.
+// `scrub<T>` was written that way for exactly one commit. Banned here because it
+// is otherwise invisible: it passes the compiler, the linter and every test.
+//
 // The repo carried 37 double assertions and 30 test fakes when this started.
 // None survived contact with an alternative: 11 were stale, 1 was a constructor
 // overload the types lack, 1 a callback signature we could widen ourselves, 1 a
@@ -91,6 +98,38 @@ function classify(node: ts.AsExpression): string | null {
   return `a value asserted to ${type.getText().split("\n")[0]}`;
 }
 
+// Overload signatures (no body) whose implementation gives up its return type.
+// Reported per implementation, naming the overload it cannot be checked against.
+function overloadOffences(source: ts.SourceFile, rel: string): Offence[] {
+  const declared = new Map<string, string[]>();
+  const out: Offence[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isFunctionDeclaration(node) && node.name !== undefined) {
+      const name = node.name.getText();
+      const returns = node.type?.getText() ?? "";
+      if (node.body === undefined) {
+        declared.set(name, [...(declared.get(name) ?? []), returns]);
+      } else {
+        const promises = declared.get(name) ?? [];
+        const vague = returns === "unknown" || returns === "any" || returns === "";
+        const specific = promises.filter((one) => one !== returns && one !== "");
+        if (vague && specific.length > 0) {
+          const { line } = source.getLineAndCharacterOfPosition(node.getStart());
+          out.push({
+            file: rel,
+            line: line + 1,
+            kind: "an overload nothing checks",
+            text: `${name}(): ${specific[0]} declared over an implementation returning ${returns === "" ? "an inferred type" : returns}`,
+          });
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return out;
+}
+
 function sourceFiles(): string[] {
   const out: string[] = [];
   const walk = (dir: string): void => {
@@ -138,6 +177,7 @@ function main(): void {
       ts.forEachChild(node, visit);
     };
     visit(source);
+    offences.push(...overloadOffences(source, rel));
   }
 
   for (const offence of offences) {

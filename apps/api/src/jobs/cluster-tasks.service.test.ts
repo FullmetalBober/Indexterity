@@ -16,21 +16,40 @@ import { suggestForCluster } from "./suggest";
 // The passes themselves are tested where they live. What is untested — and what a
 // registry refactor can silently break — is which pass each queue name runs and
 // what it enqueues afterwards, so that is what this pins.
-vi.mock("./collect", () => ({ collectCluster: vi.fn() }));
-vi.mock("./classify", () => ({ classifyCluster: vi.fn() }));
-vi.mock("./change-window", () => ({ refreshInferredWindow: vi.fn() }));
-vi.mock("./suggest", () => ({ suggestForCluster: vi.fn() }));
-vi.mock("./apply", () => ({ applyCluster: vi.fn() }));
-vi.mock("./building", () => ({ settleBuildsForCluster: vi.fn() }));
-vi.mock("./create", () => ({ applyCreatesForCluster: vi.fn() }));
-vi.mock("./finalize", () => ({ finalizeCluster: vi.fn() }));
-vi.mock("./probe", () => ({ probeCluster: vi.fn(async () => []) }));
+vi.mock("./collect", (): typeof import("./collect") => ({ collectCluster: vi.fn() }));
+vi.mock("./classify", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./classify")>()),
+  classifyCluster: vi.fn(),
+}));
+vi.mock("./change-window", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./change-window")>()),
+  refreshInferredWindow: vi.fn(),
+}));
+vi.mock("./suggest", (): typeof import("./suggest") => ({ suggestForCluster: vi.fn() }));
+vi.mock("./apply", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./apply")>()),
+  applyCluster: vi.fn(),
+}));
+vi.mock("./building", (): typeof import("./building") => ({ settleBuildsForCluster: vi.fn() }));
+vi.mock("./create", (): typeof import("./create") => ({ applyCreatesForCluster: vi.fn() }));
+vi.mock("./finalize", (): typeof import("./finalize") => ({ finalizeCluster: vi.fn() }));
+vi.mock("./probe", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./probe")>()),
+  probeCluster: vi.fn(async () => []),
+}));
 // Why the pipeline stopped is written to the clusters row, and this suite's db is
 // an empty object: what it pins is which pass each queue name runs, not what a
 // pass records about itself (tasks.test.ts owns that).
-vi.mock("./blocked", () => ({ markBlocked: vi.fn(), markUnblocked: vi.fn() }));
-vi.mock("../events/emit", () => ({ emitPassFinished: vi.fn(), pgNotifier: vi.fn() }));
-vi.mock("../mail/notify", () => ({
+vi.mock("./blocked", (): typeof import("./blocked") => ({
+  markBlocked: vi.fn(),
+  markUnblocked: vi.fn(),
+}));
+vi.mock("../events/emit", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../events/emit")>()),
+  emitPassFinished: vi.fn(),
+  pgNotifier: vi.fn(),
+}));
+vi.mock("../mail/notify", (): typeof import("../mail/notify") => ({
   ALERT_COOLDOWN_MS: 1,
   alertAllowed: vi.fn(async () => false),
 }));
