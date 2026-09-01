@@ -83,7 +83,7 @@ export interface ProbeClient {
   end(): Promise<void>;
 }
 
-export type ProbeClientFactory = (connectionString: string) => ProbeClient;
+type ProbeClientFactory = (connectionString: string) => ProbeClient;
 
 export interface NotifyProbeOptions {
   // Defaults to the validated DATABASE_URL. Passed explicitly by the tests, and by

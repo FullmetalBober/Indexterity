@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DatabaseInaccessibleError, type EngineSession, workloadKey } from "../src/engine/ports";
 import { ProvisionDeniedError, SCOPED_USERNAME } from "../src/engine/provision";
 import { detectEngine } from "../src/engine/registry";
+import { present } from "../src/errors/at";
 import { postgresAdapter } from "../src/postgres/adapter";
 import { PostgresIndexCollector } from "../src/postgres/collector";
 import { withPgCredentials, withPgDatabase } from "../src/postgres/conn-string";
@@ -44,7 +45,7 @@ describe.skipIf(POSTGRES_URL === undefined)("postgres adapter against a live ser
   let session: EngineSession;
 
   beforeAll(async () => {
-    seed = new PostgresConnection(POSTGRES_URL as string, OVERRIDES);
+    seed = new PostgresConnection(present(POSTGRES_URL, "POSTGRES_URL"), OVERRIDES);
     await seed.connect();
     await seed.execute(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`);
     await seed.execute(`DROP DATABASE IF EXISTS ${VIEWS_ONLY}`);
@@ -79,7 +80,7 @@ describe.skipIf(POSTGRES_URL === undefined)("postgres adapter against a live ser
       `CREATE INDEX orders_cover ON ${SCHEMA}.orders (status) INCLUDE (total, email)`,
     );
     await seed.execute(`ANALYZE ${SCHEMA}.orders`);
-    session = await postgresAdapter.open(POSTGRES_URL as string, OVERRIDES);
+    session = await postgresAdapter.open(present(POSTGRES_URL, "POSTGRES_URL"), OVERRIDES);
   }, 120_000);
 
   afterAll(async () => {
@@ -89,7 +90,7 @@ describe.skipIf(POSTGRES_URL === undefined)("postgres adapter against a live ser
   });
 
   it("is the engine the registry picks for this string", () => {
-    expect(detectEngine(POSTGRES_URL as string)).toBe("POSTGRESQL");
+    expect(detectEngine(present(POSTGRES_URL, "POSTGRES_URL"))).toBe("POSTGRESQL");
     expect(postgresAdapter.capabilities).toEqual({
       hideIndexes: false,
       provisionScopedUsers: true,
@@ -110,7 +111,7 @@ describe.skipIf(POSTGRES_URL === undefined)("postgres adapter against a live ser
     // database for its life, and postgres refuses to drop a database anything is
     // still connected to.
     const inside = new PostgresConnection(
-      withPgDatabase(POSTGRES_URL as string, VIEWS_ONLY),
+      withPgDatabase(present(POSTGRES_URL, "POSTGRES_URL"), VIEWS_ONLY),
       OVERRIDES,
     );
     try {
@@ -233,7 +234,7 @@ describe.skipIf(POSTGRES_URL === undefined)("postgres adapter against a live ser
     await seed.execute(`GRANT pg_monitor TO ${role}`);
     await seed.execute(`REVOKE CONNECT ON DATABASE ${LOCKED} FROM PUBLIC`);
     const partial = new PostgresConnection(
-      withPgCredentials(POSTGRES_URL as string, role, "p"),
+      withPgCredentials(present(POSTGRES_URL, "POSTGRES_URL"), role, "p"),
       OVERRIDES,
     );
     try {
@@ -363,7 +364,10 @@ describe.skipIf(POSTGRES_URL === undefined)("postgres adapter against a live ser
 
   describe("privileges", () => {
     it("reports an admin string as ready and able to apply", async () => {
-      const diagnosis = await postgresAdapter.diagnose(POSTGRES_URL as string, OVERRIDES);
+      const diagnosis = await postgresAdapter.diagnose(
+        present(POSTGRES_URL, "POSTGRES_URL"),
+        OVERRIDES,
+      );
       expect(diagnosis.reachable).toBe(true);
       expect(diagnosis.ready).toBe(true);
       expect(diagnosis.canApply).toBe(true);
@@ -376,7 +380,11 @@ describe.skipIf(POSTGRES_URL === undefined)("postgres adapter against a live ser
     // the good one and the assertion failed on a connection that worked.
     it("reports an unreachable string as unreachable rather than throwing", async () => {
       const diagnosis = await postgresAdapter.diagnose(
-        withPgCredentials(POSTGRES_URL as string, "postgres", "definitely-not-the-password"),
+        withPgCredentials(
+          present(POSTGRES_URL, "POSTGRES_URL"),
+          "postgres",
+          "definitely-not-the-password",
+        ),
         OVERRIDES,
       );
       expect(diagnosis.reachable).toBe(false);
@@ -389,7 +397,10 @@ describe.skipIf(POSTGRES_URL === undefined)("postgres adapter against a live ser
     // Both halves asserted, because only proving the first would leave the
     // promise unverified.
     it("provisions a role that analyses and cannot read or apply", async () => {
-      const provisioned = await provisionPostgresScopedUser(POSTGRES_URL as string, OVERRIDES);
+      const provisioned = await provisionPostgresScopedUser(
+        present(POSTGRES_URL, "POSTGRES_URL"),
+        OVERRIDES,
+      );
       expect(provisioned.username).toBe(SCOPED_USERNAME);
       const scoped = new PostgresConnection(provisioned.connectionString, OVERRIDES);
       try {
@@ -428,10 +439,13 @@ describe.skipIf(POSTGRES_URL === undefined)("postgres adapter against a live ser
     // and it is the CLUSTER that refuses, rather than a uniqueness rule invented
     // over connection strings that can spell one server a dozen ways.
     it("refuses a second provision against a server it already provisioned", async () => {
-      const first = await provisionPostgresScopedUser(POSTGRES_URL as string, OVERRIDES);
+      const first = await provisionPostgresScopedUser(
+        present(POSTGRES_URL, "POSTGRES_URL"),
+        OVERRIDES,
+      );
       try {
         await expect(
-          provisionPostgresScopedUser(POSTGRES_URL as string, OVERRIDES),
+          provisionPostgresScopedUser(present(POSTGRES_URL, "POSTGRES_URL"), OVERRIDES),
         ).rejects.toThrow(/already has an Indexterity user/i);
 
         // And the refusal did not take the working role down with it: rolling
@@ -464,7 +478,10 @@ describe.skipIf(POSTGRES_URL === undefined)("postgres adapter against a live ser
       const limited = `nolimit_${Date.now().toString(36)}`;
       await seed.execute(`CREATE ROLE ${limited} LOGIN PASSWORD 'p' NOCREATEROLE`);
       try {
-        const asLimited = (POSTGRES_URL as string).replace(/\/\/[^@]+@/, `//${limited}:p@`);
+        const asLimited = present(POSTGRES_URL, "POSTGRES_URL").replace(
+          /\/\/[^@]+@/,
+          `//${limited}:p@`,
+        );
         await expect(provisionPostgresScopedUser(asLimited, OVERRIDES)).rejects.toThrow(
           ProvisionDeniedError,
         );

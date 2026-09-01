@@ -4,6 +4,7 @@ import {
   type TunnelRoute,
 } from "../engine/net-guard";
 import type { DialProxy, TlsOverrides } from "../engine/ports";
+import type { ResolvedConnection } from "./conn-string";
 import { directConnectionTo } from "./conn-string";
 import { MongoConnection } from "./connection";
 
@@ -15,7 +16,7 @@ import { MongoConnection } from "./connection";
 //   refused     — the net guard would not let us dial the address the cluster
 //                 named; a policy fact about this deployment, not a health
 //                 fact about the member
-export type MemberState = "answered" | "unreachable" | "refused";
+type MemberState = "answered" | "unreachable" | "refused";
 
 export interface MemberDial {
   readonly host: string;
@@ -35,11 +36,25 @@ export interface MemberDial {
 // So: ask the cluster for its members and open a direct connection to each.
 // A standalone reports none, and a mongos reports none of its own (its shards'
 // primaries answer the fan-out already), so both cost nothing.
+/**
+ * What the member dialer needs of the primary: two answers.
+ *
+ * `MongoConnection` has twelve members and this uses two, so taking the class
+ * meant a test had to claim an object with those two on it WAS a connection.
+ * Naming them makes the test's object complete instead — and states the real
+ * dependency, which is not "a connection" but "the member list, and what the
+ * live client resolved".
+ */
+export interface MongoPrimary {
+  replicaMembers(): Promise<string[]>;
+  resolved(): ResolvedConnection;
+}
+
 export class MemberConnections {
   private dialled: MemberDial[] | null = null;
 
   constructor(
-    private readonly primary: MongoConnection,
+    private readonly primary: MongoPrimary,
     private readonly connString: string,
     private readonly overrides?: TlsOverrides,
     // How this cluster is REACHED, when it is not simply reachable. Both halves
@@ -54,9 +69,7 @@ export class MemberConnections {
   // primary client is already on — $indexStats dedupes by host downstream).
   // Opened once and reused for the life of the session.
   async all(): Promise<MongoConnection[]> {
-    return (await this.dials())
-      .map((dial) => dial.connection)
-      .filter((conn): conn is MongoConnection => conn !== null);
+    return (await this.dials()).map((dial) => dial.connection).filter((conn) => conn !== null);
   }
 
   // Every dial and how it went, which used to be a silent catch: every member

@@ -1,6 +1,7 @@
 import { EventEmitter, on } from "node:events";
 import { Injectable, type OnModuleDestroy } from "@nestjs/common";
 import type { ClusterEvent } from "@repo/contracts";
+import { clusterEvent } from "@repo/contracts";
 import { Client } from "pg";
 import { coreEnv } from "../config/env";
 import { CLUSTER_EVENTS_CHANNEL, parseClusterEventNotification, toClusterEvent } from "./channel";
@@ -81,7 +82,11 @@ export class ClusterEventsService implements OnModuleDestroy {
     this.acquire();
     try {
       for await (const [event] of on(this.emitter, clusterId, { signal: stop })) {
-        yield event as ClusterEvent;
+        // Parsed, not asserted. `on()` yields `any` from the emitter, and this
+        // is the boundary where an event becomes something a subscriber is
+        // promised the shape of — an emit that ever went wrong should fail here
+        // rather than reach a browser as a malformed frame.
+        yield clusterEvent.parse(event);
       }
     } catch (error) {
       // The signal firing is the normal way a subscription ends, not a failure

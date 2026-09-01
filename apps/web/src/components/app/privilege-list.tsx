@@ -13,6 +13,22 @@ import { Button } from "~/components/ui/button";
 // per line is how it will be pasted into a query window. No syntax colouring — it is
 // three lines at most in practice, and a highlighter is a dependency plus a second
 // way for this to be wrong about somebody's dialect.
+/**
+ * `command` is optional HERE even though the contract makes it required.
+ *
+ * The contract's `.default(null)` fills it on parse, so a response that went
+ * through the schema always has it — but during a rolling deploy the api that
+ * ANSWERS may predate the field entirely, and then the key is simply absent.
+ * That is the failure this component's test is named for: `=== null` let
+ * `undefined` through into `command.split`, which the error boundary drew as a
+ * blank page over the whole dashboard.
+ *
+ * So the prop says what can actually arrive. The alternative was a test that
+ * deleted the key behind an assertion — describing the wire in the test while
+ * the type kept promising something the wire does not.
+ */
+type WirePrivilege = Omit<PrivilegeCheck, "command"> & { command?: string | null };
+
 export function FixCommand({ command }: { command: string }) {
   const [copied, setCopied] = useState(false);
   const lines = command.split("\n").length;
@@ -43,7 +59,7 @@ export function FixCommand({ command }: { command: string }) {
   );
 }
 
-export function Row({ privilege, optional }: { privilege: PrivilegeCheck; optional: boolean }) {
+export function Row({ privilege, optional }: { privilege: WirePrivilege; optional: boolean }) {
   // An ungranted requirement is a fault in the connection; an ungranted optional
   // action is a path that is not available. Different marks, because red is a
   // claim that something is wrong.
@@ -88,7 +104,7 @@ export function Row({ privilege, optional }: { privilege: PrivilegeCheck; option
 // It is a separate group rather than three more rows in the first because a
 // missing `createUser` is not a fault in the connection — mixed in with a missing
 // $indexStats it would read as "this cluster cannot be analyzed".
-export function PrivilegeList({ privileges }: { privileges: readonly PrivilegeCheck[] }) {
+export function PrivilegeList({ privileges }: { privileges: readonly WirePrivilege[] }) {
   const engine = privileges.filter((privilege) => privilege.tier !== "PROVISION");
   const provisioning = privileges.filter((privilege) => privilege.tier === "PROVISION");
   return (

@@ -1,5 +1,5 @@
 import { Injectable, type OnApplicationShutdown } from "@nestjs/common";
-import type { SQL } from "drizzle-orm";
+import type { Assume, SQL } from "drizzle-orm";
 import type { Pool, QueryResultRow } from "pg";
 import { coreEnv, workerEnv } from "../config/env";
 import { drainPool } from "../jobs/connection-pool";
@@ -46,15 +46,17 @@ export class DatabaseService implements OnApplicationShutdown {
    * the result is typed, so callers depend on `Promise<TRow[]>` — something a
    * fake can honestly be. Nothing here wanted a whole Database; it wanted rows.
    */
-  // `TRow[]`, not drizzle's `Assume<TRow, QueryResultRow>[]`. The two are the
-  // same type — `Assume<T, U>` is `T extends U ? T : U` and TRow is constrained
-  // to QueryResultRow — but TypeScript defers the conditional while TRow is
-  // still a type variable and cannot see it. Returning drizzle's version instead
-  // would compile with no assertion and cost every caller its row types, which
-  // is a worse trade than one narrowing the constraint above already proves.
-  async rows<TRow extends QueryResultRow>(query: SQL): Promise<TRow[]> {
+  // Drizzle's own row type rather than `TRow[]`, which needs no assertion at
+  // all. `Assume<T, U>` is `T extends U ? T : U`, and TypeScript only defers
+  // that while TRow is an unresolved type variable — at a call site, where TRow
+  // is concrete, it resolves to TRow and the caller keeps its row types.
+  //
+  // An earlier version returned `TRow[]` and asserted, on the belief that
+  // returning drizzle's spelling would cost callers their types. It does not;
+  // that was assumed rather than checked.
+  async rows<TRow extends QueryResultRow>(query: SQL): Promise<Assume<TRow, QueryResultRow>[]> {
     const result = await this.db.execute<TRow>(query);
-    return result.rows as TRow[];
+    return result.rows;
   }
 
   async onApplicationShutdown(): Promise<void> {

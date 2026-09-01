@@ -1,3 +1,4 @@
+import type { QueryResultRow } from "pg";
 import {
   type ClusterNode,
   DatabaseInaccessibleError,
@@ -9,7 +10,8 @@ import {
   workloadKey,
 } from "../engine/ports";
 import type { IndexKey, IndexSpec, QueryShape, ServerHealth } from "../engine/types";
-import { type PostgresConnection, SYSTEM_SCHEMAS } from "./connection";
+import { errorCode } from "../errors/message";
+import { type PostgresReader, type PostgresStatementSource, SYSTEM_SCHEMAS } from "./connection";
 import { collectPostgresHealth } from "./health";
 import { collectPostgresNodes } from "./members";
 import { postgresHasLastIdxScan } from "./version";
@@ -44,7 +46,14 @@ export function joinTableRef(ref: PostgresTableRef): string {
 }
 
 export class PostgresIndexCollector implements IndexCollector {
-  constructor(private readonly conn: PostgresConnection) {}
+  constructor(
+    private readonly conn: PostgresReader,
+    // The workload read, which names its row rather than asking for one by type.
+    // It IS the connection — that is the default and the only thing production
+    // passes — but saying what this read returns is what lets its tests hand
+    // over a complete object instead of asserting statements into `T[]`.
+    private readonly workload: PostgresStatementSource = conn,
+  ) {}
 
   // Ordinary and partitioned tables. A partitioned parent is included because
   // its indexes are the ones a reader manages; the partitions' own indexes are
@@ -400,11 +409,13 @@ export class PostgresIndexCollector implements IndexCollector {
   // by pg_stat_statements.max anyway.
   private async statementsFor(database: string): Promise<NormalizedStatement[]> {
     try {
-      const rows = await this.query<{
-        query: unknown;
-        calls: unknown;
-        rows: unknown;
-      }>(database, `SELECT query, calls, rows FROM pg_stat_statements WHERE calls > 0`);
+      const rows = await this.guarded(database, () =>
+        this.workload.query(
+          `SELECT query, calls, rows FROM pg_stat_statements WHERE calls > 0`,
+          [],
+          database,
+        ),
+      );
       // Coerced HERE, at the boundary, because `calls` and `rows` are bigint
       // columns and node-pg hands bigint back as a STRING — it will not narrow
       // one to a JS number on its own, since a bigint can exceed Number's exact
@@ -439,13 +450,19 @@ export class PostgresIndexCollector implements IndexCollector {
   // Run against one database, turning the driver's "cannot connect" into the one
   // per-database failure the passes above must survive: an inaccessible database
   // contributes nothing and the rest of the cluster is still worth walking.
-  private async query<T>(
+  private async query<T extends QueryResultRow>(
     database: string,
     text: string,
     params: readonly unknown[] = [],
   ): Promise<T[]> {
+    return this.guarded(database, () => this.conn.query<T>(text, params, database));
+  }
+
+  // The classification itself, shared by both reads: the driver's "cannot
+  // connect" becomes the one per-database failure the passes above must survive.
+  private async guarded<T>(database: string, read: () => Promise<T>): Promise<T> {
     try {
-      return await this.conn.query<T>(text, params, database);
+      return await read();
     } catch (error) {
       if (isDatabaseInaccessible(error)) throw new DatabaseInaccessibleError(database, error);
       throw error;
@@ -470,7 +487,7 @@ function escapeRegex(value: string): string {
 const INACCESSIBLE_CODES = new Set(["3D000", "28000", "28P01", "42501"]);
 
 function isDatabaseInaccessible(error: unknown): boolean {
-  const code = (error as { code?: unknown } | null)?.code;
+  const code = errorCode(error);
   return typeof code === "string" && INACCESSIBLE_CODES.has(code);
 }
 

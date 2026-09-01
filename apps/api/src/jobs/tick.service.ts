@@ -1,12 +1,12 @@
 import { EventEmitter } from "node:events";
-import { type BeforeApplicationShutdown, Injectable, Logger } from "@nestjs/common";
+import { type BeforeApplicationShutdown, Inject, Injectable, Logger } from "@nestjs/common";
 import { runOnce, type WorkerEvents, type WorkerPool } from "graphile-worker";
 import { apiEnv, workerEnv } from "../config/env";
 import { sql } from "../db";
 import { DatabaseService } from "../db/database.service";
 import { captureError } from "../errors/reporting";
-import { type BurstResult, claimDuePasses } from "./burst";
-import { ClusterTasksService } from "./cluster-tasks.service";
+import { type BurstResult, claimDuePasses, dbPassClaims } from "./burst";
+import { type ClusterPasses, ClusterTasksService } from "./cluster-tasks.service";
 import { releaseStaleLocks } from "./locks";
 import { wireRunnerEvents } from "./runner";
 import { everyMinutes } from "./schedule";
@@ -64,6 +64,20 @@ export interface TickOutcome {
 // #212 against postgres 17 with graphile-worker 0.17.3 — which is what makes a
 // single drain per tick enough: the tick enqueues the scheduler passes, those
 // fan out per cluster, and the same drain executes the lot.
+/**
+ * The three members the tick uses of the database service.
+ *
+ * Not a big narrowing — the service has four — but it is the difference between
+ * a test object that IS this and one that claims to be a DatabaseService while
+ * implementing part of it. `onApplicationShutdown` is the one left out, and the
+ * tick has no business calling it.
+ */
+export interface TickDatabase {
+  db: DatabaseService["db"];
+  pool: DatabaseService["pool"];
+  rows: DatabaseService["rows"];
+}
+
 @Injectable()
 export class TickService implements BeforeApplicationShutdown {
   private readonly log = new Logger(TickService.name);
@@ -73,7 +87,7 @@ export class TickService implements BeforeApplicationShutdown {
   // the dead-letter capture, the owner alerts and the job counters survive the
   // resident runner's removal. Re-wiring per drain would stack handlers and
   // report every failure N times.
-  private readonly events = new EventEmitter() as WorkerEvents;
+  private readonly events: WorkerEvents = new EventEmitter();
   private readonly taskList: ReturnType<typeof createTaskList>;
   // The overlap guard (#231, must-not-get-wrong 1). The watermark claims
   // protect DISPATCH only — two concurrent runOnce calls are otherwise legal
@@ -90,8 +104,8 @@ export class TickService implements BeforeApplicationShutdown {
   private stopping = false;
 
   constructor(
-    private readonly database: DatabaseService,
-    clusterTasks: ClusterTasksService,
+    @Inject(DatabaseService) private readonly database: TickDatabase,
+    @Inject(ClusterTasksService) clusterTasks: ClusterPasses,
   ) {
     this.taskList = createTaskList(database.db, clusterTasks);
     this.events.on("pool:create", ({ workerPool }) => {
@@ -154,7 +168,7 @@ export class TickService implements BeforeApplicationShutdown {
   // duplicate — and preserve_run_at keeps a re-key from bumping the schedule.
   private async enqueueDue(now: Date = new Date()): Promise<BurstResult> {
     return claimDuePasses(
-      this.database.db,
+      dbPassClaims(this.database.db),
       (task) =>
         this.database.rows(
           sql`select graphile_worker.add_job(

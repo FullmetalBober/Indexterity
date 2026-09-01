@@ -33,6 +33,17 @@ const CONF = parseWireGuardConf(
   ].join("\n"),
 );
 
+// `JSON.parse` returns `any`, so annotating its result is a claim rather than a
+// check — and this fake service stands in for the tunnel daemon, so a line that
+// is not an object at all should fail HERE, naming what arrived.
+function asRecord(line: string, what: string): Record<string, unknown> {
+  const parsed: unknown = JSON.parse(line);
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`expected a ${what} object, got ${line}`);
+  }
+  return { ...parsed };
+}
+
 const GATEWAY = { address: "203.0.113.7", port: 51_820 };
 const ANNOUNCED_PORT = 34_567;
 
@@ -41,7 +52,9 @@ type Emit = (event: Record<string, unknown>) => void;
 interface Stub {
   /** Once, after the listener has been announced. */
   readonly onStart?: (emit: Emit) => void;
-  readonly onCommand?: (command: Record<string, string>, emit: Emit) => void;
+  // Values are `unknown`, which is what a parsed line actually holds — the two
+  // stubs below only compare `cmd`, and comparing an unknown costs nothing.
+  readonly onCommand?: (command: Record<string, unknown>, emit: Emit) => void;
   /** Drop the connection on this command instead of answering it. */
   readonly dropOn?: string;
 }
@@ -66,7 +79,7 @@ async function listen(stub: Stub, greetings: Record<string, unknown>[], commands
     createInterface({ input: socket }).on("line", (line) => {
       if (!greeted) {
         greeted = true;
-        const greeting = JSON.parse(line) as Record<string, unknown>;
+        const greeting = asRecord(line, "greeting");
         greetings.push(greeting);
         // The real service refuses a greeting that names no peering by dropping
         // the connection, having said nothing.
@@ -79,7 +92,7 @@ async function listen(stub: Stub, greetings: Record<string, unknown>[], commands
         return;
       }
       commands.push(line);
-      const command = JSON.parse(line) as Record<string, string>;
+      const command = asRecord(line, "command");
       if (command.cmd === "shutdown") {
         socket.end();
         return;
@@ -152,6 +165,18 @@ afterEach(async () => {
   );
 });
 
+// One level down a parsed greeting, checked. These were
+// `greeting?.config as Record<string, unknown> | undefined`, which claimed a
+// shape for JSON the service sent — so a greeting that carried no config at all
+// compared `undefined` to a key and reported a missing section as a wrong value.
+function nested(parent: Record<string, unknown> | undefined, key: string): Record<string, unknown> {
+  const value = parent?.[key];
+  if (typeof value !== "object" || value === null) {
+    throw new Error(`expected ${key} to be an object, got ${JSON.stringify(value)}`);
+  }
+  return { ...value };
+}
+
 describe("talking to the tunnel service", () => {
   it("greets with the id and the key, on the connection and nowhere else", async () => {
     const { greetings } = await start();
@@ -163,10 +188,10 @@ describe("talking to the tunnel service", () => {
     expect(greeting?.id).toBe("tunnel-under-test");
     // The private key travels in the greeting: not on argv, which /proc exposes,
     // and not in a file that would outlive the peering.
-    const config = greeting?.config as Record<string, unknown> | undefined;
+    const config = nested(greeting, "config");
     expect(config?.privateKey).toBe("6JPr8SWK9dFrjLwOWvGxJvVwt1nJKvXNTKLkS3LPvW8=");
     // Already resolved and vetted by the caller — the service refuses a hostname.
-    const peer = config?.peer as Record<string, unknown> | undefined;
+    const peer = nested(config, "peer");
     expect(peer?.endpoint).toBe("203.0.113.7:51820");
   });
 

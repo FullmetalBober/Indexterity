@@ -1,4 +1,4 @@
-import type { Pool, PoolClient } from "pg";
+import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { workerEnv } from "../config/env";
 import type { DialProxy, TlsOverrides } from "../engine/ports";
 import { pgPool } from "./client";
@@ -51,6 +51,41 @@ const DEFAULT_DATABASE = "postgres";
 // held for the session's life — the same bargain members.ts makes for replicas,
 // for the same reason: a three-database cluster costs three connections rather
 // than three per collect.
+/**
+ * What the executor needs of a Postgres connection: four members.
+ *
+ * The twin of `MssqlWriter`, and separate from the class for the same reason —
+ * a test hands over a complete object rather than claiming a literal IS a
+ * connection. `execute` carries the build flag because the build budget is
+ * asked for per statement (#410).
+ */
+export interface PostgresReader {
+  query<T extends QueryResultRow>(
+    text: string,
+    params?: readonly unknown[],
+    database?: string,
+  ): Promise<T[]>;
+  serverIdentity(): Promise<PostgresServerIdentity>;
+  serverVersion(): Promise<PostgresServerVersion | null>;
+}
+
+export interface PostgresWriter extends PostgresReader {
+  execute(text: string, database?: string, opts?: { build?: boolean }): Promise<void>;
+}
+
+// The one row `pg_stat_statements` answers with, and a port that names it.
+//
+// Split from the reader above because `query<T>` promises rows of whatever type
+// the caller asks for: the only value assignable to `T[]` for every `T` is `[]`,
+// so a test double for the workload read had to assert its statements into
+// shape. Every field is `unknown` because that is what the driver hands back —
+// `calls` and `rows` are bigint columns and arrive as STRINGS.
+export type PgStatementRow = { query: unknown; calls: unknown; rows: unknown };
+
+export interface PostgresStatementSource {
+  query(text: string, params?: readonly unknown[], database?: string): Promise<PgStatementRow[]>;
+}
+
 export class PostgresConnection {
   private readonly pools = new Map<string, Pool>();
   private identity: PostgresServerIdentity | null = null;
@@ -84,10 +119,17 @@ export class PostgresConnection {
   }
 
   // Run against one database. `database` empty means the connection's own.
-  async query<T>(text: string, params: readonly unknown[] = [], database = ""): Promise<T[]> {
+  // `pool.query<T>` is generic itself, so the row type is carried by node-pg
+  // rather than asserted back onto its result — which is what the `as T[]` here
+  // used to do, at the one place raw rows enter the program.
+  async query<T extends QueryResultRow>(
+    text: string,
+    params: readonly unknown[] = [],
+    database = "",
+  ): Promise<T[]> {
     const pool = await this.poolFor(database);
-    const result = await pool.query(text, params as unknown[]);
-    return result.rows as T[];
+    const result = await pool.query<T>(text, [...params]);
+    return result.rows;
   }
 
   // DDL that must NOT run inside a transaction: `CREATE INDEX CONCURRENTLY` and
@@ -200,12 +242,7 @@ export class PostgresConnection {
   // probe is one catalog read on the database in question, against a pool this
   // session would otherwise have opened to walk it anyway.
   async listDatabaseNames(): Promise<string[]> {
-    const rows = await this.query<{ datname: string }>(
-      `SELECT datname FROM pg_database
-        WHERE datallowconn AND NOT datistemplate
-        ORDER BY datname`,
-    );
-    const names = rows.map((row) => row.datname);
+    const names = (await this.catalogRows()).map((row) => row.datname);
     if (!names.includes(DEFAULT_DATABASE)) return names;
     if (await this.holdsUserTables(this.keyFor(DEFAULT_DATABASE))) return names;
     return names.filter((name) => name !== DEFAULT_DATABASE);
@@ -231,20 +268,24 @@ export class PostgresConnection {
   // collects nothing.
   private async holdsUserTables(database: string): Promise<boolean> {
     try {
-      const rows = await this.query<{ present: boolean }>(
-        `SELECT EXISTS (
-           SELECT 1 FROM pg_class c
-             JOIN pg_namespace n ON n.oid = c.relnamespace
-            WHERE c.relkind IN ('r', 'p')
-              AND n.nspname <> ALL($1::text[])
-         ) AS present`,
-        [SYSTEM_SCHEMAS],
-        database,
-      );
-      return rows[0]?.present === true;
+      return (await this.tableRows(database))[0]?.present === true;
     } catch {
       return false;
     }
+  }
+
+  // The two catalog reads, each naming the row it comes back with.
+  //
+  // Separate from `query<T>` because that method promises rows of whatever type
+  // the caller asks for, and the only value assignable to `T[]` for every `T` is
+  // `[]` — so a test double standing in for it has to assert its data into
+  // shape. These say what the server answers, and a double just answers rows.
+  protected async catalogRows(): Promise<{ datname: string }[]> {
+    return this.query<{ datname: string }>(DATABASE_LISTING_SQL);
+  }
+
+  protected async tableRows(database: string): Promise<{ present: boolean }[]> {
+    return this.query<{ present: boolean }>(USER_TABLES_SQL, [SYSTEM_SCHEMAS], database);
   }
 
   async ping(): Promise<void> {
@@ -259,3 +300,19 @@ export class PostgresConnection {
     await Promise.allSettled(pools.map((pool) => pool.end()));
   }
 }
+
+// Templates and undiallable databases are left to the statement's own filter:
+// one cannot be dialled, so it never reaches the decision above.
+export const DATABASE_LISTING_SQL = `SELECT datname FROM pg_database
+        WHERE datallowconn AND NOT datistemplate
+        ORDER BY datname`;
+
+// Ordinary and partitioned tables only, the same relkind pair the collector
+// walks: a database holding nothing but views has no index to have an opinion
+// about.
+export const USER_TABLES_SQL = `SELECT EXISTS (
+           SELECT 1 FROM pg_class c
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE c.relkind IN ('r', 'p')
+              AND n.nspname <> ALL($1::text[])
+         ) AS present`;

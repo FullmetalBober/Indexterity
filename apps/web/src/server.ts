@@ -68,10 +68,11 @@ const fetch = createStartHandler((ctx) => {
 // to the module that made them. Unguarded, saving a file binds an already-bound
 // port and leaves two more SIGTERM handlers behind.
 const BOOTED: unique symbol = Symbol.for("indexterity.web.metrics-booted");
-const bootState = globalThis as { [BOOTED]?: true };
+// Reflect rather than asserting a shape onto globalThis — the symbol is
+// deliberately not part of its type. Same guard as lib/errors/provider.ts.
 
-if (bootState[BOOTED] !== true) {
-  bootState[BOOTED] = true;
+if (Reflect.get(globalThis, BOOTED) !== true) {
+  Reflect.set(globalThis, BOOTED, true);
   void startMetricsServer({
     info: (message) => console.info(`metrics: ${message}`),
     warn: (message) => console.warn(`metrics: ${message}`),
@@ -108,11 +109,18 @@ if (bootState[BOOTED] !== true) {
 // its own, stricter set (apps/api/src/http/security-headers.ts) and a response
 // that arrived through `fetch` has an immutable header list, so adding to it here
 // would throw for no gain.
+// `opts` is `unknown` because the framework's handler signature says so, and it
+// is forwarded to `fetch`, whose second argument is an all-optional object. So
+// it is CHECKED for being one rather than asserted to be: anything else was
+// never a RequestInit and is dropped instead of handed on as if it were.
+const requestInit = (opts: unknown): Parameters<typeof fetch>[1] =>
+  typeof opts === "object" && opts !== null ? opts : undefined;
+
 const handleRequest = (request: Request, opts?: unknown): Response | Promise<Response> =>
   measureRequest(request, async () =>
     isApiRequest(new URL(request.url).pathname)
       ? passThroughToApi(request)
-      : withSecurityHeaders(await fetch(request, opts as Parameters<typeof fetch>[1])),
+      : withSecurityHeaders(await fetch(request, requestInit(opts))),
   );
 
 // The wrapper only when there is something to report to (#176). This was the

@@ -35,7 +35,7 @@ const parser = new XMLParser({
 export type XmlNode = Record<string, unknown>;
 
 function asArray(value: unknown): XmlNode[] {
-  if (Array.isArray(value)) return value.filter((entry): entry is XmlNode => isNode(entry));
+  if (Array.isArray(value)) return value.filter((entry) => isNode(entry));
   return isNode(value) ? [value] : [];
 }
 
@@ -104,7 +104,7 @@ interface TableShape {
   constants: Record<string, ConstantValue>;
 }
 
-export interface MissingIndexSuggestion {
+interface MissingIndexSuggestion {
   readonly table: string;
   readonly equality: string[];
   readonly range: string[];

@@ -1,6 +1,6 @@
 import type { CreateIndexOptions, IndexBuildOutcome, IndexExecutor } from "../engine/ports";
 import { UnsupportedServerError } from "../engine/version";
-import { MssqlConnection, qualifiedTable, quoteIdent } from "./connection";
+import { type MssqlWriter, qualifiedTable, quoteIdent } from "./connection";
 import { mssqlVersionRefusal } from "./version";
 
 // The SQL Server write surface. hide/unhide are ALTER INDEX DISABLE/REBUILD —
@@ -19,9 +19,22 @@ import { mssqlVersionRefusal } from "./version";
 //   fail on the duplicates that crept in. Those classes are all isNeverDrop
 //   upstream; this file refuses them structurally so an upstream bug cannot
 //   reach one.
+// What sys.indexes answers about one index, and the only row this class reads.
+// Named on the port rather than asked for per call: `query<T>` promises rows of
+// whatever type the caller names, which no test double can honestly answer —
+// the only value assignable to `T[]` for every `T` is `[]`. Fixing the row here
+// lets the double just return index states.
+export interface IndexStateRow {
+  type: number;
+  isUnique: boolean;
+  isPrimaryKey: boolean;
+  isUniqueConstraint: boolean;
+  isDisabled: boolean;
+}
+
 export class MssqlIndexExecutor implements IndexExecutor {
   constructor(
-    private readonly conn: MssqlConnection,
+    private readonly conn: MssqlWriter<IndexStateRow>,
     private readonly readOnly: boolean,
   ) {}
 
@@ -43,20 +56,8 @@ export class MssqlIndexExecutor implements IndexExecutor {
     database: string,
     collection: string,
     indexName: string,
-  ): Promise<{
-    type: number;
-    isUnique: boolean;
-    isPrimaryKey: boolean;
-    isUniqueConstraint: boolean;
-    isDisabled: boolean;
-  } | null> {
-    const rows = await this.conn.query<{
-      type: number;
-      isUnique: boolean;
-      isPrimaryKey: boolean;
-      isUniqueConstraint: boolean;
-      isDisabled: boolean;
-    }>(
+  ): Promise<IndexStateRow | null> {
+    const rows = await this.conn.query(
       `SELECT i.type AS type, i.is_unique AS isUnique, i.is_primary_key AS isPrimaryKey,
               i.is_unique_constraint AS isUniqueConstraint, i.is_disabled AS isDisabled
        FROM ${quoteIdent(database)}.sys.indexes i

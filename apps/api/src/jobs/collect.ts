@@ -55,7 +55,7 @@ function shapeKey(database: string, collection: string, indexName: string, spec:
 function canonicalSpec(spec: unknown): string {
   if (Array.isArray(spec)) return `[${spec.map(canonicalSpec).join(",")}]`;
   if (spec === null || typeof spec !== "object") return JSON.stringify(spec) ?? "null";
-  const entries = Object.entries(spec as Record<string, unknown>)
+  const entries = Object.entries(spec)
     .filter(([, value]) => value !== undefined)
     .sort(([a], [b]) => a.localeCompare(b));
   return `{${entries.map(([key, value]) => `${JSON.stringify(key)}:${canonicalSpec(value)}`).join(",")}}`;

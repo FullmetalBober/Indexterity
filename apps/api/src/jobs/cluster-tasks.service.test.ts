@@ -1,8 +1,5 @@
-import type { Job } from "graphile-worker";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { DatabaseService } from "../db/database.service";
-import type { NotifyService } from "../mail/notify.service";
-import { stub } from "../test-utils";
+import { createDatabase } from "../db/client";
 import { TunnelRegistry } from "../tunnel/tunnel.registry";
 import { applyCluster } from "./apply";
 import { settleBuildsForCluster } from "./building";
@@ -12,38 +9,64 @@ import { ClusterGoneError } from "./cluster-connection";
 import { ClusterTasksService } from "./cluster-tasks.service";
 import { collectCluster } from "./collect";
 import { applyCreatesForCluster } from "./create";
+import type { JobQueue } from "./dispatch";
 import { probeCluster } from "./probe";
 import { suggestForCluster } from "./suggest";
 
 // The passes themselves are tested where they live. What is untested — and what a
 // registry refactor can silently break — is which pass each queue name runs and
 // what it enqueues afterwards, so that is what this pins.
-vi.mock("./collect", () => ({ collectCluster: vi.fn() }));
-vi.mock("./classify", () => ({ classifyCluster: vi.fn() }));
-vi.mock("./change-window", () => ({ refreshInferredWindow: vi.fn() }));
-vi.mock("./suggest", () => ({ suggestForCluster: vi.fn() }));
-vi.mock("./apply", () => ({ applyCluster: vi.fn() }));
-vi.mock("./building", () => ({ settleBuildsForCluster: vi.fn() }));
-vi.mock("./create", () => ({ applyCreatesForCluster: vi.fn() }));
-vi.mock("./finalize", () => ({ finalizeCluster: vi.fn() }));
-vi.mock("./probe", () => ({ probeCluster: vi.fn(async () => []) }));
+vi.mock("./collect", (): typeof import("./collect") => ({ collectCluster: vi.fn() }));
+vi.mock("./classify", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./classify")>()),
+  classifyCluster: vi.fn(),
+}));
+vi.mock("./change-window", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./change-window")>()),
+  refreshInferredWindow: vi.fn(),
+}));
+vi.mock("./suggest", (): typeof import("./suggest") => ({ suggestForCluster: vi.fn() }));
+vi.mock("./apply", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./apply")>()),
+  applyCluster: vi.fn(),
+}));
+vi.mock("./building", (): typeof import("./building") => ({ settleBuildsForCluster: vi.fn() }));
+vi.mock("./create", (): typeof import("./create") => ({ applyCreatesForCluster: vi.fn() }));
+vi.mock("./finalize", (): typeof import("./finalize") => ({ finalizeCluster: vi.fn() }));
+vi.mock("./probe", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./probe")>()),
+  probeCluster: vi.fn(async () => []),
+}));
 // Why the pipeline stopped is written to the clusters row, and this suite's db is
 // an empty object: what it pins is which pass each queue name runs, not what a
 // pass records about itself (tasks.test.ts owns that).
-vi.mock("./blocked", () => ({ markBlocked: vi.fn(), markUnblocked: vi.fn() }));
-vi.mock("../events/emit", () => ({ emitPassFinished: vi.fn(), pgNotifier: vi.fn() }));
-vi.mock("../mail/notify", () => ({
+vi.mock("./blocked", (): typeof import("./blocked") => ({
+  markBlocked: vi.fn(),
+  markUnblocked: vi.fn(),
+}));
+vi.mock("../events/emit", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../events/emit")>()),
+  emitPassFinished: vi.fn(),
+  pgNotifier: vi.fn(),
+}));
+vi.mock("../mail/notify", (): typeof import("../mail/notify") => ({
   ALERT_COOLDOWN_MS: 1,
   alertAllowed: vi.fn(async () => false),
 }));
 
 const CLUSTER = "11111111-1111-1111-1111-111111111111";
 
+// A REAL drizzle client, not `{} as DatabaseService["db"]`. It opens no
+// connection until something queries it — measured: `totalCount` 0 and no
+// socket — and every pass below is mocked, so nothing ever does. Shared, so the
+// assertions can name the object the service was actually handed.
+const db = createDatabase("postgres://unused:unused@127.0.0.1:1/unused", 1);
+
 function service() {
-  const db = {} as DatabaseService["db"];
   return new ClusterTasksService(
-    { db } as DatabaseService,
-    stub<NotifyService>({ notifyClusterOwners: vi.fn() }),
+    { db },
+    // A complete OwnerAlerts: one method, implemented.
+    { notifyClusterOwners: vi.fn() },
     // A real registry with no tunnels in it: these tests are about what a task
     // does with a failure, and no cluster here has a tunnel_id.
     new TunnelRegistry(),
@@ -52,22 +75,23 @@ function service() {
 
 // The real JobHelpers, plus the two members the assertions reach for. Named
 // rather than inline so `stub` has something to check the literal against.
-type Helpers = Parameters<ClusterTasksService["collect"]>[1] & {
+// A complete JobQueue, plus the mock handles the assertions read back off it.
+// No `stub` and no fake Job: nothing reads what addJob returns, and the port
+// says so.
+type Helpers = JobQueue & {
   addJob: ReturnType<typeof vi.fn>;
   logger: { info: ReturnType<typeof vi.fn> };
 };
 
 function helpers(): Helpers {
-  return stub<Helpers>({
-    addJob: vi.fn(async () => stub<Job>({})),
-    // Typed mocks, not bare `vi.fn()`: the Logger's methods take a message, and
-    // an untyped mock is `Mock<Procedure | Constructable>`, which is not one.
-    logger: stub<Helpers["logger"]>({
+  return {
+    addJob: vi.fn(async () => undefined),
+    logger: {
       info: vi.fn((_message: string) => undefined),
       warn: vi.fn((_message: string) => undefined),
       error: vi.fn((_message: string) => undefined),
-    }),
-  });
+    },
+  };
 }
 
 afterEach(() => {
@@ -82,8 +106,11 @@ describe("the per-cluster passes", () => {
     // The third argument is the point of the change: the registry is handed
     // DOWN from the one place the container reaches, rather than the pipeline
     // reaching sideways for a module global.
-    expect(collectCluster).toHaveBeenCalledWith({}, CLUSTER, expect.any(TunnelRegistry));
-    expect(help.addJob.mock.calls.map((call) => call[0])).toEqual(["classify", "suggest"]);
+    expect(collectCluster).toHaveBeenCalledWith(db, CLUSTER, expect.any(TunnelRegistry));
+    expect(help.addJob.mock.calls.map((call: unknown[]) => call[0])).toEqual([
+      "classify",
+      "suggest",
+    ]);
   });
 
   // Nothing is chased when the collect itself did not land: the enqueue happens
@@ -98,8 +125,8 @@ describe("the per-cluster passes", () => {
 
   it("re-derives the change window in the same pass as the classify", async () => {
     await service().classify({ clusterId: CLUSTER }, helpers());
-    expect(classifyCluster).toHaveBeenCalledWith({}, CLUSTER);
-    expect(refreshInferredWindow).toHaveBeenCalledWith({}, CLUSTER);
+    expect(classifyCluster).toHaveBeenCalledWith(db, CLUSTER);
+    expect(refreshInferredWindow).toHaveBeenCalledWith(db, CLUSTER);
   });
 
   // Order is the assertion, not just the calls: a build asked for on an earlier
@@ -156,9 +183,10 @@ describe("the per-cluster passes", () => {
     await service().probe({ clusterId: CLUSTER }, quiet);
     expect(quiet.addJob).not.toHaveBeenCalled();
 
-    vi.mocked(probeCluster).mockResolvedValueOnce([
+    const found: Awaited<ReturnType<typeof probeCluster>> = [
       { database: "app", collection: "orders", reason: "reads up 4x" },
-    ] as Awaited<ReturnType<typeof probeCluster>>);
+    ];
+    vi.mocked(probeCluster).mockResolvedValueOnce(found);
     const loud = helpers();
     await service().probe({ clusterId: CLUSTER }, loud);
     expect(loud.addJob).toHaveBeenCalledWith("suggest", { clusterId: CLUSTER });

@@ -54,7 +54,10 @@ async function planOf(db: Database, orgId: string) {
 
 function assertRole(role: string): void {
   // The plugin accepts a comma-separated list; we accept exactly one of two.
-  if (!(ORG_ROLES as readonly string[]).includes(role)) {
+  // `.some` rather than `(ORG_ROLES as readonly string[]).includes(role)`:
+  // `includes` on a literal tuple wants the literal union, so the assertion was
+  // only there to widen the receiver. A comparison needs no widening.
+  if (!ORG_ROLES.some((allowed) => allowed === role)) {
     throw new APIError("BAD_REQUEST", { message: `role must be one of: ${ORG_ROLES.join(", ")}` });
   }
 }
@@ -182,7 +185,7 @@ export function organizationPlugin(db: Database, config: OrganizationPluginConfi
       // walked past by whoever happens to click a week-old link.
       beforeAcceptInvitation: async ({ invitation, organization: org }) => {
         const verdict = withinLimit(
-          planFrom(org.plan as string | null | undefined),
+          planFrom(org.plan),
           "members",
           await new UsageService(db).seatsUsed(org.id, invitation.id),
         );
@@ -193,7 +196,7 @@ export function organizationPlugin(db: Database, config: OrganizationPluginConfi
       beforeAddMember: async ({ member, organization: org }) => {
         assertRole(member.role);
         const verdict = withinLimit(
-          planFrom(org.plan as string | null | undefined),
+          planFrom(org.plan),
           "members",
           await new UsageService(db).seatsUsed(org.id),
         );

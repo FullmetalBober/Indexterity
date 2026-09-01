@@ -2,6 +2,7 @@ import type { ClusterNodes, IndexUsage, Recommendation } from "@repo/contracts";
 import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { at } from "~/lib/at";
 import { renderInApp } from "~/test-utils";
 import { RecommendationsTable } from "./recommendations-table";
 
@@ -10,15 +11,38 @@ const unhideRecommendation = vi.hoisted(() => vi.fn());
 const rollbackRecommendation = vi.hoisted(() => vi.fn());
 const shortenObserveWindow = vi.hoisted(() => vi.fn());
 
-vi.mock("~/lib/api", () => ({
-  api: () => ({
-    approveRecommendation,
-    unhideRecommendation,
-    rollbackRecommendation,
-    shortenObserveWindow,
-  }),
-}));
-vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
+// The real client with these calls replaced, through a forwarding Proxy: the
+// oRPC client is itself a Proxy over fetch, so spreading it yields `{}` and a
+// call this test never set up would answer `undefined` instead of failing.
+vi.mock("~/lib/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/lib/api")>();
+  const { overriding } = await import("~/lib/overriding");
+  return {
+    ...actual,
+    api: () =>
+      overriding(actual.api(), {
+        approveRecommendation,
+        unhideRecommendation,
+        rollbackRecommendation,
+        shortenObserveWindow,
+      }),
+  };
+});
+// The real sonner with two of `toast`'s methods replaced, rather than an object
+// named `toast`. A factory returning `{ toast: { success, error } }` swaps the
+// WHOLE module — `Toaster` and every other export become undefined — and the two
+// functions were checked against nothing. Built on a copy so sonner's own object
+// is not mutated for whatever else imports it.
+vi.mock("sonner", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("sonner")>();
+  return {
+    ...actual,
+    toast: Object.assign(vi.fn(actual.toast), actual.toast, {
+      success: vi.fn(),
+      error: vi.fn(),
+    }),
+  };
+});
 
 function rec(over: Partial<Recommendation> = {}): Recommendation {
   return {
@@ -410,8 +434,8 @@ describe("RecommendationsTable, the per-node usage split", () => {
         roster={{
           ...ROSTER,
           nodes: [
-            ROSTER.nodes[0] as ClusterNodes["nodes"][number],
-            ROSTER.nodes[1] as ClusterNodes["nodes"][number],
+            at(ROSTER.nodes),
+            at(ROSTER.nodes, 1),
             { host: "c:27017", role: "unknown", state: "unreachable" },
           ],
         }}

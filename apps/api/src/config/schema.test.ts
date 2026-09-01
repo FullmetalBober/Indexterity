@@ -10,8 +10,8 @@ const MIGRATE = { DATABASE_URL: "postgres://u:p@localhost:5432/db" };
 const WORKER = { ...MIGRATE, MASTER_KEY };
 const API = { ...WORKER, BETTER_AUTH_SECRET: "secret" };
 
-function parse(process: "api" | "worker" | "migrate", raw: Record<string, string>) {
-  return loadEnv(process, raw as NodeJS.ProcessEnv);
+function parse(process: "api" | "worker" | "migrate", raw: NodeJS.ProcessEnv) {
+  return loadEnv(process, raw);
 }
 
 function refusal(process: "api" | "worker" | "migrate", raw: Record<string, string>): string {

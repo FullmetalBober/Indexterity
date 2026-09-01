@@ -1,16 +1,16 @@
 // Nest's route decorators write metadata at class-definition time, and this
 // file constructs the controller directly rather than through Nest — the
 // polyfill still has to exist before the class does.
-import { stub } from "../test-utils";
 import "reflect-metadata";
 import { describe, expect, it, vi } from "vitest";
 import { loadEnv } from "../config/env";
 import { TickController } from "./tick.controller";
-import type { TickService } from "./tick.service";
 
 // The controller's job is routing between the refusals and the bounded drain —
 // the tick itself is TickService's and tested there, so a fake stands in.
-vi.mock("./tick.service", () => ({ TickService: class {} }));
+vi.mock("./tick.service", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./tick.service")>()),
+}));
 
 const SECRET = "s".repeat(48);
 const BASE = {
@@ -35,7 +35,7 @@ function makeController(drained = false) {
       drained,
     })),
   };
-  return { controller: new TickController(stub<TickService>(service)), service };
+  return { controller: new TickController(service), service };
 }
 
 describe("GET /api/internal/tick", () => {

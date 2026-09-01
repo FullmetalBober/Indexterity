@@ -9,6 +9,7 @@ import { AuditService } from "../audit/audit.service";
 import type { TrailActor } from "../audit/audit.types";
 import { AuditUtils } from "../audit/audit.utils";
 import { and, type Database, eq, members, schema, user as userTable } from "../db";
+import { field } from "../errors/message";
 import { mailEnabled, sendMail, sendMailDetached } from "../mail/mailer";
 import { GatesService } from "./gates.service";
 import { organizationPlugin } from "./organization";
@@ -433,7 +434,7 @@ export function createAuth(config: AuthConfig) {
         // instead of a dead verification link.
         if (ctx.path === "/change-email") {
           const resolved = await getSessionFromCtx(ctx);
-          const newEmail = (ctx.body as { newEmail?: unknown } | undefined)?.newEmail;
+          const newEmail = field(ctx.body, "newEmail");
           if (resolved === null || typeof newEmail !== "string") return; // its own checks answer
           const decision = await gates.evaluateSignup(newEmail);
           if (!decision.allowed) {
@@ -460,7 +461,7 @@ export function createAuth(config: AuthConfig) {
         if (!OWNER_2FA_PATHS.has(ctx.path)) return;
         const resolved = await getSessionFromCtx(ctx);
         if (resolved === null) return; // the endpoint's own authn answers this
-        const enabled = (resolved.user as { twoFactorEnabled?: unknown }).twoFactorEnabled;
+        const enabled = field(resolved.user, "twoFactorEnabled");
         if (enabled === true) return;
         const [owns] = await db
           .select({ orgId: members.orgId })

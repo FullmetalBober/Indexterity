@@ -3,11 +3,12 @@ import type { JobHelpers } from "graphile-worker";
 import type { Database } from "../db";
 import { InsecureConnectionError } from "../engine/tls";
 import { UnsupportedServerError } from "../engine/version";
+import { messageOf } from "../errors/message";
 import { isUnreachableError } from "../errors/unreachable";
 import { recordClusterTask } from "../metrics";
 import { TunnelUnavailableError } from "../tunnel/resolve";
 import { ClusterCredentialsError, ClusterGoneError } from "./cluster-connection";
-import type { ClusterTasksService } from "./cluster-tasks.service";
+import type { ClusterPasses } from "./cluster-tasks.service";
 import { runDigest } from "./digest";
 import { clusterRoster, dispatchToAllClusters } from "./dispatch";
 import { pruneOldSamples } from "./retention";
@@ -301,7 +302,42 @@ export async function runClusterTask(
 // it (jobs/runner.ts). Before this, each task reached for a module-level singleton
 // instead — which worked, and meant the pool's lifetime belonged to whichever
 // module was imported first rather than to whoever composed the worker.
-export function createTaskList(db: Database, cluster: ClusterTasksService) {
+/**
+ * Every task name the queue knows, as data.
+ *
+ * Declared rather than derived, so a schedule can be checked against it without
+ * constructing the registry — which used to mean handing `createTaskList` two
+ * fake dependencies purely to read the keys back off the object it returned.
+ * The arguments are only ever used when a task RUNS, so the fakes were never
+ * called; they existed to satisfy a signature.
+ *
+ * The registry below is typed as a record over this, so the two cannot drift:
+ * a task added to one and forgotten in the other does not compile.
+ */
+export const TASK_NAMES = [
+  "collect",
+  "classify",
+  "suggest",
+  "apply",
+  "finalize",
+  "probe",
+  "scheduleProbe",
+  "scheduleCollect",
+  "scheduleSuggest",
+  "scheduleApply",
+  "scheduleFinalize",
+  "retention",
+  "digest",
+] as const;
+
+export type TaskName = (typeof TASK_NAMES)[number];
+
+type TaskHandler = (payload: unknown, helpers: JobHelpers) => Promise<void>;
+
+export function createTaskList(
+  db: Database,
+  cluster: ClusterPasses,
+): Record<TaskName, TaskHandler> {
   return {
     collect: (payload: unknown, helpers: JobHelpers): Promise<void> =>
       cluster.collect(payload, helpers),
@@ -337,11 +373,4 @@ export function createTaskList(db: Database, cluster: ClusterTasksService) {
       await runDigest(db);
     },
   };
-}
-
-// A sentence for the badge, from whatever was thrown. The driver's own words are
-// usually the useful ones — "connect ETIMEDOUT 10.0.0.5:27017" tells an owner
-// more than any wording of ours — and the address in them is their own.
-function messageOf(error: unknown): string {
-  return error instanceof Error && error.message !== "" ? error.message : String(error);
 }

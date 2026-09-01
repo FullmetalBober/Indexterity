@@ -2,14 +2,17 @@ import type { z } from "zod";
 import type { Plan } from "../billing/plans";
 import {
   type ApiEnv,
+  apiEnvSchema,
   decodeKey,
   isSecretVar,
   type MigrateEnv,
+  migrateEnvSchema,
   PROCESS_SCHEMAS,
   type ProcessName,
   type TrustProxy,
   type WorkerEnv,
   withoutBlanks,
+  workerEnvSchema,
 } from "./schema";
 
 // The one place in the api that reads process.env, and the one moment it is
@@ -30,8 +33,11 @@ export class EnvironmentError extends Error {
   }
 }
 
-let loaded: { readonly process: ProcessName; readonly values: Record<string, unknown> } | null =
-  null;
+let loaded: {
+  readonly process: ProcessName;
+  readonly values: Record<string, unknown>;
+  readonly raw: NodeJS.ProcessEnv;
+} | null = null;
 
 // What to do about it, for the variables where "required" alone leaves the
 // reader looking for a value they have to generate rather than find.
@@ -79,7 +85,13 @@ export function loadEnv(process: ProcessName, raw: NodeJS.ProcessEnv = globalThi
   const present = withoutBlanks(raw);
   const result = PROCESS_SCHEMAS[process].safeParse(present);
   if (!result.success) throw new EnvironmentError(report(process, present, result.error));
-  loaded = { process, values: result.data as Record<string, unknown> };
+  // The RAW input is kept beside the parsed values because the schemas read
+  // strings and produce typed values — a narrower view has to be parsed from
+  // what came in, not from what came out.
+  loaded = { process, values: result.data, raw: present };
+  // Cleared with the load, not only with resetEnv: a test that re-loads a
+  // different environment must not read a view parsed from the previous one.
+  clearViews();
   return result.data;
 }
 
@@ -103,9 +115,33 @@ export function loadEnvOrExit(process: ProcessName): void {
 // their own and put this back.
 export function resetEnv(): void {
   loaded = null;
+  clearViews();
 }
 
-function current(allowed: readonly ProcessName[], accessor: string): Record<string, unknown> {
+/**
+ * Each accessor's own view, parsed once.
+ *
+ * The three accessors below used to end `as MigrateEnv` — well founded, since a
+ * process's schema is a superset of the narrower ones, and still an assertion
+ * about a value this module had deliberately widened on the way in. Parsing with
+ * the narrow schema says the same thing and checks it.
+ *
+ * Three typed slots rather than one keyed cache, because a `Map<string, unknown>`
+ * would need an assertion coming back out — which is the thing being removed.
+ * They are cleared by `loadEnv` as well as `resetEnv`: a test that re-loads a
+ * different environment must not read a view parsed from the previous one.
+ */
+let coreView: MigrateEnv | null = null;
+let workerView: WorkerEnv | null = null;
+let apiView: ApiEnv | null = null;
+
+function clearViews(): void {
+  coreView = null;
+  workerView = null;
+  apiView = null;
+}
+
+function rawOf(allowed: readonly ProcessName[], accessor: string): NodeJS.ProcessEnv {
   if (loaded === null) {
     throw new EnvironmentError(
       `${accessor}() was called before loadEnv() — an entrypoint has to validate the environment first`,
@@ -116,14 +152,15 @@ function current(allowed: readonly ProcessName[], accessor: string): Record<stri
       `${accessor}() is not available to the ${loaded.process} process, which does not validate those variables`,
     );
   }
-  return loaded.values;
+  return loaded.raw;
 }
 
 // The floor every process shares: Postgres, logging, error reporting. The Helm
 // pre-install migration hook is given DATABASE_URL and nothing else, so this is
 // as much as that Job may ask for.
 export function coreEnv(): MigrateEnv {
-  return current(["api", "worker", "migrate"], "coreEnv") as MigrateEnv;
+  coreView ??= migrateEnvSchema.parse(rawOf(["api", "worker", "migrate"], "coreEnv"));
+  return coreView;
 }
 
 // The pipeline's variables: the master key, the plans, the cluster-dialling
@@ -132,14 +169,16 @@ export function coreEnv(): MigrateEnv {
 // validation the rotate-key CLI runs under, since that tool unseals credentials
 // without ever being given the api's HTTP half.
 export function workerEnv(): WorkerEnv {
-  return current(["api", "worker"], "workerEnv") as WorkerEnv;
+  workerView ??= workerEnvSchema.parse(rawOf(["api", "worker"], "workerEnv"));
+  return workerView;
 }
 
 // The api's own half: HTTP, auth, the rate limits, the sign-up posture. Not
 // reachable from the rotate-key CLI, which validates workerShape and is never
 // given BETTER_AUTH_SECRET.
 export function apiEnv(): ApiEnv {
-  return current(["api"], "apiEnv") as ApiEnv;
+  apiView ??= apiEnvSchema.parse(rawOf(["api"], "apiEnv"));
+  return apiView;
 }
 
 // ── Derived accessors ────────────────────────────────────────────────────────

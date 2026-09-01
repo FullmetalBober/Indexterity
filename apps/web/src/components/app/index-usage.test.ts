@@ -1,5 +1,6 @@
 import type { ClusterNodes, IndexUsage } from "@repo/contracts";
 import { describe, expect, it } from "vitest";
+import { present } from "~/lib/at";
 import { usageDetail, usageLine, usageSplit } from "./index-usage";
 
 function usage(perMember: { member: string; ops: number }[]): IndexUsage {
@@ -35,7 +36,7 @@ describe("usageSplit", () => {
     );
     expect(split?.concentrated).toBe(true);
     expect(split?.activeCount).toBe(1);
-    expect(usageLine(split as NonNullable<typeof split>)).toBe("40,000 ops · 1 of 3 nodes");
+    expect(usageLine(present(split, "the split usage"))).toBe("40,000 ops · 1 of 3 nodes");
   });
 
   it("does not flag traffic spread across the set", () => {
@@ -48,7 +49,7 @@ describe("usageSplit", () => {
       THREE_ANSWERED,
     );
     expect(split?.concentrated).toBe(false);
-    expect(usageLine(split as NonNullable<typeof split>)).toBe("40,000 ops · 3 of 3 nodes");
+    expect(usageLine(present(split, "the split usage"))).toBe("40,000 ops · 3 of 3 nodes");
   });
 
   // A secondary serving a nightly report still picks up the odd stray query, so
@@ -98,8 +99,8 @@ describe("usageSplit", () => {
     );
     expect(split?.blindSpots).toEqual(["c:27017"]);
     // And it stays out of the ratio: two of two ANSWERED, plus a named absence.
-    expect(usageLine(split as NonNullable<typeof split>)).toBe("200 ops · 2 of 2 nodes");
-    expect(usageDetail(split as NonNullable<typeof split>, "2026-08-11T09:00:00.000Z")).toContain(
+    expect(usageLine(present(split, "the split usage"))).toBe("200 ops · 2 of 2 nodes");
+    expect(usageDetail(present(split, "the split usage"), "2026-08-11T09:00:00.000Z")).toContain(
       "c:27017 — not reported by the last collect",
     );
   });
@@ -130,6 +131,6 @@ describe("usageSplit", () => {
 
   it("says so when a reading exists and no member reported", () => {
     const split = usageSplit(usage([]), THREE_ANSWERED);
-    expect(usageLine(split as NonNullable<typeof split>)).toBe("no member reported this index");
+    expect(usageLine(present(split, "the split usage"))).toBe("no member reported this index");
   });
 });

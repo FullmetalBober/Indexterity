@@ -5,6 +5,7 @@ import {
   ProvisionDeniedError,
   SCOPED_USERNAME,
 } from "../engine/provision";
+import { errorCode, messageOf } from "../errors/message";
 import { pgConnStringUsername, withPgCredentials } from "./conn-string";
 import { PostgresConnection } from "./connection";
 import { quoteIdent } from "./executor";
@@ -57,17 +58,17 @@ function scopedPassword(): string {
 // Postgres reports an authorization failure as 42501, and "role does not exist"
 // style problems as 42704 — neither of which a retry fixes.
 function isAuthorizationError(error: unknown): boolean {
-  const code = (error as { code?: unknown } | null)?.code;
+  const code = errorCode(error);
   if (code === "42501") return true;
   return /permission denied|must be (?:owner|superuser)|insufficient privilege/i.test(
-    String((error as { message?: unknown } | null)?.message ?? ""),
+    messageOf(error),
   );
 }
 
 // 42710 duplicate_object — the role name is taken. The backstop behind the
 // pg_roles lookup below, for the window between asking and creating.
 function isDuplicateRoleError(error: unknown): boolean {
-  return (error as { code?: unknown } | null)?.code === "42710";
+  return errorCode(error) === "42710";
 }
 
 export const PROVISION_REFUSAL =

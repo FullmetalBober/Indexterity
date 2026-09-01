@@ -108,6 +108,64 @@ export function buildRequest(pool: mssql.ConnectionPool): mssql.Request {
   return new RequestCtor(pool, { requestTimeout: workerEnv().INDEX_BUILD_TIMEOUT_MS });
 }
 
+/**
+ * What a reader needs of a connection: three answers out of twenty-two.
+ *
+ * Taking the whole `MssqlConnection` meant every test of this class had to claim
+ * an object with these three on it WAS a connection — the other nineteen members
+ * asserted away, unchecked, and silently wrong the moment one of them was
+ * renamed. Naming the three makes each test's object a complete implementation.
+ */
+export interface MssqlSource {
+  query<T>(text: string, params?: QueryParams): Promise<T[]>;
+  serverIdentity(): Promise<MssqlServerIdentity>;
+  localReplicaRole(): Promise<"primary" | "secondary" | null>;
+}
+
+/**
+ * A member connection: read from it, and close it when the roster is done.
+ *
+ * `MssqlSource` plus the one thing the member manager owns. Separate from the
+ * reader because a collector must not be able to close a connection it borrowed.
+ */
+/**
+ * What the executor needs: read, write, and two questions about the server.
+ *
+ * Four of the connection's twenty-two, and deliberately NOT an extension of
+ * `MssqlSource`: the executor never asks who the server is or which replica it
+ * is on, and a port that demanded those would be describing a dependency this
+ * class does not have. The distinction from the reader is real in the other
+ * direction too — a collector must not be able to `execute` DDL against a
+ * customer's database, and the type is where that is said.
+ */
+/**
+ * What a read needs of a connection: one query, answering one row shape.
+ *
+ * `MssqlConnection` has 22 members and a collector uses one, so taking the whole
+ * class meant a test had to fake 21 members it never called.
+ *
+ * Parameterised on the ROW rather than generic on the method, which is what
+ * makes the double assertion-free. `query<T>()` promises "rows of whatever type
+ * you ask for", and the only value assignable to `T[]` for every `T` is `[]` —
+ * so any double with real data in it has to assert. Fixing the row at the port
+ * says what this call actually returns, the real connection's generic `query`
+ * satisfies it, and the double just answers rows.
+ */
+export interface MssqlReader<Row> {
+  query(text: string): Promise<Row[]>;
+}
+
+export interface MssqlWriter<Row> {
+  query(text: string, params?: QueryParams): Promise<Row[]>;
+  execute(text: string, opts?: { build?: boolean }): Promise<void>;
+  serverVersion(): Promise<MssqlServerVersion | null>;
+  supportsOnlineRebuild(): Promise<boolean>;
+}
+
+export interface MssqlMemberSource extends MssqlSource {
+  close(): Promise<void>;
+}
+
 export class MssqlConnection {
   private pool: mssql.ConnectionPool | null = null;
   private identity: MssqlServerIdentity | null = null;
@@ -210,12 +268,7 @@ export class MssqlConnection {
   // SQL Server's own working state, and putting application tables in one is an
   // anti-pattern Microsoft documents against rather than a shape to support.
   async listDatabaseNames(): Promise<string[]> {
-    const rows = await this.query<{ name: string }>(
-      `SELECT name FROM sys.databases
-       WHERE state = 0 AND name NOT IN ('master', 'tempdb', 'model', 'msdb')
-       ORDER BY name`,
-    );
-    return rows.map((row) => row.name);
+    return listDatabaseNames(this);
   }
 
   // Every replica of every Availability Group this instance belongs to, as the
@@ -283,4 +336,21 @@ export class MssqlConnection {
     if (this.pool !== null) await this.pool.close();
     this.pool = null;
   }
+}
+
+// The listing statement, and the rule it carries.
+//
+// Excluded by name, which is the rule all three adapters follow (#347). `model`
+// and `msdb` go even though a real installation can be found with tables in
+// them — they are SQL Server's own working state. On top of the names: an
+// OFFLINE or RESTORING database cannot be listed into, so `state = 0`.
+export const DATABASE_LISTING_SQL = `SELECT name FROM sys.databases
+       WHERE state = 0 AND name NOT IN ('master', 'tempdb', 'model', 'msdb')
+       ORDER BY name`;
+
+// A free function over the reader rather than a method, so the statement and
+// the mapping can be checked without standing up a connection at all.
+export async function listDatabaseNames(reader: MssqlReader<{ name: string }>): Promise<string[]> {
+  const rows = await reader.query(DATABASE_LISTING_SQL);
+  return rows.map((row) => row.name);
 }

@@ -21,12 +21,24 @@ function pathOf(route: RouteLike): string | undefined {
   return route.path ?? route.options?.path;
 }
 
+/**
+ * A type guard rather than three assertions.
+ *
+ * The route tree arrives as `unknown` — it is the router's generated object and
+ * this module deliberately does not depend on its types — so every read used to
+ * assert a shape onto it. Every field of RouteLike is optional, so the only
+ * thing worth checking is that a value is an object at all, and a predicate says
+ * exactly that: anything else is skipped rather than walked as if it were a
+ * route.
+ */
+function isRoute(value: unknown): value is RouteLike {
+  return typeof value === "object" && value !== null;
+}
+
 function childrenOf(route: RouteLike): Array<RouteLike> {
   const children = route.children;
-  if (Array.isArray(children)) return children as Array<RouteLike>;
-  if (typeof children === "object" && children !== null) {
-    return Object.values(children as Record<string, RouteLike>);
-  }
+  if (Array.isArray(children)) return children.filter(isRoute);
+  if (isRoute(children)) return Object.values(children).filter(isRoute);
   return [];
 }
 
@@ -47,7 +59,7 @@ export function routePatterns(tree: unknown): Set<string> {
     if (own !== undefined) patterns.add(here === "" ? "/" : here);
     for (const child of childrenOf(route)) walk(child, here);
   };
-  if (typeof tree === "object" && tree !== null) walk(tree as RouteLike, "");
+  if (isRoute(tree)) walk(tree, "");
   return patterns;
 }
 

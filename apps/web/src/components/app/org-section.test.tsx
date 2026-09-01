@@ -23,27 +23,64 @@ const updateOrgPolicy = vi.hoisted(() => vi.fn());
 // endpoints now, not the api's. A refusal arrives as a RESOLVED `{ data, error }`
 // rather than a throw, which is the whole reason mutations/org.ts has an
 // `unwrap`: a promise that never rejects has no onError.
-vi.mock("~/lib/auth-client", () => ({
-  authClient: {
-    organization: {
-      acceptInvitation,
-      cancelInvitation,
-      create: createOrg,
-      delete: deleteOrg,
-      inviteMember,
-      leave,
-      rejectInvitation,
-      removeMember,
-      update,
-      updateMemberRole,
+// The real client with only the calls these tests make replaced. A factory
+// returning a bare `{ authClient: { … } }` swaps the WHOLE module and leaves the
+// rest of better-auth's client undefined, and nothing checked the replacements
+// against the methods they stand in for.
+vi.mock("~/lib/auth-client", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/lib/auth-client")>();
+  return {
+    ...actual,
+    authClient: {
+      ...actual.authClient,
+      organization: {
+        ...actual.authClient.organization,
+        acceptInvitation,
+        cancelInvitation,
+        create: createOrg,
+        delete: deleteOrg,
+        inviteMember,
+        leave,
+        rejectInvitation,
+        removeMember,
+        update,
+        updateMemberRole,
+      },
     },
-  },
-}));
-vi.mock("sonner", () => ({ toast: { success: toastSuccess, error: toastError } }));
-vi.mock("@tanstack/react-router", () => ({ useNavigate: () => navigate }));
+  };
+});
+// The real sonner with two of `toast`'s methods replaced, rather than an object
+// named `toast`. A factory returning `{ toast: { success, error } }` swaps the
+// WHOLE module — `Toaster` and every other export become undefined — and the two
+// functions were checked against nothing. Built on a copy so sonner's own object
+// is not mutated for whatever else imports it.
+vi.mock("sonner", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("sonner")>();
+  return {
+    ...actual,
+    toast: Object.assign(vi.fn(actual.toast), actual.toast, {
+      success: toastSuccess,
+      error: toastError,
+    }),
+  };
+});
+vi.mock("@tanstack/react-router", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@tanstack/react-router")>();
+  const { overriding } = await import("~/lib/overriding");
+  return overriding(actual, {
+    useNavigate: () => navigate,
+  });
+});
 // The credential policy is OURS, not the plugin's (#313), so it goes through the
 // api client while everything else on this card goes through better-auth.
-vi.mock("~/lib/api", () => ({ api: () => ({ updateOrgPolicy }) }));
+// The real client with these calls replaced, through a forwarding Proxy: the
+// oRPC client is itself a Proxy over fetch, so spreading it yields `{}` and a
+// call this test never set up would answer `undefined` instead of failing.
+vi.mock("~/lib/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/lib/api")>();
+  const { overriding } = await import("~/lib/overriding");
+  return { ...actual, api: () => overriding(actual.api(), { updateOrgPolicy }) };
+});
 
 const org = {
   id: "o1",

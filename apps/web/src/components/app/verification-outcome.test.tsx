@@ -6,14 +6,40 @@ import { VerificationOutcome } from "./verification-outcome";
 
 const sendVerificationEmail = vi.hoisted(() => vi.fn());
 
-vi.mock("~/lib/auth-client", () => ({ authClient: { sendVerificationEmail } }));
+// The real client with only the calls these tests make replaced. A factory
+// returning a bare `{ authClient: { … } }` swaps the WHOLE module and leaves the
+// rest of better-auth's client undefined, and nothing checked the replacements
+// against the methods they stand in for.
+vi.mock("~/lib/auth-client", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/lib/auth-client")>();
+  return {
+    ...actual,
+    authClient: {
+      ...actual.authClient,
+      sendVerificationEmail,
+    },
+  };
+});
 // Only Link is used here, and rendering it needs a router this test has no
 // reason to stand up — the same shortcut every other component test takes.
-vi.mock("@tanstack/react-router", () => ({
-  Link: ({ children, to }: { children: React.ReactNode; to: string }) => (
-    <a href={to}>{children}</a>
-  ),
-}));
+vi.mock("@tanstack/react-router", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@tanstack/react-router")>();
+  const { overriding } = await import("~/lib/overriding");
+  return overriding(actual, {
+    // `props` is left to the contextual type — TanStack's Link is a GENERIC
+    // component, and a double annotating its own narrower props is not the
+    // component it stands in for. Which is also why the render-prop form is
+    // honoured below: a Link's children may be a function, and this one used to
+    // drop it on the floor.
+    Link: (props) => (
+      <a href={String(props.to)}>
+        {typeof props.children === "function"
+          ? props.children({ isActive: false, isTransitioning: false })
+          : props.children}
+      </a>
+    ),
+  });
+});
 
 beforeEach(() => {
   vi.clearAllMocks();

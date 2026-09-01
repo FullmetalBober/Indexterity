@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import type { MssqlConnection, MssqlReplica } from "./connection";
-import { MssqlMemberConnections } from "./members";
+import type { MssqlReplica } from "./connection";
+import { MssqlMemberConnections, type MssqlReplicaCatalog } from "./members";
 
 // A replica dial that fails at once, so a test can tell "the guard allowed it and
 // the socket did not answer" (`unreachable`) from "the guard refused it"
@@ -21,11 +21,11 @@ vi.mock("./connection", async (importOriginal) => {
 // A base connection that answers only what the dialer asks it: the replica
 // catalog. Dialling itself is not exercised here — that needs two live servers,
 // and the integration suite does it (#202).
-function baseWith(replicas: MssqlReplica[] | Error) {
+function baseWith(replicas: MssqlReplica[] | Error): MssqlReplicaCatalog {
   return {
     availabilityReplicas: () =>
       replicas instanceof Error ? Promise.reject(replicas) : Promise.resolve(replicas),
-  } as MssqlConnection;
+  };
 }
 
 function replica(overrides: Partial<MssqlReplica> = {}): MssqlReplica {
@@ -82,12 +82,12 @@ describe("MssqlMemberConnections", () => {
 
   it("dials once and reuses the result", async () => {
     let reads = 0;
-    const base = {
+    const base: MssqlReplicaCatalog = {
       availabilityReplicas: () => {
         reads += 1;
         return Promise.resolve([replica({ secondaryAllows: 0 })]);
       },
-    } as MssqlConnection;
+    };
     const members = new MssqlMemberConnections(base, CONN);
     await members.dials();
     await members.dials();

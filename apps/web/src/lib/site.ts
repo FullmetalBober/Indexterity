@@ -14,7 +14,7 @@ export const CANONICAL_ORIGIN = "https://indexterity.alivlad.com";
 // whose site is indexterity.alivlad.com and whose contact address is somewhere
 // else reads as forwarded-on, and the two constants a fork edits should not
 // disagree about where this deployment lives.
-export const CONTACT_EMAIL = "hello@indexterity.alivlad.com";
+const CONTACT_EMAIL = "hello@indexterity.alivlad.com";
 
 export const REQUEST_ACCESS_HREF = `mailto:${CONTACT_EMAIL}?subject=${encodeURIComponent(
   "Indexterity access request",

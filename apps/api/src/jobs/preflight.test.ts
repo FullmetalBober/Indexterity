@@ -1,8 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { IndexCollector } from "../engine/ports";
 import type { IndexKey, IndexSpec } from "../engine/types";
-import { stub } from "../test-utils";
-import { enforcesTheSame, preflightDrop } from "./preflight";
+import { enforcesTheSame, type PreflightSource, preflightDrop } from "./preflight";
 
 function index(name: string, keys: IndexKey[], overrides: Partial<IndexSpec> = {}): IndexSpec {
   return {
@@ -38,11 +36,12 @@ const DESC = index(
   { unique: true },
 );
 
-function collector(specs: IndexSpec[]): IndexCollector {
-  return stub<IndexCollector>({
+// A complete PreflightSource: both members implemented, nothing asserted away.
+function collector(specs: IndexSpec[]): PreflightSource {
+  return {
     listIndexes: () => Promise.resolve(specs),
     collectUsage: () => Promise.resolve([]),
-  });
+  };
 }
 
 const REORDERED = {
@@ -65,12 +64,12 @@ describe("enforcesTheSame", () => {
   // original forbade and answers fewer queries from its own leaves. The
   // post-build watch is a WRITE-latency gate, so nothing downstream sees it.
   it("refuses a replacement that dropped the original's covering columns", () => {
-    const original = index("a_1_b_1", ASC.keys as IndexKey[], {
+    const original = index("a_1_b_1", [...ASC.keys], {
       unique: true,
       include: ["total"],
     });
     expect(enforcesTheSame(original, DESC)).toBe(false);
-    const carried = index("a_1_b_-1", DESC.keys as IndexKey[], {
+    const carried = index("a_1_b_-1", [...DESC.keys], {
       unique: true,
       include: ["total"],
     });
@@ -78,8 +77,8 @@ describe("enforcesTheSame", () => {
   });
 
   it("accepts a replacement that covers MORE than the original", () => {
-    const original = index("a_1_b_1", ASC.keys as IndexKey[], { unique: true, include: ["total"] });
-    const wider = index("a_1_b_-1", DESC.keys as IndexKey[], {
+    const original = index("a_1_b_1", [...ASC.keys], { unique: true, include: ["total"] });
+    const wider = index("a_1_b_-1", [...DESC.keys], {
       unique: true,
       include: ["total", "email"],
     });

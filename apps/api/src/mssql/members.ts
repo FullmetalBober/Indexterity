@@ -5,6 +5,12 @@ import {
 } from "../engine/net-guard";
 import type { DialProxy, TlsOverrides } from "../engine/ports";
 import { parseMssqlConnString, parseRoutingUrl, retargetMssqlConnString } from "./conn-string";
+import type {
+  MssqlMemberSource,
+  MssqlReplica,
+  MssqlServerIdentity,
+  QueryParams,
+} from "./connection";
 import { MssqlConnection } from "./connection";
 
 // One replica's dial, kept whether or not it worked — the mssql twin of
@@ -17,7 +23,7 @@ import { MssqlConnection } from "./connection";
 //                 accept read connections at all, or the group gave no
 //                 routing URL and its bare instance name is not an address.
 //                 A fact about the arrangement, never about the node's health
-export type MssqlMemberState = "answered" | "unreachable" | "refused";
+type MssqlMemberState = "answered" | "unreachable" | "refused";
 
 export interface MssqlMemberDial {
   // The replica's own name (replica_server_name = its @@SERVERNAME), which is
@@ -25,7 +31,8 @@ export interface MssqlMemberDial {
   // entry and its usage readings line up.
   readonly host: string;
   readonly state: MssqlMemberState;
-  readonly connection: MssqlConnection | null;
+  // The PORT, not the class: everything downstream only reads from a member.
+  readonly connection: MssqlMemberSource | null;
 }
 
 // Per-replica connections for usage collection.
@@ -41,11 +48,62 @@ export interface MssqlMemberDial {
 //
 // So: ask the instance for its group's replicas and open a direct connection to
 // each of the others. A standalone names none, and costs one cheap query.
+/**
+ * What a collector needs of the roster: the dials, and nothing else.
+ *
+ * `MssqlMemberConnections` is a class that also owns dialling and closing them.
+ * A collector reads the list; saying so lets a test write the whole thing.
+ */
+export interface MssqlRoster {
+  dials(): Promise<readonly MssqlMemberRead[]>;
+  all(): Promise<MssqlUsageMember[]>;
+}
+
+// One index's counter on one instance, which is the only row a collector reads
+// through a member.
+interface MssqlUsageRow {
+  indexName: string;
+  ops: number;
+}
+
+/**
+ * A member as the collector sees it: identity, role, and that one read.
+ *
+ * Narrower than `MssqlMemberSource` in both directions. It has no `close` —
+ * the roster owns the connections it dialled and a borrower must not be able to
+ * shut one — and its `query` names the row instead of promising rows of
+ * whatever type the caller asks for, which is what lets a test double answer
+ * with readings rather than assert an array into shape. The real connection's
+ * generic `query` satisfies it.
+ */
+export interface MssqlUsageMember {
+  query(text: string, params?: QueryParams): Promise<MssqlUsageRow[]>;
+  serverIdentity(): Promise<MssqlServerIdentity>;
+  localReplicaRole(): Promise<"primary" | "secondary" | null>;
+}
+
+export interface MssqlMemberRead {
+  readonly host: string;
+  readonly state: MssqlMemberState;
+  readonly connection: MssqlUsageMember | null;
+}
+
+/**
+ * The one thing this needs of the base connection: the replica catalog.
+ *
+ * Taking `MssqlConnection` meant a test had to assert a one-method object into a
+ * 22-member class. Dialling is not part of it — that is what this class does
+ * with the answer, and it needs two live servers to exercise (#202).
+ */
+export interface MssqlReplicaCatalog {
+  availabilityReplicas(): Promise<MssqlReplica[]>;
+}
+
 export class MssqlMemberConnections {
   private dialled: MssqlMemberDial[] | null = null;
 
   constructor(
-    private readonly base: MssqlConnection,
+    private readonly base: MssqlReplicaCatalog,
     private readonly connString: string,
     private readonly overrides?: TlsOverrides,
     // Where a replica's socket goes, and what its address is judged against.
@@ -54,10 +112,8 @@ export class MssqlMemberConnections {
     private readonly route?: TunnelRoute,
   ) {}
 
-  async all(): Promise<MssqlConnection[]> {
-    return (await this.dials())
-      .map((dial) => dial.connection)
-      .filter((conn): conn is MssqlConnection => conn !== null);
+  async all(): Promise<MssqlMemberSource[]> {
+    return (await this.dials()).map((dial) => dial.connection).filter((conn) => conn !== null);
   }
 
   // Every replica besides the one the base connection is already on, and how

@@ -68,20 +68,45 @@ const HEADERS: Readonly<Record<string, string>> = {
 // previous tenant's numbers from the browser's back-forward cache.
 const NO_STORE = "no-store, max-age=0";
 
+/**
+ * The three things this does to a response.
+ *
+ * `FastifyReply` is the vendor's whole surface; naming the three members used
+ * lets the rule below be tested against a complete object rather than a fake of
+ * a reply — and a real reply satisfies it, so the hook is unchanged.
+ */
+export interface HeaderSink {
+  getHeader(name: string): unknown;
+  header(name: string, value: string): unknown;
+  removeHeader(name: string): unknown;
+}
+
+/**
+ * The rule itself, separated from the hook that carries it.
+ *
+ * What the hook contributes is `onSend` ordering — a route that set its own
+ * value has already run — and that is a Fastify fact covered by the e2e suite
+ * against real responses. What is decided HERE is which headers, and that is
+ * worth asserting without a web server in the way.
+ */
+export function applySecurityHeaders(reply: HeaderSink): void {
+  for (const [name, value] of Object.entries(HEADERS)) {
+    if (reply.getHeader(name) === undefined) reply.header(name, value);
+  }
+  if (reply.getHeader("cache-control") === undefined) reply.header("cache-control", NO_STORE);
+  // Defensive rather than corrective: neither Fastify nor the Nest adapter sets
+  // this (checked — Express does, and this api is not on Express). A plugin or a
+  // proxy that starts naming the framework and its version is free
+  // reconnaissance, and the cost of never having to notice is one line.
+  reply.removeHeader("x-powered-by");
+}
+
 export function securityHeaders(fastify: FastifyInstance): void {
   // onSend rather than onRequest: a route that sets its own value wins, because
   // by here the route has already run. Nothing overrides these today, and the
   // ordering is what makes it possible to.
   fastify.addHook("onSend", (_request: FastifyRequest, reply: FastifyReply, payload, done) => {
-    for (const [name, value] of Object.entries(HEADERS)) {
-      if (reply.getHeader(name) === undefined) reply.header(name, value);
-    }
-    if (reply.getHeader("cache-control") === undefined) reply.header("cache-control", NO_STORE);
-    // Defensive rather than corrective: neither Fastify nor the Nest adapter
-    // sets this (checked — Express does, and this api is not on Express). A
-    // plugin or a proxy that starts naming the framework and its version is free
-    // reconnaissance, and the cost of never having to notice is one line.
-    reply.removeHeader("x-powered-by");
+    applySecurityHeaders(reply);
     done(null, payload);
   });
 }

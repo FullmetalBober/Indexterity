@@ -2,6 +2,7 @@ import net, { isIP, type Socket } from "node:net";
 import { createInterface } from "node:readline";
 import { z } from "zod";
 import { assertDialableThroughTunnel, type Cidr, parseCidr } from "../engine/net-guard";
+import { messageOf } from "../errors/message";
 import type { WireGuardConf } from "./conf";
 
 // The peering carried by apps/tunnel: wireguard-go for the protocol, gvisor's
@@ -347,7 +348,7 @@ export class RemoteTunnel {
       // The guard's own sentence, or the resolver's. Silence would be read by
       // the binary as a refusal after its timeout anyway, but late and without
       // the reason.
-      this.#send({ cmd: "dialDeny", id, message: (error as Error).message });
+      this.#send({ cmd: "dialDeny", id, message: messageOf(error) });
     }
   }
 
