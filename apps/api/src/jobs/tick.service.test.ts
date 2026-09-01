@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadEnv } from "../config/env";
 import { createDatabase } from "../db/client";
 import { present } from "../errors/at";
+import type { BurstResult } from "./burst";
 import type { ClusterPasses } from "./cluster-tasks.service";
 import { TASK_NAMES } from "./tasks";
 import type { TickDatabase } from "./tick.service";
@@ -53,7 +54,9 @@ vi.mock("graphile-worker", async (importOriginal) => ({
 // The claim side has its own tests (burst.test.ts); here it only has to say
 // what it dispatched so the outcome passthrough is observable.
 vi.mock("./burst", (): typeof import("./burst") => ({
-  claimDuePasses: vi.fn(async () => ({ dispatched: ["scheduleApply"], alreadyClaimed: [] })),
+  claimDuePasses: vi.fn(
+    async (): Promise<BurstResult> => ({ dispatched: ["scheduleApply"], alreadyClaimed: [] }),
+  ),
   // The adapter that turns the database into the two statements a claim needs.
   // Mocked with the module because claimDuePasses is: what it returns is only
   // ever handed to the mock above.

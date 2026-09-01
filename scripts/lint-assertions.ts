@@ -9,7 +9,14 @@
 // enforces the rule. So it walks the AST and looks at `AsExpression` nodes.
 //
 // EVERY assertion except `as const`, which narrows a literal rather than making
-// a claim about a value's shape. The ban started as five named shapes with the
+// a claim about a value's shape. Both syntaxes: `value as T` and `<T>value`.
+//
+// This is `@typescript-eslint/consistent-type-assertions` with
+// `assertionStyle: "never"`, which this repo cannot use — it lints with biome,
+// and biome 2.5 has no equivalent (`useAsConstAssertion` is about PREFERRING
+// `as const`, and the three `NonNullAssertion` rules are about `!`). Writing it
+// here rather than adding eslint for one rule also bought the two checks below,
+// which no published rule performs. The ban started as five named shapes with the
 // rest merely counted, and it widened as each remaining group turned out to be
 // removable — the count reached zero, so the rule is now what the codebase
 // already is. Naming a shape still buys a better message, which is what
@@ -32,6 +39,11 @@
 // where an unchecked `parsed.vulnerabilities` that npm had renamed would have
 // been `undefined` and let every advisory through as "none found". Narrow it, or
 // hand it to a schema. `unknown` is the one honest annotation.
+//
+// `@total-typescript/ts-reset` now makes `JSON.parse` return `unknown`, so the
+// compiler catches this form too — and catches the forms this cannot see, like
+// a parse passed straight into a call. This stays as the backstop for the day
+// somebody drops the reset, and because it names what to do about it.
 //
 // And one shape that is not an `as` at all. TypeScript does NOT check an overload
 // signature against its implementation — `function f<T>(x: T): T[]` declared over
@@ -190,6 +202,19 @@ function main(): void {
       rel.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
     );
     const visit = (node: ts.Node): void => {
+      // The OTHER assertion syntax. `<T>value` says exactly what `value as T`
+      // says, and banning one without the other is a rule with a door in it.
+      // (It is also unavailable in .tsx, which is why nobody had written one —
+      // not a reason to leave it legal in the 300 .ts files.)
+      if (ts.isTypeAssertionExpression(node)) {
+        const { line } = source.getLineAndCharacterOfPosition(node.getStart());
+        offences.push({
+          file: rel,
+          line: line + 1,
+          kind: "an angle-bracket assertion",
+          text: node.getText().split("\n")[0] ?? "",
+        });
+      }
       if (ts.isAsExpression(node)) {
         const kind = classify(node);
         if (kind === null) {

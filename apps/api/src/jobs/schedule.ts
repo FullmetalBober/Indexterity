@@ -18,9 +18,13 @@
 // "whenever you happened to tick first" — a customer-facing weekly email going
 // out at 04:12 because that is when the cron service was free.
 
+import type { TaskName } from "./tasks";
+
 export interface ScheduledPass {
-  // The graphile-worker task to enqueue.
-  readonly task: string;
+  // The graphile-worker task to enqueue, by NAME from the registry rather than
+  // as any string: a typo here used to compile and enqueue a job nothing
+  // handles, which graphile-worker retries until it gives up.
+  readonly task: TaskName;
   // The cron entry this stands for, so the two can be read side by side.
   readonly cron: string;
   // The most recent time this was due at or before `now`.
@@ -82,7 +86,11 @@ function weeklyAt(weekday: number, hour: number, minute: number) {
 // moment by construction, so the offset is dropped rather than faked; the
 // `cron` field keeps the entry each pass historically stood for, readable side
 // by side with the occurrence arithmetic.
-export const BURST_SCHEDULE: readonly ScheduledPass[] = [
+// `satisfies` rather than an annotation, which is the difference between "these
+// are ScheduledPasses" and "these are ScheduledPasses AND here is which ones".
+// The annotation widened every `task` back to the interface's type, so callers
+// read `string[]` off a list whose entries the compiler knew exactly.
+export const BURST_SCHEDULE = [
   { task: "scheduleCollect", cron: "0 * * * *", occurrenceAt: everyMinutes(60) },
   // The `:30` offset keeps two hourly passes off the same cluster in the same
   // minute in a resident worker. A burst tick has one moment to work with, so
@@ -97,7 +105,7 @@ export const BURST_SCHEDULE: readonly ScheduledPass[] = [
   { task: "scheduleFinalize", cron: "0 * * * *", occurrenceAt: everyMinutes(60) },
   { task: "retention", cron: "0 3 * * *", occurrenceAt: dailyAt(3, 0) },
   { task: "digest", cron: "0 9 * * 1", occurrenceAt: weeklyAt(1, 9, 0) },
-];
+] satisfies readonly ScheduledPass[];
 
 // Which passes became due since each was last dispatched.
 //

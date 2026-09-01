@@ -56,10 +56,17 @@ function asDispatch(body: unknown): { dispatched: string[]; drained: boolean } {
   // a cast to read two fields, which is the thing it exists to remove.
   const dispatched = "dispatched" in body ? body.dispatched : undefined;
   const drained = "drained" in body ? body.drained : undefined;
-  if (!Array.isArray(dispatched) || dispatched.some((task) => typeof task !== "string")) {
+  if (!Array.isArray(dispatched)) {
     throw new Error(`expected dispatched task names, got ${JSON.stringify(dispatched)}`);
   }
-  return { dispatched, drained: drained === true };
+  // Derived from the predicate rather than returned on the strength of a
+  // runtime check: `Array.isArray` narrows to `unknown[]` under ts-reset, where
+  // it used to give `any[]` and let this through unproved.
+  const names = dispatched.filter((task) => typeof task === "string");
+  if (names.length !== dispatched.length) {
+    throw new Error(`expected dispatched task names, got ${JSON.stringify(dispatched)}`);
+  }
+  return { dispatched: names, drained: drained === true };
 }
 
 async function tick(

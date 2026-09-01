@@ -1,5 +1,6 @@
 import { type Database, inArray, workerWatermarks } from "../db";
 import { BURST_SCHEDULE, duePasses } from "./schedule";
+import type { TaskName } from "./tasks";
 import { claimWatermark, passKey } from "./watermark";
 
 // The dispatch half of a tick: work out what became due and enqueue it.
@@ -12,11 +13,11 @@ import { claimWatermark, passKey } from "./watermark";
 // its OCCURRENCE, so any number of concurrent tickers — interval, HTTP,
 // replicas — dispatch each occurrence exactly once, with no lock.
 export interface BurstResult {
-  readonly dispatched: readonly string[];
+  readonly dispatched: readonly TaskName[];
   // Passes that were due but claimed by another tick first. Not an error — it
   // is the overlap guard doing its job — but worth returning so a tick can say
   // so rather than looking like it did nothing.
-  readonly alreadyClaimed: readonly string[];
+  readonly alreadyClaimed: readonly TaskName[];
 }
 
 /**
@@ -55,7 +56,7 @@ export function dbPassClaims(db: Database): PassClaims {
 // take minutes, and roll back work that had already been enqueued.
 export async function claimDuePasses(
   claims: PassClaims,
-  addJob: (task: string) => Promise<unknown>,
+  addJob: (task: TaskName) => Promise<unknown>,
   now: Date = new Date(),
 ): Promise<BurstResult> {
   const tasks = BURST_SCHEDULE.map((pass) => pass.task);
@@ -63,8 +64,8 @@ export async function claimDuePasses(
   const lastDispatchedAt = new Map<string, Date>();
   for (const row of rows) lastDispatchedAt.set(row.key.slice("pass:".length), row.at);
 
-  const dispatched: string[] = [];
-  const alreadyClaimed: string[] = [];
+  const dispatched: TaskName[] = [];
+  const alreadyClaimed: TaskName[] = [];
   for (const { pass, occurrence } of duePasses(now, lastDispatchedAt)) {
     // Claim BEFORE enqueueing. The other order would let two ticks both enqueue
     // and then both stamp, and the cost of the failure is asymmetric: a claim

@@ -97,10 +97,18 @@ function asRecord(value: unknown): Record<string, unknown> {
  */
 /** The same, for a list of strings. */
 function asStrings(value: unknown, what: string): string[] {
-  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+  if (!Array.isArray(value)) {
+    throw new Error(`expected ${what} to be an array, got ${JSON.stringify(value)}`);
+  }
+  // Filtered rather than checked-then-returned. `Array.isArray` used to narrow
+  // to `any[]` — so `return value` was accepted as `string[]` with nothing but
+  // the runtime `some()` behind it — and ts-reset makes it `unknown[]`, which is
+  // the truth. The compiler derives `string[]` from the predicate here.
+  const strings = value.filter((item) => typeof item === "string");
+  if (strings.length !== value.length) {
     throw new Error(`expected ${what} to be strings, got ${JSON.stringify(value)}`);
   }
-  return value;
+  return strings;
 }
 
 function asRecords(value: unknown, what: string): Record<string, unknown>[] {
