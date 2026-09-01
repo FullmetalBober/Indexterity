@@ -1,6 +1,6 @@
 {
+  "version": "0.16.1",
   "name": "@repo/web",
-  "version": "0.16.0",
   "private": true,
   "type": "module",
   "scripts": {
