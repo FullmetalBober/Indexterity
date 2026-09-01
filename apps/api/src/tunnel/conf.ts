@@ -15,7 +15,7 @@ import { at } from "../errors/at";
 // ignoring them silently would run a config whose author expects side effects
 // that never happen — and on their side of the tunnel, not ours.
 
-export interface WireGuardPeerConf {
+interface WireGuardPeerConf {
   readonly publicKey: Buffer;
   readonly presharedKey?: Buffer;
   readonly endpoint: { readonly host: string; readonly port: number };

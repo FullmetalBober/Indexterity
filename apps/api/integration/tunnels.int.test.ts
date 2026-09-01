@@ -13,6 +13,9 @@ import {
 } from "../src/db";
 import {
   api,
+  asArray,
+  asRecord,
+  asString,
   authPost,
   databaseUrl,
   type Session,
@@ -39,23 +42,6 @@ import {
 // speaks the protocol and no WireGuard at all.
 //
 // Mongo-free and dial-free, so this costs nothing from the dial budget.
-
-function asRecord(value: unknown): Record<string, unknown> {
-  if (typeof value === "object" && value !== null && !Array.isArray(value)) {
-    return { ...value };
-  }
-  throw new Error(`expected an object body, got ${JSON.stringify(value)}`);
-}
-
-function asString(value: unknown): string {
-  if (typeof value !== "string") throw new Error(`expected a string, got ${typeof value}`);
-  return value;
-}
-
-function asArray(value: unknown): unknown[] {
-  if (!Array.isArray(value)) throw new Error(`expected an array, got ${typeof value}`);
-  return value;
-}
 
 // Real base64 keys, as a wg0.conf carries them — the parser decodes both and
 // checks their length, so placeholders would be refused before any route ran.

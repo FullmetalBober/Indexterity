@@ -23,7 +23,7 @@ import { MssqlConnection } from "./connection";
 //                 accept read connections at all, or the group gave no
 //                 routing URL and its bare instance name is not an address.
 //                 A fact about the arrangement, never about the node's health
-export type MssqlMemberState = "answered" | "unreachable" | "refused";
+type MssqlMemberState = "answered" | "unreachable" | "refused";
 
 export interface MssqlMemberDial {
   // The replica's own name (replica_server_name = its @@SERVERNAME), which is
@@ -61,7 +61,7 @@ export interface MssqlRoster {
 
 // One index's counter on one instance, which is the only row a collector reads
 // through a member.
-export interface MssqlUsageRow {
+interface MssqlUsageRow {
   indexName: string;
   ops: number;
 }

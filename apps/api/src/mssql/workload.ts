@@ -104,7 +104,7 @@ interface TableShape {
   constants: Record<string, ConstantValue>;
 }
 
-export interface MissingIndexSuggestion {
+interface MissingIndexSuggestion {
   readonly table: string;
   readonly equality: string[];
   readonly range: string[];

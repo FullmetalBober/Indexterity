@@ -16,7 +16,7 @@ import { MongoConnection } from "./connection";
 //   refused     — the net guard would not let us dial the address the cluster
 //                 named; a policy fact about this deployment, not a health
 //                 fact about the member
-export type MemberState = "answered" | "unreachable" | "refused";
+type MemberState = "answered" | "unreachable" | "refused";
 
 export interface MemberDial {
   readonly host: string;

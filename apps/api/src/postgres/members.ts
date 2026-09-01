@@ -22,7 +22,7 @@ import type { PostgresServerIdentity } from "./connection";
 // this engine, and better than a roster of one that implies the whole cluster was
 // read.
 /** The one row this file reads, named so the port can be fixed to it. */
-export interface ReplicaRow extends QueryResultRow {
+interface ReplicaRow extends QueryResultRow {
   host: string | null;
   state: string | null;
 }

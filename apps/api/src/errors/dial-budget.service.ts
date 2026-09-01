@@ -37,7 +37,7 @@ export const DIAL_BUDGET_CODE = "DIAL_BUDGET";
 // The budget, as a provider (#354). It holds the pool because the count lives in
 // postgres — see the note above for why it is not in memory.
 /** The one row this service reads back. */
-export interface BudgetRow extends QueryResultRow {
+interface BudgetRow extends QueryResultRow {
   count: number;
   seconds_left: number;
 }

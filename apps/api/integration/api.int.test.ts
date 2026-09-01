@@ -58,6 +58,10 @@ import {
   API_BASE,
   API_PORT,
   api,
+  asRecord,
+  asRecords,
+  asString,
+  asStrings,
   authPost,
   createOrg,
   databaseUrl,
@@ -75,54 +79,6 @@ import {
 import { secretFromTotpUri, totpCode } from "./totp";
 
 // fetch().json() is unknown — narrow at the boundary, no `as`.
-function asRecord(value: unknown): Record<string, unknown> {
-  if (typeof value === "object" && value !== null && !Array.isArray(value)) {
-    return { ...value };
-  }
-  throw new Error(`expected an object body, got ${JSON.stringify(value)}`);
-}
-
-/**
- * A list of objects out of a response field, CHECKED.
- *
- * These reads used to be `asRecords(body.nodes, "body.nodes")` —
- * fifteen of them — which is an assertion about a value the api actually sent,
- * made by the test that is supposed to be verifying it. A response that came
- * back as an object, a string, or null asserted just as happily and failed
- * later on a property access, several lines from the thing that was wrong.
- *
- * Element fields stay `unknown`, which is the truth and costs nothing: `expect`
- * takes unknown, and a wrong type fails the comparison it was going to fail
- * anyway — with the value in the message.
- */
-/** The same, for a list of strings. */
-function asStrings(value: unknown, what: string): string[] {
-  if (!Array.isArray(value)) {
-    throw new Error(`expected ${what} to be an array, got ${JSON.stringify(value)}`);
-  }
-  // Filtered rather than checked-then-returned. `Array.isArray` used to narrow
-  // to `any[]` — so `return value` was accepted as `string[]` with nothing but
-  // the runtime `some()` behind it — and ts-reset makes it `unknown[]`, which is
-  // the truth. The compiler derives `string[]` from the predicate here.
-  const strings = value.filter((item) => typeof item === "string");
-  if (strings.length !== value.length) {
-    throw new Error(`expected ${what} to be strings, got ${JSON.stringify(value)}`);
-  }
-  return strings;
-}
-
-function asRecords(value: unknown, what: string): Record<string, unknown>[] {
-  if (!Array.isArray(value)) {
-    throw new Error(`expected ${what} to be an array, got ${JSON.stringify(value)}`);
-  }
-  return value.map((item) => asRecord(item));
-}
-
-function asString(value: unknown): string {
-  if (typeof value !== "string") throw new Error(`expected a string, got ${typeof value}`);
-  return value;
-}
-
 let server: ChildProcess;
 let db: ReturnType<typeof createDatabase>;
 let mongo: MongoConnection;

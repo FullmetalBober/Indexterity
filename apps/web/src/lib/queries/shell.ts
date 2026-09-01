@@ -97,7 +97,7 @@ export function useMyInvites(): MyInvite[] {
 // and answered with something other than 401. A 500 is not the same failure as
 // a dropped connection, and the layout draws them differently (#183 follow-up:
 // the card used to say "unreachable" for both).
-export interface ApiFailure {
+interface ApiFailure {
   readonly status: number | null;
 }
 

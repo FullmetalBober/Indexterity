@@ -1,7 +1,17 @@
 import type { ChildProcess } from "node:child_process";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { clusters, createDatabase, eq, inArray, organizations, sql, user } from "../src/db";
-import { API_ROOT, api, databaseUrl, type Session, signUp, startApi, stopApi } from "./helpers";
+import {
+  API_ROOT,
+  api,
+  asRecord,
+  asString,
+  databaseUrl,
+  type Session,
+  signUp,
+  startApi,
+  stopApi,
+} from "./helpers";
 
 // The SSE surface end to end: the same postgres NOTIFY the worker sends, heard
 // by the api's listener, fanned out to a subscribed browser — with the tenancy
@@ -10,18 +20,6 @@ import { API_ROOT, api, databaseUrl, type Session, signUp, startApi, stopApi } f
 // Deliberately mongo-free: nothing on this path dials a cluster, so the
 // fixture cluster is a row with dummy sealed credentials rather than a real
 // connection — which also keeps this suite off the dial budget.
-
-function asRecord(value: unknown): Record<string, unknown> {
-  if (typeof value === "object" && value !== null && !Array.isArray(value)) {
-    return { ...value };
-  }
-  throw new Error(`expected an object body, got ${JSON.stringify(value)}`);
-}
-
-function asString(value: unknown): string {
-  if (typeof value !== "string") throw new Error(`expected a string, got ${typeof value}`);
-  return value;
-}
 
 let server: ChildProcess;
 let db: ReturnType<typeof createDatabase>;

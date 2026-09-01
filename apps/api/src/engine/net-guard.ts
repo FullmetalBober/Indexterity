@@ -17,7 +17,7 @@ import { workerEnv } from "../config/env";
 //               normal case for self-hosted deployments whose database sits on
 //               the same private network.
 
-export type AddressCategory = "PUBLIC" | "PRIVATE" | "FORBIDDEN";
+type AddressCategory = "PUBLIC" | "PRIVATE" | "FORBIDDEN";
 
 export interface AddressVerdict {
   readonly category: AddressCategory;

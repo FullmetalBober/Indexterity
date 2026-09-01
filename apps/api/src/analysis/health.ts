@@ -7,7 +7,7 @@ import type { ServerHealth } from "../engine/types";
 // they are declared (engine/types.ts). What lives here is the judgement — the
 // thresholds, the per-engine wording, and the one sentence a human reads.
 
-export type HealthSeverity = "CRITICAL" | "ELEVATED" | "HEALTHY";
+type HealthSeverity = "CRITICAL" | "ELEVATED" | "HEALTHY";
 
 export interface HealthVerdict {
   readonly severity: HealthSeverity;
@@ -45,7 +45,7 @@ export interface HealthOptions {
   readonly wording: HealthWording;
 }
 
-export interface HealthWording {
+interface HealthWording {
   // "collection scans" / "table scans"
   readonly scans: string;
   // "documents" / "pages"

@@ -221,7 +221,7 @@ export async function authPost(
 // Unique by construction. A slug is required and unique, nothing routes by it,
 // and a suite that reruns against the same database would otherwise collide
 // with its own previous run on the second `owner-org`.
-export function uniqueSlug(name: string): string {
+function uniqueSlug(name: string): string {
   const base =
     name
       .toLowerCase()
@@ -421,4 +421,56 @@ export async function api(
   });
   adoptCookies(session, res);
   return res;
+}
+
+/**
+ * The narrowing an integration test does at the wire, in one place.
+ *
+ * `Response.json()` is `unknown` (ts-reset, and undici already), which is the
+ * truth about a body the api just sent — so a test that reads a field either
+ * checks or claims. These check, and throw with the value in the message, so a
+ * response of the wrong shape fails AT the read rather than several lines later
+ * on a property access.
+ *
+ * Here rather than in each spec because three of them had byte-identical copies.
+ */
+export function asRecord(value: unknown): Record<string, unknown> {
+  if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+    return { ...value };
+  }
+  throw new Error(`expected an object body, got ${JSON.stringify(value)}`);
+}
+
+export function asString(value: unknown): string {
+  if (typeof value !== "string") throw new Error(`expected a string, got ${typeof value}`);
+  return value;
+}
+
+export function asArray(value: unknown): unknown[] {
+  if (!Array.isArray(value)) throw new Error(`expected an array, got ${typeof value}`);
+  return value;
+}
+
+/** A list of objects out of a response field, each one checked. */
+export function asRecords(value: unknown, what: string): Record<string, unknown>[] {
+  if (!Array.isArray(value)) {
+    throw new Error(`expected ${what} to be an array, got ${JSON.stringify(value)}`);
+  }
+  return value.map((item) => asRecord(item));
+}
+
+/** The same, for a list of strings. */
+export function asStrings(value: unknown, what: string): string[] {
+  if (!Array.isArray(value)) {
+    throw new Error(`expected ${what} to be an array, got ${JSON.stringify(value)}`);
+  }
+  // Filtered rather than checked-then-returned: `Array.isArray` narrows to
+  // `unknown[]` under ts-reset, and the compiler derives `string[]` from the
+  // predicate. It used to narrow to `any[]`, where `return value` was accepted
+  // with nothing but a runtime check behind it.
+  const strings = value.filter((item) => typeof item === "string");
+  if (strings.length !== value.length) {
+    throw new Error(`expected ${what} to be strings, got ${JSON.stringify(value)}`);
+  }
+  return strings;
 }

@@ -17,7 +17,7 @@ const CHART_HEIGHT = 200;
 // a legend, direct labels and the summary table.
 export const SERIES_PALETTE = ["#00A35C", "#016BF8", "#C77F00", "#B45AF2"];
 
-export interface ChartPoint {
+interface ChartPoint {
   readonly t: string; // ISO-8601
   readonly v: number | null;
 }
