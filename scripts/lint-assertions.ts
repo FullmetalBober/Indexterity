@@ -80,9 +80,17 @@ const SKIP = new Set(["node_modules", ".git", "dist", ".output", ".turbo", "grap
 // obey is a rule people learn to disable.
 const GENERATED = /\.gen\.tsx?$/;
 
-// Files allowed to hold one anyway. EMPTY, and it has stayed empty through
-// every case that looked irreducible — see the note above.
-const ALLOWED = new Set<string>([]);
+// Files allowed to hold one anyway, and an entry is a decision rather than a
+// convenience: it has to arrive with the reason, in the file.
+//
+// `test-utils.ts` holds `stub<T>(partial: Partial<T>): T` — a deliberate
+// re-introduction. The allowlist emptied itself once, when every fake turned out
+// to have a narrower dependency behind it, and most of those narrowings were
+// worth keeping on their own account. What they did not cover is a VENDOR type
+// with eighteen members that a test touches one of, and writing those out is
+// cost with no reader. `Partial<T>` still checks every member the double does
+// define, so what is asserted is the absence of the rest and nothing else.
+const ALLOWED = new Set<string>(["apps/api/src/test-utils.ts"]);
 
 interface Offence {
   readonly file: string;
