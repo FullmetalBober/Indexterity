@@ -73,7 +73,10 @@ export interface OpenClusterOptions {
   // here rather than reached for through a module global, so a reader of this
   // signature can see that a tunnelled cluster needs one — and so a test can
   // supply a fake without remembering to reset anything afterwards.
-  readonly tunnels?: TunnelRegistry;
+  // `| undefined` as well as `?`: every caller reads a registry that may not
+  // exist and forwards it, so passing undefined IS the way to say "no tunnels"
+  // here. The distinction the flag protects is real elsewhere and not here.
+  readonly tunnels?: TunnelRegistry | undefined;
 }
 
 // The cluster row and the credentials it was sealed with.

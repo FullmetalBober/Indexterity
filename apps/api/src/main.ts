@@ -110,7 +110,10 @@ async function bootstrap(): Promise<void> {
         new Request(url, {
           method: request.method,
           headers,
-          body: hasBody ? JSON.stringify(request.body) : undefined,
+          // Spread rather than `body: … : undefined`. RequestInit's `body` is
+          // `BodyInit`, and undefined is not one — which is right: a GET does not
+          // carry an empty body, it carries no body.
+          ...(hasBody ? { body: JSON.stringify(request.body) } : {}),
         }),
       );
       // better-auth turns its own failures into a 500 rather than throwing, so

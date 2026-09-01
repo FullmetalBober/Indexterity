@@ -37,7 +37,13 @@ interface Cursor {
 
 function SecurityPage() {
   const org = useOrg();
-  const [filter, setFilter] = useState<{ event?: string; actorUserId?: string }>({});
+  // `| undefined` as well as `?`: the filter bar clears a field by handing back
+  // an object with the key present and undefined, which under
+  // exactOptionalPropertyTypes is not the same type as the key being absent.
+  const [filter, setFilter] = useState<{
+    event?: string | undefined;
+    actorUserId?: string | undefined;
+  }>({});
   const [cursor, setCursor] = useState<Cursor | null>(null);
 
   const query: TrailFilter = {

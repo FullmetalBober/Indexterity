@@ -61,7 +61,7 @@ export interface CreateCandidate {
   readonly scanning: boolean;
   // When set, build a partial index: these constant equality predicates move
   // into partialFilterExpression and out of the keys — smaller index, same query.
-  readonly partialFilter?: Readonly<Record<string, ConstantValue>>;
+  readonly partialFilter?: Readonly<Record<string, ConstantValue>> | undefined;
 }
 
 export interface WorkloadOptions {
@@ -194,7 +194,7 @@ export function sortOrderAdvisories(
 interface Want {
   readonly shape: QueryShape;
   readonly wantedKeys: SortKey[];
-  readonly partialFilter?: Readonly<Record<string, ConstantValue>>;
+  readonly partialFilter?: Readonly<Record<string, ConstantValue>> | undefined;
   scanning: boolean;
   absorbedCount: number;
   absorbedShapes: number;

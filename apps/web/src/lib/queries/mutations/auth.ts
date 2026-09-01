@@ -17,15 +17,21 @@ import { queryKeys } from "../keys";
 // better-auth answers with { data, error } rather than throwing, so a refusal
 // arrives as a resolved promise and is branched on here. onError underneath is
 // what catches the request that got no answer at all.
+//
+// Every optional member is `?: X | undefined`, matching the library's own
+// spelling. Under exactOptionalPropertyTypes a narrower declaration here refuses
+// better-auth's actual return value at all ten call sites: it declares
+// `Error$1<{ code?: string | undefined; message?: string | undefined }>`, and
+// "present and undefined" is not assignable to "absent".
 interface Answer {
   // Unknown on purpose: better-auth types each endpoint's data individually
   // and the twoFactorClient's `twoFactorRedirect` marker is not on any of
   // them — it is a runtime answer, so it is read by a guard rather than a type.
   readonly data?: unknown;
   readonly error: {
-    readonly message?: string;
-    readonly code?: string;
-    readonly status?: number;
+    readonly message?: string | undefined;
+    readonly code?: string | undefined;
+    readonly status?: number | undefined;
   } | null;
 }
 
