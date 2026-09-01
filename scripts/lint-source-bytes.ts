@@ -19,32 +19,14 @@
 // Biome does not object (both files passed `biome check` for their whole life),
 // which is why this is a check of its own rather than a rule setting.
 import { readFileSync } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-
-const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+import { relative } from "node:path";
+import { ROOT, sourceFiles } from "./source-files.ts";
 
 // Everything a human edits. Deliberately not the whole tree: lockfiles, images
 // and build output are not source, and one of them legitimately holding a NUL
 // would turn this into a check people learn to ignore.
 const ROOTS = ["apps", "packages", "scripts", "deploy", "docs"];
 const EXTENSIONS = [".ts", ".tsx", ".js", ".mjs", ".json", ".md", ".yaml", ".yml", ".tpl", ".sql"];
-const SKIP = new Set(["node_modules", ".git", "dist", ".output", ".turbo", "graphify-out"]);
-
-async function sourceFiles(): Promise<string[]> {
-  const { readdirSync } = await import("node:fs");
-  const out: string[] = [];
-  const walk = (dir: string): void => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (SKIP.has(entry.name)) continue;
-      const path = join(dir, entry.name);
-      if (entry.isDirectory()) walk(path);
-      else if (EXTENSIONS.some((extension) => entry.name.endsWith(extension))) out.push(path);
-    }
-  };
-  for (const root of ROOTS) walk(join(ROOT, root));
-  return out;
-}
 
 // 1-indexed, so the message points where an editor does.
 export function nulLines(contents: Buffer): number[] {
@@ -58,7 +40,7 @@ export function nulLines(contents: Buffer): number[] {
 }
 
 async function main(): Promise<void> {
-  const files = await sourceFiles();
+  const files = sourceFiles(ROOTS, EXTENSIONS);
   let found = 0;
   for (const path of files) {
     const lines = nulLines(readFileSync(path));

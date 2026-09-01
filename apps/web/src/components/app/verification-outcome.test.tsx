@@ -24,21 +24,8 @@ vi.mock("~/lib/auth-client", async (importOriginal) => {
 // reason to stand up — the same shortcut every other component test takes.
 vi.mock("@tanstack/react-router", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@tanstack/react-router")>();
-  const { overriding } = await import("~/lib/overriding");
-  return overriding(actual, {
-    // `props` is left to the contextual type — TanStack's Link is a GENERIC
-    // component, and a double annotating its own narrower props is not the
-    // component it stands in for. Which is also why the render-prop form is
-    // honoured below: a Link's children may be a function, and this one used to
-    // drop it on the floor.
-    Link: (props) => (
-      <a href={String(props.to)}>
-        {typeof props.children === "function"
-          ? props.children({ isActive: false, isTransitioning: false })
-          : props.children}
-      </a>
-    ),
-  });
+  const { anchorLink, overriding } = await import("~/lib/overriding");
+  return overriding(actual, { Link: anchorLink });
 });
 
 beforeEach(() => {

@@ -9,31 +9,25 @@ import {
   type MongoRole,
   queryStatsAdvisory,
 } from "./diagnose";
+import { ENGINE_PRIVILEGES } from "./provision";
 import { parseServerVersion } from "./version";
 
-// The privilege set our own provisioned role grants (provision.ts).
-const enginePrivileges: MongoPrivilege[] = [
-  {
-    resource: { cluster: true },
-    actions: ["listDatabases", "serverStatus", "queryStatsRead", "queryStatsReadTransformed"],
-  },
-  {
-    resource: { db: "", collection: "" },
-    actions: [
-      "listCollections",
-      "listIndexes",
-      "indexStats",
-      "collStats",
-      "createIndex",
-      "dropIndex",
-      "collMod",
-    ],
-  },
-  { resource: { db: "", collection: "system.profile" }, actions: ["find"] },
-  { resource: { db: "config", collection: "collections" }, actions: ["find"] },
-];
+// The privilege set our own provisioned role grants — IMPORTED, not restated.
+//
+// This used to be a verbatim copy of `ENGINE_PRIVILEGES`, which is the shape
+// that keeps passing while production drifts: an action added to the real role
+// would leave every expectation below green about a role nobody grants. The
+// expectations are still written out, because what is under test is which
+// diagnose checks a privilege set satisfies — that mapping is the rule, and it
+// is not derivable from the list.
+// Copied element-wise only because the role declares `readonly` arrays and the
+// zod-inferred reader type does not — the CONTENTS come from production.
+const enginePrivileges: MongoPrivilege[] = ENGINE_PRIVILEGES.map((privilege) => ({
+  resource: privilege.resource,
+  actions: [...privilege.actions],
+}));
 
-function granted(privileges: MongoPrivilege[], databases: string[] = []): string[] {
+function granted(privileges: readonly MongoPrivilege[], databases: string[] = []): string[] {
   return evaluatePrivileges(privileges, databases)
     .filter((check) => check.granted)
     .map((check) => check.key);

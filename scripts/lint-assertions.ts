@@ -61,19 +61,16 @@
 //
 // Replacements live where they are needed: `messageOf` (errors/message.ts),
 // `at` and `present` (errors/at.ts, web lib/at.ts).
-import { readdirSync, readFileSync } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { readFileSync } from "node:fs";
+import { relative } from "node:path";
 import ts from "typescript";
-
-const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+import { ROOT, sourceFiles } from "./source-files.ts";
 
 // `deploy` is in the list because leaving it out was a hole: it is typechecked
 // by the scripts project and holds the manifest rewriter and the all-in-one
 // supervisor, and nothing had ever linted it.
 const ROOTS = ["apps", "packages", "scripts", "deploy"];
 const EXTENSIONS = [".ts", ".tsx", ".mts"];
-const SKIP = new Set(["node_modules", ".git", "dist", ".output", ".turbo", "graphify-out"]);
 
 // Generated files. `routeTree.gen.ts` is written by TanStack Router's plugin and
 // carries fifteen `as any` that regenerate on every build — a rule nobody can
@@ -183,22 +180,8 @@ function parseOffences(source: ts.SourceFile, rel: string): Offence[] {
   return out;
 }
 
-function sourceFiles(): string[] {
-  const out: string[] = [];
-  const walk = (dir: string): void => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (SKIP.has(entry.name)) continue;
-      const path = join(dir, entry.name);
-      if (entry.isDirectory()) walk(path);
-      else if (EXTENSIONS.some((extension) => entry.name.endsWith(extension))) out.push(path);
-    }
-  };
-  for (const root of ROOTS) walk(join(ROOT, root));
-  return out;
-}
-
 function main(): void {
-  const files = sourceFiles();
+  const files = sourceFiles(ROOTS, EXTENSIONS);
   const offences: Offence[] = [];
   let asConst = 0;
 
