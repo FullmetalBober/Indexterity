@@ -20,6 +20,7 @@ import {
   clusterCooldowns,
   clusterDatabases,
   clusterEvent,
+  clusterIndexes,
   clusterIndexSizeSeries,
   clusterLatency,
   clusterLatencySeries,
@@ -116,6 +117,44 @@ export const contract = {
     })
     .input(clusterId)
     .output(clusterCollections),
+
+  // Every index the cluster HAS, not only the ones something is proposing about
+  // (#431). `getCollections` above sums the same snapshots to a count and a byte
+  // total per collection — a collection with fourteen indexes is one row saying
+  // fourteen — and index-level numbers reached the dashboard only as
+  // `IndexUsage`, which is keyed by `recommendationId` (D66). So the only
+  // indexes a customer could see were the ones we already wanted to change.
+  //
+  // Paged by keyset rather than capped like `listRecommendations`, because the
+  // question is different: proposals are RANKED, so the top few are the answer
+  // and a cursor buys nothing, while an inventory is browsed — "what else is on
+  // `orders`" has no top. Namespace order for the same reason, and the two
+  // optional filters are that order's own scoping.
+  getClusterIndexes: oc
+    .route({
+      method: "GET",
+      path: "/clusters/{clusterId}/indexes",
+      summary:
+        "One page of the cluster's index inventory: spec, flags, size and per-member usage for every index the last collect saw",
+    })
+    .input(
+      z.object({
+        clusterId: z.uuid(),
+        // Exact, both of them, and `collection` without `database` is accepted:
+        // two databases holding a collection of the same name is normal, and
+        // refusing the narrower ask would only send the reader to page through
+        // the wider one.
+        database: z.string().optional(),
+        collection: z.string().optional(),
+        // The cursor from the previous page. All three or none — the sort is
+        // (database, collection, indexName) and any prefix of it repeats or
+        // skips rows across the boundary.
+        afterDatabase: z.string().optional(),
+        afterCollection: z.string().optional(),
+        afterIndexName: z.string().optional(),
+      }),
+    )
+    .output(clusterIndexes),
 
   // Read on its own, never joined to `recommendations` (#159). A cooldown
   // OUTLIVES the recommendation that caused it: cancelling a pending drop parks
