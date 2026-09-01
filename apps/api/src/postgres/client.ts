@@ -120,6 +120,35 @@ export async function pgPool(
     // is a plain Duplex.
     ...(proxy === undefined ? {} : { stream: pgStreamFactory(proxy) }),
   });
+  // A pg Pool is an EventEmitter that emits 'error' when an IDLE client's
+  // connection dies, and an EventEmitter 'error' with no listener is an uncaught
+  // exception — so a customer's database restarting while one of its pooled
+  // sessions sat idle took THIS PROCESS down. Measured on postgres 17: check a
+  // client out, release it, terminate its backend, and the process exits on
+  // `error: terminating connection due to administrator command` with no frame of
+  // ours in it. Sessions are held for five idle minutes (jobs/connection-pool.ts),
+  // so the window is most of the time a cluster is connected at all.
+  //
+  // The control-plane pool has had this handler since it took graphile-worker's
+  // pgPool (db/client.ts, where the same reasoning is written out); the three
+  // customer pools built here never got one. pg terminates and evicts the dead
+  // client itself, so the handler's job is to exist and to say whose database it
+  // was — the cluster is not named here because this function is not told, and
+  // the pass that touches the cluster next reports it through the ordinary
+  // unreachable path.
+  pool.on("error", (error) => {
+    console.error(`cluster postgres pool: idle client errored: ${String(error)}`);
+  });
+  // The other half of the same crash: a client CHECKED OUT of the pool emits
+  // connection errors on itself, not on the pool. pg re-raises the failure from
+  // the client's next query — which is where the customer boundary in
+  // postgres/connection.ts classifies it (#420) — so this listener only has to
+  // keep the emitter from throwing.
+  pool.on("connect", (client) => {
+    client.on("error", (error) => {
+      console.error(`cluster postgres pool: active client errored: ${String(error)}`);
+    });
+  });
   // A pool hands out connections lazily, so nothing above has dialled yet — and
   // a bad password or an unreachable host must surface HERE rather than at the
   // first query, which is what every caller's error handling expects.

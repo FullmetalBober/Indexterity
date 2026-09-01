@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { ClusterUnreachableError } from "../errors/unreachable";
 import { DATABASE_LISTING_SQL, PostgresConnection, USER_TABLES_SQL } from "./connection";
 
 // What a fresh install answers with once the statement's own WHERE has run:
@@ -106,5 +107,26 @@ describe("listDatabaseNames", () => {
     }
     const conn = new Refusing([...FRESH, { datname: "app" }], new Set(["postgres"]));
     expect(await conn.listDatabaseNames()).toEqual(["app"]);
+  });
+});
+
+// The customer boundary, on the one failure a unit test can produce for real
+// (#420).
+//
+// A closed port on the loopback address: no server, no container, and the answer
+// is immediate — node-pg raises `Error: connect ECONNREFUSED 127.0.0.1:1`, name
+// "Error", which is precisely the shape our OWN control-plane pool produces when
+// it flaps. What makes it classifiable is where it was raised, so this asserts
+// the wiring rather than the pattern: that a dial made through
+// `PostgresConnection` comes back typed.
+//
+// `sslmode=verify-full` so the TLS gate passes and the dial is what fails; the
+// refusal happens at the socket, long before any certificate.
+describe("a failed dial", () => {
+  it("arrives typed, so the worker classifies it without guessing", async () => {
+    const conn = new PostgresConnection("postgresql://u:p@127.0.0.1:1/db?sslmode=verify-full");
+    await expect(conn.connect()).rejects.toBeInstanceOf(ClusterUnreachableError);
+    // And the driver's own words survive, addresses and all (D112).
+    await expect(conn.connect()).rejects.toThrow(/ECONNREFUSED 127\.0\.0\.1:1/);
   });
 });

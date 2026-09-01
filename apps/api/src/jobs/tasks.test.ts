@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { InsecureConnectionError } from "../engine/tls";
 import { UnsupportedServerError } from "../engine/version";
+import { asClusterUnreachable } from "../errors/unreachable";
 import { TunnelUnavailableError } from "../tunnel/resolve";
 import { ClusterCredentialsError, ClusterGoneError } from "./cluster-connection";
 import { type ClusterTaskDeps, runClusterTask } from "./tasks";
@@ -65,8 +66,31 @@ function recorder(): {
   };
 }
 
-function unreachable(): Error {
-  return new Error("connect ECONNREFUSED 10.0.0.4:27017");
+// What a pass actually throws when a customer's cluster cannot be reached.
+//
+// Not the bare `Error("connect ECONNREFUSED …")` this used to be: since #420 a
+// socket code on its own is NOT an unreachable cluster, because this process
+// holds pg pools to its own control plane as well as to customers' PostgreSQL
+// clusters and both produce that message. The customer boundary that dialled it
+// says so instead (postgres/connection.ts), which is what
+// `asClusterUnreachable` stands in for here.
+function unreachable(): unknown {
+  return asClusterUnreachable(new Error("connect ECONNREFUSED 10.0.0.4:27017"));
+}
+
+// The mongo and SQL Server half of the same answer, which needs no boundary: the
+// driver names the failure, and this process speaks those drivers to nothing but
+// a customer's database.
+function unreachableFromMongo(): Error {
+  const error = new Error("connection 1 to 10.0.0.4:27017 closed");
+  error.name = "MongoNetworkError";
+  return error;
+}
+
+// And what our OWN postgres failing looks like: the same socket code, raised by
+// nothing that vouched for whose socket it was.
+function controlPlaneBlip(): Error {
+  return new Error("read ECONNRESET");
 }
 
 const TUNNEL = "22222222-2222-2222-2222-222222222222";
@@ -127,6 +151,42 @@ describe("runClusterTask", () => {
     expect(log.warns[0]).toContain("unreachable");
     // The cooldown means one email, not one per tick.
     expect(log.alerts).toEqual([`${CLUSTER}:collect skipped — cluster unreachable`]);
+  });
+
+  // The other shape a real unreachable cluster arrives in, and the same branch.
+  it("treats a driver-named network failure the same, with no boundary", async () => {
+    const log = recorder();
+    await expect(
+      runClusterTask("collect", CLUSTER, log.deps, () => Promise.reject(unreachableFromMongo())),
+    ).resolves.toBeUndefined();
+    expect(log.alerts).toEqual([`${CLUSTER}:collect skipped — cluster unreachable`]);
+    expect(log.blocked).toEqual([
+      `${CLUSTER}:collect:UNREACHABLE:connection 1 to 10.0.0.4:27017 closed`,
+    ]);
+  });
+
+  // #420, at the level where it cost the most. A pass is postgres-heavy on BOTH
+  // sides — it reads the customer's cluster and writes our samples, our
+  // recommendations and our state — so a control-plane pool that drops a
+  // checked-out connection mid-pass surfaces here. It used to be classified as
+  // the customer's cluster being unreachable: their cluster marked UNREACHABLE,
+  // their owners mailed about a database answering fine, the day's alert claim
+  // burned, and our own postgres fault silenced — a handled skip is recorded as a
+  // queue SUCCESS, so `job:failed` never fires and nothing reaches Sentry.
+  //
+  // One failover hits every cluster with a pass in flight, so the old behaviour
+  // mailed a batch of unrelated owners at once.
+  it("rethrows a control-plane failure instead of blaming the customer", async () => {
+    const log = recorder();
+    await expect(
+      runClusterTask("collect", CLUSTER, log.deps, () => Promise.reject(controlPlaneBlip())),
+    ).rejects.toThrow("read ECONNRESET");
+    // Nobody is mailed about a database that is answering fine.
+    expect(log.alerts).toHaveLength(0);
+    // It is recorded as an ERROR rather than as UNREACHABLE, and the rethrow is
+    // what puts it on the retry-then-dead-letter path that reports to Sentry.
+    expect(log.blocked).toEqual([`${CLUSTER}:collect:ERROR:read ECONNRESET`]);
+    expect(log.warns).toHaveLength(0);
   });
 
   it("keeps the alert cooldown per cluster and per task", async () => {
