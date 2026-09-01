@@ -35,7 +35,7 @@ const parser = new XMLParser({
 export type XmlNode = Record<string, unknown>;
 
 function asArray(value: unknown): XmlNode[] {
-  if (Array.isArray(value)) return value.filter((entry): entry is XmlNode => isNode(entry));
+  if (Array.isArray(value)) return value.filter((entry) => isNode(entry));
   return isNode(value) ? [value] : [];
 }
 

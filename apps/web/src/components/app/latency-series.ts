@@ -61,7 +61,7 @@ function chartNote(
   gapOf: (series: CollectionLatencySeries) => LatencyGap | null,
   metric: "read" | "write",
 ): string | null {
-  const seen = new Set(collections.map(gapOf).filter((gap): gap is LatencyGap => gap !== null));
+  const seen = new Set(collections.map(gapOf).filter((gap) => gap !== null));
   const gap = GAP_RANK.find((candidate) => seen.has(candidate));
   return gap === undefined ? null : noteFor(gap, metric);
 }

@@ -113,9 +113,7 @@ export class MssqlMemberConnections {
   ) {}
 
   async all(): Promise<MssqlMemberSource[]> {
-    return (await this.dials())
-      .map((dial) => dial.connection)
-      .filter((conn): conn is MssqlConnection => conn !== null);
+    return (await this.dials()).map((dial) => dial.connection).filter((conn) => conn !== null);
   }
 
   // Every replica besides the one the base connection is already on, and how

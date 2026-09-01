@@ -26,6 +26,13 @@
 //   x as T          anything else: state it in a signature and let the compiler
 //                   check the body, or narrow the value and let it prove itself
 //
+// And a second one. `JSON.parse` returns `any`, so ANNOTATING its result checks
+// exactly as much as asserting it would — nothing — while reading like a
+// declaration. Four of these were in the repo, two of them in the security gate,
+// where an unchecked `parsed.vulnerabilities` that npm had renamed would have
+// been `undefined` and let every advisory through as "none found". Narrow it, or
+// hand it to a schema. `unknown` is the one honest annotation.
+//
 // And one shape that is not an `as` at all. TypeScript does NOT check an overload
 // signature against its implementation — `function f<T>(x: T): T[]` declared over
 // a body returning a scalar compiles — so an overload whose implementation
@@ -130,6 +137,29 @@ function overloadOffences(source: ts.SourceFile, rel: string): Offence[] {
   return out;
 }
 
+// `const x: T = JSON.parse(...)` — a declaration over `any`, which is a claim.
+function parseOffences(source: ts.SourceFile, rel: string): Offence[] {
+  const out: Offence[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node) && node.type !== undefined) {
+      const declared = node.type.getText();
+      const from = node.initializer?.getText() ?? "";
+      if (/^JSON\.parse\(/.test(from) && declared !== "unknown" && declared !== "any") {
+        const { line } = source.getLineAndCharacterOfPosition(node.getStart());
+        out.push({
+          file: rel,
+          line: line + 1,
+          kind: "an annotation over `any`",
+          text: `${node.name.getText()}: ${declared} = JSON.parse(…)`,
+        });
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return out;
+}
+
 function sourceFiles(): string[] {
   const out: string[] = [];
   const walk = (dir: string): void => {
@@ -178,6 +208,7 @@ function main(): void {
     };
     visit(source);
     offences.push(...overloadOffences(source, rel));
+    offences.push(...parseOffences(source, rel));
   }
 
   for (const offence of offences) {

@@ -499,7 +499,7 @@ async function retireSuperseded(
   if (typeof target !== "object" || target === null) return;
   const retire: unknown = Reflect.get(target, "retire");
   if (!Array.isArray(retire)) return;
-  const names = retire.filter((name): name is string => typeof name === "string");
+  const names = retire.filter((name) => typeof name === "string");
   if (names.length === 0) return;
   // A REORDER retires a PROTECTED index, which every other drop path refuses on
   // sight. The row therefore names what replaced it, and preflightDrop re-checks

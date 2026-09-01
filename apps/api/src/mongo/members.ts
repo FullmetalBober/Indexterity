@@ -69,9 +69,7 @@ export class MemberConnections {
   // primary client is already on — $indexStats dedupes by host downstream).
   // Opened once and reused for the life of the session.
   async all(): Promise<MongoConnection[]> {
-    return (await this.dials())
-      .map((dial) => dial.connection)
-      .filter((conn): conn is MongoConnection => conn !== null);
+    return (await this.dials()).map((dial) => dial.connection).filter((conn) => conn !== null);
   }
 
   // Every dial and how it went, which used to be a silent catch: every member

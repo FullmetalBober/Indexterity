@@ -33,6 +33,17 @@ const CONF = parseWireGuardConf(
   ].join("\n"),
 );
 
+// `JSON.parse` returns `any`, so annotating its result is a claim rather than a
+// check — and this fake service stands in for the tunnel daemon, so a line that
+// is not an object at all should fail HERE, naming what arrived.
+function asRecord(line: string, what: string): Record<string, unknown> {
+  const parsed: unknown = JSON.parse(line);
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`expected a ${what} object, got ${line}`);
+  }
+  return { ...parsed };
+}
+
 const GATEWAY = { address: "203.0.113.7", port: 51_820 };
 const ANNOUNCED_PORT = 34_567;
 
@@ -41,7 +52,9 @@ type Emit = (event: Record<string, unknown>) => void;
 interface Stub {
   /** Once, after the listener has been announced. */
   readonly onStart?: (emit: Emit) => void;
-  readonly onCommand?: (command: Record<string, string>, emit: Emit) => void;
+  // Values are `unknown`, which is what a parsed line actually holds — the two
+  // stubs below only compare `cmd`, and comparing an unknown costs nothing.
+  readonly onCommand?: (command: Record<string, unknown>, emit: Emit) => void;
   /** Drop the connection on this command instead of answering it. */
   readonly dropOn?: string;
 }
@@ -66,7 +79,7 @@ async function listen(stub: Stub, greetings: Record<string, unknown>[], commands
     createInterface({ input: socket }).on("line", (line) => {
       if (!greeted) {
         greeted = true;
-        const greeting: Record<string, unknown> = JSON.parse(line);
+        const greeting = asRecord(line, "greeting");
         greetings.push(greeting);
         // The real service refuses a greeting that names no peering by dropping
         // the connection, having said nothing.
@@ -79,7 +92,7 @@ async function listen(stub: Stub, greetings: Record<string, unknown>[], commands
         return;
       }
       commands.push(line);
-      const command: Record<string, string> = JSON.parse(line);
+      const command = asRecord(line, "command");
       if (command.cmd === "shutdown") {
         socket.end();
         return;

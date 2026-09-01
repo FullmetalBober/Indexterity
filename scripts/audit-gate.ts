@@ -25,6 +25,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { z } from "zod";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -42,7 +43,8 @@ const BLOCKING = new Set<Severity>(["high", "critical"]);
 // its face — and the point of naming them is that the move becomes a type
 // error instead of an empty result.
 
-type Severity = "info" | "low" | "moderate" | "high" | "critical";
+const SEVERITY = z.enum(["info", "low", "moderate", "high", "critical"]);
+type Severity = z.infer<typeof SEVERITY>;
 
 /** An entry in `package-lock.json`'s `packages` map. */
 type LockNode = {
@@ -60,26 +62,46 @@ type LockNode = {
 
 type LockPackages = Record<string, LockNode>;
 
-/** One advisory, as `npm audit --json` states it inside a `via` array. */
-type AuditAdvisory = {
-  source?: number;
-  title?: string;
-  severity: Severity;
-  url?: string;
-};
+const LOCK_NODE = z.object({
+  link: z.boolean().optional(),
+  resolved: z.string().optional(),
+  dependencies: z.record(z.string(), z.string()).optional(),
+  optionalDependencies: z.record(z.string(), z.string()).optional(),
+  devDependencies: z.record(z.string(), z.string()).optional(),
+});
 
-type AuditVulnerability = {
+const LOCKFILE_SCHEMA = z.object({ packages: z.record(z.string(), LOCK_NODE).optional() });
+
+/**
+ * The two external schemas, as SCHEMAS rather than as types.
+ *
+ * `JSON.parse` returns `any`, so the annotation these used to carry checked
+ * exactly as much as an assertion would: nothing. That matters most here of
+ * anywhere — a gate whose input it cannot read must FAIL, and an unchecked
+ * `parsed.vulnerabilities` that npm had renamed would simply be `undefined`
+ * and let every advisory through as "none found".
+ *
+ * Deliberately loose about what it does not read: unknown keys pass, and every
+ * field this gate ignores stays unstated. What is checked is what is used.
+ */
+const AUDIT_ADVISORY = z.object({
+  source: z.number().optional(),
+  title: z.string().optional(),
+  severity: SEVERITY,
+  url: z.string().optional(),
+});
+const AUDIT_VULNERABILITY = z.object({
   /** The paths in node_modules this package was found at. */
-  nodes?: string[];
+  nodes: z.array(z.string()).optional(),
   /** An advisory, or the name of another package whose advisory this inherits. */
-  via: Array<string | AuditAdvisory>;
-};
-
-type AuditReport = {
-  auditReportVersion?: number;
-  vulnerabilities?: Record<string, AuditVulnerability>;
-  metadata?: { vulnerabilities?: { total?: number } };
-};
+  via: z.array(z.union([z.string(), AUDIT_ADVISORY])),
+});
+const AUDIT_REPORT = z.object({
+  auditReportVersion: z.number().optional(),
+  vulnerabilities: z.record(z.string(), AUDIT_VULNERABILITY).optional(),
+  metadata: z.object({ vulnerabilities: z.object({ total: z.number().optional() }) }).optional(),
+});
+type AuditReport = z.infer<typeof AUDIT_REPORT>;
 
 /** One advisory, collected across every package it was reported against. */
 type Advisory = {
@@ -200,9 +222,7 @@ function audit(): AuditReport {
     if (typeof stdout !== "string" || stdout === "") throw error;
     raw = stdout;
   }
-  // Annotated rather than asserted — see set-version.ts.
-  const parsed: AuditReport = JSON.parse(raw);
-  return parsed;
+  return AUDIT_REPORT.parse(JSON.parse(raw));
 }
 
 // One advisory can be reported against several packages (the vulnerable one and
@@ -390,8 +410,8 @@ function assertReportIsParsable(report: AuditReport): void {
 function main(): void {
   selfCheck();
 
-  const lock: { packages?: LockPackages } = JSON.parse(
-    readFileSync(resolve(ROOT, "package-lock.json"), "utf8"),
+  const lock = LOCKFILE_SCHEMA.parse(
+    JSON.parse(readFileSync(resolve(ROOT, "package-lock.json"), "utf8")),
   );
   if (lock.packages === undefined) {
     console.error("package-lock.json has no `packages` map — nothing to walk.");
