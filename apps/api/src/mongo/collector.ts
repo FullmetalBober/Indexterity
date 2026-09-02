@@ -375,9 +375,22 @@ export function pipelineShape(pipeline: readonly Record<string, unknown>[]): Pip
   return { equality, sort, range };
 }
 
-function normalizeDirection(direction: number | string): IndexDirection {
+// The fallback is 1 and stays 1: a key form this engine has never heard of is not
+// worth refusing a whole collect over. But every form that CHANGES a verdict has to
+// survive the trip, and `2d` did not — normalized to 1, a legacy geo index became
+// indistinguishable from `{loc: 1}`, which is how a geo index reached both the
+// unused-drop and the redundancy rules as an ordinary b-tree (see IndexDirection).
+//
+// Exported for the test, because that loss was silent: nothing failed, nothing
+// logged, and one direction missing from this list is the whole bug.
+export function normalizeDirection(direction: number | string): IndexDirection {
   if (direction === 1 || direction === -1) return direction;
-  if (direction === "2dsphere" || direction === "text" || direction === "hashed") {
+  if (
+    direction === "2d" ||
+    direction === "2dsphere" ||
+    direction === "text" ||
+    direction === "hashed"
+  ) {
     return direction;
   }
   return 1;

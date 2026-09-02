@@ -3,6 +3,7 @@ import {
   dateRangeCutoff,
   equalityConstants,
   lookupJoins,
+  normalizeDirection,
   pipelineShape,
   sumLatencyStats,
 } from "./collector";
@@ -176,3 +177,28 @@ describe("sumLatencyStats", () => {
 // So faking MongoConnection -> Db -> ListCollectionsCursor was buying a
 // duplicate of the integration test, at the cost of the only three vendor-typed
 // fakes left in this suite. It is gone rather than converted.
+
+describe("normalizeDirection", () => {
+  // Every key form that changes a verdict has to survive the trip. `2d` is the one
+  // that did not: coerced to 1, a legacy geo index reached the drop rules looking
+  // like an ordinary ascending b-tree (analysis/safety.ts).
+  it("preserves every special key form", () => {
+    expect(normalizeDirection("2d")).toBe("2d");
+    expect(normalizeDirection("2dsphere")).toBe("2dsphere");
+    expect(normalizeDirection("text")).toBe("text");
+    expect(normalizeDirection("hashed")).toBe("hashed");
+  });
+
+  it("passes ordinary directions through", () => {
+    expect(normalizeDirection(1)).toBe(1);
+    expect(normalizeDirection(-1)).toBe(-1);
+  });
+
+  // A form this engine has never heard of is not worth refusing a whole collect
+  // over — geoHaystack was removed in 5.0, and a future one would be unknown here
+  // by definition.
+  it("falls back to 1 for anything unrecognized", () => {
+    expect(normalizeDirection("geoHaystack")).toBe(1);
+    expect(normalizeDirection(2)).toBe(1);
+  });
+});
