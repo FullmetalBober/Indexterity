@@ -1,7 +1,7 @@
 import type { ClusterEngine, ClusterIndexRow, ClusterNodes } from "@repo/contracts";
 import { indexFlags, keyPattern } from "@repo/contracts";
 import { Link } from "@tanstack/react-router";
-import { useMemo } from "react";
+import { type ComponentProps, useMemo } from "react";
 import { fmtBytes } from "~/components/app/format";
 import { type UsageSplit, usageDetail, usageLine, usageSplit } from "~/components/app/index-usage";
 import { type DashboardColumns, DataTable, dashboardColumns } from "~/components/data-table";
@@ -193,6 +193,7 @@ export function IndexTable({
   roster,
   engine,
   loading,
+  pagination,
 }: {
   clusterId: string;
   indexes: ClusterIndexRow[];
@@ -204,6 +205,10 @@ export function IndexTable({
   // holds, so the badge and this table cannot disagree about the engine.
   engine: ClusterEngine;
   loading: boolean;
+  // Forwarded straight to the table, which owns the page arithmetic. Typed by
+  // reading it off DataTable rather than restated, so a change there cannot
+  // leave this signature quietly describing the old shape.
+  pagination: NonNullable<ComponentProps<typeof DataTable>["pagination"]>;
 }) {
   const splits = useMemo(() => {
     const built = new Map<string, SplitEntry>();
@@ -230,8 +235,11 @@ export function IndexTable({
       getRowId={(row) => row.id}
       // Namespace order, which is the order the api paged in: sorting a page by
       // size and calling it "the biggest indexes" would be a claim about the
-      // cluster made from a hundred of its rows.
+      // cluster made from a hundred of its rows. The footer says as much, since
+      // a control that pages the SET and sorts the PAGE has to admit which is
+      // which.
       initialSorting={[{ id: "namespace", desc: false }]}
+      pagination={pagination}
       filterLabel="Filter indexes"
       // A page is at most CLUSTER_INDEXES_PAGE rows and each is single-line, so
       // they estimate the same as a collection's.

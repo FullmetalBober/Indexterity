@@ -455,6 +455,18 @@ export type ClusterCollections = z.infer<typeof clusterCollections>;
 // namespaces, which is a page rather than a payload.
 export const CLUSTER_INDEXES_PAGE = 100;
 
+// The sizes the page-size control offers, and the only ones it may ask for.
+//
+// A list rather than a range, so the api and the control cannot disagree about
+// what is allowed, and small enough at the low end that a page number is worth
+// having: 517 indexes is six pages at 100 and twenty-one at 25.
+export const CLUSTER_INDEXES_PAGE_SIZES = [25, 50, 100] as const;
+
+// The largest page this endpoint will serve. Not one of the offered sizes — it
+// bounds a hand-written request, and it is what keeps this a page rather than a
+// report whatever a caller asks for.
+export const CLUSTER_INDEXES_PAGE_MAX = 200;
+
 // One key of an index, in the order the index declares it. The direction
 // vocabulary is the adapters' (engine/types.ts): a relational engine only ever
 // reports 1 or -1, and the four MongoDB special forms are what the others
@@ -568,14 +580,19 @@ export const clusterIndexes = z.object({
   indexes: z.array(clusterIndexRow),
   // How many indexes MATCH — the whole cluster's, or the namespace filter's, so
   // a page can say "100 of 211" instead of implying it is everything.
+  //
+  // Load-bearing since #445 rather than only wording: it is the row count the
+  // table's pagination reads to know how many pages exist, and it is re-counted
+  // per request so the page count follows a set that moved (D133).
   total: z.int().nonnegative(),
-  // The cursor for the page after this one, or null at the end. A compound key
-  // for the same reason the security trail's is (D67): the sort is namespace
-  // then name, and one cluster can hold two indexes of the same name in two
-  // collections, so any prefix of the three would skip a row.
-  nextDatabase: z.string().nullable(),
-  nextCollection: z.string().nullable(),
-  nextIndexName: z.string().nullable(),
+  // Where this page actually starts, echoed rather than assumed. The reader asked
+  // for an offset and may not have got it: past the end of a set that shrank, the
+  // api clamps to the last page rather than serving an empty one, and the control
+  // has to move with it or it would keep saying page five of three.
+  offset: z.int().nonnegative(),
+  // How many rows the page carries at most, which is the page size in effect. The
+  // api owns the default, so a caller that sent no limit still learns what it got.
+  limit: z.int().positive(),
   // When the reading these rows come from was taken. Null when nothing has ever
   // been collected, which is the page's "nothing yet" state rather than "this
   // cluster has no indexes".

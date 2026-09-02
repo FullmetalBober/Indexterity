@@ -5593,9 +5593,10 @@ describe("bounded per-cluster reads", () => {
     ]);
     expect(body.total).toBe(3);
     expect(body.collectedAt).not.toBeNull();
-    // Nothing more to fetch, so no cursor is offered — a reader must not have to
-    // page into an empty response to discover the end.
-    expect(body.nextIndexName).toBeNull();
+    // Three rows and three matches, so this page IS the set — which the control
+    // reads off `total` against the page it was served rather than being told.
+    expect(body.offset).toBe(0);
+    expect(body.limit).toBe(CLUSTER_INDEXES_PAGE);
 
     const status = rows.find((row) => row.indexName === "status_1");
     expect(status).toBeDefined();
@@ -5675,9 +5676,11 @@ describe("bounded per-cluster reads", () => {
     expect(foreign.collectedAt).toBeNull();
   });
 
-  // The cursor is the whole reason this endpoint is not the uncapped read
+  // Paging is the whole reason this endpoint is not the uncapped read
   // `getCollections` is: an index list grows with the customer's schema forever.
-  it("pages the inventory by keyset without repeating or skipping a row", async () => {
+  // By OFFSET since #445, so the reader gets page numbers rather than a More
+  // button they have to keep clicking (D133).
+  it("pages the inventory by offset, and clamps past the end", async () => {
     const pagedId = await bareCluster("Index Inventory Paging");
     const now = Date.now();
     const spec = {
@@ -5699,8 +5702,8 @@ describe("bounded per-cluster reads", () => {
         clusterId: pagedId,
         database: "app",
         collection: "wide",
-        // Zero-padded so lexicographic order — which is what the keyset
-        // comparison uses — is also the order a reader expects.
+        // Zero-padded so lexicographic order — which is what the ORDER BY uses,
+        // and what offset paging slices — is also the order a reader expects.
         indexName: `idx_${String(n).padStart(4, "0")}`,
         spec: { ...spec, name: `idx_${String(n).padStart(4, "0")}` },
         sizeBytes: 100 + n,
@@ -5713,26 +5716,61 @@ describe("bounded per-cluster reads", () => {
     const first = asRecord(await (await api(`/clusters/${pagedId}/indexes`, owner)).json());
     const firstRows = asRecords(first.indexes, "first.indexes");
     expect(firstRows).toHaveLength(CLUSTER_INDEXES_PAGE);
-    // The honest denominator: this is a page of a larger set and says so.
+    // The honest denominator: this is a page of a larger set and says so. Since
+    // #445 it is also the row count the control counts pages from, so it is
+    // load-bearing rather than only wording.
     expect(first.total).toBe(count);
-    expect(first.nextIndexName).toBe(firstRows[firstRows.length - 1]?.indexName);
+    // The page it served, echoed. A caller that sent neither gets the api's own
+    // answer for both rather than having to assume it.
+    expect(first.offset).toBe(0);
+    expect(first.limit).toBe(CLUSTER_INDEXES_PAGE);
 
-    const cursor = new URLSearchParams({
-      afterDatabase: asString(first.nextDatabase),
-      afterCollection: asString(first.nextCollection),
-      afterIndexName: asString(first.nextIndexName),
-    });
     const second = asRecord(
-      await (await api(`/clusters/${pagedId}/indexes?${cursor.toString()}`, owner)).json(),
+      await (
+        await api(`/clusters/${pagedId}/indexes?offset=${CLUSTER_INDEXES_PAGE}`, owner)
+      ).json(),
     );
     const secondRows = asRecords(second.indexes, "second.indexes");
     expect(secondRows).toHaveLength(count - CLUSTER_INDEXES_PAGE);
-    expect(second.nextIndexName).toBeNull();
+    expect(second.offset).toBe(CLUSTER_INDEXES_PAGE);
 
-    // Every index exactly once across the two pages, which is the property an
-    // offset page loses the moment a collect lands mid-read.
+    // Every index exactly once across the two pages. Offset paging gives this up
+    // only when the set MOVES mid-read (D133); nothing collects here between the
+    // two requests, so the property holds and is worth pinning.
     const seen = [...firstRows, ...secondRows].map((row) => String(row.indexName));
     expect(new Set(seen).size).toBe(count);
+
+    // A page size the reader chose, and the page numbering that follows from it.
+    const sized = asRecord(
+      await (await api(`/clusters/${pagedId}/indexes?offset=25&limit=25`, owner)).json(),
+    );
+    expect(asRecords(sized.indexes, "sized.indexes")).toHaveLength(25);
+    expect(sized.limit).toBe(25);
+    expect(sized.offset).toBe(25);
+    expect(asRecord(asRecords(sized.indexes, "sized.indexes")[0] ?? {}).indexName).toBe(
+      String(asRecord(firstRows[25] ?? {}).indexName),
+    );
+
+    // Past the end, which is where a reader lands after narrowing a filter while
+    // on a later page. Clamped to the last page rather than served empty, and it
+    // says where it landed so the control can follow (D133).
+    const beyond = asRecord(
+      await (await api(`/clusters/${pagedId}/indexes?offset=100000&limit=25`, owner)).json(),
+    );
+    const beyondRows = asRecords(beyond.indexes, "beyond.indexes");
+    expect(beyondRows.length).toBeGreaterThan(0);
+    expect(beyond.total).toBe(count);
+    // The last page boundary at 25 per page, not the raw offset: a clamp mid-page
+    // would straddle two pages and the reader would see rows repeat.
+    expect(beyond.offset).toBe(Math.floor((count - 1) / 25) * 25);
+    // The fixture numbers from zero, so the last index is count - 1.
+    expect(asRecord(beyondRows[beyondRows.length - 1] ?? {}).indexName).toBe(
+      `idx_${String(count - 1).padStart(4, "0")}`,
+    );
+
+    // A limit past the ceiling is refused rather than served: the endpoint is a
+    // page, and the bound is what keeps it one.
+    expect((await api(`/clusters/${pagedId}/indexes?limit=100000`, owner)).status).toBe(400);
   });
 
   // #432. Every one of these numbers was read once an hour and thrown away:

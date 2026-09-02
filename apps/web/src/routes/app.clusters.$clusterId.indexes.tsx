@@ -23,9 +23,21 @@
 // the proposal it did not become.
 //
 // One route, two tables, and deliberately not one component: they share a
-// subject and nothing else — different reads, different cursors, and either can
+// subject and nothing else — different reads, different paging, and either can
 // fail without blanking the other (#289).
-import type { ClusterIndexRow } from "@repo/contracts";
+//
+// The two page DIFFERENTLY since #445, and that is the shape of the question
+// rather than an inconsistency left behind. The inventory is browsed, so it pages
+// by offset and draws page numbers: "what else is on `orders`" has no top, and
+// six pages with no way to reach the fifth is a control that answers it with
+// "keep clicking". The workload list is RANKED by weekly cost, so the worst
+// shapes are the answer and a reader who needs the fiftieth is looking at a
+// different problem — it keeps its cursor and its More button (D133).
+import {
+  CLUSTER_INDEXES_PAGE,
+  CLUSTER_INDEXES_PAGE_SIZES,
+  type ClusterIndexRow,
+} from "@repo/contracts";
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
 import { IndexTable } from "~/components/app/index-table";
@@ -37,7 +49,6 @@ import { Label } from "~/components/ui/label";
 import { LocalTime } from "~/lib/local-time";
 import { useCluster } from "~/lib/queries/shell";
 import {
-  type ClusterIndexPage,
   clusterIndexesQuery,
   clusterWorkloadQuery,
   nodesQuery,
@@ -70,15 +81,6 @@ export const Route = createFileRoute("/app/clusters/$clusterId/indexes")({
   component: ClusterIndexesPage,
 });
 
-// Where the reader is in the keyset, as a stack rather than a page number.
-//
-// A keyset cursor can only step forward, so "back" is the cursor that produced
-// the previous page — which nothing but the reader's own history knows. Keeping
-// the stack makes Back exact instead of approximate, and it costs one array.
-type Cursor = Required<
-  Pick<ClusterIndexPage, "afterDatabase" | "afterCollection" | "afterIndexName">
->;
-
 // The workload half's cursor, same shape and same reason: keyset pages only
 // step forward, so Back is the cursor that produced the previous page and
 // nothing but the reader's own history knows it.
@@ -95,37 +97,31 @@ function costCursorFrom(payload: {
   };
 }
 
-function cursorFrom(payload: {
-  nextDatabase: string | null;
-  nextCollection: string | null;
-  nextIndexName: string | null;
-}): Cursor | null {
-  // All three or none: the api sends them together and a partial cursor would
-  // page from a boundary it never named.
-  if (
-    payload.nextDatabase === null ||
-    payload.nextCollection === null ||
-    payload.nextIndexName === null
-  ) {
-    return null;
-  }
-  return {
-    afterDatabase: payload.nextDatabase,
-    afterCollection: payload.nextCollection,
-    afterIndexName: payload.nextIndexName,
-  };
-}
-
 function ClusterIndexesPage() {
   const { clusterId: id } = Route.useParams();
   // Off the live cluster list rather than a read of its own — the layout above
   // already draws this cluster's badge from it, and the flag wording and the
   // badge must not be able to disagree about the engine.
   const cluster = useCluster(id);
-  const [stack, setStack] = useState<Cursor[]>([]);
-  const page = stack[stack.length - 1];
-  const inventory = useClusterIndexes(id, page ?? {});
+  // The reader's position, as a page rather than a cursor stack. Owned here and
+  // not by the table, because it is what the next request is made from — the
+  // table does the arithmetic over it and nothing else.
+  const [pagination, setPagination] = useState({
+    pageIndex: 0,
+    pageSize: CLUSTER_INDEXES_PAGE,
+  });
+  const inventory = useClusterIndexes(id, {
+    offset: pagination.pageIndex * pagination.pageSize,
+    limit: pagination.pageSize,
+  });
   const nodes = useNodes(id);
+
+  // The api CLAMPS past the end of a set that shrank, and says where it landed.
+  // Following that rather than insisting on the page asked for is what stops the
+  // control reading "page 12 of 3" against rows that are plainly the last page.
+  const served = inventory.data;
+  const servedIndex =
+    served.limit > 0 ? Math.floor(served.offset / served.limit) : pagination.pageIndex;
 
   // The workload half's own state. Its own cursor stack, because the two tables
   // page independently, and its own filter — "only the ones you declined" is the
@@ -140,8 +136,6 @@ function ClusterIndexesPage() {
   const nextCost = costCursorFrom(workload.data);
 
   const rows: ClusterIndexRow[] = inventory.data.indexes;
-  const next = cursorFrom(inventory.data);
-  const shown = rows.length;
 
   return (
     <>
@@ -154,14 +148,10 @@ function ClusterIndexesPage() {
       {inventory.data.collectedAt === null ? null : (
         <p className="mt-1 text-muted-foreground text-xs">
           As of <LocalTime iso={inventory.data.collectedAt} />
-          {inventory.data.total > 0 ? (
-            <>
-              {" · "}
-              {shown === inventory.data.total
-                ? `${inventory.data.total} indexes`
-                : `${shown} of ${inventory.data.total} indexes`}
-            </>
-          ) : null}
+          {/* The COUNT only. Which of them this page holds is the footer's line
+              now, and two places saying "100 of 517" in different words was one
+              of them being a worse copy of the other. */}
+          {inventory.data.total > 0 ? `  ·  ${inventory.data.total} indexes` : null}
         </p>
       )}
 
@@ -179,34 +169,16 @@ function ClusterIndexesPage() {
           // a primary key, which the next render corrects.
           engine={cluster?.engine ?? "MONGODB"}
           loading={inventory.pending}
+          pagination={{
+            // The SERVED page, not the requested one — see servedIndex above.
+            pageIndex: servedIndex,
+            pageSize: served.limit,
+            rowCount: served.total,
+            pageSizes: CLUSTER_INDEXES_PAGE_SIZES,
+            noun: "indexes",
+            onChange: setPagination,
+          }}
         />
-      )}
-
-      {/* Offered only when the api said there IS a next page. Paging into an
-          empty one to discover the end is how a reader concludes the inventory
-          stops where it does not — the same rule the security trail follows. */}
-      {stack.length === 0 && next === null ? null : (
-        <div className="mt-4 flex items-center gap-2">
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={stack.length === 0}
-            onClick={() => setStack((current) => current.slice(0, -1))}
-          >
-            Back
-          </Button>
-          {next === null ? (
-            <span className="text-muted-foreground text-xs">The end of the inventory.</span>
-          ) : (
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => setStack((current) => [...current, next])}
-            >
-              More
-            </Button>
-          )}
-        </div>
       )}
 
       <section className="mt-10">

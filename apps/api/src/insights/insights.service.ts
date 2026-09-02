@@ -59,9 +59,10 @@ export interface WorkloadQuery {
 export interface ClusterIndexQuery {
   readonly database?: string | undefined;
   readonly collection?: string | undefined;
-  readonly afterDatabase?: string | undefined;
-  readonly afterCollection?: string | undefined;
-  readonly afterIndexName?: string | undefined;
+  // Offset paging since #445 (D133). Both optional, because a first page is the
+  // request with neither and the api owns what that means.
+  readonly offset?: number | undefined;
+  readonly limit?: number | undefined;
 }
 
 // Read-only views over what the engine has already decided and recorded: ROI,
@@ -253,13 +254,16 @@ export class InsightsService {
     orgId: string,
     query: ClusterIndexQuery,
   ): Promise<ClusterIndexes> {
+    // The page size the caller asked for survives into the empty views, so a
+    // control that reads it back does not snap to a different size on a cluster
+    // that has never been collected.
+    const limit = query.limit ?? CLUSTER_INDEXES_PAGE;
     const empty = {
       clusterId,
       indexes: [],
       total: 0,
-      nextDatabase: null,
-      nextCollection: null,
-      nextIndexName: null,
+      offset: 0,
+      limit,
       collectedAt: null,
     };
     if (!(await this.tenancy.ownsCluster(clusterId, orgId))) return empty;
@@ -268,14 +272,11 @@ export class InsightsService {
     const collectedAt = await this.repo.latestIndexReadingAt(clusterId);
     if (collectedAt === null) return empty;
 
-    const { rows, total } = await this.repo.clusterIndexPage(
-      clusterId,
-      query,
-      CLUSTER_INDEXES_PAGE,
-    );
-    const page = rows.slice(0, CLUSTER_INDEXES_PAGE);
-    const more = rows.length > CLUSTER_INDEXES_PAGE;
-    const last = page[page.length - 1];
+    const {
+      rows: page,
+      total,
+      offset,
+    } = await this.repo.clusterIndexPage(clusterId, query, limit, query.offset ?? 0);
 
     // One lookup per namespace ON THIS PAGE, deduplicated: a hundred indexes
     // commonly live in a handful of collections, and the point of paging is that
@@ -352,11 +353,11 @@ export class InsightsService {
         };
       }),
       total,
-      // Null at the end, so the page stops offering "more" rather than fetching
-      // an empty one to discover the end.
-      nextDatabase: more && last !== undefined ? last.database : null,
-      nextCollection: more && last !== undefined ? last.collection : null,
-      nextIndexName: more && last !== undefined ? last.indexName : null,
+      // Where the rows actually START, which is not always where the reader asked:
+      // the repository clamps past the end of a set that shrank. Echoed so the
+      // control follows the rows instead of insisting on a page that is gone.
+      offset,
+      limit,
       collectedAt: collectedAt.toISOString(),
     };
   }

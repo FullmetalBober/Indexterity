@@ -242,20 +242,33 @@ export class InsightsRepository {
   // started weeks ago: that is the same mistake `latestIndexFootprint` above
   // documents having made.
   //
-  // Keyset, not offset, for the reason the security trail gives (D67): the set
-  // moves under the reader — a collect lands, an index is built — and an offset
-  // page would then repeat or skip whatever crossed the boundary. The tuple
-  // comparison is exact where three separate `>` clauses would not be.
+  // OFFSET, and it was a keyset cursor until #445 (D133).
+  //
+  // The keyset argument was the security trail's (D67) and it is still true: the
+  // set moves under the reader — a collect lands, an index is built — and an
+  // offset page can then repeat or skip whatever crossed the boundary. What that
+  // argument does not weigh is that a cursor can only STEP, so the reader got a
+  // Back and a More button, no page number, and no way to reach the fifth page of
+  // six on a cluster with 517 indexes. Browsing is the access pattern that wants
+  // a page number, which is why this endpoint pages at all.
+  //
+  // Survivable here and NOT in the trail: a namespace is not a queue, so nothing
+  // is missed by being skipped once — the row is still there on the next read,
+  // under a filter, or on the page either side. An audit trail is read to
+  // establish that nothing happened, and a skipped row there is a false negative
+  // about a security event. Different question, different guarantee.
+  //
+  // The count and the page are two queries against the same filters, and the
+  // count is re-run per request rather than cached in a cursor, which is what
+  // makes the page count follow a set that changed size mid-browse.
   async clusterIndexPage(
     clusterId: string,
     query: {
       readonly database?: string | undefined;
       readonly collection?: string | undefined;
-      readonly afterDatabase?: string | undefined;
-      readonly afterCollection?: string | undefined;
-      readonly afterIndexName?: string | undefined;
     },
     limit: number,
+    offset: number,
   ) {
     const filters = [
       eq(indexSnapshots.clusterId, clusterId),
@@ -277,18 +290,16 @@ export class InsightsRepository {
       .innerJoin(clusterIndexes, eq(indexSnapshots.indexId, clusterIndexes.id))
       .where(and(...filters));
 
-    const page = [...filters];
-    if (
-      query.afterDatabase !== undefined &&
-      query.afterCollection !== undefined &&
-      query.afterIndexName !== undefined
-    ) {
-      page.push(
-        sql`(${clusterIndexes.database}, ${clusterIndexes.collection}, ${clusterIndexes.indexName}) > (${query.afterDatabase}, ${query.afterCollection}, ${query.afterIndexName})`,
-      );
-    }
-    // One more than the page, so "is there another" costs no second query, and
-    // the extra row is dropped rather than sent.
+    const total = counted?.total ?? 0;
+    // Clamped to the last page rather than serving an empty one past the end.
+    // A reader on page five who narrows the filter has asked for an offset that
+    // no longer exists, and an empty table under a "517 indexes" heading reads as
+    // a broken screen rather than as a moved boundary. Reported back, so the
+    // control lands where the rows did.
+    const start = total === 0 ? 0 : Math.min(offset, Math.max(0, total - 1));
+    // To the page boundary, not to the raw offset: a clamp mid-page would serve a
+    // window straddling two pages and the reader would see rows repeat.
+    const from = Math.floor(start / limit) * limit;
     const rows = await this.database.db
       .select({
         id: clusterIndexes.id,
@@ -303,10 +314,15 @@ export class InsightsRepository {
       })
       .from(indexSnapshots)
       .innerJoin(clusterIndexes, eq(indexSnapshots.indexId, clusterIndexes.id))
-      .where(and(...page))
+      .where(and(...filters))
+      // The whole triple, because one cluster can hold two indexes of the same
+      // name in two collections — and under offset paging a total order is no
+      // longer merely tidy: rows that tie sort arbitrarily, so a partial order
+      // would let the same row appear on two pages of one browse.
       .orderBy(clusterIndexes.database, clusterIndexes.collection, clusterIndexes.indexName)
-      .limit(limit + 1);
-    return { rows, total: counted?.total ?? rows.length };
+      .limit(limit)
+      .offset(from);
+    return { rows, total, offset: from };
   }
 
   // Live recommendations over the namespaces one page covers.

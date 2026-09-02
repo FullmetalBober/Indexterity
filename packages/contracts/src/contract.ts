@@ -15,6 +15,7 @@ import {
 } from "./inputs.js";
 import {
   auditAction,
+  CLUSTER_INDEXES_PAGE_MAX,
   cluster,
   clusterCollections,
   clusterCooldowns,
@@ -126,11 +127,23 @@ export const contract = {
   // `IndexUsage`, which is keyed by `recommendationId` (D66). So the only
   // indexes a customer could see were the ones we already wanted to change.
   //
-  // Paged by keyset rather than capped like `listRecommendations`, because the
+  // Paged by OFFSET rather than capped like `listRecommendations`, because the
   // question is different: proposals are RANKED, so the top few are the answer
-  // and a cursor buys nothing, while an inventory is browsed — "what else is on
+  // and paging buys nothing, while an inventory is browsed — "what else is on
   // `orders`" has no top. Namespace order for the same reason, and the two
   // optional filters are that order's own scoping.
+  //
+  // It was a keyset cursor until #445, and offset is a deliberate trade rather
+  // than a simplification (D133). Keyset can only step, so the reader got a Back
+  // and a More button and no way to reach page five of six; browsing is exactly
+  // the access pattern that wants a page number. What offset gives up is the
+  // guarantee keyset had for free: the set moves under the reader — a collect
+  // lands, an index is built — and a page boundary can then repeat or skip the
+  // row that crossed it. Survivable HERE, and only here, because a namespace is
+  // not a queue: nothing is consumed by being read, `total` is re-counted per
+  // request so the page count follows the set, and the collect cadence is hours
+  // against a reader who pages in seconds. The security trail keeps its cursor
+  // (D67) and so does the workload list beside this one, which is ranked.
   getClusterIndexes: oc
     .route({
       method: "GET",
@@ -147,12 +160,16 @@ export const contract = {
         // the wider one.
         database: z.string().optional(),
         collection: z.string().optional(),
-        // The cursor from the previous page. All three or none — the sort is
-        // (database, collection, indexName) and any prefix of it repeats or
-        // skips rows across the boundary.
-        afterDatabase: z.string().optional(),
-        afterCollection: z.string().optional(),
-        afterIndexName: z.string().optional(),
+        // Where the page starts, in rows. Coerced because this arrives as a query
+        // string; clamped rather than refused past the end, since a reader who
+        // filters while on page five has asked for an offset that no longer exists
+        // and an empty page would read as "this cluster has no indexes".
+        offset: z.coerce.number().int().nonnegative().optional(),
+        // How many rows the page carries. Bounded at both ends: the floor stops a
+        // request for zero rows paging forever, and the ceiling is what keeps this
+        // endpoint a page rather than a report — the reason it pages at all is that
+        // an index list is unbounded.
+        limit: z.coerce.number().int().min(1).max(CLUSTER_INDEXES_PAGE_MAX).optional(),
       }),
     )
     .output(clusterIndexes),
