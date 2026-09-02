@@ -5999,16 +5999,29 @@ describe("bounded per-cluster reads", () => {
     expect(firstRows).toHaveLength(WORKLOAD_SHAPES_PAGE);
     expect(first.total).toBe(count);
 
-    const cursor = new URLSearchParams({
-      afterWeeklyDocsExamined: String(first.nextWeeklyDocsExamined),
-      afterId: asString(first.nextId),
-    });
+    expect(first.offset).toBe(0);
+    expect(first.limit).toBe(WORKLOAD_SHAPES_PAGE);
+
     const second = asRecord(
-      await (await api(`/clusters/${pagedId}/workload?${cursor.toString()}`, owner)).json(),
+      await (
+        await api(`/clusters/${pagedId}/workload?offset=${WORKLOAD_SHAPES_PAGE}`, owner)
+      ).json(),
     );
     const secondRows = asRecords(second.shapes, "second.shapes");
     expect(secondRows).toHaveLength(count - WORKLOAD_SHAPES_PAGE);
-    expect(second.nextId).toBeNull();
+    expect(second.offset).toBe(WORKLOAD_SHAPES_PAGE);
+
+    // Clamped to the last page boundary past the end rather than served empty,
+    // the same rule the inventory follows (D133).
+    const beyond = asRecord(
+      await (await api(`/clusters/${pagedId}/workload?offset=99999&limit=10`, owner)).json(),
+    );
+    expect(asRecords(beyond.shapes, "beyond.shapes").length).toBeGreaterThan(0);
+    expect(beyond.offset).toBe(Math.floor((count - 1) / 10) * 10);
+    expect(beyond.limit).toBe(10);
+
+    // And the ceiling is enforced: this endpoint is a page, not a report.
+    expect((await api(`/clusters/${pagedId}/workload?limit=99999`, owner)).status).toBe(400);
 
     // Every shape exactly once across the two pages, including the ones with no
     // measured cost.

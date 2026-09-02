@@ -26,24 +26,21 @@
 // subject and nothing else — different reads, different paging, and either can
 // fail without blanking the other (#289).
 //
-// The two page DIFFERENTLY since #445, and that is the shape of the question
-// rather than an inconsistency left behind. The inventory is browsed, so it pages
-// by offset and draws page numbers: "what else is on `orders`" has no top, and
-// six pages with no way to reach the fifth is a control that answers it with
-// "keep clicking". The workload list is RANKED by weekly cost, so the worst
-// shapes are the answer and a reader who needs the fiftieth is looking at a
-// different problem — it keeps its cursor and its More button (D133).
+// Both page by OFFSET with page numbers since #445 (D133), and independently:
+// two cursors became two page states, because a reader looking at page four of
+// the inventory has said nothing about where they are in the workload list.
 import {
   CLUSTER_INDEXES_PAGE,
   CLUSTER_INDEXES_PAGE_SIZES,
   type ClusterIndexRow,
+  WORKLOAD_SHAPES_PAGE,
+  WORKLOAD_SHAPES_PAGE_SIZES,
 } from "@repo/contracts";
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
 import { IndexTable } from "~/components/app/index-table";
 import { Unavailable } from "~/components/app/unavailable";
 import { WorkloadTable } from "~/components/app/workload-table";
-import { Button } from "~/components/ui/button";
 import { Checkbox } from "~/components/ui/checkbox";
 import { Label } from "~/components/ui/label";
 import { LocalTime } from "~/lib/local-time";
@@ -55,7 +52,6 @@ import {
   useClusterIndexes,
   useClusterWorkload,
   useNodes,
-  type WorkloadPage,
 } from "~/lib/queries/telemetry";
 
 export const Route = createFileRoute("/app/clusters/$clusterId/indexes")({
@@ -80,22 +76,6 @@ export const Route = createFileRoute("/app/clusters/$clusterId/indexes")({
   head: () => ({ meta: [{ title: "Indexes — Indexterity" }] }),
   component: ClusterIndexesPage,
 });
-
-// The workload half's cursor, same shape and same reason: keyset pages only
-// step forward, so Back is the cursor that produced the previous page and
-// nothing but the reader's own history knows it.
-type CostCursor = Required<Pick<WorkloadPage, "afterWeeklyDocsExamined" | "afterId">>;
-
-function costCursorFrom(payload: {
-  nextWeeklyDocsExamined: number | null;
-  nextId: string | null;
-}): CostCursor | null {
-  if (payload.nextWeeklyDocsExamined === null || payload.nextId === null) return null;
-  return {
-    afterWeeklyDocsExamined: payload.nextWeeklyDocsExamined,
-    afterId: payload.nextId,
-  };
-}
 
 function ClusterIndexesPage() {
   const { clusterId: id } = Route.useParams();
@@ -123,17 +103,22 @@ function ClusterIndexesPage() {
   const servedIndex =
     served.limit > 0 ? Math.floor(served.offset / served.limit) : pagination.pageIndex;
 
-  // The workload half's own state. Its own cursor stack, because the two tables
-  // page independently, and its own filter — "only the ones you declined" is the
+  // The workload half's own page state, because the two tables page
+  // independently, and its own filter — "only the ones you declined" is the
   // question this page exists to answer and the one no other screen can.
-  const [costStack, setCostStack] = useState<CostCursor[]>([]);
+  const [costPaging, setCostPaging] = useState({
+    pageIndex: 0,
+    pageSize: WORKLOAD_SHAPES_PAGE,
+  });
   const [declinedOnly, setDeclinedOnly] = useState(false);
-  const costPage = costStack[costStack.length - 1];
   const workload = useClusterWorkload(id, {
-    ...(costPage ?? {}),
+    offset: costPaging.pageIndex * costPaging.pageSize,
+    limit: costPaging.pageSize,
     ...(declinedOnly ? { declinedOnly: true } : {}),
   });
-  const nextCost = costCursorFrom(workload.data);
+  const costServed = workload.data;
+  const costIndex =
+    costServed.limit > 0 ? Math.floor(costServed.offset / costServed.limit) : costPaging.pageIndex;
 
   const rows: ClusterIndexRow[] = inventory.data.indexes;
 
@@ -243,10 +228,9 @@ function ClusterIndexesPage() {
             checked={declinedOnly}
             onCheckedChange={(checked) => {
               setDeclinedOnly(checked === true);
-              // A filter change invalidates the cursor: it was a position in a
-              // different result set, and paging from it would land somewhere
-              // the api never named.
-              setCostStack([]);
+              // Back to the first page: page four of the unfiltered list is not
+              // page four of the filtered one, and the api would clamp anyway.
+              setCostPaging((current) => ({ ...current, pageIndex: 0 }));
             }}
           />
           <Label htmlFor="declined-only" className="text-sm">
@@ -258,33 +242,20 @@ function ClusterIndexesPage() {
           {workload.failed ? (
             <Unavailable what="the scanning workload" onRetry={workload.retry} />
           ) : (
-            <WorkloadTable shapes={workload.data.shapes} loading={workload.pending} />
+            <WorkloadTable
+              shapes={workload.data.shapes}
+              loading={workload.pending}
+              pagination={{
+                pageIndex: costIndex,
+                pageSize: costServed.limit,
+                rowCount: costServed.total,
+                pageSizes: WORKLOAD_SHAPES_PAGE_SIZES,
+                noun: "query shapes",
+                onChange: setCostPaging,
+              }}
+            />
           )}
         </div>
-
-        {costStack.length === 0 && nextCost === null ? null : (
-          <div className="mt-4 flex items-center gap-2">
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={costStack.length === 0}
-              onClick={() => setCostStack((current) => current.slice(0, -1))}
-            >
-              Back
-            </Button>
-            {nextCost === null ? (
-              <span className="text-muted-foreground text-xs">The end of the list.</span>
-            ) : (
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => setCostStack((current) => [...current, nextCost])}
-              >
-                More
-              </Button>
-            )}
-          </div>
-        )}
       </section>
     </>
   );

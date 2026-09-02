@@ -600,6 +600,14 @@ export const clusterIndexes = z.object({
 });
 export type ClusterIndexes = z.infer<typeof clusterIndexes>;
 
+// The sizes the workload page-size control offers, and the only ones it may ask
+// for. Smaller than the inventory's because a row here is wider.
+export const WORKLOAD_SHAPES_PAGE_SIZES = [10, 25, 50] as const;
+
+// The largest workload page this endpoint will serve, bounding a hand-written
+// request the way CLUSTER_INDEXES_PAGE_MAX does for the inventory.
+export const WORKLOAD_SHAPES_PAGE_MAX = 100;
+
 // How many scanning shapes one page of the workload view carries (#432).
 //
 // Smaller than the index page's because a row here is wider — the ESR split, the
@@ -706,14 +714,14 @@ export type WorkloadShape = z.infer<typeof workloadShape>;
 export const clusterWorkload = z.object({
   clusterId: z.uuid(),
   shapes: z.array(workloadShape),
-  // How many shapes match, so a page can say "50 of 312".
+  // How many shapes match, so a page can say "50 of 312" — and, since #445, the
+  // row count the pagination reads to know how many pages there are.
   total: z.int().nonnegative(),
-  // The cursor for the page after this one, or null at the end. Two halves: the
-  // sort is by weekly cost descending and the id breaks the tie, because two
-  // shapes with the same cost on one collection is ordinary and a cursor that
-  // was only the cost would skip whichever sorted second.
-  nextWeeklyDocsExamined: z.int().nullable(),
-  nextId: z.uuid().nullable(),
+  // Where this page starts and how many it carries, echoed rather than assumed:
+  // past the end of a set that shrank the api clamps to the last page, and the
+  // control has to move with it (D133).
+  offset: z.int().nonnegative(),
+  limit: z.int().positive(),
   // Whether create-side analysis is switched off for this cluster. The one gate
   // that leaves NO shape rows at all, because nothing is read when it fires — so
   // an empty page has two very different meanings and this is which one.

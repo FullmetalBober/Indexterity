@@ -56,11 +56,22 @@ describe("esrLine", () => {
   });
 });
 
+// The pagination the route always supplies. One fixture spread into every render,
+// describing a single page, which is the state that draws no page buttons and
+// keeps these tests about the COLUMNS.
+const paging = {
+  pageIndex: 0,
+  pageSize: 50,
+  rowCount: 1,
+  noun: "query shapes",
+  onChange: () => undefined,
+};
+
 describe("WorkloadTable", () => {
   // The row that could not exist before #432: seen, priced, discarded, and now
   // on screen with the gate that discarded it.
   it("draws a shape nothing was proposed for, with the gate that declined it", () => {
-    renderInApp(<WorkloadTable shapes={[shape()]} loading={false} />);
+    renderInApp(<WorkloadTable shapes={[shape()]} loading={false} pagination={paging} />);
 
     expect(screen.getByText("shop.orders")).toBeInTheDocument();
     expect(screen.getByText("{ status }")).toBeInTheDocument();
@@ -81,6 +92,7 @@ describe("WorkloadTable", () => {
           }),
         ]}
         loading={false}
+        pagination={paging}
       />,
     );
 
@@ -95,6 +107,7 @@ describe("WorkloadTable", () => {
       <WorkloadTable
         shapes={[shape({ weeklyDocsExamined: null, docsExamined: null })]}
         loading={false}
+        pagination={paging}
       />,
     );
 
@@ -107,6 +120,7 @@ describe("WorkloadTable", () => {
       <WorkloadTable
         shapes={[shape({ executions: 12_481_003, weeklyDocsExamined: 43_200_000 })]}
         loading={false}
+        pagination={paging}
       />,
     );
 
@@ -126,6 +140,7 @@ describe("WorkloadTable", () => {
           }),
         ]}
         loading={false}
+        pagination={paging}
       />,
     );
 
@@ -140,6 +155,7 @@ describe("WorkloadTable", () => {
       <WorkloadTable
         shapes={[shape({ outcome: null, outcomeRaw: "some-future-gate", explanation: null })]}
         loading={false}
+        pagination={paging}
       />,
     );
 
@@ -147,7 +163,7 @@ describe("WorkloadTable", () => {
   });
 
   it("dates the shape from when it was FIRST seen, not last", () => {
-    renderInApp(<WorkloadTable shapes={[shape()]} loading={false} />);
+    renderInApp(<WorkloadTable shapes={[shape()]} loading={false} pagination={paging} />);
 
     expect(screen.getByText("3d ago")).toBeInTheDocument();
   });
@@ -159,6 +175,7 @@ describe("WorkloadTable", () => {
       <WorkloadTable
         shapes={[shape({ clients: [{ application: null, driver: "nodejs" }] })]}
         loading={false}
+        pagination={paging}
       />,
     );
 

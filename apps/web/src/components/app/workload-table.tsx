@@ -1,4 +1,5 @@
 import type { WorkloadShape } from "@repo/contracts";
+import type { ComponentProps } from "react";
 import { fmtCount } from "~/components/app/format";
 import { type DashboardColumns, DataTable, dashboardColumns } from "~/components/data-table";
 import { Truncated } from "~/components/truncated";
@@ -236,7 +237,18 @@ const columns: DashboardColumns<WorkloadShape> = column.columns([
   }),
 ]);
 
-export function WorkloadTable({ shapes, loading }: { shapes: WorkloadShape[]; loading: boolean }) {
+export function WorkloadTable({
+  shapes,
+  loading,
+  pagination,
+}: {
+  shapes: WorkloadShape[];
+  loading: boolean;
+  // Forwarded straight to the table, which owns the page arithmetic. Typed by
+  // reading it off DataTable rather than restated, so a change there cannot
+  // leave this signature quietly describing the old shape.
+  pagination: NonNullable<ComponentProps<typeof DataTable>["pagination"]>;
+}) {
   return (
     <DataTable
       className="mt-2"
@@ -249,6 +261,7 @@ export function WorkloadTable({ shapes, loading }: { shapes: WorkloadShape[]; lo
       // answer — so the initial sort agrees with the order the page arrived in
       // rather than re-ranking one page and calling it the cluster's worst.
       initialSorting={[{ id: "weeklyDocs", desc: true }]}
+      pagination={pagination}
       filterLabel="Filter shapes"
       virtualize={{ maxHeight: 560, estimateRowHeight: 48 }}
       // Collection, Index it needs, Failure, Runs, Docs/week, Severity,

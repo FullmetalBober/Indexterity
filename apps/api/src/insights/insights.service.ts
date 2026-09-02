@@ -36,7 +36,7 @@ import { workerEnv } from "../config/env";
 import { TenancyService } from "../http/tenancy.service";
 import { isWholeCollection } from "../jobs/cooldowns";
 import { severityOf, storedShapeSchema } from "../jobs/workload-shapes";
-import { InsightsRepository, UNMEASURED_COST } from "./insights.repository";
+import { InsightsRepository } from "./insights.repository";
 
 const RECENT_ACTIONS = 50;
 const TOP_CONTRIBUTORS = 10;
@@ -52,8 +52,9 @@ export interface WorkloadQuery {
   readonly database?: string | undefined;
   readonly collection?: string | undefined;
   readonly declinedOnly?: boolean | undefined;
-  readonly afterWeeklyDocsExamined?: number | undefined;
-  readonly afterId?: string | undefined;
+  // Offset paging since #445 (D133), the same shape as ClusterIndexQuery below.
+  readonly offset?: number | undefined;
+  readonly limit?: number | undefined;
 }
 
 export interface ClusterIndexQuery {
@@ -381,12 +382,15 @@ export class InsightsService {
     orgId: string,
     query: WorkloadQuery,
   ): Promise<ClusterWorkload> {
+    // Resolved before the empty views, which report it: a control that reads the
+    // page size back must not snap to a different one on a cluster with no shapes.
+    const workloadLimit = query.limit ?? WORKLOAD_SHAPES_PAGE;
     const empty = {
       clusterId,
       shapes: [],
       total: 0,
-      nextWeeklyDocsExamined: null,
-      nextId: null,
+      offset: 0,
+      limit: workloadLimit,
       // True in the empty view, so a cluster the caller does not own does not
       // read as one with create-side analysis switched off. Not-yours and
       // switched-off are different answers and only one of them is a setting.
@@ -401,15 +405,17 @@ export class InsightsService {
       this.repo.workloadAnalysisEnabled(clusterId),
       this.repo.workloadNote(clusterId),
     ]);
-    const { rows, total } = await this.repo.workloadShapePage(
+    const {
+      rows: page,
+      total,
+      offset,
+    } = await this.repo.workloadShapePage(
       clusterId,
       await this.repo.readableSince(clusterId),
       query,
-      WORKLOAD_SHAPES_PAGE,
+      workloadLimit,
+      query.offset ?? 0,
     );
-    const page = rows.slice(0, WORKLOAD_SHAPES_PAGE);
-    const more = rows.length > WORKLOAD_SHAPES_PAGE;
-    const last = page[page.length - 1];
 
     return {
       clusterId,
@@ -450,12 +456,11 @@ export class InsightsService {
         };
       }),
       total,
-      // Null at the end of the list, so the page stops offering more rather than
-      // fetching an empty one to find out. Both halves or neither: the cost
-      // alone would skip a shape that shares it.
-      nextWeeklyDocsExamined:
-        more && last !== undefined ? (last.weeklyDocsExamined ?? UNMEASURED_COST) : null,
-      nextId: more && last !== undefined ? last.id : null,
+      // Where the rows actually start, which is not always where the reader asked:
+      // the repository clamps past the end of a set that shrank. Echoed so the
+      // control follows the rows rather than insisting on a page that is gone.
+      offset,
+      limit: workloadLimit,
       workloadAnalysisEnabled: enabled,
       // The two gates that fire BEFORE the workload is read, so they can have no
       // shape rows at all — what exists is a count of collections nobody

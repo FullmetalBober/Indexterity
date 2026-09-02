@@ -36,6 +36,8 @@ export interface LatencyGroup {
 // The sort key an unmeasured weekly cost stands in for (#432). Negative because
 // a real one never is, so the ordering below stays total and the page's cursor
 // stays a plain number — see workloadShapePage.
+// Not exported any more than it has to be: the service used to read it to build
+// the workload cursor, and offset paging left this the ORDER BY's alone (D133).
 export const UNMEASURED_COST = -1;
 
 export interface IndexSizeDay {
@@ -387,9 +389,17 @@ export class InsightsRepository {
   // as `orNull` in the collections table, where a missing number sorts as -1 so
   // it stays out of the middle of a ranking it is not part of.
   //
-  // Keyset for the reason the security trail gives (D67), with the id as the
-  // tiebreak: two shapes on one collection sharing a weekly figure is ordinary,
-  // and a cursor that was only the cost would skip whichever sorted second.
+  // OFFSET, and the id is still the tiebreak (D133). The ordering argument above
+  // is what makes offset paging sound here rather than merely convenient: two
+  // shapes on one collection sharing a weekly figure is ordinary, so without the
+  // id the sort would be PARTIAL — and under offset a partial order lets the same
+  // row appear on two pages of one browse, where a keyset cursor only stalled.
+  //
+  // Same trade as the inventory: the set moves under the reader and a boundary can
+  // then repeat or skip a row. A ranked list of problems is the easier case for
+  // it, not the harder one — nothing here is consumed by being read, and a shape
+  // that moves across a boundary moved because its cost changed, which is the
+  // column the reader is sorting by.
   async workloadShapePage(
     clusterId: string,
     since: Date,
@@ -397,10 +407,9 @@ export class InsightsRepository {
       readonly database?: string | undefined;
       readonly collection?: string | undefined;
       readonly declinedOnly?: boolean | undefined;
-      readonly afterWeeklyDocsExamined?: number | undefined;
-      readonly afterId?: string | undefined;
     },
     limit: number,
+    offset: number,
   ) {
     const filters = [
       eq(workloadShapes.clusterId, clusterId),
@@ -424,23 +433,24 @@ export class InsightsRepository {
       .from(workloadShapes)
       .where(and(...filters));
 
-    const page = [...filters];
-    if (query.afterWeeklyDocsExamined !== undefined && query.afterId !== undefined) {
-      page.push(
-        sql`(coalesce(${workloadShapes.weeklyDocsExamined}, ${UNMEASURED_COST}), ${workloadShapes.id})
-            < (${query.afterWeeklyDocsExamined}::bigint, ${query.afterId}::uuid)`,
-      );
-    }
+    const total = counted?.total ?? 0;
+    // Clamped to the last page BOUNDARY past the end, for the reason
+    // clusterIndexPage gives: a reader who narrows the filter while on a later
+    // page has asked for an offset that no longer exists, and a mid-page clamp
+    // would straddle two pages so rows would repeat.
+    const start = total === 0 ? 0 : Math.min(offset, Math.max(0, total - 1));
+    const from = Math.floor(start / limit) * limit;
     const rows = await this.database.db
       .select()
       .from(workloadShapes)
-      .where(and(...page))
+      .where(and(...filters))
       .orderBy(
         sql`coalesce(${workloadShapes.weeklyDocsExamined}, ${UNMEASURED_COST}) desc`,
         desc(workloadShapes.id),
       )
-      .limit(limit + 1);
-    return { rows, total: counted?.total ?? rows.length };
+      .limit(limit)
+      .offset(from);
+    return { rows, total, offset: from };
   }
 
   // The WORKLOAD pass's own note (#277), for the two gates that can have no

@@ -16,7 +16,7 @@ import type {
   CollectionStat,
   LatencySummary,
 } from "@repo/contracts";
-import { CLUSTER_INDEXES_PAGE } from "@repo/contracts";
+import { CLUSTER_INDEXES_PAGE, WORKLOAD_SHAPES_PAGE } from "@repo/contracts";
 import { queryOptions, useQuery } from "@tanstack/react-query";
 import { api } from "../api";
 import { queryKeys } from "./keys";
@@ -143,8 +143,9 @@ export interface WorkloadPage {
   readonly database?: string | undefined;
   readonly collection?: string | undefined;
   readonly declinedOnly?: boolean | undefined;
-  readonly afterWeeklyDocsExamined?: number | undefined;
-  readonly afterId?: string | undefined;
+  // Offset paging since #445 (D133), same shape as ClusterIndexPage above.
+  readonly offset?: number | undefined;
+  readonly limit?: number | undefined;
 }
 
 // `workloadAnalysisEnabled` true in the empty fallback, so a cluster whose read
@@ -155,8 +156,8 @@ export const NO_CLUSTER_WORKLOAD: ClusterWorkload = {
   clusterId: "",
   shapes: [],
   total: 0,
-  nextWeeklyDocsExamined: null,
-  nextId: null,
+  offset: 0,
+  limit: WORKLOAD_SHAPES_PAGE,
   workloadAnalysisEnabled: true,
   collectionsBelowDocFloor: 0,
   collectionsAboveSizeCeiling: 0,
@@ -168,14 +169,8 @@ function workloadInput(page: WorkloadPage) {
     ...(page.database === undefined ? {} : { database: page.database }),
     ...(page.collection === undefined ? {} : { collection: page.collection }),
     ...(page.declinedOnly === undefined ? {} : { declinedOnly: page.declinedOnly }),
-    // Both halves or neither, for the reason the api gives: a cost without its
-    // tiebreak would skip a shape that shares it.
-    ...(page.afterWeeklyDocsExamined === undefined || page.afterId === undefined
-      ? {}
-      : {
-          afterWeeklyDocsExamined: page.afterWeeklyDocsExamined,
-          afterId: page.afterId,
-        }),
+    ...(page.offset === undefined ? {} : { offset: page.offset }),
+    ...(page.limit === undefined ? {} : { limit: page.limit }),
   };
 }
 

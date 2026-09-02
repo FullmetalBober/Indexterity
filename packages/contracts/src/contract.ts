@@ -43,6 +43,7 @@ import {
   supportedEngine,
   tunnelTestResult,
   tunnelView,
+  WORKLOAD_SHAPES_PAGE_MAX,
 } from "./schemas.js";
 
 const clusterId = z.object({ clusterId: z.uuid() });
@@ -189,6 +190,13 @@ export const contract = {
   // Ranked by weekly cost rather than sorted by namespace, which is the
   // difference from `getClusterIndexes` beside it: an inventory is browsed, and
   // this is a list of problems, so the worst ones are the answer.
+  //
+  // Paged by offset since #445, the same as the inventory (D133). The ranking is
+  // what makes it sound rather than merely convenient: the sort key is
+  // `(weekly cost desc, id)` and the id is not decoration — two shapes on one
+  // collection sharing a weekly figure is ordinary, so without it the order is
+  // PARTIAL, and under offset a partial order lets one row appear on two pages of
+  // a single browse where a keyset cursor merely stalled.
   getClusterWorkload: oc
     .route({
       method: "GET",
@@ -204,10 +212,12 @@ export const contract = {
         // Only the shapes nothing was proposed for, which is the question the
         // page exists to answer and the one no other screen can.
         declinedOnly: z.coerce.boolean().optional(),
-        // The cursor from the previous page. Both halves or neither — a cost
-        // without its tiebreak would skip a shape that shares it.
-        afterWeeklyDocsExamined: z.coerce.number().optional(),
-        afterId: z.uuid().optional(),
+        // Where the page starts and how big it is. Coerced from the query string,
+        // and the limit is bounded at both ends for the reason the inventory gives:
+        // a floor so a request for zero rows cannot page forever, and a ceiling
+        // that keeps this a page rather than a report.
+        offset: z.coerce.number().int().nonnegative().optional(),
+        limit: z.coerce.number().int().min(1).max(WORKLOAD_SHAPES_PAGE_MAX).optional(),
       }),
     )
     .output(clusterWorkload),
