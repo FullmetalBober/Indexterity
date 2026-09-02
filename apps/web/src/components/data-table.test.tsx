@@ -1,8 +1,14 @@
+import type { SortingState } from "@tanstack/react-table";
 import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { type DashboardColumns, DataTable, dashboardColumns } from "~/components/data-table";
+import {
+  type DashboardColumns,
+  DataTable,
+  dashboardColumns,
+  pageWindow,
+} from "~/components/data-table";
 import { renderInApp } from "~/test-utils";
 
 interface Row {
@@ -385,5 +391,251 @@ describe("DataTable, column widths", () => {
     expect(
       container.querySelector("[data-slot=table-container]")?.parentElement?.className,
     ).toContain("w-fit");
+  });
+});
+
+// The elision, which is the only part of the control with arithmetic in it.
+describe("pageWindow", () => {
+  // Under the window width every page is a button, so there is nothing to elide
+  // and no reason to make a reader interpret one.
+  it("lists every page when they all fit", () => {
+    expect(pageWindow(0, 1)).toEqual([0]);
+    expect(pageWindow(3, 7)).toEqual([0, 1, 2, 3, 4, 5, 6]);
+  });
+
+  // First and last are always reachable: they are the two pages a browsing
+  // reader most often wants, and the two an offset cursor can now actually jump
+  // to (D133).
+  it("always keeps the first and last page", () => {
+    for (const index of [0, 5, 10, 20]) {
+      const window = pageWindow(index, 21);
+      expect(window[0]).toBe(0);
+      expect(window.at(-1)).toBe(20);
+    }
+  });
+
+  it("elides the middle around the current page", () => {
+    expect(pageWindow(10, 21)).toEqual([0, "gap-start", 9, 10, 11, "gap-end", 20]);
+  });
+
+  it("clamps the window at both ends rather than running off them", () => {
+    expect(pageWindow(0, 21)).toEqual([0, 1, 2, 3, "gap-end", 20]);
+    expect(pageWindow(20, 21)).toEqual([0, "gap-start", 17, 18, 19, 20]);
+  });
+
+  // The property that matters most, because breaking it makes a page reachable
+  // from nowhere: every drawn page number is contiguous with its neighbour or
+  // separated by a gap standing for two or more.
+  it("never draws a gap in place of a single page", () => {
+    for (const count of [8, 9, 10, 11, 12, 21, 40]) {
+      for (let index = 0; index < count; index += 1) {
+        const window = pageWindow(index, count);
+        const numbers = window.filter((entry): entry is number => typeof entry === "number");
+        for (const [position, page] of numbers.entries()) {
+          const previous = numbers[position - 1];
+          if (previous === undefined) continue;
+          const hidden = page - previous - 1;
+          // Adjacent, or a gap that earns its place by hiding at least two.
+          expect(hidden === 0 || hidden >= 2).toBe(true);
+          if (hidden >= 2) {
+            expect(window).toContain(position === 1 ? "gap-start" : "gap-end");
+          }
+        }
+        // And the page the reader is on is always one of them.
+        expect(numbers).toContain(index);
+      }
+    }
+  });
+});
+
+// The footer. Only drawn with the prop, which is what keeps the two tables that
+// page nothing exactly as they were.
+describe("DataTable pagination", () => {
+  function renderPaged(options: {
+    pageIndex?: number;
+    pageSize?: number;
+    rowCount?: number;
+    noun?: string;
+    onChange?: (next: { pageIndex: number; pageSize: number }) => void;
+    pageSizes?: readonly number[];
+  }) {
+    return renderInApp(
+      <DataTable
+        caption="Test rows"
+        columns={columns}
+        data={ROWS.slice(0, 2)}
+        getRowId={(row) => row.id}
+        initialSorting={[{ id: "name", desc: false }]}
+        empty={{ title: "Nothing here", description: "Not collected yet." }}
+        pagination={{
+          pageIndex: options.pageIndex ?? 0,
+          pageSize: options.pageSize ?? 2,
+          rowCount: options.rowCount ?? 5,
+          noun: options.noun ?? "rows",
+          onChange: options.onChange ?? (() => undefined),
+          ...(options.pageSizes === undefined ? {} : { pageSizes: options.pageSizes }),
+        }}
+      />,
+    );
+  }
+
+  it("draws no footer without the prop", () => {
+    render();
+    expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
+  });
+
+  // The range, not just the total: "1-2 of 5" is what tells a reader the table
+  // in front of them is a window rather than everything.
+  it("says which rows of how many this page holds", () => {
+    renderPaged({ pageIndex: 0 });
+    expect(screen.getByText(/1-2 of 5 rows/)).toBeInTheDocument();
+  });
+
+  // The last page is short, and saying "5-6 of 5" would be arithmetic leaking
+  // through the copy.
+  it("does not run the range past the total on a short last page", () => {
+    renderPaged({ pageIndex: 2 });
+    expect(screen.getByText(/5-5 of 5 rows/)).toBeInTheDocument();
+  });
+
+  // Three pages of two out of five rows: the count comes from rowCount, which is
+  // the whole reason the api returns a total the page cannot compute for itself.
+  it("derives the page buttons from the row count, not the rows in hand", () => {
+    renderPaged({});
+    expect(screen.getByRole("button", { name: "Page 1" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Page 3" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Page 4" })).not.toBeInTheDocument();
+  });
+
+  it("marks the current page for a reader who cannot see which is filled", () => {
+    renderPaged({ pageIndex: 1 });
+    expect(screen.getByRole("button", { name: "Page 2" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("button", { name: "Page 1" })).not.toHaveAttribute("aria-current");
+  });
+
+  it("cannot step off either end", () => {
+    renderPaged({ pageIndex: 0 });
+    expect(screen.getByRole("button", { name: "Previous page" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Next page" })).toBeEnabled();
+  });
+
+  it("reports the page the reader asked for", async () => {
+    const seen: { pageIndex: number; pageSize: number }[] = [];
+    renderPaged({ pageIndex: 0, onChange: (next) => seen.push(next) });
+    await userEvent.click(screen.getByRole("button", { name: "Page 3" }));
+    expect(seen).toEqual([{ pageIndex: 2, pageSize: 2 }]);
+  });
+
+  // v9 hands onPaginationChange an UPDATER, and setPageSize's updater also moves
+  // the page index so the row at the top of the page stays in view. Both have to
+  // survive the trip to the caller, which is the only thing the adapter does.
+  it("reports a page size change with the recomputed index", async () => {
+    const seen: { pageIndex: number; pageSize: number }[] = [];
+    renderPaged({
+      pageIndex: 2,
+      pageSize: 2,
+      rowCount: 20,
+      pageSizes: [2, 10],
+      onChange: (next) => seen.push(next),
+    });
+    await userEvent.click(screen.getByRole("combobox", { name: "rows per page" }));
+    await userEvent.click(screen.getByRole("option", { name: "10 / page" }));
+    // Row 5 was at the top of page 3 at two per page; at ten per page that row
+    // is on page 1.
+    expect(seen).toEqual([{ pageIndex: 0, pageSize: 10 }]);
+  });
+
+  // One offered size is not a choice, so the control is not drawn.
+  it("offers no size control for a single size", () => {
+    renderPaged({ pageSizes: [2] });
+    expect(screen.queryByRole("combobox", { name: "rows per page" })).not.toBeInTheDocument();
+  });
+
+  // The caveat the control would otherwise imply away: it pages the SET and
+  // sorts the PAGE, and those are different scopes.
+  it("admits that sorting and filtering are page-scoped", () => {
+    renderPaged({});
+    expect(screen.getByText(/sorting and filtering apply to this page/)).toBeInTheDocument();
+  });
+});
+
+// Server-owned sort and filter. The dimension the api owns must be REPORTED and
+// not applied, or the table would reorder the rows the server chose and the
+// header would describe a set nobody asked for (D135).
+describe("DataTable server-owned sort and filter", () => {
+  function renderManual(over: {
+    sorting?: { state: SortingState; onChange: (next: SortingState) => void };
+    filter?: { value: string; onChange: (next: string) => void };
+  }) {
+    return renderInApp(
+      <DataTable
+        caption="Test rows"
+        columns={columns}
+        data={ROWS}
+        getRowId={(row) => row.id}
+        initialSorting={[{ id: "name", desc: false }]}
+        filterLabel="Filter rows"
+        empty={{ title: "Nothing here", description: "Not collected yet." }}
+        {...over}
+      />,
+    );
+  }
+
+  const names = () =>
+    screen
+      .getAllByRole("row")
+      .slice(1)
+      .map((tr) => tr.querySelector("td")?.textContent ?? "");
+
+  // ROWS is orders/users/events — deliberately NOT alphabetical, so a table that
+  // sorted locally would be visibly different from one that did not.
+  it("leaves the api's row order alone", async () => {
+    const seen: SortingState[] = [];
+    renderManual({
+      sorting: { state: [{ id: "name", desc: false }], onChange: (next) => seen.push(next) },
+    });
+    expect(names()).toEqual(["orders", "users", "events"]);
+
+    await userEvent.click(screen.getByRole("button", { name: /^Name/ }));
+    // Reported, not applied: the next render's rows are the api's answer.
+    expect(seen).toEqual([[{ id: "name", desc: true }]]);
+    expect(names()).toEqual(["orders", "users", "events"]);
+  });
+
+  it("still draws which column the api sorted by", () => {
+    renderManual({
+      sorting: { state: [{ id: "size", desc: true }], onChange: () => undefined },
+    });
+    // On the header CELL, which is where aria-sort belongs — the button inside it
+    // is the control, not the sorted thing.
+    expect(screen.getByRole("columnheader", { name: /Size/ })).toHaveAttribute(
+      "aria-sort",
+      "descending",
+    );
+  });
+
+  it("reports the filter without applying it", async () => {
+    const seen: string[] = [];
+    renderManual({ filter: { value: "", onChange: (next) => seen.push(next) } });
+    await userEvent.type(screen.getByLabelText("Filter rows"), "ord");
+    expect(seen.at(-1)).toBe("d");
+    // Every row still drawn: the api decides what matches, and it has not answered.
+    expect(names()).toHaveLength(ROWS.length);
+  });
+
+  // The value is the caller's, so a controlled box shows what the route holds
+  // rather than its own copy.
+  it("shows the filter value the caller holds", () => {
+    renderManual({ filter: { value: "orders", onChange: () => undefined } });
+    expect(screen.getByLabelText("Filter rows")).toHaveValue("orders");
+  });
+
+  // Without the props nothing changes, which is what protects the three capped
+  // tables that sort and filter in the browser (D33).
+  it("sorts and filters locally when the api owns neither", async () => {
+    render();
+    expect(names()).toEqual(["events", "orders", "users"]);
+    await userEvent.type(screen.getByLabelText("Filter rows"), "ord");
+    expect(names()).toEqual(["orders"]);
   });
 });

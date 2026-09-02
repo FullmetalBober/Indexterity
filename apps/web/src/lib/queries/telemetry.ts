@@ -16,6 +16,7 @@ import type {
   CollectionStat,
   LatencySummary,
 } from "@repo/contracts";
+import { CLUSTER_INDEXES_PAGE, WORKLOAD_SHAPES_PAGE } from "@repo/contracts";
 import { queryOptions, useQuery } from "@tanstack/react-query";
 import { api } from "../api";
 import { queryKeys } from "./keys";
@@ -93,42 +94,37 @@ export function indexSizeSeriesQuery(clusterId: string | null) {
 export interface ClusterIndexPage {
   readonly database?: string | undefined;
   readonly collection?: string | undefined;
-  readonly afterDatabase?: string | undefined;
-  readonly afterCollection?: string | undefined;
-  readonly afterIndexName?: string | undefined;
+  // Offset paging since #445 (D133). The query key carries them, so a page is a
+  // cache entry of its own and stepping back is a cache hit rather than a fetch.
+  readonly offset?: number | undefined;
+  readonly limit?: number | undefined;
 }
 
-// The whole payload again, and for the third time the same reason: `total` is
-// the honest denominator for a page of 100, and the three cursor fields are how
-// the table knows whether to offer another page at all. Folding any of them away
-// here would put the reader back to paging into an empty response to find the
-// end.
+// The whole payload again, and for the third time the same reason: `total` is the
+// honest denominator for a page, and `offset`/`limit` are what the pagination
+// control reads to know which page it is on and how many there are. Folding any
+// of them away here would give the control a page count of zero on a read that
+// has not answered, which draws as "no indexes" rather than as "not yet".
+//
+// `limit` is the api's default rather than 0, because it is a divisor.
 export const NO_CLUSTER_INDEXES: ClusterIndexes = {
   clusterId: "",
   indexes: [],
   total: 0,
-  nextDatabase: null,
-  nextCollection: null,
-  nextIndexName: null,
+  offset: 0,
+  limit: CLUSTER_INDEXES_PAGE,
   collectedAt: null,
 };
 
-// The cursor travels as three fields or none. Half of one would page from a
-// namespace boundary the api never named, which is a quietly wrong page rather
-// than an error.
+// Only the fields the reader actually set. Sending `offset: undefined` would be a
+// query string with an empty parameter in it, and the api coerces before it
+// validates.
 function pageInput(page: ClusterIndexPage) {
   return {
     ...(page.database === undefined ? {} : { database: page.database }),
     ...(page.collection === undefined ? {} : { collection: page.collection }),
-    ...(page.afterDatabase === undefined ||
-    page.afterCollection === undefined ||
-    page.afterIndexName === undefined
-      ? {}
-      : {
-          afterDatabase: page.afterDatabase,
-          afterCollection: page.afterCollection,
-          afterIndexName: page.afterIndexName,
-        }),
+    ...(page.offset === undefined ? {} : { offset: page.offset }),
+    ...(page.limit === undefined ? {} : { limit: page.limit }),
   };
 }
 
@@ -147,8 +143,9 @@ export interface WorkloadPage {
   readonly database?: string | undefined;
   readonly collection?: string | undefined;
   readonly declinedOnly?: boolean | undefined;
-  readonly afterWeeklyDocsExamined?: number | undefined;
-  readonly afterId?: string | undefined;
+  // Offset paging since #445 (D133), same shape as ClusterIndexPage above.
+  readonly offset?: number | undefined;
+  readonly limit?: number | undefined;
 }
 
 // `workloadAnalysisEnabled` true in the empty fallback, so a cluster whose read
@@ -159,8 +156,8 @@ export const NO_CLUSTER_WORKLOAD: ClusterWorkload = {
   clusterId: "",
   shapes: [],
   total: 0,
-  nextWeeklyDocsExamined: null,
-  nextId: null,
+  offset: 0,
+  limit: WORKLOAD_SHAPES_PAGE,
   workloadAnalysisEnabled: true,
   collectionsBelowDocFloor: 0,
   collectionsAboveSizeCeiling: 0,
@@ -172,14 +169,8 @@ function workloadInput(page: WorkloadPage) {
     ...(page.database === undefined ? {} : { database: page.database }),
     ...(page.collection === undefined ? {} : { collection: page.collection }),
     ...(page.declinedOnly === undefined ? {} : { declinedOnly: page.declinedOnly }),
-    // Both halves or neither, for the reason the api gives: a cost without its
-    // tiebreak would skip a shape that shares it.
-    ...(page.afterWeeklyDocsExamined === undefined || page.afterId === undefined
-      ? {}
-      : {
-          afterWeeklyDocsExamined: page.afterWeeklyDocsExamined,
-          afterId: page.afterId,
-        }),
+    ...(page.offset === undefined ? {} : { offset: page.offset }),
+    ...(page.limit === undefined ? {} : { limit: page.limit }),
   };
 }
 

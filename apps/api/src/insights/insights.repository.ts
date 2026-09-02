@@ -1,10 +1,13 @@
 import { Injectable } from "@nestjs/common";
+import type { IndexSortKey, SortDirection, WorkloadSortKey } from "@repo/contracts";
+import type { Column, SQL } from "drizzle-orm";
 import type { LatencyReading } from "../analysis";
 import { runFrom } from "../analysis/types";
 import {
   actions,
   analysisNotes,
   and,
+  asc,
   clusterIndexes,
   clusterRosters,
   desc,
@@ -37,7 +40,73 @@ export interface LatencyGroup {
 // The sort key an unmeasured weekly cost stands in for (#432). Negative because
 // a real one never is, so the ordering below stays total and the page's cursor
 // stays a plain number — see workloadShapePage.
+// Not exported any more than it has to be: the service used to read it to build
+// the workload cursor, and offset paging left this the ORDER BY's alone (D133).
 export const UNMEASURED_COST = -1;
+
+// Neutralise the ILIKE wildcards in a reader's search term.
+//
+// `%` and `_` are wildcards, and `ilike` escapes nothing itself — so a reader
+// looking for the index `id_1` would also match `id01`, and one who typed `%`
+// would match the whole cluster. Backslash is ILIKE's default escape character
+// in Postgres, and the backslash goes first: escaping the wildcards before it
+// would then escape the escapes.
+function likeEscape(value: string): string {
+  return value.replace(/[\\%_]/g, (match) => `\\${match}`);
+}
+
+// Ops summed out of the per-member jsonb, in SQL.
+//
+// The dashboard sums the same array to draw the Usage column, and ordering the
+// whole cluster by it means the database has to do the same arithmetic — there is
+// no column to sort on, because the split IS the stored value (D66). Unindexable
+// by nature: it is a per-row aggregate over a document. Fine at the scale the
+// inventory runs at and named here rather than discovered later, since it is the
+// one sortable key that cannot be answered from an index.
+//
+// `coalesce` to 0 rather than leaving null, so an index no member reported sorts
+// as unused instead of vanishing to one end under a nulls-first default.
+const totalOpsSql = sql`coalesce((
+  select sum((entry->>'ops')::bigint)
+  from jsonb_array_elements(${indexSnapshots.perMember}) as entry
+), 0)`;
+
+// Each sortable key to its expression, and the map is TOTAL over the enum — so a
+// key that parsed is a key that sorts, and nothing reaches an ORDER BY that did
+// not come from the whitelist (D135). Namespace is two columns, because the
+// dashboard shows one `database.collection` cell and sorting on the concatenation
+// would order `app.z` before `apple.a`.
+const INDEX_SORTS: Record<IndexSortKey, readonly [SQL | Column, ...(SQL | Column)[]]> = {
+  namespace: [clusterIndexes.database, clusterIndexes.collection],
+  indexName: [clusterIndexes.indexName],
+  sizeBytes: [indexSnapshots.sizeBytes],
+  totalOps: [totalOpsSql],
+};
+
+const WORKLOAD_SORTS: Record<WorkloadSortKey, readonly [SQL | Column, ...(SQL | Column)[]]> = {
+  namespace: [workloadShapes.database, workloadShapes.collection],
+  executions: [workloadShapes.executions],
+  weeklyDocsExamined: [sql`coalesce(${workloadShapes.weeklyDocsExamined}, ${UNMEASURED_COST})`],
+  severity: [workloadShapes.severity],
+  outcome: [workloadShapes.outcome],
+  firstSeenAt: [workloadShapes.firstSeenAt],
+};
+
+// The ORDER BY for one request: the chosen key in the chosen direction, then the
+// tiebreak that makes the order TOTAL.
+//
+// The tiebreak is not tidiness under offset paging. Rows that tie sort
+// arbitrarily, and an arbitrary order between two requests is how the same row
+// lands on two pages of one browse while another is never shown at all — a
+// keyset cursor merely stalled on that, offset silently duplicates.
+function orderBy(
+  columns: readonly (SQL | Column)[],
+  direction: SortDirection,
+  tiebreak: readonly (SQL | Column)[],
+) {
+  const apply = direction === "asc" ? asc : desc;
+  return [...columns.map((column) => apply(column)), ...tiebreak.map((column) => asc(column))];
+}
 
 export interface IndexSizeDay {
   readonly day: string;
@@ -243,20 +312,36 @@ export class InsightsRepository {
   // started weeks ago: that is the same mistake `latestIndexFootprint` above
   // documents having made.
   //
-  // Keyset, not offset, for the reason the security trail gives (D67): the set
-  // moves under the reader — a collect lands, an index is built — and an offset
-  // page would then repeat or skip whatever crossed the boundary. The tuple
-  // comparison is exact where three separate `>` clauses would not be.
+  // OFFSET, and it was a keyset cursor until #445 (D133).
+  //
+  // The keyset argument was the security trail's (D67) and it is still true: the
+  // set moves under the reader — a collect lands, an index is built — and an
+  // offset page can then repeat or skip whatever crossed the boundary. What that
+  // argument does not weigh is that a cursor can only STEP, so the reader got a
+  // Back and a More button, no page number, and no way to reach the fifth page of
+  // six on a cluster with 517 indexes. Browsing is the access pattern that wants
+  // a page number, which is why this endpoint pages at all.
+  //
+  // Survivable here and NOT in the trail: a namespace is not a queue, so nothing
+  // is missed by being skipped once — the row is still there on the next read,
+  // under a filter, or on the page either side. An audit trail is read to
+  // establish that nothing happened, and a skipped row there is a false negative
+  // about a security event. Different question, different guarantee.
+  //
+  // The count and the page are two queries against the same filters, and the
+  // count is re-run per request rather than cached in a cursor, which is what
+  // makes the page count follow a set that changed size mid-browse.
   async clusterIndexPage(
     clusterId: string,
     query: {
       readonly database?: string | undefined;
       readonly collection?: string | undefined;
-      readonly afterDatabase?: string | undefined;
-      readonly afterCollection?: string | undefined;
-      readonly afterIndexName?: string | undefined;
+      readonly sort?: IndexSortKey | undefined;
+      readonly dir?: SortDirection | undefined;
+      readonly q?: string | undefined;
     },
     limit: number,
+    offset: number,
   ) {
     const filters = [
       eq(indexSnapshots.clusterId, clusterId),
@@ -269,6 +354,21 @@ export class InsightsRepository {
     if (query.collection !== undefined) {
       filters.push(eq(clusterIndexes.collection, query.collection));
     }
+    // The reader's search box, over the two things they type: the namespace and
+    // the index name. Bound as a parameter, and `ilike` escapes nothing itself —
+    // so `%` and `_` in the box are wildcards the reader did not ask for, and
+    // escaping them is what makes an index literally named `id_1` findable.
+    if (query.q !== undefined) {
+      const term = `%${likeEscape(query.q)}%`;
+      // One `sql` predicate rather than `or(ilike(...), ilike(...))`, because
+      // drizzle types `or` as possibly-undefined — it returns undefined when every
+      // argument is — and the alternative to this is an assertion saying the two
+      // arguments right there are not undefined.
+      filters.push(
+        sql`(${clusterIndexes.database} || '.' || ${clusterIndexes.collection} ilike ${term}
+             or ${clusterIndexes.indexName} ilike ${term})`,
+      );
+    }
     // The total is of what MATCHES the namespace filter, not of the cluster: a
     // filtered page saying "100 of 211" against the unfiltered count would be
     // describing rows the reader did not ask for.
@@ -278,18 +378,16 @@ export class InsightsRepository {
       .innerJoin(clusterIndexes, eq(indexSnapshots.indexId, clusterIndexes.id))
       .where(and(...filters));
 
-    const page = [...filters];
-    if (
-      query.afterDatabase !== undefined &&
-      query.afterCollection !== undefined &&
-      query.afterIndexName !== undefined
-    ) {
-      page.push(
-        sql`(${clusterIndexes.database}, ${clusterIndexes.collection}, ${clusterIndexes.indexName}) > (${query.afterDatabase}, ${query.afterCollection}, ${query.afterIndexName})`,
-      );
-    }
-    // One more than the page, so "is there another" costs no second query, and
-    // the extra row is dropped rather than sent.
+    const total = counted?.total ?? 0;
+    // Clamped to the last page rather than serving an empty one past the end.
+    // A reader on page five who narrows the filter has asked for an offset that
+    // no longer exists, and an empty table under a "517 indexes" heading reads as
+    // a broken screen rather than as a moved boundary. Reported back, so the
+    // control lands where the rows did.
+    const start = total === 0 ? 0 : Math.min(offset, Math.max(0, total - 1));
+    // To the page boundary, not to the raw offset: a clamp mid-page would serve a
+    // window straddling two pages and the reader would see rows repeat.
+    const from = Math.floor(start / limit) * limit;
     const rows = await this.database.db
       .select({
         id: clusterIndexes.id,
@@ -304,10 +402,20 @@ export class InsightsRepository {
       })
       .from(indexSnapshots)
       .innerJoin(clusterIndexes, eq(indexSnapshots.indexId, clusterIndexes.id))
-      .where(and(...page))
-      .orderBy(clusterIndexes.database, clusterIndexes.collection, clusterIndexes.indexName)
-      .limit(limit + 1);
-    return { rows, total: counted?.total ?? rows.length };
+      .where(and(...filters))
+      // The reader's key, then the namespace triple as the tiebreak — which is
+      // also the default when nothing was asked for, and is the order the page
+      // has always arrived in.
+      .orderBy(
+        ...orderBy(INDEX_SORTS[query.sort ?? "namespace"], query.dir ?? "asc", [
+          clusterIndexes.database,
+          clusterIndexes.collection,
+          clusterIndexes.indexName,
+        ]),
+      )
+      .limit(limit)
+      .offset(from);
+    return { rows, total, offset: from };
   }
 
   // Live recommendations over the namespaces one page covers.
@@ -372,9 +480,17 @@ export class InsightsRepository {
   // as `orNull` in the collections table, where a missing number sorts as -1 so
   // it stays out of the middle of a ranking it is not part of.
   //
-  // Keyset for the reason the security trail gives (D67), with the id as the
-  // tiebreak: two shapes on one collection sharing a weekly figure is ordinary,
-  // and a cursor that was only the cost would skip whichever sorted second.
+  // OFFSET, and the id is still the tiebreak (D133). The ordering argument above
+  // is what makes offset paging sound here rather than merely convenient: two
+  // shapes on one collection sharing a weekly figure is ordinary, so without the
+  // id the sort would be PARTIAL — and under offset a partial order lets the same
+  // row appear on two pages of one browse, where a keyset cursor only stalled.
+  //
+  // Same trade as the inventory: the set moves under the reader and a boundary can
+  // then repeat or skip a row. A ranked list of problems is the easier case for
+  // it, not the harder one — nothing here is consumed by being read, and a shape
+  // that moves across a boundary moved because its cost changed, which is the
+  // column the reader is sorting by.
   async workloadShapePage(
     clusterId: string,
     since: Date,
@@ -382,10 +498,12 @@ export class InsightsRepository {
       readonly database?: string | undefined;
       readonly collection?: string | undefined;
       readonly declinedOnly?: boolean | undefined;
-      readonly afterWeeklyDocsExamined?: number | undefined;
-      readonly afterId?: string | undefined;
+      readonly sort?: WorkloadSortKey | undefined;
+      readonly dir?: SortDirection | undefined;
+      readonly q?: string | undefined;
     },
     limit: number,
+    offset: number,
   ) {
     const filters = [
       eq(workloadShapes.clusterId, clusterId),
@@ -403,29 +521,44 @@ export class InsightsRepository {
     // direction, since the alternative is a new gate silently vanishing from the
     // filter that exists to show it.
     if (query.declinedOnly === true) filters.push(ne(workloadShapes.outcome, "proposed"));
+    // Namespace only here. A shape has no name — its identity is the ESR key list,
+    // which lives in the jsonb and is assembled into a line by the dashboard, so
+    // there is nothing else a SQL predicate can match on.
+    if (query.q !== undefined) {
+      const term = `%${likeEscape(query.q)}%`;
+      filters.push(
+        sql`${workloadShapes.database} || '.' || ${workloadShapes.collection} ilike ${term}`,
+      );
+    }
 
     const [counted] = await this.database.db
       .select({ total: sql<number>`count(*)::int` })
       .from(workloadShapes)
       .where(and(...filters));
 
-    const page = [...filters];
-    if (query.afterWeeklyDocsExamined !== undefined && query.afterId !== undefined) {
-      page.push(
-        sql`(coalesce(${workloadShapes.weeklyDocsExamined}, ${UNMEASURED_COST}), ${workloadShapes.id})
-            < (${query.afterWeeklyDocsExamined}::bigint, ${query.afterId}::uuid)`,
-      );
-    }
+    const total = counted?.total ?? 0;
+    // Clamped to the last page BOUNDARY past the end, for the reason
+    // clusterIndexPage gives: a reader who narrows the filter while on a later
+    // page has asked for an offset that no longer exists, and a mid-page clamp
+    // would straddle two pages so rows would repeat.
+    const start = total === 0 ? 0 : Math.min(offset, Math.max(0, total - 1));
+    const from = Math.floor(start / limit) * limit;
     const rows = await this.database.db
       .select()
       .from(workloadShapes)
-      .where(and(...page))
+      .where(and(...filters))
+      // The reader's key, then the id as the tiebreak that makes the order total.
+      // The default is weekly cost descending, which is the ranking this list is
+      // for — and note the default DIRECTION is desc here where the inventory's is
+      // asc: the worst shape is the answer, and the first namespace is.
       .orderBy(
-        sql`coalesce(${workloadShapes.weeklyDocsExamined}, ${UNMEASURED_COST}) desc`,
-        desc(workloadShapes.id),
+        ...orderBy(WORKLOAD_SORTS[query.sort ?? "weeklyDocsExamined"], query.dir ?? "desc", [
+          workloadShapes.id,
+        ]),
       )
-      .limit(limit + 1);
-    return { rows, total: counted?.total ?? rows.length };
+      .limit(limit)
+      .offset(from);
+    return { rows, total, offset: from };
   }
 
   // Un-park an index (D136). Delegates to jobs/cooldowns.ts rather than writing
