@@ -43,7 +43,14 @@ export const MIN_INTRODUCED_FAILURES = 3;
 
 export type FailureVerdict =
   // The hide is implicated: nothing was failing before it and something is now.
-  | { readonly kind: "INTRODUCED"; readonly failed: number }
+  //
+  // `baselineMs` is how far back the clean baseline actually reached, and it is on
+  // the verdict because it is the SCOPE of the claim rather than decoration. It is
+  // deliberately not a gate: a short reach means a BUSY collection (the ring filled
+  // fast, so those seconds hold many operations) and a long one means a quiet
+  // collection, so time-reach is no proxy for how much evidence "none before" is.
+  // Recorded in the audit line instead, where a reader can weigh it.
+  | { readonly kind: "INTRODUCED"; readonly failed: number; readonly baselineMs: number }
   // Failures exist but cannot be attributed to the hide — they were already
   // happening, or there is no before to compare against. Reported, never acted
   // on: aborting here would let a collection with its own pre-existing errors
@@ -59,6 +66,8 @@ export function judgeFailures(
   before: FailureSample | null,
   // Sampled now, counting only what happened at or after the hide.
   after: FailureSample | null,
+  // When the hide happened, so the baseline's reach can be stated as a span.
+  hiddenAtMs: number,
 ): FailureVerdict {
   if (after === null) return { kind: "UNAVAILABLE" };
   if (after.failed < MIN_INTRODUCED_FAILURES) {
@@ -73,7 +82,11 @@ export function judgeFailures(
   if (before === null || before.failed > 0) {
     return { kind: "INCONCLUSIVE", before: before?.failed ?? 0, after: after.failed };
   }
-  return { kind: "INTRODUCED", failed: after.failed };
+  return {
+    kind: "INTRODUCED",
+    failed: after.failed,
+    baselineMs: Math.max(0, hiddenAtMs - before.reachMs),
+  };
 }
 
 // The audit line, in the words the action trail keeps. Every verdict says
@@ -82,7 +95,10 @@ export function judgeFailures(
 export function describeFailures(verdict: FailureVerdict): string {
   switch (verdict.kind) {
     case "INTRODUCED":
-      return `${verdict.failed} failed operations since the hide, and none before it`;
+      return (
+        `${verdict.failed} failed operations since the hide, and none in the ` +
+        `${Math.round(verdict.baselineMs / 60_000)} minutes of history readable before it`
+      );
     case "INCONCLUSIVE":
       return `${verdict.after} failed operations since the hide, but ${
         verdict.before === 0 ? "nothing to compare against" : `${verdict.before} before it`

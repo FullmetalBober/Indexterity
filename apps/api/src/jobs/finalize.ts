@@ -309,6 +309,7 @@ export async function finalizeCluster(
             ? null
             : { failed: rec.baselineFailedOps, reachMs: rec.baselineFailedReachMs ?? 0 },
           await collector.collectFailedOps(rec.database, rec.collection, hiddenAtMs),
+          hiddenAtMs,
         );
         if (failures.kind === "INTRODUCED") {
           await executor.unhide(rec.database, rec.collection, rec.indexName);

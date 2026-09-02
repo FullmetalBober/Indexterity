@@ -2611,9 +2611,12 @@ describe("the observe window can see a query that fails", () => {
       expect(later?.failed).toBe(0);
 
       // The verdict the pipeline actually acts on.
-      expect(
-        judgeFailures({ failed: before?.failed ?? 0, reachMs: before?.reachMs ?? 0 }, after),
-      ).toEqual({ kind: "INTRODUCED", failed: after?.failed });
+      const verdict = judgeFailures(
+        { failed: before?.failed ?? 0, reachMs: before?.reachMs ?? 0 },
+        after,
+        hiddenAt,
+      );
+      expect(verdict).toMatchObject({ kind: "INTRODUCED", failed: after?.failed });
     } finally {
       await db_.command({ profile: 0 }).catch(() => undefined);
       await db_
