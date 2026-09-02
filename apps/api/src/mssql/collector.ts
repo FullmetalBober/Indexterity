@@ -3,6 +3,7 @@ import type {
   CollectionLatency,
   CollectionStorage,
   DeletePattern,
+  FailedOpsWindow,
   IndexCollector,
   IndexUsageStat,
   LatencyPair,
@@ -443,6 +444,53 @@ export class MssqlIndexCollector implements IndexCollector {
   async readLatency(database: string, collection: string): Promise<LatencyPair> {
     const { reads } = await this.collectionLatency(database, collection);
     return reads;
+  }
+
+  // Failed operations on this table, at or after `sinceMs`.
+  //
+  // Query Store splits its runtime stats by outcome, and an errored execution gets
+  // its own row: `execution_type = 4`, `execution_type_desc = 'Exception'`. Verified
+  // on SQL Server 2022 rather than taken from the docs, which is worth saying
+  // because the numbering is easy to get wrong — a divide-by-zero SELECT landed as
+  // type 4, beside the successful query as type 0.
+  //
+  // Two limits of the source, both real and neither fixable from here:
+  //
+  //   - QUERY_CAPTURE_MODE. Under the default AUTO, Query Store discards queries it
+  //     judges infrequent or cheap, and in the same probe the failing ad-hoc SELECT
+  //     was captured only once the database was set to ALL. So a low rate of
+  //     failures on a database left at AUTO can be invisible here — which is exactly
+  //     why this is a one-way signal: what it reports happened, and silence is not a
+  //     claim.
+  //   - the table attribution is the PLAN's, not the statement's. A query that failed
+  //     before producing a plan has no plan XML to match a table against, so it is
+  //     counted for no namespace at all.
+  async collectFailedOps(
+    database: string,
+    collection: string,
+    sinceMs: number,
+  ): Promise<FailedOpsWindow | null> {
+    if (!(await this.queryStoreEnabled(database))) return null;
+    const rows = await this.conn.query<{ failed: number | null; reach: Date | null }>(
+      `SELECT
+         COALESCE(SUM(CASE WHEN rs.execution_type = 4
+                            AND rs.last_execution_time >= CAST(@since AS datetimeoffset)
+                           THEN rs.count_executions ELSE 0 END), 0) AS failed,
+         MIN(rs.first_execution_time) AS reach
+       FROM ${quoteIdent(database)}.sys.query_store_runtime_stats rs
+       JOIN ${quoteIdent(database)}.sys.query_store_plan p ON p.plan_id = rs.plan_id
+       WHERE CAST(p.query_plan AS nvarchar(max)) LIKE @pattern`,
+      // ISO 8601 with an offset, and CAST rather than compared as a string: the
+      // parameter type this connection takes is string | number, and an implicit
+      // conversion against a datetimeoffset column is the kind of thing that works
+      // until somebody's server has a different default language.
+      { since: new Date(sinceMs).toISOString(), pattern: tablePlanPattern(collection) },
+    );
+    const row = rows[0];
+    // No retained row for this table is not a clean table — it is Query Store
+    // holding nothing about it, which says nothing either way.
+    if (row === undefined || row.reach === null) return null;
+    return { failed: asNumber(row.failed) ?? 0, reachMs: row.reach.getTime() };
   }
 
   // Indexes named explicitly in the workload: `WITH (INDEX(…))` hints in Query

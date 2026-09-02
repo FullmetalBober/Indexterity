@@ -9,6 +9,7 @@ import {
 } from "@repo/contracts";
 import { makeWorkerUtils } from "graphile-worker";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { judgeFailures } from "../src/analysis";
 import { outcomeOf } from "../src/analysis/workload-outcome";
 import { entitledAutomation } from "../src/billing/plans";
 import { loadEnv } from "../src/config/env";
@@ -2544,6 +2545,92 @@ describe("auto-approval is one threshold", () => {
       // after the promotion, which is the step under test.
     });
     expect(await approvedNames()).toEqual([]);
+  });
+});
+
+describe("the observe window can see a query that fails", () => {
+  // The gate that decides whether a hidden index gets dropped measures latency,
+  // and a failed query is not slow — it is fast. So this is the one signal that
+  // can tell a hide which BROKE the workload from a hide that improved it, and it
+  // is worth proving against a real mongod rather than a double: the marker is
+  // `ok: 0` on a profiler document, and nothing about $collStats records it.
+  const DB = "intfail";
+  const QUIET_DB = "intfail_quiet";
+  const COLL = "fail_probe";
+
+  // Its own databases, because system.profile is per-database and inttest's ring
+  // is shared by the workload tests above. The cost of that is these two joining
+  // the cluster's database list, which "choosing which databases to observe"
+  // asserts exactly — so they go away again before it runs.
+  afterAll(async () => {
+    await mongo
+      .db(DB)
+      .dropDatabase()
+      .catch(() => undefined);
+    await mongo
+      .db(QUIET_DB)
+      .dropDatabase()
+      .catch(() => undefined);
+  });
+
+  it("counts failed operations for a namespace, and only since the instant asked", async () => {
+    const collector = new MongoIndexCollector(mongo);
+    const db_ = mongo.db(DB);
+    await db_.collection(COLL).deleteMany({});
+    await db_.collection(COLL).insertMany([{ name: "beans and rice" }, { name: "spicy noodle" }]);
+    await db_.collection(COLL).createIndex({ name: "text" }, { name: "name_text" });
+    // Its own database, so the capped profiler ring is this test's alone —
+    // system.profile is per-database, and inttest is shared by everything above.
+    await db_.command({ profile: 2 });
+    try {
+      // A working $text query first, so "no failures" is a reading and not an
+      // empty ring.
+      expect(await db_.collection(COLL).countDocuments({ $text: { $search: "beans" } })).toBe(1);
+      const before = await collector.collectFailedOps(DB, COLL, 0);
+      expect(before).not.toBeNull();
+      expect(before?.failed).toBe(0);
+
+      // Hide the text index and the same query stops working. Not slows —
+      // NoQueryExecutionPlans (291), "need exactly one text index for $text query".
+      await db_.command({ collMod: COLL, index: { name: "name_text", hidden: true } });
+      const hiddenAt = Date.now();
+      for (let i = 0; i < 3; i += 1) {
+        await expect(
+          db_.collection(COLL).countDocuments({ $text: { $search: "beans" } }),
+        ).rejects.toThrow();
+      }
+
+      const after = await collector.collectFailedOps(DB, COLL, hiddenAt - 1000);
+      expect(after?.failed).toBeGreaterThanOrEqual(3);
+      // The ring reaches back at least to the working query, so its zero above was
+      // an observation rather than a blind spot.
+      expect(after?.reachMs).toBeLessThanOrEqual(hiddenAt);
+
+      // And the `since` filter is real: nothing failed after the future.
+      const later = await collector.collectFailedOps(DB, COLL, Date.now() + 60_000);
+      expect(later?.failed).toBe(0);
+
+      // The verdict the pipeline actually acts on.
+      const verdict = judgeFailures(
+        { failed: before?.failed ?? 0, reachMs: before?.reachMs ?? 0 },
+        after,
+        hiddenAt,
+      );
+      expect(verdict).toMatchObject({ kind: "INTRODUCED", failed: after?.failed });
+    } finally {
+      await db_.command({ profile: 0 }).catch(() => undefined);
+      await db_
+        .command({ collMod: COLL, index: { name: "name_text", hidden: false } })
+        .catch(() => undefined);
+    }
+  });
+
+  // Nothing turned the profiler on, which is the state most clusters are in — and
+  // it must read as "no source", never as "no failures" (D19).
+  it("reports no source rather than a clean window when the profiler is off", async () => {
+    const collector = new MongoIndexCollector(mongo);
+    await mongo.db(QUIET_DB).collection("untouched").insertOne({ n: 1 });
+    expect(await collector.collectFailedOps(QUIET_DB, "untouched", 0)).toBeNull();
   });
 });
 

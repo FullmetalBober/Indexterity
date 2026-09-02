@@ -3,6 +3,7 @@ import {
   type ClusterNode,
   DatabaseInaccessibleError,
   type DeletePattern,
+  type FailedOpsWindow,
   type IndexCollector,
   type IndexUsageStat,
   type LatencyPair,
@@ -329,6 +330,24 @@ export class PostgresIndexCollector implements IndexCollector {
   // readable from any statistics view. Reported as none rather than guessed.
   async collectHintedIndexes(): Promise<string[]> {
     return [];
+  }
+
+  // Failed operations per relation, which PostgreSQL does not count anywhere.
+  //
+  // A fact about the engine rather than a privilege we lack.
+  // `pg_stat_database.xact_rollback` is per DATABASE and counts rolled-back
+  // transactions rather than failed statements; `pg_stat_statements` has no error
+  // column at all and does not record a statement that errored; and
+  // `pg_stat_user_tables` counts scans and tuples, never outcomes. The only
+  // per-statement error record is `log_min_error_statement` output in the server
+  // log, which is not a relation this can read.
+  //
+  // Null and not zero, which matters here more than anywhere: this engine has no
+  // reversible hide either (§9.3), so the observe window runs with the index still
+  // serving and a broken query is not among the things that can happen. Reporting
+  // zero would still be a claim, and it is not ours to make.
+  async collectFailedOps(): Promise<FailedOpsWindow | null> {
+    return null;
   }
 
   // Every namespace at once, which is why the port batches this: the workload

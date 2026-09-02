@@ -6,9 +6,11 @@ overlapping, extends prefixes, creates the missing — and proves the result in
 freed bytes and latency.
 
 **Read-only until you say otherwise.** The one irreversible step, a drop, is
-gated behind an observe window, a pre-flight check and a read-latency regression
-test. Everything before that is reversible, and the dashboard says which is
-which.
+gated behind an observe window, a pre-flight check, a read-latency regression
+test, and a check that the workload did not start FAILING while the index was
+hidden — which is a separate question, because a query that fails returns faster
+than one that works and a latency test reads it as an improvement. Everything
+before the drop is reversible, and the dashboard says which is which.
 
 **Some indexes are never dropped automatically, whatever they score.** That gate
 is a measurement, and a measurement needs the experiment to be survivable. A

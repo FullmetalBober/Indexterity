@@ -6,6 +6,7 @@ import {
   type CollectionStorage,
   DatabaseInaccessibleError,
   type DeletePattern,
+  type FailedOpsWindow,
   type IndexCollector,
   type IndexUsageStat,
   type LatencyPair,
@@ -210,6 +211,12 @@ const profileDoc = z.object({
   docsExamined: z.coerce.number().optional(),
   // Recorded only when true.
   hasSortStage: z.boolean().optional(),
+  // How a FAILED operation is marked, and the only place it is marked at all:
+  // `ok: 0` with an errCode, both absent on a success (verified on mongod 7.0.39).
+  // $collStats counts the same operation in latencyStats and distinguishes it in
+  // no way whatsoever.
+  ok: z.coerce.number().optional(),
+  errCode: z.coerce.number().optional(),
   // The client's own name for itself — same signal as the $queryStats client
   // key, and the reason shell traffic can be discounted on the profiler path.
   appName: z.string().optional(),
@@ -955,6 +962,55 @@ export class MongoIndexCollector implements IndexCollector {
     } catch {
       return null;
     }
+  }
+
+  // Operations on this namespace that FAILED, at or after `sinceMs`.
+  //
+  // `ok: 0` with an `errCode` is how the profiler records a failure, and a success
+  // carries neither — verified on mongod 7.0.39, where a $text query against a
+  // hidden text index wrote `ok: 0, errCode: 291, errName: "NoQueryExecutionPlans"`.
+  // $collStats counts that same operation in latencyStats and marks it in no way at
+  // all, which is the entire reason this method exists.
+  //
+  // Neither `top` nor `serverStatus` can substitute (both probed on 7.0.39): `top`
+  // totals per namespace are total/readLock/writeLock/queries/getmore/insert/update/
+  // remove/commands with no failure field, and `serverStatus.metrics.operation`
+  // carries only specific errors — writeConflicts, temporarilyUnavailableErrors —
+  // server-wide and never per namespace.
+  //
+  // Reports the ring's reach rather than assuming it, for the same reason
+  // collectSlowQueries does: system.profile is capped, so a count of zero means
+  // "nothing seen since reachMs" and never "nothing happened".
+  async collectFailedOps(
+    database: string,
+    collection: string,
+    sinceMs: number,
+  ): Promise<FailedOpsWindow | null> {
+    const ns = `${database}.${collection}`;
+    const raw = await this.conn
+      .db(database)
+      .collection("system.profile")
+      .find({ ns })
+      .toArray()
+      .catch(() => null);
+    if (raw === null) return null;
+    let failed = 0;
+    let reachMs: number | null = null;
+    for (const doc of raw) {
+      const parsed = profileDoc.safeParse(doc);
+      if (!parsed.success) continue;
+      const ts = parsed.data.ts;
+      if (ts === undefined) continue;
+      const at = ts.getTime();
+      reachMs = reachMs === null ? at : Math.min(reachMs, at);
+      const isFailure = parsed.data.ok === 0 || parsed.data.errCode !== undefined;
+      if (isFailure && at >= sinceMs) failed += 1;
+    }
+    // Nothing in the ring for this namespace is not the same as a clean namespace:
+    // the profiler is opt-in, so the usual reason to see nothing is that nobody
+    // turned it on. Null, so the caller cannot spell it "all clear" (D19).
+    if (reachMs === null) return null;
+    return { failed, reachMs };
   }
 
   // Indexes the application names explicitly with hint().

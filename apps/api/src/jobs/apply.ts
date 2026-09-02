@@ -210,6 +210,19 @@ export async function applyCluster(
       const baseline = canHide
         ? await collector.readLatency(rec.database, rec.collection)
         : { ops: null, latencyMicros: null };
+      // And the failures, which the latency baseline above cannot stand in for: a
+      // failed read lands in latencyStats as a FAST read, so the gate reading only
+      // that would see a hide which broke the workload as a hide that improved it
+      // (#438). Null on an engine with no source, and null costs nothing — the signal
+      // is one-way and only ever rolls a hide back.
+      //
+      // Sampled over whatever window the source can see BACKWARDS from now, which is
+      // the question worth asking here: "was this namespace already failing before we
+      // touched it". Zero here is what makes a failure after the hide attributable to
+      // the hide.
+      const failuresBefore = canHide
+        ? await collector.collectFailedOps(rec.database, rec.collection, 0)
+        : null;
       // The observe window this index actually deserves, from its own usage
       // history: periodic usage extends it (a monthly job must get a chance to
       // run inside the window), long-proven idleness shortens it.
@@ -256,6 +269,8 @@ export async function applyCluster(
           observeReason: window.reason,
           baselineReadOps: baseline.ops,
           baselineReadLatency: baseline.latencyMicros,
+          baselineFailedOps: failuresBefore?.failed ?? null,
+          baselineFailedReachMs: failuresBefore?.reachMs ?? null,
           updatedAt: new Date(),
         })
         .where(eq(recommendations.id, rec.id));
