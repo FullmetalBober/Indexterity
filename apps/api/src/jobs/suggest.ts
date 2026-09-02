@@ -33,6 +33,7 @@ import {
 import { activeCooldownKeys, collectionCooldownKey, cooldownKey } from "./cooldowns";
 import { planForCluster } from "./plan";
 import { BUILD_TYPES, standingRecommendationKeys, watchKey } from "./watched";
+import { isScanning, ShapeLedger } from "./workload-shapes";
 
 // A shape must recur before it earns a recommendation, measured two ways.
 //
@@ -110,6 +111,22 @@ export async function suggestForCluster(
   // on screen — but "the engine chose not to do this by itself" is a decision,
   // and #277 is the surface for saying so.
   let heldFromInstant = 0;
+  // What the two ELIGIBILITY gates declined, as counts (#432).
+  //
+  // These two are the reason the shape table cannot cover all six gates: they
+  // fire BEFORE the workload is read, and `collectWorkload` is only asked about
+  // the namespaces that clear them. Widening the read would mean a profiler dial
+  // per collection on every cluster below MongoDB 8.0 — `collectSlowQueries` is
+  // the per-namespace fallback — which is a real cost to pay for a row saying a
+  // 40-document collection was not analysed. So the collection is COUNTED
+  // instead, in the same analysis note the budget already uses (#277), and the
+  // workload page reports the two numbers rather than inventing rows for them.
+  let belowDocFloor = 0;
+  let aboveSizeCeiling = 0;
+  // Every scanning shape this pass read, and what the create side decided about
+  // each (#432). Written once at the end, so a pass that throws leaves the
+  // previous verdicts standing rather than a half-updated account of itself.
+  const ledger = new ShapeLedger();
   // Full cooldown history — a previously rolled-back build cuts the score hard.
   const cooldownRows = await db
     .select()
@@ -222,11 +239,17 @@ export async function suggestForCluster(
       // Counts come from $collStats, not the count command — the scoped
       // least-privilege user has no `find` grant, which `count` requires.
       const { dataSizeBytes, docCount } = await collector.collectionStorage(database, collection);
-      if (docCount < TRIVIAL_COLLECTION_DOCS) continue;
+      if (docCount < TRIVIAL_COLLECTION_DOCS) {
+        belowDocFloor += 1;
+        continue;
+      }
       // Policy ceiling: building an index on a huge collection is the one
       // expensive create-side operation — skip collections above the limit.
       const sizeCeiling = policy?.maxCollectionSizeBytes ?? null;
-      if (sizeCeiling !== null && dataSizeBytes > sizeCeiling) continue;
+      if (sizeCeiling !== null && dataSizeBytes > sizeCeiling) {
+        aboveSizeCeiling += 1;
+        continue;
+      }
       eligible.push({ database, collection, docCount });
     }
     const workload = await collector.collectWorkload(eligible);
@@ -262,7 +285,23 @@ export async function suggestForCluster(
       const blockingSort = shapes.some(
         (shape) => shape.sortedInMemory === true && isRecurring(shape, WORKLOAD_OPTIONS),
       );
-      if (weeklyScan < MIN_WEEKLY_DOCS_EXAMINED && !blockingSort) continue;
+      // Every scanning shape gets a row before any gate below can discard it,
+      // seeded at the residual outcome. Recording it here rather than where each
+      // gate fires is what makes the account COMPLETE: a shape no producer
+      // mentions is then a row saying so, instead of a row that does not exist.
+      const scanning = shapes.filter(isScanning);
+      for (const shape of scanning) {
+        ledger.note(database, collection, shape, docCount, "no-candidate");
+      }
+      if (weeklyScan < MIN_WEEKLY_DOCS_EXAMINED && !blockingSort) {
+        // The finding survives the proposal being declined, which is the whole
+        // of #432: this is the gate that discards a query walking 900k documents
+        // a week on a small collection, and it left no trace anywhere.
+        for (const shape of scanning) {
+          ledger.note(database, collection, shape, docCount, "below-cost-floor");
+        }
+        continue;
+      }
       const [existing, sizes] = await Promise.all([
         collector.listIndexes(database, collection),
         collector.indexSizes(database, collection),
@@ -305,12 +344,36 @@ export async function suggestForCluster(
       const reordering = new Set<string>();
       for (const candidate of recommendReorder(shapes, existing, WORKLOAD_OPTIONS, hinted)) {
         const indexName = proposedName(candidate.keys);
-        if (cooled.has(cooldownKey(database, collection, indexName))) continue;
-        if (standing.has(watchKey(database, collection, indexName))) continue;
-        if (existing.some((idx) => idx.name === indexName)) continue;
-        if (toInsert.some((row) => row.collection === collection && row.indexName === indexName)) {
+        // Each guard says so on the shapes the candidate answers, which the
+        // candidate carries — attribution, not a second reading of the rules
+        // (#432).
+        const declined = (outcome: "cooldown" | "standing" | "index-exists"): void => {
+          ledger.resolve(database, collection, docCount, candidate.sourceShapes, outcome);
+        };
+        if (cooled.has(cooldownKey(database, collection, indexName))) {
+          declined("cooldown");
           continue;
         }
+        if (standing.has(watchKey(database, collection, indexName))) {
+          declined("standing");
+          continue;
+        }
+        if (existing.some((idx) => idx.name === indexName)) {
+          declined("index-exists");
+          continue;
+        }
+        if (toInsert.some((row) => row.collection === collection && row.indexName === indexName)) {
+          declined("standing");
+          continue;
+        }
+        ledger.resolve(
+          database,
+          collection,
+          docCount,
+          candidate.sourceShapes,
+          "proposed",
+          indexName,
+        );
         toInsert.push({
           clusterId,
           type: "REORDER",
@@ -364,9 +427,24 @@ export async function suggestForCluster(
       // properly, which is the only case where there IS something better than
       // an advisory: rebuilding the one index rather than keeping two.
       for (const advisory of sortOrderAdvisories(shapes, existing, WORKLOAD_OPTIONS)) {
+        // The re-order pass above already proposed doing this properly, and it
+        // has already claimed these shapes as `proposed` — which the ledger
+        // keeps, since a proposal outranks anything a later producer says about
+        // the same shape.
         if (reordering.has(advisory.existingIndex)) continue;
         const indexName = `${advisory.existingIndex}_sortorder`;
-        if (cooled.has(cooldownKey(database, collection, indexName))) continue;
+        if (cooled.has(cooldownKey(database, collection, indexName))) {
+          ledger.resolve(database, collection, docCount, advisory.sourceShapes, "cooldown");
+          continue;
+        }
+        ledger.resolve(
+          database,
+          collection,
+          docCount,
+          advisory.sourceShapes,
+          "proposed",
+          indexName,
+        );
         const keys = advisory.wantedKeys.map((key) => `${key.field}: ${key.direction}`).join(", ");
         toInsert.push({
           clusterId,
@@ -391,17 +469,39 @@ export async function suggestForCluster(
       // candidate the smallest penalty (#281). Left in derivation order, the
       // staircase would fall on whichever shape the profiler happened to emit
       // first — a real decision made by an accident of iteration order.
-      const creates = [...recommendCreates(shapes, existing, WORKLOAD_OPTIONS)].sort(
-        (a, b) => b.count - a.count,
-      );
+      // The sink is how the recommender's OWN gates reach the ledger (#432).
+      // Without it the writer would have to re-apply `isRecurring`,
+      // `isWorthIndexing` and the already-indexed test to work out why a shape
+      // produced no candidate — a second copy of the rules, true only until it
+      // drifted, on a page whose entire claim is "this is the gate that
+      // declined it".
+      const creates = [
+        ...recommendCreates(shapes, existing, WORKLOAD_OPTIONS, (shape, reason) => {
+          ledger.note(database, collection, shape, docCount, reason);
+        }),
+      ].sort((a, b) => b.count - a.count);
       const budgetKey = `${database} ${collection}`;
       for (const candidate of creates) {
         // Partial variants get a suffix so they never collide with the full
         // index of the same keys.
         const indexName =
           proposedName(candidate.keys) + (candidate.partialFilter === undefined ? "" : "_partial");
-        if (cooled.has(cooldownKey(database, collection, indexName))) continue;
-        if (standing.has(watchKey(database, collection, indexName))) continue;
+        if (cooled.has(cooldownKey(database, collection, indexName))) {
+          ledger.resolve(database, collection, docCount, candidate.sourceShapes, "cooldown");
+          continue;
+        }
+        if (standing.has(watchKey(database, collection, indexName))) {
+          ledger.resolve(database, collection, docCount, candidate.sourceShapes, "standing");
+          continue;
+        }
+        ledger.resolve(
+          database,
+          collection,
+          docCount,
+          candidate.sourceShapes,
+          "proposed",
+          indexName,
+        );
         // Net-new only. A candidate that retires what it replaces leaves the
         // collection carrying the same number of indexes or fewer, so it answers
         // to no budget — see collection-budget.ts.
@@ -618,6 +718,12 @@ export async function suggestForCluster(
     if (toInsert.length > 0)
       await db.insert(recommendations).values(toInsert).onConflictDoNothing();
     created = toInsert.length;
+    // Every scanning shape this pass read, with the verdict the create side
+    // reached (#432). After the recommendations are written, so the two agree
+    // about the same pass — and inside the try, so a pass that dies leaves the
+    // previous account standing rather than half of a new one.
+    const decidedAt = new Date();
+    await ledger.flush(db, clusterId, decidedAt);
     // This pass's own account of what it declined to do by itself (#277/#281).
     // Its own row rather than classify's, which is why analysis_notes is keyed by
     // producer: the usage gate refusing has nothing to do with a crowded
@@ -625,20 +731,24 @@ export async function suggestForCluster(
     //
     // No usage columns — this producer has no usage gate, so leaving them zero is
     // the honest answer rather than a claim that nothing was trusted.
+    //
+    // The two collection counts ride in the same map (#432). They are the two
+    // gates that fire before the workload is read, so they can have no shape
+    // rows — a collection nobody analysed is a fact about the collection, not
+    // about a query — and the map is keyed by whatever the writing pass calls
+    // its reasons, so adding them costs no migration and an older reader ignores
+    // them.
+    const suppressed = {
+      ...(heldFromInstant > 0 ? { budget: heldFromInstant } : {}),
+      ...(belowDocFloor > 0 ? { "trivial-collection": belowDocFloor } : {}),
+      ...(aboveSizeCeiling > 0 ? { "oversize-collection": aboveSizeCeiling } : {}),
+    };
     await db
       .insert(analysisNotes)
-      .values({
-        clusterId,
-        source: "WORKLOAD",
-        decidedAt: new Date(),
-        suppressed: heldFromInstant > 0 ? { budget: heldFromInstant } : {},
-      })
+      .values({ clusterId, source: "WORKLOAD", decidedAt, suppressed })
       .onConflictDoUpdate({
         target: [analysisNotes.clusterId, analysisNotes.source],
-        set: {
-          decidedAt: new Date(),
-          suppressed: heldFromInstant > 0 ? { budget: heldFromInstant } : {},
-        },
+        set: { decidedAt, suppressed },
       });
   } finally {
     release();

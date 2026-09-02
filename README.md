@@ -15,6 +15,13 @@ to provision its own least-privilege one instead — `indexterity`, holding inde
 metadata and statistics and no read privilege at all. The server enforces that;
 it is not a promise we make. The admin string is used once and never stored.
 
+**It shows you what it looked at, not only what it proposes.** Every index a
+cluster has, with its size, its flags and which replica-set member is actually
+using it — and every query that misses an index, including the ones the engine
+decided not to act on and which threshold declined them. An empty
+recommendations list should mean "your indexes are fine", and the only way it can
+mean that is if you can see the population it is a statement about.
+
 ```bash
 git clone https://github.com/FullmetalBober/Indexterity.git
 cd Indexterity

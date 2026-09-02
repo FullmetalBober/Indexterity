@@ -40,6 +40,9 @@ export function invalidationKeys(
         case "collect":
           return [
             queryKeys.collections(clusterId),
+            // Every page of the index inventory, by prefix (#431): a collect
+            // moves every index's size and counters, not the page in view.
+            queryKeys.clusterIndexesAll(clusterId),
             queryKeys.indexSizeSeries(clusterId),
             queryKeys.latency(clusterId),
             queryKeys.latencySeries(clusterId),
@@ -48,7 +51,17 @@ export function invalidationKeys(
           ];
         case "classify":
         case "suggest":
-          return [queryKeys.recommendations(clusterId)];
+          // The inventory's last column is "is something proposing to change
+          // this index", so a pass that rewrites the proposals moves it too —
+          // even though not one measurement on the page has changed.
+          return [
+            queryKeys.recommendations(clusterId),
+            queryKeys.clusterIndexesAll(clusterId),
+            // The scanning workload is REWRITTEN by the suggest pass — every
+            // shape's outcome is decided there — so this is the event that
+            // moves it, not the collect (#432).
+            queryKeys.clusterWorkloadAll(clusterId),
+          ];
         case "apply":
         case "finalize":
           return [
@@ -60,6 +73,9 @@ export function invalidationKeys(
             // cooldown of its own — an invalidation that refetches an unchanged
             // list is cheaper than two arms that have to be kept apart.
             queryKeys.cooldowns(clusterId),
+            // Same column: a drop that executes takes its row out of the live
+            // states, and a build that graduates puts one in.
+            queryKeys.clusterIndexesAll(clusterId),
           ];
         default:
           return [];
@@ -70,6 +86,9 @@ export function invalidationKeys(
         queryKeys.recommendations(clusterId),
         queryKeys.activity(clusterId),
         queryKeys.roi(clusterId),
+        // A hide is a state the inventory draws in its own right, not only a
+        // recommendation state: `hidden` comes off the index's spec.
+        queryKeys.clusterIndexesAll(clusterId),
       ];
     // The one event that always writes a cooldown: both places that fire it call
     // recordRegression first (jobs/finalize.ts). The parked panel is the only
@@ -81,6 +100,9 @@ export function invalidationKeys(
         queryKeys.activity(clusterId),
         queryKeys.roi(clusterId),
         queryKeys.cooldowns(clusterId),
+        // The rolled-back row leaves the live states, so the inventory's link
+        // column has to stop pointing at it.
+        queryKeys.clusterIndexesAll(clusterId),
       ];
   }
 }

@@ -1,4 +1,4 @@
-import type { ClusterNodes, IndexUsage } from "@repo/contracts";
+import type { ClusterNodes } from "@repo/contracts";
 import { instantOf } from "~/lib/instant";
 
 // Reading a per-node usage split honestly (#161).
@@ -16,10 +16,21 @@ import { instantOf } from "~/lib/instant";
 // two nodes were never asked is not a concentration finding; it is our blind
 // spot rendered as the customer's.
 
+// One member's reading, as either payload carries it. `since` is the member's
+// counter start and is present only on the index inventory (#431) — the
+// recommendation-scoped `IndexUsage` predates it, so it is optional here rather
+// than nullable, and the two payloads share this module instead of forking the
+// blind-spot rule.
+export interface MemberReading {
+  readonly member: string;
+  readonly ops: number;
+  readonly since?: string | null | undefined;
+}
+
 export interface UsageSplit {
   readonly totalOps: number;
   // Members that answered and reported this index, busiest first.
-  readonly reporting: readonly { readonly member: string; readonly ops: number }[];
+  readonly reporting: readonly MemberReading[];
   // How many of them recorded any operations at all. The numerator of "N of M".
   readonly activeCount: number;
   // Roster members whose usage is NOT in this reading — named, never counted as
@@ -38,8 +49,17 @@ export interface UsageSplit {
 // would miss the case it exists for.
 const CONCENTRATION = 0.9;
 
+// Structural rather than `IndexUsage`, so the index inventory's rows go through
+// the same rule the recommendations table does. Widening this was the whole cost
+// of not writing the blind-spot logic a second time (#431): both payloads carry
+// a total and a list of members, and everything below reads only those.
+export interface UsageReading {
+  readonly totalOps: number;
+  readonly perMember: readonly MemberReading[];
+}
+
 export function usageSplit(
-  usage: IndexUsage | undefined,
+  usage: UsageReading | undefined,
   roster: ClusterNodes | null,
 ): UsageSplit | null {
   if (usage === undefined) return null;
@@ -78,9 +98,18 @@ export function usageLine(split: UsageSplit): string {
 
 // What the tooltip says, member by member, with the blind spots named at the end
 // rather than left out.
+// A member's counter start, when the reading carries one. Said in the tooltip
+// rather than folded into the number, because it is what stops "0 ops" being
+// read as idleness on a member that came up an hour ago (D114) — the counters
+// are cumulative from `since` and nothing before it was ever counted.
+function sinceClause(entry: MemberReading): string {
+  const started = entry.since === undefined || entry.since === null ? null : instantOf(entry.since);
+  return started === null ? "" : `, counting since ${started.toLocaleString()}`;
+}
+
 export function usageDetail(split: UsageSplit, observedAt: string): string[] {
   const lines = split.reporting.map(
-    (entry) => `${entry.member} — ${entry.ops.toLocaleString()} ops`,
+    (entry) => `${entry.member} — ${entry.ops.toLocaleString()} ops${sinceClause(entry)}`,
   );
   for (const host of split.blindSpots) lines.push(`${host} — not reported by the last collect`);
   const observed = instantOf(observedAt);

@@ -72,6 +72,59 @@ export const queryKeys = {
   // draws them in different places.
   indexSizeSeries: (clusterId: string | null) => ["index-size-series", clusterId] as const,
   nodes: (clusterId: string | null) => ["nodes", clusterId] as const,
+  // One page of the cluster's index inventory (#431). The namespace filter and
+  // the page cursor are IN the key for the same reason the security trail's are:
+  // they are what the api was ASKED, so two cursors are two answers, and one
+  // entry holding both would draw the previous page's rows under the next page's
+  // heading while it loaded.
+  clusterIndexes: (
+    clusterId: string | null,
+    filter: {
+      database?: string | undefined;
+      collection?: string | undefined;
+      afterDatabase?: string | undefined;
+      afterCollection?: string | undefined;
+      afterIndexName?: string | undefined;
+    },
+  ) =>
+    [
+      "cluster-indexes",
+      clusterId,
+      filter.database ?? null,
+      filter.collection ?? null,
+      filter.afterDatabase ?? null,
+      filter.afterCollection ?? null,
+      filter.afterIndexName ?? null,
+    ] as const,
+  // Every page of that inventory, as a PREFIX. TanStack Query matches
+  // invalidations by prefix, and an event moves the whole inventory rather than
+  // the one page a reader happens to be on — so an invalidation written with a
+  // concrete cursor would miss every other page and leave them to be served
+  // stale from the cache.
+  clusterIndexesAll: (clusterId: string | null) => ["cluster-indexes", clusterId] as const,
+  // One page of the cluster's scanning workload (#432). Same rule as the two
+  // above: what the api was ASKED is in the key, and the prefix exists for the
+  // invalidations that move every page at once.
+  clusterWorkload: (
+    clusterId: string | null,
+    filter: {
+      database?: string | undefined;
+      collection?: string | undefined;
+      declinedOnly?: boolean | undefined;
+      afterWeeklyDocsExamined?: number | undefined;
+      afterId?: string | undefined;
+    },
+  ) =>
+    [
+      "cluster-workload",
+      clusterId,
+      filter.database ?? null,
+      filter.collection ?? null,
+      filter.declinedOnly ?? null,
+      filter.afterWeeklyDocsExamined ?? null,
+      filter.afterId ?? null,
+    ] as const,
+  clusterWorkloadAll: (clusterId: string | null) => ["cluster-workload", clusterId] as const,
   // Its own key rather than a field on `recommendations`: a cooldown outlives
   // the recommendation that caused it, and the two are moved by different
   // writes — a regression parks an index without touching the proposal list.

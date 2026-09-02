@@ -446,6 +446,273 @@ export const clusterCollections = z.object({
 });
 export type ClusterCollections = z.infer<typeof clusterCollections>;
 
+// How many indexes one page of the inventory carries (#431).
+//
+// The dev cluster has 211; a real one has more, and every row carries a key
+// pattern and a per-member split, so this is the read that would otherwise grow
+// with the customer's index count forever — the unbounded shape #64 bounded
+// everywhere else. 100 measured ~46 KB against the dev cluster's widest
+// namespaces, which is a page rather than a payload.
+export const CLUSTER_INDEXES_PAGE = 100;
+
+// One key of an index, in the order the index declares it. The direction
+// vocabulary is the adapters' (engine/types.ts): a relational engine only ever
+// reports 1 or -1, and the three MongoDB special forms are what the others
+// cannot express.
+export const indexKeyView = z.object({
+  field: z.string(),
+  direction: z.union([
+    z.literal(1),
+    z.literal(-1),
+    z.literal("2dsphere"),
+    z.literal("text"),
+    z.literal("hashed"),
+  ]),
+});
+export type IndexKeyView = z.infer<typeof indexKeyView>;
+
+// One member's share of an index's operations, with the counter start beside it.
+//
+// `since` is the difference between this and `memberOps`, and it is the whole
+// reason the inventory does not reuse that schema: `$indexStats` counters are
+// cumulative from the moment the member came up, so "0 ops" on a member that
+// restarted an hour ago is not idleness (D114). Null when the reading predates
+// the field being captured, which is not the same as "the counter started at
+// the epoch".
+export const indexMemberUsage = z.object({
+  member: z.string(),
+  ops: z.int().nonnegative(),
+  since: instant.nullable(),
+});
+export type IndexMemberUsage = z.infer<typeof indexMemberUsage>;
+
+// A recommendation that currently points at an index, so the row can link to it
+// rather than leaving the reader to find out on another page whether the engine
+// has an opinion. Null for the indexes nobody has proposed anything about —
+// which is most of them, and the population this page exists to show.
+export const indexRecommendationLink = z.object({
+  id: z.uuid(),
+  type: recommendationType,
+  state: recommendationState,
+});
+export type IndexRecommendationLink = z.infer<typeof indexRecommendationLink>;
+
+// One index the cluster actually has, as of the latest collect (#431).
+//
+// Everything here was already stored — `cluster_indexes` carries the identity
+// and the spec, `index_snapshots` the size and the per-member counters — and
+// none of it had anywhere to be looked at: index-level numbers reached the
+// dashboard only as `IndexUsage`, keyed by `recommendationId` (D66), so an index
+// nobody had proposed anything about had no row on any screen.
+//
+// The flags are carried as the booleans the adapters set rather than as a
+// rendered list, and they are NOT all meaningful on every engine: PostgreSQL
+// reports no TTL, no sparse and no hidden (its collector hardcodes all three,
+// and D106 is why the last one), SQL Server reports `hidden` as a disabled index
+// and no TTL or sparse. `isShardKey` is the port's "the cluster does not work
+// without this" flag and means a shard key, a primary key and a clustered index
+// on the three engines — so the WORDING is resolved against the cluster's engine
+// by index-flags.ts rather than being fixed here.
+export const clusterIndexRow = z.object({
+  // The dimension row's id, which is the page's stable row key. Not the
+  // namespace-plus-name triple: a rebuilt index has a second dimension row (the
+  // table is keyed by spec digest), and only one of them is the live one.
+  id: z.uuid(),
+  database: z.string(),
+  collection: z.string(),
+  indexName: z.string(),
+  keys: z.array(indexKeyView),
+  // Carried at the leaves without being ordered by — SQL Server's INCLUDE.
+  // Empty on the engines that have no such concept, which is every engine but
+  // that one.
+  include: z.array(z.string()),
+  unique: z.boolean(),
+  ttl: z.boolean(),
+  partial: z.boolean(),
+  // The predicate itself, not just whether there is one: two partial indexes
+  // are only interchangeable if they filter on the same thing. A mongo
+  // expression, `{ sql: … }` from PostgreSQL, `{ definition: … }` from SQL
+  // Server — rendered as text, never interpreted.
+  partialFilter: z.record(z.string(), z.unknown()).nullable(),
+  sparse: z.boolean(),
+  hidden: z.boolean(),
+  isShardKey: z.boolean(),
+  collation: z.string().nullable(),
+  // Seen as the target of a hint() in the profiler window. The engine will not
+  // re-order or hide a hinted index (analysis/reorder.ts), so this is a state
+  // the customer could previously only infer from a recommendation's absence.
+  hinted: z.boolean(),
+  sizeBytes: z.int().nonnegative(),
+  // Summed across the members that ANSWERED. The split is beside it because the
+  // split is the finding (D66) — 40,000 ops all on one secondary is a reporting
+  // replica, and the same total spread evenly is the application.
+  totalOps: z.int().nonnegative(),
+  perMember: z.array(indexMemberUsage),
+  // When this reading was last confirmed still true — `last_seen_at`, the run's
+  // end, not its start. A page drawn from a collect that failed three days ago
+  // is a claim about three days ago, so the age travels with the number.
+  observedAt: instant,
+  recommendation: indexRecommendationLink.nullable(),
+});
+export type ClusterIndexRow = z.infer<typeof clusterIndexRow>;
+
+// One page of the cluster's index inventory.
+export const clusterIndexes = z.object({
+  clusterId: z.uuid(),
+  indexes: z.array(clusterIndexRow),
+  // How many indexes MATCH — the whole cluster's, or the namespace filter's, so
+  // a page can say "100 of 211" instead of implying it is everything.
+  total: z.int().nonnegative(),
+  // The cursor for the page after this one, or null at the end. A compound key
+  // for the same reason the security trail's is (D67): the sort is namespace
+  // then name, and one cluster can hold two indexes of the same name in two
+  // collections, so any prefix of the three would skip a row.
+  nextDatabase: z.string().nullable(),
+  nextCollection: z.string().nullable(),
+  nextIndexName: z.string().nullable(),
+  // When the reading these rows come from was taken. Null when nothing has ever
+  // been collected, which is the page's "nothing yet" state rather than "this
+  // cluster has no indexes".
+  collectedAt: instant.nullable(),
+});
+export type ClusterIndexes = z.infer<typeof clusterIndexes>;
+
+// How many scanning shapes one page of the workload view carries (#432).
+//
+// Smaller than the index page's because a row here is wider — the ESR split, the
+// clients, and a sentence explaining the gate — and because these are ranked by
+// cost rather than browsed by namespace: the worst ones are the answer, and a
+// reader who needs the fiftieth is looking at a different problem.
+export const WORKLOAD_SHAPES_PAGE = 50;
+
+// What the create side decided about a scanning shape. `proposed` is the only
+// one that means an index was recommended; every other value names the gate that
+// declined, and each gate is correct — see analysis/workload-outcome.ts, which
+// owns the sentence for each.
+export const workloadOutcome = z.enum([
+  "proposed",
+  "below-cost-floor",
+  "not-recurring",
+  "ad-hoc-client",
+  "cooldown",
+  "standing",
+  "index-exists",
+  "no-candidate",
+]);
+export type WorkloadOutcome = z.infer<typeof workloadOutcome>;
+
+// One client as the workload source described it. An appName from a connection
+// string and the driver's own name — operational metadata, never customer data,
+// and the signal behind the `ad-hoc-client` outcome.
+export const workloadClient = z.object({
+  application: z.string().nullable(),
+  driver: z.string().nullable(),
+});
+export type WorkloadClient = z.infer<typeof workloadClient>;
+
+// A scanning query shape, in ESR terms: what an index would have to cover.
+//
+// Equality first, then sort, then range — the order that lets ONE index serve
+// the whole query. Sort keys keep their directions because an index can only
+// serve a sort in the order it was built; equality and range keys do not, since
+// direction is irrelevant to a point or a bound.
+export const workloadShapeKeys = z.object({
+  equality: z.array(z.string()),
+  sort: z.array(z.object({ field: z.string(), direction: z.union([z.literal(1), z.literal(-1)]) })),
+  range: z.array(z.string()),
+});
+export type WorkloadShapeKeys = z.infer<typeof workloadShapeKeys>;
+
+// One scanning shape the engine saw, priced, and either proposed an index for or
+// declined (#432).
+//
+// `collscan` and `sortedInMemory` are separate booleans rather than one enum
+// because a shape can be both, and because they are different failures: a scan
+// found no index at all, while an in-memory sort found the documents through an
+// index and could not ORDER them. The second is invisible to every scan test —
+// keys were examined, so by that measure the query looks healthy — and it is the
+// one that ends in an ERROR rather than in slowness, since a blocking sort dies
+// at 100 MB.
+export const workloadShape = z.object({
+  id: z.uuid(),
+  database: z.string(),
+  collection: z.string(),
+  keys: workloadShapeKeys,
+  collscan: z.boolean(),
+  sortedInMemory: z.boolean(),
+  // Cumulative from the workload store's own start, not per pass: `$queryStats`
+  // accumulates for the life of the store and the profiler's ring reports what
+  // it still holds. Which is why the rate below is a quotient rather than a
+  // difference between two readings (D26).
+  executions: z.int().nonnegative(),
+  // Documents the server actually walked — D40's urgency measure. Null where the
+  // source cannot say: `$queryStats` reports it only from mongo 8.0, and zero
+  // would be a claim that a collection scan walked nothing.
+  docsExamined: z.int().nonnegative().nullable(),
+  // The window the rate is over. Null when the source cannot say, which is not
+  // the same as zero.
+  observedForHours: z.number().nonnegative().nullable(),
+  // Documents walked per week, as the severity tiers actually measure it
+  // (analysis/severity.ts: >=10M/week or >=500k per execution is critical,
+  // >=1M elevated). Computed server-side because the tier is, and two places
+  // dividing by an optional window is how they come to disagree.
+  weeklyDocsExamined: z.int().nonnegative().nullable(),
+  severity: z.enum(["CRITICAL", "ELEVATED", "ROUTINE"]),
+  clients: z.array(workloadClient),
+  outcome: workloadOutcome.nullable(),
+  // Verbatim, when the api did not recognise the outcome — a row written by a
+  // newer worker than the api reading it renders as itself rather than failing
+  // the page (the column is text for exactly this).
+  outcomeRaw: z.string(),
+  // The engine's own sentence for that outcome. Null when the outcome is not one
+  // this build knows how to explain.
+  explanation: z.string().nullable(),
+  // The index that WAS proposed, when one was. Null for every declined outcome.
+  proposedIndex: z.string().nullable(),
+  // When this shape was first seen scanning, and when that was last true. The
+  // pair is the whole answer to "is this new": a scan that started on Tuesday
+  // and one that has been there three months are otherwise the same row, and
+  // they are not the same problem.
+  firstSeenAt: instant,
+  lastSeenAt: instant,
+  observations: z.int().positive(),
+});
+export type WorkloadShape = z.infer<typeof workloadShape>;
+
+// One page of the cluster's scanning workload.
+export const clusterWorkload = z.object({
+  clusterId: z.uuid(),
+  shapes: z.array(workloadShape),
+  // How many shapes match, so a page can say "50 of 312".
+  total: z.int().nonnegative(),
+  // The cursor for the page after this one, or null at the end. Two halves: the
+  // sort is by weekly cost descending and the id breaks the tie, because two
+  // shapes with the same cost on one collection is ordinary and a cursor that
+  // was only the cost would skip whichever sorted second.
+  nextWeeklyDocsExamined: z.int().nullable(),
+  nextId: z.uuid().nullable(),
+  // Whether create-side analysis is switched off for this cluster. The one gate
+  // that leaves NO shape rows at all, because nothing is read when it fires — so
+  // an empty page has two very different meanings and this is which one.
+  workloadAnalysisEnabled: z.boolean(),
+  // The two ELIGIBILITY gates, as counts of COLLECTIONS rather than rows.
+  //
+  // Both fire before the workload is read — `collectWorkload` is only asked
+  // about the namespaces that clear them — so there are no shapes to carry an
+  // outcome. Reading a workload for an ineligible namespace would mean a
+  // profiler dial per collection on every cluster below MongoDB 8.0, which is a
+  // real cost to pay for a row saying a 40-document collection was not
+  // analysed. So the pass counts them into its own note (#277) and the page
+  // reports the numbers.
+  collectionsBelowDocFloor: z.int().nonnegative(),
+  collectionsAboveSizeCeiling: z.int().nonnegative(),
+  // When the newest reading here was taken. Null when no create-side pass has
+  // ever stored a shape, which is the page's "nothing yet" state rather than
+  // "this cluster scans nothing".
+  analysedAt: instant.nullable(),
+});
+export type ClusterWorkload = z.infer<typeof clusterWorkload>;
+
 // One node of the cluster as the last collect saw it (#100). `refused` is this
 // deployment's net guard declining to dial the address the cluster named — a
 // policy fact, not member health — and a role stays "unknown" exactly when the

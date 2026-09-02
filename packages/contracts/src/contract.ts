@@ -20,6 +20,7 @@ import {
   clusterCooldowns,
   clusterDatabases,
   clusterEvent,
+  clusterIndexes,
   clusterIndexSizeSeries,
   clusterLatency,
   clusterLatencySeries,
@@ -28,6 +29,7 @@ import {
   clusterPrivileges,
   clusterRecommendations,
   clusterRoi,
+  clusterWorkload,
   connectionDiagnosis,
   myInvite,
   offboardResult,
@@ -116,6 +118,82 @@ export const contract = {
     })
     .input(clusterId)
     .output(clusterCollections),
+
+  // Every index the cluster HAS, not only the ones something is proposing about
+  // (#431). `getCollections` above sums the same snapshots to a count and a byte
+  // total per collection — a collection with fourteen indexes is one row saying
+  // fourteen — and index-level numbers reached the dashboard only as
+  // `IndexUsage`, which is keyed by `recommendationId` (D66). So the only
+  // indexes a customer could see were the ones we already wanted to change.
+  //
+  // Paged by keyset rather than capped like `listRecommendations`, because the
+  // question is different: proposals are RANKED, so the top few are the answer
+  // and a cursor buys nothing, while an inventory is browsed — "what else is on
+  // `orders`" has no top. Namespace order for the same reason, and the two
+  // optional filters are that order's own scoping.
+  getClusterIndexes: oc
+    .route({
+      method: "GET",
+      path: "/clusters/{clusterId}/indexes",
+      summary:
+        "One page of the cluster's index inventory: spec, flags, size and per-member usage for every index the last collect saw",
+    })
+    .input(
+      z.object({
+        clusterId: z.uuid(),
+        // Exact, both of them, and `collection` without `database` is accepted:
+        // two databases holding a collection of the same name is normal, and
+        // refusing the narrower ask would only send the reader to page through
+        // the wider one.
+        database: z.string().optional(),
+        collection: z.string().optional(),
+        // The cursor from the previous page. All three or none — the sort is
+        // (database, collection, indexName) and any prefix of it repeats or
+        // skips rows across the boundary.
+        afterDatabase: z.string().optional(),
+        afterCollection: z.string().optional(),
+        afterIndexName: z.string().optional(),
+      }),
+    )
+    .output(clusterIndexes),
+
+  // The queries that MISS an index, including the ones the engine declined to
+  // act on (#432).
+  //
+  // `collector.collectWorkload` has always returned every scanning shape with
+  // its executions, its documents walked and the window behind both.
+  // `jobs/suggest.ts` read them once an hour, used them in memory, and persisted
+  // only the recommendations that cleared every create-side gate — so a query
+  // walking 900k documents a week on a small collection was seen, priced,
+  // discarded, and never mentioned. Every gate is right; each worked by making
+  // the FINDING disappear along with the proposal, which is the same defect #277
+  // fixed on the drop side.
+  //
+  // Ranked by weekly cost rather than sorted by namespace, which is the
+  // difference from `getClusterIndexes` beside it: an inventory is browsed, and
+  // this is a list of problems, so the worst ones are the answer.
+  getClusterWorkload: oc
+    .route({
+      method: "GET",
+      path: "/clusters/{clusterId}/workload",
+      summary:
+        "One page of the cluster's scanning query shapes: what an index would have to cover, what the scanning costs, and which gate declined to act on it",
+    })
+    .input(
+      z.object({
+        clusterId: z.uuid(),
+        database: z.string().optional(),
+        collection: z.string().optional(),
+        // Only the shapes nothing was proposed for, which is the question the
+        // page exists to answer and the one no other screen can.
+        declinedOnly: z.coerce.boolean().optional(),
+        // The cursor from the previous page. Both halves or neither — a cost
+        // without its tiebreak would skip a shape that shares it.
+        afterWeeklyDocsExamined: z.coerce.number().optional(),
+        afterId: z.uuid().optional(),
+      }),
+    )
+    .output(clusterWorkload),
 
   // Read on its own, never joined to `recommendations` (#159). A cooldown
   // OUTLIVES the recommendation that caused it: cancelling a pending drop parks
