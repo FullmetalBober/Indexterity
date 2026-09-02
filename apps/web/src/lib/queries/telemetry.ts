@@ -8,9 +8,11 @@
 // required them to share an entry — that is a fact about *why* they go stale, not
 // about who reads them.
 import type {
+  ClusterIndexes,
   ClusterIndexSizeSeries,
   ClusterLatencySeries,
   ClusterNodes,
+  ClusterWorkload,
   CollectionStat,
   LatencySummary,
 } from "@repo/contracts";
@@ -86,6 +88,111 @@ export function indexSizeSeriesQuery(clusterId: string | null) {
   });
 }
 
+// Which page of the inventory is being asked for. Namespace scope and cursor,
+// which is exactly the api's input minus the cluster the caller already holds.
+export interface ClusterIndexPage {
+  readonly database?: string | undefined;
+  readonly collection?: string | undefined;
+  readonly afterDatabase?: string | undefined;
+  readonly afterCollection?: string | undefined;
+  readonly afterIndexName?: string | undefined;
+}
+
+// The whole payload again, and for the third time the same reason: `total` is
+// the honest denominator for a page of 100, and the three cursor fields are how
+// the table knows whether to offer another page at all. Folding any of them away
+// here would put the reader back to paging into an empty response to find the
+// end.
+export const NO_CLUSTER_INDEXES: ClusterIndexes = {
+  clusterId: "",
+  indexes: [],
+  total: 0,
+  nextDatabase: null,
+  nextCollection: null,
+  nextIndexName: null,
+  collectedAt: null,
+};
+
+// The cursor travels as three fields or none. Half of one would page from a
+// namespace boundary the api never named, which is a quietly wrong page rather
+// than an error.
+function pageInput(page: ClusterIndexPage) {
+  return {
+    ...(page.database === undefined ? {} : { database: page.database }),
+    ...(page.collection === undefined ? {} : { collection: page.collection }),
+    ...(page.afterDatabase === undefined ||
+    page.afterCollection === undefined ||
+    page.afterIndexName === undefined
+      ? {}
+      : {
+          afterDatabase: page.afterDatabase,
+          afterCollection: page.afterCollection,
+          afterIndexName: page.afterIndexName,
+        }),
+  };
+}
+
+export function clusterIndexesQuery(clusterId: string | null, page: ClusterIndexPage = {}) {
+  return queryOptions({
+    queryKey: queryKeys.clusterIndexes(clusterId, page),
+    queryFn: async () =>
+      clusterId === null
+        ? NO_CLUSTER_INDEXES
+        : api().getClusterIndexes({ clusterId, ...pageInput(page) }),
+  });
+}
+
+// Which page of the scanning workload is being asked for (#432).
+export interface WorkloadPage {
+  readonly database?: string | undefined;
+  readonly collection?: string | undefined;
+  readonly declinedOnly?: boolean | undefined;
+  readonly afterWeeklyDocsExamined?: number | undefined;
+  readonly afterId?: string | undefined;
+}
+
+// `workloadAnalysisEnabled` true in the empty fallback, so a cluster whose read
+// has not answered yet does not draw "create-side analysis is off" — that is a
+// setting, and claiming it from an absence of data is the same mistake #289 was
+// about.
+export const NO_CLUSTER_WORKLOAD: ClusterWorkload = {
+  clusterId: "",
+  shapes: [],
+  total: 0,
+  nextWeeklyDocsExamined: null,
+  nextId: null,
+  workloadAnalysisEnabled: true,
+  collectionsBelowDocFloor: 0,
+  collectionsAboveSizeCeiling: 0,
+  analysedAt: null,
+};
+
+function workloadInput(page: WorkloadPage) {
+  return {
+    ...(page.database === undefined ? {} : { database: page.database }),
+    ...(page.collection === undefined ? {} : { collection: page.collection }),
+    ...(page.declinedOnly === undefined ? {} : { declinedOnly: page.declinedOnly }),
+    // Both halves or neither, for the reason the api gives: a cost without its
+    // tiebreak would skip a shape that shares it.
+    ...(page.afterWeeklyDocsExamined === undefined || page.afterId === undefined
+      ? {}
+      : {
+          afterWeeklyDocsExamined: page.afterWeeklyDocsExamined,
+          afterId: page.afterId,
+        }),
+  };
+}
+
+export function clusterWorkloadQuery(clusterId: string | null, page: WorkloadPage = {}) {
+  return queryOptions({
+    queryKey: queryKeys.clusterWorkload(clusterId, page),
+    queryFn: async () =>
+      clusterId === null
+        ? NO_CLUSTER_WORKLOAD
+        : api().getClusterWorkload({ clusterId, ...workloadInput(page) }),
+  });
+}
+
 // The whole payload, not just the array: collectedAt is the panel's "as of",
 // and a roster without its moment is a topology claim nobody made (#100).
 export function nodesQuery(clusterId: string | null) {
@@ -130,5 +237,34 @@ export function useIndexSizeSeries(clusterId: string | null): Read<ClusterIndexS
 
 export function useNodes(clusterId: string | null): Read<ClusterNodes | null> {
   const { data = null, isPending, isError, refetch } = useQuery(nodesQuery(clusterId));
+  return { data, pending: isPending, failed: isError, retry: () => void refetch() };
+}
+
+// Its own hook rather than a `useQuery` at the call site, for the reason all six
+// above are: `Read` carries `failed` beside the payload, and #289 was the panel
+// that went on drawing the reassuring empty state after a 500.
+export function useClusterIndexes(
+  clusterId: string | null,
+  page: ClusterIndexPage = {},
+): Read<ClusterIndexes> {
+  const {
+    data = NO_CLUSTER_INDEXES,
+    isPending,
+    isError,
+    refetch,
+  } = useQuery(clusterIndexesQuery(clusterId, page));
+  return { data, pending: isPending, failed: isError, retry: () => void refetch() };
+}
+
+export function useClusterWorkload(
+  clusterId: string | null,
+  page: WorkloadPage = {},
+): Read<ClusterWorkload> {
+  const {
+    data = NO_CLUSTER_WORKLOAD,
+    isPending,
+    isError,
+    refetch,
+  } = useQuery(clusterWorkloadQuery(clusterId, page));
   return { data, pending: isPending, failed: isError, retry: () => void refetch() };
 }

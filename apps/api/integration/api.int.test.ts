@@ -1,12 +1,16 @@
 import type { ChildProcess } from "node:child_process";
 import {
+  CLUSTER_INDEXES_PAGE,
   LATENCY_SERIES_MAX_COLLECTIONS,
   LATENCY_SERIES_WINDOW_DAYS,
   RECOMMENDATIONS_CAP,
   SECURITY_TRAIL_PAGE,
+  WORKLOAD_SHAPES_PAGE,
 } from "@repo/contracts";
 import { makeWorkerUtils } from "graphile-worker";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { judgeFailures } from "../src/analysis";
+import { outcomeOf } from "../src/analysis/workload-outcome";
 import { entitledAutomation } from "../src/billing/plans";
 import { loadEnv } from "../src/config/env";
 import {
@@ -34,6 +38,7 @@ import {
   sql,
   user,
   verification,
+  workloadShapes,
 } from "../src/db";
 import { workloadKey } from "../src/engine/ports";
 import { SCOPED_USERNAME } from "../src/engine/provision";
@@ -52,6 +57,7 @@ import { planForCluster } from "../src/jobs/plan";
 import { latestBaselines } from "../src/jobs/probe";
 import { pruneDeadLetterJobs, pruneOldSamples } from "../src/jobs/retention";
 import { suggestForCluster } from "../src/jobs/suggest";
+import { isScanning } from "../src/jobs/workload-shapes";
 import { MongoConnection, MongoIndexCollector } from "../src/mongo";
 import { hasQueryStatsPlanMetrics, parseServerVersion } from "../src/mongo/version";
 import {
@@ -2116,6 +2122,10 @@ describe("outage resilience", () => {
     // trustworthy history to weigh and refuses on that. Which is the difference
     // the epoch model bought — a day that counts and grows, where a reset used to
     // void the history and keep voiding it for as long as the restarts lasted.
+    //
+    // A day is short of the warm-up whether that is three days or seven (#434), so
+    // this case is unmoved by the split; what changed is which number the sentence
+    // quotes.
     const [note] = await db
       .select()
       .from(analysisNotes)
@@ -2133,7 +2143,7 @@ describe("outage resilience", () => {
     expect(analysis.usagePaused).toBe(true);
     expect(analysis.dominantRefusal).toBe("span-too-short");
     expect(analysis.refusedIndexes).toBe(1);
-    expect(String(analysis.explanation)).toContain("less than 7 days");
+    expect(String(analysis.explanation)).toContain("less than 3 days");
     expect(String(analysis.explanation)).toContain("A restart does not reset that clock");
     expect(String(analysis.explanation)).toContain("Redundancy findings are unaffected.");
   });
@@ -2471,6 +2481,33 @@ describe("auto-approval is one threshold", () => {
           score: 95,
           estimatedBytesSaved: 1024,
         },
+        // The promotion floor (#434). Same score as strong_1, and the only
+        // difference is how long the usage claim behind it was watched for: three
+        // days clears the proposal gate and never the unattended one.
+        {
+          clusterId: thresholdId,
+          type: "DROP_UNUSED",
+          state: "PROPOSED",
+          database: "inttest",
+          collection: "orders",
+          indexName: "thin_1",
+          rationale: "high confidence, thin history",
+          score: 90,
+          estimatedBytesSaved: 1024,
+          evidenceDays: 3,
+        },
+        {
+          clusterId: thresholdId,
+          type: "DROP_UNUSED",
+          state: "PROPOSED",
+          database: "inttest",
+          collection: "orders",
+          indexName: "seasoned_1",
+          rationale: "high confidence, week of history",
+          score: 90,
+          estimatedBytesSaved: 1024,
+          evidenceDays: 7,
+        },
       ]);
     };
     const approvedNames = async (): Promise<string[]> => {
@@ -2488,13 +2525,17 @@ describe("auto-approval is one threshold", () => {
 
     await seed();
     await promoteByScore(db, thresholdId, 70);
-    expect(await approvedNames()).toEqual(["strong_1"]);
+    // strong_1 carries no span at all, which reads as eligible: a NULL means the
+    // finding does not rest on one, or predates the column. seasoned_1 has the
+    // week the floor asks for. thin_1 scores the same as both and has three days.
+    expect(await approvedNames()).toEqual(["seasoned_1", "strong_1"]);
 
     await seed();
     await promoteByScore(db, thresholdId, 0);
     // Everything except the advisory, which no setting may promote — an
-    // approved advisory leaves the PROPOSED set classify refreshes.
-    expect(await approvedNames()).toEqual(["strong_1", "weak_1"]);
+    // approved advisory leaves the PROPOSED set classify refreshes — and except
+    // thin_1: the history floor is not a threshold, so 0 does not open it.
+    expect(await approvedNames()).toEqual(["seasoned_1", "strong_1", "weak_1"]);
 
     // And the threshold applyCluster reads is the stored policy value.
     await db.insert(policies).values({ clusterId: thresholdId, autoApplyScore: 95 });
@@ -2504,6 +2545,92 @@ describe("auto-approval is one threshold", () => {
       // after the promotion, which is the step under test.
     });
     expect(await approvedNames()).toEqual([]);
+  });
+});
+
+describe("the observe window can see a query that fails", () => {
+  // The gate that decides whether a hidden index gets dropped measures latency,
+  // and a failed query is not slow — it is fast. So this is the one signal that
+  // can tell a hide which BROKE the workload from a hide that improved it, and it
+  // is worth proving against a real mongod rather than a double: the marker is
+  // `ok: 0` on a profiler document, and nothing about $collStats records it.
+  const DB = "intfail";
+  const QUIET_DB = "intfail_quiet";
+  const COLL = "fail_probe";
+
+  // Its own databases, because system.profile is per-database and inttest's ring
+  // is shared by the workload tests above. The cost of that is these two joining
+  // the cluster's database list, which "choosing which databases to observe"
+  // asserts exactly — so they go away again before it runs.
+  afterAll(async () => {
+    await mongo
+      .db(DB)
+      .dropDatabase()
+      .catch(() => undefined);
+    await mongo
+      .db(QUIET_DB)
+      .dropDatabase()
+      .catch(() => undefined);
+  });
+
+  it("counts failed operations for a namespace, and only since the instant asked", async () => {
+    const collector = new MongoIndexCollector(mongo);
+    const db_ = mongo.db(DB);
+    await db_.collection(COLL).deleteMany({});
+    await db_.collection(COLL).insertMany([{ name: "beans and rice" }, { name: "spicy noodle" }]);
+    await db_.collection(COLL).createIndex({ name: "text" }, { name: "name_text" });
+    // Its own database, so the capped profiler ring is this test's alone —
+    // system.profile is per-database, and inttest is shared by everything above.
+    await db_.command({ profile: 2 });
+    try {
+      // A working $text query first, so "no failures" is a reading and not an
+      // empty ring.
+      expect(await db_.collection(COLL).countDocuments({ $text: { $search: "beans" } })).toBe(1);
+      const before = await collector.collectFailedOps(DB, COLL, 0);
+      expect(before).not.toBeNull();
+      expect(before?.failed).toBe(0);
+
+      // Hide the text index and the same query stops working. Not slows —
+      // NoQueryExecutionPlans (291), "need exactly one text index for $text query".
+      await db_.command({ collMod: COLL, index: { name: "name_text", hidden: true } });
+      const hiddenAt = Date.now();
+      for (let i = 0; i < 3; i += 1) {
+        await expect(
+          db_.collection(COLL).countDocuments({ $text: { $search: "beans" } }),
+        ).rejects.toThrow();
+      }
+
+      const after = await collector.collectFailedOps(DB, COLL, hiddenAt - 1000);
+      expect(after?.failed).toBeGreaterThanOrEqual(3);
+      // The ring reaches back at least to the working query, so its zero above was
+      // an observation rather than a blind spot.
+      expect(after?.reachMs).toBeLessThanOrEqual(hiddenAt);
+
+      // And the `since` filter is real: nothing failed after the future.
+      const later = await collector.collectFailedOps(DB, COLL, Date.now() + 60_000);
+      expect(later?.failed).toBe(0);
+
+      // The verdict the pipeline actually acts on.
+      const verdict = judgeFailures(
+        { failed: before?.failed ?? 0, reachMs: before?.reachMs ?? 0 },
+        after,
+        hiddenAt,
+      );
+      expect(verdict).toMatchObject({ kind: "INTRODUCED", failed: after?.failed });
+    } finally {
+      await db_.command({ profile: 0 }).catch(() => undefined);
+      await db_
+        .command({ collMod: COLL, index: { name: "name_text", hidden: false } })
+        .catch(() => undefined);
+    }
+  });
+
+  // Nothing turned the profiler on, which is the state most clusters are in — and
+  // it must read as "no source", never as "no failures" (D19).
+  it("reports no source rather than a clean window when the profiler is off", async () => {
+    const collector = new MongoIndexCollector(mongo);
+    await mongo.db(QUIET_DB).collection("untouched").insertOne({ n: 1 });
+    expect(await collector.collectFailedOps(QUIET_DB, "untouched", 0)).toBeNull();
   });
 });
 
@@ -2594,6 +2721,53 @@ describe("workload collection is batched", () => {
     // the build it can auto-approve moved out to the caller so a budget can never
     // cut one off. `created` is the number this line has always been about.
     expect((await suggestForCluster(db, clusterId)).created).toBeGreaterThanOrEqual(0);
+
+    // And it now leaves a record of what it SAW, not only of what it proposed
+    // (#432).
+    //
+    // Conditional on the store having reported a SCANNING shape, and that is not
+    // hedging — it is the version matrix. `$queryStats` carries `docsExamined`
+    // only from mongo 8.0, and this adapter derives `collscan` from
+    // `keysExamined === 0 && docsExamined > 0` (mongo/collector.ts), so on 6.0
+    // and 7.0 the same queries come back as shapes with no measured scan. Both
+    // directions are asserted, because "only scanning shapes are stored" is
+    // itself the rule: nothing recorded is the right answer when nothing was
+    // seen scanning.
+    const seenScanning = [...orders, ...carts].filter(isScanning);
+    const recorded = await db
+      .select()
+      .from(workloadShapes)
+      .where(eq(workloadShapes.clusterId, clusterId));
+    if (seenScanning.length === 0) {
+      expect(recorded).toEqual([]);
+    } else {
+      expect(recorded.length).toBeGreaterThan(0);
+      for (const row of recorded) {
+        // Every row carries a verdict, and it is one this build knows how to
+        // explain — a row with no outcome would be the silence the whole feature
+        // exists to end.
+        expect(outcomeOf(row.outcome)).not.toBeNull();
+        expect(row.observations).toBeGreaterThan(0);
+        expect(row.lastSeenAt.getTime()).toBeGreaterThanOrEqual(row.firstSeenAt.getTime());
+      }
+      // The storage decision (D128): `constants` carries real customer VALUES
+      // and is dropped on the way in. These queries filtered on literal
+      // strings, and the profiler is the source that would have captured them.
+      const stored = JSON.stringify(recorded.map((row) => row.shape));
+      expect(stored).not.toContain("gold");
+      expect(stored).not.toContain("open");
+
+      // A second pass extends the rows it already has rather than adding more:
+      // one row per SHAPE, not one per pass, which is what stops this table
+      // growing with the cadence (D39's argument, reached by a shorter route).
+      await suggestForCluster(db, clusterId);
+      const again = await db
+        .select()
+        .from(workloadShapes)
+        .where(eq(workloadShapes.clusterId, clusterId));
+      expect(again.length).toBe(recorded.length);
+      expect(Math.max(...again.map((row) => row.observations))).toBeGreaterThan(1);
+    }
 
     // Off is still off, and now it is a decision the data records rather than
     // the absence of one. Asserted through the api so the round trip that stores
@@ -5331,6 +5505,481 @@ describe("bounded per-cluster reads", () => {
     expect(foreign.points).toEqual([]);
     expect(foreign.latestBytes).toBeNull();
     expect(foreign.changeBytes).toBeNull();
+  });
+
+  // #431. Every one of these numbers was already stored and none of them had
+  // anywhere to be looked at: index-level readings reached the dashboard only as
+  // `IndexUsage`, keyed by recommendationId, so an index nobody had proposed
+  // anything about was invisible along with the judgement that it was fine.
+  it("lists every index the last collect saw, paged by namespace", async () => {
+    const invId = await bareCluster("Index Inventory");
+    const now = Date.now();
+    const collectedAt = new Date(now);
+    const specOf = (name: string, extra: Record<string, unknown> = {}) => ({
+      name,
+      keys: [{ field: "status", direction: 1 }],
+      unique: false,
+      ttl: false,
+      partial: false,
+      partialFilter: null,
+      sparse: false,
+      hidden: false,
+      isShardKey: false,
+      collation: null,
+      ...extra,
+    });
+    // Three namespaces so the sort and the filter have something to be wrong
+    // about, and a deliberately unsorted insert order.
+    await insertSnapshots(db, [
+      {
+        clusterId: invId,
+        database: "app",
+        collection: "orders",
+        indexName: "status_1",
+        spec: specOf("status_1"),
+        sizeBytes: 4_096,
+        perMember: [
+          { member: "a:27017", ops: 40, since: new Date(now - 86_400_000).toISOString() },
+          { member: "b:27017", ops: 2, since: new Date(now - 86_400_000).toISOString() },
+        ],
+        capturedAt: new Date(now - 7_200_000),
+        lastSeenAt: collectedAt,
+      },
+      {
+        clusterId: invId,
+        database: "app",
+        collection: "orders",
+        indexName: "hidden_1",
+        spec: specOf("hidden_1", { hidden: true, unique: true }),
+        sizeBytes: 1_024,
+        perMember: [],
+        hinted: true,
+        capturedAt: new Date(now - 7_200_000),
+        lastSeenAt: collectedAt,
+      },
+      {
+        clusterId: invId,
+        database: "app",
+        collection: "carts",
+        indexName: "user_1",
+        spec: specOf("user_1"),
+        sizeBytes: 512,
+        perMember: [{ member: "a:27017", ops: 9, since: new Date(now - 3_600_000).toISOString() }],
+        capturedAt: new Date(now - 7_200_000),
+        lastSeenAt: collectedAt,
+      },
+      // A run that ENDED before the latest collect: the index was rebuilt or
+      // dropped, and the inventory is about what the cluster has now.
+      {
+        clusterId: invId,
+        database: "app",
+        collection: "orders",
+        indexName: "gone_1",
+        spec: specOf("gone_1"),
+        sizeBytes: 8_192,
+        perMember: [],
+        capturedAt: new Date(now - 172_800_000),
+        lastSeenAt: new Date(now - 86_400_000),
+      },
+    ]);
+
+    const body = asRecord(await (await api(`/clusters/${invId}/indexes`, owner)).json());
+    const rows = asRecords(body.indexes, "body.indexes");
+    // Namespace order, and the retired index is not in it.
+    expect(rows.map((row) => `${row.collection}.${row.indexName}`)).toEqual([
+      "carts.user_1",
+      "orders.hidden_1",
+      "orders.status_1",
+    ]);
+    expect(body.total).toBe(3);
+    expect(body.collectedAt).not.toBeNull();
+    // Nothing more to fetch, so no cursor is offered — a reader must not have to
+    // page into an empty response to discover the end.
+    expect(body.nextIndexName).toBeNull();
+
+    const status = rows.find((row) => row.indexName === "status_1");
+    expect(status).toBeDefined();
+    // Summed over the members that ANSWERED, with the split beside it: the whole
+    // point of D66 is that these two are not the same fact.
+    expect(status?.totalOps).toBe(42);
+    expect(asRecords(status?.perMember, "perMember").map((entry) => entry.ops)).toEqual([40, 2]);
+    // The counter start travels with the count, so a restart is not read as
+    // idleness (D114).
+    expect(asRecords(status?.perMember, "perMember")[0]?.since).not.toBeNull();
+    expect(status?.sizeBytes).toBe(4_096);
+
+    // Two states the customer could previously only infer from a
+    // recommendation's ABSENCE.
+    const hidden = rows.find((row) => row.indexName === "hidden_1");
+    expect(hidden).toMatchObject({ hidden: true, unique: true, hinted: true });
+    // A member that did not report this index is not invented as a zero.
+    expect(hidden?.perMember).toEqual([]);
+    expect(hidden?.totalOps).toBe(0);
+
+    // Namespace-scoped, and the total narrows with it rather than describing
+    // rows the reader did not ask for.
+    const scoped = asRecord(
+      await (await api(`/clusters/${invId}/indexes?collection=carts`, owner)).json(),
+    );
+    expect(asRecords(scoped.indexes, "scoped.indexes").map((row) => row.indexName)).toEqual([
+      "user_1",
+    ]);
+    expect(scoped.total).toBe(1);
+
+    // A recommendation pointing at an index shows up on that index's row —
+    // including one that RETIRES it under a different proposed name, which is
+    // what a REORDER is.
+    const [dropRow] = await db
+      .insert(recommendations)
+      .values({
+        clusterId: invId,
+        type: "DROP_UNUSED",
+        state: "PROPOSED",
+        database: "app",
+        collection: "orders",
+        indexName: "status_1",
+        rationale: "unused",
+      })
+      .returning();
+    await db.insert(recommendations).values({
+      clusterId: invId,
+      type: "REORDER",
+      state: "PROPOSED",
+      database: "app",
+      collection: "carts",
+      indexName: "user_-1",
+      rationale: "wrong direction",
+      targetSpec: { keys: ["user:-1"], retire: ["user_1"] },
+    });
+    const linked = asRecords(
+      asRecord(await (await api(`/clusters/${invId}/indexes`, owner)).json()).indexes,
+      "linked.indexes",
+    );
+    expect(asRecord(linked.find((row) => row.indexName === "status_1")?.recommendation).id).toBe(
+      dropRow?.id,
+    );
+    expect(asRecord(linked.find((row) => row.indexName === "user_1")?.recommendation).type).toBe(
+      "REORDER",
+    );
+    // And most indexes have none, which is the population this page exists for.
+    expect(linked.find((row) => row.indexName === "hidden_1")?.recommendation).toBeNull();
+
+    // Another tenant gets the empty shape rather than a refusal, like every
+    // other per-cluster read.
+    const stranger = await signUp("inventory-stranger");
+    createdEmails.push(stranger.email);
+    createdOrgIds.push(asString(asRecord(await (await api("/org", stranger)).json()).id));
+    const foreign = asRecord(await (await api(`/clusters/${invId}/indexes`, stranger)).json());
+    expect(foreign.indexes).toEqual([]);
+    expect(foreign.total).toBe(0);
+    expect(foreign.collectedAt).toBeNull();
+  });
+
+  // The cursor is the whole reason this endpoint is not the uncapped read
+  // `getCollections` is: an index list grows with the customer's schema forever.
+  it("pages the inventory by keyset without repeating or skipping a row", async () => {
+    const pagedId = await bareCluster("Index Inventory Paging");
+    const now = Date.now();
+    const spec = {
+      name: "k",
+      keys: [{ field: "k", direction: 1 }],
+      unique: false,
+      ttl: false,
+      partial: false,
+      partialFilter: null,
+      sparse: false,
+      hidden: false,
+      isShardKey: false,
+      collation: null,
+    };
+    const count = CLUSTER_INDEXES_PAGE + 7;
+    await insertSnapshots(
+      db,
+      Array.from({ length: count }, (_, n) => ({
+        clusterId: pagedId,
+        database: "app",
+        collection: "wide",
+        // Zero-padded so lexicographic order — which is what the keyset
+        // comparison uses — is also the order a reader expects.
+        indexName: `idx_${String(n).padStart(4, "0")}`,
+        spec: { ...spec, name: `idx_${String(n).padStart(4, "0")}` },
+        sizeBytes: 100 + n,
+        perMember: [],
+        capturedAt: new Date(now - 3_600_000),
+        lastSeenAt: new Date(now),
+      })),
+    );
+
+    const first = asRecord(await (await api(`/clusters/${pagedId}/indexes`, owner)).json());
+    const firstRows = asRecords(first.indexes, "first.indexes");
+    expect(firstRows).toHaveLength(CLUSTER_INDEXES_PAGE);
+    // The honest denominator: this is a page of a larger set and says so.
+    expect(first.total).toBe(count);
+    expect(first.nextIndexName).toBe(firstRows[firstRows.length - 1]?.indexName);
+
+    const cursor = new URLSearchParams({
+      afterDatabase: asString(first.nextDatabase),
+      afterCollection: asString(first.nextCollection),
+      afterIndexName: asString(first.nextIndexName),
+    });
+    const second = asRecord(
+      await (await api(`/clusters/${pagedId}/indexes?${cursor.toString()}`, owner)).json(),
+    );
+    const secondRows = asRecords(second.indexes, "second.indexes");
+    expect(secondRows).toHaveLength(count - CLUSTER_INDEXES_PAGE);
+    expect(second.nextIndexName).toBeNull();
+
+    // Every index exactly once across the two pages, which is the property an
+    // offset page loses the moment a collect lands mid-read.
+    const seen = [...firstRows, ...secondRows].map((row) => String(row.indexName));
+    expect(new Set(seen).size).toBe(count);
+  });
+
+  // #432. Every one of these numbers was read once an hour and thrown away:
+  // `jobs/suggest.ts` used the shapes in memory and persisted only the
+  // recommendations that cleared every create-side gate, so a query walking 900k
+  // documents a week on a small collection was seen, priced, discarded, and
+  // never mentioned to the customer.
+  it("lists the scanning shapes the engine declined, and which gate declined them", async () => {
+    const wlId = await bareCluster("Scanning Workload");
+    const now = Date.now();
+    const shapeOf = (equality: string[], over: Record<string, unknown> = {}) => ({
+      equality,
+      sort: [],
+      range: [],
+      collscan: true,
+      sortedInMemory: false,
+      ...over,
+    });
+    await db.insert(workloadShapes).values([
+      // The headline case: real cost, and under every threshold.
+      {
+        clusterId: wlId,
+        database: "app",
+        collection: "orders",
+        shape: shapeOf(["status"]),
+        executions: 1200,
+        docsExamined: 900_000,
+        observedForHours: 168,
+        clients: [{ application: "checkout-api", driver: "nodejs" }],
+        weeklyDocsExamined: 900_000,
+        severity: "ROUTINE",
+        outcome: "below-cost-floor",
+        proposedIndex: null,
+        firstSeenAt: new Date(now - 30 * 86_400_000),
+        lastSeenAt: new Date(now),
+        observations: 700,
+      },
+      // The expensive one, which DID become a proposal.
+      {
+        clusterId: wlId,
+        database: "app",
+        collection: "events",
+        shape: shapeOf(["kind"], { sortedInMemory: true }),
+        executions: 40_000,
+        docsExamined: 50_000_000,
+        observedForHours: 168,
+        clients: [{ driver: "python" }],
+        weeklyDocsExamined: 50_000_000,
+        severity: "CRITICAL",
+        outcome: "proposed",
+        proposedIndex: "kind_1",
+        firstSeenAt: new Date(now - 2 * 86_400_000),
+        lastSeenAt: new Date(now),
+        observations: 40,
+      },
+      // A blocking sort whose source could not report examined documents. Its
+      // weekly cost is unknown, and unknown must sort LAST rather than first:
+      // Postgres puts nulls first under `desc`, so the one row whose cost nobody
+      // measured would otherwise head a page ranked by cost.
+      {
+        clusterId: wlId,
+        database: "app",
+        collection: "carts",
+        shape: shapeOf([], { collscan: false, sortedInMemory: true }),
+        executions: 90,
+        docsExamined: null,
+        observedForHours: null,
+        clients: [],
+        weeklyDocsExamined: null,
+        severity: "ROUTINE",
+        outcome: "not-recurring",
+        proposedIndex: null,
+        firstSeenAt: new Date(now - 86_400_000),
+        lastSeenAt: new Date(now),
+        observations: 3,
+      },
+      // Outside every plan's window, so the entitlement is what keeps it off the
+      // page rather than a deletion that has not run yet.
+      {
+        clusterId: wlId,
+        database: "app",
+        collection: "ancient",
+        shape: shapeOf(["gone"]),
+        executions: 5,
+        docsExamined: 99_000_000_000,
+        observedForHours: 168,
+        clients: [],
+        weeklyDocsExamined: 99_000_000_000,
+        severity: "CRITICAL",
+        outcome: "below-cost-floor",
+        proposedIndex: null,
+        firstSeenAt: new Date(now - 500 * 86_400_000),
+        lastSeenAt: new Date(now - 400 * 86_400_000),
+        observations: 10,
+      },
+    ]);
+    // The two gates that fire BEFORE the workload is read, so they can have no
+    // shape rows — the pass counts collections into its own note instead (#277).
+    await db.insert(analysisNotes).values({
+      clusterId: wlId,
+      source: "WORKLOAD",
+      decidedAt: new Date(now),
+      suppressed: { "trivial-collection": 12, "oversize-collection": 2 },
+    });
+
+    const body = asRecord(await (await api(`/clusters/${wlId}/workload`, owner)).json());
+    const shapes = asRecords(body.shapes, "body.shapes");
+    // Worst first, by documents walked per week — and the unmeasured one last,
+    // never first. The ancient row is absent whatever its cost.
+    expect(shapes.map((row) => row.collection)).toEqual(["events", "orders", "carts"]);
+    expect(body.total).toBe(3);
+    expect(body.analysedAt).not.toBeNull();
+    expect(body.workloadAnalysisEnabled).toBe(true);
+    // Counted, not given rows, and reported rather than silently left out.
+    expect(body.collectionsBelowDocFloor).toBe(12);
+    expect(body.collectionsAboveSizeCeiling).toBe(2);
+
+    const declined = shapes.find((row) => row.collection === "orders");
+    expect(declined).toBeDefined();
+    // The point of the page: the gate that declined, and the engine's own
+    // sentence for it.
+    expect(declined?.outcome).toBe("below-cost-floor");
+    expect(String(declined?.explanation)).toContain("million documents a week");
+    expect(declined?.proposedIndex).toBeNull();
+    // The ESR split — what an index would have to cover — rather than a rendered
+    // key pattern.
+    expect(asRecord(declined?.keys).equality).toEqual(["status"]);
+    // First and last seen, so a scan that started on Tuesday is distinguishable
+    // from one that has been there for a month. The create side had no history
+    // at all before this: recommendations are deleted and re-proposed wholesale
+    // on every pass.
+    expect(declined?.firstSeenAt).not.toBe(declined?.lastSeenAt);
+    expect(declined?.observations).toBe(700);
+    expect(asRecords(declined?.clients, "clients")[0]?.application).toBe("checkout-api");
+
+    // A blocking sort is a different failure from a scan, and the one no scan
+    // test can see.
+    const sorting = shapes.find((row) => row.collection === "carts");
+    expect(sorting).toMatchObject({ collscan: false, sortedInMemory: true });
+    // Unmeasured, not zero: zero would read as "this costs nothing".
+    expect(sorting?.weeklyDocsExamined).toBeNull();
+
+    // The filter the page exists for.
+    const onlyDeclined = asRecord(
+      await (await api(`/clusters/${wlId}/workload?declinedOnly=true`, owner)).json(),
+    );
+    const declinedRows = asRecords(onlyDeclined.shapes, "onlyDeclined.shapes");
+    expect(declinedRows.map((row) => row.collection)).toEqual(["orders", "carts"]);
+    expect(onlyDeclined.total).toBe(2);
+
+    // Namespace scoping, and the total narrows with it.
+    const scoped = asRecord(
+      await (await api(`/clusters/${wlId}/workload?collection=events`, owner)).json(),
+    );
+    expect(asRecords(scoped.shapes, "scoped.shapes")).toHaveLength(1);
+    expect(scoped.total).toBe(1);
+
+    // Switching create-side analysis off leaves NO shapes at all, because
+    // nothing is read — so an empty page has two meanings and the payload says
+    // which one it is.
+    await api(`/clusters/${wlId}/policy`, owner, {
+      method: "PUT",
+      body: JSON.stringify({
+        workloadAnalysis: false,
+        instantCreate: false,
+        observeWindowDays: 7,
+        maxCollectionSizeBytes: null,
+        autoApplyScore: null,
+        changeWindowStartHour: null,
+        changeWindowEndHour: null,
+      }),
+    });
+    const off = asRecord(await (await api(`/clusters/${wlId}/workload`, owner)).json());
+    expect(off.workloadAnalysisEnabled).toBe(false);
+
+    // Another tenant gets the empty shape rather than a refusal — and
+    // `workloadAnalysisEnabled` true, because not-yours and switched-off are
+    // different answers and only one of them is a setting.
+    const stranger = await signUp("workload-stranger");
+    createdEmails.push(stranger.email);
+    createdOrgIds.push(asString(asRecord(await (await api("/org", stranger)).json()).id));
+    const foreign = asRecord(await (await api(`/clusters/${wlId}/workload`, stranger)).json());
+    expect(foreign.shapes).toEqual([]);
+    expect(foreign.total).toBe(0);
+    expect(foreign.workloadAnalysisEnabled).toBe(true);
+    expect(foreign.analysedAt).toBeNull();
+  });
+
+  // The cursor has to cross the boundary between the measured shapes and the
+  // unmeasured ones, which is what a nullable sort key makes easy to get wrong:
+  // a plain tuple comparison is null-propagating, so every unmeasured shape
+  // would vanish from the second page onwards.
+  it("pages the scanning workload by keyset across the unmeasured shapes", async () => {
+    const pagedId = await bareCluster("Workload Paging");
+    const now = Date.now();
+    const count = WORKLOAD_SHAPES_PAGE + 6;
+    // Half of them with a cost, half without, interleaved by construction.
+    await db.insert(workloadShapes).values(
+      Array.from({ length: count }, (_, n) => ({
+        clusterId: pagedId,
+        database: "app",
+        collection: "wide",
+        shape: {
+          equality: [`f${n}`],
+          sort: [],
+          range: [],
+          collscan: true,
+          sortedInMemory: false,
+        },
+        executions: 10 + n,
+        docsExamined: n % 2 === 0 ? 1000 * (n + 1) : null,
+        observedForHours: 168,
+        clients: [],
+        weeklyDocsExamined: n % 2 === 0 ? 1000 * (n + 1) : null,
+        severity: "ROUTINE",
+        outcome: "below-cost-floor",
+        proposedIndex: null,
+        firstSeenAt: new Date(now - 86_400_000),
+        lastSeenAt: new Date(now),
+        observations: 1,
+      })),
+    );
+
+    const first = asRecord(await (await api(`/clusters/${pagedId}/workload`, owner)).json());
+    const firstRows = asRecords(first.shapes, "first.shapes");
+    expect(firstRows).toHaveLength(WORKLOAD_SHAPES_PAGE);
+    expect(first.total).toBe(count);
+
+    const cursor = new URLSearchParams({
+      afterWeeklyDocsExamined: String(first.nextWeeklyDocsExamined),
+      afterId: asString(first.nextId),
+    });
+    const second = asRecord(
+      await (await api(`/clusters/${pagedId}/workload?${cursor.toString()}`, owner)).json(),
+    );
+    const secondRows = asRecords(second.shapes, "second.shapes");
+    expect(secondRows).toHaveLength(count - WORKLOAD_SHAPES_PAGE);
+    expect(second.nextId).toBeNull();
+
+    // Every shape exactly once across the two pages, including the ones with no
+    // measured cost.
+    const seen = [...firstRows, ...secondRows].map((row) => String(row.id));
+    expect(new Set(seen).size).toBe(count);
+    const unmeasured = [...firstRows, ...secondRows].filter(
+      (row) => row.weeklyDocsExamined === null,
+    );
+    expect(unmeasured.length).toBe(Math.floor(count / 2));
   });
 });
 

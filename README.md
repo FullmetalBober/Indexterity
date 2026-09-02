@@ -6,14 +6,37 @@ overlapping, extends prefixes, creates the missing — and proves the result in
 freed bytes and latency.
 
 **Read-only until you say otherwise.** The one irreversible step, a drop, is
-gated behind an observe window, a pre-flight check and a read-latency regression
-test. Everything before that is reversible, and the dashboard says which is
-which.
+gated behind an observe window, a pre-flight check, a read-latency regression
+test, and a check that the workload did not start FAILING while the index was
+hidden — which is a separate question, because a query that fails returns faster
+than one that works and a latency test reads it as an improvement. Everything
+before the drop is reversible, and the dashboard says which is which.
+
+**Some indexes are never dropped automatically, whatever they score.** That gate
+is a measurement, and a measurement needs the experiment to be survivable. A
+unique index's loss is invisible to it — nothing about latency says duplicates
+are now permitted. A text or geo index is worse than invisible: hiding one makes
+its own queries **fail** rather than slow down, so there is no experiment to run.
+Those, and TTL indexes and shard keys, are reported for a human to act on, with
+the reason and the score, rather than being quietly withheld.
+
+**Findings appear before the engine will act on them.** A newly connected cluster
+gets usage findings after three days of watching it serve reads, and for the first
+week they are yours to approve rather than the engine's to apply on its own.
+Waiting a week before deleting an index is caution; waiting a week before
+mentioning one is an empty screen.
 
 **It cannot read your data.** Given credentials that can create users, it offers
 to provision its own least-privilege one instead — `indexterity`, holding index
 metadata and statistics and no read privilege at all. The server enforces that;
 it is not a promise we make. The admin string is used once and never stored.
+
+**It shows you what it looked at, not only what it proposes.** Every index a
+cluster has, with its size, its flags and which replica-set member is actually
+using it — and every query that misses an index, including the ones the engine
+decided not to act on and which threshold declined them. An empty
+recommendations list should mean "your indexes are fine", and the only way it can
+mean that is if you can see the population it is a statement about.
 
 ```bash
 git clone https://github.com/FullmetalBober/Indexterity.git

@@ -13,7 +13,12 @@
 //
 // Vocabulary is MongoDB-flavored on purpose, for the reason given in ports.ts.
 
-export type IndexDirection = 1 | -1 | "2dsphere" | "text" | "hashed";
+// `2d` is the legacy geo form, and it is listed for the same reason as the rest:
+// coercing it to 1 makes a geo index read as an ordinary ascending b-tree, and two
+// rules downstream then draw the wrong conclusion from that (analysis/safety.ts
+// cannot see an access path to protect, analysis/redundancy.ts judges the key
+// walkable and finds a wider index that appears to cover it).
+export type IndexDirection = 1 | -1 | "2d" | "2dsphere" | "text" | "hashed";
 
 export interface IndexKey {
   readonly field: string;

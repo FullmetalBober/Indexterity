@@ -63,6 +63,19 @@ import {
 // dev cluster can take weeks of calendar time to accumulate it — which is
 // exactly the point.
 //
+// minHistoryDays: three, and it was seven until #434. Seven was the smallest
+// number spanning a weekly cadence, which is the right floor for an unattended
+// DELETION and was being applied to whether the finding appeared at all — so a
+// newly connected cluster showed an empty panel for a week. The weekly-batch
+// argument moved to AUTO_APPLY_HISTORY_DAYS, which is what the promotion path now
+// reads.
+//
+// Three rather than lower because minActiveHours above is the real floor: it sits
+// directly behind this check and refuses until the collection has served reads for
+// 72 hours, so anything under three days would only swap the reassuring warm-up
+// sentence for the one about an idle collection. The number is chosen to match the
+// gate that would answer instead of it.
+//
 // recentHours: how far back a burst still counts as recent when deciding
 // PERIODIC_ALIVE against the droppable PERIODIC_DEAD. Twelve, because three
 // trailing snapshots six hours apart spanned twelve hours.
@@ -74,7 +87,7 @@ import {
 export const CLASSIFY_OPTIONS = {
   recentHours: 12,
   minHistory: 3,
-  minHistoryDays: 7,
+  minHistoryDays: 3,
   minActiveHours: 72,
   // The one threshold the STORAGE layer also has to agree with, so it comes from
   // the shared constant rather than from a literal here. A run asserts that
@@ -359,6 +372,7 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
         rationale: candidate.rationale,
         score: candidate.score,
         estimatedBytesSaved: candidate.estimatedBytesSaved,
+        evidenceDays: candidate.evidenceDays,
       });
     }
   }

@@ -1,15 +1,21 @@
 import type { RecommendationType, UsageClass } from "@repo/contracts";
 import { z } from "zod";
 import type { IndexSpec } from "../engine/types";
-import { type ClassifyOptions, classifyUsage, usageHistoryIsTrustworthy } from "./classify";
+import {
+  type ClassifyOptions,
+  classifyUsage,
+  trustedWatchDays,
+  usageHistoryIsTrustworthy,
+} from "./classify";
 import { coversIncludes, isKeyPrefix, isRedundantPrefix, servedByBackwardWalk } from "./redundancy";
-import { isNeverDrop } from "./safety";
+import { hideBreaksQueries, isNeverDrop } from "./safety";
 import { dropScore } from "./score";
 import { totalObservations, type UsageSnapshot } from "./types";
 
 const directionSchema = z.union([
   z.literal(1),
   z.literal(-1),
+  z.literal("2d"),
   z.literal("2dsphere"),
   z.literal("text"),
   z.literal("hashed"),
@@ -53,6 +59,29 @@ export interface IndexInput {
   readonly pendingRemoval?: boolean;
 }
 
+// Why an unused protected index is a human's call, in its own terms.
+//
+// The two reasons are not interchangeable and the reader acts on the difference:
+// a constraint index is protected because dropping it admits data no latency gate
+// can see, and a text or geo index is protected because the observe window cannot
+// be RUN on it — the first is a judgement the engine declines to make, the second
+// is a measurement the engine cannot take.
+function advisoryRationale(spec: IndexSpec): string {
+  if (!hideBreaksQueries(spec)) {
+    return (
+      "Protected index (unique/TTL/shard key) with no recorded usage — never auto-dropped; " +
+      "review manually."
+    );
+  }
+  const operator = spec.keys.some((key) => key.direction === "text") ? "$text" : "$near";
+  return (
+    `No recorded usage, but this index is the only way its queries run: hiding it makes ` +
+    `${operator} fail outright rather than run slower, so the observe window cannot test ` +
+    `the drop and the engine never proposes one. If the feature it served is gone, drop it ` +
+    `yourself with dropIndex.`
+  );
+}
+
 export interface RecommendationCandidate {
   readonly type: RecommendationType;
   readonly indexName: string;
@@ -60,10 +89,15 @@ export interface RecommendationCandidate {
   readonly rationale: string;
   readonly score: number;
   readonly estimatedBytesSaved: number;
+  // Days of trusted watch time behind this finding, or null when usage is not the
+  // argument for it. Carried onto the row so the promotion floor can be applied
+  // without re-reading the history (#434) — and null means "this finding does not
+  // rest on a usage span", which is why a structural one is never held back by it.
+  readonly evidenceDays: number | null;
 }
 
 // Pure: given all indexes of one collection, propose safe drops. Never proposes
-// a never-drop index (_id_/unique/TTL/shard-key/partial/sparse).
+// a never-drop index (_id_/unique/TTL/shard-key/text/geo).
 export function recommendForCollection(
   indexes: readonly IndexInput[],
   sizes: Readonly<Record<string, number>>,
@@ -108,6 +142,7 @@ export function recommendForCollection(
           regressionWeight: regressionWeights[candidate.spec.name] ?? 0,
         }),
         estimatedBytesSaved: sizes[candidate.spec.name] ?? 0,
+        evidenceDays: null,
       });
     }
   }
@@ -135,12 +170,18 @@ export function recommendForCollection(
         regressionWeight: regressionWeights[index.spec.name] ?? 0,
       }),
       estimatedBytesSaved: sizes[index.spec.name] ?? 0,
+      evidenceDays: trustedWatchDays(index.history),
     });
   }
 
-  // Advisory tier: protected indexes (unique/TTL/shard/partial/sparse) are never
+  // Advisory tier: protected indexes (unique/TTL/shard key/text/geo) are never
   // auto-dropped, but one that also shows zero usage deserves a human look
   // instead of staying silent. _id_ is exempt — it is never optional.
+  //
+  // This is the tier a text or geo index lands in, and landing here is the whole
+  // fix: the finding stays on screen and stays scored, and promoteByScore excludes
+  // ADVISORY_REVIEW at every threshold including 0 — so it can never be approved
+  // unattended, and it is never silently withheld either.
   const advised = new Set<string>();
   for (const index of indexes) {
     if (!isNeverDrop(index.spec) || index.spec.name === "_id_") continue;
@@ -152,8 +193,7 @@ export function recommendForCollection(
       type: "ADVISORY_REVIEW",
       indexName: index.spec.name,
       usageClass,
-      rationale:
-        "Protected index (unique/TTL/shard/partial/sparse) with no recorded usage — never auto-dropped; review manually.",
+      rationale: advisoryRationale(index.spec),
       score: dropScore({
         usageClass,
         snapshots: totalObservations(index.history),
@@ -162,6 +202,7 @@ export function recommendForCollection(
         regressionWeight: regressionWeights[index.spec.name] ?? 0,
       }),
       estimatedBytesSaved: sizes[index.spec.name] ?? 0,
+      evidenceDays: trustedWatchDays(index.history),
     });
   }
 
@@ -202,6 +243,7 @@ export function recommendForCollection(
         regressionWeight: regressionWeights[index.spec.name] ?? 0,
       }),
       estimatedBytesSaved: sizes[index.spec.name] ?? 0,
+      evidenceDays: null,
     });
   }
 

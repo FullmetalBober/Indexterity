@@ -289,6 +289,22 @@ jobs:
           key: modules-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
       - run: npm ci
         if: steps.modules.outputs.cache-hit != 'true'
+      # The internal packages, and only those. Every one of them declares
+      # `exports["."].default` as `dist/index.js` (`types` is the source, which
+      # is why typecheck needs no build), so a suite run straight from source
+      # resolves `@repo/contracts` to a directory that does not exist here — this
+      # job never ran `npm run build`, unlike the mongo integration leg.
+      #
+      # It went unnoticed for as long as it did because the api's imports of
+      # `@repo/contracts` along this path were all TYPE-only and erase to
+      # nothing. The first VALUE import added to `analysis/` (#432's
+      # `workloadOutcome`) turned an invisible dependency into
+      # "Failed to resolve entry for package @repo/contracts", in a suite that
+      # touches neither the enum nor the module that imports it.
+      #
+      # `@repo/api^...` is the dependencies of the api WITHOUT the api itself, so
+      # this is three `tsc` runs and does not build the Go tunnel.
+      - run: npx turbo run build --filter='@repo/api^...'
       - run: npm run test:int -w @repo/api -- integration/mssql.int.test.ts
 
   # PostgreSQL is the third engine (#35), and this job is what makes its claims
@@ -355,6 +371,22 @@ jobs:
           echo "postgres did not become ready"
           docker logs pgint
           exit 1
+      # The internal packages, and only those. Every one of them declares
+      # `exports["."].default` as `dist/index.js` (`types` is the source, which
+      # is why typecheck needs no build), so a suite run straight from source
+      # resolves `@repo/contracts` to a directory that does not exist here — this
+      # job never ran `npm run build`, unlike the mongo integration leg.
+      #
+      # It went unnoticed for as long as it did because the api's imports of
+      # `@repo/contracts` along this path were all TYPE-only and erase to
+      # nothing. The first VALUE import added to `analysis/` (#432's
+      # `workloadOutcome`) turned an invisible dependency into
+      # "Failed to resolve entry for package @repo/contracts", in a suite that
+      # touches neither the enum nor the module that imports it.
+      #
+      # `@repo/api^...` is the dependencies of the api WITHOUT the api itself, so
+      # this is three `tsc` runs and does not build the Go tunnel.
+      - run: npx turbo run build --filter='@repo/api^...'
       - run: npm run test:int -w @repo/api -- integration/postgres.int.test.ts
       - name: Server log on failure
         if: failure()

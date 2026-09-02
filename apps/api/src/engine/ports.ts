@@ -185,6 +185,35 @@ export interface IndexCollector {
   // Indexes named explicitly with hint(). Hiding one breaks its queries instead
   // of slowing them, so no latency gate can catch the mistake.
   collectHintedIndexes(database: string, collection: string): Promise<string[]>;
+  // Operations on this namespace that FAILED, at or after an instant. Null when
+  // the engine has no per-namespace failure count these credentials can read.
+  //
+  // The gate deciding whether a hidden index gets dropped measures LATENCY, and a
+  // query that fails is not slow — it is fast. Measured on mongod 7.0.39: twenty
+  // failing $text queries against a hidden text index averaged 159 µs/op where the
+  // baseline they were compared against was 245 µs/op, so a hide that broke the
+  // workload read as an improvement and the drop graduated. This is the signal
+  // that says otherwise.
+  //
+  // A ONE-WAY signal, exactly like collectHintedIndexes above: failures seen are
+  // evidence, failures unseen are nothing. `reachMs` is how far back the source
+  // can see at all, so absence is only a claim within it.
+  collectFailedOps(
+    database: string,
+    collection: string,
+    sinceMs: number,
+  ): Promise<FailedOpsWindow | null>;
+}
+
+// Failed operations on one namespace, over the window the source can see.
+export interface FailedOpsWindow {
+  // Operations that returned an error at or after the requested instant.
+  readonly failed: number;
+  // The oldest observation the source can still produce, epoch ms. On MongoDB this
+  // is the profiler ring's reach — a busy collection fills it in minutes and a
+  // quiet one holds weeks — so a count of zero means "nothing seen since here",
+  // never "nothing happened".
+  readonly reachMs: number;
 }
 
 export interface CreateIndexOptions {

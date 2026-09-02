@@ -1,4 +1,10 @@
-import { DEFAULT_OBSERVE_DAYS, dynamicObserveDays, inChangeWindow, usageSeries } from "../analysis";
+import {
+  AUTO_APPLY_HISTORY_DAYS,
+  DEFAULT_OBSERVE_DAYS,
+  dynamicObserveDays,
+  inChangeWindow,
+  usageSeries,
+} from "../analysis";
 import { runFrom } from "../analysis/types";
 import { entitledAutomation } from "../billing/plans";
 import {
@@ -9,7 +15,9 @@ import {
   eq,
   gte,
   indexSnapshots,
+  isNull,
   notInArray,
+  or,
   policies,
   recommendations,
   sql,
@@ -39,6 +47,17 @@ const DROP_TYPES = new Set(["DROP_UNUSED", "DROP_REDUNDANT", "MERGE"]);
 // nothing is ever unenforced — but a change to a constraint-bearing index is a
 // different felt risk from adding one, and this is where that decision is
 // enforced rather than left to a threshold somebody may set to 0.
+//
+// And a usage finding needs AUTO_APPLY_HISTORY_DAYS of watch time behind it,
+// which is the other half of #434: the proposal gate now clears at three days so
+// the panel has something a human can act on, and this is what keeps the engine
+// from acting on the same three days by itself. A NULL span is eligible — it means
+// the finding does not rest on a span (redundancy, a create) or predates the
+// column, and the next classify pass rewrites it either way.
+//
+// A hand-approved drop never reaches this function. Somebody clicking Approve on
+// three days of evidence is a person deciding, which is exactly the distinction
+// the two thresholds exist to draw.
 export async function promoteByScore(
   db: Database,
   clusterId: string,
@@ -54,6 +73,10 @@ export async function promoteByScore(
         eq(recommendations.state, "PROPOSED"),
         gte(recommendations.score, threshold),
         notInArray(recommendations.type, ["ADVISORY_REVIEW", "REORDER"]),
+        or(
+          isNull(recommendations.evidenceDays),
+          gte(recommendations.evidenceDays, AUTO_APPLY_HISTORY_DAYS),
+        ),
       ),
     );
 }
@@ -187,6 +210,19 @@ export async function applyCluster(
       const baseline = canHide
         ? await collector.readLatency(rec.database, rec.collection)
         : { ops: null, latencyMicros: null };
+      // And the failures, which the latency baseline above cannot stand in for: a
+      // failed read lands in latencyStats as a FAST read, so the gate reading only
+      // that would see a hide which broke the workload as a hide that improved it
+      // (#438). Null on an engine with no source, and null costs nothing — the signal
+      // is one-way and only ever rolls a hide back.
+      //
+      // Sampled over whatever window the source can see BACKWARDS from now, which is
+      // the question worth asking here: "was this namespace already failing before we
+      // touched it". Zero here is what makes a failure after the hide attributable to
+      // the hide.
+      const failuresBefore = canHide
+        ? await collector.collectFailedOps(rec.database, rec.collection, 0)
+        : null;
       // The observe window this index actually deserves, from its own usage
       // history: periodic usage extends it (a monthly job must get a chance to
       // run inside the window), long-proven idleness shortens it.
@@ -233,6 +269,8 @@ export async function applyCluster(
           observeReason: window.reason,
           baselineReadOps: baseline.ops,
           baselineReadLatency: baseline.latencyMicros,
+          baselineFailedOps: failuresBefore?.failed ?? null,
+          baselineFailedReachMs: failuresBefore?.reachMs ?? null,
           updatedAt: new Date(),
         })
         .where(eq(recommendations.id, rec.id));

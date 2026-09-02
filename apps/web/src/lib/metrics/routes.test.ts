@@ -14,6 +14,7 @@ describe("route patterns from the generated tree", () => {
       "/",
       "/app",
       "/app/clusters/$clusterId",
+      "/app/clusters/$clusterId/indexes",
       "/app/clusters/$clusterId/settings",
       "/app/clusters/new",
       "/app/settings",
