@@ -26,27 +26,31 @@
 // subject and nothing else — different reads, different paging, and either can
 // fail without blanking the other (#289).
 //
-// The two page DIFFERENTLY since #445, and that is the shape of the question
-// rather than an inconsistency left behind. The inventory is browsed, so it pages
-// by offset and draws page numbers: "what else is on `orders`" has no top, and
-// six pages with no way to reach the fifth is a control that answers it with
-// "keep clicking". The workload list is RANKED by weekly cost, so the worst
-// shapes are the answer and a reader who needs the fiftieth is looking at a
-// different problem — it keeps its cursor and its More button (D133).
+// Both page by OFFSET with page numbers since #445 (D133), and independently:
+// two cursors became two page states, because a reader looking at page four of
+// the inventory has said nothing about where they are in the workload list.
+//
+// The SORT and the FILTER are the api's too (D135). Which is the point rather
+// than a detail: the server chooses which rows the page holds, so a control that
+// ordered the hundred rows already in the browser would be sorting an arbitrary
+// hundred and calling it the cluster. All three live here because all three are
+// what the next request is made from.
 import {
   CLUSTER_INDEXES_PAGE,
   CLUSTER_INDEXES_PAGE_SIZES,
   type ClusterIndexRow,
+  WORKLOAD_SHAPES_PAGE,
+  WORKLOAD_SHAPES_PAGE_SIZES,
 } from "@repo/contracts";
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
 import { IndexTable } from "~/components/app/index-table";
 import { Unavailable } from "~/components/app/unavailable";
 import { WorkloadTable } from "~/components/app/workload-table";
-import { Button } from "~/components/ui/button";
 import { Checkbox } from "~/components/ui/checkbox";
 import { Label } from "~/components/ui/label";
 import { LocalTime } from "~/lib/local-time";
+import { usePagedView } from "~/lib/paged-view";
 import { useCluster } from "~/lib/queries/shell";
 import {
   clusterIndexesQuery,
@@ -55,7 +59,6 @@ import {
   useClusterIndexes,
   useClusterWorkload,
   useNodes,
-  type WorkloadPage,
 } from "~/lib/queries/telemetry";
 
 export const Route = createFileRoute("/app/clusters/$clusterId/indexes")({
@@ -81,22 +84,6 @@ export const Route = createFileRoute("/app/clusters/$clusterId/indexes")({
   component: ClusterIndexesPage,
 });
 
-// The workload half's cursor, same shape and same reason: keyset pages only
-// step forward, so Back is the cursor that produced the previous page and
-// nothing but the reader's own history knows it.
-type CostCursor = Required<Pick<WorkloadPage, "afterWeeklyDocsExamined" | "afterId">>;
-
-function costCursorFrom(payload: {
-  nextWeeklyDocsExamined: number | null;
-  nextId: string | null;
-}): CostCursor | null {
-  if (payload.nextWeeklyDocsExamined === null || payload.nextId === null) return null;
-  return {
-    afterWeeklyDocsExamined: payload.nextWeeklyDocsExamined,
-    afterId: payload.nextId,
-  };
-}
-
 function ClusterIndexesPage() {
   const { clusterId: id } = Route.useParams();
   // Off the live cluster list rather than a read of its own — the layout above
@@ -106,34 +93,31 @@ function ClusterIndexesPage() {
   // The reader's position, as a page rather than a cursor stack. Owned here and
   // not by the table, because it is what the next request is made from — the
   // table does the arithmetic over it and nothing else.
-  const [pagination, setPagination] = useState({
-    pageIndex: 0,
+  const inventoryView = usePagedView({
     pageSize: CLUSTER_INDEXES_PAGE,
+    sort: { id: "namespace", desc: false },
   });
-  const inventory = useClusterIndexes(id, {
-    offset: pagination.pageIndex * pagination.pageSize,
-    limit: pagination.pageSize,
-  });
+  const inventory = useClusterIndexes(id, inventoryView.request);
   const nodes = useNodes(id);
 
   // The api CLAMPS past the end of a set that shrank, and says where it landed.
   // Following that rather than insisting on the page asked for is what stops the
   // control reading "page 12 of 3" against rows that are plainly the last page.
   const served = inventory.data;
-  const servedIndex =
-    served.limit > 0 ? Math.floor(served.offset / served.limit) : pagination.pageIndex;
 
-  // The workload half's own state. Its own cursor stack, because the two tables
-  // page independently, and its own filter — "only the ones you declined" is the
+  // The workload half's own page state, because the two tables page
+  // independently, and its own filter — "only the ones you declined" is the
   // question this page exists to answer and the one no other screen can.
-  const [costStack, setCostStack] = useState<CostCursor[]>([]);
+  const workloadView = usePagedView({
+    pageSize: WORKLOAD_SHAPES_PAGE,
+    sort: { id: "weeklyDocsExamined", desc: true },
+  });
   const [declinedOnly, setDeclinedOnly] = useState(false);
-  const costPage = costStack[costStack.length - 1];
   const workload = useClusterWorkload(id, {
-    ...(costPage ?? {}),
+    ...workloadView.request,
     ...(declinedOnly ? { declinedOnly: true } : {}),
   });
-  const nextCost = costCursorFrom(workload.data);
+  const costServed = workload.data;
 
   const rows: ClusterIndexRow[] = inventory.data.indexes;
 
@@ -170,14 +154,17 @@ function ClusterIndexesPage() {
           engine={cluster?.engine ?? "MONGODB"}
           loading={inventory.pending}
           pagination={{
-            // The SERVED page, not the requested one — see servedIndex above.
-            pageIndex: servedIndex,
+            // The SERVED page, not the requested one: past the end of a set that
+            // shrank the api clamps, and the control follows the rows.
+            pageIndex: inventoryView.servedIndex(served.offset, served.limit),
             pageSize: served.limit,
             rowCount: served.total,
             pageSizes: CLUSTER_INDEXES_PAGE_SIZES,
             noun: "indexes",
-            onChange: setPagination,
+            onChange: inventoryView.onPagination,
           }}
+          sorting={{ state: inventoryView.sorting, onChange: inventoryView.onSorting }}
+          filter={{ value: inventoryView.filter, onChange: inventoryView.onFilter }}
         />
       )}
 
@@ -243,10 +230,10 @@ function ClusterIndexesPage() {
             checked={declinedOnly}
             onCheckedChange={(checked) => {
               setDeclinedOnly(checked === true);
-              // A filter change invalidates the cursor: it was a position in a
-              // different result set, and paging from it would land somewhere
-              // the api never named.
-              setCostStack([]);
+              // Back to the first page, the same rule the sort and the search box
+              // follow: page four of the unfiltered list is not page four of the
+              // filtered one, and the api would clamp anyway.
+              workloadView.onPagination({ pageIndex: 0, pageSize: workloadView.pageSize });
             }}
           />
           <Label htmlFor="declined-only" className="text-sm">
@@ -258,33 +245,22 @@ function ClusterIndexesPage() {
           {workload.failed ? (
             <Unavailable what="the scanning workload" onRetry={workload.retry} />
           ) : (
-            <WorkloadTable shapes={workload.data.shapes} loading={workload.pending} />
+            <WorkloadTable
+              shapes={workload.data.shapes}
+              loading={workload.pending}
+              pagination={{
+                pageIndex: workloadView.servedIndex(costServed.offset, costServed.limit),
+                pageSize: costServed.limit,
+                rowCount: costServed.total,
+                pageSizes: WORKLOAD_SHAPES_PAGE_SIZES,
+                noun: "query shapes",
+                onChange: workloadView.onPagination,
+              }}
+              sorting={{ state: workloadView.sorting, onChange: workloadView.onSorting }}
+              filter={{ value: workloadView.filter, onChange: workloadView.onFilter }}
+            />
           )}
         </div>
-
-        {costStack.length === 0 && nextCost === null ? null : (
-          <div className="mt-4 flex items-center gap-2">
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={costStack.length === 0}
-              onClick={() => setCostStack((current) => current.slice(0, -1))}
-            >
-              Back
-            </Button>
-            {nextCost === null ? (
-              <span className="text-muted-foreground text-xs">The end of the list.</span>
-            ) : (
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => setCostStack((current) => [...current, nextCost])}
-              >
-                More
-              </Button>
-            )}
-          </div>
-        )}
       </section>
     </>
   );
