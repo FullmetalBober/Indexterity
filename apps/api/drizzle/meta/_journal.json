@@ -428,6 +428,13 @@
       "when": 1788345314282,
       "tag": "0060_evidence_days",
       "breakpoints": true
+    },
+    {
+      "idx": 61,
+      "version": "7",
+      "when": 1788346556787,
+      "tag": "0061_observe_window_failures",
+      "breakpoints": true
     }
   ]
 }

@@ -819,6 +819,18 @@ export const recommendations = pgTable(
     observeReason: text("observe_reason"),
     baselineReadOps: bigint("baseline_read_ops", { mode: "number" }),
     baselineReadLatency: bigint("baseline_read_latency", { mode: "number" }),
+    // Failed operations on this namespace at hide time, and how far back the source
+    // could see when that was sampled (#438). The pair the two columns above cannot
+    // give: latencyStats counts a failed read and marks it in no way, and a failed
+    // read is FASTER than a slow one, so a hide that breaks the workload reads as an
+    // improvement to every gate that only knows latency.
+    //
+    // NULL means no source — the MongoDB profiler is opt-in, SQL Server's Query Store
+    // may be off, and PostgreSQL counts per-relation failures nowhere at all. A NULL
+    // here can never hold a drop back: the signal is one-way, so failures seen roll a
+    // hide back and failures unseen decide nothing.
+    baselineFailedOps: bigint("baseline_failed_ops", { mode: "number" }),
+    baselineFailedReachMs: bigint("baseline_failed_reach_ms", { mode: "number" }),
     // Set when a CREATE/UPDATE/MERGE is built: the write-latency baseline for the
     // post-build regression watch. Cleared once the index graduates the window.
     builtAt: timestamp("built_at", { withTimezone: true }),

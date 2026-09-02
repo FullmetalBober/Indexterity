@@ -1,7 +1,10 @@
 import {
   DEFAULT_OBSERVE_DAYS,
+  describeFailures,
   evaluateRegression,
+  type FailureVerdict,
   inChangeWindow,
+  judgeFailures,
   type LatencyReading,
   latencyRatio,
   OBSERVE_WALLCLOCK_MULTIPLE,
@@ -283,6 +286,9 @@ export async function finalizeCluster(
       // measurement is owed — apply.ts records them exactly when the index was
       // really hidden, and an engine that cannot hide records neither. Only HOW
       // the measurement is taken has changed.
+      // What the error side of the window saw, carried out of the block below so the
+      // graduating drop can record it. UNAVAILABLE until something asks (#438).
+      let failures: FailureVerdict = { kind: "UNAVAILABLE" };
       if (
         rec.hiddenAt !== null &&
         rec.baselineReadOps !== null &&
@@ -290,6 +296,57 @@ export async function finalizeCluster(
       ) {
         const hiddenAtMs = rec.hiddenAt.getTime();
         const days = rec.observeDays ?? observeDays;
+        // Errors before latency, and before anything can graduate on the strength of
+        // them (#438). A hide that broke its queries is an OUTAGE, so it must not wait
+        // for the observation window to fill the way a slowdown does — and the latency
+        // gate below cannot see it at all, because a failed read is a fast read.
+        //
+        // One-way: this can turn a graduation into a rollback and never the reverse.
+        // Every source is optional and PostgreSQL has none, so a gate that demanded
+        // the signal would refuse every drop on every cluster that cannot supply it.
+        failures = judgeFailures(
+          rec.baselineFailedOps === null
+            ? null
+            : { failed: rec.baselineFailedOps, reachMs: rec.baselineFailedReachMs ?? 0 },
+          await collector.collectFailedOps(rec.database, rec.collection, hiddenAtMs),
+        );
+        if (failures.kind === "INTRODUCED") {
+          await executor.unhide(rec.database, rec.collection, rec.indexName);
+          const until = await recordRegression(
+            db,
+            clusterId,
+            { database: rec.database, collection: rec.collection, indexName: rec.indexName },
+            observeDays,
+            "failed operations during observe",
+          );
+          const day = until.toISOString().slice(0, 10);
+          await db
+            .update(recommendations)
+            .set({
+              state: "REJECTED",
+              hiddenAt: null,
+              rationale: `${rec.rationale} — auto-rejected: queries began failing while it was hidden; cooling down until ${day}`,
+              updatedAt: new Date(),
+            })
+            .where(eq(recommendations.id, rec.id));
+          await db.insert(actions).values({
+            recommendationId: rec.id,
+            kind: "DROP",
+            actor: "system",
+            result: `aborted + cooldown until ${day}: ${describeFailures(failures)}`,
+          });
+          await new NotifyService(db).notifyClusterOwners(
+            clusterId,
+            `kept ${rec.indexName} (queries failing)`,
+            `Queries on ${rec.database}.${rec.collection} started FAILING while ${rec.indexName} was hidden — ${failures.failed} of them, where none were failing before. The index has been un-hidden and the drop aborted; it is cooling down until ${day}. This is the case a latency check cannot catch, because a query that fails returns faster than one that works.`,
+          );
+          await emitClusterEvent(pgNotifier(db), {
+            clusterId,
+            kind: "REGRESSION_FIRED",
+            task: null,
+          });
+          continue;
+        }
         // Two windows back: the observation, and the reference before it. The
         // wall-clock cap bounds how long the first can take, so this is the
         // furthest back either half can reach.
@@ -439,7 +496,10 @@ export async function finalizeCluster(
         recommendationId: rec.id,
         kind: "DROP",
         actor: "system",
-        result: "ok",
+        // Named even when it found nothing, and especially when it could not look: a
+        // gate that ran and cleared the drop must not read the same in the audit
+        // trail as a gate that never ran (D19).
+        result: `ok — ${describeFailures(failures)}`,
         rollbackToken: check.spec === null ? null : { spec: serializeSpec(check.spec) },
       });
       // One ROI row per drop, attributed to its recommendation, so the

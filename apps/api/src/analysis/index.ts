@@ -2,6 +2,7 @@ export * from "./activity";
 export * from "./classify";
 export * from "./client";
 export * from "./cost";
+export * from "./failures";
 export * from "./footprint";
 export * from "./health";
 export * from "./latency";
