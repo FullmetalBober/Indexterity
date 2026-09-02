@@ -9,6 +9,7 @@ import type {
   ClusterLatencySeries,
   ClusterNodes,
   ClusterRoi,
+  ClusterWorkload,
   IndexRecommendationLink,
   RoiContribution,
 } from "@repo/contracts";
@@ -18,6 +19,7 @@ import {
   instant,
   LATENCY_SERIES_MAX_COLLECTIONS,
   LATENCY_SERIES_WINDOW_DAYS,
+  WORKLOAD_SHAPES_PAGE,
 } from "@repo/contracts";
 import { z } from "zod";
 import {
@@ -29,10 +31,12 @@ import {
   summarizeLatency,
 } from "../analysis";
 import { parseStoredSpec } from "../analysis/recommend";
+import { explainOutcome, outcomeOf } from "../analysis/workload-outcome";
 import { workerEnv } from "../config/env";
 import { TenancyService } from "../http/tenancy.service";
 import { isWholeCollection } from "../jobs/cooldowns";
-import { InsightsRepository } from "./insights.repository";
+import { severityOf, storedShapeSchema } from "../jobs/workload-shapes";
+import { InsightsRepository, UNMEASURED_COST } from "./insights.repository";
 
 const RECENT_ACTIONS = 50;
 const TOP_CONTRIBUTORS = 10;
@@ -42,6 +46,16 @@ const TOP_CONTRIBUTORS = 10;
 // re-deriving it, and stays a plain interface for the same reason
 // `SecurityTrailQuery` does — the controller has already validated it, so
 // re-parsing here would be a second opinion about a settled question.
+// What the workload page was asked for: an optional namespace scope, whether to
+// show only the declined shapes, and the cursor of the page before this one.
+export interface WorkloadQuery {
+  readonly database?: string | undefined;
+  readonly collection?: string | undefined;
+  readonly declinedOnly?: boolean | undefined;
+  readonly afterWeeklyDocsExamined?: number | undefined;
+  readonly afterId?: string | undefined;
+}
+
 export interface ClusterIndexQuery {
   readonly database?: string | undefined;
   readonly collection?: string | undefined;
@@ -344,6 +358,112 @@ export class InsightsService {
       nextCollection: more && last !== undefined ? last.collection : null,
       nextIndexName: more && last !== undefined ? last.indexName : null,
       collectedAt: collectedAt.toISOString(),
+    };
+  }
+
+  // The queries that MISS an index, including the ones the engine declined to
+  // act on (#432).
+  //
+  // `collector.collectWorkload` has always returned every scanning shape with
+  // its executions, its documents walked and the window behind both.
+  // `jobs/suggest.ts` read them once an hour, used them in memory, and persisted
+  // only the recommendations that cleared every create-side gate — so a query
+  // walking 900k documents a week on a small collection was seen, priced,
+  // discarded, and never mentioned. Every gate is right; each worked by making
+  // the FINDING disappear along with the proposal, which is the same defect #277
+  // fixed on the drop side.
+  //
+  // Nothing here decides anything. `outcome` is the verdict the pass reached, at
+  // the gate that fired, and this only puts the sentence beside it.
+  async clusterWorkload(
+    clusterId: string,
+    orgId: string,
+    query: WorkloadQuery,
+  ): Promise<ClusterWorkload> {
+    const empty = {
+      clusterId,
+      shapes: [],
+      total: 0,
+      nextWeeklyDocsExamined: null,
+      nextId: null,
+      // True in the empty view, so a cluster the caller does not own does not
+      // read as one with create-side analysis switched off. Not-yours and
+      // switched-off are different answers and only one of them is a setting.
+      workloadAnalysisEnabled: true,
+      collectionsBelowDocFloor: 0,
+      collectionsAboveSizeCeiling: 0,
+      analysedAt: null,
+    };
+    if (!(await this.tenancy.ownsCluster(clusterId, orgId))) return empty;
+
+    const [enabled, note] = await Promise.all([
+      this.repo.workloadAnalysisEnabled(clusterId),
+      this.repo.workloadNote(clusterId),
+    ]);
+    const { rows, total } = await this.repo.workloadShapePage(
+      clusterId,
+      await this.repo.readableSince(clusterId),
+      query,
+      WORKLOAD_SHAPES_PAGE,
+    );
+    const page = rows.slice(0, WORKLOAD_SHAPES_PAGE);
+    const more = rows.length > WORKLOAD_SHAPES_PAGE;
+    const last = page[page.length - 1];
+
+    return {
+      clusterId,
+      shapes: page.map((row) => {
+        const shape = storedShapeSchema.parse(row.shape);
+        // Parsed, not asserted: `outcome` is a text column so that adding a gate
+        // costs no migration, which means the value can be one this build has
+        // never heard of. It then renders as itself with no explanation rather
+        // than failing the page — the whole reason the column is text.
+        const outcome = outcomeOf(row.outcome);
+        return {
+          id: row.id,
+          database: row.database,
+          collection: row.collection,
+          keys: shape,
+          collscan: shape.collscan,
+          sortedInMemory: shape.sortedInMemory,
+          executions: row.executions,
+          docsExamined: row.docsExamined,
+          observedForHours: row.observedForHours,
+          weeklyDocsExamined: row.weeklyDocsExamined,
+          severity: severityOf(row.severity),
+          // Absent keys are dropped on the way in (jobs/workload-shapes.ts), so
+          // this is where they become the nulls the contract promises — a
+          // driver that reported no appName is a null on screen, not a missing
+          // field a reader has to interpret.
+          clients: row.clients.map((client) => ({
+            application: client.application ?? null,
+            driver: client.driver ?? null,
+          })),
+          outcome,
+          outcomeRaw: row.outcome,
+          explanation: outcome === null ? null : explainOutcome(outcome),
+          proposedIndex: row.proposedIndex,
+          firstSeenAt: row.firstSeenAt.toISOString(),
+          lastSeenAt: row.lastSeenAt.toISOString(),
+          observations: row.observations,
+        };
+      }),
+      total,
+      // Null at the end of the list, so the page stops offering more rather than
+      // fetching an empty one to find out. Both halves or neither: the cost
+      // alone would skip a shape that shares it.
+      nextWeeklyDocsExamined:
+        more && last !== undefined ? (last.weeklyDocsExamined ?? UNMEASURED_COST) : null,
+      nextId: more && last !== undefined ? last.id : null,
+      workloadAnalysisEnabled: enabled,
+      // The two gates that fire BEFORE the workload is read, so they can have no
+      // shape rows at all — what exists is a count of collections nobody
+      // analysed, in the pass's own note (#277). Counted rather than given rows
+      // because reading a workload for an ineligible namespace means a profiler
+      // dial per collection on every cluster below MongoDB 8.0.
+      collectionsBelowDocFloor: note?.suppressed["trivial-collection"] ?? 0,
+      collectionsAboveSizeCeiling: note?.suppressed["oversize-collection"] ?? 0,
+      analysedAt: note?.decidedAt.toISOString() ?? null,
     };
   }
 

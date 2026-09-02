@@ -51,6 +51,21 @@ export function fmtMicros(value: number | null): string {
   return value === null ? "—" : `${Math.round(value)}`;
 }
 
+// A plain count, compacted (#432).
+//
+// The workload table's two numbers are executions and documents walked, and both
+// reach the tens of millions on a cluster with a real problem — which is exactly
+// the cluster the page is for. `12,481,003` in a hundred-pixel column is a
+// number nobody reads; `12.5M` is the finding. Same tiers as the api's own
+// `round` in analysis/severity.ts, which composes the sentence a recommendation
+// carries, so the table and the rationale beside it do not describe the same
+// scan in two different orders of magnitude.
+export function fmtCount(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1000) return `${Math.round(value / 1000)}k`;
+  return String(Math.round(value));
+}
+
 // When a hidden index is due to be dropped, or null if that is not a question
 // yet. The observe window is chosen per index from its own usage pattern, so it
 // is not something a reader can derive from the policy setting — a monthly

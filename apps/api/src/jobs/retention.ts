@@ -14,6 +14,7 @@ import {
   organizations,
   recommendations,
   sql,
+  workloadShapes,
 } from "../db";
 
 const DAY_MS = 86_400_000;
@@ -141,7 +142,19 @@ export async function pruneOldSamples(db: Database): Promise<number> {
         ),
       )
       .returning({ id: clusterIndexes.id });
-    pruned += samples.length + snapshots.length + dimensions.length;
+    // Scanning query shapes (#432). By `last_seen_at` for the same reason the
+    // two series above are: the row is a standing statement — first seen then,
+    // still true at last_seen_at — so a shape the workload still runs is not
+    // aged out however long ago it started. What ages out is a shape that
+    // stopped scanning before the cutoff, which is either an index somebody
+    // built or a query somebody deleted, and in both cases the finding is gone.
+    const shapes = await db
+      .delete(workloadShapes)
+      .where(
+        and(inArray(workloadShapes.clusterId, clusterIds), lt(workloadShapes.lastSeenAt, cutoff)),
+      )
+      .returning({ id: workloadShapes.id });
+    pruned += samples.length + snapshots.length + dimensions.length + shapes.length;
   }
 
   // Finished decisions stay per-plan, and deliberately so. The visibility trick

@@ -13,20 +13,38 @@
 // view; an inventory is the answer to "what did you actually look at"; and
 // `hidden`, `hinted` and each member's counter start were collected and never
 // once displayed.
+//
+// The second table is the same argument about the OTHER side of the engine
+// (#432). `collectWorkload` returns every scanning query shape with its cost;
+// `jobs/suggest.ts` read them once an hour and persisted only the
+// recommendations that cleared every gate, so a query walking 900k documents a
+// week on a small collection was seen, priced, discarded and never mentioned.
+// Both halves of this page exist because a finding was being deleted along with
+// the proposal it did not become.
+//
+// One route, two tables, and deliberately not one component: they share a
+// subject and nothing else — different reads, different cursors, and either can
+// fail without blanking the other (#289).
 import type { ClusterIndexRow } from "@repo/contracts";
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
 import { IndexTable } from "~/components/app/index-table";
 import { Unavailable } from "~/components/app/unavailable";
+import { WorkloadTable } from "~/components/app/workload-table";
 import { Button } from "~/components/ui/button";
+import { Checkbox } from "~/components/ui/checkbox";
+import { Label } from "~/components/ui/label";
 import { LocalTime } from "~/lib/local-time";
 import { useCluster } from "~/lib/queries/shell";
 import {
   type ClusterIndexPage,
   clusterIndexesQuery,
+  clusterWorkloadQuery,
   nodesQuery,
   useClusterIndexes,
+  useClusterWorkload,
   useNodes,
+  type WorkloadPage,
 } from "~/lib/queries/telemetry";
 
 export const Route = createFileRoute("/app/clusters/$clusterId/indexes")({
@@ -44,6 +62,7 @@ export const Route = createFileRoute("/app/clusters/$clusterId/indexes")({
     const warm = Promise.allSettled([
       context.queryClient.ensureQueryData(clusterIndexesQuery(id)),
       context.queryClient.ensureQueryData(nodesQuery(id)),
+      context.queryClient.ensureQueryData(clusterWorkloadQuery(id)),
     ]);
     if (import.meta.env.SSR) await warm;
   },
@@ -59,6 +78,22 @@ export const Route = createFileRoute("/app/clusters/$clusterId/indexes")({
 type Cursor = Required<
   Pick<ClusterIndexPage, "afterDatabase" | "afterCollection" | "afterIndexName">
 >;
+
+// The workload half's cursor, same shape and same reason: keyset pages only
+// step forward, so Back is the cursor that produced the previous page and
+// nothing but the reader's own history knows it.
+type CostCursor = Required<Pick<WorkloadPage, "afterWeeklyDocsExamined" | "afterId">>;
+
+function costCursorFrom(payload: {
+  nextWeeklyDocsExamined: number | null;
+  nextId: string | null;
+}): CostCursor | null {
+  if (payload.nextWeeklyDocsExamined === null || payload.nextId === null) return null;
+  return {
+    afterWeeklyDocsExamined: payload.nextWeeklyDocsExamined,
+    afterId: payload.nextId,
+  };
+}
 
 function cursorFrom(payload: {
   nextDatabase: string | null;
@@ -91,6 +126,18 @@ function ClusterIndexesPage() {
   const page = stack[stack.length - 1];
   const inventory = useClusterIndexes(id, page ?? {});
   const nodes = useNodes(id);
+
+  // The workload half's own state. Its own cursor stack, because the two tables
+  // page independently, and its own filter — "only the ones you declined" is the
+  // question this page exists to answer and the one no other screen can.
+  const [costStack, setCostStack] = useState<CostCursor[]>([]);
+  const [declinedOnly, setDeclinedOnly] = useState(false);
+  const costPage = costStack[costStack.length - 1];
+  const workload = useClusterWorkload(id, {
+    ...(costPage ?? {}),
+    ...(declinedOnly ? { declinedOnly: true } : {}),
+  });
+  const nextCost = costCursorFrom(workload.data);
 
   const rows: ClusterIndexRow[] = inventory.data.indexes;
   const next = cursorFrom(inventory.data);
@@ -161,6 +208,112 @@ function ClusterIndexesPage() {
           )}
         </div>
       )}
+
+      <section className="mt-10">
+        <h2 className="font-semibold text-lg">Queries missing an index</h2>
+        <p className="text-muted-foreground text-sm">
+          Every scanning query shape the workload source reported, what it costs, and whether the
+          engine proposed an index for it — including the ones it declined, and which gate declined
+          them. Worst first, by documents walked per week.
+        </p>
+        {/* The one gate that leaves nothing behind: create-side analysis returns
+            before it reads anything, so an empty table would mean "nothing is
+            scanning" when it means "nobody looked". Said here rather than drawn
+            as an empty state, which is the #72/#289 rule again. */}
+        {workload.data.workloadAnalysisEnabled ? null : (
+          <p className="mt-2 text-sm">
+            Create-side analysis is switched off for this cluster, so no query shapes are read at
+            all. Turn it back on under Settings to see what is scanning.
+          </p>
+        )}
+        <p className="mt-1 text-muted-foreground text-xs">
+          {workload.data.analysedAt === null ? null : (
+            <>
+              As of <LocalTime iso={workload.data.analysedAt} />
+              {workload.data.total > 0
+                ? ` · ${
+                    workload.data.shapes.length === workload.data.total
+                      ? `${workload.data.total} shapes`
+                      : `${workload.data.shapes.length} of ${workload.data.total} shapes`
+                  }`
+                : null}
+            </>
+          )}
+          {/* The two gates that fire BEFORE anything is read, so they can have
+              no rows of their own — a collection nobody analysed is a fact about
+              the collection, not about a query. Reported as counts rather than
+              silently left out, which is what "five of the six gates leave no
+              trace" was about. */}
+          {workload.data.collectionsBelowDocFloor > 0 ||
+          workload.data.collectionsAboveSizeCeiling > 0 ? (
+            <>
+              {workload.data.analysedAt === null ? null : " · "}
+              {workload.data.collectionsBelowDocFloor > 0
+                ? `${workload.data.collectionsBelowDocFloor} collection${
+                    workload.data.collectionsBelowDocFloor === 1 ? "" : "s"
+                  } under the 100-document floor`
+                : null}
+              {workload.data.collectionsBelowDocFloor > 0 &&
+              workload.data.collectionsAboveSizeCeiling > 0
+                ? ", "
+                : null}
+              {workload.data.collectionsAboveSizeCeiling > 0
+                ? `${workload.data.collectionsAboveSizeCeiling} above the size ceiling`
+                : null}
+              {" — not analysed"}
+            </>
+          ) : null}
+        </p>
+
+        <div className="mt-3 flex items-center gap-2">
+          <Checkbox
+            id="declined-only"
+            checked={declinedOnly}
+            onCheckedChange={(checked) => {
+              setDeclinedOnly(checked === true);
+              // A filter change invalidates the cursor: it was a position in a
+              // different result set, and paging from it would land somewhere
+              // the api never named.
+              setCostStack([]);
+            }}
+          />
+          <Label htmlFor="declined-only" className="text-sm">
+            Only the ones nothing was proposed for
+          </Label>
+        </div>
+
+        <div className="mt-2">
+          {workload.failed ? (
+            <Unavailable what="the scanning workload" onRetry={workload.retry} />
+          ) : (
+            <WorkloadTable shapes={workload.data.shapes} loading={workload.pending} />
+          )}
+        </div>
+
+        {costStack.length === 0 && nextCost === null ? null : (
+          <div className="mt-4 flex items-center gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={costStack.length === 0}
+              onClick={() => setCostStack((current) => current.slice(0, -1))}
+            >
+              Back
+            </Button>
+            {nextCost === null ? (
+              <span className="text-muted-foreground text-xs">The end of the list.</span>
+            ) : (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setCostStack((current) => [...current, nextCost])}
+              >
+                More
+              </Button>
+            )}
+          </div>
+        )}
+      </section>
     </>
   );
 }

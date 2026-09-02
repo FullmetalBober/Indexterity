@@ -131,6 +131,9 @@ export interface ReorderCandidate {
   readonly spec: IndexSpec;
   readonly count: number;
   readonly rationale: string;
+  // The blocked shapes this re-order answers — see
+  // CreateCandidate.sourceShapes (#432).
+  readonly sourceShapes: readonly QueryShape[];
 }
 
 // The direction pattern to build, given what the index has now and what one
@@ -221,6 +224,7 @@ export function recommendReorder(
       indexName: index.name,
       keys,
       spec: index,
+      sourceShapes: blocked,
       count,
       rationale:
         `${index.name} covers these fields but not in an order that serves the sort, so the ` +

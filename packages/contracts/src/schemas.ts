@@ -577,6 +577,142 @@ export const clusterIndexes = z.object({
 });
 export type ClusterIndexes = z.infer<typeof clusterIndexes>;
 
+// How many scanning shapes one page of the workload view carries (#432).
+//
+// Smaller than the index page's because a row here is wider — the ESR split, the
+// clients, and a sentence explaining the gate — and because these are ranked by
+// cost rather than browsed by namespace: the worst ones are the answer, and a
+// reader who needs the fiftieth is looking at a different problem.
+export const WORKLOAD_SHAPES_PAGE = 50;
+
+// What the create side decided about a scanning shape. `proposed` is the only
+// one that means an index was recommended; every other value names the gate that
+// declined, and each gate is correct — see analysis/workload-outcome.ts, which
+// owns the sentence for each.
+export const workloadOutcome = z.enum([
+  "proposed",
+  "below-cost-floor",
+  "not-recurring",
+  "ad-hoc-client",
+  "cooldown",
+  "standing",
+  "index-exists",
+  "no-candidate",
+]);
+export type WorkloadOutcome = z.infer<typeof workloadOutcome>;
+
+// One client as the workload source described it. An appName from a connection
+// string and the driver's own name — operational metadata, never customer data,
+// and the signal behind the `ad-hoc-client` outcome.
+export const workloadClient = z.object({
+  application: z.string().nullable(),
+  driver: z.string().nullable(),
+});
+export type WorkloadClient = z.infer<typeof workloadClient>;
+
+// A scanning query shape, in ESR terms: what an index would have to cover.
+//
+// Equality first, then sort, then range — the order that lets ONE index serve
+// the whole query. Sort keys keep their directions because an index can only
+// serve a sort in the order it was built; equality and range keys do not, since
+// direction is irrelevant to a point or a bound.
+export const workloadShapeKeys = z.object({
+  equality: z.array(z.string()),
+  sort: z.array(z.object({ field: z.string(), direction: z.union([z.literal(1), z.literal(-1)]) })),
+  range: z.array(z.string()),
+});
+export type WorkloadShapeKeys = z.infer<typeof workloadShapeKeys>;
+
+// One scanning shape the engine saw, priced, and either proposed an index for or
+// declined (#432).
+//
+// `collscan` and `sortedInMemory` are separate booleans rather than one enum
+// because a shape can be both, and because they are different failures: a scan
+// found no index at all, while an in-memory sort found the documents through an
+// index and could not ORDER them. The second is invisible to every scan test —
+// keys were examined, so by that measure the query looks healthy — and it is the
+// one that ends in an ERROR rather than in slowness, since a blocking sort dies
+// at 100 MB.
+export const workloadShape = z.object({
+  id: z.uuid(),
+  database: z.string(),
+  collection: z.string(),
+  keys: workloadShapeKeys,
+  collscan: z.boolean(),
+  sortedInMemory: z.boolean(),
+  // Cumulative from the workload store's own start, not per pass: `$queryStats`
+  // accumulates for the life of the store and the profiler's ring reports what
+  // it still holds. Which is why the rate below is a quotient rather than a
+  // difference between two readings (D26).
+  executions: z.int().nonnegative(),
+  // Documents the server actually walked — D40's urgency measure. Null where the
+  // source cannot say: `$queryStats` reports it only from mongo 8.0, and zero
+  // would be a claim that a collection scan walked nothing.
+  docsExamined: z.int().nonnegative().nullable(),
+  // The window the rate is over. Null when the source cannot say, which is not
+  // the same as zero.
+  observedForHours: z.number().nonnegative().nullable(),
+  // Documents walked per week, as the severity tiers actually measure it
+  // (analysis/severity.ts: >=10M/week or >=500k per execution is critical,
+  // >=1M elevated). Computed server-side because the tier is, and two places
+  // dividing by an optional window is how they come to disagree.
+  weeklyDocsExamined: z.int().nonnegative().nullable(),
+  severity: z.enum(["CRITICAL", "ELEVATED", "ROUTINE"]),
+  clients: z.array(workloadClient),
+  outcome: workloadOutcome.nullable(),
+  // Verbatim, when the api did not recognise the outcome — a row written by a
+  // newer worker than the api reading it renders as itself rather than failing
+  // the page (the column is text for exactly this).
+  outcomeRaw: z.string(),
+  // The engine's own sentence for that outcome. Null when the outcome is not one
+  // this build knows how to explain.
+  explanation: z.string().nullable(),
+  // The index that WAS proposed, when one was. Null for every declined outcome.
+  proposedIndex: z.string().nullable(),
+  // When this shape was first seen scanning, and when that was last true. The
+  // pair is the whole answer to "is this new": a scan that started on Tuesday
+  // and one that has been there three months are otherwise the same row, and
+  // they are not the same problem.
+  firstSeenAt: instant,
+  lastSeenAt: instant,
+  observations: z.int().positive(),
+});
+export type WorkloadShape = z.infer<typeof workloadShape>;
+
+// One page of the cluster's scanning workload.
+export const clusterWorkload = z.object({
+  clusterId: z.uuid(),
+  shapes: z.array(workloadShape),
+  // How many shapes match, so a page can say "50 of 312".
+  total: z.int().nonnegative(),
+  // The cursor for the page after this one, or null at the end. Two halves: the
+  // sort is by weekly cost descending and the id breaks the tie, because two
+  // shapes with the same cost on one collection is ordinary and a cursor that
+  // was only the cost would skip whichever sorted second.
+  nextWeeklyDocsExamined: z.int().nullable(),
+  nextId: z.uuid().nullable(),
+  // Whether create-side analysis is switched off for this cluster. The one gate
+  // that leaves NO shape rows at all, because nothing is read when it fires — so
+  // an empty page has two very different meanings and this is which one.
+  workloadAnalysisEnabled: z.boolean(),
+  // The two ELIGIBILITY gates, as counts of COLLECTIONS rather than rows.
+  //
+  // Both fire before the workload is read — `collectWorkload` is only asked
+  // about the namespaces that clear them — so there are no shapes to carry an
+  // outcome. Reading a workload for an ineligible namespace would mean a
+  // profiler dial per collection on every cluster below MongoDB 8.0, which is a
+  // real cost to pay for a row saying a 40-document collection was not
+  // analysed. So the pass counts them into its own note (#277) and the page
+  // reports the numbers.
+  collectionsBelowDocFloor: z.int().nonnegative(),
+  collectionsAboveSizeCeiling: z.int().nonnegative(),
+  // When the newest reading here was taken. Null when no create-side pass has
+  // ever stored a shape, which is the page's "nothing yet" state rather than
+  // "this cluster scans nothing".
+  analysedAt: instant.nullable(),
+});
+export type ClusterWorkload = z.infer<typeof clusterWorkload>;
+
 // One node of the cluster as the last collect saw it (#100). `refused` is this
 // deployment's net guard declining to dial the address the cluster named — a
 // policy fact, not member health — and a role stays "unknown" exactly when the

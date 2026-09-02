@@ -442,6 +442,103 @@ describe("sortOrderAdvisories", () => {
   });
 });
 
+// #432. The page's whole claim is "this is the gate that declined it", and the
+// only way that can be true is for the pipeline to report it: the alternative
+// was for the writer to re-apply `isRecurring`, `isWorthIndexing` and the
+// already-indexed test, which is a second copy of the rules, true only until it
+// drifted.
+describe("recommendCreates (decline attribution)", () => {
+  function declines(
+    shapes: QueryShape[],
+    existing: IndexSpec[],
+    opts = options,
+  ): { shape: QueryShape; reason: string }[] {
+    const seen: { shape: QueryShape; reason: string }[] = [];
+    recommendCreates(shapes, existing, opts, (shape, reason) => seen.push({ shape, reason }));
+    return seen;
+  }
+
+  it("names the recurrence floor", () => {
+    const under = shape(["a"], [], [], 1);
+    expect(declines([under], [], { minCount: 3, minPerWeek: 0 })).toEqual([
+      { shape: under, reason: "not-recurring" },
+    ]);
+  });
+
+  it("names an interactive client", () => {
+    const adHoc: QueryShape = { ...shape(["a"], [], [], 5), clients: [mongosh] };
+    expect(declines([adHoc], [])).toEqual([{ shape: adHoc, reason: "ad-hoc-client" }]);
+  });
+
+  it("names an index that already covers the fields", () => {
+    const scan = shape(["a", "b"], [], [], 5);
+    expect(declines([scan], [idx("a_1_b_1", ["a", "b"])])).toEqual([
+      { shape: scan, reason: "index-exists" },
+    ]);
+  });
+
+  it("names a shape with nothing to put in a key", () => {
+    const nothing = shape([], [], [], 5);
+    expect(declines([nothing], [])).toEqual([{ shape: nothing, reason: "no-candidate" }]);
+  });
+
+  // A shape the planner served from an index is not a finding, so it is skipped
+  // without being reported — there is nothing to explain about it, and a row for
+  // it would make the table the size of the workload rather than of the problem.
+  it("says nothing about a query that used an index", () => {
+    expect(declines([{ ...shape(["a"], [], [], 5), collscan: false }], [])).toEqual([]);
+  });
+
+  // The other half of the same contract: a candidate carries every shape it
+  // answers, so folding two shapes into one index leaves NEITHER of them
+  // looking declined.
+  it("carries both shapes on the candidate that consolidated them", () => {
+    const narrow = shape(["a"], [], [], 5);
+    const wide = shape(["a", "b"], [], [], 5);
+    const seen: QueryShape[] = [];
+    const [candidate] = recommendCreates([narrow, wide], [], options, (shape) => seen.push(shape));
+
+    expect(seen).toEqual([]);
+    expect(candidate?.keys.map((key) => key.field)).toEqual(["a", "b"]);
+    expect(candidate?.sourceShapes).toHaveLength(2);
+    expect(candidate?.sourceShapes).toContain(narrow);
+    expect(candidate?.sourceShapes).toContain(wide);
+  });
+
+  it("carries both shapes when two want the identical index", () => {
+    const one = shape(["a"], [], [], 5);
+    const two = shape(["a"], [], [], 7);
+    const [candidate] = recommendCreates([one, two], [], options);
+
+    expect(candidate?.sourceShapes).toHaveLength(2);
+  });
+});
+
+// The dedupe used to DROP the second shape wanting one advisory, which would
+// have read as a decline on a shape the advisory is the finding for (#432).
+describe("sortOrderAdvisories (attribution)", () => {
+  it("attributes a deduplicated shape to the advisory that survives", () => {
+    const sorting = (count: number): QueryShape => ({
+      ...shape(["a"], [atDesc], [], count),
+      collscan: false,
+      sortedInMemory: true,
+    });
+    const existing = [
+      {
+        ...idx("a_1_at_1", ["a", "at"]),
+        keys: [
+          { field: "a", direction: 1 as const },
+          { field: "at", direction: 1 as const },
+        ],
+      },
+    ];
+    const advisories = sortOrderAdvisories([sorting(5), sorting(9)], existing, options);
+
+    expect(advisories).toHaveLength(1);
+    expect(advisories[0]?.sourceShapes).toHaveLength(2);
+  });
+});
+
 describe("recommendNarrowing", () => {
   const wide = idx("a_1_b_1_c_1", ["a", "b", "c"]);
 

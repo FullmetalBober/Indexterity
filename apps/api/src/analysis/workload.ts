@@ -62,7 +62,34 @@ export interface CreateCandidate {
   // When set, build a partial index: these constant equality predicates move
   // into partialFilterExpression and out of the keys — smaller index, same query.
   readonly partialFilter?: Readonly<Record<string, ConstantValue>> | undefined;
+  // Every shape this candidate answers, including the ones folded into it by
+  // consolidation and by two shapes wanting the same index (#432).
+  //
+  // Carried so the caller can say what happened to each shape it read, rather
+  // than re-deriving that from the gates a second time. `jobs/suggest.ts` stores
+  // one row per scanning shape with the outcome the create side reached, and
+  // "which gate declined this" is only true if the pipeline reports it — a
+  // second copy of the rules in the writer would be a second opinion, and the
+  // day it drifted the page would explain a decision nobody made.
+  readonly sourceShapes: readonly QueryShape[];
 }
+
+// Why the create-side recommender declined a shape, reported as it happens
+// (#432).
+//
+// A sink rather than a second return value, and optional, so every existing
+// caller and every test is untouched. The alternative was for the WRITER to
+// re-apply these rules to decide what to record, which would be a second copy
+// of them: the page's whole claim is "this is the gate that declined it", and a
+// claim derived from a copy of the rules is only true until the copy drifts.
+//
+// The vocabulary is @repo/contracts' `workloadOutcome` minus the outcomes this
+// function cannot reach — it knows nothing about cooldowns, standing
+// recommendations or the collection's cost floor, all of which are the caller's
+// gates.
+export type ShapeDecline = "not-recurring" | "ad-hoc-client" | "index-exists" | "no-candidate";
+
+export type ShapeDeclineSink = (shape: QueryShape, reason: ShapeDecline) => void;
 
 export interface WorkloadOptions {
   // Absolute floor. Two sightings are a coincidence whatever the window.
@@ -163,6 +190,8 @@ export interface SortOrderAdvisory {
   readonly existingIndex: string;
   readonly wantedKeys: readonly SortKey[];
   readonly count: number;
+  // The shapes behind it — see CreateCandidate.sourceShapes (#432).
+  readonly sourceShapes: readonly QueryShape[];
 }
 
 export function sortOrderAdvisories(
@@ -171,7 +200,11 @@ export function sortOrderAdvisories(
   options: WorkloadOptions,
 ): SortOrderAdvisory[] {
   const out: SortOrderAdvisory[] = [];
-  const seen = new Set<string>();
+  // By dedupe key rather than a Set of them, so a second shape wanting the same
+  // advisory is ATTRIBUTED to it instead of vanishing — the advisory is the
+  // finding for both, and a shape that reached one must not read as declined
+  // (#432).
+  const byKey = new Map<string, { advisory: SortOrderAdvisory; shapes: QueryShape[] }>();
   for (const shape of shapes) {
     if (shape.sortedInMemory !== true || !isRecurring(shape, options)) continue;
     if (shape.sort.length === 0) continue;
@@ -184,9 +217,20 @@ export function sortOrderAdvisories(
     );
     if (blocker === undefined) continue;
     const key = `${blocker.name}\u0000${wantedKeys.map((k) => `${k.field}:${k.direction}`).join(",")}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push({ existingIndex: blocker.name, wantedKeys, count: shape.count });
+    const already = byKey.get(key);
+    if (already !== undefined) {
+      already.shapes.push(shape);
+      continue;
+    }
+    const shapesFor: QueryShape[] = [shape];
+    const advisory: SortOrderAdvisory = {
+      existingIndex: blocker.name,
+      wantedKeys,
+      count: shape.count,
+      sourceShapes: shapesFor,
+    };
+    byKey.set(key, { advisory, shapes: shapesFor });
+    out.push(advisory);
   }
   return out;
 }
@@ -198,6 +242,11 @@ interface Want {
   scanning: boolean;
   absorbedCount: number;
   absorbedShapes: number;
+  // `shape` plus everything folded in, for attribution (#432). Kept beside the
+  // primary rather than replacing it: `shape` is what the counts and the
+  // rationale are derived from, and conflating "the shape this candidate is
+  // named for" with "every shape it answers" is how the two would drift.
+  readonly sourceShapes: QueryShape[];
 }
 
 // Propose index additions from query shapes the server is working too hard to
@@ -217,17 +266,32 @@ export function recommendCreates(
   shapes: readonly QueryShape[],
   existing: readonly IndexSpec[],
   options: WorkloadOptions,
+  // Told about each shape this declines, in the order the checks run, so the
+  // caller can record WHICH gate declined rather than guessing (#432).
+  onDecline: ShapeDeclineSink = () => {},
 ): CreateCandidate[] {
   const seen = new Map<string, Want>();
   const wants: Want[] = [];
   for (const shape of shapes) {
     const sorting = shape.sortedInMemory === true;
-    if ((!shape.collscan && !sorting) || !isRecurring(shape, options)) continue;
+    // A shape the planner served from an index is not a finding at all, so it is
+    // skipped without being reported — there is nothing to explain about it.
+    if (!shape.collscan && !sorting) continue;
+    if (!isRecurring(shape, options)) {
+      onDecline(shape, "not-recurring");
+      continue;
+    }
     // Someone exploring at a prompt is not a workload. The index would be
     // maintained on every write for years, for queries nobody runs again.
-    if (!isWorthIndexing(shape.clients ?? [])) continue;
+    if (!isWorthIndexing(shape.clients ?? [])) {
+      onDecline(shape, "ad-hoc-client");
+      continue;
+    }
     let wantedKeys = esrKeys(shape);
-    if (wantedKeys.length === 0) continue;
+    if (wantedKeys.length === 0) {
+      onDecline(shape, "no-candidate");
+      continue;
+    }
     // Constant equality predicates (same literal in every sample) become a
     // partialFilterExpression instead of index keys — but only when other keys
     // remain to index; a filter with nothing to index stays a normal candidate.
@@ -252,6 +316,7 @@ export function recommendCreates(
       // Two shapes wanting the same index. One candidate covers both, but a
       // scan behind either of them is a scan behind the candidate.
       already.scanning = already.scanning || shape.collscan;
+      already.sourceShapes.push(shape);
       continue;
     }
     // An index on exactly these fields already exists. For a scanning shape
@@ -268,6 +333,7 @@ export function recommendCreates(
         ),
       )
     ) {
+      onDecline(shape, "index-exists");
       continue;
     }
     const want: Want = {
@@ -277,6 +343,7 @@ export function recommendCreates(
       scanning: shape.collscan,
       absorbedCount: 0,
       absorbedShapes: 0,
+      sourceShapes: [shape],
     };
     seen.set(wantedKey, want);
     wants.push(want);
@@ -299,6 +366,9 @@ export function recommendCreates(
       widest.absorbedCount += want.shape.count + want.absorbedCount;
       widest.absorbedShapes += 1 + want.absorbedShapes;
       widest.scanning = widest.scanning || want.scanning;
+      // The wider index serves these shapes too, so the finding for them is the
+      // wider candidate — not a decline (#432).
+      widest.sourceShapes.push(...want.sourceShapes);
       continue;
     }
     survivors.push(want);
@@ -339,6 +409,7 @@ export function recommendCreates(
         rationale: `Extend ${extendable.name} to {${describe(wantedKeys)}} — ${scan}.`,
         count,
         scanning: want.scanning,
+        sourceShapes: want.sourceShapes,
         ...keepFilter,
       });
     } else if (singles.length >= 2) {
@@ -349,6 +420,7 @@ export function recommendCreates(
         rationale: `Replace ${singles.map((idx) => idx.name).join(" + ")} with a compound index on {${describe(wantedKeys)}} — ${scan}.`,
         count,
         scanning: want.scanning,
+        sourceShapes: want.sourceShapes,
         ...keepFilter,
       });
     } else {
@@ -365,6 +437,7 @@ export function recommendCreates(
         rationale: `Add an index on {${describe(wantedKeys)}} — ${scan}.${partialNote}`,
         count,
         scanning: want.scanning,
+        sourceShapes: want.sourceShapes,
         ...(partialFilter === undefined ? {} : { partialFilter }),
       });
     }

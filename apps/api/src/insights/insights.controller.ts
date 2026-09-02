@@ -63,6 +63,16 @@ export class InsightsController {
     );
   }
 
+  @Implement(contract.getClusterWorkload)
+  getClusterWorkload(@Req() req: FastifyRequest) {
+    return route(this.tenancy, contract.getClusterWorkload, req, "member").handler(
+      ({ input, context }) => {
+        const { clusterId, ...query } = input;
+        return this.insights.clusterWorkload(clusterId, context.member.orgId, query);
+      },
+    );
+  }
+
   @Implement(contract.listCooldowns)
   listCooldowns(@Req() req: FastifyRequest) {
     return route(this.tenancy, contract.listCooldowns, req, "member").handler(
