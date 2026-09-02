@@ -316,11 +316,7 @@ export class RecommendationsService {
   // `days` is the owner's answer, and null means never (D136). The caller
   // resolves the default — this only writes what it was told, so there is one
   // place that knows what "the engine proposes" means and it is not here.
-  private veto(
-    rec: RecommendationRow,
-    reason: string,
-    days: number | null,
-  ): Promise<Date | null> {
+  private veto(rec: RecommendationRow, reason: string, days: number | null): Promise<Date | null> {
     return recordManualVeto(
       this.database.db,
       rec.clusterId,
