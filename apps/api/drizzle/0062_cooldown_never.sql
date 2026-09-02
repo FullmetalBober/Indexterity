@@ -1,0 +1,1 @@
+ALTER TABLE "index_cooldowns" ALTER COLUMN "until" DROP NOT NULL;

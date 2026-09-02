@@ -1,5 +1,6 @@
 import type { ClusterCooldowns, ParkedIndex } from "@repo/contracts";
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { ParkedPanel } from "./parked-panel";
 
@@ -130,5 +131,49 @@ describe("ParkedPanel", () => {
   it("explains the empty state rather than drawing an empty list", () => {
     render(<ParkedPanel cooldowns={payload([])} loading={false} />);
     expect(screen.getByText("Nothing parked")).toBeInTheDocument();
+  });
+});
+
+// The two things D136 added: a park with no end, and a way out of one.
+describe("ParkedPanel un-parking", () => {
+  it("says a park has no end rather than drawing a far-off date", () => {
+    render(
+      <ParkedPanel cooldowns={payload([entry({ until: null, active: true })])} loading={false} />,
+    );
+    expect(screen.getByText(/parked indefinitely/)).toBeInTheDocument();
+  });
+
+  // No handler means the reader may not un-park, and a button whose refusal is
+  // certain is worse than no button.
+  it("draws no un-park control without a handler", () => {
+    render(<ParkedPanel cooldowns={payload([entry()])} loading={false} />);
+    expect(screen.queryByRole("button", { name: "Un-park" })).not.toBeInTheDocument();
+  });
+
+  // The whole namespace triple travels, because that is what the api is keyed on
+  // — and the empty index name is the collection-level park, a real target.
+  it("reports the namespace and index name it was asked to clear", async () => {
+    const cleared: { database: string; collection: string; indexName: string }[] = [];
+    render(
+      <ParkedPanel
+        cooldowns={payload([entry({ indexName: "idx_a" })])}
+        loading={false}
+        onClear={(target) => cleared.push(target)}
+      />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Un-park" }));
+    expect(cleared).toEqual([{ database: "shop", collection: "orders", indexName: "idx_a" }]);
+  });
+
+  it("blocks the control while a clear is in flight", () => {
+    render(
+      <ParkedPanel
+        cooldowns={payload([entry()])}
+        loading={false}
+        onClear={() => undefined}
+        clearing
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Un-park" })).toBeDisabled();
   });
 });

@@ -1050,7 +1050,15 @@ export const indexCooldowns = pgTable(
     indexName: text("index_name").notNull(),
     reason: text("reason").notNull(),
     regressionCount: integer("regression_count").notNull().default(1),
-    until: timestamp("until", { withTimezone: true }).notNull(),
+    // Nullable since D136, and the null means NEVER: an owner who cancels a drop
+    // may say "do not touch this index again" rather than pick a date.
+    //
+    // A null rather than a date far in the future, because "never" is not a very
+    // long time — a sentinel would eventually pass and the index would become
+    // eligible again on a day nobody chose. Every reader has to say which it
+    // means, which is the point: `activeCooldownKeys` treats null as active
+    // forever, and the panel draws it as "never" rather than as a date.
+    until: timestamp("until", { withTimezone: true }),
     createdAt,
     updatedAt,
   },

@@ -401,6 +401,13 @@ export const recommendation = z.object({
   // A date does.
   hiddenAt: instant.nullable(),
   observeDays: z.number().int().positive().nullable(),
+  // What the cancel dialog offers as its default park, in days (D136).
+  //
+  // Computed by the api rather than by the dashboard, for the reason
+  // `shortenObserveWindow` takes the floor by name instead of a date: the curve
+  // is the engine's (analysis/cooldown.ts), and a client that reimplemented it
+  // would keep proposing the old number the day the curve moved.
+  proposedCooldownDays: z.number().int().positive(),
   // And why that window, when it differs from the policy baseline. The number
   // alone reads as arbitrary next to another row with a different one; this is
   // the sentence the engine already wrote to explain it.
@@ -759,7 +766,9 @@ export const parkedIndex = z.object({
   indexName: z.string(),
   reason: z.string(),
   regressionCount: z.int().nonnegative(),
-  until: z.string(),
+  // Null means NEVER — an owner cancelled the drop and said not to touch this
+  // index again (D136). `active` is true for as long as such a row exists.
+  until: z.string().nullable(),
   // Whether `until` is still in the future. Computed by the api against ITS
   // clock, not left to the browser's: a laptop an hour behind would draw a
   // parked index as eligible, and this is the field the panel's headline counts.

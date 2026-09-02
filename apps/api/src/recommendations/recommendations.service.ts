@@ -13,6 +13,7 @@ import {
   explainRefusal,
   explainSuppression,
   parseStoredSpec,
+  proposedVetoDays,
   rebuildKeys,
   rebuildOptions,
   SUPPRESSION_GUARDS,
@@ -29,7 +30,6 @@ import { type RecommendationRow, RecommendationsRepository } from "./recommendat
 
 // How long a cancelled drop stays off the table before the engine may propose
 // it again -- long enough that an owner is not re-rejecting the same row weekly.
-const VETO_COOLDOWN_DAYS = 90;
 
 // The refusals these use cases raise, taken as the handler's own error map
 // rather than thrown as a bare ORPCError -- for the reason
@@ -171,7 +171,14 @@ export class RecommendationsService {
     //
     // Not a regression, for the same reason as the cancel path: nothing got
     // slower, an owner simply knows something the engine does not.
-    await this.veto(rec, "drop undone by an owner");
+    // The engine's default rather than a choice: undo is one click on a table
+    // row and there is no dialog to answer. An owner who wants longer, or never,
+    // says so from the parked list (D136).
+    await this.veto(
+      rec,
+      "drop undone by an owner",
+      proposedVetoDays(rec.observeDays ?? DEFAULT_OBSERVE_DAYS),
+    );
     const updated = await this.repo.setState(rec.id, { state: "ROLLED_BACK" });
     if (updated === undefined) throw errors.NOT_FOUND({ message: "recommendation not found" });
     await this.repo.recordAction(rec.id, "ROLLBACK", "ok");
@@ -184,7 +191,16 @@ export class RecommendationsService {
   // regression gate, a counter reset, a failed pre-flight — or disconnecting
   // the cluster. An owner who simply knew the index was needed had to wait out
   // the window.
-  async unhide(id: string, orgId: string, errors: Refusals): Promise<Recommendation> {
+  // `cooldownDays` is the owner's answer from the cancel dialog: a number of
+  // days, or null for never (D136). Undefined means they did not choose, so the
+  // engine's proposal stands — which is what an older client sends and what the
+  // api must therefore keep meaning.
+  async unhide(
+    id: string,
+    orgId: string,
+    errors: Refusals,
+    cooldownDays?: number | null,
+  ): Promise<Recommendation> {
     const rec = await this.repo.ownedBy(id, orgId);
     if (rec === undefined) throw errors.NOT_FOUND({ message: "recommendation not found" });
     if (rec.state !== "HIDDEN") {
@@ -213,8 +229,14 @@ export class RecommendationsService {
     // Park it, so the next classify pass does not propose the same drop straight
     // back. Not counted as a regression — nothing regressed, an owner just
     // knows something the engine does not.
-    const until = await this.veto(rec, "drop cancelled by an owner");
-    const day = until.toISOString().slice(0, 10);
+    const parkFor =
+      cooldownDays === undefined
+        ? proposedVetoDays(rec.observeDays ?? DEFAULT_OBSERVE_DAYS)
+        : cooldownDays;
+    const until = await this.veto(rec, "drop cancelled by an owner", parkFor);
+    // "never" has no date to quote, and saying so is the point: an owner who
+    // chose it should read it back rather than see a date far away.
+    const day = until === null ? "never" : until.toISOString().slice(0, 10);
     const updated = await this.repo.setState(rec.id, {
       state: "REJECTED",
       hiddenAt: null,
@@ -222,10 +244,18 @@ export class RecommendationsService {
       observeReason: null,
       baselineReadOps: null,
       baselineReadLatency: null,
-      rationale: `${rec.rationale} — cancelled by an owner; not re-proposed until ${day}`,
+      rationale: `${rec.rationale} — cancelled by an owner; ${
+        day === "never" ? "not to be re-proposed" : `not re-proposed until ${day}`
+      }`,
     });
     if (updated === undefined) throw errors.NOT_FOUND({ message: "recommendation not found" });
-    await this.repo.recordAction(rec.id, "HIDE", `un-hidden on request; cooling down until ${day}`);
+    await this.repo.recordAction(
+      rec.id,
+      "HIDE",
+      day === "never"
+        ? "un-hidden on request; parked indefinitely"
+        : `un-hidden on request; cooling down until ${day}`,
+    );
     return toRecommendation(updated);
   }
 
@@ -283,12 +313,19 @@ export class RecommendationsService {
     return toRecommendation(updated);
   }
 
-  private veto(rec: RecommendationRow, reason: string): Promise<Date> {
+  // `days` is the owner's answer, and null means never (D136). The caller
+  // resolves the default — this only writes what it was told, so there is one
+  // place that knows what "the engine proposes" means and it is not here.
+  private veto(
+    rec: RecommendationRow,
+    reason: string,
+    days: number | null,
+  ): Promise<Date | null> {
     return recordManualVeto(
       this.database.db,
       rec.clusterId,
       { database: rec.database, collection: rec.collection, indexName: rec.indexName },
-      VETO_COOLDOWN_DAYS,
+      days,
       reason,
     );
   }

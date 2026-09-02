@@ -1,5 +1,5 @@
 import type { ClusterNodes, IndexUsage, Recommendation } from "@repo/contracts";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { badgeVariant, DropsOn, dropsOn } from "~/components/app/format";
 import { type UsageSplit, usageDetail, usageLine, usageSplit } from "~/components/app/index-usage";
 import { ConfirmButton } from "~/components/confirm-button";
@@ -7,6 +7,9 @@ import { type DashboardColumns, DataTable, dashboardColumns } from "~/components
 import { Truncated } from "~/components/truncated";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
+import { Checkbox } from "~/components/ui/checkbox";
+import { Input } from "~/components/ui/input";
+import { Label } from "~/components/ui/label";
 import { millisOf } from "~/lib/instant";
 import {
   useApproveRecommendation,
@@ -22,7 +25,10 @@ const column = dashboardColumns<Recommendation>();
 // and the row models are not rebuilt on every keystroke in the filter box.
 interface Actions {
   readonly approve: (id: string) => void;
-  readonly unhide: (id: string) => void;
+  // Carries the cancel dialog's answer: how many days to park the index, or null
+  // for never (D136). It used to be a flat 90 the reader was told about in the
+  // description and never asked about.
+  readonly unhide: (input: { id: string; cooldownDays: number | null }) => void;
   readonly undo: (id: string) => void;
   readonly shorten: (id: string) => void;
 }
@@ -94,44 +100,131 @@ function action(rec: Recommendation, actions: Actions, readOnly: boolean) {
       />
     );
   }
-  if (rec.state === "HIDDEN") {
-    // The window is decided per index and frozen at hide time, so an owner who
-    // already knows the index is dead otherwise has to wait out a cadence the
-    // engine inferred — or cancel the drop, which re-proposes it later and
-    // computes the very same window again (#270). Offered only while there is
-    // something left to wait for: past the window the drop is already due and
-    // ending the observation would do nothing.
-    const waiting = dropsOn(rec);
-    return (
-      <div className="flex gap-1">
+  if (rec.state === "HIDDEN") return <HiddenActions rec={rec} actions={actions} />;
+  return <span className="text-muted-foreground text-xs">{rec.state}</span>;
+}
+
+// The two controls a hidden drop offers, as a COMPONENT rather than a branch of
+// `action` above, because cancelling now asks a question and the answer is state
+// (D136). `action` is a plain function called from a cell renderer and cannot
+// hold any.
+function HiddenActions({ rec, actions }: { rec: Recommendation; actions: Actions }) {
+  // The engine's proposal until the reader says otherwise, and it comes from the
+  // api rather than being computed here — the curve is the engine's, and a
+  // dashboard that reimplemented it would keep offering the old number the day it
+  // moved.
+  // Held as the TEXT in the box plus a flag, not as a number.
+  //
+  // A number cannot represent a half-typed answer, and the first version proved
+  // why: it fell back to the proposal whenever the box parsed as NaN, so clearing
+  // it to retype snapped 30 straight back and typing `7` gave 307. An empty box
+  // is a reader mid-edit; it becomes a decision only on confirm.
+  const [days, setDays] = useState(String(rec.proposedCooldownDays));
+  const [forever, setForever] = useState(false);
+
+  // What the box means when the reader presses the button. An unreadable or
+  // non-positive answer takes the engine's proposal rather than refusing: they
+  // asked to keep the index, and the parking is the detail.
+  const parkFor = (): number | null => {
+    if (forever) return null;
+    const parsed = Number.parseInt(days, 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : rec.proposedCooldownDays;
+  };
+
+  // The window is decided per index and frozen at hide time, so an owner who
+  // already knows the index is dead otherwise has to wait out a cadence the
+  // engine inferred — or cancel the drop, which re-proposes it later and
+  // computes the very same window again (#270). Offered only while there is
+  // something left to wait for: past the window the drop is already due and
+  // ending the observation would do nothing.
+  const waiting = dropsOn(rec);
+  return (
+    <div className="flex gap-1">
+      <ConfirmButton
+        trigger={
+          <Button size="sm" variant="outline">
+            Keep it
+          </Button>
+        }
+        title={`Cancel the pending drop of ${rec.indexName}?`}
+        description="The index becomes visible to the query planner again straight away. Choose how long the engine should leave it alone afterwards."
+        confirmLabel="Un-hide"
+        body={
+          <CooldownChoice days={days} forever={forever} onDays={setDays} onForever={setForever} />
+        }
+        onConfirm={() => actions.unhide({ id: rec.id, cooldownDays: parkFor() })}
+      />
+      {waiting !== null && (millisOf(waiting) ?? 0) > Date.now() ? (
         <ConfirmButton
           trigger={
-            <Button size="sm" variant="outline">
-              Keep it
+            <Button size="sm" variant="ghost">
+              Drop sooner
             </Button>
           }
-          title={`Cancel the pending drop of ${rec.indexName}?`}
-          description="The index becomes visible to the query planner again straight away, and this drop is not proposed again for 90 days."
-          confirmLabel="Un-hide"
-          onConfirm={() => actions.unhide(rec.id)}
+          title={`Stop observing ${rec.indexName}?`}
+          description="The window is cut to the time this index has already been hidden, rounded up — so the drop becomes due within a day rather than at the end of its window. It still waits for the change window and still passes the regression gate: if hiding this index has slowed reads, it is un-hidden instead. Only the waiting is skipped."
+          confirmLabel="End observation"
+          onConfirm={() => actions.shorten(rec.id)}
         />
-        {waiting !== null && (millisOf(waiting) ?? 0) > Date.now() ? (
-          <ConfirmButton
-            trigger={
-              <Button size="sm" variant="ghost">
-                Drop sooner
-              </Button>
-            }
-            title={`Stop observing ${rec.indexName}?`}
-            description="The window is cut to the time this index has already been hidden, rounded up — so the drop becomes due within a day rather than at the end of its window. It still waits for the change window and still passes the regression gate: if hiding this index has slowed reads, it is un-hidden instead. Only the waiting is skipped."
-            confirmLabel="End observation"
-            onConfirm={() => actions.shorten(rec.id)}
-          />
-        ) : null}
+      ) : null}
+    </div>
+  );
+}
+
+// How long to leave the index alone: a number of days, or never.
+//
+// Two controls rather than a select of preset spans, because the two answers are
+// different in kind. A duration is a guess the owner is refining — "give me a
+// month, I will look again" — and never is a statement about the index: this one
+// is load-bearing and the engine is wrong about it. A dropdown with `Never` as
+// its last option reads as the longest duration, which is the one thing it is
+// not.
+function CooldownChoice({
+  days,
+  forever,
+  onDays,
+  onForever,
+}: {
+  days: string;
+  forever: boolean;
+  onDays: (next: string) => void;
+  onForever: (next: boolean) => void;
+}) {
+  return (
+    <div className="space-y-3 rounded-md border p-3">
+      <div className="flex items-center gap-2">
+        <Label htmlFor="cooldown-days" className="text-sm">
+          Leave it alone for
+        </Label>
+        <Input
+          id="cooldown-days"
+          type="number"
+          min={1}
+          max={3650}
+          className="w-24"
+          disabled={forever}
+          // The raw text, so an empty box stays empty while it is retyped. What it
+          // MEANS is resolved on confirm rather than on every keystroke.
+          value={days}
+          onChange={(event) => onDays(event.target.value)}
+        />
+        <span className="text-muted-foreground text-sm">days</span>
       </div>
-    );
-  }
-  return <span className="text-muted-foreground text-xs">{rec.state}</span>;
+      <div className="flex items-start gap-2">
+        <Checkbox
+          id="cooldown-never"
+          checked={forever}
+          onCheckedChange={(checked) => onForever(checked === true)}
+        />
+        <Label htmlFor="cooldown-never" className="text-sm leading-snug">
+          Never propose this index again
+          <span className="block text-muted-foreground text-xs">
+            Nothing expires it. Un-park it from the parked list when that changes.
+          </span>
+        </Label>
+      </div>
+    </div>
+  );
 }
 
 // The per-node split, under the usage class it qualifies.

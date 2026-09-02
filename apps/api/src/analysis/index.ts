@@ -1,6 +1,7 @@
 export * from "./activity";
 export * from "./classify";
 export * from "./client";
+export * from "./cooldown";
 export * from "./cost";
 export * from "./failures";
 export * from "./footprint";

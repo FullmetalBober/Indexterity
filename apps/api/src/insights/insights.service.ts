@@ -471,6 +471,27 @@ export class InsightsService {
   //
   // `active` is computed here rather than left to the browser, because a clock
   // an hour behind would draw a parked index as eligible.
+  // Un-park an index and hand back the list it was on, so the panel redraws from
+  // one response rather than a mutation followed by a refetch (D136).
+  //
+  // Owner-only at the route, and scoped to the caller's org here — the same rule
+  // every write in this file follows: a cluster the caller does not own answers
+  // as if the row were not there, because "not yours" and "not found" must not be
+  // distinguishable from outside.
+  async clearCooldown(
+    clusterId: string,
+    orgId: string,
+    target: { readonly database: string; readonly collection: string; readonly indexName: string },
+    errors: { NOT_FOUND: (init: { message: string }) => Error },
+  ): Promise<ClusterCooldowns> {
+    if (!(await this.tenancy.ownsCluster(clusterId, orgId))) {
+      throw errors.NOT_FOUND({ message: "cooldown not found" });
+    }
+    const removed = await this.repo.clearCooldown(clusterId, target);
+    if (!removed) throw errors.NOT_FOUND({ message: "cooldown not found" });
+    return this.cooldowns(clusterId, orgId);
+  }
+
   async cooldowns(clusterId: string, orgId: string): Promise<ClusterCooldowns> {
     if (!(await this.tenancy.ownsCluster(clusterId, orgId))) {
       return { clusterId, activeCount: 0, nextEligibleAt: null, parked: [] };
@@ -485,8 +506,11 @@ export class InsightsService {
       indexName: row.indexName,
       reason: row.reason,
       regressionCount: row.regressionCount,
-      until: row.until.toISOString(),
-      active: row.until.getTime() > now,
+      // Null is "never" (D136): the row travels as a null rather than as a date
+      // the dashboard would have to recognise as impossibly far away, and it is
+      // active for as long as it exists.
+      until: row.until === null ? null : row.until.toISOString(),
+      active: row.until === null || row.until.getTime() > now,
       // Computed here for the same reason `active` is: the empty index name is a
       // storage sentinel (jobs/cooldowns.ts), and the dashboard should not have
       // to know that to draw the row.

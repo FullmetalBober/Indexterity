@@ -80,6 +80,25 @@ export class InsightsController {
     );
   }
 
+  // Owner-only: un-parking an index is what puts it back in front of the engine,
+  // which is a decision about the cluster rather than a read of it (D136).
+  @Implement(contract.clearCooldown)
+  clearCooldown(@Req() req: FastifyRequest) {
+    return route(this.tenancy, contract.clearCooldown, req, "owner").handler(
+      ({ input, errors, context }) =>
+        this.insights.clearCooldown(
+          input.clusterId,
+          context.member.orgId,
+          {
+            database: input.database,
+            collection: input.collection,
+            indexName: input.indexName,
+          },
+          errors,
+        ),
+    );
+  }
+
   @Implement(contract.getNodes)
   getNodes(@Req() req: FastifyRequest) {
     return route(this.tenancy, contract.getNodes, req, "member").handler(({ input, context }) =>

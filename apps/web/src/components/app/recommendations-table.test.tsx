@@ -59,6 +59,9 @@ function rec(over: Partial<Recommendation> = {}): Recommendation {
     estimatedBytesSaved: 1024,
     hiddenAt: null,
     observeDays: null,
+    // The engine's proposed park, which the cancel dialog offers as its default
+    // (D136). The api computes it, so the fixture just has to carry one.
+    proposedCooldownDays: 30,
     observeReason: null,
     createdAt: "2026-08-01T00:00:00.000Z",
     ...over,
@@ -191,6 +194,61 @@ describe("RecommendationsTable", () => {
 
     expect(await screen.findByRole("button", { name: "Keep it" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Drop sooner" })).not.toBeInTheDocument();
+  });
+
+  // The cancel dialog asks how long to park the index (D136), where it used to
+  // announce a flat 90 days nobody chose.
+  describe("the cancel dialog's cooldown choice", () => {
+    async function openKeepIt(proposed = 30) {
+      renderInApp(
+        <RecommendationsTable
+          total={1}
+          clusterId="c1"
+          recommendations={[
+            rec({ state: "HIDDEN", hiddenAt: null, proposedCooldownDays: proposed }),
+          ]}
+          loading={false}
+        />,
+      );
+      await userEvent.click(await screen.findByRole("button", { name: "Keep it" }));
+    }
+
+    // The default is the api's number, not one the dashboard worked out: the
+    // curve is the engine's and a client that reimplemented it would keep
+    // offering the old span the day it moved.
+    it("offers the engine's proposal as the default", async () => {
+      await openKeepIt(45);
+      expect(screen.getByLabelText("Leave it alone for")).toHaveValue(45);
+    });
+
+    it("sends the days the reader typed", async () => {
+      await openKeepIt();
+      const box = screen.getByLabelText("Leave it alone for");
+      await userEvent.clear(box);
+      await userEvent.type(box, "7");
+      await userEvent.click(screen.getByRole("button", { name: "Un-hide" }));
+      expect(unhideRecommendation).toHaveBeenCalledWith({ id: "r1", cooldownDays: 7 });
+    });
+
+    // Never is null on the wire and not a very large number, so nothing expires
+    // it on a day nobody chose.
+    it("sends null for never, and disables the day box", async () => {
+      await openKeepIt();
+      await userEvent.click(screen.getByLabelText(/Never propose this index again/));
+      expect(screen.getByLabelText("Leave it alone for")).toBeDisabled();
+      await userEvent.click(screen.getByRole("button", { name: "Un-hide" }));
+      expect(unhideRecommendation).toHaveBeenCalledWith({ id: "r1", cooldownDays: null });
+    });
+
+    // Unticking it comes back to the proposal rather than to an empty box, which
+    // would submit a park of no time at all.
+    it("returns to the proposal when never is unticked", async () => {
+      await openKeepIt(45);
+      const never = screen.getByLabelText(/Never propose this index again/);
+      await userEvent.click(never);
+      await userEvent.click(never);
+      expect(screen.getByLabelText("Leave it alone for")).toHaveValue(45);
+    });
   });
 
   // Each state offers exactly one thing, and an advisory offers none — the engine
