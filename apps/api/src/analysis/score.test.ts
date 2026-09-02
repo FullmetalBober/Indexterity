@@ -6,10 +6,26 @@ import {
   narrowScore,
   RECOMMENDED_AUTO_APPLY_SCORE,
   regressionWeight,
+  thinEvidencePenalty,
 } from "./score";
 
 describe("dropScore", () => {
   it("scores a long-dead sizable index high", () => {
+    const score = dropScore({
+      usageClass: "FLAT_ZERO",
+      snapshots: 125,
+      redundant: false,
+      sizeBytes: 1024 ** 3,
+      regressionWeight: 0,
+    });
+    expect(score).toBeGreaterThanOrEqual(RECOMMENDED_AUTO_APPLY_SCORE);
+  });
+
+  // The same index on three days of watching. This case used to score 72 — above
+  // the threshold this file recommends — on two points of history credit, which is
+  // what made lowering the proposal gate a change to what gets DELETED rather than
+  // to what is displayed (#434). It still surfaces; it just cannot auto-apply.
+  it("does not reach the recommended threshold on a first-week history", () => {
     const score = dropScore({
       usageClass: "FLAT_ZERO",
       snapshots: 12,
@@ -17,7 +33,8 @@ describe("dropScore", () => {
       sizeBytes: 1024 ** 3,
       regressionWeight: 0,
     });
-    expect(score).toBeGreaterThanOrEqual(70);
+    expect(score).toBeLessThan(RECOMMENDED_AUTO_APPLY_SCORE);
+    expect(score).toBeGreaterThan(0);
   });
 
   // The top of the range has to exist, or a threshold above it approves
@@ -368,5 +385,33 @@ describe("a faded regression stops disqualifying a drop", () => {
   it("clears the suggested auto-approve threshold once it has faded", () => {
     const faded = regressionWeight({ regressionCount: 1, until: at(90) }, 30, at(180));
     expect(dropScore(signals(faded))).toBeGreaterThanOrEqual(70);
+  });
+});
+
+describe("thinEvidencePenalty", () => {
+  // Zero exactly where a week of collects lands, so nothing about the scale past
+  // the first week moves and the ceiling on a drop is untouched.
+  it("is zero from a week of collects onward", () => {
+    expect(thinEvidencePenalty(28)).toBe(0);
+    expect(thinEvidencePenalty(125)).toBe(0);
+  });
+
+  it("discounts a shorter history, hardest at the start", () => {
+    expect(thinEvidencePenalty(12)).toBe(14);
+    expect(thinEvidencePenalty(3)).toBeGreaterThan(thinEvidencePenalty(20));
+  });
+
+  // A redundancy finding is provable from the index list and claims no span, so
+  // dropScore never charges it this — otherwise the strongest case the engine can
+  // make would stop reaching 100.
+  it("is not applied to a redundancy finding", () => {
+    const score = dropScore({
+      usageClass: null,
+      snapshots: 3,
+      redundant: true,
+      sizeBytes: 0,
+      regressionWeight: 0,
+    });
+    expect(score).toBe(55);
   });
 });

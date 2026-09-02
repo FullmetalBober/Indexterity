@@ -56,6 +56,23 @@ describe("recommendForCollection", () => {
     expect(out[0]?.estimatedBytesSaved).toBe(4096);
   });
 
+  // The span is carried onto the finding so the promotion floor can be applied
+  // without re-reading the history (#434). Null on a structural finding, which is
+  // what stops a redundancy verdict being held back by a short history it never
+  // rested on.
+  it("carries the evidence span on a usage finding and not on a structural one", () => {
+    const idle = input(spec("stale", [{ field: "s", direction: 1 }]), [0, 0, 0]);
+    const [unused] = recommendForCollection([idle], {}, options, {}, NOW);
+    expect(unused?.type).toBe("DROP_UNUSED");
+    // The fixture spans 2026-01-01 to 2026-01-03, floored to whole days.
+    expect(unused?.evidenceDays).toBe(2);
+
+    const a = input(spec("a", [x1]), [5, 5, 5]);
+    const ab = input(spec("ab", [x1, y1]), [5, 5, 5]);
+    const out = recommendForCollection([a, ab], {}, options, {}, NOW);
+    expect(out.find((c) => c.type === "DROP_REDUNDANT")?.evidenceDays).toBeNull();
+  });
+
   it("proposes DROP_REDUNDANT for a prefix covered by a compound", () => {
     const a = input(spec("a", [x1]), [5, 5, 5]);
     const ab = input(spec("ab", [x1, y1]), [5, 5, 5]);

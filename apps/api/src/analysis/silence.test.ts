@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { AUTO_APPLY_HISTORY_DAYS } from "./classify";
 import {
   type AnalysisSilence,
   dominantRefusal,
@@ -104,7 +105,16 @@ describe("explainRefusal", () => {
   it("quotes the observation window the gate actually used", () => {
     const text = explainRefusal("span-too-short", { ...OPTIONS, minHistoryDays: 14 });
     expect(text).toContain("less than 14 days");
-    expect(text).not.toContain("7 days");
+    expect(text).not.toContain("less than 7 days");
+  });
+
+  // Two thresholds now, and the sentence has to name both or it promises less than
+  // the engine does: findings appear at the warm-up, and the engine acting on them
+  // by itself waits for the longer one (#434).
+  it("says findings appear first and unattended drops wait longer", () => {
+    const text = explainRefusal("span-too-short", OPTIONS);
+    expect(text).toContain("yours to approve");
+    expect(text).toContain(`first ${AUTO_APPLY_HISTORY_DAYS} days`);
   });
 
   // The sentence a restarting cluster now gets, and the one thing it must not

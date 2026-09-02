@@ -1,4 +1,4 @@
-import type { ClassifyOptions, UsageTrustRefusal } from "./classify";
+import { AUTO_APPLY_HISTORY_DAYS, type ClassifyOptions, type UsageTrustRefusal } from "./classify";
 
 // Why a pass had nothing to say, in the words the customer gets (#277).
 //
@@ -162,12 +162,17 @@ export function explainRefusal(
     case "span-too-short":
       return (
         `We have been watching this cluster for less than ${options.minHistoryDays} days. That ` +
-        `is the warm-up, not a fault: a shorter window would call the weekly batch job's index ` +
-        `dead because it happened not to run yet. Usage findings begin once it passes. A ` +
-        `restart does not reset that clock — the counters it zeroed are read as a fresh ` +
-        `stretch and the time already watched still counts — but the minutes between our last ` +
-        `reading and the restart are nobody's observation, so a cluster that restarts often ` +
-        `reaches the threshold more slowly than one that does not.` +
+        `is the warm-up, not a fault: usage is read as the change between readings, and a ` +
+        `span that short cannot separate an index nothing has needed yet from one nothing ` +
+        `needs. Usage findings begin once it passes, and for the first ` +
+        `${AUTO_APPLY_HISTORY_DAYS} days they are yours to approve rather than the engine's ` +
+        `to apply on its own — a shorter span would call the weekly batch job's index dead ` +
+        `because it happened not to run yet, which is a reason to wait before deleting one ` +
+        `and not a reason to say nothing about it. A restart does not reset that clock — the ` +
+        `counters it zeroed are read as a fresh stretch and the time already watched still ` +
+        `counts — but the minutes between our last reading and the restart are nobody's ` +
+        `observation, so a cluster that restarts often reaches the threshold more slowly ` +
+        `than one that does not.` +
         unaffected
       );
     case "too-few-collects":

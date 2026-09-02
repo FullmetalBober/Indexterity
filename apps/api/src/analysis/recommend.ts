@@ -1,7 +1,12 @@
 import type { RecommendationType, UsageClass } from "@repo/contracts";
 import { z } from "zod";
 import type { IndexSpec } from "../engine/types";
-import { type ClassifyOptions, classifyUsage, usageHistoryIsTrustworthy } from "./classify";
+import {
+  type ClassifyOptions,
+  classifyUsage,
+  trustedWatchDays,
+  usageHistoryIsTrustworthy,
+} from "./classify";
 import { coversIncludes, isKeyPrefix, isRedundantPrefix, servedByBackwardWalk } from "./redundancy";
 import { hideBreaksQueries, isNeverDrop } from "./safety";
 import { dropScore } from "./score";
@@ -84,6 +89,11 @@ export interface RecommendationCandidate {
   readonly rationale: string;
   readonly score: number;
   readonly estimatedBytesSaved: number;
+  // Days of trusted watch time behind this finding, or null when usage is not the
+  // argument for it. Carried onto the row so the promotion floor can be applied
+  // without re-reading the history (#434) — and null means "this finding does not
+  // rest on a usage span", which is why a structural one is never held back by it.
+  readonly evidenceDays: number | null;
 }
 
 // Pure: given all indexes of one collection, propose safe drops. Never proposes
@@ -132,6 +142,7 @@ export function recommendForCollection(
           regressionWeight: regressionWeights[candidate.spec.name] ?? 0,
         }),
         estimatedBytesSaved: sizes[candidate.spec.name] ?? 0,
+        evidenceDays: null,
       });
     }
   }
@@ -159,6 +170,7 @@ export function recommendForCollection(
         regressionWeight: regressionWeights[index.spec.name] ?? 0,
       }),
       estimatedBytesSaved: sizes[index.spec.name] ?? 0,
+      evidenceDays: trustedWatchDays(index.history),
     });
   }
 
@@ -190,6 +202,7 @@ export function recommendForCollection(
         regressionWeight: regressionWeights[index.spec.name] ?? 0,
       }),
       estimatedBytesSaved: sizes[index.spec.name] ?? 0,
+      evidenceDays: trustedWatchDays(index.history),
     });
   }
 
@@ -230,6 +243,7 @@ export function recommendForCollection(
         regressionWeight: regressionWeights[index.spec.name] ?? 0,
       }),
       estimatedBytesSaved: sizes[index.spec.name] ?? 0,
+      evidenceDays: null,
     });
   }
 

@@ -173,6 +173,28 @@ export function trustedWatchMs(history: readonly UsageSnapshot[]): number {
   return counterEpochs(history).reduce((sum, epoch) => sum + (epoch.endMs - epoch.startMs), 0);
 }
 
+// Whole days of trusted watch time behind a usage finding, which is what the row
+// carries and what the promotion floor below is compared against. Floored, so a
+// span is never rounded up into eligibility it has not earned.
+export function trustedWatchDays(history: readonly UsageSnapshot[]): number {
+  return Math.floor(trustedWatchMs(history) / (24 * HOUR_MS));
+}
+
+// The span a usage finding needs before the engine may act on it UNATTENDED.
+//
+// Seven days, which is where the single gate above used to sit, and it keeps the
+// argument that put it there: a shorter window calls the weekly batch job's index
+// dead because it happened not to run yet. What #434 separated is that this is a
+// reason to wait before deleting an index, not a reason to say nothing about it —
+// so the proposal now appears at CLASSIFY_OPTIONS.minHistoryDays and the
+// unattended drop still waits for this.
+//
+// Read by jobs/apply.ts (promoteByScore) against the evidence span stored on the
+// row, and named in the customer sentence analysis/silence.ts composes. A
+// hand-approved drop is unaffected: a human clicking Approve on three days of
+// evidence is a human deciding, which is the whole distinction.
+export const AUTO_APPLY_HISTORY_DAYS = 7;
+
 // Is this history good enough to claim an index is UNUSED? Absence of evidence
 // only counts when we were actually watching: too few snapshots, too short a
 // span, a hole in the series, or counters that restarted underneath us, and a
@@ -184,6 +206,11 @@ export function trustedWatchMs(history: readonly UsageSnapshot[]): number {
 // happened to run in those eighteen hours reads as dead — including the weekly
 // batch and the quarterly export. Counting snapshots measures how often we
 // looked; only the span measures how long we watched.
+//
+// That argument bounds how long to wait before DELETING an index, and it was
+// being used to decide how long to wait before MENTIONING one (#434). The two
+// are now separate numbers: this gate is the floor to say anything, and
+// AUTO_APPLY_HISTORY_DAYS below is the floor to act without a human.
 //
 // Returns WHICH check refused rather than a bare no (#267). The gate has seven
 // of them and they are not equally strict — two are about holes we did not watch

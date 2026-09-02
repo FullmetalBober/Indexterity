@@ -2121,6 +2121,10 @@ describe("outage resilience", () => {
     // trustworthy history to weigh and refuses on that. Which is the difference
     // the epoch model bought — a day that counts and grows, where a reset used to
     // void the history and keep voiding it for as long as the restarts lasted.
+    //
+    // A day is short of the warm-up whether that is three days or seven (#434), so
+    // this case is unmoved by the split; what changed is which number the sentence
+    // quotes.
     const [note] = await db
       .select()
       .from(analysisNotes)
@@ -2138,7 +2142,7 @@ describe("outage resilience", () => {
     expect(analysis.usagePaused).toBe(true);
     expect(analysis.dominantRefusal).toBe("span-too-short");
     expect(analysis.refusedIndexes).toBe(1);
-    expect(String(analysis.explanation)).toContain("less than 7 days");
+    expect(String(analysis.explanation)).toContain("less than 3 days");
     expect(String(analysis.explanation)).toContain("A restart does not reset that clock");
     expect(String(analysis.explanation)).toContain("Redundancy findings are unaffected.");
   });
@@ -2476,6 +2480,33 @@ describe("auto-approval is one threshold", () => {
           score: 95,
           estimatedBytesSaved: 1024,
         },
+        // The promotion floor (#434). Same score as strong_1, and the only
+        // difference is how long the usage claim behind it was watched for: three
+        // days clears the proposal gate and never the unattended one.
+        {
+          clusterId: thresholdId,
+          type: "DROP_UNUSED",
+          state: "PROPOSED",
+          database: "inttest",
+          collection: "orders",
+          indexName: "thin_1",
+          rationale: "high confidence, thin history",
+          score: 90,
+          estimatedBytesSaved: 1024,
+          evidenceDays: 3,
+        },
+        {
+          clusterId: thresholdId,
+          type: "DROP_UNUSED",
+          state: "PROPOSED",
+          database: "inttest",
+          collection: "orders",
+          indexName: "seasoned_1",
+          rationale: "high confidence, week of history",
+          score: 90,
+          estimatedBytesSaved: 1024,
+          evidenceDays: 7,
+        },
       ]);
     };
     const approvedNames = async (): Promise<string[]> => {
@@ -2493,13 +2524,17 @@ describe("auto-approval is one threshold", () => {
 
     await seed();
     await promoteByScore(db, thresholdId, 70);
-    expect(await approvedNames()).toEqual(["strong_1"]);
+    // strong_1 carries no span at all, which reads as eligible: a NULL means the
+    // finding does not rest on one, or predates the column. seasoned_1 has the
+    // week the floor asks for. thin_1 scores the same as both and has three days.
+    expect(await approvedNames()).toEqual(["seasoned_1", "strong_1"]);
 
     await seed();
     await promoteByScore(db, thresholdId, 0);
     // Everything except the advisory, which no setting may promote — an
-    // approved advisory leaves the PROPOSED set classify refreshes.
-    expect(await approvedNames()).toEqual(["strong_1", "weak_1"]);
+    // approved advisory leaves the PROPOSED set classify refreshes — and except
+    // thin_1: the history floor is not a threshold, so 0 does not open it.
+    expect(await approvedNames()).toEqual(["seasoned_1", "strong_1", "weak_1"]);
 
     // And the threshold applyCluster reads is the stored policy value.
     await db.insert(policies).values({ clusterId: thresholdId, autoApplyScore: 95 });
