@@ -78,6 +78,7 @@ describe("invalidationKeys", () => {
       expect(invalidationKeys(CLUSTER, { kind: "PASS_FINISHED", task })).toEqual([
         queryKeys.recommendations(CLUSTER),
         queryKeys.clusterIndexesAll(CLUSTER),
+        queryKeys.clusterWorkloadAll(CLUSTER),
       ]);
     }
   });

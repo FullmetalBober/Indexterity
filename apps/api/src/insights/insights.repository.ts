@@ -3,6 +3,7 @@ import type { LatencyReading } from "../analysis";
 import { runFrom } from "../analysis/types";
 import {
   actions,
+  analysisNotes,
   and,
   clusterIndexes,
   clusterRosters,
@@ -14,10 +15,13 @@ import {
   indexSnapshots,
   LIVE_STATES,
   latencySamples,
+  ne,
   or,
+  policies,
   recommendations,
   roiMetrics,
   sql,
+  workloadShapes,
 } from "../db";
 import { DatabaseService } from "../db/database.service";
 import { historyWindow } from "../jobs/plan";
@@ -28,6 +32,11 @@ export interface LatencyGroup {
   readonly collection: string;
   readonly readings: LatencyReading[];
 }
+
+// The sort key an unmeasured weekly cost stands in for (#432). Negative because
+// a real one never is, so the ordering below stays total and the page's cursor
+// stays a plain number — see workloadShapePage.
+export const UNMEASURED_COST = -1;
 
 export interface IndexSizeDay {
   readonly day: string;
@@ -342,6 +351,109 @@ export class InsightsRepository {
           ),
         ),
       );
+  }
+
+  // One page of the cluster's scanning workload (#432).
+  //
+  // Ranked by weekly cost descending rather than sorted by namespace, which is
+  // the difference from `clusterIndexPage` above: an inventory is browsed and
+  // this is a list of problems, so the worst ones are the answer and a reader
+  // who needs the fiftieth is looking at something else.
+  //
+  // Ordered on `coalesce(weekly_docs_examined, -1)`, which does two things at
+  // once. Postgres sorts nulls FIRST under `desc`, so a shape whose source could
+  // not report examined documents — an in-memory sort, or any `$queryStats`
+  // entry below mongo 8.0 — would otherwise HEAD a page ranked by cost while
+  // being the one row whose cost is unknown: unmeasured is not worst. And it
+  // makes the sort key total, which is what lets the cursor be a plain number
+  // rather than a nullable one: a real cost is never negative, so -1 is the
+  // unmeasured region and a tuple comparison works across both. Same reasoning
+  // as `orNull` in the collections table, where a missing number sorts as -1 so
+  // it stays out of the middle of a ranking it is not part of.
+  //
+  // Keyset for the reason the security trail gives (D67), with the id as the
+  // tiebreak: two shapes on one collection sharing a weekly figure is ordinary,
+  // and a cursor that was only the cost would skip whichever sorted second.
+  async workloadShapePage(
+    clusterId: string,
+    since: Date,
+    query: {
+      readonly database?: string | undefined;
+      readonly collection?: string | undefined;
+      readonly declinedOnly?: boolean | undefined;
+      readonly afterWeeklyDocsExamined?: number | undefined;
+      readonly afterId?: string | undefined;
+    },
+    limit: number,
+  ) {
+    const filters = [
+      eq(workloadShapes.clusterId, clusterId),
+      // The plan's window, same entitlement as every other per-cluster read.
+      // A shape last seen before it is history this caller has not bought.
+      gte(workloadShapes.lastSeenAt, since),
+    ];
+    if (query.database !== undefined) filters.push(eq(workloadShapes.database, query.database));
+    if (query.collection !== undefined) {
+      filters.push(eq(workloadShapes.collection, query.collection));
+    }
+    // The page's own question, and the one no other screen can answer: which of
+    // these did we decline to act on. `ne` rather than a list of the declining
+    // outcomes, so an outcome added later is declined by default — the safe
+    // direction, since the alternative is a new gate silently vanishing from the
+    // filter that exists to show it.
+    if (query.declinedOnly === true) filters.push(ne(workloadShapes.outcome, "proposed"));
+
+    const [counted] = await this.database.db
+      .select({ total: sql<number>`count(*)::int` })
+      .from(workloadShapes)
+      .where(and(...filters));
+
+    const page = [...filters];
+    if (query.afterWeeklyDocsExamined !== undefined && query.afterId !== undefined) {
+      page.push(
+        sql`(coalesce(${workloadShapes.weeklyDocsExamined}, ${UNMEASURED_COST}), ${workloadShapes.id})
+            < (${query.afterWeeklyDocsExamined}::bigint, ${query.afterId}::uuid)`,
+      );
+    }
+    const rows = await this.database.db
+      .select()
+      .from(workloadShapes)
+      .where(and(...page))
+      .orderBy(
+        sql`coalesce(${workloadShapes.weeklyDocsExamined}, ${UNMEASURED_COST}) desc`,
+        desc(workloadShapes.id),
+      )
+      .limit(limit + 1);
+    return { rows, total: counted?.total ?? rows.length };
+  }
+
+  // The WORKLOAD pass's own note (#277), for the two gates that can have no
+  // shape rows: they fire before the workload is read, so what exists is a count
+  // of COLLECTIONS nobody analysed. Read from the same row the budget count
+  // already lives in.
+  async workloadNote(clusterId: string) {
+    const [row] = await this.database.db
+      .select()
+      .from(analysisNotes)
+      .where(and(eq(analysisNotes.clusterId, clusterId), eq(analysisNotes.source, "WORKLOAD")))
+      .limit(1);
+    return row;
+  }
+
+  // Whether create-side analysis is switched off for this cluster.
+  //
+  // The one gate that leaves nothing at all behind — `suggestForCluster` returns
+  // before it reads anything — so an empty page has two very different meanings
+  // and this is which one. A MISSING policy row is not "off": that is the normal
+  // state of a new cluster, and reading absence as off is what kept the whole
+  // feature silent on exactly the clusters it had most to say about (#258).
+  async workloadAnalysisEnabled(clusterId: string): Promise<boolean> {
+    const [row] = await this.database.db
+      .select({ enabled: policies.workloadAnalysis })
+      .from(policies)
+      .where(eq(policies.clusterId, clusterId))
+      .limit(1);
+    return row?.enabled !== false;
   }
 
   async proposedNamespaces(clusterId: string) {

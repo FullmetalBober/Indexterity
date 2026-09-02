@@ -102,6 +102,29 @@ export const queryKeys = {
   // concrete cursor would miss every other page and leave them to be served
   // stale from the cache.
   clusterIndexesAll: (clusterId: string | null) => ["cluster-indexes", clusterId] as const,
+  // One page of the cluster's scanning workload (#432). Same rule as the two
+  // above: what the api was ASKED is in the key, and the prefix exists for the
+  // invalidations that move every page at once.
+  clusterWorkload: (
+    clusterId: string | null,
+    filter: {
+      database?: string | undefined;
+      collection?: string | undefined;
+      declinedOnly?: boolean | undefined;
+      afterWeeklyDocsExamined?: number | undefined;
+      afterId?: string | undefined;
+    },
+  ) =>
+    [
+      "cluster-workload",
+      clusterId,
+      filter.database ?? null,
+      filter.collection ?? null,
+      filter.declinedOnly ?? null,
+      filter.afterWeeklyDocsExamined ?? null,
+      filter.afterId ?? null,
+    ] as const,
+  clusterWorkloadAll: (clusterId: string | null) => ["cluster-workload", clusterId] as const,
   // Its own key rather than a field on `recommendations`: a cooldown outlives
   // the recommendation that caused it, and the two are moved by different
   // writes — a regression parks an index without touching the proposal list.

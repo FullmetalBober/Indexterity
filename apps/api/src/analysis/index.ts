@@ -22,3 +22,4 @@ export * from "./types";
 export * from "./usage";
 export * from "./window";
 export * from "./workload";
+export * from "./workload-outcome";

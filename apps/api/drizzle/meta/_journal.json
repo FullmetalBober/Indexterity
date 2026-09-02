@@ -414,6 +414,13 @@
       "when": 1788031711509,
       "tag": "0058_blocked_task",
       "breakpoints": true
+    },
+    {
+      "idx": 59,
+      "version": "7",
+      "when": 1788338308146,
+      "tag": "0059_workload_shapes",
+      "breakpoints": true
     }
   ]
 }

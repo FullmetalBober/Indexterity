@@ -29,6 +29,7 @@ import {
   clusterPrivileges,
   clusterRecommendations,
   clusterRoi,
+  clusterWorkload,
   connectionDiagnosis,
   myInvite,
   offboardResult,
@@ -155,6 +156,44 @@ export const contract = {
       }),
     )
     .output(clusterIndexes),
+
+  // The queries that MISS an index, including the ones the engine declined to
+  // act on (#432).
+  //
+  // `collector.collectWorkload` has always returned every scanning shape with
+  // its executions, its documents walked and the window behind both.
+  // `jobs/suggest.ts` read them once an hour, used them in memory, and persisted
+  // only the recommendations that cleared every create-side gate — so a query
+  // walking 900k documents a week on a small collection was seen, priced,
+  // discarded, and never mentioned. Every gate is right; each worked by making
+  // the FINDING disappear along with the proposal, which is the same defect #277
+  // fixed on the drop side.
+  //
+  // Ranked by weekly cost rather than sorted by namespace, which is the
+  // difference from `getClusterIndexes` beside it: an inventory is browsed, and
+  // this is a list of problems, so the worst ones are the answer.
+  getClusterWorkload: oc
+    .route({
+      method: "GET",
+      path: "/clusters/{clusterId}/workload",
+      summary:
+        "One page of the cluster's scanning query shapes: what an index would have to cover, what the scanning costs, and which gate declined to act on it",
+    })
+    .input(
+      z.object({
+        clusterId: z.uuid(),
+        database: z.string().optional(),
+        collection: z.string().optional(),
+        // Only the shapes nothing was proposed for, which is the question the
+        // page exists to answer and the one no other screen can.
+        declinedOnly: z.coerce.boolean().optional(),
+        // The cursor from the previous page. Both halves or neither — a cost
+        // without its tiebreak would skip a shape that shares it.
+        afterWeeklyDocsExamined: z.coerce.number().optional(),
+        afterId: z.uuid().optional(),
+      }),
+    )
+    .output(clusterWorkload),
 
   // Read on its own, never joined to `recommendations` (#159). A cooldown
   // OUTLIVES the recommendation that caused it: cancelling a pending drop parks

@@ -12,6 +12,7 @@ import type {
   ClusterIndexSizeSeries,
   ClusterLatencySeries,
   ClusterNodes,
+  ClusterWorkload,
   CollectionStat,
   LatencySummary,
 } from "@repo/contracts";
@@ -141,6 +142,57 @@ export function clusterIndexesQuery(clusterId: string | null, page: ClusterIndex
   });
 }
 
+// Which page of the scanning workload is being asked for (#432).
+export interface WorkloadPage {
+  readonly database?: string | undefined;
+  readonly collection?: string | undefined;
+  readonly declinedOnly?: boolean | undefined;
+  readonly afterWeeklyDocsExamined?: number | undefined;
+  readonly afterId?: string | undefined;
+}
+
+// `workloadAnalysisEnabled` true in the empty fallback, so a cluster whose read
+// has not answered yet does not draw "create-side analysis is off" — that is a
+// setting, and claiming it from an absence of data is the same mistake #289 was
+// about.
+export const NO_CLUSTER_WORKLOAD: ClusterWorkload = {
+  clusterId: "",
+  shapes: [],
+  total: 0,
+  nextWeeklyDocsExamined: null,
+  nextId: null,
+  workloadAnalysisEnabled: true,
+  collectionsBelowDocFloor: 0,
+  collectionsAboveSizeCeiling: 0,
+  analysedAt: null,
+};
+
+function workloadInput(page: WorkloadPage) {
+  return {
+    ...(page.database === undefined ? {} : { database: page.database }),
+    ...(page.collection === undefined ? {} : { collection: page.collection }),
+    ...(page.declinedOnly === undefined ? {} : { declinedOnly: page.declinedOnly }),
+    // Both halves or neither, for the reason the api gives: a cost without its
+    // tiebreak would skip a shape that shares it.
+    ...(page.afterWeeklyDocsExamined === undefined || page.afterId === undefined
+      ? {}
+      : {
+          afterWeeklyDocsExamined: page.afterWeeklyDocsExamined,
+          afterId: page.afterId,
+        }),
+  };
+}
+
+export function clusterWorkloadQuery(clusterId: string | null, page: WorkloadPage = {}) {
+  return queryOptions({
+    queryKey: queryKeys.clusterWorkload(clusterId, page),
+    queryFn: async () =>
+      clusterId === null
+        ? NO_CLUSTER_WORKLOAD
+        : api().getClusterWorkload({ clusterId, ...workloadInput(page) }),
+  });
+}
+
 // The whole payload, not just the array: collectedAt is the panel's "as of",
 // and a roster without its moment is a topology claim nobody made (#100).
 export function nodesQuery(clusterId: string | null) {
@@ -201,5 +253,18 @@ export function useClusterIndexes(
     isError,
     refetch,
   } = useQuery(clusterIndexesQuery(clusterId, page));
+  return { data, pending: isPending, failed: isError, retry: () => void refetch() };
+}
+
+export function useClusterWorkload(
+  clusterId: string | null,
+  page: WorkloadPage = {},
+): Read<ClusterWorkload> {
+  const {
+    data = NO_CLUSTER_WORKLOAD,
+    isPending,
+    isError,
+    refetch,
+  } = useQuery(clusterWorkloadQuery(clusterId, page));
   return { data, pending: isPending, failed: isError, retry: () => void refetch() };
 }

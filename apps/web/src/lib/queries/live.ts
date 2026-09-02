@@ -54,7 +54,14 @@ export function invalidationKeys(
           // The inventory's last column is "is something proposing to change
           // this index", so a pass that rewrites the proposals moves it too —
           // even though not one measurement on the page has changed.
-          return [queryKeys.recommendations(clusterId), queryKeys.clusterIndexesAll(clusterId)];
+          return [
+            queryKeys.recommendations(clusterId),
+            queryKeys.clusterIndexesAll(clusterId),
+            // The scanning workload is REWRITTEN by the suggest pass — every
+            // shape's outcome is decided there — so this is the event that
+            // moves it, not the collect (#432).
+            queryKeys.clusterWorkloadAll(clusterId),
+          ];
         case "apply":
         case "finalize":
           return [
