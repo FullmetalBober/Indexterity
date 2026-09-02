@@ -61,6 +61,7 @@ describe("invalidationKeys", () => {
   it("a landed collect moves the telemetry and the cluster list", () => {
     expect(invalidationKeys(CLUSTER, { kind: "PASS_FINISHED", task: "collect" })).toEqual([
       queryKeys.collections(CLUSTER),
+      queryKeys.clusterIndexesAll(CLUSTER),
       queryKeys.indexSizeSeries(CLUSTER),
       queryKeys.latency(CLUSTER),
       queryKeys.latencySeries(CLUSTER),
@@ -69,10 +70,14 @@ describe("invalidationKeys", () => {
     ]);
   });
 
-  it("analysis passes move the recommendations and nothing else", () => {
+  // And the index inventory with them (#431): its last column says whether
+  // something is proposing to change each index, so a pass that rewrites the
+  // proposals moves a page on which no measurement changed at all.
+  it("analysis passes move the recommendations and the inventory", () => {
     for (const task of ["classify", "suggest"] as const) {
       expect(invalidationKeys(CLUSTER, { kind: "PASS_FINISHED", task })).toEqual([
         queryKeys.recommendations(CLUSTER),
+        queryKeys.clusterIndexesAll(CLUSTER),
       ]);
     }
   });
@@ -86,6 +91,7 @@ describe("invalidationKeys", () => {
         queryKeys.activity(CLUSTER),
         queryKeys.roi(CLUSTER),
         queryKeys.cooldowns(CLUSTER),
+        queryKeys.clusterIndexesAll(CLUSTER),
       ]);
     }
   });
@@ -101,6 +107,7 @@ describe("invalidationKeys", () => {
         queryKeys.recommendations(CLUSTER),
         queryKeys.activity(CLUSTER),
         queryKeys.roi(CLUSTER),
+        queryKeys.clusterIndexesAll(CLUSTER),
       ]);
     }
   });
@@ -114,6 +121,7 @@ describe("invalidationKeys", () => {
       queryKeys.activity(CLUSTER),
       queryKeys.roi(CLUSTER),
       queryKeys.cooldowns(CLUSTER),
+      queryKeys.clusterIndexesAll(CLUSTER),
     ]);
   });
 });

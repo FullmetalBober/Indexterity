@@ -3,15 +3,19 @@ import type {
   AuditAction,
   ClusterCollections,
   ClusterCooldowns,
+  ClusterIndexes,
   ClusterIndexSizeSeries,
   ClusterLatency,
   ClusterLatencySeries,
   ClusterNodes,
   ClusterRoi,
+  IndexRecommendationLink,
   RoiContribution,
 } from "@repo/contracts";
 import {
+  CLUSTER_INDEXES_PAGE,
   clusterNode,
+  instant,
   LATENCY_SERIES_MAX_COLLECTIONS,
   LATENCY_SERIES_WINDOW_DAYS,
 } from "@repo/contracts";
@@ -24,6 +28,7 @@ import {
   summarizeFootprint,
   summarizeLatency,
 } from "../analysis";
+import { parseStoredSpec } from "../analysis/recommend";
 import { workerEnv } from "../config/env";
 import { TenancyService } from "../http/tenancy.service";
 import { isWholeCollection } from "../jobs/cooldowns";
@@ -31,6 +36,19 @@ import { InsightsRepository } from "./insights.repository";
 
 const RECENT_ACTIONS = 50;
 const TOP_CONTRIBUTORS = 10;
+
+// What the inventory page was asked for: an optional namespace scope, and the
+// cursor of the page before this one. Mirrors the contract's input rather than
+// re-deriving it, and stays a plain interface for the same reason
+// `SecurityTrailQuery` does — the controller has already validated it, so
+// re-parsing here would be a second opinion about a settled question.
+export interface ClusterIndexQuery {
+  readonly database?: string | undefined;
+  readonly collection?: string | undefined;
+  readonly afterDatabase?: string | undefined;
+  readonly afterCollection?: string | undefined;
+  readonly afterIndexName?: string | undefined;
+}
 
 // Read-only views over what the engine has already decided and recorded: ROI,
 // latency trends, per-collection footprint, the roster and the audit trail.
@@ -203,6 +221,130 @@ export class InsightsService {
       .map(([key, group]) => ({ ...group, proposedRecommendations: proposedByNs.get(key) ?? 0 }))
       .sort((a, b) => b.totalIndexBytes - a.totalIndexBytes);
     return { clusterId, collections };
+  }
+
+  // Every index the cluster HAS, one page of it (#431).
+  //
+  // The gap this closes: index-level numbers reached the dashboard only through
+  // `IndexUsage`, which is keyed by `recommendationId` because D66 attached it
+  // to the recommendations table. An index nobody had proposed anything about
+  // therefore had no size, no counters and no spec on any screen — so the only
+  // indexes a customer could see were the ones we already wanted to change, and
+  // everything the engine judged fine was invisible, including the judgement.
+  //
+  // No collector work and no new storage: `cluster_indexes` has carried the spec
+  // and `index_snapshots` the size and per-member counters since #67.
+  async clusterIndexes(
+    clusterId: string,
+    orgId: string,
+    query: ClusterIndexQuery,
+  ): Promise<ClusterIndexes> {
+    const empty = {
+      clusterId,
+      indexes: [],
+      total: 0,
+      nextDatabase: null,
+      nextCollection: null,
+      nextIndexName: null,
+      collectedAt: null,
+    };
+    if (!(await this.tenancy.ownsCluster(clusterId, orgId))) return empty;
+    // Display only — the page's own filter keeps the comparison in SQL, because
+    // this value has lost its microseconds on the way here.
+    const collectedAt = await this.repo.latestIndexReadingAt(clusterId);
+    if (collectedAt === null) return empty;
+
+    const { rows, total } = await this.repo.clusterIndexPage(
+      clusterId,
+      query,
+      CLUSTER_INDEXES_PAGE,
+    );
+    const page = rows.slice(0, CLUSTER_INDEXES_PAGE);
+    const more = rows.length > CLUSTER_INDEXES_PAGE;
+    const last = page[page.length - 1];
+
+    // One lookup per namespace ON THIS PAGE, deduplicated: a hundred indexes
+    // commonly live in a handful of collections, and the point of paging is that
+    // nothing here reads the whole cluster.
+    const namespaces = new Map<string, { database: string; collection: string }>();
+    for (const row of page) {
+      namespaces.set(`${row.database} ${row.collection}`, {
+        database: row.database,
+        collection: row.collection,
+      });
+    }
+    const links = await this.repo.liveRecommendationsFor(clusterId, [...namespaces.values()]);
+    const linkByIndex = new Map<string, IndexRecommendationLink>();
+    for (const rec of links) {
+      const link = { id: rec.id, type: rec.type, state: rec.state };
+      // A drop names the index it removes, so its own `index_name` is the one on
+      // screen. A build names the index it would CREATE, which does not exist
+      // yet and matches nothing here — but a REORDER or a narrowing UPDATE also
+      // RETIRES an existing index, and that one does. Retiring an index is a
+      // decision about the index being retired, so the row it belongs on is that
+      // one rather than none.
+      for (const name of [rec.indexName, ...(rec.targetSpec?.retire ?? [])]) {
+        const key = `${rec.database} ${rec.collection} ${name}`;
+        // First writer wins. Two live rows cannot both claim one index — the
+        // partial unique index recommendations_one_live_claim forbids it for the
+        // types that make the same claim — but a REORDER retiring the index a
+        // DROP also names is reachable, and the page needs one link rather than
+        // a rule about which.
+        if (!linkByIndex.has(key)) linkByIndex.set(key, link);
+      }
+    }
+
+    return {
+      clusterId,
+      indexes: page.map((row) => {
+        const spec = parseStoredSpec(row.spec);
+        const perMember = row.perMember.map((entry) => ({
+          member: entry.member,
+          ops: entry.ops,
+          // Validated rather than forwarded. The value is an adapter's string
+          // and one of them falls back to "" when the server did not answer the
+          // identity query (postgres/connection.ts) — an empty string is not an
+          // instant, and forwarding it would fail the contract's output
+          // validation and take the whole page down over one member's unknown
+          // counter start. Unknown is what null means here.
+          since: instant.safeParse(entry.since).success ? (entry.since ?? null) : null,
+        }));
+        return {
+          id: row.id,
+          database: row.database,
+          collection: row.collection,
+          indexName: row.indexName,
+          keys: spec.keys.map((key) => ({ field: key.field, direction: key.direction })),
+          include: [...(spec.include ?? [])],
+          unique: spec.unique,
+          ttl: spec.ttl,
+          partial: spec.partial,
+          partialFilter: spec.partialFilter,
+          sparse: spec.sparse,
+          hidden: spec.hidden,
+          isShardKey: spec.isShardKey,
+          collation: spec.collation,
+          hinted: row.hinted,
+          sizeBytes: row.sizeBytes,
+          // Summed over the members that ANSWERED, which is the only total that
+          // can be honestly stated: a member the collect could not reach is not
+          // in `per_member` at all, and the roster read beside this page is what
+          // names it rather than counting it as a zero (D66).
+          totalOps: perMember.reduce((sum, entry) => sum + entry.ops, 0),
+          perMember,
+          observedAt: row.lastSeenAt.toISOString(),
+          recommendation:
+            linkByIndex.get(`${row.database} ${row.collection} ${row.indexName}`) ?? null,
+        };
+      }),
+      total,
+      // Null at the end, so the page stops offering "more" rather than fetching
+      // an empty one to discover the end.
+      nextDatabase: more && last !== undefined ? last.database : null,
+      nextCollection: more && last !== undefined ? last.collection : null,
+      nextIndexName: more && last !== undefined ? last.indexName : null,
+      collectedAt: collectedAt.toISOString(),
+    };
   }
 
   // What the engine has agreed not to touch, and until when (#159).

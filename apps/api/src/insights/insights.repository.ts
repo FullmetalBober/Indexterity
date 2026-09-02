@@ -12,7 +12,9 @@ import {
   inArray,
   indexCooldowns,
   indexSnapshots,
+  LIVE_STATES,
   latencySamples,
+  or,
   recommendations,
   roiMetrics,
   sql,
@@ -188,6 +190,156 @@ export class InsightsRepository {
         and(
           eq(indexSnapshots.clusterId, clusterId),
           sql`${indexSnapshots.lastSeenAt} = (select max(${indexSnapshots.lastSeenAt}) from ${indexSnapshots} where ${indexSnapshots.clusterId} = ${clusterId})`,
+        ),
+      );
+  }
+
+  // The instant the newest index reading was confirmed, or null if none ever
+  // was. The inventory's "as of" — a display value, and ONLY that.
+  //
+  // It is deliberately not fed back in as the page's filter. Postgres keeps
+  // microseconds on a timestamptz and a JS Date is milliseconds, so a value that
+  // has been through this method no longer compares equal to the rows it came
+  // from: re-querying `last_seen_at = ` this would match nothing at all. The
+  // page's own filter keeps the comparison in SQL for that reason, which is the
+  // same trap `latestIndexFootprint` documents below.
+  //
+  // Typed as a string, and converted here, because that is what actually comes
+  // back: drizzle decodes a column by the schema's type, and a raw `sql`
+  // fragment has no column for it to look up — so an aggregate arrives as
+  // node-postgres left it. Writing `sql<Date>` would have been an assertion
+  // dressed as a type, and it was: the first run of this endpoint died on
+  // `collectedAt.toISOString is not a function`.
+  async latestIndexReadingAt(clusterId: string): Promise<Date | null> {
+    const [row] = await this.database.db
+      .select({ at: sql<string | null>`max(${indexSnapshots.lastSeenAt})` })
+      .from(indexSnapshots)
+      .where(eq(indexSnapshots.clusterId, clusterId));
+    if (row?.at === undefined || row.at === null) return null;
+    const at = new Date(row.at);
+    return Number.isNaN(at.getTime()) ? null : at;
+  }
+
+  // One page of the cluster's index inventory (#431).
+  //
+  // Scoped to the runs the LATEST collect confirmed, which is what makes this
+  // one row per live index rather than one per historical shape. Two things it
+  // rests on, both already true of the writer: a collect stamps every run it
+  // touches with one `now` (jobs/collect.ts), and the exclusion constraint on
+  // `span` forbids two runs of one index overlapping — so an index seen by that
+  // collect has exactly one row here, and a REBUILT index's older dimension row
+  // has a run that ended earlier and is therefore absent. Filtering by
+  // `captured_at` instead would drop every idle index, whose run may have
+  // started weeks ago: that is the same mistake `latestIndexFootprint` above
+  // documents having made.
+  //
+  // Keyset, not offset, for the reason the security trail gives (D67): the set
+  // moves under the reader — a collect lands, an index is built — and an offset
+  // page would then repeat or skip whatever crossed the boundary. The tuple
+  // comparison is exact where three separate `>` clauses would not be.
+  async clusterIndexPage(
+    clusterId: string,
+    query: {
+      readonly database?: string | undefined;
+      readonly collection?: string | undefined;
+      readonly afterDatabase?: string | undefined;
+      readonly afterCollection?: string | undefined;
+      readonly afterIndexName?: string | undefined;
+    },
+    limit: number,
+  ) {
+    const filters = [
+      eq(indexSnapshots.clusterId, clusterId),
+      // In SQL, never as a parameter round-tripped through a JS Date — see
+      // latestIndexReadingAt above, and latestIndexFootprint below, which lost
+      // this argument once already.
+      sql`${indexSnapshots.lastSeenAt} = (select max(${indexSnapshots.lastSeenAt}) from ${indexSnapshots} where ${indexSnapshots.clusterId} = ${clusterId})`,
+    ];
+    if (query.database !== undefined) filters.push(eq(clusterIndexes.database, query.database));
+    if (query.collection !== undefined) {
+      filters.push(eq(clusterIndexes.collection, query.collection));
+    }
+    // The total is of what MATCHES the namespace filter, not of the cluster: a
+    // filtered page saying "100 of 211" against the unfiltered count would be
+    // describing rows the reader did not ask for.
+    const [counted] = await this.database.db
+      .select({ total: sql<number>`count(*)::int` })
+      .from(indexSnapshots)
+      .innerJoin(clusterIndexes, eq(indexSnapshots.indexId, clusterIndexes.id))
+      .where(and(...filters));
+
+    const page = [...filters];
+    if (
+      query.afterDatabase !== undefined &&
+      query.afterCollection !== undefined &&
+      query.afterIndexName !== undefined
+    ) {
+      page.push(
+        sql`(${clusterIndexes.database}, ${clusterIndexes.collection}, ${clusterIndexes.indexName}) > (${query.afterDatabase}, ${query.afterCollection}, ${query.afterIndexName})`,
+      );
+    }
+    // One more than the page, so "is there another" costs no second query, and
+    // the extra row is dropped rather than sent.
+    const rows = await this.database.db
+      .select({
+        id: clusterIndexes.id,
+        database: clusterIndexes.database,
+        collection: clusterIndexes.collection,
+        indexName: clusterIndexes.indexName,
+        spec: clusterIndexes.spec,
+        sizeBytes: indexSnapshots.sizeBytes,
+        perMember: indexSnapshots.perMember,
+        hinted: indexSnapshots.hinted,
+        lastSeenAt: indexSnapshots.lastSeenAt,
+      })
+      .from(indexSnapshots)
+      .innerJoin(clusterIndexes, eq(indexSnapshots.indexId, clusterIndexes.id))
+      .where(and(...page))
+      .orderBy(clusterIndexes.database, clusterIndexes.collection, clusterIndexes.indexName)
+      .limit(limit + 1);
+    return { rows, total: counted?.total ?? rows.length };
+  }
+
+  // Live recommendations over the namespaces one page covers.
+  //
+  // Scoped to the page rather than to the cluster on purpose: the whole reason
+  // this endpoint pages is that an index list is unbounded, and reading every
+  // proposal to decorate a hundred rows would put the unbounded read back one
+  // layer down. An OR over the pairs, not a cluster-wide read filtered in
+  // memory — and an OR of two equalities rather than a tuple `in`, because
+  // drizzle's `inArray` binds its right-hand side as ONE parameter and a
+  // row-constructor there is a runtime error rather than a type one.
+  //
+  // Live states only — a DROPPED or REJECTED row is history, and the column the
+  // page draws is "is something proposing to change this index right now".
+  async liveRecommendationsFor(
+    clusterId: string,
+    namespaces: readonly { readonly database: string; readonly collection: string }[],
+  ) {
+    if (namespaces.length === 0) return [];
+    return this.database.db
+      .select({
+        id: recommendations.id,
+        type: recommendations.type,
+        state: recommendations.state,
+        database: recommendations.database,
+        collection: recommendations.collection,
+        indexName: recommendations.indexName,
+        targetSpec: recommendations.targetSpec,
+      })
+      .from(recommendations)
+      .where(
+        and(
+          eq(recommendations.clusterId, clusterId),
+          inArray(recommendations.state, [...LIVE_STATES]),
+          or(
+            ...namespaces.map((ns) =>
+              and(
+                eq(recommendations.database, ns.database),
+                eq(recommendations.collection, ns.collection),
+              ),
+            ),
+          ),
         ),
       );
   }

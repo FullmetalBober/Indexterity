@@ -446,6 +446,137 @@ export const clusterCollections = z.object({
 });
 export type ClusterCollections = z.infer<typeof clusterCollections>;
 
+// How many indexes one page of the inventory carries (#431).
+//
+// The dev cluster has 211; a real one has more, and every row carries a key
+// pattern and a per-member split, so this is the read that would otherwise grow
+// with the customer's index count forever — the unbounded shape #64 bounded
+// everywhere else. 100 measured ~46 KB against the dev cluster's widest
+// namespaces, which is a page rather than a payload.
+export const CLUSTER_INDEXES_PAGE = 100;
+
+// One key of an index, in the order the index declares it. The direction
+// vocabulary is the adapters' (engine/types.ts): a relational engine only ever
+// reports 1 or -1, and the three MongoDB special forms are what the others
+// cannot express.
+export const indexKeyView = z.object({
+  field: z.string(),
+  direction: z.union([
+    z.literal(1),
+    z.literal(-1),
+    z.literal("2dsphere"),
+    z.literal("text"),
+    z.literal("hashed"),
+  ]),
+});
+export type IndexKeyView = z.infer<typeof indexKeyView>;
+
+// One member's share of an index's operations, with the counter start beside it.
+//
+// `since` is the difference between this and `memberOps`, and it is the whole
+// reason the inventory does not reuse that schema: `$indexStats` counters are
+// cumulative from the moment the member came up, so "0 ops" on a member that
+// restarted an hour ago is not idleness (D114). Null when the reading predates
+// the field being captured, which is not the same as "the counter started at
+// the epoch".
+export const indexMemberUsage = z.object({
+  member: z.string(),
+  ops: z.int().nonnegative(),
+  since: instant.nullable(),
+});
+export type IndexMemberUsage = z.infer<typeof indexMemberUsage>;
+
+// A recommendation that currently points at an index, so the row can link to it
+// rather than leaving the reader to find out on another page whether the engine
+// has an opinion. Null for the indexes nobody has proposed anything about —
+// which is most of them, and the population this page exists to show.
+export const indexRecommendationLink = z.object({
+  id: z.uuid(),
+  type: recommendationType,
+  state: recommendationState,
+});
+export type IndexRecommendationLink = z.infer<typeof indexRecommendationLink>;
+
+// One index the cluster actually has, as of the latest collect (#431).
+//
+// Everything here was already stored — `cluster_indexes` carries the identity
+// and the spec, `index_snapshots` the size and the per-member counters — and
+// none of it had anywhere to be looked at: index-level numbers reached the
+// dashboard only as `IndexUsage`, keyed by `recommendationId` (D66), so an index
+// nobody had proposed anything about had no row on any screen.
+//
+// The flags are carried as the booleans the adapters set rather than as a
+// rendered list, and they are NOT all meaningful on every engine: PostgreSQL
+// reports no TTL, no sparse and no hidden (its collector hardcodes all three,
+// and D106 is why the last one), SQL Server reports `hidden` as a disabled index
+// and no TTL or sparse. `isShardKey` is the port's "the cluster does not work
+// without this" flag and means a shard key, a primary key and a clustered index
+// on the three engines — so the WORDING is resolved against the cluster's engine
+// by index-flags.ts rather than being fixed here.
+export const clusterIndexRow = z.object({
+  // The dimension row's id, which is the page's stable row key. Not the
+  // namespace-plus-name triple: a rebuilt index has a second dimension row (the
+  // table is keyed by spec digest), and only one of them is the live one.
+  id: z.uuid(),
+  database: z.string(),
+  collection: z.string(),
+  indexName: z.string(),
+  keys: z.array(indexKeyView),
+  // Carried at the leaves without being ordered by — SQL Server's INCLUDE.
+  // Empty on the engines that have no such concept, which is every engine but
+  // that one.
+  include: z.array(z.string()),
+  unique: z.boolean(),
+  ttl: z.boolean(),
+  partial: z.boolean(),
+  // The predicate itself, not just whether there is one: two partial indexes
+  // are only interchangeable if they filter on the same thing. A mongo
+  // expression, `{ sql: … }` from PostgreSQL, `{ definition: … }` from SQL
+  // Server — rendered as text, never interpreted.
+  partialFilter: z.record(z.string(), z.unknown()).nullable(),
+  sparse: z.boolean(),
+  hidden: z.boolean(),
+  isShardKey: z.boolean(),
+  collation: z.string().nullable(),
+  // Seen as the target of a hint() in the profiler window. The engine will not
+  // re-order or hide a hinted index (analysis/reorder.ts), so this is a state
+  // the customer could previously only infer from a recommendation's absence.
+  hinted: z.boolean(),
+  sizeBytes: z.int().nonnegative(),
+  // Summed across the members that ANSWERED. The split is beside it because the
+  // split is the finding (D66) — 40,000 ops all on one secondary is a reporting
+  // replica, and the same total spread evenly is the application.
+  totalOps: z.int().nonnegative(),
+  perMember: z.array(indexMemberUsage),
+  // When this reading was last confirmed still true — `last_seen_at`, the run's
+  // end, not its start. A page drawn from a collect that failed three days ago
+  // is a claim about three days ago, so the age travels with the number.
+  observedAt: instant,
+  recommendation: indexRecommendationLink.nullable(),
+});
+export type ClusterIndexRow = z.infer<typeof clusterIndexRow>;
+
+// One page of the cluster's index inventory.
+export const clusterIndexes = z.object({
+  clusterId: z.uuid(),
+  indexes: z.array(clusterIndexRow),
+  // How many indexes MATCH — the whole cluster's, or the namespace filter's, so
+  // a page can say "100 of 211" instead of implying it is everything.
+  total: z.int().nonnegative(),
+  // The cursor for the page after this one, or null at the end. A compound key
+  // for the same reason the security trail's is (D67): the sort is namespace
+  // then name, and one cluster can hold two indexes of the same name in two
+  // collections, so any prefix of the three would skip a row.
+  nextDatabase: z.string().nullable(),
+  nextCollection: z.string().nullable(),
+  nextIndexName: z.string().nullable(),
+  // When the reading these rows come from was taken. Null when nothing has ever
+  // been collected, which is the page's "nothing yet" state rather than "this
+  // cluster has no indexes".
+  collectedAt: instant.nullable(),
+});
+export type ClusterIndexes = z.infer<typeof clusterIndexes>;
+
 // One node of the cluster as the last collect saw it (#100). `refused` is this
 // deployment's net guard declining to dial the address the cluster named — a
 // policy fact, not member health — and a role stays "unknown" exactly when the

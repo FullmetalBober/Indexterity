@@ -78,6 +78,15 @@ function ClusterLayout() {
           Overview
         </Link>
         <Link
+          to="/app/clusters/$clusterId/indexes"
+          params={{ clusterId }}
+          activeProps={TAB_ACTIVE}
+          inactiveProps={TAB_INACTIVE}
+          className={TAB}
+        >
+          Indexes
+        </Link>
+        <Link
           to="/app/clusters/$clusterId/settings"
           params={{ clusterId }}
           activeProps={TAB_ACTIVE}

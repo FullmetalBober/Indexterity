@@ -1,5 +1,6 @@
 import type { ChildProcess } from "node:child_process";
 import {
+  CLUSTER_INDEXES_PAGE,
   LATENCY_SERIES_MAX_COLLECTIONS,
   LATENCY_SERIES_WINDOW_DAYS,
   RECOMMENDATIONS_CAP,
@@ -5331,6 +5332,234 @@ describe("bounded per-cluster reads", () => {
     expect(foreign.points).toEqual([]);
     expect(foreign.latestBytes).toBeNull();
     expect(foreign.changeBytes).toBeNull();
+  });
+
+  // #431. Every one of these numbers was already stored and none of them had
+  // anywhere to be looked at: index-level readings reached the dashboard only as
+  // `IndexUsage`, keyed by recommendationId, so an index nobody had proposed
+  // anything about was invisible along with the judgement that it was fine.
+  it("lists every index the last collect saw, paged by namespace", async () => {
+    const invId = await bareCluster("Index Inventory");
+    const now = Date.now();
+    const collectedAt = new Date(now);
+    const specOf = (name: string, extra: Record<string, unknown> = {}) => ({
+      name,
+      keys: [{ field: "status", direction: 1 }],
+      unique: false,
+      ttl: false,
+      partial: false,
+      partialFilter: null,
+      sparse: false,
+      hidden: false,
+      isShardKey: false,
+      collation: null,
+      ...extra,
+    });
+    // Three namespaces so the sort and the filter have something to be wrong
+    // about, and a deliberately unsorted insert order.
+    await insertSnapshots(db, [
+      {
+        clusterId: invId,
+        database: "app",
+        collection: "orders",
+        indexName: "status_1",
+        spec: specOf("status_1"),
+        sizeBytes: 4_096,
+        perMember: [
+          { member: "a:27017", ops: 40, since: new Date(now - 86_400_000).toISOString() },
+          { member: "b:27017", ops: 2, since: new Date(now - 86_400_000).toISOString() },
+        ],
+        capturedAt: new Date(now - 7_200_000),
+        lastSeenAt: collectedAt,
+      },
+      {
+        clusterId: invId,
+        database: "app",
+        collection: "orders",
+        indexName: "hidden_1",
+        spec: specOf("hidden_1", { hidden: true, unique: true }),
+        sizeBytes: 1_024,
+        perMember: [],
+        hinted: true,
+        capturedAt: new Date(now - 7_200_000),
+        lastSeenAt: collectedAt,
+      },
+      {
+        clusterId: invId,
+        database: "app",
+        collection: "carts",
+        indexName: "user_1",
+        spec: specOf("user_1"),
+        sizeBytes: 512,
+        perMember: [{ member: "a:27017", ops: 9, since: new Date(now - 3_600_000).toISOString() }],
+        capturedAt: new Date(now - 7_200_000),
+        lastSeenAt: collectedAt,
+      },
+      // A run that ENDED before the latest collect: the index was rebuilt or
+      // dropped, and the inventory is about what the cluster has now.
+      {
+        clusterId: invId,
+        database: "app",
+        collection: "orders",
+        indexName: "gone_1",
+        spec: specOf("gone_1"),
+        sizeBytes: 8_192,
+        perMember: [],
+        capturedAt: new Date(now - 172_800_000),
+        lastSeenAt: new Date(now - 86_400_000),
+      },
+    ]);
+
+    const body = asRecord(await (await api(`/clusters/${invId}/indexes`, owner)).json());
+    const rows = asRecords(body.indexes, "body.indexes");
+    // Namespace order, and the retired index is not in it.
+    expect(rows.map((row) => `${row.collection}.${row.indexName}`)).toEqual([
+      "carts.user_1",
+      "orders.hidden_1",
+      "orders.status_1",
+    ]);
+    expect(body.total).toBe(3);
+    expect(body.collectedAt).not.toBeNull();
+    // Nothing more to fetch, so no cursor is offered — a reader must not have to
+    // page into an empty response to discover the end.
+    expect(body.nextIndexName).toBeNull();
+
+    const status = rows.find((row) => row.indexName === "status_1");
+    expect(status).toBeDefined();
+    // Summed over the members that ANSWERED, with the split beside it: the whole
+    // point of D66 is that these two are not the same fact.
+    expect(status?.totalOps).toBe(42);
+    expect(asRecords(status?.perMember, "perMember").map((entry) => entry.ops)).toEqual([40, 2]);
+    // The counter start travels with the count, so a restart is not read as
+    // idleness (D114).
+    expect(asRecords(status?.perMember, "perMember")[0]?.since).not.toBeNull();
+    expect(status?.sizeBytes).toBe(4_096);
+
+    // Two states the customer could previously only infer from a
+    // recommendation's ABSENCE.
+    const hidden = rows.find((row) => row.indexName === "hidden_1");
+    expect(hidden).toMatchObject({ hidden: true, unique: true, hinted: true });
+    // A member that did not report this index is not invented as a zero.
+    expect(hidden?.perMember).toEqual([]);
+    expect(hidden?.totalOps).toBe(0);
+
+    // Namespace-scoped, and the total narrows with it rather than describing
+    // rows the reader did not ask for.
+    const scoped = asRecord(
+      await (await api(`/clusters/${invId}/indexes?collection=carts`, owner)).json(),
+    );
+    expect(asRecords(scoped.indexes, "scoped.indexes").map((row) => row.indexName)).toEqual([
+      "user_1",
+    ]);
+    expect(scoped.total).toBe(1);
+
+    // A recommendation pointing at an index shows up on that index's row —
+    // including one that RETIRES it under a different proposed name, which is
+    // what a REORDER is.
+    const [dropRow] = await db
+      .insert(recommendations)
+      .values({
+        clusterId: invId,
+        type: "DROP_UNUSED",
+        state: "PROPOSED",
+        database: "app",
+        collection: "orders",
+        indexName: "status_1",
+        rationale: "unused",
+      })
+      .returning();
+    await db.insert(recommendations).values({
+      clusterId: invId,
+      type: "REORDER",
+      state: "PROPOSED",
+      database: "app",
+      collection: "carts",
+      indexName: "user_-1",
+      rationale: "wrong direction",
+      targetSpec: { keys: ["user:-1"], retire: ["user_1"] },
+    });
+    const linked = asRecords(
+      asRecord(await (await api(`/clusters/${invId}/indexes`, owner)).json()).indexes,
+      "linked.indexes",
+    );
+    expect(asRecord(linked.find((row) => row.indexName === "status_1")?.recommendation).id).toBe(
+      dropRow?.id,
+    );
+    expect(asRecord(linked.find((row) => row.indexName === "user_1")?.recommendation).type).toBe(
+      "REORDER",
+    );
+    // And most indexes have none, which is the population this page exists for.
+    expect(linked.find((row) => row.indexName === "hidden_1")?.recommendation).toBeNull();
+
+    // Another tenant gets the empty shape rather than a refusal, like every
+    // other per-cluster read.
+    const stranger = await signUp("inventory-stranger");
+    createdEmails.push(stranger.email);
+    createdOrgIds.push(asString(asRecord(await (await api("/org", stranger)).json()).id));
+    const foreign = asRecord(await (await api(`/clusters/${invId}/indexes`, stranger)).json());
+    expect(foreign.indexes).toEqual([]);
+    expect(foreign.total).toBe(0);
+    expect(foreign.collectedAt).toBeNull();
+  });
+
+  // The cursor is the whole reason this endpoint is not the uncapped read
+  // `getCollections` is: an index list grows with the customer's schema forever.
+  it("pages the inventory by keyset without repeating or skipping a row", async () => {
+    const pagedId = await bareCluster("Index Inventory Paging");
+    const now = Date.now();
+    const spec = {
+      name: "k",
+      keys: [{ field: "k", direction: 1 }],
+      unique: false,
+      ttl: false,
+      partial: false,
+      partialFilter: null,
+      sparse: false,
+      hidden: false,
+      isShardKey: false,
+      collation: null,
+    };
+    const count = CLUSTER_INDEXES_PAGE + 7;
+    await insertSnapshots(
+      db,
+      Array.from({ length: count }, (_, n) => ({
+        clusterId: pagedId,
+        database: "app",
+        collection: "wide",
+        // Zero-padded so lexicographic order — which is what the keyset
+        // comparison uses — is also the order a reader expects.
+        indexName: `idx_${String(n).padStart(4, "0")}`,
+        spec: { ...spec, name: `idx_${String(n).padStart(4, "0")}` },
+        sizeBytes: 100 + n,
+        perMember: [],
+        capturedAt: new Date(now - 3_600_000),
+        lastSeenAt: new Date(now),
+      })),
+    );
+
+    const first = asRecord(await (await api(`/clusters/${pagedId}/indexes`, owner)).json());
+    const firstRows = asRecords(first.indexes, "first.indexes");
+    expect(firstRows).toHaveLength(CLUSTER_INDEXES_PAGE);
+    // The honest denominator: this is a page of a larger set and says so.
+    expect(first.total).toBe(count);
+    expect(first.nextIndexName).toBe(firstRows[firstRows.length - 1]?.indexName);
+
+    const cursor = new URLSearchParams({
+      afterDatabase: asString(first.nextDatabase),
+      afterCollection: asString(first.nextCollection),
+      afterIndexName: asString(first.nextIndexName),
+    });
+    const second = asRecord(
+      await (await api(`/clusters/${pagedId}/indexes?${cursor.toString()}`, owner)).json(),
+    );
+    const secondRows = asRecords(second.indexes, "second.indexes");
+    expect(secondRows).toHaveLength(count - CLUSTER_INDEXES_PAGE);
+    expect(second.nextIndexName).toBeNull();
+
+    // Every index exactly once across the two pages, which is the property an
+    // offset page loses the moment a collect lands mid-read.
+    const seen = [...firstRows, ...secondRows].map((row) => String(row.indexName));
+    expect(new Set(seen).size).toBe(count);
   });
 });
 
