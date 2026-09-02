@@ -15,10 +15,14 @@ import {
   columnFilteringFeature,
   createColumnHelper,
   createFilteredRowModel,
+  createPaginatedRowModel,
   createSortedRowModel,
   filterFn_includesString,
+  functionalUpdate,
   globalFilteringFeature,
+  type PaginationState,
   type RowData,
+  rowPaginationFeature,
   rowSortingFeature,
   type SortingState,
   sortFn_alphanumeric,
@@ -26,14 +30,29 @@ import {
   sortFn_datetime,
   sortFn_text,
   tableFeatures,
+  type Updater,
   useTable,
 } from "@tanstack/react-table";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { ArrowDownIcon, ArrowUpIcon, ChevronsUpDownIcon, SearchIcon } from "lucide-react";
+import {
+  ArrowDownIcon,
+  ArrowUpIcon,
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  ChevronsUpDownIcon,
+  SearchIcon,
+} from "lucide-react";
 import { type ReactNode, useRef, useState } from "react";
 import { Button } from "~/components/ui/button";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "~/components/ui/empty";
 import { Input } from "~/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "~/components/ui/select";
 import { Skeleton } from "~/components/ui/skeleton";
 import {
   Table,
@@ -47,9 +66,19 @@ import {
 
 // Declared once, statically, outside any component — which is what v9 asks for
 // and is the point of its feature registry: what a table can do is settled at
-// build time, so the grouping, pagination and row selection nobody here uses are
-// not in the bundle. The three dashboard tables want the same three things, so
-// there is one set rather than three.
+// build time, so the grouping and row selection nobody here uses are not in the
+// bundle. The three dashboard tables want the same things, so there is one set
+// rather than three.
+//
+// Pagination joined it in #445, and every table passes `manualPagination: true`
+// unconditionally — which is what keeps the two tables with no pagination props
+// exactly as they were. Registering the feature without that would be a silent
+// regression rather than an addition: v9 defaults `PaginationState` to
+// `{ pageIndex: 0, pageSize: 10 }`, so the recommendations and footprint tables
+// would quietly start showing ten rows. Under `manualPagination` the slicing
+// function is never called and every row is returned, so the feature is only the
+// page ARITHMETIC — which is all that is wanted here, because the server does the
+// slicing (D133).
 //
 // Only the sort functions a column actually names are registered. `basic` is the
 // numeric one (scores, byte counts, percentages), `alphanumeric` orders
@@ -59,8 +88,10 @@ export const dashboardTableFeatures = tableFeatures({
   rowSortingFeature,
   columnFilteringFeature,
   globalFilteringFeature,
+  rowPaginationFeature,
   sortedRowModel: createSortedRowModel(),
   filteredRowModel: createFilteredRowModel(),
+  paginatedRowModel: createPaginatedRowModel(),
   sortFns: {
     alphanumeric: sortFn_alphanumeric,
     basic: sortFn_basic,
@@ -167,6 +198,47 @@ interface DataTableProps<TData extends RowData> {
   // when stretched — a line much past ninety characters is hard to track back
   // from, so a column of prose in a narrow page still wants a ceiling.
   readonly flexColumn?: { readonly index: number; readonly max?: number };
+  // Server-side pagination, drawn as a footer under the table. Absent means no
+  // footer and every row rendered, which is what the other two tables do.
+  //
+  // The page index and size are the CALLER's state, not the table's, because they
+  // are what the next request is made from — the table owns the arithmetic over
+  // them and nothing else. `rowCount` is the matching total, which is the only way
+  // a page count can exist at all when the table holds one page.
+  //
+  // A caveat the footer states rather than hides: the sort and the filter above act
+  // on the rows THIS PAGE holds, so "sort by size" orders the page and not the
+  // cluster. Paging server-side and sorting client-side cannot both be true at
+  // once, and saying so is better than a control that looks like it did something
+  // larger than it did.
+  // Server-owned sort. Present means the ORDER BY is the api's, so the table does
+  // not reorder anything — it draws the header state and reports clicks.
+  //
+  // A sibling of `pagination` rather than a field on it, because the three
+  // dimensions are independent: a capped read wants none of them, and these two
+  // paged reads want all three (D135). What they must NOT be is mixed — a table
+  // that pages on the server and sorts in the browser orders the rows the server
+  // happened to choose, which is the reading nobody wants.
+  readonly sorting?: {
+    readonly state: SortingState;
+    readonly onChange: (next: SortingState) => void;
+  };
+  // Server-owned filter, same contract. The value is the caller's, because it is
+  // what the next request carries.
+  readonly filter?: {
+    readonly value: string;
+    readonly onChange: (next: string) => void;
+  };
+  readonly pagination?: {
+    readonly pageIndex: number;
+    readonly pageSize: number;
+    readonly rowCount: number;
+    readonly onChange: (next: PaginationState) => void;
+    // Offered in a select when given. One size means no control.
+    readonly pageSizes?: readonly number[];
+    // What one row is, for the "1-100 of 517 indexes" line. Plural.
+    readonly noun: string;
+  };
 }
 
 export function DataTable<TData extends RowData>({
@@ -182,19 +254,73 @@ export function DataTable<TData extends RowData>({
   virtualize,
   columnWidths,
   flexColumn,
+  pagination,
+  sorting: serverSorting,
+  filter: serverFilter,
 }: DataTableProps<TData>) {
-  const [sorting, setSorting] = useState<SortingState>(initialSorting);
-  const [globalFilter, setGlobalFilter] = useState("");
+  // Local state is the fallback, not the mechanism: a capped read owns its own
+  // sort and filter (D33), and a paged one hands them to the api (D135). Both
+  // hooks are always called — the state they hold is simply unread in the second
+  // case, which is what keeps this one component rather than two.
+  const [localSorting, setLocalSorting] = useState<SortingState>(initialSorting);
+  const [localFilter, setLocalFilter] = useState("");
+  const sorting = serverSorting?.state ?? localSorting;
+  const setSorting = serverSorting?.onChange ?? setLocalSorting;
+  const globalFilter = serverFilter?.value ?? localFilter;
+  const setGlobalFilter = serverFilter?.onChange ?? setLocalFilter;
 
   const table = useTable({
     features: dashboardTableFeatures,
     columns,
     data,
     getRowId,
-    state: { sorting, globalFilter },
-    onSortingChange: setSorting,
-    onGlobalFilterChange: setGlobalFilter,
+    state: {
+      sorting,
+      globalFilter,
+      ...(pagination === undefined
+        ? {}
+        : { pagination: { pageIndex: pagination.pageIndex, pageSize: pagination.pageSize } }),
+    },
+    // v9 hands every `on*Change` an UPDATER rather than a value — a header click,
+    // `setPageIndex` and `setPageSize` all call it with a function of the previous
+    // state, and `setPageSize`'s recomputes the page index so the row at the top of
+    // the page stays in view. `functionalUpdate` is the library's own resolver for
+    // that; the state it resolves against is the CALLER's, which is the only copy
+    // there is once the api owns the dimension, so there is nothing to drift from.
+    onSortingChange: (updater: Updater<SortingState>) =>
+      setSorting(functionalUpdate(updater, sorting)),
+    onGlobalFilterChange: (updater: Updater<string>) =>
+      setGlobalFilter(functionalUpdate(updater, globalFilter)),
     globalFilterFn: "includesString",
+    // Always, and see dashboardTableFeatures: the rows in `data` ARE the page, so
+    // the table must not slice them again. Without it a registered pagination
+    // feature would cut every table to its default ten rows.
+    manualPagination: true,
+    // Each dimension is manual only where the api owns it. Under manualSorting
+    // the sorted row model is never built, so the rows render in the order they
+    // arrived — which is the api's order — while the header still draws and
+    // reports its state.
+    ...(serverSorting === undefined ? {} : { manualSorting: true }),
+    ...(serverFilter === undefined ? {} : { manualFiltering: true }),
+    // What the page count is computed from. Omitted with no pagination prop, and
+    // then nothing asks for a page count.
+    ...(pagination === undefined ? {} : { rowCount: pagination.rowCount }),
+    // v9 hands this an UPDATER, not a value — `setPageIndex` and `setPageSize`
+    // both call it with a function of the previous state. Resolved here so the
+    // caller receives the state it is about to request rather than having to
+    // reimplement that, and the previous state is the caller's own, which is
+    // what makes it correct with no table-held copy to drift from it.
+    ...(pagination === undefined
+      ? {}
+      : {
+          onPaginationChange: (updater: Updater<PaginationState>) =>
+            pagination.onChange(
+              functionalUpdate(updater, {
+                pageIndex: pagination.pageIndex,
+                pageSize: pagination.pageSize,
+              }),
+            ),
+        }),
     // Clearing a sort would land the reader back on the api's arbitrary order,
     // which is not a state worth being able to reach; the toggle cycles asc/desc.
     enableSortingRemoval: false,
@@ -441,7 +567,201 @@ export function DataTable<TData extends RowData>({
           </TableBody>
         </Table>
       </div>
+
+      {pagination === undefined ? null : (
+        <PaginationBar
+          pageIndex={pagination.pageIndex}
+          pageSize={pagination.pageSize}
+          rowCount={pagination.rowCount}
+          pageCount={table.getPageCount()}
+          canPrevious={table.getCanPreviousPage()}
+          canNext={table.getCanNextPage()}
+          noun={pagination.noun}
+          pageSizes={pagination.pageSizes}
+          disabled={loading}
+          onPageIndex={(index) => table.setPageIndex(index)}
+          onPageSize={(size) => table.setPageSize(size)}
+        />
+      )}
     </div>
+  );
+}
+
+// Which page numbers to draw, with gaps where the pages are elided.
+//
+// Pure and exported for the test, because the interesting cases are the ends: at
+// twenty-one pages a naive window centred on the current page runs off both
+// edges, and clamping it produces a different number of buttons per page, which
+// makes the control jump sideways under the reader's cursor as they page through.
+// The width here is constant wherever it can be.
+//
+// The first and last page are always present — they are the two a browsing reader
+// most often wants and the two an offset cursor can now actually reach — and a gap
+// is only drawn where it stands for more than one hidden page. A `…` in place of a
+// single page is strictly worse than the page.
+// A gap is "start" or "end" rather than an anonymous marker, because by
+// construction there is at most one of each — one before the window and one
+// after — which makes them stable React keys. Keying an elision on its array
+// position would be keying it on the page the reader is on.
+export type PageEntry = number | "gap-start" | "gap-end";
+
+// Which page numbers to draw, with gaps where pages are elided.
+//
+// Pure and exported for the test, because the properties worth having are easy
+// to get subtly wrong and invisible when you do:
+//
+//   - the first and last page are always drawn. They are the two a browsing
+//     reader most often wants, and the two an offset cursor can now actually
+//     jump to (D133).
+//   - the window is CONTIGUOUS. A gap that hides exactly one page is replaced by
+//     that page rather than drawn, which is not cosmetic: the first version of
+//     this drew `0 … 2 3 4 … 8` for page 4 of 9 and page 1 was reachable from
+//     nowhere at all.
+//   - a `…` therefore always stands for two or more pages.
+//
+// Deliberately NOT constant-width. Keeping the button count identical on every
+// page needs the window to widen at the ends to make up for the missing gap, and
+// the arithmetic for that is more than the one-button shift is worth.
+export function pageWindow(pageIndex: number, pageCount: number): readonly PageEntry[] {
+  if (pageCount <= 7) return Array.from({ length: pageCount }, (_, index) => index);
+  // Three pages around the current one, clamped inside the interior — page 0 and
+  // the last page are added either side, so the window never repeats them.
+  const last = pageCount - 1;
+  let lo = Math.min(Math.max(pageIndex - 1, 1), last - 3);
+  let hi = lo + 2;
+  // Absorb a gap that would stand for a single page.
+  if (lo === 2) lo = 1;
+  if (hi === last - 2) hi = last - 1;
+  const middle = Array.from({ length: hi - lo + 1 }, (_, offset) => lo + offset);
+  return [
+    0,
+    ...(lo > 1 ? (["gap-start"] as const) : []),
+    ...middle,
+    ...(hi < last - 1 ? (["gap-end"] as const) : []),
+    last,
+  ];
+}
+
+// The footer: what this page is out of what, the page numbers, and the size.
+//
+// Numbers rather than a Back and a More, which is what the endpoint's cursor used
+// to allow and the whole reason it now pages by offset (D133) — six pages of an
+// inventory with no way to reach the fifth is a control that answers "what else is
+// in here" with "keep clicking".
+function PaginationBar({
+  pageIndex,
+  pageSize,
+  rowCount,
+  pageCount,
+  canPrevious,
+  canNext,
+  noun,
+  pageSizes,
+  disabled,
+  onPageIndex,
+  onPageSize,
+}: {
+  readonly pageIndex: number;
+  readonly pageSize: number;
+  readonly rowCount: number;
+  readonly pageCount: number;
+  readonly canPrevious: boolean;
+  readonly canNext: boolean;
+  readonly noun: string;
+  // `| undefined` written out: the call site forwards an optional prop straight
+  // through, and under exactOptionalPropertyTypes "absent" and "present and
+  // undefined" are not the same type.
+  readonly pageSizes: readonly number[] | undefined;
+  readonly disabled: boolean;
+  readonly onPageIndex: (index: number) => void;
+  readonly onPageSize: (size: number) => void;
+}) {
+  // One-based and inclusive, because the reader counts rows from one. `min` on the
+  // upper end so the last page says "501-517" rather than "501-600".
+  const first = rowCount === 0 ? 0 : pageIndex * pageSize + 1;
+  const last = Math.min(rowCount, (pageIndex + 1) * pageSize);
+
+  return (
+    <nav
+      aria-label={`${noun} pagination`}
+      className="mt-4 flex flex-wrap items-center justify-between gap-3"
+    >
+      <p className="text-muted-foreground text-xs">
+        {rowCount === 0 ? `No ${noun}` : `${first}-${last} of ${rowCount} ${noun}`}
+        {/* The one thing about this control that would otherwise mislead: the
+            column sort and the filter box act on the page, not the set. */}
+        {pageCount > 1 ? " — sorting and filtering apply to this page" : ""}
+      </p>
+
+      <div className="flex items-center gap-2">
+        {pageSizes === undefined || pageSizes.length < 2 ? null : (
+          <Select
+            value={String(pageSize)}
+            disabled={disabled}
+            onValueChange={(value) => {
+              const size = Number(value);
+              if (Number.isFinite(size)) onPageSize(size);
+            }}
+          >
+            <SelectTrigger size="sm" className="w-28" aria-label={`${noun} per page`}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {pageSizes.map((size) => (
+                <SelectItem key={size} value={String(size)}>
+                  {size} / page
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
+
+        <Button
+          size="sm"
+          variant="outline"
+          aria-label="Previous page"
+          disabled={disabled || !canPrevious}
+          onClick={() => onPageIndex(pageIndex - 1)}
+        >
+          <ChevronLeftIcon aria-hidden="true" className="size-4" />
+        </Button>
+
+        {pageWindow(pageIndex, pageCount).map((entry) =>
+          typeof entry === "string" ? (
+            // Not a button, and not announced: it stands for pages rather than
+            // being one, and a screen reader reading "ellipsis" between two page
+            // numbers has been told nothing.
+            <span key={entry} aria-hidden="true" className="px-1 text-muted-foreground text-xs">
+              …
+            </span>
+          ) : (
+            <Button
+              key={entry}
+              size="sm"
+              variant={entry === pageIndex ? "default" : "outline"}
+              // `aria-current` rather than only a variant, so the current page is
+              // the current page to a reader who cannot see which one is filled.
+              aria-current={entry === pageIndex ? "page" : undefined}
+              aria-label={`Page ${entry + 1}`}
+              disabled={disabled}
+              onClick={() => onPageIndex(entry)}
+            >
+              {entry + 1}
+            </Button>
+          ),
+        )}
+
+        <Button
+          size="sm"
+          variant="outline"
+          aria-label="Next page"
+          disabled={disabled || !canNext}
+          onClick={() => onPageIndex(pageIndex + 1)}
+        >
+          <ChevronRightIcon aria-hidden="true" className="size-4" />
+        </Button>
+      </div>
+    </nav>
   );
 }
 
