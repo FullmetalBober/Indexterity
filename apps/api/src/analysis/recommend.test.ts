@@ -105,15 +105,24 @@ describe("recommendForCollection", () => {
     expect(recommendForCollection([hot], {}, options, {}, NOW)).toHaveLength(0);
   });
 
-  it("surfaces an unused protected index as ADVISORY_REVIEW, never a drop", () => {
-    const ttl = input(
+  // Says NOTHING about an unused unique, TTL or shard-key index, which is the
+  // whole of D134. It used to advise on all three, and the premise was false:
+  // `$indexStats.accesses.ops` counts QUERY access only, so a unique index that
+  // enforced its constraint across fifty inserts and a TTL index expiring
+  // documents both sit at ops 0 for ever (measured, mongod 7.0.39). FLAT_ZERO is
+  // their expected state, so "no recorded usage" was never a finding about them.
+  it("says nothing about an unused unique, TTL or shard-key index", () => {
+    const cases = [
       spec("expiry_ttl", [{ field: "at", direction: 1 }], { ttl: true }),
-      [0, 0, 0],
-    );
-    const out = recommendForCollection([ttl], { expiry_ttl: 2048 }, options, {}, NOW);
-    expect(out).toHaveLength(1);
-    expect(out[0]?.type).toBe("ADVISORY_REVIEW");
-    expect(out[0]?.estimatedBytesSaved).toBe(2048);
+      spec("email_unique", [{ field: "email", direction: 1 }], { unique: true }),
+      spec("shard_key", [{ field: "tenant", direction: 1 }], { isShardKey: true }),
+    ];
+    for (const protected_ of cases) {
+      const idle = input(protected_, [0, 0, 0]);
+      expect(recommendForCollection([idle], { [protected_.name]: 2048 }, options, {}, NOW)).toEqual(
+        [],
+      );
+    }
   });
 
   it("never advises on _id_ or on used protected indexes", () => {
