@@ -10,6 +10,14 @@ gated behind an observe window, a pre-flight check and a read-latency regression
 test. Everything before that is reversible, and the dashboard says which is
 which.
 
+**Some indexes are never dropped automatically, whatever they score.** That gate
+is a measurement, and a measurement needs the experiment to be survivable. A
+unique index's loss is invisible to it — nothing about latency says duplicates
+are now permitted. A text or geo index is worse than invisible: hiding one makes
+its own queries **fail** rather than slow down, so there is no experiment to run.
+Those, and TTL indexes and shard keys, are reported for a human to act on, with
+the reason and the score, rather than being quietly withheld.
+
 **It cannot read your data.** Given credentials that can create users, it offers
 to provision its own least-privilege one instead — `indexterity`, holding index
 metadata and statistics and no read privilege at all. The server enforces that;

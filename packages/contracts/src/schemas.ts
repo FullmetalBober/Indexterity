@@ -457,13 +457,19 @@ export const CLUSTER_INDEXES_PAGE = 100;
 
 // One key of an index, in the order the index declares it. The direction
 // vocabulary is the adapters' (engine/types.ts): a relational engine only ever
-// reports 1 or -1, and the three MongoDB special forms are what the others
+// reports 1 or -1, and the four MongoDB special forms are what the others
 // cannot express.
+//
+// `2d` is the legacy geo form and it has to be here rather than only in the
+// adapter: this schema is what the inventory route answers with, so a union
+// missing a form the collector reports does not degrade — it throws, and a failed
+// read renders as "this cluster has no indexes" (D129).
 export const indexKeyView = z.object({
   field: z.string(),
   direction: z.union([
     z.literal(1),
     z.literal(-1),
+    z.literal("2d"),
     z.literal("2dsphere"),
     z.literal("text"),
     z.literal("hashed"),

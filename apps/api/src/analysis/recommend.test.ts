@@ -105,6 +105,51 @@ describe("recommendForCollection", () => {
     expect(recommendForCollection([id, busyUnique], {}, options, {}, NOW)).toHaveLength(0);
   });
 
+  // A text index reaches the advisory tier rather than DROP_UNUSED: hiding one
+  // makes $text fail outright, so the observe window cannot be run on it and every
+  // gate downstream would read that outage as evidence the index was dead.
+  it("advises on an unused text index instead of proposing a drop", () => {
+    const text = input(spec("name_text", [{ field: "name", direction: "text" }]), [0, 0, 0]);
+    const out = recommendForCollection([text], { name_text: 8192 }, options, {}, NOW);
+    expect(out.map((c) => c.type)).toEqual(["ADVISORY_REVIEW"]);
+    expect(out[0]?.rationale).toContain("$text");
+    // Still scored and still on screen: the advisory tier exists so that nothing
+    // is silently withheld.
+    expect(out[0]?.score).toBeGreaterThan(0);
+    expect(out[0]?.estimatedBytesSaved).toBe(8192);
+  });
+
+  it("advises on an unused 2dsphere index and names the operator that would fail", () => {
+    const geo = input(spec("loc_2dsphere", [{ field: "loc", direction: "2dsphere" }]), [0, 0, 0]);
+    const out = recommendForCollection([geo], {}, options, {}, NOW);
+    expect(out.map((c) => c.type)).toEqual(["ADVISORY_REVIEW"]);
+    expect(out[0]?.rationale).toContain("$near");
+  });
+
+  // The legacy geo form, and why the collector must stop coercing it to 1: as
+  // `{loc: 1}` it is not merely unprotected, it reads as an ordinary key-prefix of
+  // the compound and is proposed as DROP_REDUNDANT — a structural finding that
+  // needs no usage evidence at all.
+  it("never folds a 2d index into a wider compound", () => {
+    const geo = input(spec("loc_2d", [{ field: "loc", direction: "2d" }]), [5, 5, 5]);
+    const wider = input(
+      spec("loc_ts", [
+        { field: "loc", direction: 1 },
+        { field: "ts", direction: 1 },
+      ]),
+      [5, 5, 5],
+    );
+    expect(recommendForCollection([geo, wider], {}, options, {}, NOW)).toHaveLength(0);
+  });
+
+  // hashed is not in that class — hidden, it degrades to a collection scan, which
+  // is the regression the observe gate is there to catch.
+  it("still proposes dropping an unused hashed index", () => {
+    const hashed = input(spec("k_hashed", [{ field: "k", direction: "hashed" }]), [0, 0, 0]);
+    const out = recommendForCollection([hashed], {}, options, {}, NOW);
+    expect(out.map((c) => c.type)).toEqual(["DROP_UNUSED"]);
+  });
+
   it("parseStoredSpec rehydrates a persisted spec", () => {
     const parsed = parseStoredSpec({
       name: "x",
@@ -119,6 +164,23 @@ describe("recommendForCollection", () => {
     });
     expect(parsed.name).toBe("x");
     expect(parsed.keys[0]?.field).toBe("a");
+  });
+
+  // Rehydration has to accept every form the collector now persists, or the rule
+  // that protects a legacy geo index throws before it can run.
+  it("parseStoredSpec accepts the legacy 2d key form", () => {
+    const parsed = parseStoredSpec({
+      name: "loc_2d",
+      keys: [{ field: "loc", direction: "2d" }],
+      unique: false,
+      ttl: false,
+      partial: false,
+      partialFilter: null,
+      sparse: false,
+      hidden: false,
+      isShardKey: false,
+    });
+    expect(parsed.keys[0]?.direction).toBe("2d");
   });
 });
 

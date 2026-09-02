@@ -85,7 +85,11 @@ export async function preflightDrop(
     // rather than at proposal time.
     const replacementName = target.targetSpec?.supersededBy;
     if (replacementName === undefined) {
-      return { safe: false, reason: "index is now protected (unique/ttl/shard/_id_)", spec };
+      return {
+        safe: false,
+        reason: "index is now protected (unique/ttl/shard key/_id_/text/geo)",
+        spec,
+      };
     }
     const replacement = specs.find((candidate) => candidate.name === replacementName) ?? null;
     if (replacement === null) {
