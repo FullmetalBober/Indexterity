@@ -789,6 +789,21 @@ export const recommendations = pgTable(
     rationale: text("rationale").notNull(),
     // Confidence 0-100 — gates propose/auto-approve, never the safety stages.
     score: integer("score").notNull().default(0),
+    // Days of trusted watch time behind this finding when it was proposed, or NULL
+    // when usage is not the argument for it — a redundancy finding is provable from
+    // the index list and rests on no span at all (#434).
+    //
+    // Stored rather than recomputed at promotion time, which is the trade worth
+    // naming: promoteByScore is one UPDATE over the cluster's proposals, and asking
+    // this question live would mean loading every index's usage history on every
+    // tick inside the change window. Stale by at most one classify pass, and a
+    // classify pass is what re-derives the row anyway.
+    //
+    // NULL therefore also means "written before this column existed", and that
+    // reads as eligible on purpose: those rows are deleted and re-inserted by the
+    // next classify pass, so failing them closed would freeze proposals that
+    // already have months of evidence behind them for one cadence.
+    evidenceDays: integer("evidence_days"),
     estimatedBytesSaved: bigint("estimated_bytes_saved", { mode: "number" }).notNull().default(0),
     hiddenAt: timestamp("hidden_at", { withTimezone: true }),
     // The observe window this drop actually got, decided at hide time from the

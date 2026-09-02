@@ -12,7 +12,7 @@ function note(overrides: Partial<AnalysisNote> = {}): AnalysisNote {
     dominantRefusal: "span-too-short",
     refusedIndexes: 12,
     explanation:
-      "We have been watching this cluster for less than 7 days. Redundancy findings are unaffected.",
+      "We have been watching this cluster for less than 3 days. Redundancy findings are unaffected.",
     suppressed: [],
     ...overrides,
   };
@@ -24,7 +24,7 @@ describe("AnalysisNotePanel", () => {
   it("says usage recommendations are paused, and why", () => {
     render(<AnalysisNotePanel analysis={note()} />);
     expect(screen.getByText(/Usage-based recommendations are paused/)).toBeInTheDocument();
-    expect(screen.getByText(/less than 7 days/)).toBeInTheDocument();
+    expect(screen.getByText(/less than 3 days/)).toBeInTheDocument();
     expect(screen.getByText(/12 indexes affected/)).toBeInTheDocument();
   });
 
@@ -62,13 +62,13 @@ describe("AnalysisNotePanel", () => {
           usagePaused: false,
           dominantRefusal: "span-too-short",
           refusedIndexes: 3,
-          explanation: "We have been watching this cluster for less than 7 days.",
+          explanation: "We have been watching this cluster for less than 3 days.",
         })}
       />,
     );
     expect(screen.queryByText(/paused/)).not.toBeInTheDocument();
     expect(screen.getByText(/3 indexes of 12 not yet usable/)).toBeInTheDocument();
-    expect(screen.getByText(/less than 7 days/)).toBeInTheDocument();
+    expect(screen.getByText(/less than 3 days/)).toBeInTheDocument();
   });
 
   // The other half of #277: a guard that withholds a finding leaves no trace, so

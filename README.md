@@ -18,6 +18,12 @@ its own queries **fail** rather than slow down, so there is no experiment to run
 Those, and TTL indexes and shard keys, are reported for a human to act on, with
 the reason and the score, rather than being quietly withheld.
 
+**Findings appear before the engine will act on them.** A newly connected cluster
+gets usage findings after three days of watching it serve reads, and for the first
+week they are yours to approve rather than the engine's to apply on its own.
+Waiting a week before deleting an index is caution; waiting a week before
+mentioning one is an empty screen.
+
 **It cannot read your data.** Given credentials that can create users, it offers
 to provision its own least-privilege one instead — `indexterity`, holding index
 metadata and statistics and no read privilege at all. The server enforces that;

@@ -53,6 +53,10 @@ const GB = 1024 ** 3;
 const SNAPSHOTS_FOR_FULL_CREDIT = 125;
 // Sightings of a query shape for full frequency credit.
 const SIGHTINGS_FOR_FULL_CREDIT = 35;
+// A week of collects at the 6h cadence, and the point at which a usage finding
+// stops being discounted for thinness — see thinEvidencePenalty.
+const SNAPSHOTS_FOR_A_WEEK = 28;
+const THIN_EVIDENCE_MAX = 25;
 // One regression is close to disqualifying, two are disqualifying.
 const REGRESSION_PENALTY = 40;
 const DAY_MS = 86_400_000;
@@ -98,6 +102,37 @@ export function crowdingPenalty(collectionIndexes: number): number {
   const over = collectionIndexes - ORDINARY_COLLECTION_INDEXES;
   if (over <= 0) return 0;
   return Math.min(CROWDING_MAX, over * CROWDING_STEP);
+}
+
+// What a history shorter than a week costs a usage finding, and why the credit
+// ramp alone was not enough once the proposal gate moved (#434).
+//
+// The history term in dropScore is a CREDIT: 25 points spread over a month, so
+// three days of watching earns 2 and a full week earns 5. Three points is the
+// entire distance the scale put between "watched for three days" and "watched for
+// a week" — and `policies.auto_apply_score` is compared against that same number.
+// A FLAT_ZERO drop on a gigabyte index scored 50 + 2 + 20 = 72 on three days of
+// evidence, above the 70 this file recommends as a threshold. Lowering the gate
+// without touching the ramp would not have been a change to what is displayed, it
+// would have been a change to what gets deleted unattended.
+//
+// So the first week is priced as a discount rather than as merely absent credit.
+// It reaches zero exactly where a week of collects does, so nothing about the
+// scale past that point moves and the 95-point ceiling on a drop is untouched:
+// this only lowers scores the engine was previously too sure about.
+//
+// The floor for acting unattended is still a hard gate rather than this number
+// (AUTO_APPLY_HISTORY_DAYS, enforced in jobs/apply.ts against the span stored on
+// the row). This is the honesty half: a threshold nobody set cannot be relied on,
+// and a reader who sees 58 rather than 72 has been told what the engine actually
+// knows.
+//
+// Usage findings only. A redundancy finding is provable from the index list and
+// does not rest on a span at all, so discounting it for a short history would be
+// charging it for evidence it never claimed.
+export function thinEvidencePenalty(snapshots: number): number {
+  if (snapshots >= SNAPSHOTS_FOR_A_WEEK) return 0;
+  return Math.round(THIN_EVIDENCE_MAX * (1 - snapshots / SNAPSHOTS_FOR_A_WEEK));
 }
 
 // How much a past regression still counts, from the cooldown row it wrote.
@@ -155,6 +190,7 @@ function clamp(score: number): number {
 //   FLAT_ZERO       50  never touched across a history we can trust
 //   PERIODIC_DEAD   35  it used to run and stopped; the job may come back
 //   history       0-25  a month of unbroken collection for full credit
+//   thin        0 to -25  usage findings only, under a week of collects (#434)
 //   size          0-20  ~1 GB reclaimed for full credit
 //
 // Redundant and FLAT_ZERO never co-occur: a redundant index is excluded from the
@@ -165,6 +201,9 @@ export function dropScore(signals: DropSignals): number {
   else if (signals.usageClass === "FLAT_ZERO") score += 50;
   else if (signals.usageClass === "PERIODIC_DEAD") score += 35;
   score += Math.min(25, Math.floor((25 * signals.snapshots) / SNAPSHOTS_FOR_FULL_CREDIT));
+  // Same condition that chose the argument above: a null class is a redundancy
+  // finding, which makes no claim about a span.
+  if (signals.usageClass !== null) score -= thinEvidencePenalty(signals.snapshots);
   if (signals.sizeBytes > 0) {
     score += Math.min(20, Math.round(20 * Math.log10(1 + (9 * signals.sizeBytes) / GB)));
   }
