@@ -18,6 +18,7 @@ import {
   createPaginatedRowModel,
   createSortedRowModel,
   filterFn_includesString,
+  functionalUpdate,
   globalFilteringFeature,
   type PaginationState,
   type RowData,
@@ -210,6 +211,24 @@ interface DataTableProps<TData extends RowData> {
   // cluster. Paging server-side and sorting client-side cannot both be true at
   // once, and saying so is better than a control that looks like it did something
   // larger than it did.
+  // Server-owned sort. Present means the ORDER BY is the api's, so the table does
+  // not reorder anything — it draws the header state and reports clicks.
+  //
+  // A sibling of `pagination` rather than a field on it, because the three
+  // dimensions are independent: a capped read wants none of them, and these two
+  // paged reads want all three (D135). What they must NOT be is mixed — a table
+  // that pages on the server and sorts in the browser orders the rows the server
+  // happened to choose, which is the reading nobody wants.
+  readonly sorting?: {
+    readonly state: SortingState;
+    readonly onChange: (next: SortingState) => void;
+  };
+  // Server-owned filter, same contract. The value is the caller's, because it is
+  // what the next request carries.
+  readonly filter?: {
+    readonly value: string;
+    readonly onChange: (next: string) => void;
+  };
   readonly pagination?: {
     readonly pageIndex: number;
     readonly pageSize: number;
@@ -236,9 +255,19 @@ export function DataTable<TData extends RowData>({
   columnWidths,
   flexColumn,
   pagination,
+  sorting: serverSorting,
+  filter: serverFilter,
 }: DataTableProps<TData>) {
-  const [sorting, setSorting] = useState<SortingState>(initialSorting);
-  const [globalFilter, setGlobalFilter] = useState("");
+  // Local state is the fallback, not the mechanism: a capped read owns its own
+  // sort and filter (D33), and a paged one hands them to the api (D135). Both
+  // hooks are always called — the state they hold is simply unread in the second
+  // case, which is what keeps this one component rather than two.
+  const [localSorting, setLocalSorting] = useState<SortingState>(initialSorting);
+  const [localFilter, setLocalFilter] = useState("");
+  const sorting = serverSorting?.state ?? localSorting;
+  const setSorting = serverSorting?.onChange ?? setLocalSorting;
+  const globalFilter = serverFilter?.value ?? localFilter;
+  const setGlobalFilter = serverFilter?.onChange ?? setLocalFilter;
 
   const table = useTable({
     features: dashboardTableFeatures,
@@ -252,13 +281,27 @@ export function DataTable<TData extends RowData>({
         ? {}
         : { pagination: { pageIndex: pagination.pageIndex, pageSize: pagination.pageSize } }),
     },
-    onSortingChange: setSorting,
-    onGlobalFilterChange: setGlobalFilter,
+    // v9 hands every `on*Change` an UPDATER rather than a value — a header click,
+    // `setPageIndex` and `setPageSize` all call it with a function of the previous
+    // state, and `setPageSize`'s recomputes the page index so the row at the top of
+    // the page stays in view. `functionalUpdate` is the library's own resolver for
+    // that; the state it resolves against is the CALLER's, which is the only copy
+    // there is once the api owns the dimension, so there is nothing to drift from.
+    onSortingChange: (updater: Updater<SortingState>) =>
+      setSorting(functionalUpdate(updater, sorting)),
+    onGlobalFilterChange: (updater: Updater<string>) =>
+      setGlobalFilter(functionalUpdate(updater, globalFilter)),
     globalFilterFn: "includesString",
     // Always, and see dashboardTableFeatures: the rows in `data` ARE the page, so
     // the table must not slice them again. Without it a registered pagination
     // feature would cut every table to its default ten rows.
     manualPagination: true,
+    // Each dimension is manual only where the api owns it. Under manualSorting
+    // the sorted row model is never built, so the rows render in the order they
+    // arrived — which is the api's order — while the header still draws and
+    // reports its state.
+    ...(serverSorting === undefined ? {} : { manualSorting: true }),
+    ...(serverFilter === undefined ? {} : { manualFiltering: true }),
     // What the page count is computed from. Omitted with no pagination prop, and
     // then nothing asks for a page count.
     ...(pagination === undefined ? {} : { rowCount: pagination.rowCount }),
@@ -270,13 +313,13 @@ export function DataTable<TData extends RowData>({
     ...(pagination === undefined
       ? {}
       : {
-          onPaginationChange: (updater: Updater<PaginationState>) => {
-            const current = {
-              pageIndex: pagination.pageIndex,
-              pageSize: pagination.pageSize,
-            };
-            pagination.onChange(typeof updater === "function" ? updater(current) : updater);
-          },
+          onPaginationChange: (updater: Updater<PaginationState>) =>
+            pagination.onChange(
+              functionalUpdate(updater, {
+                pageIndex: pagination.pageIndex,
+                pageSize: pagination.pageSize,
+              }),
+            ),
         }),
     // Clearing a sort would land the reader back on the api's arbitrary order,
     // which is not a state worth being able to reach; the toggle cycles asc/desc.

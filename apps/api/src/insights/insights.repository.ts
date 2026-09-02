@@ -1,10 +1,13 @@
 import { Injectable } from "@nestjs/common";
+import type { IndexSortKey, SortDirection, WorkloadSortKey } from "@repo/contracts";
+import type { Column, SQL } from "drizzle-orm";
 import type { LatencyReading } from "../analysis";
 import { runFrom } from "../analysis/types";
 import {
   actions,
   analysisNotes,
   and,
+  asc,
   clusterIndexes,
   clusterRosters,
   desc,
@@ -39,6 +42,70 @@ export interface LatencyGroup {
 // Not exported any more than it has to be: the service used to read it to build
 // the workload cursor, and offset paging left this the ORDER BY's alone (D133).
 export const UNMEASURED_COST = -1;
+
+// Neutralise the ILIKE wildcards in a reader's search term.
+//
+// `%` and `_` are wildcards, and `ilike` escapes nothing itself — so a reader
+// looking for the index `id_1` would also match `id01`, and one who typed `%`
+// would match the whole cluster. Backslash is ILIKE's default escape character
+// in Postgres, and the backslash goes first: escaping the wildcards before it
+// would then escape the escapes.
+function likeEscape(value: string): string {
+  return value.replace(/[\\%_]/g, (match) => `\\${match}`);
+}
+
+// Ops summed out of the per-member jsonb, in SQL.
+//
+// The dashboard sums the same array to draw the Usage column, and ordering the
+// whole cluster by it means the database has to do the same arithmetic — there is
+// no column to sort on, because the split IS the stored value (D66). Unindexable
+// by nature: it is a per-row aggregate over a document. Fine at the scale the
+// inventory runs at and named here rather than discovered later, since it is the
+// one sortable key that cannot be answered from an index.
+//
+// `coalesce` to 0 rather than leaving null, so an index no member reported sorts
+// as unused instead of vanishing to one end under a nulls-first default.
+const totalOpsSql = sql`coalesce((
+  select sum((entry->>'ops')::bigint)
+  from jsonb_array_elements(${indexSnapshots.perMember}) as entry
+), 0)`;
+
+// Each sortable key to its expression, and the map is TOTAL over the enum — so a
+// key that parsed is a key that sorts, and nothing reaches an ORDER BY that did
+// not come from the whitelist (D135). Namespace is two columns, because the
+// dashboard shows one `database.collection` cell and sorting on the concatenation
+// would order `app.z` before `apple.a`.
+const INDEX_SORTS: Record<IndexSortKey, readonly [SQL | Column, ...(SQL | Column)[]]> = {
+  namespace: [clusterIndexes.database, clusterIndexes.collection],
+  indexName: [clusterIndexes.indexName],
+  sizeBytes: [indexSnapshots.sizeBytes],
+  totalOps: [totalOpsSql],
+};
+
+const WORKLOAD_SORTS: Record<WorkloadSortKey, readonly [SQL | Column, ...(SQL | Column)[]]> = {
+  namespace: [workloadShapes.database, workloadShapes.collection],
+  executions: [workloadShapes.executions],
+  weeklyDocsExamined: [sql`coalesce(${workloadShapes.weeklyDocsExamined}, ${UNMEASURED_COST})`],
+  severity: [workloadShapes.severity],
+  outcome: [workloadShapes.outcome],
+  firstSeenAt: [workloadShapes.firstSeenAt],
+};
+
+// The ORDER BY for one request: the chosen key in the chosen direction, then the
+// tiebreak that makes the order TOTAL.
+//
+// The tiebreak is not tidiness under offset paging. Rows that tie sort
+// arbitrarily, and an arbitrary order between two requests is how the same row
+// lands on two pages of one browse while another is never shown at all — a
+// keyset cursor merely stalled on that, offset silently duplicates.
+function orderBy(
+  columns: readonly (SQL | Column)[],
+  direction: SortDirection,
+  tiebreak: readonly (SQL | Column)[],
+) {
+  const apply = direction === "asc" ? asc : desc;
+  return [...columns.map((column) => apply(column)), ...tiebreak.map((column) => asc(column))];
+}
 
 export interface IndexSizeDay {
   readonly day: string;
@@ -268,6 +335,9 @@ export class InsightsRepository {
     query: {
       readonly database?: string | undefined;
       readonly collection?: string | undefined;
+      readonly sort?: IndexSortKey | undefined;
+      readonly dir?: SortDirection | undefined;
+      readonly q?: string | undefined;
     },
     limit: number,
     offset: number,
@@ -282,6 +352,21 @@ export class InsightsRepository {
     if (query.database !== undefined) filters.push(eq(clusterIndexes.database, query.database));
     if (query.collection !== undefined) {
       filters.push(eq(clusterIndexes.collection, query.collection));
+    }
+    // The reader's search box, over the two things they type: the namespace and
+    // the index name. Bound as a parameter, and `ilike` escapes nothing itself —
+    // so `%` and `_` in the box are wildcards the reader did not ask for, and
+    // escaping them is what makes an index literally named `id_1` findable.
+    if (query.q !== undefined) {
+      const term = `%${likeEscape(query.q)}%`;
+      // One `sql` predicate rather than `or(ilike(...), ilike(...))`, because
+      // drizzle types `or` as possibly-undefined — it returns undefined when every
+      // argument is — and the alternative to this is an assertion saying the two
+      // arguments right there are not undefined.
+      filters.push(
+        sql`(${clusterIndexes.database} || '.' || ${clusterIndexes.collection} ilike ${term}
+             or ${clusterIndexes.indexName} ilike ${term})`,
+      );
     }
     // The total is of what MATCHES the namespace filter, not of the cluster: a
     // filtered page saying "100 of 211" against the unfiltered count would be
@@ -317,11 +402,16 @@ export class InsightsRepository {
       .from(indexSnapshots)
       .innerJoin(clusterIndexes, eq(indexSnapshots.indexId, clusterIndexes.id))
       .where(and(...filters))
-      // The whole triple, because one cluster can hold two indexes of the same
-      // name in two collections — and under offset paging a total order is no
-      // longer merely tidy: rows that tie sort arbitrarily, so a partial order
-      // would let the same row appear on two pages of one browse.
-      .orderBy(clusterIndexes.database, clusterIndexes.collection, clusterIndexes.indexName)
+      // The reader's key, then the namespace triple as the tiebreak — which is
+      // also the default when nothing was asked for, and is the order the page
+      // has always arrived in.
+      .orderBy(
+        ...orderBy(INDEX_SORTS[query.sort ?? "namespace"], query.dir ?? "asc", [
+          clusterIndexes.database,
+          clusterIndexes.collection,
+          clusterIndexes.indexName,
+        ]),
+      )
       .limit(limit)
       .offset(from);
     return { rows, total, offset: from };
@@ -407,6 +497,9 @@ export class InsightsRepository {
       readonly database?: string | undefined;
       readonly collection?: string | undefined;
       readonly declinedOnly?: boolean | undefined;
+      readonly sort?: WorkloadSortKey | undefined;
+      readonly dir?: SortDirection | undefined;
+      readonly q?: string | undefined;
     },
     limit: number,
     offset: number,
@@ -427,6 +520,15 @@ export class InsightsRepository {
     // direction, since the alternative is a new gate silently vanishing from the
     // filter that exists to show it.
     if (query.declinedOnly === true) filters.push(ne(workloadShapes.outcome, "proposed"));
+    // Namespace only here. A shape has no name — its identity is the ESR key list,
+    // which lives in the jsonb and is assembled into a line by the dashboard, so
+    // there is nothing else a SQL predicate can match on.
+    if (query.q !== undefined) {
+      const term = `%${likeEscape(query.q)}%`;
+      filters.push(
+        sql`${workloadShapes.database} || '.' || ${workloadShapes.collection} ilike ${term}`,
+      );
+    }
 
     const [counted] = await this.database.db
       .select({ total: sql<number>`count(*)::int` })
@@ -444,9 +546,14 @@ export class InsightsRepository {
       .select()
       .from(workloadShapes)
       .where(and(...filters))
+      // The reader's key, then the id as the tiebreak that makes the order total.
+      // The default is weekly cost descending, which is the ranking this list is
+      // for — and note the default DIRECTION is desc here where the inventory's is
+      // asc: the worst shape is the answer, and the first namespace is.
       .orderBy(
-        sql`coalesce(${workloadShapes.weeklyDocsExamined}, ${UNMEASURED_COST}) desc`,
-        desc(workloadShapes.id),
+        ...orderBy(WORKLOAD_SORTS[query.sort ?? "weeklyDocsExamined"], query.dir ?? "desc", [
+          workloadShapes.id,
+        ]),
       )
       .limit(limit)
       .offset(from);

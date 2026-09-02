@@ -467,6 +467,44 @@ export const CLUSTER_INDEXES_PAGE_SIZES = [25, 50, 100] as const;
 // report whatever a caller asks for.
 export const CLUSTER_INDEXES_PAGE_MAX = 200;
 
+// Which way a paged read is ordered. Shared by both paged endpoints.
+export const sortDirection = z.enum(["asc", "desc"]);
+export type SortDirection = z.infer<typeof sortDirection>;
+
+// Every value here is also the dashboard column's `id`, deliberately: the sort
+// key IS the column id, so the route forwards what the header reports and there
+// is no translation table to fall out of step with either side.
+//
+// The inventory columns the SERVER can order by, as a closed set (D135).
+//
+// A whitelist and not a column name, because the value reaches an `ORDER BY`:
+// an enum is the difference between choosing a sort and choosing some SQL. The
+// repository maps each of these to an expression and the mapping is total, so a
+// key that parses is a key that sorts.
+//
+// Deliberately SHORTER than the table's sortable columns were. `keys`, the flag
+// count and the proposal type are each computed after the read — the key pattern
+// out of the spec jsonb, the flags per engine in the dashboard, and the proposal
+// from a lookup scoped to the page — so ordering the whole cluster by them is not
+// a thing the database can be asked. Those columns say so with `enableSorting:
+// false` rather than sorting one page and looking like they sorted the cluster.
+export const indexSortKey = z.enum(["namespace", "indexName", "sizeBytes", "totalOps"]);
+export type IndexSortKey = z.infer<typeof indexSortKey>;
+
+// The same for the workload list. `outcome` and `severity` are real columns, so
+// "show me everything the cost floor declined" is one request rather than a page
+// at a time; the ESR line, the failure kind and the clients are read out of the
+// shape jsonb after the fact and are not offered.
+export const workloadSortKey = z.enum([
+  "namespace",
+  "executions",
+  "weeklyDocsExamined",
+  "severity",
+  "outcome",
+  "firstSeenAt",
+]);
+export type WorkloadSortKey = z.infer<typeof workloadSortKey>;
+
 // One key of an index, in the order the index declares it. The direction
 // vocabulary is the adapters' (engine/types.ts): a relational engine only ever
 // reports 1 or -1, and the four MongoDB special forms are what the others

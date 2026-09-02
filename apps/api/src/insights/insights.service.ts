@@ -16,10 +16,13 @@ import type {
 import {
   CLUSTER_INDEXES_PAGE,
   clusterNode,
+  type IndexSortKey,
   instant,
   LATENCY_SERIES_MAX_COLLECTIONS,
   LATENCY_SERIES_WINDOW_DAYS,
+  type SortDirection,
   WORKLOAD_SHAPES_PAGE,
+  type WorkloadSortKey,
 } from "@repo/contracts";
 import { z } from "zod";
 import {
@@ -55,6 +58,12 @@ export interface WorkloadQuery {
   // Offset paging since #445 (D133), the same shape as ClusterIndexQuery below.
   readonly offset?: number | undefined;
   readonly limit?: number | undefined;
+  // And the order and the filter, because the server owns which rows the page
+  // holds and therefore owns both (D135). Passed through untouched — the
+  // whitelist is the contract's and the expressions are the repository's.
+  readonly sort?: WorkloadSortKey | undefined;
+  readonly dir?: SortDirection | undefined;
+  readonly q?: string | undefined;
 }
 
 export interface ClusterIndexQuery {
@@ -64,6 +73,10 @@ export interface ClusterIndexQuery {
   // request with neither and the api owns what that means.
   readonly offset?: number | undefined;
   readonly limit?: number | undefined;
+  // See WorkloadQuery above (D135).
+  readonly sort?: IndexSortKey | undefined;
+  readonly dir?: SortDirection | undefined;
+  readonly q?: string | undefined;
 }
 
 // Read-only views over what the engine has already decided and recorded: ROI,

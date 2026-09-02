@@ -111,10 +111,15 @@ function buildColumns(
     // and cannot guess from its head — `{ tenant: 1, status: 1, created: -1 }`
     // clips to something that looks like a single-field index — so it gets a
     // measured tooltip rather than a `title`.
+    // Not server-sortable: the key pattern is assembled from the spec jsonb after
+    // the read, so the database cannot order the cluster by it (D135). Saying so
+    // beats a header that sorts the hundred rows in front of the reader and looks
+    // like it sorted the cluster — and sorting BY a key pattern was never much of
+    // a question anyway.
     column.accessor((row) => keyPattern(row.keys), {
       id: "keys",
       header: "Keys",
-      sortFn: "alphanumeric",
+      enableSorting: false,
       cell: (info) => {
         const row = info.row.original;
         // The covering columns and the predicate belong with the keys: they are
@@ -138,10 +143,13 @@ function buildColumns(
         );
       },
     }),
+    // Not server-sortable either, and for a second reason on top of the first: the
+    // flags are worded per engine in the dashboard, so their ORDER is not a fact
+    // the database holds at all.
     column.accessor((row) => indexFlags(row, engine).length + (row.hinted ? 1 : 0), {
       id: "flags",
       header: "Flags",
-      sortFn: "basic",
+      enableSorting: false,
       sortDescFirst: true,
       cell: (info) => <FlagsCell row={info.row.original} engine={engine} />,
     }),
@@ -161,10 +169,13 @@ function buildColumns(
       sortDescFirst: true,
       cell: (info) => <UsageCell split={splits.get(info.row.original.id)} />,
     }),
+    // Not server-sortable: the proposal is a lookup scoped to THIS PAGE, because
+    // reading every proposal on the cluster to decorate a hundred rows would put
+    // the unbounded read back one layer down (D127).
     column.accessor((row) => row.recommendation?.type ?? "", {
       id: "proposed",
       header: "Proposed",
-      sortFn: "text",
+      enableSorting: false,
       cell: (info) => {
         const rec = info.row.original.recommendation;
         if (rec === null) return <span className="text-muted-foreground text-xs">—</span>;
@@ -194,6 +205,8 @@ export function IndexTable({
   engine,
   loading,
   pagination,
+  sorting,
+  filter,
 }: {
   clusterId: string;
   indexes: ClusterIndexRow[];
@@ -209,6 +222,10 @@ export function IndexTable({
   // reading it off DataTable rather than restated, so a change there cannot
   // leave this signature quietly describing the old shape.
   pagination: NonNullable<ComponentProps<typeof DataTable>["pagination"]>;
+  // The order and the filter, same reasoning and same source of truth: all three
+  // are the api's here (D135), so all three arrive from the route.
+  sorting: NonNullable<ComponentProps<typeof DataTable>["sorting"]>;
+  filter: NonNullable<ComponentProps<typeof DataTable>["filter"]>;
 }) {
   const splits = useMemo(() => {
     const built = new Map<string, SplitEntry>();
@@ -240,7 +257,12 @@ export function IndexTable({
       // which.
       initialSorting={[{ id: "namespace", desc: false }]}
       pagination={pagination}
-      filterLabel="Filter indexes"
+      sorting={sorting}
+      filter={filter}
+      // Says what it MATCHES, because that changed when the filter moved to the
+      // api (D135): it was every rendered cell of the page, and it is now the
+      // namespace and the index name across the whole cluster.
+      filterLabel="Search namespace or index name"
       // A page is at most CLUSTER_INDEXES_PAGE rows and each is single-line, so
       // they estimate the same as a collection's.
       virtualize={{ maxHeight: 560, estimateRowHeight: 44 }}

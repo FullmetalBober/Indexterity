@@ -5771,6 +5771,57 @@ describe("bounded per-cluster reads", () => {
     // A limit past the ceiling is refused rather than served: the endpoint is a
     // page, and the bound is what keeps it one.
     expect((await api(`/clusters/${pagedId}/indexes?limit=100000`, owner)).status).toBe(400);
+
+    // The order is the api's, over the WHOLE match rather than the page (D135):
+    // sorting by size descending has to return the cluster's biggest index first,
+    // not the biggest of an arbitrary hundred.
+    const bySize = asRecord(
+      await (
+        await api(`/clusters/${pagedId}/indexes?sort=sizeBytes&dir=desc&limit=5`, owner)
+      ).json(),
+    );
+    const sizes = asRecords(bySize.indexes, "bySize.indexes").map((row) => Number(row.sizeBytes));
+    expect(sizes).toEqual([...sizes].sort((a, b) => b - a));
+    // The fixture's sizes are 100 + n over n = 0..count-1, so the largest is the
+    // last index — which a page-scoped sort could never have reached.
+    expect(sizes[0]).toBe(100 + count - 1);
+
+    // A key outside the whitelist is refused rather than reaching an ORDER BY,
+    // and so is a direction that is not a direction.
+    expect((await api(`/clusters/${pagedId}/indexes?sort=keys`, owner)).status).toBe(400);
+    expect((await api(`/clusters/${pagedId}/indexes?sort=1;drop table x`, owner)).status).toBe(400);
+
+    // And the filter searches the CLUSTER, not the page: idx_0106 is on the second
+    // page under the default order and this finds it in one request.
+    const found = asRecord(
+      await (await api(`/clusters/${pagedId}/indexes?q=idx_0106`, owner)).json(),
+    );
+    const foundRows = asRecords(found.indexes, "found.indexes");
+    expect(foundRows).toHaveLength(1);
+    expect(found.total).toBe(1);
+    expect(asRecord(foundRows[0] ?? {}).indexName).toBe("idx_0106");
+
+    // `_` is an ILIKE wildcard and the reader did not mean it as one: every index
+    // here is `idx_NNNN`, so an unescaped `idx_0106` would still match one but
+    // `idx_010_` would match ten. Escaped, it matches exactly the one named that.
+    expect(
+      asRecords(
+        asRecord(await (await api(`/clusters/${pagedId}/indexes?q=idx_010_`, owner)).json())
+          .indexes,
+        "wildcard.indexes",
+      ),
+    ).toHaveLength(0);
+    // And `%` cannot be used to select everything.
+    expect(
+      asRecord(await (await api(`/clusters/${pagedId}/indexes?q=%25`, owner)).json()).total,
+    ).toBe(0);
+
+    // The filter narrows the TOTAL as well, or the page count would describe rows
+    // the reader filtered away.
+    const namespaced = asRecord(
+      await (await api(`/clusters/${pagedId}/indexes?q=app.wide`, owner)).json(),
+    );
+    expect(namespaced.total).toBe(count);
   });
 
   // #432. Every one of these numbers was read once an hour and thrown away:
@@ -6022,6 +6073,17 @@ describe("bounded per-cluster reads", () => {
 
     // And the ceiling is enforced: this endpoint is a page, not a report.
     expect((await api(`/clusters/${pagedId}/workload?limit=99999`, owner)).status).toBe(400);
+
+    // The ORDER is the api's too (D135), and the sort key is a closed set: the
+    // value reaches an ORDER BY, so anything outside the whitelist is refused
+    // rather than interpolated.
+    const byRuns = asRecord(
+      await (await api(`/clusters/${pagedId}/workload?sort=executions&dir=asc`, owner)).json(),
+    );
+    const runs = asRecords(byRuns.shapes, "byRuns.shapes").map((row) => Number(row.executions));
+    expect(runs).toEqual([...runs].sort((a, b) => a - b));
+    expect((await api(`/clusters/${pagedId}/workload?sort=shape`, owner)).status).toBe(400);
+    expect((await api(`/clusters/${pagedId}/workload?dir=sideways`, owner)).status).toBe(400);
 
     // Every shape exactly once across the two pages, including the ones with no
     // measured cost.

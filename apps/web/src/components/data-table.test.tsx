@@ -1,3 +1,4 @@
+import type { SortingState } from "@tanstack/react-table";
 import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { renderToString } from "react-dom/server";
@@ -555,5 +556,86 @@ describe("DataTable pagination", () => {
   it("admits that sorting and filtering are page-scoped", () => {
     renderPaged({});
     expect(screen.getByText(/sorting and filtering apply to this page/)).toBeInTheDocument();
+  });
+});
+
+// Server-owned sort and filter. The dimension the api owns must be REPORTED and
+// not applied, or the table would reorder the rows the server chose and the
+// header would describe a set nobody asked for (D135).
+describe("DataTable server-owned sort and filter", () => {
+  function renderManual(over: {
+    sorting?: { state: SortingState; onChange: (next: SortingState) => void };
+    filter?: { value: string; onChange: (next: string) => void };
+  }) {
+    return renderInApp(
+      <DataTable
+        caption="Test rows"
+        columns={columns}
+        data={ROWS}
+        getRowId={(row) => row.id}
+        initialSorting={[{ id: "name", desc: false }]}
+        filterLabel="Filter rows"
+        empty={{ title: "Nothing here", description: "Not collected yet." }}
+        {...over}
+      />,
+    );
+  }
+
+  const names = () =>
+    screen
+      .getAllByRole("row")
+      .slice(1)
+      .map((tr) => tr.querySelector("td")?.textContent ?? "");
+
+  // ROWS is orders/users/events — deliberately NOT alphabetical, so a table that
+  // sorted locally would be visibly different from one that did not.
+  it("leaves the api's row order alone", async () => {
+    const seen: SortingState[] = [];
+    renderManual({
+      sorting: { state: [{ id: "name", desc: false }], onChange: (next) => seen.push(next) },
+    });
+    expect(names()).toEqual(["orders", "users", "events"]);
+
+    await userEvent.click(screen.getByRole("button", { name: /^Name/ }));
+    // Reported, not applied: the next render's rows are the api's answer.
+    expect(seen).toEqual([[{ id: "name", desc: true }]]);
+    expect(names()).toEqual(["orders", "users", "events"]);
+  });
+
+  it("still draws which column the api sorted by", () => {
+    renderManual({
+      sorting: { state: [{ id: "size", desc: true }], onChange: () => undefined },
+    });
+    // On the header CELL, which is where aria-sort belongs — the button inside it
+    // is the control, not the sorted thing.
+    expect(screen.getByRole("columnheader", { name: /Size/ })).toHaveAttribute(
+      "aria-sort",
+      "descending",
+    );
+  });
+
+  it("reports the filter without applying it", async () => {
+    const seen: string[] = [];
+    renderManual({ filter: { value: "", onChange: (next) => seen.push(next) } });
+    await userEvent.type(screen.getByLabelText("Filter rows"), "ord");
+    expect(seen.at(-1)).toBe("d");
+    // Every row still drawn: the api decides what matches, and it has not answered.
+    expect(names()).toHaveLength(ROWS.length);
+  });
+
+  // The value is the caller's, so a controlled box shows what the route holds
+  // rather than its own copy.
+  it("shows the filter value the caller holds", () => {
+    renderManual({ filter: { value: "orders", onChange: () => undefined } });
+    expect(screen.getByLabelText("Filter rows")).toHaveValue("orders");
+  });
+
+  // Without the props nothing changes, which is what protects the three capped
+  // tables that sort and filter in the browser (D33).
+  it("sorts and filters locally when the api owns neither", async () => {
+    render();
+    expect(names()).toEqual(["events", "orders", "users"]);
+    await userEvent.type(screen.getByLabelText("Filter rows"), "ord");
+    expect(names()).toEqual(["orders"]);
   });
 });

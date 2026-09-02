@@ -67,11 +67,25 @@ const paging = {
   onChange: () => undefined,
 };
 
+// The api owns the order and the filter for this table (D135), so the render
+// needs both handed in. Inert here: these tests are about the COLUMNS, and a
+// manual sort means the rows appear in the order the fixture lists them.
+const ordering = { state: [], onChange: () => undefined };
+const filtering = { value: "", onChange: () => undefined };
+
 describe("WorkloadTable", () => {
   // The row that could not exist before #432: seen, priced, discarded, and now
   // on screen with the gate that discarded it.
   it("draws a shape nothing was proposed for, with the gate that declined it", () => {
-    renderInApp(<WorkloadTable shapes={[shape()]} loading={false} pagination={paging} />);
+    renderInApp(
+      <WorkloadTable
+        shapes={[shape()]}
+        loading={false}
+        pagination={paging}
+        sorting={ordering}
+        filter={filtering}
+      />,
+    );
 
     expect(screen.getByText("shop.orders")).toBeInTheDocument();
     expect(screen.getByText("{ status }")).toBeInTheDocument();
@@ -93,6 +107,8 @@ describe("WorkloadTable", () => {
         ]}
         loading={false}
         pagination={paging}
+        sorting={ordering}
+        filter={filtering}
       />,
     );
 
@@ -108,6 +124,8 @@ describe("WorkloadTable", () => {
         shapes={[shape({ weeklyDocsExamined: null, docsExamined: null })]}
         loading={false}
         pagination={paging}
+        sorting={ordering}
+        filter={filtering}
       />,
     );
 
@@ -121,6 +139,8 @@ describe("WorkloadTable", () => {
         shapes={[shape({ executions: 12_481_003, weeklyDocsExamined: 43_200_000 })]}
         loading={false}
         pagination={paging}
+        sorting={ordering}
+        filter={filtering}
       />,
     );
 
@@ -141,6 +161,8 @@ describe("WorkloadTable", () => {
         ]}
         loading={false}
         pagination={paging}
+        sorting={ordering}
+        filter={filtering}
       />,
     );
 
@@ -156,6 +178,8 @@ describe("WorkloadTable", () => {
         shapes={[shape({ outcome: null, outcomeRaw: "some-future-gate", explanation: null })]}
         loading={false}
         pagination={paging}
+        sorting={ordering}
+        filter={filtering}
       />,
     );
 
@@ -163,7 +187,15 @@ describe("WorkloadTable", () => {
   });
 
   it("dates the shape from when it was FIRST seen, not last", () => {
-    renderInApp(<WorkloadTable shapes={[shape()]} loading={false} pagination={paging} />);
+    renderInApp(
+      <WorkloadTable
+        shapes={[shape()]}
+        loading={false}
+        pagination={paging}
+        sorting={ordering}
+        filter={filtering}
+      />,
+    );
 
     expect(screen.getByText("3d ago")).toBeInTheDocument();
   });
@@ -176,6 +208,8 @@ describe("WorkloadTable", () => {
         shapes={[shape({ clients: [{ application: null, driver: "nodejs" }] })]}
         loading={false}
         pagination={paging}
+        sorting={ordering}
+        filter={filtering}
       />,
     );
 

@@ -32,6 +32,7 @@ import {
   clusterRoi,
   clusterWorkload,
   connectionDiagnosis,
+  indexSortKey,
   myInvite,
   offboardResult,
   orgInfo,
@@ -40,10 +41,12 @@ import {
   provisionedCluster,
   recommendation,
   securityTrail,
+  sortDirection,
   supportedEngine,
   tunnelTestResult,
   tunnelView,
   WORKLOAD_SHAPES_PAGE_MAX,
+  workloadSortKey,
 } from "./schemas.js";
 
 const clusterId = z.object({ clusterId: z.uuid() });
@@ -171,6 +174,20 @@ export const contract = {
         // endpoint a page rather than a report — the reason it pages at all is that
         // an index list is unbounded.
         limit: z.coerce.number().int().min(1).max(CLUSTER_INDEXES_PAGE_MAX).optional(),
+        // The order and the filter live HERE and not in the dashboard, because the
+        // server decides which rows the page holds (D135). A control that orders the
+        // hundred rows in front of the reader while the server chose WHICH hundred is
+        // not sorting the cluster: "size descending" then means "the biggest of an
+        // arbitrary hundred", which is the one reading nobody wants and the one it
+        // looked like it was doing.
+        sort: indexSortKey.optional(),
+        dir: sortDirection.optional(),
+        // Substring, case-insensitive, over `database.collection` and the index name.
+        // Narrower than the client filter it replaces, which matched any rendered
+        // cell — the flags and the key pattern are computed after the read, so they
+        // cannot be a SQL predicate. Narrower in scope and wider in REACH: it
+        // searches the cluster now rather than the page.
+        q: z.string().trim().min(1).max(200).optional(),
       }),
     )
     .output(clusterIndexes),
@@ -218,6 +235,11 @@ export const contract = {
         // that keeps this a page rather than a report.
         offset: z.coerce.number().int().nonnegative().optional(),
         limit: z.coerce.number().int().min(1).max(WORKLOAD_SHAPES_PAGE_MAX).optional(),
+        // Same reasoning as the inventory above (D135). The default stays weekly cost
+        // descending, which is the ranking this list exists to present.
+        sort: workloadSortKey.optional(),
+        dir: sortDirection.optional(),
+        q: z.string().trim().min(1).max(200).optional(),
       }),
     )
     .output(clusterWorkload),
