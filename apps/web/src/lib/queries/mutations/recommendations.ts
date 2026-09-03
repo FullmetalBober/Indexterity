@@ -4,8 +4,11 @@
 // does not touch the latency series or the collection footprint.
 //
 // Two of the three move a fourth: un-hiding and undoing both call
-// `recordManualVeto`, so the index is parked for 90 days and the parked panel
-// (#159) is stale the moment either succeeds. Approving parks nothing.
+// `recordManualVeto`, so the index is parked and the parked panel (#159) is
+// stale the moment either succeeds. Approving parks nothing.
+//
+// How LONG it is parked for is the owner's answer since D136 — a number of days,
+// or never — where it used to be a flat 90 nobody was shown or asked.
 import type { Recommendation } from "@repo/contracts";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -41,17 +44,25 @@ function usePipelineMutation(
     // Three invalidations rather than one blanket key. Naming them is the point:
     // it is a list of what this write actually moves, and the reader of this file
     // can check it against the api instead of trusting a grouping.
-    onSettled: async () => {
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: queryKeys.recommendations(clusterId) }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.roi(clusterId) }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.activity(clusterId) }),
-        ...(messages.parks
-          ? [queryClient.invalidateQueries({ queryKey: queryKeys.cooldowns(clusterId) })]
-          : []),
-      ]);
-    },
+    onSettled: () => invalidatePipeline(queryClient, clusterId, messages.parks),
   });
+}
+
+// The four keys a pipeline write can move, extracted so the two mutations that
+// do not go through `usePipelineMutation` — un-hide, which carries the owner's
+// cooldown answer, and un-park — move exactly the same set rather than each
+// keeping its own list to fall out of step with.
+function invalidatePipeline(
+  queryClient: ReturnType<typeof useQueryClient>,
+  clusterId: string | null,
+  parks: boolean,
+): Promise<unknown> {
+  return Promise.all([
+    queryClient.invalidateQueries({ queryKey: queryKeys.recommendations(clusterId) }),
+    queryClient.invalidateQueries({ queryKey: queryKeys.roi(clusterId) }),
+    queryClient.invalidateQueries({ queryKey: queryKeys.activity(clusterId) }),
+    ...(parks ? [queryClient.invalidateQueries({ queryKey: queryKeys.cooldowns(clusterId) })] : []),
+  ]);
 }
 
 export function useApproveRecommendation(clusterId: string | null) {
@@ -62,11 +73,36 @@ export function useApproveRecommendation(clusterId: string | null) {
   });
 }
 
+// The cancel dialog's answer travels with the id: a number of days, or null for
+// never. `undefined` is not offered here — the dialog always has a value in its
+// box — but the api still accepts an absent one, which is what an older client
+// sends and why the default lives there rather than in this file.
 export function useUnhideRecommendation(clusterId: string | null) {
-  return usePipelineMutation(clusterId, (id) => api().unhideRecommendation({ id }), {
-    ok: "Index un-hidden — this drop won't be proposed again for 90 days",
-    failed: UNHIDE_FAILED,
-    parks: true,
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, cooldownDays }: { id: string; cooldownDays: number | null }) =>
+      api().unhideRecommendation({ id, cooldownDays }),
+    onSuccess: (_result, { cooldownDays }) =>
+      toast.success(
+        cooldownDays === null
+          ? "Index un-hidden — it will not be proposed again"
+          : `Index un-hidden — not proposed again for ${cooldownDays} days`,
+      ),
+    onError: () => toast.error(UNHIDE_FAILED),
+    onSettled: () => invalidatePipeline(queryClient, clusterId, true),
+  });
+}
+
+// Un-park (D136). Answers with the whole list, so the panel redraws from the
+// response rather than from a refetch that could disagree with it.
+export function useClearCooldown(clusterId: string | null) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (target: { database: string; collection: string; indexName: string }) =>
+      api().clearCooldown({ clusterId: clusterId ?? "", ...target }),
+    onSuccess: () => toast.success("Un-parked — the engine may propose it again"),
+    onError: () => toast.error("Could not un-park — are you an owner, and is the API up?"),
+    onSettled: () => invalidatePipeline(queryClient, clusterId, true),
   });
 }
 

@@ -521,8 +521,53 @@ export const contract = {
       summary: "Cancel a pending drop: make the index visible again now",
     })
     .errors({ NOT_FOUND: {}, CONFLICT: {} })
-    .input(z.object({ id: z.uuid() }))
+    .input(
+      z.object({
+        id: z.uuid(),
+        // How long to park the index afterwards, as the owner answered the cancel
+        // dialog (D136). Three distinct values, and the difference matters:
+        //
+        //   a number   park for that many days
+        //   null       NEVER — do not propose this index again
+        //   absent     the owner did not choose, so the engine's proposal stands
+        //
+        // Absent has to keep meaning that, because it is what a client written
+        // before this existed sends. It was a flat 90 days, neither shown nor
+        // chosen, which is a long time to park an index for one click.
+        cooldownDays: z.number().int().positive().max(3650).nullable().optional(),
+      }),
+    )
     .output(recommendation),
+
+  // Un-park an index: the owner changed their mind, or the workload did (D136).
+  //
+  // Keyed by namespace and index name rather than by a cooldown id, because that
+  // is the key the table itself is unique on and the one the parked list already
+  // carries — and it is what lets an owner clear a COLLECTION-level park, whose
+  // index name is the empty sentinel.
+  //
+  // A DELETE of the row and not an expiry backdated to now: `regression_count`
+  // lives on it and feeds both the escalation and the confidence penalty, so
+  // backdating would make the index eligible again while still docking its score
+  // for regressions the owner has just said to forget.
+  clearCooldown: oc
+    .route({
+      method: "POST",
+      path: "/clusters/{clusterId}/cooldowns/clear",
+      summary: "Un-park an index: remove its cooldown and the regression history behind it",
+    })
+    .errors({ NOT_FOUND: {} })
+    .input(
+      z.object({
+        clusterId: z.uuid(),
+        database: z.string(),
+        collection: z.string(),
+        // Empty is the collection-level park, which is a real target here rather
+        // than a missing value — see WHOLE_COLLECTION in jobs/cooldowns.ts.
+        indexName: z.string(),
+      }),
+    )
+    .output(clusterCooldowns),
 
   // Shorten a pending drop's observe window, never lengthen it. The window is
   // decided once at hide time and frozen on purpose — a date that walked as

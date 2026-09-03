@@ -44,7 +44,7 @@ export class RecommendationsController {
   unhideRecommendation(@Req() req: FastifyRequest) {
     return route(this.tenancy, contract.unhideRecommendation, req, "owner").handler(
       ({ input, errors, context }) =>
-        this.recommendations.unhide(input.id, context.member.orgId, errors),
+        this.recommendations.unhide(input.id, context.member.orgId, errors, input.cooldownDays),
     );
   }
 

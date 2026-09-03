@@ -27,6 +27,7 @@ import {
   workloadShapes,
 } from "../db";
 import { DatabaseService } from "../db/database.service";
+import { clearCooldown } from "../jobs/cooldowns";
 import { historyWindow } from "../jobs/plan";
 
 // One collection's latency counters over the window, grouped by namespace.
@@ -558,6 +559,17 @@ export class InsightsRepository {
       .limit(limit)
       .offset(from);
     return { rows, total, offset: from };
+  }
+
+  // Un-park an index (D136). Delegates to jobs/cooldowns.ts rather than writing
+  // its own delete, because the row carries `regression_count` and the reason
+  // clearing is a DELETE rather than a backdated expiry lives with the escalation
+  // it feeds.
+  clearCooldown(
+    clusterId: string,
+    target: { readonly database: string; readonly collection: string; readonly indexName: string },
+  ): Promise<boolean> {
+    return clearCooldown(this.database.db, clusterId, target);
   }
 
   // The WORKLOAD pass's own note (#277), for the two gates that can have no

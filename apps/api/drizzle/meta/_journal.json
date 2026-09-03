@@ -435,6 +435,13 @@
       "when": 1788346556787,
       "tag": "0061_observe_window_failures",
       "breakpoints": true
+    },
+    {
+      "idx": 62,
+      "version": "7",
+      "when": 1788377283712,
+      "tag": "0062_cooldown_never",
+      "breakpoints": true
     }
   ]
 }

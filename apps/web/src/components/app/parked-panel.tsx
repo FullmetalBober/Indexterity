@@ -1,6 +1,7 @@
 import type { ClusterCooldowns, ParkedIndex } from "@repo/contracts";
 import { Truncated } from "~/components/truncated";
 import { Badge } from "~/components/ui/badge";
+import { Button } from "~/components/ui/button";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "~/components/ui/empty";
 import { Skeleton } from "~/components/ui/skeleton";
 import { instantOf } from "~/lib/instant";
@@ -38,7 +39,24 @@ function regressionNote(count: number) {
   return <Badge variant={count > 1 ? "destructive" : "secondary"}>regressed {count}×</Badge>;
 }
 
-function ParkedRow({ entry }: { entry: ParkedIndex }) {
+function ParkedRow({
+  entry,
+  onClear,
+  clearing,
+}: {
+  entry: ParkedIndex;
+  // Undefined means the reader may not un-park — the control is owner-only, and a
+  // button that would be refused is worse than no button (the rule the
+  // recommendations table's action cell already follows).
+  //
+  // `| undefined` written out because the panel forwards its own optional prop
+  // straight through, and under exactOptionalPropertyTypes "absent" and "present
+  // and undefined" are different types.
+  onClear:
+    | ((target: { database: string; collection: string; indexName: string }) => void)
+    | undefined;
+  clearing: boolean;
+}) {
   return (
     <li className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-sm">
       {/* A collection-level park names no index, because there is no one index to
@@ -52,9 +70,35 @@ function ParkedRow({ entry }: { entry: ParkedIndex }) {
       {regressionNote(entry.regressionCount)}
       <Truncated className="text-muted-foreground text-xs">{entry.reason}</Truncated>
       <span className="whitespace-nowrap text-muted-foreground text-xs tabular-nums">
-        {entry.active ? "until " : "eligible since "}
-        <LocalTime iso={entry.until} options={dayOptions(entry.until)} dateOnly />
+        {/* No date to draw when the owner said never (D136), and no date is the
+            honest rendering: a far-away one would read as an expiry that is
+            simply a long way off, which is the opposite of what they chose. */}
+        {entry.until === null ? (
+          "parked indefinitely"
+        ) : (
+          <>
+            {entry.active ? "until " : "eligible since "}
+            <LocalTime iso={entry.until} options={dayOptions(entry.until)} dateOnly />
+          </>
+        )}
       </span>
+      {onClear === undefined ? null : (
+        <Button
+          size="sm"
+          variant="ghost"
+          className="h-6 px-2 text-xs"
+          disabled={clearing}
+          onClick={() =>
+            onClear({
+              database: entry.database,
+              collection: entry.collection,
+              indexName: entry.indexName,
+            })
+          }
+        >
+          Un-park
+        </Button>
+      )}
     </li>
   );
 }
@@ -62,9 +106,16 @@ function ParkedRow({ entry }: { entry: ParkedIndex }) {
 export function ParkedPanel({
   cooldowns,
   loading,
+  onClear,
+  clearing = false,
 }: {
   cooldowns: ClusterCooldowns;
   loading: boolean;
+  // Un-park (D136). Absent means the reader is not an owner and the control is
+  // not drawn — the same rule the recommendations table's action cell follows,
+  // since a button the api would refuse is worse than no button.
+  onClear?: (target: { database: string; collection: string; indexName: string }) => void;
+  clearing?: boolean;
 }) {
   if (loading) return <Skeleton className="h-16 w-full" />;
 
@@ -121,6 +172,8 @@ export function ParkedPanel({
             <ParkedRow
               key={`${entry.database}.${entry.collection}.${entry.indexName}`}
               entry={entry}
+              onClear={onClear}
+              clearing={clearing}
             />
           ))}
         </ul>
@@ -140,6 +193,8 @@ export function ParkedPanel({
               <ParkedRow
                 key={`${entry.database}.${entry.collection}.${entry.indexName}`}
                 entry={entry}
+                onClear={onClear}
+                clearing={clearing}
               />
             ))}
           </ul>

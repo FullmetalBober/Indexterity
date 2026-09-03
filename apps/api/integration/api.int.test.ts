@@ -2307,7 +2307,10 @@ describe("cancelling a pending drop", () => {
       .from(indexCooldowns)
       .where(and(eq(indexCooldowns.clusterId, clusterId), eq(indexCooldowns.indexName, "keep_1")));
     expect(cooldown?.regressionCount).toBe(0);
-    expect((cooldown?.until.getTime() ?? 0) > Date.now()).toBe(true);
+    // A date and not a null: this cancel took the engine's proposal rather than
+    // choosing never (D136), and `until` is nullable now.
+    expect(cooldown?.until).not.toBeNull();
+    expect((cooldown?.until?.getTime() ?? 0) > Date.now()).toBe(true);
 
     // And a reader can now see it (#159). The row above was written by exactly
     // one function and read by no controller until this route existed.
@@ -2322,7 +2325,7 @@ describe("cancelling a pending drop", () => {
     expect(kept?.reason).toBe("drop cancelled by an owner");
     expect(kept?.regressionCount).toBe(0);
     expect(kept?.active).toBe(true);
-    expect(kept?.until).toBe(cooldown?.until.toISOString());
+    expect(kept?.until).toBe(cooldown?.until?.toISOString());
 
     const stillParked = entries.filter((entry) => entry.active);
     expect(parked.activeCount).toBe(stillParked.length);
@@ -2362,6 +2365,49 @@ describe("cancelling a pending drop", () => {
     expect(
       asRecords(orphaned.parked, "orphaned.parked").some((entry) => entry.indexName === "keep_1"),
     ).toBe(true);
+
+    // Un-parking it (D136): the row goes, and the response is the list it was on
+    // so the panel redraws from one answer rather than a refetch.
+    const clearRes = await api(`/clusters/${clusterId}/cooldowns/clear`, owner, {
+      method: "POST",
+      body: JSON.stringify({
+        database: "inttest",
+        collection: "keepme",
+        indexName: "keep_1",
+      }),
+    });
+    expect(clearRes.status).toBe(200);
+    const afterClear = asRecord(await clearRes.json());
+    expect(
+      asRecords(afterClear.parked, "afterClear.parked").some(
+        (entry) => entry.indexName === "keep_1",
+      ),
+    ).toBe(false);
+
+    // A DELETE and not a backdated expiry, so the regression history behind it
+    // goes too — otherwise the index would be eligible again while still docking
+    // its own score for regressions the owner just said to forget.
+    const [gone] = await db
+      .select()
+      .from(indexCooldowns)
+      .where(and(eq(indexCooldowns.clusterId, clusterId), eq(indexCooldowns.indexName, "keep_1")));
+    expect(gone).toBeUndefined();
+
+    // Clearing something that is not parked is a 404 rather than a silent ok: the
+    // reader pressed a button about a row, and "done" would be a claim about a
+    // row that was not there.
+    expect(
+      (
+        await api(`/clusters/${clusterId}/cooldowns/clear`, owner, {
+          method: "POST",
+          body: JSON.stringify({
+            database: "inttest",
+            collection: "keepme",
+            indexName: "never_parked_1",
+          }),
+        })
+      ).status,
+    ).toBe(404);
 
     await coll.drop().catch(() => {});
   });
@@ -2894,7 +2940,7 @@ describe("builds that are individually fine and cumulatively are not", () => {
         ),
       );
     expect(parked?.reason).toContain("slower than before the run of builds");
-    expect(parked?.until.getTime()).toBeGreaterThan(Date.now());
+    expect(parked?.until?.getTime()).toBeGreaterThan(Date.now());
     // Nothing was rolled back: the newest index is not necessarily the culprit,
     // and undoing the wrong one is worse than saying so.
     expect(graduated?.state).not.toBe("ROLLED_BACK");

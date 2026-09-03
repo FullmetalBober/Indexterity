@@ -17,6 +17,10 @@ interface ConfirmButtonProps {
   readonly trigger: ReactNode;
   readonly title: string;
   readonly description: ReactNode;
+  // Controls the reader answers before confirming — a duration, a choice.
+  // Rendered between the description and the footer, and NOT inside the
+  // description, which is what the dialog is named by.
+  readonly body?: ReactNode;
   readonly confirmLabel: string;
   readonly destructive?: boolean;
   readonly onConfirm: () => void;
@@ -42,6 +46,7 @@ export function ConfirmButton({
   trigger,
   title,
   description,
+  body,
   confirmLabel,
   destructive = false,
   onConfirm,
@@ -64,6 +69,11 @@ export function ConfirmButton({
             <div className="space-y-2 text-muted-foreground text-sm">{description}</div>
           </AlertDialogDescription>
         </AlertDialogHeader>
+        {/* Controls go HERE and not in `description`, which is what the dialog
+            names itself by: an aria-describedby pointing at a number input and a
+            checkbox describes the dialog as its own form. Text above, controls
+            below, footer last. */}
+        {body}
         <AlertDialogFooter>
           <AlertDialogCancel disabled={pending}>Cancel</AlertDialogCancel>
           <AlertDialogAction

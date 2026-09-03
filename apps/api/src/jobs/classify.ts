@@ -312,7 +312,19 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
       // the trace: "nothing to suggest" and "we suggested it and hid it" rendered
       // identically, so a guard that had become too broad was indistinguishable
       // from a quiet cluster (#277).
-      if (cooled.has(cooldownKey(entry.database, entry.collection, candidate.indexName))) {
+      // Advisories are not drops, so a cooldown says nothing about them — the same
+      // exemption the `standing` and `hinted` checks below already make, and the
+      // one this check was missing (D136).
+      //
+      // It mattered: a cooldown is written when a human CANCELS a drop, and the
+      // only finding a protected index can produce is an advisory. So cancelling
+      // the drop of a text index also buried "this text index looks unused, look
+      // at it" for the length of the cooldown — the reader pressed a button about
+      // a drop and lost a finding about the index.
+      if (
+        candidate.type !== "ADVISORY_REVIEW" &&
+        cooled.has(cooldownKey(entry.database, entry.collection, candidate.indexName))
+      ) {
         suppress("cooldown");
         continue;
       }
