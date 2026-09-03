@@ -156,9 +156,11 @@ export async function suggestForCluster(
     await planForCluster(db, clusterId),
   );
 
-  const { session, engine, readOnly, release } = await openClusterSession(db, clusterId, {
-    tunnels,
-  });
+  const { session, engine, readOnly, canPartial, release } = await openClusterSession(
+    db,
+    clusterId,
+    { tunnels },
+  );
   let created = 0;
   let instantApproved = 0;
   try {
@@ -475,10 +477,18 @@ export async function suggestForCluster(
       // produced no candidate — a second copy of the rules, true only until it
       // drifted, on a page whose entire claim is "this is the gate that
       // declined it".
+      //
+      // Partial candidates only where the executor can build one from a shape's
+      // constants (#452): elsewhere the recommender keeps those columns as keys.
       const creates = [
-        ...recommendCreates(shapes, existing, WORKLOAD_OPTIONS, (shape, reason) => {
-          ledger.note(database, collection, shape, docCount, reason);
-        }),
+        ...recommendCreates(
+          shapes,
+          existing,
+          { ...WORKLOAD_OPTIONS, partialIndexes: canPartial },
+          (shape, reason) => {
+            ledger.note(database, collection, shape, docCount, reason);
+          },
+        ),
       ].sort((a, b) => b.count - a.count);
       const budgetKey = `${database} ${collection}`;
       for (const candidate of creates) {

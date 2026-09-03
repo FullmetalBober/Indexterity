@@ -63,9 +63,17 @@ class MssqlEngineSession implements EngineSession {
 // shape). hideIndexes is true with the asymmetry settled there: DISABLE is the
 // instant hide, REBUILD is the exact-but-not-instant undo, and the executor
 // refuses the classes for which DISABLE is destructive.
+//
+// partialIndexFromConstants is FALSE. A filtered index wants its predicate in
+// T-SQL, and the executor carries one only in the `{definition}` shape the
+// collector reads off sys.indexes.filter_definition — exact for a restore or a
+// re-order, and nothing it can do with the recommender's `{field: literal}`
+// map. It refused that map as an unsupported server version once, in
+// production, and blocked the cluster as "wrong major" (#452); now the
+// recommender keeps those columns as keys instead.
 export const mssqlAdapter: EngineAdapter = {
   engine: "MSSQL",
-  capabilities: { hideIndexes: true, provisionScopedUsers: true },
+  capabilities: { hideIndexes: true, provisionScopedUsers: true, partialIndexFromConstants: false },
   connStringHint: "mssql://user:password@host:1433 or Server=host;User Id=…;Password=…",
   isConnString: isMssqlConnString,
   hostsOf: mssqlHosts,

@@ -1,4 +1,9 @@
-import type { CreateIndexOptions, IndexBuildOutcome, IndexExecutor } from "../engine/ports";
+import {
+  type CreateIndexOptions,
+  type IndexBuildOutcome,
+  IndexBuildRefusedError,
+  type IndexExecutor,
+} from "../engine/ports";
 import { UnsupportedServerError } from "../engine/version";
 import { type MssqlWriter, qualifiedTable, quoteIdent } from "./connection";
 import { mssqlVersionRefusal } from "./version";
@@ -166,12 +171,20 @@ export class MssqlIndexExecutor implements IndexExecutor {
     // collector read off sys.indexes. A mongo-shaped filter cannot be
     // translated and refusing is better than building a different index than
     // the one being restored.
+    //
+    // A build refusal, not UnsupportedServerError: the server is fine, the
+    // specification is what cannot be built, and the version class blocked a
+    // production cluster as "wrong major" for exactly this (#452). The
+    // recommender no longer proposes the shape for SQL Server
+    // (capabilities.partialIndexFromConstants), so what still arrives here is a
+    // row approved before it stopped — or a bug, and either way the pass records
+    // it against the row and moves on.
     const filter = options.partialFilterExpression;
     let where = "";
     if (filter !== undefined && Object.keys(filter).length > 0) {
       const definition = filter.definition;
       if (typeof definition !== "string" || definition.length === 0) {
-        throw new UnsupportedServerError(
+        throw new IndexBuildRefusedError(
           "cannot create a filtered index from a non-SQL filter expression",
         );
       }

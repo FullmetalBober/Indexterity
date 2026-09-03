@@ -136,3 +136,17 @@ describe("canHideIndexes", () => {
     expect(canHideIndexes("POSTGRESQL")).toBe(false);
   });
 });
+
+// The recommender's `{field: literal}` filter is MongoDB's partialFilterExpression
+// as it stands. The SQL engines build a partial index only from the predicate
+// their own collector read back (`{definition}`, `{sql}`), so a candidate derived
+// from constants is one they cannot build — and proposing it anyway blocked a
+// production SQL Server as an unsupported version (#452). Spelled out per engine
+// rather than looped, so a fourth adapter has to say which it is.
+describe("partialIndexFromConstants", () => {
+  it("is MongoDB's alone until a SQL translation exists", () => {
+    expect(adapterFor("MONGODB").capabilities.partialIndexFromConstants).toBe(true);
+    expect(adapterFor("MSSQL").capabilities.partialIndexFromConstants).toBe(false);
+    expect(adapterFor("POSTGRESQL").capabilities.partialIndexFromConstants).toBe(false);
+  });
+});

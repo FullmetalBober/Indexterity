@@ -28,8 +28,10 @@ function idx(name: string, fields: string[]): IndexSpec {
 }
 
 // Rate off by default in these tests: they are about the shape rules, and a
-// shape with no measured window is decided by count alone anyway.
-const options = { minCount: 1, minPerWeek: 0 };
+// shape with no measured window is decided by count alone anyway. Partial
+// candidates on, as MongoDB has them; the one test about an engine without them
+// turns the option off itself.
+const options = { minCount: 1, minPerWeek: 0, partialIndexes: true };
 const mongosh = { application: "mongosh 2.8.3" };
 const atDesc: SortKey = { field: "at", direction: -1 };
 const bAsc: SortKey = { field: "b", direction: 1 };
@@ -91,6 +93,29 @@ describe("recommendCreates (ESR)", () => {
     expect(out[0]?.partialFilter).toEqual({ status: "active" });
     expect(out[0]?.keys.map((key) => key.field)).toEqual(["region", "at"]);
     expect(out[0]?.rationale).toContain('status = "active"');
+  });
+
+  // The SQL engines build a partial index only from a predicate their own
+  // collector read back, so the recommender must not derive one from constants
+  // for them (#452). The constants stay keys — the same candidate a shape that
+  // carries no constants produces, so nothing about the index depends on
+  // whether the source happened to record literals.
+  it("keeps constants as keys where the engine cannot build a partial index from them", () => {
+    const withConstants: QueryShape = {
+      equality: ["status", "region"],
+      sort: [atDesc],
+      range: [],
+      collscan: true,
+      count: 5,
+      constants: { status: "active" },
+    };
+    const out = recommendCreates([withConstants], [], { ...options, partialIndexes: false });
+    expect(out).toHaveLength(1);
+    expect(out[0]?.partialFilter).toBeUndefined();
+    expect(out[0]?.keys.map((key) => key.field)).toEqual(["status", "region", "at"]);
+    expect(out[0]?.rationale).not.toContain("Partial");
+    const plain = recommendCreates([{ ...withConstants, constants: {} }], [], options);
+    expect(plain[0]?.keys).toEqual(out[0]?.keys);
   });
 
   it("keeps a normal candidate when constants would leave no keys", () => {
@@ -460,7 +485,7 @@ describe("recommendCreates (decline attribution)", () => {
 
   it("names the recurrence floor", () => {
     const under = shape(["a"], [], [], 1);
-    expect(declines([under], [], { minCount: 3, minPerWeek: 0 })).toEqual([
+    expect(declines([under], [], { ...options, minCount: 3 })).toEqual([
       { shape: under, reason: "not-recurring" },
     ]);
   });
@@ -639,7 +664,7 @@ describe("recommendNarrowing", () => {
 });
 
 describe("isRecurring", () => {
-  const rated = { minCount: 3, minPerWeek: 0.5 };
+  const rated = { minCount: 3, minPerWeek: 0.5, partialIndexes: true };
   const withWindow = (count: number, hours: number): QueryShape => ({
     ...shape(["a"], [], [], count),
     observedForHours: hours,
