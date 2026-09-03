@@ -235,6 +235,23 @@ export interface CreateIndexOptions {
   readonly include?: readonly string[] | undefined;
 }
 
+// An index the executor will not build AS SPECIFIED — not because the server
+// refused it, but because the specification asks for something the adapter
+// cannot express: today, a partial filter in a shape it cannot translate.
+//
+// Distinct from UnsupportedServerError, which is about the server's major and
+// blocks the whole cluster, and from the driver errors a transient failure
+// raises, which the pass retries. Neither fits: the server is fine, and no retry
+// changes a specification. jobs/create.ts catches it per recommendation,
+// records the refusal as that row's CREATE action and carries on with the next
+// build (#452).
+export class IndexBuildRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "IndexBuildRefusedError";
+  }
+}
+
 // The only write surface. Implementations must enforce read-only mode
 // structurally (throw on any write when the cluster is read-only).
 export interface IndexExecutor {
@@ -368,6 +385,23 @@ export interface EngineCapabilities {
   readonly hideIndexes: boolean;
   // Can create a scoped least-privilege user from an admin connection string.
   readonly provisionScopedUsers: boolean;
+  // Can build a partial index from the recommender's filter — the `{field:
+  // literal}` map `recommendCreates` derives from a shape's constant equality
+  // predicates (#452).
+  //
+  // Gates the SUGGESTION, not the build: where this is false the recommender
+  // keeps the constant columns as index keys, which is the candidate a shape
+  // without constants produces anyway. MongoDB's createIndexes takes the map as
+  // its partialFilterExpression verbatim. SQL Server's filtered index and
+  // PostgreSQL's WHERE want a predicate in their own SQL, and those executors
+  // carry one only in the shape their own collector reads back (`{definition}`
+  // and `{sql}`) — so a partial index restored or re-ordered is exact, and one
+  // proposed from constants is something they cannot build. Turning the map
+  // into T-SQL or SQL is a feature with its own questions (the predicate's
+  // types have to match the column's for the optimizer to use the index, and a
+  // parameterised plan never picks a filtered one), and until it is done the
+  // honest answer is false.
+  readonly partialIndexFromConstants: boolean;
 }
 
 // One live, pooled connection to a customer cluster.

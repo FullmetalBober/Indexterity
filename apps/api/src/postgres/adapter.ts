@@ -55,9 +55,20 @@ class PostgresEngineSession implements EngineSession {
 // applied would therefore be able to read every table it manages — so this one
 // analyses, and applying takes the owner's own string, pasted deliberately. See
 // provision.ts and the APPLY tier in diagnose.ts.
+//
+// partialIndexFromConstants is FALSE. The executor builds a partial index only
+// from the `{sql}` predicate its own collector read off pg_get_expr, and an
+// unrecognised filter shape yields a FULL index (executor.ts, partialPredicate) —
+// so a candidate proposed from a shape's constants would be built wider than its
+// rationale claims. Until the `{field: literal}` map is translated into a WHERE
+// clause the recommender keeps those columns as keys instead (#452).
 export const postgresAdapter: EngineAdapter = {
   engine: "POSTGRESQL",
-  capabilities: { hideIndexes: false, provisionScopedUsers: true },
+  capabilities: {
+    hideIndexes: false,
+    provisionScopedUsers: true,
+    partialIndexFromConstants: false,
+  },
   connStringHint:
     "postgresql://user:password@host:5432/dbname?sslmode=verify-full or host=… port=5432 dbname=… user=…",
   isConnString: isPgConnString,

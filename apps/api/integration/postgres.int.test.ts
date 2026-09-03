@@ -94,6 +94,9 @@ describe.skipIf(POSTGRES_URL === undefined)("postgres adapter against a live ser
     expect(postgresAdapter.capabilities).toEqual({
       hideIndexes: false,
       provisionScopedUsers: true,
+      // The executor builds a partial index only from the `{sql}` its collector
+      // read back, so a constant-derived candidate stays a full-key one (#452).
+      partialIndexFromConstants: false,
     });
   });
 
