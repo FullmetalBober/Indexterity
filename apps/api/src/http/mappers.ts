@@ -1,5 +1,6 @@
 import { ORPCError } from "@orpc/server";
 import type { Cluster, ClusterEngine, Recommendation } from "@repo/contracts";
+import { DEFAULT_OBSERVE_DAYS, proposedVetoDays } from "../analysis";
 import { clusters, recommendations } from "../db";
 import type { ConnectionDiagnosis as EngineConnectionDiagnosis } from "../engine/ports";
 import { revokeCommandFor } from "../engine/provision";
@@ -97,6 +98,9 @@ export function toRecommendation(row: typeof recommendations.$inferSelect): Reco
     estimatedBytesSaved: row.estimatedBytesSaved,
     hiddenAt: row.hiddenAt?.toISOString() ?? null,
     observeDays: row.observeDays,
+    // The engine's own first-retry span for this row's window, so the cancel
+    // dialog shows the engine's opinion rather than a round number (D136).
+    proposedCooldownDays: proposedVetoDays(row.observeDays ?? DEFAULT_OBSERVE_DAYS),
     observeReason: row.observeReason,
     createdAt: row.createdAt.toISOString(),
   };

@@ -1,4 +1,5 @@
-import { and, type Database, eq, gt, indexCooldowns } from "../db";
+import { cooldownDaysFor } from "../analysis/cooldown";
+import { and, type Database, eq, gt, indexCooldowns, isNull, or } from "../db";
 
 const DAY_MS = 86_400_000;
 
@@ -41,8 +42,44 @@ export async function activeCooldownKeys(db: Database, clusterId: string): Promi
   const rows = await db
     .select()
     .from(indexCooldowns)
-    .where(and(eq(indexCooldowns.clusterId, clusterId), gt(indexCooldowns.until, new Date())));
+    .where(
+      and(
+        eq(indexCooldowns.clusterId, clusterId),
+        // A NULL `until` is forever: the owner said never touch this index again
+        // (D136). Written as a null rather than a date far in the future, because
+        // "never" is not a very long time — a sentinel date would eventually pass,
+        // and the row would silently become eligible on a day nobody chose.
+        or(isNull(indexCooldowns.until), gt(indexCooldowns.until, new Date())),
+      ),
+    );
   return new Set(rows.map((row) => cooldownKey(row.database, row.collection, row.indexName)));
+}
+
+// Un-park an index: the owner changed their mind, or the workload did.
+//
+// A DELETE and not an expiry backdated to now, which is the choice worth stating.
+// `regression_count` lives on this row and feeds both the escalation above and
+// the confidence score (analysis/score.ts), so backdating would leave the count
+// in force: the index would be eligible again and still be carrying a score
+// penalty for regressions the owner has just said to forget. Clearing means
+// clearing.
+export async function clearCooldown(
+  db: Database,
+  clusterId: string,
+  target: CooldownTarget,
+): Promise<boolean> {
+  const removed = await db
+    .delete(indexCooldowns)
+    .where(
+      and(
+        eq(indexCooldowns.clusterId, clusterId),
+        eq(indexCooldowns.database, target.database),
+        eq(indexCooldowns.collection, target.collection),
+        eq(indexCooldowns.indexName, target.indexName),
+      ),
+    )
+    .returning({ id: indexCooldowns.id });
+  return removed.length > 0;
 }
 
 // Park an index after a human cancelled its pending drop. Deliberately NOT a
@@ -50,14 +87,19 @@ export async function activeCooldownKeys(db: Database, clusterId: string): Promi
 // backoff, and nothing regressed — someone simply knows something the engine
 // does not. The cooldown exists so the next classify pass does not re-propose
 // the same index straight back into the pipeline.
+//
+// `days` is the owner's answer and null means NEVER (D136). The engine proposes
+// `proposedVetoDays` and the owner may take it, change it, or say never — which
+// is the case the old flat 90 days had no way to express, so an owner who knew
+// an index was load-bearing forever had to re-cancel its drop four times a year.
 export async function recordManualVeto(
   db: Database,
   clusterId: string,
   target: CooldownTarget,
-  days: number,
+  days: number | null,
   reason: string,
-): Promise<Date> {
-  const until = new Date(Date.now() + days * DAY_MS);
+): Promise<Date | null> {
+  const until = days === null ? null : new Date(Date.now() + days * DAY_MS);
   await db
     .insert(indexCooldowns)
     .values({ clusterId, ...target, reason, regressionCount: 0, until })
@@ -74,8 +116,9 @@ export async function recordManualVeto(
   return until;
 }
 
-// Record a regression and escalate: each repeat pushes the cooldown further out
-// (base = 3x the observe window, linear in the regression count). Returns `until`.
+// Record a regression and escalate: the first parks the index for one observe
+// window and each repeat doubles it, capped (see cooldownDaysFor). Returns
+// `until`.
 export async function recordRegression(
   db: Database,
   clusterId: string,
@@ -96,7 +139,7 @@ export async function recordRegression(
     )
     .limit(1);
   const count = (existing?.regressionCount ?? 0) + 1;
-  const until = new Date(Date.now() + observeDays * DAY_MS * 3 * count);
+  const until = new Date(Date.now() + cooldownDaysFor(observeDays, count) * DAY_MS);
   await db
     .insert(indexCooldowns)
     .values({ clusterId, ...target, reason, regressionCount: count, until })

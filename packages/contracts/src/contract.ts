@@ -15,6 +15,7 @@ import {
 } from "./inputs.js";
 import {
   auditAction,
+  CLUSTER_INDEXES_PAGE_MAX,
   cluster,
   clusterCollections,
   clusterCooldowns,
@@ -31,6 +32,7 @@ import {
   clusterRoi,
   clusterWorkload,
   connectionDiagnosis,
+  indexSortKey,
   myInvite,
   offboardResult,
   orgInfo,
@@ -39,9 +41,12 @@ import {
   provisionedCluster,
   recommendation,
   securityTrail,
+  sortDirection,
   supportedEngine,
   tunnelTestResult,
   tunnelView,
+  WORKLOAD_SHAPES_PAGE_MAX,
+  workloadSortKey,
 } from "./schemas.js";
 
 const clusterId = z.object({ clusterId: z.uuid() });
@@ -126,11 +131,23 @@ export const contract = {
   // `IndexUsage`, which is keyed by `recommendationId` (D66). So the only
   // indexes a customer could see were the ones we already wanted to change.
   //
-  // Paged by keyset rather than capped like `listRecommendations`, because the
+  // Paged by OFFSET rather than capped like `listRecommendations`, because the
   // question is different: proposals are RANKED, so the top few are the answer
-  // and a cursor buys nothing, while an inventory is browsed — "what else is on
+  // and paging buys nothing, while an inventory is browsed — "what else is on
   // `orders`" has no top. Namespace order for the same reason, and the two
   // optional filters are that order's own scoping.
+  //
+  // It was a keyset cursor until #445, and offset is a deliberate trade rather
+  // than a simplification (D133). Keyset can only step, so the reader got a Back
+  // and a More button and no way to reach page five of six; browsing is exactly
+  // the access pattern that wants a page number. What offset gives up is the
+  // guarantee keyset had for free: the set moves under the reader — a collect
+  // lands, an index is built — and a page boundary can then repeat or skip the
+  // row that crossed it. Survivable HERE, and only here, because a namespace is
+  // not a queue: nothing is consumed by being read, `total` is re-counted per
+  // request so the page count follows the set, and the collect cadence is hours
+  // against a reader who pages in seconds. The security trail keeps its cursor
+  // (D67) and so does the workload list beside this one, which is ranked.
   getClusterIndexes: oc
     .route({
       method: "GET",
@@ -147,12 +164,30 @@ export const contract = {
         // the wider one.
         database: z.string().optional(),
         collection: z.string().optional(),
-        // The cursor from the previous page. All three or none — the sort is
-        // (database, collection, indexName) and any prefix of it repeats or
-        // skips rows across the boundary.
-        afterDatabase: z.string().optional(),
-        afterCollection: z.string().optional(),
-        afterIndexName: z.string().optional(),
+        // Where the page starts, in rows. Coerced because this arrives as a query
+        // string; clamped rather than refused past the end, since a reader who
+        // filters while on page five has asked for an offset that no longer exists
+        // and an empty page would read as "this cluster has no indexes".
+        offset: z.coerce.number().int().nonnegative().optional(),
+        // How many rows the page carries. Bounded at both ends: the floor stops a
+        // request for zero rows paging forever, and the ceiling is what keeps this
+        // endpoint a page rather than a report — the reason it pages at all is that
+        // an index list is unbounded.
+        limit: z.coerce.number().int().min(1).max(CLUSTER_INDEXES_PAGE_MAX).optional(),
+        // The order and the filter live HERE and not in the dashboard, because the
+        // server decides which rows the page holds (D135). A control that orders the
+        // hundred rows in front of the reader while the server chose WHICH hundred is
+        // not sorting the cluster: "size descending" then means "the biggest of an
+        // arbitrary hundred", which is the one reading nobody wants and the one it
+        // looked like it was doing.
+        sort: indexSortKey.optional(),
+        dir: sortDirection.optional(),
+        // Substring, case-insensitive, over `database.collection` and the index name.
+        // Narrower than the client filter it replaces, which matched any rendered
+        // cell — the flags and the key pattern are computed after the read, so they
+        // cannot be a SQL predicate. Narrower in scope and wider in REACH: it
+        // searches the cluster now rather than the page.
+        q: z.string().trim().min(1).max(200).optional(),
       }),
     )
     .output(clusterIndexes),
@@ -172,6 +207,13 @@ export const contract = {
   // Ranked by weekly cost rather than sorted by namespace, which is the
   // difference from `getClusterIndexes` beside it: an inventory is browsed, and
   // this is a list of problems, so the worst ones are the answer.
+  //
+  // Paged by offset since #445, the same as the inventory (D133). The ranking is
+  // what makes it sound rather than merely convenient: the sort key is
+  // `(weekly cost desc, id)` and the id is not decoration — two shapes on one
+  // collection sharing a weekly figure is ordinary, so without it the order is
+  // PARTIAL, and under offset a partial order lets one row appear on two pages of
+  // a single browse where a keyset cursor merely stalled.
   getClusterWorkload: oc
     .route({
       method: "GET",
@@ -187,10 +229,17 @@ export const contract = {
         // Only the shapes nothing was proposed for, which is the question the
         // page exists to answer and the one no other screen can.
         declinedOnly: z.coerce.boolean().optional(),
-        // The cursor from the previous page. Both halves or neither — a cost
-        // without its tiebreak would skip a shape that shares it.
-        afterWeeklyDocsExamined: z.coerce.number().optional(),
-        afterId: z.uuid().optional(),
+        // Where the page starts and how big it is. Coerced from the query string,
+        // and the limit is bounded at both ends for the reason the inventory gives:
+        // a floor so a request for zero rows cannot page forever, and a ceiling
+        // that keeps this a page rather than a report.
+        offset: z.coerce.number().int().nonnegative().optional(),
+        limit: z.coerce.number().int().min(1).max(WORKLOAD_SHAPES_PAGE_MAX).optional(),
+        // Same reasoning as the inventory above (D135). The default stays weekly cost
+        // descending, which is the ranking this list exists to present.
+        sort: workloadSortKey.optional(),
+        dir: sortDirection.optional(),
+        q: z.string().trim().min(1).max(200).optional(),
       }),
     )
     .output(clusterWorkload),
@@ -472,8 +521,53 @@ export const contract = {
       summary: "Cancel a pending drop: make the index visible again now",
     })
     .errors({ NOT_FOUND: {}, CONFLICT: {} })
-    .input(z.object({ id: z.uuid() }))
+    .input(
+      z.object({
+        id: z.uuid(),
+        // How long to park the index afterwards, as the owner answered the cancel
+        // dialog (D136). Three distinct values, and the difference matters:
+        //
+        //   a number   park for that many days
+        //   null       NEVER — do not propose this index again
+        //   absent     the owner did not choose, so the engine's proposal stands
+        //
+        // Absent has to keep meaning that, because it is what a client written
+        // before this existed sends. It was a flat 90 days, neither shown nor
+        // chosen, which is a long time to park an index for one click.
+        cooldownDays: z.number().int().positive().max(3650).nullable().optional(),
+      }),
+    )
     .output(recommendation),
+
+  // Un-park an index: the owner changed their mind, or the workload did (D136).
+  //
+  // Keyed by namespace and index name rather than by a cooldown id, because that
+  // is the key the table itself is unique on and the one the parked list already
+  // carries — and it is what lets an owner clear a COLLECTION-level park, whose
+  // index name is the empty sentinel.
+  //
+  // A DELETE of the row and not an expiry backdated to now: `regression_count`
+  // lives on it and feeds both the escalation and the confidence penalty, so
+  // backdating would make the index eligible again while still docking its score
+  // for regressions the owner has just said to forget.
+  clearCooldown: oc
+    .route({
+      method: "POST",
+      path: "/clusters/{clusterId}/cooldowns/clear",
+      summary: "Un-park an index: remove its cooldown and the regression history behind it",
+    })
+    .errors({ NOT_FOUND: {} })
+    .input(
+      z.object({
+        clusterId: z.uuid(),
+        database: z.string(),
+        collection: z.string(),
+        // Empty is the collection-level park, which is a real target here rather
+        // than a missing value — see WHOLE_COLLECTION in jobs/cooldowns.ts.
+        indexName: z.string(),
+      }),
+    )
+    .output(clusterCooldowns),
 
   // Shorten a pending drop's observe window, never lengthen it. The window is
   // decided once at hide time and frozen on purpose — a date that walked as

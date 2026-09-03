@@ -55,6 +55,24 @@ function cellsOf(name: string): string[] {
   return [...(cells?.querySelectorAll("td") ?? [])].map((cell) => cell.textContent ?? "");
 }
 
+// The pagination the route always supplies. One fixture spread into every render
+// below, so a change to the control's shape is one edit here rather than eight —
+// and it describes a single page of a single row, which is the state that draws
+// no page buttons and keeps these tests about the COLUMNS.
+const paging = {
+  pageIndex: 0,
+  pageSize: 100,
+  rowCount: 1,
+  noun: "indexes",
+  onChange: () => undefined,
+};
+
+// The api owns the order and the filter for this table (D135), so the render
+// needs both handed in. Inert here: these tests are about the COLUMNS, and a
+// manual sort means the rows appear in the order the fixture lists them.
+const ordering = { state: [], onChange: () => undefined };
+const filtering = { value: "", onChange: () => undefined };
+
 describe("IndexTable", () => {
   it("draws an index nothing has been proposed about, which is the point of the page", () => {
     renderInApp(
@@ -64,6 +82,9 @@ describe("IndexTable", () => {
         roster={null}
         engine="MONGODB"
         loading={false}
+        pagination={paging}
+        sorting={ordering}
+        filter={filtering}
       />,
     );
 
@@ -86,6 +107,9 @@ describe("IndexTable", () => {
         roster={null}
         engine="MONGODB"
         loading={false}
+        pagination={paging}
+        sorting={ordering}
+        filter={filtering}
       />,
     );
     expect(screen.getByText("shard key")).toBeInTheDocument();
@@ -98,6 +122,9 @@ describe("IndexTable", () => {
         roster={null}
         engine="POSTGRESQL"
         loading={false}
+        pagination={paging}
+        sorting={ordering}
+        filter={filtering}
       />,
     );
     expect(screen.getByText("primary key")).toBeInTheDocument();
@@ -115,6 +142,9 @@ describe("IndexTable", () => {
         roster={null}
         engine="POSTGRESQL"
         loading={false}
+        pagination={paging}
+        sorting={ordering}
+        filter={filtering}
       />,
     );
     expect(screen.queryByText("sparse")).not.toBeInTheDocument();
@@ -132,6 +162,9 @@ describe("IndexTable", () => {
         roster={null}
         engine="MONGODB"
         loading={false}
+        pagination={paging}
+        sorting={ordering}
+        filter={filtering}
       />,
     );
     expect(screen.getByText("hidden")).toBeInTheDocument();
@@ -155,6 +188,9 @@ describe("IndexTable", () => {
         roster={roster(["a:27017", "b:27017", "c:27017"])}
         engine="MONGODB"
         loading={false}
+        pagination={paging}
+        sorting={ordering}
+        filter={filtering}
       />,
     );
 
@@ -183,6 +219,9 @@ describe("IndexTable", () => {
         roster={null}
         engine="MONGODB"
         loading={false}
+        pagination={paging}
+        sorting={ordering}
+        filter={filtering}
       />,
     );
 

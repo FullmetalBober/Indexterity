@@ -322,43 +322,52 @@ describe("narrowScore", () => {
 describe("regressionWeight", () => {
   const DAY = 86_400_000;
   const at = (days: number) => new Date(Date.UTC(2026, 0, 1) + days * DAY);
-  // One regression on a 30-day observe window buys a 90-day cooldown, so this
-  // row was written on day 0 and blocks until day 90.
-  const once = { regressionCount: 1, until: at(90) };
+  // One regression on a 30-day observe window buys a 30-day cooldown since D136
+  // (one window, doubling per repeat), so this row was written on day 0 and
+  // blocks until day 30.
+  const once = { regressionCount: 1, until: at(30) };
 
   it("counts in full while the cooldown it bought is still running", () => {
     expect(regressionWeight(once, 30, at(0))).toBe(1);
-    expect(regressionWeight(once, 30, at(89))).toBe(1);
+    expect(regressionWeight(once, 30, at(29))).toBe(1);
   });
 
   it("fades over the same span again once the block lifts", () => {
-    expect(regressionWeight(once, 30, at(90))).toBe(1);
-    expect(regressionWeight(once, 30, at(135))).toBeCloseTo(0.5, 5);
-    expect(regressionWeight(once, 30, at(157.5))).toBeCloseTo(0.25, 5);
+    expect(regressionWeight(once, 30, at(30))).toBe(1);
+    expect(regressionWeight(once, 30, at(45))).toBeCloseTo(0.5, 5);
+    expect(regressionWeight(once, 30, at(52.5))).toBeCloseTo(0.25, 5);
   });
 
   it("reaches zero, so a workload that has moved on is not still paying", () => {
-    expect(regressionWeight(once, 30, at(180))).toBe(0);
+    expect(regressionWeight(once, 30, at(60))).toBe(0);
     expect(regressionWeight(once, 30, at(400))).toBe(0);
   });
 
   // The escalation looks after itself: a second regression buys twice the
   // cooldown, so it starts twice as deep AND takes twice as long to fade.
   it("keeps a repeat offender down for longer without a second rule", () => {
-    const twice = { regressionCount: 2, until: at(180) };
-    expect(regressionWeight(twice, 30, at(179))).toBe(2);
-    expect(regressionWeight(twice, 30, at(270))).toBeCloseTo(1, 5);
-    expect(regressionWeight(twice, 30, at(360))).toBe(0);
+    const twice = { regressionCount: 2, until: at(60) };
+    expect(regressionWeight(twice, 30, at(59))).toBe(2);
+    expect(regressionWeight(twice, 30, at(90))).toBeCloseTo(1, 5);
+    expect(regressionWeight(twice, 30, at(120))).toBe(0);
   });
 
   it("is nothing at all for the owner-veto rows, which carry no count", () => {
     expect(regressionWeight({ regressionCount: 0, until: at(90) }, 30, at(0))).toBe(0);
   });
 
+  // An open-ended park is the owner saying never (D136). The block it bought has
+  // not started fading, so the weight stands — and a row with no count still
+  // weighs nothing, which is every manual veto.
+  it("holds at full weight for a park with no end", () => {
+    expect(regressionWeight({ regressionCount: 2, until: null }, 30, at(4000))).toBe(2);
+    expect(regressionWeight({ regressionCount: 0, until: null }, 30, at(0))).toBe(0);
+  });
+
   // A shortened observe window is an owner asking for faster verdicts; the fade
   // follows the current policy rather than a span policy no longer stands behind.
   it("follows the policy in force rather than the one at the time", () => {
-    expect(regressionWeight(once, 7, at(90 + 10.5))).toBeCloseTo(0.5, 5);
+    expect(regressionWeight(once, 7, at(30 + 3.5))).toBeCloseTo(0.5, 5);
   });
 
   it("survives a row whose date cannot be read", () => {

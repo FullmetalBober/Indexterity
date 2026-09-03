@@ -16,10 +16,13 @@ import type {
 import {
   CLUSTER_INDEXES_PAGE,
   clusterNode,
+  type IndexSortKey,
   instant,
   LATENCY_SERIES_MAX_COLLECTIONS,
   LATENCY_SERIES_WINDOW_DAYS,
+  type SortDirection,
   WORKLOAD_SHAPES_PAGE,
+  type WorkloadSortKey,
 } from "@repo/contracts";
 import { z } from "zod";
 import {
@@ -36,7 +39,7 @@ import { workerEnv } from "../config/env";
 import { TenancyService } from "../http/tenancy.service";
 import { isWholeCollection } from "../jobs/cooldowns";
 import { severityOf, storedShapeSchema } from "../jobs/workload-shapes";
-import { InsightsRepository, UNMEASURED_COST } from "./insights.repository";
+import { InsightsRepository } from "./insights.repository";
 
 const RECENT_ACTIONS = 50;
 const TOP_CONTRIBUTORS = 10;
@@ -52,16 +55,28 @@ export interface WorkloadQuery {
   readonly database?: string | undefined;
   readonly collection?: string | undefined;
   readonly declinedOnly?: boolean | undefined;
-  readonly afterWeeklyDocsExamined?: number | undefined;
-  readonly afterId?: string | undefined;
+  // Offset paging since #445 (D133), the same shape as ClusterIndexQuery below.
+  readonly offset?: number | undefined;
+  readonly limit?: number | undefined;
+  // And the order and the filter, because the server owns which rows the page
+  // holds and therefore owns both (D135). Passed through untouched — the
+  // whitelist is the contract's and the expressions are the repository's.
+  readonly sort?: WorkloadSortKey | undefined;
+  readonly dir?: SortDirection | undefined;
+  readonly q?: string | undefined;
 }
 
 export interface ClusterIndexQuery {
   readonly database?: string | undefined;
   readonly collection?: string | undefined;
-  readonly afterDatabase?: string | undefined;
-  readonly afterCollection?: string | undefined;
-  readonly afterIndexName?: string | undefined;
+  // Offset paging since #445 (D133). Both optional, because a first page is the
+  // request with neither and the api owns what that means.
+  readonly offset?: number | undefined;
+  readonly limit?: number | undefined;
+  // See WorkloadQuery above (D135).
+  readonly sort?: IndexSortKey | undefined;
+  readonly dir?: SortDirection | undefined;
+  readonly q?: string | undefined;
 }
 
 // Read-only views over what the engine has already decided and recorded: ROI,
@@ -253,13 +268,16 @@ export class InsightsService {
     orgId: string,
     query: ClusterIndexQuery,
   ): Promise<ClusterIndexes> {
+    // The page size the caller asked for survives into the empty views, so a
+    // control that reads it back does not snap to a different size on a cluster
+    // that has never been collected.
+    const limit = query.limit ?? CLUSTER_INDEXES_PAGE;
     const empty = {
       clusterId,
       indexes: [],
       total: 0,
-      nextDatabase: null,
-      nextCollection: null,
-      nextIndexName: null,
+      offset: 0,
+      limit,
       collectedAt: null,
     };
     if (!(await this.tenancy.ownsCluster(clusterId, orgId))) return empty;
@@ -268,14 +286,11 @@ export class InsightsService {
     const collectedAt = await this.repo.latestIndexReadingAt(clusterId);
     if (collectedAt === null) return empty;
 
-    const { rows, total } = await this.repo.clusterIndexPage(
-      clusterId,
-      query,
-      CLUSTER_INDEXES_PAGE,
-    );
-    const page = rows.slice(0, CLUSTER_INDEXES_PAGE);
-    const more = rows.length > CLUSTER_INDEXES_PAGE;
-    const last = page[page.length - 1];
+    const {
+      rows: page,
+      total,
+      offset,
+    } = await this.repo.clusterIndexPage(clusterId, query, limit, query.offset ?? 0);
 
     // One lookup per namespace ON THIS PAGE, deduplicated: a hundred indexes
     // commonly live in a handful of collections, and the point of paging is that
@@ -352,11 +367,11 @@ export class InsightsService {
         };
       }),
       total,
-      // Null at the end, so the page stops offering "more" rather than fetching
-      // an empty one to discover the end.
-      nextDatabase: more && last !== undefined ? last.database : null,
-      nextCollection: more && last !== undefined ? last.collection : null,
-      nextIndexName: more && last !== undefined ? last.indexName : null,
+      // Where the rows actually START, which is not always where the reader asked:
+      // the repository clamps past the end of a set that shrank. Echoed so the
+      // control follows the rows instead of insisting on a page that is gone.
+      offset,
+      limit,
       collectedAt: collectedAt.toISOString(),
     };
   }
@@ -380,12 +395,15 @@ export class InsightsService {
     orgId: string,
     query: WorkloadQuery,
   ): Promise<ClusterWorkload> {
+    // Resolved before the empty views, which report it: a control that reads the
+    // page size back must not snap to a different one on a cluster with no shapes.
+    const workloadLimit = query.limit ?? WORKLOAD_SHAPES_PAGE;
     const empty = {
       clusterId,
       shapes: [],
       total: 0,
-      nextWeeklyDocsExamined: null,
-      nextId: null,
+      offset: 0,
+      limit: workloadLimit,
       // True in the empty view, so a cluster the caller does not own does not
       // read as one with create-side analysis switched off. Not-yours and
       // switched-off are different answers and only one of them is a setting.
@@ -400,15 +418,17 @@ export class InsightsService {
       this.repo.workloadAnalysisEnabled(clusterId),
       this.repo.workloadNote(clusterId),
     ]);
-    const { rows, total } = await this.repo.workloadShapePage(
+    const {
+      rows: page,
+      total,
+      offset,
+    } = await this.repo.workloadShapePage(
       clusterId,
       await this.repo.readableSince(clusterId),
       query,
-      WORKLOAD_SHAPES_PAGE,
+      workloadLimit,
+      query.offset ?? 0,
     );
-    const page = rows.slice(0, WORKLOAD_SHAPES_PAGE);
-    const more = rows.length > WORKLOAD_SHAPES_PAGE;
-    const last = page[page.length - 1];
 
     return {
       clusterId,
@@ -449,12 +469,11 @@ export class InsightsService {
         };
       }),
       total,
-      // Null at the end of the list, so the page stops offering more rather than
-      // fetching an empty one to find out. Both halves or neither: the cost
-      // alone would skip a shape that shares it.
-      nextWeeklyDocsExamined:
-        more && last !== undefined ? (last.weeklyDocsExamined ?? UNMEASURED_COST) : null,
-      nextId: more && last !== undefined ? last.id : null,
+      // Where the rows actually start, which is not always where the reader asked:
+      // the repository clamps past the end of a set that shrank. Echoed so the
+      // control follows the rows rather than insisting on a page that is gone.
+      offset,
+      limit: workloadLimit,
       workloadAnalysisEnabled: enabled,
       // The two gates that fire BEFORE the workload is read, so they can have no
       // shape rows at all — what exists is a count of collections nobody
@@ -471,6 +490,27 @@ export class InsightsService {
   //
   // `active` is computed here rather than left to the browser, because a clock
   // an hour behind would draw a parked index as eligible.
+  // Un-park an index and hand back the list it was on, so the panel redraws from
+  // one response rather than a mutation followed by a refetch (D136).
+  //
+  // Owner-only at the route, and scoped to the caller's org here — the same rule
+  // every write in this file follows: a cluster the caller does not own answers
+  // as if the row were not there, because "not yours" and "not found" must not be
+  // distinguishable from outside.
+  async clearCooldown(
+    clusterId: string,
+    orgId: string,
+    target: { readonly database: string; readonly collection: string; readonly indexName: string },
+    errors: { NOT_FOUND: (init: { message: string }) => Error },
+  ): Promise<ClusterCooldowns> {
+    if (!(await this.tenancy.ownsCluster(clusterId, orgId))) {
+      throw errors.NOT_FOUND({ message: "cooldown not found" });
+    }
+    const removed = await this.repo.clearCooldown(clusterId, target);
+    if (!removed) throw errors.NOT_FOUND({ message: "cooldown not found" });
+    return this.cooldowns(clusterId, orgId);
+  }
+
   async cooldowns(clusterId: string, orgId: string): Promise<ClusterCooldowns> {
     if (!(await this.tenancy.ownsCluster(clusterId, orgId))) {
       return { clusterId, activeCount: 0, nextEligibleAt: null, parked: [] };
@@ -485,8 +525,11 @@ export class InsightsService {
       indexName: row.indexName,
       reason: row.reason,
       regressionCount: row.regressionCount,
-      until: row.until.toISOString(),
-      active: row.until.getTime() > now,
+      // Null is "never" (D136): the row travels as a null rather than as a date
+      // the dashboard would have to recognise as impossibly far away, and it is
+      // active for as long as it exists.
+      until: row.until === null ? null : row.until.toISOString(),
+      active: row.until === null || row.until.getTime() > now,
       // Computed here for the same reason `active` is: the empty index name is a
       // storage sentinel (jobs/cooldowns.ts), and the dashboard should not have
       // to know that to draw the row.

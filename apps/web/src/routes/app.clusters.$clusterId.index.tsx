@@ -19,6 +19,7 @@ import { RecommendationsTable } from "~/components/app/recommendations-table";
 import { Unavailable, UnavailableFigure } from "~/components/app/unavailable";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
 import { Skeleton } from "~/components/ui/skeleton";
+import { useClearCooldown } from "~/lib/queries/mutations/recommendations";
 import {
   activityQuery,
   cooldownsQuery,
@@ -129,6 +130,7 @@ function ClusterOverview() {
   const footprint = useIndexSizeSeries(id);
   const nodes = useNodes(id);
   const cooldowns = useCooldowns(id);
+  const clearCooldown = useClearCooldown(id);
 
   const proposed = recommendations.data.recommendations.filter((rec) => rec.state === "PROPOSED");
   const totalSaved = proposed.reduce((sum, rec) => sum + rec.estimatedBytesSaved, 0);
@@ -314,7 +316,17 @@ function ClusterOverview() {
           {cooldowns.failed ? (
             <Unavailable what="the parked list" onRetry={cooldowns.retry} />
           ) : (
-            <ParkedPanel cooldowns={cooldowns.data} loading={cooldowns.pending} />
+            <ParkedPanel
+              cooldowns={cooldowns.data}
+              loading={cooldowns.pending}
+              // Drawn for everyone and refused by the api for non-owners, which is
+              // the rule every other pipeline action here follows (#257): the
+              // toast names the reason. Hiding it per role would need a role this
+              // route does not read, to withhold a control whose refusal already
+              // explains itself.
+              onClear={clearCooldown.mutate}
+              clearing={clearCooldown.isPending}
+            />
           )}
         </div>
       </section>

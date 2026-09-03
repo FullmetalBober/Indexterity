@@ -1,4 +1,5 @@
 import type { UsageClass } from "@repo/contracts";
+import { cooldownDaysFor } from "./cooldown";
 import type { ScanSeverity } from "./severity";
 
 // Confidence scoring (0–100). The score gates pipeline ENTRY — what gets
@@ -158,20 +159,24 @@ export function thinEvidencePenalty(snapshots: number): number {
 // and takes twice as long to fade. `regression_count` is untouched and still
 // carries the audit trail the parked panel draws; only the SCORE forgets.
 export function regressionWeight(
-  cooldown: { readonly regressionCount: number; readonly until: Date | string },
+  // `until` null is an open-ended park — the owner said never (D136) — so the
+  // block it bought has not started fading and the weight stands at full.
+  cooldown: { readonly regressionCount: number; readonly until: Date | string | null },
   observeDays: number,
   now: Date = new Date(),
 ): number {
   const count = cooldown.regressionCount;
   if (count <= 0) return 0;
+  if (cooldown.until === null) return count;
   const until = new Date(cooldown.until).getTime();
   if (!Number.isFinite(until)) return count;
-  // The block this regression bought, recomputed rather than stored: it is
-  // `observeDays * 3 * count` at the moment it was written (jobs/cooldowns.ts).
-  // Recomputing from the CURRENT policy is deliberate — an owner who shortens
-  // the observe window is saying they want faster verdicts, and the fade should
-  // follow rather than honour a span that policy no longer stands behind.
-  const span = observeDays * 3 * count * DAY_MS;
+  // The block this regression bought, recomputed rather than stored, and from
+  // the SAME curve the writer stamped it with (analysis/cooldown.ts) — two
+  // copies of that arithmetic would let the fade describe a window nobody was
+  // granted. Recomputing from the CURRENT policy is deliberate: an owner who
+  // shortens the observe window is saying they want faster verdicts, and the
+  // fade should follow rather than honour a span policy no longer stands behind.
+  const span = cooldownDaysFor(observeDays, count) * DAY_MS;
   if (span <= 0) return count;
   const past = now.getTime() - until;
   if (past <= 0) return count;

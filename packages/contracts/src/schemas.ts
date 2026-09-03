@@ -401,6 +401,13 @@ export const recommendation = z.object({
   // A date does.
   hiddenAt: instant.nullable(),
   observeDays: z.number().int().positive().nullable(),
+  // What the cancel dialog offers as its default park, in days (D136).
+  //
+  // Computed by the api rather than by the dashboard, for the reason
+  // `shortenObserveWindow` takes the floor by name instead of a date: the curve
+  // is the engine's (analysis/cooldown.ts), and a client that reimplemented it
+  // would keep proposing the old number the day the curve moved.
+  proposedCooldownDays: z.number().int().positive(),
   // And why that window, when it differs from the policy baseline. The number
   // alone reads as arbitrary next to another row with a different one; this is
   // the sentence the engine already wrote to explain it.
@@ -454,6 +461,56 @@ export type ClusterCollections = z.infer<typeof clusterCollections>;
 // everywhere else. 100 measured ~46 KB against the dev cluster's widest
 // namespaces, which is a page rather than a payload.
 export const CLUSTER_INDEXES_PAGE = 100;
+
+// The sizes the page-size control offers, and the only ones it may ask for.
+//
+// A list rather than a range, so the api and the control cannot disagree about
+// what is allowed, and small enough at the low end that a page number is worth
+// having: 517 indexes is six pages at 100 and twenty-one at 25.
+export const CLUSTER_INDEXES_PAGE_SIZES = [25, 50, 100] as const;
+
+// The largest page this endpoint will serve. Not one of the offered sizes — it
+// bounds a hand-written request, and it is what keeps this a page rather than a
+// report whatever a caller asks for.
+export const CLUSTER_INDEXES_PAGE_MAX = 200;
+
+// Which way a paged read is ordered. Shared by both paged endpoints.
+export const sortDirection = z.enum(["asc", "desc"]);
+export type SortDirection = z.infer<typeof sortDirection>;
+
+// Every value here is also the dashboard column's `id`, deliberately: the sort
+// key IS the column id, so the route forwards what the header reports and there
+// is no translation table to fall out of step with either side.
+//
+// The inventory columns the SERVER can order by, as a closed set (D135).
+//
+// A whitelist and not a column name, because the value reaches an `ORDER BY`:
+// an enum is the difference between choosing a sort and choosing some SQL. The
+// repository maps each of these to an expression and the mapping is total, so a
+// key that parses is a key that sorts.
+//
+// Deliberately SHORTER than the table's sortable columns were. `keys`, the flag
+// count and the proposal type are each computed after the read — the key pattern
+// out of the spec jsonb, the flags per engine in the dashboard, and the proposal
+// from a lookup scoped to the page — so ordering the whole cluster by them is not
+// a thing the database can be asked. Those columns say so with `enableSorting:
+// false` rather than sorting one page and looking like they sorted the cluster.
+export const indexSortKey = z.enum(["namespace", "indexName", "sizeBytes", "totalOps"]);
+export type IndexSortKey = z.infer<typeof indexSortKey>;
+
+// The same for the workload list. `outcome` and `severity` are real columns, so
+// "show me everything the cost floor declined" is one request rather than a page
+// at a time; the ESR line, the failure kind and the clients are read out of the
+// shape jsonb after the fact and are not offered.
+export const workloadSortKey = z.enum([
+  "namespace",
+  "executions",
+  "weeklyDocsExamined",
+  "severity",
+  "outcome",
+  "firstSeenAt",
+]);
+export type WorkloadSortKey = z.infer<typeof workloadSortKey>;
 
 // One key of an index, in the order the index declares it. The direction
 // vocabulary is the adapters' (engine/types.ts): a relational engine only ever
@@ -568,20 +625,33 @@ export const clusterIndexes = z.object({
   indexes: z.array(clusterIndexRow),
   // How many indexes MATCH — the whole cluster's, or the namespace filter's, so
   // a page can say "100 of 211" instead of implying it is everything.
+  //
+  // Load-bearing since #445 rather than only wording: it is the row count the
+  // table's pagination reads to know how many pages exist, and it is re-counted
+  // per request so the page count follows a set that moved (D133).
   total: z.int().nonnegative(),
-  // The cursor for the page after this one, or null at the end. A compound key
-  // for the same reason the security trail's is (D67): the sort is namespace
-  // then name, and one cluster can hold two indexes of the same name in two
-  // collections, so any prefix of the three would skip a row.
-  nextDatabase: z.string().nullable(),
-  nextCollection: z.string().nullable(),
-  nextIndexName: z.string().nullable(),
+  // Where this page actually starts, echoed rather than assumed. The reader asked
+  // for an offset and may not have got it: past the end of a set that shrank, the
+  // api clamps to the last page rather than serving an empty one, and the control
+  // has to move with it or it would keep saying page five of three.
+  offset: z.int().nonnegative(),
+  // How many rows the page carries at most, which is the page size in effect. The
+  // api owns the default, so a caller that sent no limit still learns what it got.
+  limit: z.int().positive(),
   // When the reading these rows come from was taken. Null when nothing has ever
   // been collected, which is the page's "nothing yet" state rather than "this
   // cluster has no indexes".
   collectedAt: instant.nullable(),
 });
 export type ClusterIndexes = z.infer<typeof clusterIndexes>;
+
+// The sizes the workload page-size control offers, and the only ones it may ask
+// for. Smaller than the inventory's because a row here is wider.
+export const WORKLOAD_SHAPES_PAGE_SIZES = [10, 25, 50] as const;
+
+// The largest workload page this endpoint will serve, bounding a hand-written
+// request the way CLUSTER_INDEXES_PAGE_MAX does for the inventory.
+export const WORKLOAD_SHAPES_PAGE_MAX = 100;
 
 // How many scanning shapes one page of the workload view carries (#432).
 //
@@ -689,14 +759,14 @@ export type WorkloadShape = z.infer<typeof workloadShape>;
 export const clusterWorkload = z.object({
   clusterId: z.uuid(),
   shapes: z.array(workloadShape),
-  // How many shapes match, so a page can say "50 of 312".
+  // How many shapes match, so a page can say "50 of 312" — and, since #445, the
+  // row count the pagination reads to know how many pages there are.
   total: z.int().nonnegative(),
-  // The cursor for the page after this one, or null at the end. Two halves: the
-  // sort is by weekly cost descending and the id breaks the tie, because two
-  // shapes with the same cost on one collection is ordinary and a cursor that
-  // was only the cost would skip whichever sorted second.
-  nextWeeklyDocsExamined: z.int().nullable(),
-  nextId: z.uuid().nullable(),
+  // Where this page starts and how many it carries, echoed rather than assumed:
+  // past the end of a set that shrank the api clamps to the last page, and the
+  // control has to move with it (D133).
+  offset: z.int().nonnegative(),
+  limit: z.int().positive(),
   // Whether create-side analysis is switched off for this cluster. The one gate
   // that leaves NO shape rows at all, because nothing is read when it fires — so
   // an empty page has two very different meanings and this is which one.
@@ -759,7 +829,9 @@ export const parkedIndex = z.object({
   indexName: z.string(),
   reason: z.string(),
   regressionCount: z.int().nonnegative(),
-  until: z.string(),
+  // Null means NEVER — an owner cancelled the drop and said not to touch this
+  // index again (D136). `active` is true for as long as such a row exists.
+  until: z.string().nullable(),
   // Whether `until` is still in the future. Computed by the api against ITS
   // clock, not left to the browser's: a laptop an hour behind would draw a
   // parked index as eligible, and this is the field the panel's headline counts.

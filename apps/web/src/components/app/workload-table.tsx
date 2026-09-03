@@ -1,4 +1,5 @@
 import type { WorkloadShape } from "@repo/contracts";
+import type { ComponentProps } from "react";
 import { fmtCount } from "~/components/app/format";
 import { type DashboardColumns, DataTable, dashboardColumns } from "~/components/data-table";
 import { Truncated } from "~/components/truncated";
@@ -129,7 +130,7 @@ const columns: DashboardColumns<WorkloadShape> = column.columns([
   column.accessor(esrLine, {
     id: "shape",
     header: "Index it needs",
-    sortFn: "alphanumeric",
+    enableSorting: false,
     cell: (info) => {
       const shape = info.row.original;
       return (
@@ -160,7 +161,7 @@ const columns: DashboardColumns<WorkloadShape> = column.columns([
   column.accessor((row) => (row.collscan ? 2 : 0) + (row.sortedInMemory ? 1 : 0), {
     id: "failure",
     header: "Failure",
-    sortFn: "basic",
+    enableSorting: false,
     sortDescFirst: true,
     cell: (info) => <FailureCell shape={info.row.original} />,
   }),
@@ -174,7 +175,7 @@ const columns: DashboardColumns<WorkloadShape> = column.columns([
   // ranked by. A missing figure is drawn as unknown rather than as zero: the
   // source could not say, which is not the same as "this costs nothing".
   column.accessor((row) => row.weeklyDocsExamined ?? -1, {
-    id: "weeklyDocs",
+    id: "weeklyDocsExamined",
     header: "Docs/week",
     sortFn: "basic",
     sortDescFirst: true,
@@ -210,7 +211,7 @@ const columns: DashboardColumns<WorkloadShape> = column.columns([
     {
       id: "clients",
       header: "Clients",
-      sortFn: "alphanumeric",
+      enableSorting: false,
       cell: (info) =>
         info.getValue() === "" ? (
           <span className="text-muted-foreground text-xs">—</span>
@@ -229,14 +230,31 @@ const columns: DashboardColumns<WorkloadShape> = column.columns([
   // and the create side had no history at all before this — recommendations are
   // deleted and re-proposed wholesale on every pass.
   column.accessor((row) => Date.parse(row.firstSeenAt), {
-    id: "firstSeen",
+    id: "firstSeenAt",
     header: "First seen",
     sortFn: "basic",
     cell: (info) => <FirstSeenCell shape={info.row.original} />,
   }),
 ]);
 
-export function WorkloadTable({ shapes, loading }: { shapes: WorkloadShape[]; loading: boolean }) {
+export function WorkloadTable({
+  shapes,
+  loading,
+  pagination,
+  sorting,
+  filter,
+}: {
+  shapes: WorkloadShape[];
+  loading: boolean;
+  // Forwarded straight to the table, which owns the page arithmetic. Typed by
+  // reading it off DataTable rather than restated, so a change there cannot
+  // leave this signature quietly describing the old shape.
+  pagination: NonNullable<ComponentProps<typeof DataTable>["pagination"]>;
+  // The order and the filter, same reasoning and same source of truth: all three
+  // are the api's here (D135), so all three arrive from the route.
+  sorting: NonNullable<ComponentProps<typeof DataTable>["sorting"]>;
+  filter: NonNullable<ComponentProps<typeof DataTable>["filter"]>;
+}) {
   return (
     <DataTable
       className="mt-2"
@@ -248,8 +266,13 @@ export function WorkloadTable({ shapes, loading }: { shapes: WorkloadShape[]; lo
       // The api already ranked them by weekly cost — the worst first is the
       // answer — so the initial sort agrees with the order the page arrived in
       // rather than re-ranking one page and calling it the cluster's worst.
-      initialSorting={[{ id: "weeklyDocs", desc: true }]}
-      filterLabel="Filter shapes"
+      initialSorting={[{ id: "weeklyDocsExamined", desc: true }]}
+      pagination={pagination}
+      sorting={sorting}
+      filter={filter}
+      // Namespace only: a shape has no name, and its ESR line is assembled from
+      // jsonb after the read, so there is nothing else to match on (D135).
+      filterLabel="Search namespace"
       virtualize={{ maxHeight: 560, estimateRowHeight: 48 }}
       // Collection, Index it needs, Failure, Runs, Docs/week, Severity,
       // Clients, Outcome, First seen.

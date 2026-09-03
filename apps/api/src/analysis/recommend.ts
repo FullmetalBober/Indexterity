@@ -59,20 +59,8 @@ export interface IndexInput {
   readonly pendingRemoval?: boolean;
 }
 
-// Why an unused protected index is a human's call, in its own terms.
-//
-// The two reasons are not interchangeable and the reader acts on the difference:
-// a constraint index is protected because dropping it admits data no latency gate
-// can see, and a text or geo index is protected because the observe window cannot
-// be RUN on it — the first is a judgement the engine declines to make, the second
-// is a measurement the engine cannot take.
+// Why an unused text or geo index is a human's call.
 function advisoryRationale(spec: IndexSpec): string {
-  if (!hideBreaksQueries(spec)) {
-    return (
-      "Protected index (unique/TTL/shard key) with no recorded usage — never auto-dropped; " +
-      "review manually."
-    );
-  }
   const operator = spec.keys.some((key) => key.direction === "text") ? "$text" : "$near";
   return (
     `No recorded usage, but this index is the only way its queries run: hiding it makes ` +
@@ -174,17 +162,25 @@ export function recommendForCollection(
     });
   }
 
-  // Advisory tier: protected indexes (unique/TTL/shard key/text/geo) are never
-  // auto-dropped, but one that also shows zero usage deserves a human look
-  // instead of staying silent. _id_ is exempt — it is never optional.
-  //
-  // This is the tier a text or geo index lands in, and landing here is the whole
-  // fix: the finding stays on screen and stays scored, and promoteByScore excludes
+  // Advisory tier, and it is for ONE thing: an unused text or geo index. The
+  // finding stays on screen and stays scored, and promoteByScore excludes
   // ADVISORY_REVIEW at every threshold including 0 — so it can never be approved
   // unattended, and it is never silently withheld either.
+  //
+  // It used to cover every never-drop index — unique, TTL, shard key — and that
+  // was wrong on its own premise (D134). `$indexStats.accesses.ops` counts QUERY
+  // access and nothing else, measured on mongod 7.0.39: a unique index that
+  // enforced its constraint across fifty inserts and refused a duplicate sat at
+  // ops 0 throughout, and a TTL index expiring documents does the same. So
+  // FLAT_ZERO is those indexes' permanent expected state and "no recorded usage"
+  // is not a finding about them at all.
+  //
+  // A text index is the opposite and that is why this survives: three $text
+  // queries move its counter 0 -> 3, so zero means the queries genuinely did not
+  // run, and the reader has an action — drop it by hand if the feature is gone.
   const advised = new Set<string>();
   for (const index of indexes) {
-    if (!isNeverDrop(index.spec) || index.spec.name === "_id_") continue;
+    if (!hideBreaksQueries(index.spec)) continue;
     if (!trusted(index)) continue;
     const usageClass = classifyUsage(index.history, options);
     if (usageClass !== "FLAT_ZERO" && usageClass !== "PERIODIC_DEAD") continue;

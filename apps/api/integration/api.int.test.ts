@@ -2307,7 +2307,10 @@ describe("cancelling a pending drop", () => {
       .from(indexCooldowns)
       .where(and(eq(indexCooldowns.clusterId, clusterId), eq(indexCooldowns.indexName, "keep_1")));
     expect(cooldown?.regressionCount).toBe(0);
-    expect((cooldown?.until.getTime() ?? 0) > Date.now()).toBe(true);
+    // A date and not a null: this cancel took the engine's proposal rather than
+    // choosing never (D136), and `until` is nullable now.
+    expect(cooldown?.until).not.toBeNull();
+    expect((cooldown?.until?.getTime() ?? 0) > Date.now()).toBe(true);
 
     // And a reader can now see it (#159). The row above was written by exactly
     // one function and read by no controller until this route existed.
@@ -2322,7 +2325,7 @@ describe("cancelling a pending drop", () => {
     expect(kept?.reason).toBe("drop cancelled by an owner");
     expect(kept?.regressionCount).toBe(0);
     expect(kept?.active).toBe(true);
-    expect(kept?.until).toBe(cooldown?.until.toISOString());
+    expect(kept?.until).toBe(cooldown?.until?.toISOString());
 
     const stillParked = entries.filter((entry) => entry.active);
     expect(parked.activeCount).toBe(stillParked.length);
@@ -2362,6 +2365,49 @@ describe("cancelling a pending drop", () => {
     expect(
       asRecords(orphaned.parked, "orphaned.parked").some((entry) => entry.indexName === "keep_1"),
     ).toBe(true);
+
+    // Un-parking it (D136): the row goes, and the response is the list it was on
+    // so the panel redraws from one answer rather than a refetch.
+    const clearRes = await api(`/clusters/${clusterId}/cooldowns/clear`, owner, {
+      method: "POST",
+      body: JSON.stringify({
+        database: "inttest",
+        collection: "keepme",
+        indexName: "keep_1",
+      }),
+    });
+    expect(clearRes.status).toBe(200);
+    const afterClear = asRecord(await clearRes.json());
+    expect(
+      asRecords(afterClear.parked, "afterClear.parked").some(
+        (entry) => entry.indexName === "keep_1",
+      ),
+    ).toBe(false);
+
+    // A DELETE and not a backdated expiry, so the regression history behind it
+    // goes too — otherwise the index would be eligible again while still docking
+    // its own score for regressions the owner just said to forget.
+    const [gone] = await db
+      .select()
+      .from(indexCooldowns)
+      .where(and(eq(indexCooldowns.clusterId, clusterId), eq(indexCooldowns.indexName, "keep_1")));
+    expect(gone).toBeUndefined();
+
+    // Clearing something that is not parked is a 404 rather than a silent ok: the
+    // reader pressed a button about a row, and "done" would be a claim about a
+    // row that was not there.
+    expect(
+      (
+        await api(`/clusters/${clusterId}/cooldowns/clear`, owner, {
+          method: "POST",
+          body: JSON.stringify({
+            database: "inttest",
+            collection: "keepme",
+            indexName: "never_parked_1",
+          }),
+        })
+      ).status,
+    ).toBe(404);
 
     await coll.drop().catch(() => {});
   });
@@ -2894,7 +2940,7 @@ describe("builds that are individually fine and cumulatively are not", () => {
         ),
       );
     expect(parked?.reason).toContain("slower than before the run of builds");
-    expect(parked?.until.getTime()).toBeGreaterThan(Date.now());
+    expect(parked?.until?.getTime()).toBeGreaterThan(Date.now());
     // Nothing was rolled back: the newest index is not necessarily the culprit,
     // and undoing the wrong one is worse than saying so.
     expect(graduated?.state).not.toBe("ROLLED_BACK");
@@ -5593,9 +5639,10 @@ describe("bounded per-cluster reads", () => {
     ]);
     expect(body.total).toBe(3);
     expect(body.collectedAt).not.toBeNull();
-    // Nothing more to fetch, so no cursor is offered — a reader must not have to
-    // page into an empty response to discover the end.
-    expect(body.nextIndexName).toBeNull();
+    // Three rows and three matches, so this page IS the set — which the control
+    // reads off `total` against the page it was served rather than being told.
+    expect(body.offset).toBe(0);
+    expect(body.limit).toBe(CLUSTER_INDEXES_PAGE);
 
     const status = rows.find((row) => row.indexName === "status_1");
     expect(status).toBeDefined();
@@ -5675,9 +5722,11 @@ describe("bounded per-cluster reads", () => {
     expect(foreign.collectedAt).toBeNull();
   });
 
-  // The cursor is the whole reason this endpoint is not the uncapped read
+  // Paging is the whole reason this endpoint is not the uncapped read
   // `getCollections` is: an index list grows with the customer's schema forever.
-  it("pages the inventory by keyset without repeating or skipping a row", async () => {
+  // By OFFSET since #445, so the reader gets page numbers rather than a More
+  // button they have to keep clicking (D133).
+  it("pages the inventory by offset, and clamps past the end", async () => {
     const pagedId = await bareCluster("Index Inventory Paging");
     const now = Date.now();
     const spec = {
@@ -5699,8 +5748,8 @@ describe("bounded per-cluster reads", () => {
         clusterId: pagedId,
         database: "app",
         collection: "wide",
-        // Zero-padded so lexicographic order — which is what the keyset
-        // comparison uses — is also the order a reader expects.
+        // Zero-padded so lexicographic order — which is what the ORDER BY uses,
+        // and what offset paging slices — is also the order a reader expects.
         indexName: `idx_${String(n).padStart(4, "0")}`,
         spec: { ...spec, name: `idx_${String(n).padStart(4, "0")}` },
         sizeBytes: 100 + n,
@@ -5713,26 +5762,112 @@ describe("bounded per-cluster reads", () => {
     const first = asRecord(await (await api(`/clusters/${pagedId}/indexes`, owner)).json());
     const firstRows = asRecords(first.indexes, "first.indexes");
     expect(firstRows).toHaveLength(CLUSTER_INDEXES_PAGE);
-    // The honest denominator: this is a page of a larger set and says so.
+    // The honest denominator: this is a page of a larger set and says so. Since
+    // #445 it is also the row count the control counts pages from, so it is
+    // load-bearing rather than only wording.
     expect(first.total).toBe(count);
-    expect(first.nextIndexName).toBe(firstRows[firstRows.length - 1]?.indexName);
+    // The page it served, echoed. A caller that sent neither gets the api's own
+    // answer for both rather than having to assume it.
+    expect(first.offset).toBe(0);
+    expect(first.limit).toBe(CLUSTER_INDEXES_PAGE);
 
-    const cursor = new URLSearchParams({
-      afterDatabase: asString(first.nextDatabase),
-      afterCollection: asString(first.nextCollection),
-      afterIndexName: asString(first.nextIndexName),
-    });
     const second = asRecord(
-      await (await api(`/clusters/${pagedId}/indexes?${cursor.toString()}`, owner)).json(),
+      await (
+        await api(`/clusters/${pagedId}/indexes?offset=${CLUSTER_INDEXES_PAGE}`, owner)
+      ).json(),
     );
     const secondRows = asRecords(second.indexes, "second.indexes");
     expect(secondRows).toHaveLength(count - CLUSTER_INDEXES_PAGE);
-    expect(second.nextIndexName).toBeNull();
+    expect(second.offset).toBe(CLUSTER_INDEXES_PAGE);
 
-    // Every index exactly once across the two pages, which is the property an
-    // offset page loses the moment a collect lands mid-read.
+    // Every index exactly once across the two pages. Offset paging gives this up
+    // only when the set MOVES mid-read (D133); nothing collects here between the
+    // two requests, so the property holds and is worth pinning.
     const seen = [...firstRows, ...secondRows].map((row) => String(row.indexName));
     expect(new Set(seen).size).toBe(count);
+
+    // A page size the reader chose, and the page numbering that follows from it.
+    const sized = asRecord(
+      await (await api(`/clusters/${pagedId}/indexes?offset=25&limit=25`, owner)).json(),
+    );
+    expect(asRecords(sized.indexes, "sized.indexes")).toHaveLength(25);
+    expect(sized.limit).toBe(25);
+    expect(sized.offset).toBe(25);
+    expect(asRecord(asRecords(sized.indexes, "sized.indexes")[0] ?? {}).indexName).toBe(
+      String(asRecord(firstRows[25] ?? {}).indexName),
+    );
+
+    // Past the end, which is where a reader lands after narrowing a filter while
+    // on a later page. Clamped to the last page rather than served empty, and it
+    // says where it landed so the control can follow (D133).
+    const beyond = asRecord(
+      await (await api(`/clusters/${pagedId}/indexes?offset=100000&limit=25`, owner)).json(),
+    );
+    const beyondRows = asRecords(beyond.indexes, "beyond.indexes");
+    expect(beyondRows.length).toBeGreaterThan(0);
+    expect(beyond.total).toBe(count);
+    // The last page boundary at 25 per page, not the raw offset: a clamp mid-page
+    // would straddle two pages and the reader would see rows repeat.
+    expect(beyond.offset).toBe(Math.floor((count - 1) / 25) * 25);
+    // The fixture numbers from zero, so the last index is count - 1.
+    expect(asRecord(beyondRows[beyondRows.length - 1] ?? {}).indexName).toBe(
+      `idx_${String(count - 1).padStart(4, "0")}`,
+    );
+
+    // A limit past the ceiling is refused rather than served: the endpoint is a
+    // page, and the bound is what keeps it one.
+    expect((await api(`/clusters/${pagedId}/indexes?limit=100000`, owner)).status).toBe(400);
+
+    // The order is the api's, over the WHOLE match rather than the page (D135):
+    // sorting by size descending has to return the cluster's biggest index first,
+    // not the biggest of an arbitrary hundred.
+    const bySize = asRecord(
+      await (
+        await api(`/clusters/${pagedId}/indexes?sort=sizeBytes&dir=desc&limit=5`, owner)
+      ).json(),
+    );
+    const sizes = asRecords(bySize.indexes, "bySize.indexes").map((row) => Number(row.sizeBytes));
+    expect(sizes).toEqual([...sizes].sort((a, b) => b - a));
+    // The fixture's sizes are 100 + n over n = 0..count-1, so the largest is the
+    // last index — which a page-scoped sort could never have reached.
+    expect(sizes[0]).toBe(100 + count - 1);
+
+    // A key outside the whitelist is refused rather than reaching an ORDER BY,
+    // and so is a direction that is not a direction.
+    expect((await api(`/clusters/${pagedId}/indexes?sort=keys`, owner)).status).toBe(400);
+    expect((await api(`/clusters/${pagedId}/indexes?sort=1;drop table x`, owner)).status).toBe(400);
+
+    // And the filter searches the CLUSTER, not the page: idx_0106 is on the second
+    // page under the default order and this finds it in one request.
+    const found = asRecord(
+      await (await api(`/clusters/${pagedId}/indexes?q=idx_0106`, owner)).json(),
+    );
+    const foundRows = asRecords(found.indexes, "found.indexes");
+    expect(foundRows).toHaveLength(1);
+    expect(found.total).toBe(1);
+    expect(asRecord(foundRows[0] ?? {}).indexName).toBe("idx_0106");
+
+    // `_` is an ILIKE wildcard and the reader did not mean it as one: every index
+    // here is `idx_NNNN`, so an unescaped `idx_0106` would still match one but
+    // `idx_010_` would match ten. Escaped, it matches exactly the one named that.
+    expect(
+      asRecords(
+        asRecord(await (await api(`/clusters/${pagedId}/indexes?q=idx_010_`, owner)).json())
+          .indexes,
+        "wildcard.indexes",
+      ),
+    ).toHaveLength(0);
+    // And `%` cannot be used to select everything.
+    expect(
+      asRecord(await (await api(`/clusters/${pagedId}/indexes?q=%25`, owner)).json()).total,
+    ).toBe(0);
+
+    // The filter narrows the TOTAL as well, or the page count would describe rows
+    // the reader filtered away.
+    const namespaced = asRecord(
+      await (await api(`/clusters/${pagedId}/indexes?q=app.wide`, owner)).json(),
+    );
+    expect(namespaced.total).toBe(count);
   });
 
   // #432. Every one of these numbers was read once an hour and thrown away:
@@ -5961,16 +6096,40 @@ describe("bounded per-cluster reads", () => {
     expect(firstRows).toHaveLength(WORKLOAD_SHAPES_PAGE);
     expect(first.total).toBe(count);
 
-    const cursor = new URLSearchParams({
-      afterWeeklyDocsExamined: String(first.nextWeeklyDocsExamined),
-      afterId: asString(first.nextId),
-    });
+    expect(first.offset).toBe(0);
+    expect(first.limit).toBe(WORKLOAD_SHAPES_PAGE);
+
     const second = asRecord(
-      await (await api(`/clusters/${pagedId}/workload?${cursor.toString()}`, owner)).json(),
+      await (
+        await api(`/clusters/${pagedId}/workload?offset=${WORKLOAD_SHAPES_PAGE}`, owner)
+      ).json(),
     );
     const secondRows = asRecords(second.shapes, "second.shapes");
     expect(secondRows).toHaveLength(count - WORKLOAD_SHAPES_PAGE);
-    expect(second.nextId).toBeNull();
+    expect(second.offset).toBe(WORKLOAD_SHAPES_PAGE);
+
+    // Clamped to the last page boundary past the end rather than served empty,
+    // the same rule the inventory follows (D133).
+    const beyond = asRecord(
+      await (await api(`/clusters/${pagedId}/workload?offset=99999&limit=10`, owner)).json(),
+    );
+    expect(asRecords(beyond.shapes, "beyond.shapes").length).toBeGreaterThan(0);
+    expect(beyond.offset).toBe(Math.floor((count - 1) / 10) * 10);
+    expect(beyond.limit).toBe(10);
+
+    // And the ceiling is enforced: this endpoint is a page, not a report.
+    expect((await api(`/clusters/${pagedId}/workload?limit=99999`, owner)).status).toBe(400);
+
+    // The ORDER is the api's too (D135), and the sort key is a closed set: the
+    // value reaches an ORDER BY, so anything outside the whitelist is refused
+    // rather than interpolated.
+    const byRuns = asRecord(
+      await (await api(`/clusters/${pagedId}/workload?sort=executions&dir=asc`, owner)).json(),
+    );
+    const runs = asRecords(byRuns.shapes, "byRuns.shapes").map((row) => Number(row.executions));
+    expect(runs).toEqual([...runs].sort((a, b) => a - b));
+    expect((await api(`/clusters/${pagedId}/workload?sort=shape`, owner)).status).toBe(400);
+    expect((await api(`/clusters/${pagedId}/workload?dir=sideways`, owner)).status).toBe(400);
 
     // Every shape exactly once across the two pages, including the ones with no
     // measured cost.
