@@ -9,18 +9,20 @@
 // about who reads them.
 import type {
   ClusterIndexes,
+  ClusterIndexesInput,
   ClusterIndexSizeSeries,
   ClusterLatencySeries,
   ClusterNodes,
   ClusterWorkload,
+  ClusterWorkloadInput,
   CollectionStat,
   LatencySummary,
 } from "@repo/contracts";
 import { CLUSTER_INDEXES_PAGE, WORKLOAD_SHAPES_PAGE } from "@repo/contracts";
-import { queryOptions, useQuery } from "@tanstack/react-query";
+import { keepPreviousData, queryOptions, useQuery } from "@tanstack/react-query";
 import { api } from "../api";
 import { queryKeys } from "./keys";
-import type { Read } from "./read";
+import type { PagedRead, Read } from "./read";
 
 // Module-level so the identity is stable: these are what a component renders
 // when there is genuinely nothing, and a fresh [] each render would re-run every
@@ -89,16 +91,16 @@ export function indexSizeSeriesQuery(clusterId: string | null) {
   });
 }
 
-// Which page of the inventory is being asked for. Namespace scope and cursor,
-// which is exactly the api's input minus the cluster the caller already holds.
-export interface ClusterIndexPage {
-  readonly database?: string | undefined;
-  readonly collection?: string | undefined;
-  // Offset paging since #445 (D133). The query key carries them, so a page is a
-  // cache entry of its own and stepping back is a cache hit rather than a fetch.
-  readonly offset?: number | undefined;
-  readonly limit?: number | undefined;
-}
+// Which page of the inventory is being asked for: the api's input minus the
+// cluster the caller already holds, DERIVED from the contract rather than
+// restated (#455). The interface this replaces was a hand copy that stopped at
+// `offset`/`limit`, so when `sort`, `dir` and `q` joined the contract (D135) they
+// never reached a request — and the compiler could not say so, because a
+// variable of a wider type is accepted where a narrower object type is expected,
+// with no excess-property check. A field added to the contract is a field here
+// now, is forwarded by the spread in the query function below, and is in the key
+// (keys.ts), with no second place for it to be left out of.
+export type ClusterIndexPage = Readonly<Omit<ClusterIndexesInput, "clusterId">>;
 
 // The whole payload again, and for the third time the same reason: `total` is the
 // honest denominator for a page, and `offset`/`limit` are what the pagination
@@ -116,37 +118,32 @@ export const NO_CLUSTER_INDEXES: ClusterIndexes = {
   collectedAt: null,
 };
 
-// Only the fields the reader actually set. Sending `offset: undefined` would be a
-// query string with an empty parameter in it, and the api coerces before it
-// validates.
-function pageInput(page: ClusterIndexPage) {
-  return {
-    ...(page.database === undefined ? {} : { database: page.database }),
-    ...(page.collection === undefined ? {} : { collection: page.collection }),
-    ...(page.offset === undefined ? {} : { offset: page.offset }),
-    ...(page.limit === undefined ? {} : { limit: page.limit }),
-  };
-}
-
-export function clusterIndexesQuery(clusterId: string | null, page: ClusterIndexPage = {}) {
+// The page is spread whole, not forwarded member by member — the forwarder was
+// the third hand copy of the request #455 found short. A member the reader left
+// undefined costs nothing either way: the client appends only strings, numbers
+// and booleans to the query string (OpenAPILink's serializer), and the cache
+// drops undefined members when it hashes the key, so `{ q: undefined }` and `{}`
+// are one request and one entry.
+//
+// No default page. `{}` and the first page in full are the same question to the
+// api and two entries to the cache, so every caller says what it is asking for
+// — the route's loader and its component from one constant, see the route.
+export function clusterIndexesQuery(clusterId: string | null, page: ClusterIndexPage) {
   return queryOptions({
     queryKey: queryKeys.clusterIndexes(clusterId, page),
     queryFn: async () =>
-      clusterId === null
-        ? NO_CLUSTER_INDEXES
-        : api().getClusterIndexes({ clusterId, ...pageInput(page) }),
+      clusterId === null ? NO_CLUSTER_INDEXES : api().getClusterIndexes({ clusterId, ...page }),
+    // The page before this one stays on screen while this one is out — see
+    // PagedRead. Without it a new key is a new entry with nothing in it, and
+    // every click and keystroke would outline the table and disable the search
+    // box mid-word.
+    placeholderData: keepPreviousData,
   });
 }
 
-// Which page of the scanning workload is being asked for (#432).
-export interface WorkloadPage {
-  readonly database?: string | undefined;
-  readonly collection?: string | undefined;
-  readonly declinedOnly?: boolean | undefined;
-  // Offset paging since #445 (D133), same shape as ClusterIndexPage above.
-  readonly offset?: number | undefined;
-  readonly limit?: number | undefined;
-}
+// Which page of the scanning workload is being asked for (#432), derived the
+// same way and for the same reason as ClusterIndexPage above.
+export type WorkloadPage = Readonly<Omit<ClusterWorkloadInput, "clusterId">>;
 
 // `workloadAnalysisEnabled` true in the empty fallback, so a cluster whose read
 // has not answered yet does not draw "create-side analysis is off" — that is a
@@ -164,23 +161,12 @@ export const NO_CLUSTER_WORKLOAD: ClusterWorkload = {
   analysedAt: null,
 };
 
-function workloadInput(page: WorkloadPage) {
-  return {
-    ...(page.database === undefined ? {} : { database: page.database }),
-    ...(page.collection === undefined ? {} : { collection: page.collection }),
-    ...(page.declinedOnly === undefined ? {} : { declinedOnly: page.declinedOnly }),
-    ...(page.offset === undefined ? {} : { offset: page.offset }),
-    ...(page.limit === undefined ? {} : { limit: page.limit }),
-  };
-}
-
-export function clusterWorkloadQuery(clusterId: string | null, page: WorkloadPage = {}) {
+export function clusterWorkloadQuery(clusterId: string | null, page: WorkloadPage) {
   return queryOptions({
     queryKey: queryKeys.clusterWorkload(clusterId, page),
     queryFn: async () =>
-      clusterId === null
-        ? NO_CLUSTER_WORKLOAD
-        : api().getClusterWorkload({ clusterId, ...workloadInput(page) }),
+      clusterId === null ? NO_CLUSTER_WORKLOAD : api().getClusterWorkload({ clusterId, ...page }),
+    placeholderData: keepPreviousData,
   });
 }
 
@@ -233,29 +219,45 @@ export function useNodes(clusterId: string | null): Read<ClusterNodes | null> {
 
 // Its own hook rather than a `useQuery` at the call site, for the reason all six
 // above are: `Read` carries `failed` beside the payload, and #289 was the panel
-// that went on drawing the reassuring empty state after a 500.
+// that went on drawing the reassuring empty state after a 500. A PagedRead, with
+// `placeholder` beside them: while the next page is out, `data` is the previous
+// one, kept on screen on purpose.
 export function useClusterIndexes(
   clusterId: string | null,
-  page: ClusterIndexPage = {},
-): Read<ClusterIndexes> {
+  page: ClusterIndexPage,
+): PagedRead<ClusterIndexes> {
   const {
     data = NO_CLUSTER_INDEXES,
     isPending,
     isError,
+    isPlaceholderData,
     refetch,
   } = useQuery(clusterIndexesQuery(clusterId, page));
-  return { data, pending: isPending, failed: isError, retry: () => void refetch() };
+  return {
+    data,
+    pending: isPending,
+    failed: isError,
+    placeholder: isPlaceholderData,
+    retry: () => void refetch(),
+  };
 }
 
 export function useClusterWorkload(
   clusterId: string | null,
-  page: WorkloadPage = {},
-): Read<ClusterWorkload> {
+  page: WorkloadPage,
+): PagedRead<ClusterWorkload> {
   const {
     data = NO_CLUSTER_WORKLOAD,
     isPending,
     isError,
+    isPlaceholderData,
     refetch,
   } = useQuery(clusterWorkloadQuery(clusterId, page));
-  return { data, pending: isPending, failed: isError, retry: () => void refetch() };
+  return {
+    data,
+    pending: isPending,
+    failed: isError,
+    placeholder: isPlaceholderData,
+    retry: () => void refetch(),
+  };
 }

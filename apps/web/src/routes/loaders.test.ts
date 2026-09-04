@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+import { runLoader } from "~/test-utils";
 import { Route as OverviewRoute } from "./app.clusters.$clusterId.index";
+import { Route as IndexesRoute } from "./app.clusters.$clusterId.indexes";
 import { Route as SettingsRoute } from "./app.clusters.$clusterId.settings";
 
 // What these pin is that the cluster loaders WARM without waiting.
@@ -17,30 +19,9 @@ import { Route as SettingsRoute } from "./app.clusters.$clusterId.settings";
 // branch. The server's is the other half of the same line and deliberately DOES
 // await — its render is the SSR payload.
 
-interface LoaderContext {
-  params: { clusterId: string };
-  context: { queryClient: { ensureQueryData: (options: unknown) => Promise<unknown> } };
-}
-
-// Off the route the app actually registers, not a copy of its body — a copy
-// would keep passing while the real loader grew an await.
-/**
- * Run the loader the app really registers.
- *
- * `route.options.loader` is TanStack's own type, which is not worth restating —
- * a hand-written signature was close enough to compile and not the same
- * function, so calling it took an assertion. Narrowing with `typeof` gives a
- * callable, and the arguments are checked against LoaderContext on the way in,
- * which is the half that matters here.
- */
-async function runLoader(
-  route: { options: { loader?: unknown } },
-  context: LoaderContext,
-): Promise<unknown> {
-  const loader = route.options.loader;
-  if (typeof loader !== "function") throw new Error("expected a loader");
-  return loader(context);
-}
+// `runLoader` (test-utils) runs the loader the app actually registers, not a
+// copy of its body — a copy would keep passing while the real loader grew an
+// await.
 
 // Every read accepted and none of them answered, which is what a slow cluster
 // looks like from the loader's side.
@@ -65,5 +46,13 @@ describe("cluster route loaders", () => {
     const queryClient = stalledClient();
     await runLoader(SettingsRoute, { params: { clusterId: "c1" }, context: { queryClient } });
     expect(queryClient.ensureQueryData).toHaveBeenCalledTimes(2);
+  });
+
+  // Both tables' first pages and the roster. WHICH key each warms is the indexes
+  // route's own test, beside its page.
+  it("hands over the indexes page before its reads answer", async () => {
+    const queryClient = stalledClient();
+    await runLoader(IndexesRoute, { params: { clusterId: "c1" }, context: { queryClient } });
+    expect(queryClient.ensureQueryData).toHaveBeenCalledTimes(3);
   });
 });

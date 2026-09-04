@@ -139,6 +139,13 @@ interface DataTableProps<TData extends RowData> {
   // they are going to be. That is most of what makes a skeleton better than a
   // spinner: the page does not move underneath the reader when the data lands.
   readonly loading?: boolean;
+  // A LATER fetch, with the previous answer still in hand — the paged tables keep
+  // the page before the one asked for on screen while the next is out (#455,
+  // `PagedRead.placeholder`). Not `loading`: the rows are real and stay put, the
+  // search box stays usable mid-word, and the footer already says which page was
+  // asked for. The body dims and the table says it is busy, which is all a reader
+  // needs to know their click landed.
+  readonly busy?: boolean;
   // The table's accessible name. Each one sits under a heading that already says
   // what it is, so the caption is screen-reader-only rather than a second title.
   readonly caption: string;
@@ -249,6 +256,7 @@ export function DataTable<TData extends RowData>({
   filterLabel,
   empty,
   loading = false,
+  busy = false,
   caption,
   className,
   virtualize,
@@ -398,7 +406,7 @@ export function DataTable<TData extends RowData>({
   }
 
   return (
-    <div className={className}>
+    <div className={className} aria-busy={busy || undefined}>
       {filterLabel === undefined ? null : (
         <div className="relative mb-2 max-w-xs">
           <SearchIcon
@@ -520,7 +528,7 @@ export function DataTable<TData extends RowData>({
               </TableRow>
             ))}
           </TableHeader>
-          <TableBody>
+          <TableBody className={busy ? "opacity-60 transition-opacity" : undefined}>
             {loading ? (
               <SkeletonRows columnCount={columnCount} />
             ) : rows.length === 0 ? (
@@ -703,7 +711,9 @@ function PaginationBar({
               if (Number.isFinite(size)) onPageSize(size);
             }}
           >
-            <SelectTrigger size="sm" className="w-28" aria-label={`${noun} per page`}>
+            {/* Wide enough for "100 / page" beside the chevron: at w-28 the widest
+                option clipped to "100 / pag" (#455). */}
+            <SelectTrigger size="sm" className="w-32" aria-label={`${noun} per page`}>
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
