@@ -240,12 +240,15 @@ const columns: DashboardColumns<WorkloadShape> = column.columns([
 export function WorkloadTable({
   shapes,
   loading,
+  busy = false,
   pagination,
   sorting,
   filter,
 }: {
   shapes: WorkloadShape[];
   loading: boolean;
+  // The next page is out and these rows are the previous one (PagedRead).
+  busy?: boolean;
   // Forwarded straight to the table, which owns the page arithmetic. Typed by
   // reading it off DataTable rather than restated, so a change there cannot
   // leave this signature quietly describing the old shape.
@@ -262,6 +265,7 @@ export function WorkloadTable({
       columns={columns}
       data={shapes}
       loading={loading}
+      busy={busy}
       getRowId={(row) => row.id}
       // The api already ranked them by weekly cost — the worst first is the
       // answer — so the initial sort agrees with the order the page arrived in

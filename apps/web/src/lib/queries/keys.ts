@@ -19,6 +19,8 @@
 //
 // The four org-level keys take no cluster: they are the same reads whichever
 // cluster is selected, so selecting another is a URL change and not a refetch.
+import type { ClusterIndexesInput, ClusterWorkloadInput } from "@repo/contracts";
+
 export const queryKeys = {
   // The signed-in user, whatever org is active. "me" is better-auth's session
   // (who am I), the other two are the account page's lists. None take an org:
@@ -72,30 +74,25 @@ export const queryKeys = {
   // draws them in different places.
   indexSizeSeries: (clusterId: string | null) => ["index-size-series", clusterId] as const,
   nodes: (clusterId: string | null) => ["nodes", clusterId] as const,
-  // One page of the cluster's index inventory (#431). The namespace filter and
-  // the page cursor are IN the key for the same reason the security trail's are:
-  // they are what the api was ASKED, so two cursors are two answers, and one
-  // entry holding both would draw the previous page's rows under the next page's
-  // heading while it loaded.
+  // One page of the cluster's index inventory (#431). The WHOLE request is in the
+  // key — namespace scope, offset, limit, sort, direction and filter — for the
+  // reason the security trail's filter and cursor are: they are what the api was
+  // ASKED, so two pages are two answers, and one entry holding both would draw the
+  // previous page's rows under the next page's heading while it loaded.
+  //
+  // The request object itself, not its members spelled out (#455). A written-out
+  // list is a second copy of the request type, and this one stayed on the keyset
+  // cursor for three releases after the api stopped taking one — so every page,
+  // size, sort and search of a cluster hashed to ONE entry, and a click on page
+  // two rendered the cached page one, because TanStack Query does not refetch
+  // when only the queryFn changes under an unchanged key. hashKey sorts an
+  // object's keys and drops undefined members, so the entry is canonical however
+  // the caller built the object; and the type is the api's own input minus the
+  // cluster, so a field the contract gains is in the key by construction.
   clusterIndexes: (
     clusterId: string | null,
-    filter: {
-      database?: string | undefined;
-      collection?: string | undefined;
-      afterDatabase?: string | undefined;
-      afterCollection?: string | undefined;
-      afterIndexName?: string | undefined;
-    },
-  ) =>
-    [
-      "cluster-indexes",
-      clusterId,
-      filter.database ?? null,
-      filter.collection ?? null,
-      filter.afterDatabase ?? null,
-      filter.afterCollection ?? null,
-      filter.afterIndexName ?? null,
-    ] as const,
+    page: Readonly<Omit<ClusterIndexesInput, "clusterId">>,
+  ) => ["cluster-indexes", clusterId, page] as const,
   // Every page of that inventory, as a PREFIX. TanStack Query matches
   // invalidations by prefix, and an event moves the whole inventory rather than
   // the one page a reader happens to be on — so an invalidation written with a
@@ -103,27 +100,12 @@ export const queryKeys = {
   // stale from the cache.
   clusterIndexesAll: (clusterId: string | null) => ["cluster-indexes", clusterId] as const,
   // One page of the cluster's scanning workload (#432). Same rule as the two
-  // above: what the api was ASKED is in the key, and the prefix exists for the
-  // invalidations that move every page at once.
+  // above: what the api was ASKED is in the key — the request object whole — and
+  // the prefix exists for the invalidations that move every page at once.
   clusterWorkload: (
     clusterId: string | null,
-    filter: {
-      database?: string | undefined;
-      collection?: string | undefined;
-      declinedOnly?: boolean | undefined;
-      afterWeeklyDocsExamined?: number | undefined;
-      afterId?: string | undefined;
-    },
-  ) =>
-    [
-      "cluster-workload",
-      clusterId,
-      filter.database ?? null,
-      filter.collection ?? null,
-      filter.declinedOnly ?? null,
-      filter.afterWeeklyDocsExamined ?? null,
-      filter.afterId ?? null,
-    ] as const,
+    page: Readonly<Omit<ClusterWorkloadInput, "clusterId">>,
+  ) => ["cluster-workload", clusterId, page] as const,
   clusterWorkloadAll: (clusterId: string | null) => ["cluster-workload", clusterId] as const,
   // Its own key rather than a field on `recommendations`: a cooldown outlives
   // the recommendation that caused it, and the two are moved by different

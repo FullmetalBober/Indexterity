@@ -59,3 +59,29 @@ export function renderInApp(ui: ReactElement): AppRender {
   }
   return Object.assign(render(ui, { wrapper: Providers }), { queryClient });
 }
+
+// A real QueryClient, or a fake with the one method a loader calls.
+interface LoaderContext {
+  params: { clusterId: string };
+  context: { queryClient: Pick<QueryClient, "ensureQueryData"> };
+}
+
+/**
+ * Run the loader a route actually registers.
+ *
+ * Off the route rather than a copy of its body — a copy would keep passing while
+ * the real loader grew an await, or warmed a key the component does not read.
+ * `route.options.loader` is TanStack's own type, which is not worth restating: a
+ * hand-written signature was close enough to compile and not the same function,
+ * so calling it took an assertion. Narrowing with `typeof` gives a callable, and
+ * the arguments are checked against LoaderContext on the way in, which is the
+ * half that matters here.
+ */
+export async function runLoader(
+  route: { options: { loader?: unknown } },
+  context: LoaderContext,
+): Promise<unknown> {
+  const loader = route.options.loader;
+  if (typeof loader !== "function") throw new Error("expected a loader");
+  return loader(context);
+}
