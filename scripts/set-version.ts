@@ -29,6 +29,14 @@
 // own formatting is exactly `JSON.stringify(lock, null, 2)` plus a newline —
 // verified byte-for-byte on the committed lockfile — so a round trip through
 // here changes the version lines and nothing else.
+//
+// "Nothing else" includes the ORDER of the keys, which is npm's, and which a round
+// trip through zod does not keep: `looseObject` hands back a rebuilt object with
+// the declared keys first and the rest after. Writing that back put `name` after
+// `version` in every entry and `requires` at the bottom — a 34-line diff that the
+// next `npm install` reverted, release after release (#456). So the schemas
+// VALIDATE, and what is written is the document as it was parsed, with the
+// version set on it in place.
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -59,12 +67,48 @@ const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 const PACKAGE_JSON = z.looseObject({ version: z.string().optional() });
 type PackageJson = z.infer<typeof PACKAGE_JSON>;
 
-// `JSON.parse` returns `any`, so an annotation on it checks exactly as much as
-// an assertion would: nothing. Narrowed instead — the object-ness and the one
-// field this script reads are both tested, and a file that is neither says so
+// A JSON file read for writing back: the value exactly as it was parsed, and the
+// schema's view of it for reading. Two objects on purpose — the schema's copy has
+// its keys reordered (see the header), so it is never the one written.
+//
+// `JSON.parse` returns `any`, so an annotation on it checks exactly as much as an
+// assertion would: nothing. The schema narrows instead — the object-ness and the
+// one field this script reads are both tested, and a file that is neither says so
 // here rather than several lines later on a property access.
-function readJson(rel: string): PackageJson {
-  return PACKAGE_JSON.parse(JSON.parse(readFileSync(join(ROOT, rel), "utf8")));
+interface Document<T> {
+  readonly raw: object;
+  readonly parsed: T;
+}
+
+function readDocument<T>(rel: string, schema: z.ZodType<T>): Document<T> {
+  const raw: unknown = JSON.parse(readFileSync(join(ROOT, rel), "utf8"));
+  const parsed = schema.parse(raw);
+  // The schema has already refused anything but an object; this is the same fact
+  // in the compiler's terms, so `raw` can be handed to the writer.
+  if (typeof raw !== "object" || raw === null) {
+    console.error(`${rel} is not a JSON object`);
+    process.exit(1);
+  }
+  return { raw, parsed };
+}
+
+function readJson(rel: string): Document<PackageJson> {
+  return readDocument(rel, PACKAGE_JSON);
+}
+
+// Set `version` on the object at `path` inside a parsed document, in place, so
+// every other key stays where the file had it.
+function setVersionAt(document: object, path: readonly string[], version: string): void {
+  let node: object = document;
+  for (const key of path) {
+    const next: unknown = Reflect.get(node, key);
+    if (typeof next !== "object" || next === null) {
+      console.error(`nothing at ${JSON.stringify(path)} to write a version into`);
+      process.exit(1);
+    }
+    node = next;
+  }
+  Reflect.set(node, "version", version);
 }
 
 function writeJson(rel: string, value: object): void {
@@ -78,7 +122,6 @@ function writeJson(rel: string, value: object): void {
 // is kept — the file is written back — so both are loose about extra keys and
 // exact about the three fields it touches.
 const LOCK_ENTRY = z.looseObject({ version: z.string().optional() });
-type LockEntry = z.infer<typeof LOCK_ENTRY>;
 
 const LOCKFILE_SCHEMA = z.looseObject({
   lockfileVersion: z.number(),
@@ -98,13 +141,14 @@ function lockKey(rel: string): string {
   return rel === "package.json" ? "" : dirname(rel);
 }
 
-function readLockfile(): Lockfile {
+function readLockfile(): Document<Lockfile> {
   // Narrowed, not annotated: `JSON.parse` returns `any`, so a declaration on it
   // establishes nothing at all. Refuse a shape this does not recognise rather
   // than quietly touch nothing in it — updating no fields and reporting success
   // is the exact failure #186 was, and a lockfileVersion bump is the likeliest
   // way to reintroduce it.
-  const lock = LOCKFILE_SCHEMA.parse(JSON.parse(readFileSync(join(ROOT, LOCKFILE), "utf8")));
+  const document = readDocument(LOCKFILE, LOCKFILE_SCHEMA);
+  const lock = document.parsed;
   if (lock.lockfileVersion !== 3) {
     console.error(
       `${LOCKFILE} is lockfileVersion ${JSON.stringify(lock.lockfileVersion)}, and this ` +
@@ -116,7 +160,7 @@ function readLockfile(): Lockfile {
     console.error(`${LOCKFILE} has no "packages" map, so there is nothing to renumber in it`);
     process.exit(1);
   }
-  return lock;
+  return document;
 }
 
 // Present and possibly undefined, rather than optional: the reader always sets
@@ -155,10 +199,9 @@ function set(version: string): void {
   // happened". So the lockfile is read and its entries are resolved up front, and
   // the writes below cannot fail partway for a reason this could have known.
   const lock = readLockfile();
-  const entries: LockEntry[] = [];
   for (const rel of PACKAGES) {
     const key = lockKey(rel);
-    const entry = lock.packages[key];
+    const entry = lock.parsed.packages[key];
     // A manifest with no lockfile entry means the two have drifted about which
     // workspaces exist, and renumbering the rest would hide that.
     if (entry === undefined) {
@@ -166,13 +209,12 @@ function set(version: string): void {
       console.error("run npm install first, so the lockfile knows about every workspace");
       process.exit(1);
     }
-    entries.push(entry);
   }
 
   for (const rel of PACKAGES) {
     const pkg = readJson(rel);
-    pkg.version = version;
-    writeJson(rel, pkg);
+    setVersionAt(pkg.raw, [], version);
+    writeJson(rel, pkg.raw);
   }
   const { text } = chartVersions();
   writeFileSync(
@@ -187,9 +229,9 @@ function set(version: string): void {
         (_line, comment: string | undefined) => `appVersion: "${version}"${comment ?? ""}`,
       ),
   );
-  lock.version = version;
-  for (const entry of entries) entry.version = version;
-  writeJson(LOCKFILE, lock);
+  setVersionAt(lock.raw, [], version);
+  for (const rel of PACKAGES) setVersionAt(lock.raw, ["packages", lockKey(rel)], version);
+  writeJson(LOCKFILE, lock.raw);
 
   console.log(
     `${version} written to ${PACKAGES.length} package.json files, the chart and ${LOCKFILE}`,
@@ -203,7 +245,7 @@ function set(version: string): void {
 }
 
 function check(expected?: string): void {
-  const root = readJson("package.json").version;
+  const root = readJson("package.json").parsed.version;
   const want = expected ?? root;
   // The source of truth having no version at all is its own failure, and one
   // worth naming: without this every file below would be reported as wrong
@@ -214,7 +256,7 @@ function check(expected?: string): void {
   }
   const wrong: string[] = [];
   for (const rel of PACKAGES) {
-    const found = readJson(rel).version;
+    const found = readJson(rel).parsed.version;
     if (found !== want) wrong.push(`${rel}: ${found ?? "(no version field)"}`);
   }
   const chart = chartVersions();
@@ -228,7 +270,7 @@ function check(expected?: string): void {
   // was set. `release.yml` calls this against the tag before it builds anything
   // and before any install, so it is also what stops a tag being published
   // against a lockfile that still says the old number.
-  const lock = readLockfile();
+  const lock = readLockfile().parsed;
   if (lock.version !== want) wrong.push(`${LOCKFILE} version: ${lock.version ?? "(not found)"}`);
   for (const rel of PACKAGES) {
     const key = lockKey(rel);
