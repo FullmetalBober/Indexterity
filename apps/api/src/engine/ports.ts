@@ -83,6 +83,31 @@ export class DatabaseInaccessibleError extends Error {
   }
 }
 
+// Every pooled connection to the cluster stayed busy for as long as a statement
+// is allowed to run, so a statement was never sent (#454).
+//
+// Raised at the driver boundary from the pool's own acquire timeout, and only
+// from the variant where no connection attempt failed in the meantime — a pool
+// that could not CONNECT names that failure itself and is classified as
+// unreachable. This one means the cluster is answering, slowly: the sockets are
+// all held by statements that have not finished. `runClusterTask` treats it as
+// it treats a pass that ran out of budget — skipped, mailed once a day, retried
+// on the next tick — because the alternative it replaces was the nameless
+// ERROR bucket, five immediate retries against the same full pool, and a
+// dead-lettered job.
+export class PoolExhaustedError extends Error {
+  constructor(
+    readonly engine: ClusterEngine,
+    readonly waitedMs: number,
+  ) {
+    super(
+      `every connection to this cluster stayed busy for ${Math.round(waitedMs / 1000)} seconds, ` +
+        "so a statement was never sent",
+    );
+    this.name = "PoolExhaustedError";
+  }
+}
+
 export const NO_TLS_OVERRIDES: TlsOverrides = {
   allowInvalidCertificates: false,
   allowInvalidHostnames: false,

@@ -31,6 +31,16 @@ const REQUEST_TIMEOUT_MS = 900_000;
 // One session serves one collect at a time; a handful of sockets is plenty,
 // and the customer's connection budget is not ours to spend.
 const POOL_MAX = 4;
+// How long a statement may wait for one of those sockets before the pool gives
+// up on it. tarn's default is 30 s and node-mssql does not set it, which is how
+// the production Prod MSSQL collect died: four sockets held by Query Store scans
+// an abandoned pass had left running, a fifth statement waited 30 s, and the
+// pass failed with tarn's "operation timed out for an unknown reason" (#454).
+// A wait may legitimately be as long as the statements ahead of it, so it gets
+// the statement budget; a pass with a shorter wall clock is stopped by that
+// clock first, which is the named outcome. The connection maps the timeout to
+// PoolExhaustedError — see mssql/connection.ts.
+export const POOL_ACQUIRE_TIMEOUT_MS = REQUEST_TIMEOUT_MS;
 
 export function assertMssqlTlsEnforced(
   value: string,
@@ -102,7 +112,7 @@ export function mssqlConfig(
     password: parsed.password.length > 0 ? parsed.password : undefined,
     connectionTimeout: CONNECT_TIMEOUT_MS,
     requestTimeout: REQUEST_TIMEOUT_MS,
-    pool: { max: POOL_MAX, min: 0 },
+    pool: { max: POOL_MAX, min: 0, acquireTimeoutMillis: POOL_ACQUIRE_TIMEOUT_MS },
     options: {
       // "strict" is TDS 8.0 and the driver accepts it verbatim.
       encrypt: mode === "strict" ? "strict" : mode === "on",
