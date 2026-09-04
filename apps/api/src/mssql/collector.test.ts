@@ -1,9 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { DatabaseInaccessibleError } from "../engine/ports";
 import {
+  attributionsToRead,
+  hintsFromStore,
   indexNamesFromForcedPlan,
   indexNamesFromHintText,
+  isReadPlan,
+  latencyFromPlans,
   MssqlIndexCollector,
+  type PlanAttribution,
+  tablePlanMarker,
+  tablesOfPlan,
   toMssqlIndexSpec,
 } from "./collector";
 import type { MssqlSource } from "./connection";
@@ -286,5 +293,111 @@ describe("MssqlIndexCollector across availability replicas", () => {
     expect(await collector.collectNodes()).toEqual([
       { host: "solo", role: "standalone", state: "answered" },
     ]);
+  });
+});
+
+// #454. The per-database read attributes each plan to its tables once, from the
+// plan's own XML, and remembers it. These are its pure pieces; the live suite
+// holds the composed read to the per-table one.
+const PLAN = (statement: string, ...objects: string[]): string =>
+  `<ShowPlanXML><StmtSimple StatementType="${statement}">` +
+  objects.map((object) => `<RelOp><Object Database="[app]" ${object} /></RelOp>`).join("") +
+  "</StmtSimple></ShowPlanXML>";
+
+describe("tablesOfPlan", () => {
+  it("names each table a plan touches once, in schema.table form", () => {
+    const xml = PLAN(
+      "SELECT",
+      'Schema="[dbo]" Table="[orders]" Index="[ix_customer]"',
+      'Schema="[sales]" Table="[dummy]"',
+      'Schema="[dbo]" Table="[orders]" Index="[pk_orders]"',
+    );
+    expect(tablesOfPlan(xml)).toEqual(["dbo.orders", "sales.dummy"]);
+  });
+
+  it("reads a bracket in a name the way showplan writes it", () => {
+    expect(tablesOfPlan(PLAN("SELECT", 'Schema="[dbo]" Table="[odd]]name]"'))).toEqual([
+      "dbo.odd]name",
+    ]);
+    // And the marker the per-table LIKE is built from doubles it the same way.
+    expect(tablePlanMarker("dbo.odd]name")).toBe('Schema="[dbo]" Table="[odd]]name]"');
+  });
+
+  it("reads nothing off a plan that names no table", () => {
+    expect(tablesOfPlan(PLAN("SELECT"))).toEqual([]);
+    expect(isReadPlan(PLAN("SELECT"))).toBe(true);
+    expect(isReadPlan(PLAN("UPDATE", 'Schema="[dbo]" Table="[orders]"'))).toBe(false);
+  });
+});
+
+describe("attributionsToRead", () => {
+  const remembered = (hash: string): PlanAttribution => ({
+    hash,
+    tables: ["dbo.orders"],
+    isSelect: true,
+  });
+
+  it("keeps a plan whose hash is the one remembered and reads the rest", () => {
+    const known = new Map<number, PlanAttribution>([
+      [1, remembered("0xA")],
+      [2, remembered("0xB")],
+      [3, remembered("0xC")],
+    ]);
+    const { kept, unread } = attributionsToRead(known, [
+      { planId: 1, hash: "0xA" }, // unchanged
+      { planId: 2, hash: "0xB2" }, // same id, different plan
+      { planId: 4, hash: "0xD" }, // new
+      // 3 is gone from the store
+    ]);
+    expect([...kept.keys()]).toEqual([1]);
+    expect(unread).toEqual([2, 4]);
+  });
+
+  it("reads everything on a cold start", () => {
+    const { kept, unread } = attributionsToRead(new Map(), [{ planId: 7, hash: "0x7" }]);
+    expect(kept.size).toBe(0);
+    expect(unread).toEqual([7]);
+  });
+});
+
+describe("latencyFromPlans", () => {
+  const plans = new Map<number, PlanAttribution>([
+    [1, { hash: "0x1", tables: ["dbo.orders"], isSelect: true }],
+    [2, { hash: "0x2", tables: ["dbo.orders", "sales.dummy"], isSelect: true }],
+    [3, { hash: "0x3", tables: ["dbo.orders"], isSelect: false }],
+  ]);
+
+  it("sums reads and writes per table, counting a join for every table it names", () => {
+    const out = latencyFromPlans(plans, [
+      { planId: 1, execs: 9, micros: 3133.4 },
+      { planId: 2, execs: 3, micros: 2754 },
+      { planId: 3, execs: 5, micros: 113088.6 },
+      { planId: 99, execs: 1, micros: 1 }, // a plan the store no longer describes
+    ]);
+    expect(out.get("dbo.orders")).toEqual({
+      reads: { ops: 12, latencyMicros: 5887 },
+      writes: { ops: 5, latencyMicros: 113089 },
+    });
+    expect(out.get("sales.dummy")).toEqual({
+      reads: { ops: 3, latencyMicros: 2754 },
+      writes: { ops: 0, latencyMicros: 0 },
+    });
+    expect(out.has("dbo.nothing")).toBe(false);
+  });
+});
+
+describe("hintsFromStore", () => {
+  it("attributes hinted texts by table name, case-insensitively, and forced plans by marker", () => {
+    const out = hintsFromStore(
+      ["dbo.orders", "dbo.[odd name]", "sales.dummy"],
+      [
+        "SELECT COUNT(*) FROM dbo.Orders WITH (INDEX(ix_customer)) WHERE status = 'closed'",
+        "CREATE INDEX ix_orders_status ON dbo.orders (status)",
+      ],
+      [PLAN("SELECT", 'Schema="[sales]" Table="[dummy]" Index="[ix_dummy_customer]"')],
+    );
+    expect(out.get("dbo.orders")).toEqual(["ix_customer"]);
+    expect(out.get("sales.dummy")).toEqual(["ix_dummy_customer"]);
+    expect(out.get("dbo.[odd name]")).toEqual([]);
   });
 });

@@ -210,6 +210,23 @@ export interface IndexCollector {
   // Indexes named explicitly with hint(). Hiding one breaks its queries instead
   // of slowing them, so no latency gate can catch the mistake.
   collectHintedIndexes(database: string, collection: string): Promise<string[]>;
+  // The same two answers for EVERY collection of a database in one read, where
+  // the engine's store makes one read cheaper than one per collection (#454).
+  //
+  // Optional, and present only on SQL Server today. Its latency and hint sources
+  // are Query Store — one store per database — and answering per table meant
+  // scanning every plan in it once per table: 830 whole-store scans for a
+  // 415-table collect, measured at ~0.8 s each on a 2,000-plan store, which is
+  // how a production collect came to sit on its five-minute budget. MongoDB's
+  // `$collStats` and PostgreSQL's `pg_stat_statements` reads are cheap per
+  // collection and stay as they are. `collectSnapshots` and the probe use these
+  // where they exist and the per-collection reads where they do not; a
+  // collection absent from the map has no recorded activity.
+  latencyByCollection?(database: string): Promise<ReadonlyMap<string, CollectionLatency>>;
+  hintedByCollection?(
+    database: string,
+    collections: readonly string[],
+  ): Promise<ReadonlyMap<string, readonly string[]>>;
   // Operations on this namespace that FAILED, at or after an instant. Null when
   // the engine has no per-namespace failure count these credentials can read.
   //

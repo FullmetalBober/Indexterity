@@ -22,6 +22,9 @@ import { dropLoginStatements } from "../src/mssql/provision";
 //   MSSQL_URL='mssql://sa:Int3gration!Pass@localhost:1433?trustservercertificate=true' \
 //     npm run test:int -w apps/api -- integration/mssql.int.test.ts
 const MSSQL_URL = process.env.MSSQL_URL;
+// What a per-database read says about a table nothing ran against: the zeros the
+// per-table read returns for one.
+const NO_ACTIVITY = { reads: { ops: 0, latencyMicros: 0 }, writes: { ops: 0, latencyMicros: 0 } };
 
 // The suite writes through its own connection to seed; the adapter is what is
 // under test. TrustServerCertificate is expected in MSSQL_URL — the container
@@ -463,6 +466,33 @@ describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", 
     await expect(
       session.executor(true).create(DB, "dbo.orders", { status: 1 }, {}),
     ).rejects.toThrow(/read-only/);
+  });
+
+  // #454. The per-database reads replaced two whole-Query-Store scans per table.
+  // They attribute a plan to a table by the same marker and split reads from
+  // writes by the same test, so on a live store they must say exactly what the
+  // per-table reads say — for every table the database has.
+  it("reads latency and hints once per database and agrees with the per-table reads", async () => {
+    const collector = session.collector;
+    if (collector.latencyByCollection === undefined || collector.hintedByCollection === undefined) {
+      throw new Error("the SQL Server collector offers the per-database reads");
+    }
+    const tables = await collector.listCollectionNames(DB);
+    expect(tables).toContain("dbo.orders");
+    const latencies = await collector.latencyByCollection(DB);
+    const hints = await collector.hintedByCollection(DB, tables);
+    for (const table of tables) {
+      expect(latencies.get(table) ?? NO_ACTIVITY).toEqual(
+        await collector.collectionLatency(DB, table),
+      );
+      expect([...(hints.get(table) ?? [])].sort()).toEqual(
+        (await collector.collectHintedIndexes(DB, table)).sort(),
+      );
+    }
+    // Something ran against the fixture table, so the agreement is not two zeros.
+    expect(latencies.get("dbo.orders")?.reads.ops ?? 0).toBeGreaterThan(0);
+    // A second read remembers the plans it attributed and agrees with itself.
+    expect(await collector.latencyByCollection(DB)).toEqual(latencies);
   });
 
   it("collects query shapes from Query Store plans (#201)", async () => {

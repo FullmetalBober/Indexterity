@@ -11,6 +11,7 @@ import type {
 } from "../engine/ports";
 import { DatabaseInaccessibleError } from "../engine/ports";
 import type { IndexKey, IndexSpec, QueryShape, ServerHealth } from "../engine/types";
+import { PLAN_PARSE_CHUNK, yieldToEventLoop } from "./chunk";
 import {
   asNumber,
   type MssqlSource,
@@ -21,7 +22,7 @@ import {
 import { deletePatternsFromPlans } from "./delete-patterns";
 import { collectMssqlServerHealth } from "./health";
 import type { MssqlRoster, MssqlUsageMember } from "./members";
-import { type PlanRow, shapesFromPlans } from "./workload";
+import { type PlanRow, shapesFromPlans, unbracket } from "./workload";
 
 // Plans read per database and collect. Query Store defaults to a 1GB store —
 // a few thousand plans — so the cap is headroom, not a working truncation;
@@ -62,12 +63,141 @@ function likeEscape(value: string): string {
   return value.replace(/[[%_]/g, (match) => `[${match}]`);
 }
 
-// The pattern that finds every Query Store plan touching a table. Bracketed
-// exactly as showplan XML writes it: Schema="[dbo]" Table="[orders]".
-function tablePlanPattern(collection: string): string {
+// The `Schema="[dbo]" Table="[orders]"` pair exactly as showplan XML writes it —
+// adjacent, in this order, a `]` in a name doubled. The LIKE pattern below and
+// the per-database read (#454) are both built from it, so a plan is attributed
+// to a table the same way whichever read asks.
+export function tablePlanMarker(collection: string): string {
   const { schema, table } = splitCollectionName(collection);
-  return `%Schema="${likeEscape(`[${schema}]`)}" Table="${likeEscape(`[${table}]`)}"%`;
+  const bracket = (name: string): string => `[${name.replaceAll("]", "]]")}]`;
+  return `Schema="${bracket(schema)}" Table="${bracket(table)}"`;
 }
+
+// The pattern that finds every Query Store plan touching a table.
+function tablePlanPattern(collection: string): string {
+  return `%${likeEscape(tablePlanMarker(collection))}%`;
+}
+
+// What one plan says about latency attribution: the tables its XML names and
+// whether it is a read. Both are properties of the plan TEXT, which never changes
+// for a given plan_id, so they are read once and remembered across collects
+// (#454) — the whole-store scan per table this replaces re-read every plan's XML
+// once per table, every hour.
+export interface PlanAttribution {
+  // `query_plan_hash`, so a plan_id seen before is trusted only while it still
+  // names the same plan. Query Store does not promise an id is never reused.
+  readonly hash: string;
+  readonly tables: readonly string[];
+  readonly isSelect: boolean;
+}
+
+// Every schema.table a plan names, once each, in the collection form the rest
+// of the adapter uses. Matched as text rather than parsed, like the LIKE it
+// stands in for: showplan writes the two attributes adjacent in this order
+// (verified), and an XML parse of thousands of plans an hour is CPU this
+// process has better uses for.
+export function tablesOfPlan(planXml: string): string[] {
+  const seen = new Set<string>();
+  for (const match of planXml.matchAll(/Schema="(\[[^"]*\])" Table="(\[[^"]*\])"/g)) {
+    const schema = unbracket(match[1] ?? null);
+    const table = unbracket(match[2] ?? null);
+    if (schema !== null && table !== null) seen.add(`${schema}.${table}`);
+  }
+  return [...seen];
+}
+
+// Whether a plan counts as a read: the same substring test the per-table SQL
+// makes, so the two reads split reads from writes identically.
+export function isReadPlan(planXml: string): boolean {
+  return planXml.includes('StatementType="SELECT"');
+}
+
+// Which of a store's plans still have to be read, given what was remembered. A
+// plan is kept while its hash is the one remembered; a new plan, or an id that
+// now carries a different hash, is read again. Whatever the catalog no longer
+// lists is dropped — the remembered set is bounded by the store, not by history.
+export function attributionsToRead(
+  known: ReadonlyMap<number, PlanAttribution>,
+  catalog: readonly { readonly planId: number; readonly hash: string }[],
+): { kept: Map<number, PlanAttribution>; unread: number[] } {
+  const kept = new Map<number, PlanAttribution>();
+  const unread: number[] = [];
+  for (const { planId, hash } of catalog) {
+    const have = known.get(planId);
+    if (have !== undefined && have.hash === hash) kept.set(planId, have);
+    else unread.push(planId);
+  }
+  return { kept, unread };
+}
+
+// Per-table read/write ops and duration from per-plan runtime totals, attributed
+// through what each plan names. A plan touching two tables counts for both, as
+// two per-table LIKEs would each have matched it.
+export function latencyFromPlans(
+  plans: ReadonlyMap<number, PlanAttribution>,
+  stats: readonly { readonly planId: number; readonly execs: number; readonly micros: number }[],
+): Map<string, CollectionLatency> {
+  const sums = new Map<
+    string,
+    { readOps: number; readMicros: number; writeOps: number; writeMicros: number }
+  >();
+  for (const { planId, execs, micros } of stats) {
+    const plan = plans.get(planId);
+    if (plan === undefined) continue;
+    for (const table of plan.tables) {
+      const sum = sums.get(table) ?? { readOps: 0, readMicros: 0, writeOps: 0, writeMicros: 0 };
+      if (plan.isSelect) {
+        sum.readOps += execs;
+        sum.readMicros += micros;
+      } else {
+        sum.writeOps += execs;
+        sum.writeMicros += micros;
+      }
+      sums.set(table, sum);
+    }
+  }
+  const out = new Map<string, CollectionLatency>();
+  for (const [table, sum] of sums) {
+    out.set(table, {
+      reads: { ops: sum.readOps, latencyMicros: Math.round(sum.readMicros) },
+      writes: { ops: sum.writeOps, latencyMicros: Math.round(sum.writeMicros) },
+    });
+  }
+  return out;
+}
+
+// Hinted index names per collection, from the statement texts that mention a
+// hint at all and the plans that are forced — each read once for the database.
+// `LIKE '%table%'` under SQL Server's default collation is case-insensitive, and
+// so is the text match here; the forced-plan match is the exact marker the
+// per-table LIKE used.
+export function hintsFromStore(
+  collections: readonly string[],
+  hintTexts: readonly string[],
+  forcedPlans: readonly string[],
+): Map<string, readonly string[]> {
+  const out = new Map<string, readonly string[]>();
+  for (const collection of collections) {
+    const names = new Set<string>();
+    const needle = splitCollectionName(collection).table.toLowerCase();
+    for (const text of hintTexts) {
+      if (!text.toLowerCase().includes(needle)) continue;
+      for (const name of indexNamesFromHintText(text)) names.add(name);
+    }
+    const marker = tablePlanMarker(collection);
+    for (const planXml of forcedPlans) {
+      if (!planXml.includes(marker)) continue;
+      for (const name of indexNamesFromForcedPlan(planXml)) names.add(name);
+    }
+    out.set(collection, [...names]);
+  }
+  return out;
+}
+
+// How many unread plans' XML one statement ships. Bounds the payload per
+// statement, not the total: a cold collector reads the whole store once, which
+// is what a suggest pass already ships every hour.
+const PLAN_FETCH_CHUNK = 500;
 
 interface IndexRow {
   readonly indexName: string;
@@ -521,6 +651,106 @@ export class MssqlIndexCollector implements IndexCollector {
       for (const name of indexNamesFromForcedPlan(row.xml)) names.add(name);
     }
     return [...names];
+  }
+
+  // Per database, what each plan's XML says — kept across collects (#454). See
+  // planAttributions. Bounded by the store: every read replaces a database's map
+  // with the plans the catalog just listed, so a plan Query Store has aged out
+  // is forgotten with it. A restarted process reads the whole store once, which
+  // is what a suggest pass ships every hour anyway.
+  private readonly attributions = new Map<string, Map<number, PlanAttribution>>();
+
+  // The plans of a database, attributed — reading XML only for the plans this
+  // collector has not seen, or whose hash changed. Three reads on a warm cache:
+  // the catalog of ids and hashes (a few bytes a plan), nothing, and the runtime
+  // totals the caller asks for. The per-table read this replaces cast and
+  // scanned every plan's XML once per table.
+  private async planAttributions(database: string): Promise<Map<number, PlanAttribution>> {
+    const known = this.attributions.get(database) ?? new Map<number, PlanAttribution>();
+    const catalog = await this.conn.query<{ planId: unknown; hash: unknown }>(
+      `SELECT p.plan_id AS planId, CONVERT(varchar(20), p.query_plan_hash, 1) AS hash
+       FROM ${quoteIdent(database)}.sys.query_store_plan p`,
+    );
+    const { kept, unread } = attributionsToRead(
+      known,
+      catalog
+        .map((row) => ({ planId: asNumber(row.planId), hash: String(row.hash) }))
+        .filter((row) => Number.isInteger(row.planId)),
+    );
+    for (let start = 0; start < unread.length; start += PLAN_FETCH_CHUNK) {
+      const ids = unread.slice(start, start + PLAN_FETCH_CHUNK);
+      // Interpolated, not bound: these are integers the server itself just
+      // answered with, kept to integers above, and a parameter per id would meet
+      // the driver's 2,100-parameter ceiling long before this list did.
+      const rows = await this.conn.query<{ planId: unknown; hash: unknown; xml: string }>(
+        `SELECT p.plan_id AS planId, CONVERT(varchar(20), p.query_plan_hash, 1) AS hash,
+                CAST(p.query_plan AS nvarchar(max)) AS xml
+         FROM ${quoteIdent(database)}.sys.query_store_plan p
+         WHERE p.plan_id IN (${ids.join(", ")})`,
+      );
+      for (const [i, row] of rows.entries()) {
+        kept.set(asNumber(row.planId), {
+          hash: String(row.hash),
+          tables: tablesOfPlan(row.xml),
+          isSelect: isReadPlan(row.xml),
+        });
+        // The same breathing the plan parsers take (./chunk.ts): this runs in the
+        // process that is also answering HTTP.
+        if (i % PLAN_PARSE_CHUNK === PLAN_PARSE_CHUNK - 1) await yieldToEventLoop();
+      }
+    }
+    this.attributions.set(database, kept);
+    return kept;
+  }
+
+  // Every table's read/write ops and duration in one read of the database (#454).
+  // The per-table read stays for the callers that want one table (finalize,
+  // and the probe on engines without this); it and this attribute a plan to a
+  // table by the same marker and split reads from writes by the same test, so
+  // they agree — the live suite holds them to it.
+  async latencyByCollection(database: string): Promise<ReadonlyMap<string, CollectionLatency>> {
+    if (!(await this.queryStoreEnabled(database))) return new Map();
+    const plans = await this.planAttributions(database);
+    const stats = await this.conn.query<{ planId: unknown; execs: unknown; micros: unknown }>(
+      `SELECT rs.plan_id AS planId,
+              SUM(rs.count_executions) AS execs,
+              SUM(rs.count_executions * rs.avg_duration) AS micros
+       FROM ${quoteIdent(database)}.sys.query_store_runtime_stats rs
+       GROUP BY rs.plan_id`,
+    );
+    return latencyFromPlans(
+      plans,
+      stats.map((row) => ({
+        planId: asNumber(row.planId),
+        execs: asNumber(row.execs),
+        micros: asNumber(row.micros),
+      })),
+    );
+  }
+
+  // Hinted index names for the collections asked about, from two reads of the
+  // database rather than two per table (#454): the statement texts that mention
+  // a hint at all, and the forced plans.
+  async hintedByCollection(
+    database: string,
+    collections: readonly string[],
+  ): Promise<ReadonlyMap<string, readonly string[]>> {
+    if (!(await this.queryStoreEnabled(database))) return new Map();
+    const hinted = await this.conn.query<{ text: string }>(
+      `SELECT DISTINCT qt.query_sql_text AS text
+       FROM ${quoteIdent(database)}.sys.query_store_query_text qt
+       WHERE qt.query_sql_text LIKE '%INDEX%'`,
+    );
+    const forced = await this.conn.query<{ xml: string }>(
+      `SELECT CAST(p.query_plan AS nvarchar(max)) AS xml
+       FROM ${quoteIdent(database)}.sys.query_store_plan p
+       WHERE p.is_forced_plan = 1`,
+    );
+    return hintsFromStore(
+      collections,
+      hinted.map((row) => row.text),
+      forced.map((row) => row.xml),
+    );
   }
 
   // Query Store is the ONE workload store — there is no second source to fall
