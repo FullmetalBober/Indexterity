@@ -1,4 +1,4 @@
-import type { EngineSession, IndexUsageStat } from "../engine/ports";
+import type { CollectionLatency, EngineSession, IndexUsageStat } from "../engine/ports";
 import { DatabaseInaccessibleError } from "../engine/ports";
 import type { IndexSpec } from "../engine/types";
 
@@ -29,6 +29,13 @@ export interface CollectResult {
   readonly snapshots: CollectedSnapshot[];
   readonly latency: CollectedLatency[];
 }
+
+// What a per-database read says about a collection it did not mention: nothing
+// ran against it — the same zeros the per-collection read returns for one.
+const NO_ACTIVITY: CollectionLatency = {
+  reads: { ops: 0, latencyMicros: 0 },
+  writes: { ops: 0, latencyMicros: 0 },
+};
 
 export function serializeSpec(spec: IndexSpec): Record<string, unknown> {
   return {
@@ -84,13 +91,28 @@ export async function collectSnapshots(session: EngineSession): Promise<CollectR
       if (error instanceof DatabaseInaccessibleError) continue;
       throw error;
     }
+    // Latency and hints once per database where the engine offers that (#454):
+    // on SQL Server the per-table read was a whole-Query-Store scan, twice per
+    // table. Elsewhere the per-collection reads below are the cheap ones.
+    const latencies =
+      collector.latencyByCollection === undefined
+        ? null
+        : await collector.latencyByCollection(database);
+    const hints =
+      collector.hintedByCollection === undefined
+        ? null
+        : await collector.hintedByCollection(database, collections);
     for (const collection of collections) {
       const [specs, usage, sizes, collLatency, hinted] = await Promise.all([
         collector.listIndexes(database, collection),
         collector.collectUsage(database, collection),
         collector.indexSizes(database, collection),
-        collector.collectionLatency(database, collection),
-        collector.collectHintedIndexes(database, collection).catch(() => []),
+        latencies === null
+          ? collector.collectionLatency(database, collection)
+          : Promise.resolve(latencies.get(collection) ?? NO_ACTIVITY),
+        hints === null
+          ? collector.collectHintedIndexes(database, collection).catch(() => [])
+          : Promise.resolve(hints.get(collection) ?? []),
       ]);
       const hintedNames = new Set(hinted);
       latency.push({

@@ -1,7 +1,8 @@
 import mssql from "mssql";
 import { workerEnv } from "../config/env";
-import type { TlsOverrides } from "../engine/ports";
-import { type MssqlDialOptions, mssqlPool } from "./client";
+import { trackInFlight } from "../engine/inflight";
+import { PoolExhaustedError, type TlsOverrides } from "../engine/ports";
+import { type MssqlDialOptions, mssqlPool, POOL_ACQUIRE_TIMEOUT_MS } from "./client";
 import { type MssqlServerVersion, parseMssqlVersion } from "./version";
 
 // A named parameter for query(). Values are always bound, never interpolated;
@@ -166,6 +167,19 @@ export interface MssqlMemberSource extends MssqlSource {
   close(): Promise<void>;
 }
 
+// tarn's acquire timeout, recognised without a type to import: `TimeoutError`
+// there is `class TimeoutError extends Error {}` — no `name` set, so it reads as
+// a plain Error by name and only its constructor and its message say what it
+// is. Only the "unknown reason" wording is claimed; a timeout that names a
+// connect failure is left as it is, so the unreachable classifier still sees the
+// driver's words.
+export function asPoolExhausted(error: unknown): PoolExhaustedError | null {
+  if (!(error instanceof Error)) return null;
+  if (error.constructor.name !== "TimeoutError") return null;
+  if (!/operation timed out for an unknown reason/i.test(error.message)) return null;
+  return new PoolExhaustedError("MSSQL", POOL_ACQUIRE_TIMEOUT_MS);
+}
+
 export class MssqlConnection {
   private pool: mssql.ConnectionPool | null = null;
   private identity: MssqlServerIdentity | null = null;
@@ -190,8 +204,37 @@ export class MssqlConnection {
   async query<T>(text: string, params: QueryParams = {}): Promise<T[]> {
     const request = this.livePool().request();
     for (const [key, value] of Object.entries(params)) request.input(key, value);
-    const result = await request.query<T>(text);
-    return result.recordset ?? [];
+    return this.tracked(request, async () => (await request.query<T>(text)).recordset ?? []);
+  }
+
+  // Every statement goes through here (#454), for two things the driver does not
+  // do on its own.
+  //
+  // It is registered with the pass that issued it, so a pass that ends badly can
+  // cancel what it left running: `request.cancel()` sends the server an attention
+  // if the statement is executing, and marks a request still waiting for a
+  // socket so the pool releases it untouched the moment one is handed over
+  // (lib/tedious/request.js checks `canceled` right after acquire). Without this
+  // an abandoned Query Store scan held its socket for the full request budget.
+  //
+  // And the pool's own give-up is named. tarn rejects an acquire that waited past
+  // `acquireTimeoutMillis` with a bare TimeoutError; when no connection attempt
+  // failed in the meantime its message is "operation timed out for an unknown
+  // reason", which is exactly the case where the reason is known — every socket
+  // was busy. That one becomes PoolExhaustedError. A timeout that carries a
+  // connect failure keeps the driver's own words, which the unreachable
+  // classifier already reads.
+  private async tracked<T>(request: mssql.Request, run: () => Promise<T>): Promise<T> {
+    const untrack = trackInFlight(() => {
+      request.cancel();
+    });
+    try {
+      return await run();
+    } catch (error) {
+      throw asPoolExhausted(error) ?? error;
+    } finally {
+      untrack();
+    }
   }
 
   /**
@@ -209,7 +252,9 @@ export class MssqlConnection {
    */
   async execute(text: string, opts: { build?: boolean } = {}): Promise<void> {
     const request = opts.build === true ? buildRequest(this.livePool()) : this.livePool().request();
-    await request.query(text);
+    await this.tracked(request, async () => {
+      await request.query(text);
+    });
   }
 
   // The server describing itself, cached: none of it can change under a live

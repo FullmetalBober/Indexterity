@@ -7,7 +7,7 @@ import {
   readPressure,
 } from "../analysis";
 import { type Database, desc, eq, latencySamples } from "../db";
-import type { ClusterEngine } from "../engine/ports";
+import type { ClusterEngine, CollectionLatency } from "../engine/ports";
 import type { TunnelRegistry } from "../tunnel/tunnel.registry";
 import { openClusterSession } from "./cluster-connection";
 
@@ -131,10 +131,26 @@ export async function probeCluster(
         }
       }
     }
+    // One read per database where the engine offers it (#454) — on SQL Server
+    // the per-collection read is a whole-Query-Store scan, and twenty of them
+    // every five minutes was a third of the load the collect itself put on the
+    // server. A database whose read fails is skipped whole, as a collection
+    // whose read failed was.
+    const collector = session.collector;
+    const perDatabase = new Map<string, ReadonlyMap<string, CollectionLatency> | null>();
+    if (collector.latencyByCollection !== undefined) {
+      for (const database of new Set(busiest.map((baseline) => baseline.database))) {
+        perDatabase.set(database, await collector.latencyByCollection(database).catch(() => null));
+      }
+    }
     for (const baseline of busiest) {
-      const current = await session.collector
-        .collectionLatency(baseline.database, baseline.collection)
-        .catch(() => null);
+      const read = perDatabase.get(baseline.database);
+      const current =
+        read === undefined
+          ? await collector
+              .collectionLatency(baseline.database, baseline.collection)
+              .catch(() => null)
+          : (read?.get(baseline.collection) ?? null);
       if (current === null) continue;
       const verdict = readPressure(
         { ops: baseline.readOps, latencyMicros: baseline.readLatencyMicros },
