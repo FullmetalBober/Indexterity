@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { DATABASE_LISTING_SQL, listDatabaseNames, type MssqlReader } from "./connection";
+import { PoolExhaustedError } from "../engine/ports";
+import {
+  asPoolExhausted,
+  DATABASE_LISTING_SQL,
+  listDatabaseNames,
+  type MssqlReader,
+} from "./connection";
 
 // Unlike the other two adapters, SQL Server's whole rule is IN the statement —
 // the server filters and hands back the answer — so what a unit test can hold is
@@ -30,5 +36,28 @@ describe("listDatabaseNames", () => {
   // count the other two adapters had to be made to agree with.
   it("reports what the server answered", async () => {
     expect(await listDatabaseNames(reader(["app"]))).toEqual(["app"]);
+  });
+});
+
+// tarn's TimeoutError sets no `name`, so only its constructor and its wording
+// identify it. The "unknown reason" wording is the pool-full case and becomes
+// PoolExhaustedError; a timeout that carries a connect failure keeps the driver's
+// words, which the unreachable classifier reads (#454).
+describe("asPoolExhausted", () => {
+  class TimeoutError extends Error {}
+
+  it("names the pool-full timeout", () => {
+    const named = asPoolExhausted(new TimeoutError("operation timed out for an unknown reason"));
+    expect(named).toBeInstanceOf(PoolExhaustedError);
+    expect(named?.message).toContain("every connection to this cluster stayed busy");
+  });
+
+  it("leaves a timeout that names a connect failure alone", () => {
+    expect(asPoolExhausted(new TimeoutError("Failed to connect to db:1433 in 5000ms"))).toBeNull();
+  });
+
+  it("leaves every other error alone", () => {
+    expect(asPoolExhausted(new Error("operation timed out for an unknown reason"))).toBeNull();
+    expect(asPoolExhausted("operation timed out for an unknown reason")).toBeNull();
   });
 });

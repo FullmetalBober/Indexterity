@@ -12,7 +12,7 @@ import { refreshInferredWindow } from "./change-window";
 import { classifyCluster } from "./classify";
 import { collectCluster } from "./collect";
 import { applyCreatesForCluster } from "./create";
-import type { JobQueue } from "./dispatch";
+import { enqueueClusterPass, type JobQueue, runningPasses } from "./dispatch";
 import { finalizeCluster } from "./finalize";
 import { clusterIdFromPayload } from "./payload";
 import { probeCluster } from "./probe";
@@ -77,9 +77,13 @@ export class ClusterTasksService {
     await this.onCluster("collect", payload, helpers, async (clusterId) => {
       await collectCluster(this.database.db, clusterId, this.tunnels);
       // Only chase a collect that actually landed — re-analysing an unchanged
-      // history just re-derives yesterday's answer.
-      await helpers.addJob("classify", { clusterId });
-      await helpers.addJob("suggest", { clusterId });
+      // history just re-derives yesterday's answer. Enqueued the way the
+      // schedulers enqueue (#454): keyed, queued per cluster, five attempts —
+      // so a chased suggest dedupes against the hourly one instead of running
+      // beside it with the library's default of twenty-five retries.
+      const running = runningPasses(this.database.db);
+      await enqueueClusterPass(helpers, running, "classify", clusterId);
+      await enqueueClusterPass(helpers, running, "suggest", clusterId);
     });
   }
 
@@ -154,7 +158,7 @@ export class ClusterTasksService {
             : `probe: ${finding.database}.${finding.collection} under read pressure — ${finding.reason}`,
         );
       }
-      await helpers.addJob("suggest", { clusterId });
+      await enqueueClusterPass(helpers, runningPasses(this.database.db), "suggest", clusterId);
     });
   }
 

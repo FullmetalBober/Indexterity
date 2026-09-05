@@ -104,6 +104,15 @@ export interface WorkloadOptions {
   readonly minPerWeek: number;
 }
 
+// What recommendCreates needs beyond the recurrence floor.
+export interface CreateOptions extends WorkloadOptions {
+  // Whether the engine can build a partial index from the `{field: literal}`
+  // filter derived below (`EngineCapabilities.partialIndexFromConstants`). False
+  // keeps the constant columns as keys — the candidate a shape without constants
+  // produces — rather than proposing an index the executor will refuse (#452).
+  readonly partialIndexes: boolean;
+}
+
 function fieldsOf(index: IndexSpec): string[] {
   return index.keys.map((key) => key.field);
 }
@@ -265,7 +274,7 @@ interface Want {
 export function recommendCreates(
   shapes: readonly QueryShape[],
   existing: readonly IndexSpec[],
-  options: WorkloadOptions,
+  options: CreateOptions,
   // Told about each shape this declines, in the order the checks run, so the
   // caller can record WHICH gate declined rather than guessing (#432).
   onDecline: ShapeDeclineSink = () => {},
@@ -294,11 +303,14 @@ export function recommendCreates(
     }
     // Constant equality predicates (same literal in every sample) become a
     // partialFilterExpression instead of index keys — but only when other keys
-    // remain to index; a filter with nothing to index stays a normal candidate.
+    // remain to index (a filter with nothing to index stays a normal candidate),
+    // and only where the engine can build a partial index from them. Elsewhere
+    // the constants stay keys, as they do for a shape that carries none (#452).
     const constants = shape.constants ?? {};
     const constantFields = Object.keys(constants).filter((field) => shape.equality.includes(field));
     let partialFilter: Readonly<Record<string, ConstantValue>> | undefined;
     if (
+      options.partialIndexes &&
       constantFields.length > 0 &&
       wantedKeys.some((key) => !constantFields.includes(key.field))
     ) {

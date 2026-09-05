@@ -204,6 +204,7 @@ export function IndexTable({
   roster,
   engine,
   loading,
+  busy = false,
   pagination,
   sorting,
   filter,
@@ -218,6 +219,8 @@ export function IndexTable({
   // holds, so the badge and this table cannot disagree about the engine.
   engine: ClusterEngine;
   loading: boolean;
+  // The next page is out and these rows are the previous one (PagedRead).
+  busy?: boolean;
   // Forwarded straight to the table, which owns the page arithmetic. Typed by
   // reading it off DataTable rather than restated, so a change there cannot
   // leave this signature quietly describing the old shape.
@@ -249,6 +252,7 @@ export function IndexTable({
       columns={columns}
       data={indexes}
       loading={loading}
+      busy={busy}
       getRowId={(row) => row.id}
       // Namespace order, which is the order the api paged in: sorting a page by
       // size and calling it "the biggest indexes" would be a claim about the

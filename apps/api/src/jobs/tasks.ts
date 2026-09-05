@@ -1,6 +1,8 @@
 import type { BlockedReason } from "@repo/contracts";
 import type { JobHelpers } from "graphile-worker";
 import type { Database } from "../db";
+import { InFlight, withInFlight } from "../engine/inflight";
+import { PoolExhaustedError } from "../engine/ports";
 import { InsecureConnectionError } from "../engine/tls";
 import { UnsupportedServerError } from "../engine/version";
 import { messageOf } from "../errors/message";
@@ -10,7 +12,7 @@ import { TunnelUnavailableError } from "../tunnel/resolve";
 import { ClusterCredentialsError, ClusterGoneError } from "./cluster-connection";
 import type { ClusterPasses } from "./cluster-tasks.service";
 import { runDigest } from "./digest";
-import { clusterRoster, dispatchToAllClusters } from "./dispatch";
+import { clusterRoster, dispatchToAllClusters, runningPasses } from "./dispatch";
 import { pruneOldSamples } from "./retention";
 
 // What a cluster task needs from the outside world, narrowed to three
@@ -157,8 +159,11 @@ export async function runClusterTask(
   run: (clusterId: string) => Promise<unknown>,
   budgetMs: number | null = null,
 ): Promise<void> {
+  // Every statement the pass issues registers here (engine/inflight.ts), so a
+  // pass that ends badly can take its statements down with it.
+  const inFlight = new InFlight();
   try {
-    const pass = run(clusterId);
+    const pass = withInFlight(inFlight, () => run(clusterId));
     await (budgetMs === null ? pass : withPassBudget(task, budgetMs, pass));
     recordClusterTask(task, clusterId, "ok");
     // A pass that got through clears whatever stopped the last one: the state is
@@ -169,6 +174,18 @@ export async function runClusterTask(
     // lost nudge must not turn a landed pass into a retried one.
     await deps.emitPassFinished(clusterId, task);
   } catch (error) {
+    // First, whatever the pass still has running is nobody's now (#454). A budget
+    // only stops the await; a thrown sibling in a Promise.all leaves the others
+    // going. Either way those statements would otherwise hold the cluster's
+    // sockets until the driver's own request timeout — fifteen minutes on SQL
+    // Server — and the next pass would find the pool full. Cancelled before the
+    // failure is classified, so the classification below never races them.
+    const abandoned = inFlight.abandon();
+    if (abandoned > 0) {
+      deps.logger.warn(
+        `${task}: cluster ${clusterId} — cancelled ${abandoned} statement(s) the pass left running`,
+      );
+    }
     // Offboarded between scheduling and running. Nothing to do and nobody to
     // tell — the owners deleted it on purpose.
     if (error instanceof ClusterGoneError) {
@@ -269,16 +286,28 @@ export async function runClusterTask(
     // five attempts later it is dead-lettered having achieved nothing but five
     // budgets of the only worker slot. The next tick tries again from a clean
     // start, which is the behaviour that lets the fleet keep moving.
-    if (error instanceof PassBudgetExceededError) {
+    //
+    // A pool that stayed full for as long as a statement may run is the same
+    // condition seen from the driver (#454): the cluster is answering, slowly,
+    // and every socket is held by a statement that has not finished. Named by
+    // the connection rather than left as tarn's "operation timed out for an
+    // unknown reason", which used to land in the ERROR bucket below — five
+    // immediate retries against the same full pool, then a dead letter.
+    if (error instanceof PassBudgetExceededError || error instanceof PoolExhaustedError) {
       recordClusterTask(task, clusterId, "timed-out");
       await deps.markBlocked(clusterId, task, "TIMED_OUT", error.message);
       deps.logger.warn(`${task}: cluster ${clusterId} — ${error.message}`);
+      const how =
+        error instanceof PoolExhaustedError
+          ? `waited for a connection to this cluster for longer than a statement is allowed ` +
+            `to run — every one of them was busy — and was abandoned`
+          : `ran for longer than its budget and was abandoned`;
       await deps.alert(
         `${clusterId}:timed-out`,
         clusterId,
         `${task} is taking longer than Indexterity will wait`,
-        `The ${task} step against this cluster ran for longer than its budget and was ` +
-          `abandoned, so it did nothing. Nothing was executed and nothing was lost.\n\n` +
+        `The ${task} step against this cluster ${how}, so it did nothing. Nothing was ` +
+          `executed and nothing was lost.\n\n` +
           `This usually means the cluster is very large, very busy, or reached over a slow ` +
           `link — the step is not failing so much as not fitting. Whoever runs this ` +
           `Indexterity can raise the budget (CLUSTER_PASS_BUDGET_MS) if the cluster genuinely ` +
@@ -376,19 +405,19 @@ export function createTaskList(
     probe: (payload: unknown, helpers: JobHelpers): Promise<void> =>
       cluster.probe(payload, helpers),
     scheduleProbe: async (_payload: unknown, helpers: JobHelpers): Promise<void> => {
-      await dispatchToAllClusters(clusterRoster(db), "probe", helpers);
+      await dispatchToAllClusters(clusterRoster(db), "probe", helpers, runningPasses(db));
     },
     scheduleCollect: async (_payload: unknown, helpers: JobHelpers): Promise<void> => {
-      await dispatchToAllClusters(clusterRoster(db), "collect", helpers);
+      await dispatchToAllClusters(clusterRoster(db), "collect", helpers, runningPasses(db));
     },
     scheduleSuggest: async (_payload: unknown, helpers: JobHelpers): Promise<void> => {
-      await dispatchToAllClusters(clusterRoster(db), "suggest", helpers);
+      await dispatchToAllClusters(clusterRoster(db), "suggest", helpers, runningPasses(db));
     },
     scheduleApply: async (_payload: unknown, helpers: JobHelpers): Promise<void> => {
-      await dispatchToAllClusters(clusterRoster(db), "apply", helpers);
+      await dispatchToAllClusters(clusterRoster(db), "apply", helpers, runningPasses(db));
     },
     scheduleFinalize: async (_payload: unknown, helpers: JobHelpers): Promise<void> => {
-      await dispatchToAllClusters(clusterRoster(db), "finalize", helpers);
+      await dispatchToAllClusters(clusterRoster(db), "finalize", helpers, runningPasses(db));
     },
     retention: async (): Promise<void> => {
       await pruneOldSamples(db);

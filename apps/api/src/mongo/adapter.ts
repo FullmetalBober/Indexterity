@@ -59,7 +59,9 @@ class MongoEngineSession implements EngineSession {
 // The reference EngineAdapter (the wiki's Architecture page, Engine ports).
 export const mongoAdapter: EngineAdapter = {
   engine: "MONGODB",
-  capabilities: { hideIndexes: true, provisionScopedUsers: true },
+  // partialIndexFromConstants: the recommender's `{field: literal}` filter IS
+  // a partialFilterExpression, so createIndexes takes it as it stands.
+  capabilities: { hideIndexes: true, provisionScopedUsers: true, partialIndexFromConstants: true },
   connStringHint: "mongodb:// or mongodb+srv://",
   isConnString: isMongoConnString,
   hostsOf: mongoHosts,

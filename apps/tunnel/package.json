@@ -1,5 +1,5 @@
 {
-  "version": "0.18.0",
+  "version": "0.18.1",
   "name": "@repo/tunnel",
   "private": true,
   "description": "The WireGuard peering the api spawns per tunnel: wireguard-go and gvisor's netstack, SOCKS5 on loopback",

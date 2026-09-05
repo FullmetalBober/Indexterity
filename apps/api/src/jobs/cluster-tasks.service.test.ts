@@ -40,6 +40,12 @@ vi.mock("./probe", async (importOriginal) => ({
 // Why the pipeline stopped is written to the clusters row, and this suite's db is
 // an empty object: what it pins is which pass each queue name runs, not what a
 // pass records about itself (tasks.test.ts owns that).
+// The running-pass check reads graphile-worker's table through the real drizzle
+// client below, which must never open a socket in this suite: nothing runs here.
+vi.mock("./dispatch", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./dispatch")>()),
+  runningPasses: () => ({ locked: async () => new Set<string>() }),
+}));
 vi.mock("./blocked", (): typeof import("./blocked") => ({
   markBlocked: vi.fn(),
   markUnblocked: vi.fn(),
@@ -192,7 +198,12 @@ describe("the per-cluster passes", () => {
     vi.mocked(probeCluster).mockResolvedValueOnce(found);
     const loud = helpers();
     await service().probe({ clusterId: CLUSTER }, loud);
-    expect(loud.addJob).toHaveBeenCalledWith("suggest", { clusterId: CLUSTER });
+    expect(loud.addJob).toHaveBeenCalledWith(
+      "suggest",
+      { clusterId: CLUSTER },
+      // Keyed and queued like a scheduled suggest, so it dedupes against one (#454).
+      expect.objectContaining({ jobKey: `suggest:${CLUSTER}`, queueName: `suggest:${CLUSTER}` }),
+    );
     expect(loud.logger.info).toHaveBeenCalledOnce();
   });
 });

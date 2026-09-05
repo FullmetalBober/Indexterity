@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { trackInFlight } from "../engine/inflight";
+import { PoolExhaustedError } from "../engine/ports";
 import { InsecureConnectionError } from "../engine/tls";
 import { UnsupportedServerError } from "../engine/version";
 import { asClusterUnreachable } from "../errors/unreachable";
@@ -357,6 +359,73 @@ describe("runClusterTask on a cluster we refuse to dial", () => {
   // none at all for the pass, so it could not finish inside the life of the
   // process, and WORKER_CONCURRENCY is 1 — nothing else in the pipeline drained
   // behind it.
+  // #454. The budget stops the AWAIT; the statement it was waiting on kept its
+  // socket until the driver's own timeout — fifteen minutes on SQL Server — and
+  // the next pass found the pool full. Everything the pass registered is
+  // cancelled the moment the pass is given up on.
+  it("cancels what an abandoned pass left running", async () => {
+    const log = recorder();
+    const cancelled: string[] = [];
+    let release: () => void = () => undefined;
+    const slow = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await runClusterTask(
+      "collect",
+      CLUSTER,
+      log.deps,
+      async () => {
+        const untrack = trackInFlight(() => cancelled.push("scan"));
+        await slow;
+        untrack();
+      },
+      20,
+    );
+    expect(cancelled).toEqual(["scan"]);
+    expect(log.warns.join("\n")).toContain("cancelled 1 statement(s)");
+    release();
+  });
+
+  it("cancels the siblings a thrown statement leaves behind, then classifies the throw", async () => {
+    const log = recorder();
+    const cancelled: string[] = [];
+    await runClusterTask("collect", CLUSTER, log.deps, async () => {
+      trackInFlight(() => cancelled.push("sibling"));
+      throw asClusterUnreachable(new Error("connect ECONNREFUSED 10.0.0.4:1433"));
+    });
+    expect(cancelled).toEqual(["sibling"]);
+    expect(log.blocked[0]).toContain(":UNREACHABLE:");
+  });
+
+  it("registers nothing to cancel when the pass lands", async () => {
+    const log = recorder();
+    const cancelled: string[] = [];
+    await runClusterTask("collect", CLUSTER, log.deps, async () => {
+      const untrack = trackInFlight(() => cancelled.push("done"));
+      untrack();
+    });
+    expect(cancelled).toEqual([]);
+    expect(log.warns).toEqual([]);
+  });
+
+  // The pool's give-up is the same condition as the budget, seen from the
+  // driver: the cluster is answering, slowly, and every socket is held. Named
+  // and skipped like a budget overrun, not rethrown for five immediate retries
+  // against the same full pool.
+  it("treats a full connection pool as too slow, not as a bug", async () => {
+    const log = recorder();
+    await expect(
+      runClusterTask("collect", CLUSTER, log.deps, () =>
+        Promise.reject(new PoolExhaustedError("MSSQL", 900_000)),
+      ),
+    ).resolves.toBeUndefined();
+    expect(log.blocked).toEqual([
+      `${CLUSTER}:collect:TIMED_OUT:every connection to this cluster stayed busy for 900 seconds, so a statement was never sent`,
+    ]);
+    expect(log.alerts).toEqual([`${CLUSTER}:collect is taking longer than Indexterity will wait`]);
+    expect(log.alerts.join()).not.toContain("unreachable");
+  });
+
   it("abandons a read-only pass that runs past its budget", async () => {
     const log = recorder();
     // Never settles, which is what a pass that cannot finish looks like.

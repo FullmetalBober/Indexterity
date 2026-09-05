@@ -1,6 +1,7 @@
 import { inChangeWindow } from "../analysis";
 import type { Database } from "../db";
 import { actions, and, eq, inArray, policies, recommendations } from "../db";
+import { type IndexBuildOutcome, IndexBuildRefusedError } from "../engine/ports";
 import type { TunnelRegistry } from "../tunnel/tunnel.registry";
 import { effectiveChangeWindow } from "./change-window";
 import { openClusterSession } from "./cluster-connection";
@@ -80,23 +81,54 @@ export async function applyCreatesForCluster(
         continue;
       }
       const carried = target.options;
-      const outcome = await executor.create(rec.database, rec.collection, keys, {
-        name: rec.indexName,
-        ...(target.partial === undefined ? {} : { partialFilterExpression: target.partial }),
-        ...(carried === undefined
-          ? {}
-          : {
-              ...(carried.unique ? { unique: true } : {}),
-              ...(carried.sparse ? { sparse: true } : {}),
-              ...(carried.collation === null ? {} : { collation: { locale: carried.collation } }),
-              ...(carried.partialFilter === undefined
-                ? {}
-                : { partialFilterExpression: carried.partialFilter }),
-              ...(carried.include === undefined || carried.include.length === 0
-                ? {}
-                : { include: carried.include }),
-            }),
-      });
+      let outcome: IndexBuildOutcome;
+      try {
+        outcome = await executor.create(rec.database, rec.collection, keys, {
+          name: rec.indexName,
+          ...(target.partial === undefined ? {} : { partialFilterExpression: target.partial }),
+          ...(carried === undefined
+            ? {}
+            : {
+                ...(carried.unique ? { unique: true } : {}),
+                ...(carried.sparse ? { sparse: true } : {}),
+                ...(carried.collation === null ? {} : { collation: { locale: carried.collation } }),
+                ...(carried.partialFilter === undefined
+                  ? {}
+                  : { partialFilterExpression: carried.partialFilter }),
+                ...(carried.include === undefined || carried.include.length === 0
+                  ? {}
+                  : { include: carried.include }),
+              }),
+        });
+      } catch (error) {
+        // The adapter will not build this specification — today, a partial
+        // filter it cannot translate (#452). Not a version and not a transient
+        // failure, so neither blocking the cluster nor retrying is right; and
+        // not a proposal either, because approving it again would only be
+        // refused again, which makes PROPOSED an approve button that leads
+        // nowhere. So the row closes as REJECTED with the refusal in its
+        // rationale and its history, and the pass goes on to the next build
+        // rather than stalling every approved build on the cluster behind this
+        // one. A row like it is not proposed again: the recommender now asks
+        // the engine's capabilities before deriving a partial candidate.
+        // Anything else thrown here still fails the pass, as before.
+        if (!(error instanceof IndexBuildRefusedError)) throw error;
+        await db
+          .update(recommendations)
+          .set({
+            state: "REJECTED",
+            rationale: `${rec.rationale} — refused by the engine: ${error.message}`,
+            updatedAt: new Date(),
+          })
+          .where(eq(recommendations.id, rec.id));
+        await db.insert(actions).values({
+          recommendationId: rec.id,
+          kind: "CREATE",
+          actor: "system",
+          result: `refused: ${error.message}`,
+        });
+        continue;
+      }
       // A scheduled build does not exist yet (#332). PostgreSQL's pg_cron route
       // returns as soon as the job is registered and the index appears minutes
       // later in a background worker, so ACTIVE here would claim a finished

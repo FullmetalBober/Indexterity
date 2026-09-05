@@ -83,6 +83,31 @@ export class DatabaseInaccessibleError extends Error {
   }
 }
 
+// Every pooled connection to the cluster stayed busy for as long as a statement
+// is allowed to run, so a statement was never sent (#454).
+//
+// Raised at the driver boundary from the pool's own acquire timeout, and only
+// from the variant where no connection attempt failed in the meantime — a pool
+// that could not CONNECT names that failure itself and is classified as
+// unreachable. This one means the cluster is answering, slowly: the sockets are
+// all held by statements that have not finished. `runClusterTask` treats it as
+// it treats a pass that ran out of budget — skipped, mailed once a day, retried
+// on the next tick — because the alternative it replaces was the nameless
+// ERROR bucket, five immediate retries against the same full pool, and a
+// dead-lettered job.
+export class PoolExhaustedError extends Error {
+  constructor(
+    readonly engine: ClusterEngine,
+    readonly waitedMs: number,
+  ) {
+    super(
+      `every connection to this cluster stayed busy for ${Math.round(waitedMs / 1000)} seconds, ` +
+        "so a statement was never sent",
+    );
+    this.name = "PoolExhaustedError";
+  }
+}
+
 export const NO_TLS_OVERRIDES: TlsOverrides = {
   allowInvalidCertificates: false,
   allowInvalidHostnames: false,
@@ -185,6 +210,23 @@ export interface IndexCollector {
   // Indexes named explicitly with hint(). Hiding one breaks its queries instead
   // of slowing them, so no latency gate can catch the mistake.
   collectHintedIndexes(database: string, collection: string): Promise<string[]>;
+  // The same two answers for EVERY collection of a database in one read, where
+  // the engine's store makes one read cheaper than one per collection (#454).
+  //
+  // Optional, and present only on SQL Server today. Its latency and hint sources
+  // are Query Store — one store per database — and answering per table meant
+  // scanning every plan in it once per table: 830 whole-store scans for a
+  // 415-table collect, measured at ~0.8 s each on a 2,000-plan store, which is
+  // how a production collect came to sit on its five-minute budget. MongoDB's
+  // `$collStats` and PostgreSQL's `pg_stat_statements` reads are cheap per
+  // collection and stay as they are. `collectSnapshots` and the probe use these
+  // where they exist and the per-collection reads where they do not; a
+  // collection absent from the map has no recorded activity.
+  latencyByCollection?(database: string): Promise<ReadonlyMap<string, CollectionLatency>>;
+  hintedByCollection?(
+    database: string,
+    collections: readonly string[],
+  ): Promise<ReadonlyMap<string, readonly string[]>>;
   // Operations on this namespace that FAILED, at or after an instant. Null when
   // the engine has no per-namespace failure count these credentials can read.
   //
@@ -233,6 +275,23 @@ export interface CreateIndexOptions {
   // with no such concept must drop it rather than forward it — MongoDB's
   // createIndexes rejects an option it does not know.
   readonly include?: readonly string[] | undefined;
+}
+
+// An index the executor will not build AS SPECIFIED — not because the server
+// refused it, but because the specification asks for something the adapter
+// cannot express: today, a partial filter in a shape it cannot translate.
+//
+// Distinct from UnsupportedServerError, which is about the server's major and
+// blocks the whole cluster, and from the driver errors a transient failure
+// raises, which the pass retries. Neither fits: the server is fine, and no retry
+// changes a specification. jobs/create.ts catches it per recommendation,
+// records the refusal as that row's CREATE action and carries on with the next
+// build (#452).
+export class IndexBuildRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "IndexBuildRefusedError";
+  }
 }
 
 // The only write surface. Implementations must enforce read-only mode
@@ -368,6 +427,23 @@ export interface EngineCapabilities {
   readonly hideIndexes: boolean;
   // Can create a scoped least-privilege user from an admin connection string.
   readonly provisionScopedUsers: boolean;
+  // Can build a partial index from the recommender's filter — the `{field:
+  // literal}` map `recommendCreates` derives from a shape's constant equality
+  // predicates (#452).
+  //
+  // Gates the SUGGESTION, not the build: where this is false the recommender
+  // keeps the constant columns as index keys, which is the candidate a shape
+  // without constants produces anyway. MongoDB's createIndexes takes the map as
+  // its partialFilterExpression verbatim. SQL Server's filtered index and
+  // PostgreSQL's WHERE want a predicate in their own SQL, and those executors
+  // carry one only in the shape their own collector reads back (`{definition}`
+  // and `{sql}`) — so a partial index restored or re-ordered is exact, and one
+  // proposed from constants is something they cannot build. Turning the map
+  // into T-SQL or SQL is a feature with its own questions (the predicate's
+  // types have to match the column's for the optimizer to use the index, and a
+  // parameterised plan never picks a filtered one), and until it is done the
+  // honest answer is false.
+  readonly partialIndexFromConstants: boolean;
 }
 
 // One live, pooled connection to a customer cluster.

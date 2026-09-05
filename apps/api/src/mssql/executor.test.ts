@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { IndexBuildRefusedError } from "../engine/ports";
+import { UnsupportedServerError } from "../engine/version";
 import type { MssqlWriter } from "./connection";
 import { type IndexStateRow, MssqlIndexExecutor } from "./executor";
 
@@ -138,16 +140,34 @@ describe("MssqlIndexExecutor structural guards", () => {
     ]);
   });
 
-  it("refuses a filter it cannot translate", async () => {
+  // As a build refusal, not an unsupported version: the version class blocks the
+  // whole cluster as "wrong major", which is what a production SQL Server got
+  // for a recommender-shaped filter (#452).
+  it("refuses a filter it cannot translate, as a refusal rather than a version", async () => {
+    const { conn, executed } = stubConnection(plain);
+    const attempt = new MssqlIndexExecutor(conn, false).create(
+      "db",
+      "dbo.orders",
+      { a: 1 },
+      { partialFilterExpression: { status: { $exists: true } } },
+    );
+    await expect(attempt).rejects.toThrow(/non-SQL filter/);
+    await expect(attempt).rejects.toBeInstanceOf(IndexBuildRefusedError);
+    await expect(attempt).rejects.not.toBeInstanceOf(UnsupportedServerError);
+    expect(executed).toEqual([]);
+  });
+
+  // The recommender's own shape — what the production row carried.
+  it("refuses the recommender's constant-equality filter the same way", async () => {
     const { conn, executed } = stubConnection(plain);
     await expect(
       new MssqlIndexExecutor(conn, false).create(
         "db",
-        "dbo.orders",
-        { a: 1 },
-        { partialFilterExpression: { status: { $exists: true } } },
+        "dbo.ClientPlans",
+        { ClientID: 1 },
+        { partialFilterExpression: { IsActive: 1, IsDeleted: 0 } },
       ),
-    ).rejects.toThrow(/non-SQL filter/);
+    ).rejects.toBeInstanceOf(IndexBuildRefusedError);
     expect(executed).toEqual([]);
   });
 

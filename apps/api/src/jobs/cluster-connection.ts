@@ -50,6 +50,11 @@ export interface ClusterSession {
   // hiding), and the evidence is the usage counters staying flat — which is
   // what `preflightDrop` already re-checks before the drop.
   readonly canHide: boolean;
+  // Whether this engine can build a partial index from the recommender's
+  // constant-equality filter (`EngineCapabilities.partialIndexFromConstants`).
+  // Read here for the reason `canHide` is: the suggest pass branches on it, and
+  // no pipeline site reaches for the registry itself (#452).
+  readonly canPartial: boolean;
   // Which databases the owner asked us to observe, or null for all of them
   // (#244). Carried for the callers that need to SAY what was in scope — the
   // filtering itself is already done by the session above, and no caller has to
@@ -141,6 +146,7 @@ export async function openClusterSession(
     engine: cluster.engine,
     readOnly: cluster.readOnly,
     canHide: adapterFor(cluster.engine).capabilities.hideIndexes,
+    canPartial: adapterFor(cluster.engine).capabilities.partialIndexFromConstants,
     observedDatabases: observed,
     release,
   };

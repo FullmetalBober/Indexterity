@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { buildMssqlPool } from "./client";
+import { buildMssqlPool, mssqlConfig, POOL_ACQUIRE_TIMEOUT_MS } from "./client";
 import { parseMssqlConnString } from "./conn-string";
 
 const STRING = "mssql://sa:pw@db.example.com:1433/app";
@@ -37,5 +37,18 @@ describe("the customer pool's error listener", () => {
     ).not.toThrow();
     expect(logged).toHaveBeenCalledWith(expect.stringContaining("cluster mssql pool"));
     logged.mockRestore();
+  });
+});
+
+// #454. tarn's default acquire timeout is 30 s and node-mssql leaves it there; a
+// statement queued behind four Query Store scans waited that long and the pass
+// failed with tarn's "operation timed out for an unknown reason". A wait may
+// legitimately last as long as the statements ahead of it, so it gets the
+// statement budget.
+describe("the customer pool's acquire timeout", () => {
+  it("is the statement budget, set explicitly", () => {
+    const config = mssqlConfig(parsed());
+    expect(config.pool?.acquireTimeoutMillis).toBe(POOL_ACQUIRE_TIMEOUT_MS);
+    expect(config.pool?.acquireTimeoutMillis).toBe(config.requestTimeout);
   });
 });

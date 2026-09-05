@@ -2,7 +2,9 @@ import { eventIterator, oc } from "@orpc/contract";
 import { z } from "zod";
 import {
   checkConnectionInput,
+  clusterIndexesInput,
   clusterTunnelInput,
+  clusterWorkloadInput,
   createClusterInput,
   createTunnelInput,
   observedDatabasesInput,
@@ -15,7 +17,6 @@ import {
 } from "./inputs.js";
 import {
   auditAction,
-  CLUSTER_INDEXES_PAGE_MAX,
   cluster,
   clusterCollections,
   clusterCooldowns,
@@ -32,7 +33,6 @@ import {
   clusterRoi,
   clusterWorkload,
   connectionDiagnosis,
-  indexSortKey,
   myInvite,
   offboardResult,
   orgInfo,
@@ -41,12 +41,9 @@ import {
   provisionedCluster,
   recommendation,
   securityTrail,
-  sortDirection,
   supportedEngine,
   tunnelTestResult,
   tunnelView,
-  WORKLOAD_SHAPES_PAGE_MAX,
-  workloadSortKey,
 } from "./schemas.js";
 
 const clusterId = z.object({ clusterId: z.uuid() });
@@ -155,41 +152,7 @@ export const contract = {
       summary:
         "One page of the cluster's index inventory: spec, flags, size and per-member usage for every index the last collect saw",
     })
-    .input(
-      z.object({
-        clusterId: z.uuid(),
-        // Exact, both of them, and `collection` without `database` is accepted:
-        // two databases holding a collection of the same name is normal, and
-        // refusing the narrower ask would only send the reader to page through
-        // the wider one.
-        database: z.string().optional(),
-        collection: z.string().optional(),
-        // Where the page starts, in rows. Coerced because this arrives as a query
-        // string; clamped rather than refused past the end, since a reader who
-        // filters while on page five has asked for an offset that no longer exists
-        // and an empty page would read as "this cluster has no indexes".
-        offset: z.coerce.number().int().nonnegative().optional(),
-        // How many rows the page carries. Bounded at both ends: the floor stops a
-        // request for zero rows paging forever, and the ceiling is what keeps this
-        // endpoint a page rather than a report — the reason it pages at all is that
-        // an index list is unbounded.
-        limit: z.coerce.number().int().min(1).max(CLUSTER_INDEXES_PAGE_MAX).optional(),
-        // The order and the filter live HERE and not in the dashboard, because the
-        // server decides which rows the page holds (D135). A control that orders the
-        // hundred rows in front of the reader while the server chose WHICH hundred is
-        // not sorting the cluster: "size descending" then means "the biggest of an
-        // arbitrary hundred", which is the one reading nobody wants and the one it
-        // looked like it was doing.
-        sort: indexSortKey.optional(),
-        dir: sortDirection.optional(),
-        // Substring, case-insensitive, over `database.collection` and the index name.
-        // Narrower than the client filter it replaces, which matched any rendered
-        // cell — the flags and the key pattern are computed after the read, so they
-        // cannot be a SQL predicate. Narrower in scope and wider in REACH: it
-        // searches the cluster now rather than the page.
-        q: z.string().trim().min(1).max(200).optional(),
-      }),
-    )
+    .input(clusterIndexesInput)
     .output(clusterIndexes),
 
   // The queries that MISS an index, including the ones the engine declined to
@@ -221,27 +184,7 @@ export const contract = {
       summary:
         "One page of the cluster's scanning query shapes: what an index would have to cover, what the scanning costs, and which gate declined to act on it",
     })
-    .input(
-      z.object({
-        clusterId: z.uuid(),
-        database: z.string().optional(),
-        collection: z.string().optional(),
-        // Only the shapes nothing was proposed for, which is the question the
-        // page exists to answer and the one no other screen can.
-        declinedOnly: z.coerce.boolean().optional(),
-        // Where the page starts and how big it is. Coerced from the query string,
-        // and the limit is bounded at both ends for the reason the inventory gives:
-        // a floor so a request for zero rows cannot page forever, and a ceiling
-        // that keeps this a page rather than a report.
-        offset: z.coerce.number().int().nonnegative().optional(),
-        limit: z.coerce.number().int().min(1).max(WORKLOAD_SHAPES_PAGE_MAX).optional(),
-        // Same reasoning as the inventory above (D135). The default stays weekly cost
-        // descending, which is the ranking this list exists to present.
-        sort: workloadSortKey.optional(),
-        dir: sortDirection.optional(),
-        q: z.string().trim().min(1).max(200).optional(),
-      }),
-    )
+    .input(clusterWorkloadInput)
     .output(clusterWorkload),
 
   // Read on its own, never joined to `recommendations` (#159). A cooldown

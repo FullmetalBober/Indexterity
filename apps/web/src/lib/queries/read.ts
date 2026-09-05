@@ -40,3 +40,20 @@ export interface Read<T> {
   // is a dead end.
   readonly retry: () => void;
 }
+
+// A PAGED read (#445), which has a fifth state the four above do not: the reader
+// asked for a different page — or order, or filter — and the answer is not back.
+//
+// The key carries the whole request (#455), so each page is its own entry and
+// the new one starts with nothing. Left at that, every click and every keystroke
+// would make the read `pending` and swap the table for skeleton rows — and the
+// table disables its search box while pending, so a reader could type one
+// character before the box greyed out under their fingers. So the paged hooks
+// keep the previous page on screen as placeholder data while the next is out
+// (react-query's `keepPreviousData`), `pending` stays what it means above, and
+// THIS says that what `data` holds is the page before the one asked for. The
+// control draws the requested page while it is true, since the served offset in
+// `data` is the previous request's, and the table dims rather than outlines.
+export interface PagedRead<T> extends Read<T> {
+  readonly placeholder: boolean;
+}
