@@ -33,6 +33,7 @@ import {
 } from "../db";
 import { recordUsageTrust } from "../metrics";
 import { activeCooldownKeys, cooldownKey } from "./cooldowns";
+import { compactMembers, decodeMembers, memberDictionary } from "./per-member";
 import { historyWindow } from "./plan";
 import {
   DROP_TYPES,
@@ -194,11 +195,15 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
   // cluster's dimensions instead would additionally require the two cluster ids
   // to agree — true of every row collect writes, and still a condition the join
   // never imposed. Same rows, in the same shape, assembled here.
+  // The member names this window will mention, so the rows below can ship a
+  // position instead of a 47-character hostname on every reading (#474). One
+  // extra statement returning five rows, against 8.7 MB saved on the next one.
+  const dictionary = await memberDictionary(db, clusterId, since);
   const snapshots = await db
     .select({
       indexId: indexSnapshots.indexId,
       sizeBytes: indexSnapshots.sizeBytes,
-      perMember: indexSnapshots.perMember,
+      perMember: compactMembers(dictionary),
       hinted: indexSnapshots.hinted,
       capturedAt: indexSnapshots.capturedAt,
       lastSeenAt: indexSnapshots.lastSeenAt,
@@ -224,7 +229,7 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
           .from(clusterIndexes)
           .where(inArray(clusterIndexes.id, referenced));
   const dimensionById = new Map(dimensions.map((dimension) => [dimension.id, dimension]));
-  const rows = snapshots.flatMap(({ indexId, ...measured }) => {
+  const rows = snapshots.flatMap(({ indexId, perMember, ...measured }) => {
     const dimension = dimensionById.get(indexId);
     return dimension === undefined
       ? []
@@ -234,6 +239,10 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
             collection: dimension.collection,
             indexName: dimension.indexName,
             spec: dimension.spec,
+            // Rebuilt into the shape the analysis is written for, checked
+            // element by element — see per-member.ts for why the wire form is
+            // not the stored form.
+            perMember: decodeMembers(perMember, dictionary),
             ...measured,
           },
         ];
