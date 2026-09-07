@@ -1,3 +1,4 @@
+import { beginPhase, timePhase } from "../engine/phases";
 import type {
   ClusterNode,
   CollectionLatency,
@@ -831,9 +832,22 @@ export class MssqlIndexCollector implements IndexCollector {
   // scanned every plan's XML once per table.
   private async planAttributions(database: string): Promise<Map<number, PlanAttribution>> {
     const known = this.attributions.get(database) ?? new Map<number, PlanAttribution>();
-    const catalog = await this.conn.query<{ planId: unknown; hash: unknown }>(
-      `SELECT p.plan_id AS planId, CONVERT(varchar(20), p.query_plan_hash, 1) AS hash
+    // Two phases, split on purpose (#466). This read is two numeric columns per
+    // plan; the one below ships each unseen plan's XML, which on a 2,000-plan
+    // store is tens of megabytes. They are the same statement count and nothing
+    // like the same cost over a tunnel, so a report that merged them could not
+    // answer the question the split exists for: is the remaining cost of a
+    // tunnelled collect the round trips, or the bytes?
+    //
+    // It also makes the WARMTH visible. The attribution cache lives in this
+    // process (D138), so a restarted container ships every plan again — and
+    // `queryStore:planXml` costing minutes on one collect and nothing on the
+    // next is what that looks like from the outside.
+    const catalog = await timePhase("queryStore:catalog", () =>
+      this.conn.query<{ planId: unknown; hash: unknown }>(
+        `SELECT p.plan_id AS planId, CONVERT(varchar(20), p.query_plan_hash, 1) AS hash
        FROM ${quoteIdent(database)}.sys.query_store_plan p`,
+      ),
     );
     const { kept, unread } = attributionsToRead(
       known,
@@ -841,6 +855,9 @@ export class MssqlIndexCollector implements IndexCollector {
         .map((row) => ({ planId: asNumber(row.planId), hash: String(row.hash) }))
         .filter((row) => Number.isInteger(row.planId)),
     );
+    // One phase across every chunk, so the figure reads "the XML cost this much
+    // in total" rather than one line per chunk of plans.
+    const shipping = unread.length === 0 ? () => undefined : beginPhase("queryStore:planXml");
     for (let start = 0; start < unread.length; start += PLAN_FETCH_CHUNK) {
       const ids = unread.slice(start, start + PLAN_FETCH_CHUNK);
       // Interpolated, not bound: these are integers the server itself just
@@ -863,6 +880,7 @@ export class MssqlIndexCollector implements IndexCollector {
         if (i % PLAN_PARSE_CHUNK === PLAN_PARSE_CHUNK - 1) await yieldToEventLoop();
       }
     }
+    shipping();
     this.attributions.set(database, kept);
     return kept;
   }

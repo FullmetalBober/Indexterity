@@ -2,6 +2,7 @@ import type { BlockedReason } from "@repo/contracts";
 import type { JobHelpers } from "graphile-worker";
 import type { Database } from "../db";
 import { InFlight, withInFlight } from "../engine/inflight";
+import { PassPhases, withPhases } from "../engine/phases";
 import { PoolExhaustedError } from "../engine/ports";
 import { InsecureConnectionError } from "../engine/tls";
 import { UnsupportedServerError } from "../engine/version";
@@ -165,8 +166,11 @@ export async function runClusterTask(
   // Every statement the pass issues registers here (engine/inflight.ts), so a
   // pass that ends badly can take its statements down with it.
   const inFlight = new InFlight();
+  // And where it spent its time (engine/phases.ts, #466), so a pass that ran out
+  // of budget can say what it was doing rather than only that it stopped.
+  const phases = new PassPhases();
   try {
-    const pass = withInFlight(inFlight, () => run(clusterId));
+    const pass = withPhases(phases, () => withInFlight(inFlight, () => run(clusterId)));
     await (budgetMs === null ? pass : withPassBudget(task, budgetMs, pass));
     recordClusterTask(task, clusterId, "ok");
     // A pass that got through clears what stopped THIS pass last time: the state
@@ -300,8 +304,20 @@ export async function runClusterTask(
     // immediate retries against the same full pool, then a dead letter.
     if (error instanceof PassBudgetExceededError || error instanceof PoolExhaustedError) {
       recordClusterTask(task, clusterId, "timed-out");
-      await deps.markBlocked(clusterId, task, "TIMED_OUT", error.message);
-      deps.logger.warn(`${task}: cluster ${clusterId} — ${error.message}`);
+      // Where the time went, when anything was timed (#466). This is the one
+      // fact that turns "the step did not fit" into something actionable, so it
+      // goes everywhere the failure already goes — the block the dashboard
+      // draws, the line an operator greps, and the owner's mail. Reporting it in
+      // the mail alone would have left the two readers who can act on it
+      // (whoever runs this Indexterity, and whoever is reading the logs) with the
+      // sentence that cost #461 a release.
+      //
+      // Empty when nothing was timed, and then every one of these reads exactly
+      // as it did before this existed.
+      const spent = phases.summary();
+      const breakdown = spent === "" ? "" : ` — ${spent}`;
+      await deps.markBlocked(clusterId, task, "TIMED_OUT", `${error.message}${breakdown}`);
+      deps.logger.warn(`${task}: cluster ${clusterId} — ${error.message}${breakdown}`);
       const how =
         error instanceof PoolExhaustedError
           ? `waited for a connection to this cluster for longer than a statement is allowed ` +
@@ -316,7 +332,8 @@ export async function runClusterTask(
           `This usually means the cluster is very large, very busy, or reached over a slow ` +
           `link — the step is not failing so much as not fitting. Whoever runs this ` +
           `Indexterity can raise the budget (CLUSTER_PASS_BUDGET_MS) if the cluster genuinely ` +
-          `needs longer.`,
+          `needs longer.` +
+          (spent === "" ? "" : `\n\nWhere the time went: ${spent}.`),
       );
       return;
     }
