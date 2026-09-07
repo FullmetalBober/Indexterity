@@ -1,3 +1,4 @@
+import { beginPhase, timePhase } from "../engine/phases";
 import type { CollectionLatency, EngineSession, IndexUsageStat } from "../engine/ports";
 import { DatabaseInaccessibleError } from "../engine/ports";
 import type { IndexSpec } from "../engine/types";
@@ -71,7 +72,11 @@ function groupByIndex(usage: IndexUsageStat[]): Record<string, IndexUsageStat[]>
 // entirely against the collector port).
 export async function collectSnapshots(session: EngineSession): Promise<CollectResult> {
   const collector = session.collector;
-  const databases = await session.listDatabaseNames();
+  // Timed per boundary (#466). Aggregated by phase NAME across databases, so
+  // thirteen `latencyByCollection` calls read as one cost rather than thirteen
+  // lines — and so an abandoned pass can name which of these was the slow one
+  // instead of only that it stopped. A no-op outside a pass.
+  const databases = await timePhase("listDatabaseNames", () => session.listDatabaseNames());
   const snapshots: CollectedSnapshot[] = [];
   const latency: CollectedLatency[] = [];
   for (const database of databases) {
@@ -86,7 +91,9 @@ export async function collectSnapshots(session: EngineSession): Promise<CollectR
     // unknown failures reports a cluster as collected when it was not.
     let collections: string[];
     try {
-      collections = await collector.listCollectionNames(database);
+      collections = await timePhase("listCollectionNames", () =>
+        collector.listCollectionNames(database),
+      );
     } catch (error) {
       if (error instanceof DatabaseInaccessibleError) continue;
       throw error;
@@ -94,14 +101,20 @@ export async function collectSnapshots(session: EngineSession): Promise<CollectR
     // Latency and hints once per database where the engine offers that (#454):
     // on SQL Server the per-table read was a whole-Query-Store scan, twice per
     // table. Elsewhere the per-collection reads below are the cheap ones.
+    //
+    // Bound rather than called through the optional member, because the
+    // narrowing does not survive into the closure `timePhase` takes — and a
+    // method called off a detached reference would lose its `this`.
+    const readLatency = collector.latencyByCollection?.bind(collector);
+    const readHints = collector.hintedByCollection?.bind(collector);
     const latencies =
-      collector.latencyByCollection === undefined
+      readLatency === undefined
         ? null
-        : await collector.latencyByCollection(database);
+        : await timePhase("latencyByCollection", () => readLatency(database));
     const hints =
-      collector.hintedByCollection === undefined
+      readHints === undefined
         ? null
-        : await collector.hintedByCollection(database, collections);
+        : await timePhase("hintedByCollection", () => readHints(database, collections));
     // The three CATALOG reads on the same terms (#461). Same shape as the two
     // above deliberately: a batched read if the engine has one, the
     // per-collection read if it does not, and an absent entry means the
@@ -113,18 +126,26 @@ export async function collectSnapshots(session: EngineSession): Promise<CollectR
     // cluster reached through a tunnel — 1,086 of them on the hosted
     // deployment's 362-table cluster, whose collect then stopped fitting in five
     // minutes and stayed broken for 19 hours.
+    const readSpecs = collector.indexesByCollection?.bind(collector);
+    const readUsage = collector.usageByCollection?.bind(collector);
+    const readSizes = collector.indexSizesByCollection?.bind(collector);
     const allSpecs =
-      collector.indexesByCollection === undefined
+      readSpecs === undefined
         ? null
-        : await collector.indexesByCollection(database);
+        : await timePhase("indexesByCollection", () => readSpecs(database));
     const allUsage =
-      collector.usageByCollection === undefined
+      readUsage === undefined
         ? null
-        : await collector.usageByCollection(database);
+        : await timePhase("usageByCollection", () => readUsage(database));
     const allSizes =
-      collector.indexSizesByCollection === undefined
+      readSizes === undefined
         ? null
-        : await collector.indexSizesByCollection(database);
+        : await timePhase("indexSizesByCollection", () => readSizes(database));
+    // One phase for the whole loop, not one per collection: on an engine with
+    // the batched reads above this is map lookups, and on one without it is the
+    // per-collection reads — either way what a reader wants is the total, and
+    // 362 phases named after tables would be a report nobody finishes.
+    const perCollection = beginPhase("per-collection");
     for (const collection of collections) {
       const [specs, usage, sizes, collLatency, hinted] = await Promise.all([
         allSpecs === null
@@ -170,6 +191,11 @@ export async function collectSnapshots(session: EngineSession): Promise<CollectR
         });
       }
     }
+    // Ended here rather than in a `finally`: a throw out of the loop takes the
+    // whole pass with it, and `runClusterTask` reads the phases off the registry
+    // itself — an unended phase is simply one the report leaves out, which is
+    // honest about a loop that never finished.
+    perCollection();
   }
   return { snapshots, latency };
 }

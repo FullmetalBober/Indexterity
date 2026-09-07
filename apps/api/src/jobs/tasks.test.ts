@@ -1,8 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { trackInFlight } from "../engine/inflight";
+import { beginPhase } from "../engine/phases";
 import { PoolExhaustedError } from "../engine/ports";
 import { InsecureConnectionError } from "../engine/tls";
 import { UnsupportedServerError } from "../engine/version";
+import { at } from "../errors/at";
 import { asClusterUnreachable } from "../errors/unreachable";
 import { TunnelUnavailableError } from "../tunnel/resolve";
 import { ClusterCredentialsError, ClusterGoneError } from "./cluster-connection";
@@ -441,6 +443,58 @@ describe("runClusterTask on a cluster we refuse to dial", () => {
 
     expect(log.blocked).toEqual([
       `${CLUSTER}:suggest:TIMED_OUT:the suggest pass ran past its 20ms budget and was abandoned`,
+    ]);
+  });
+
+  // #466, and the whole reason phases exist: an abandoned pass used to report
+  // only that it stopped. That sentence was all anybody had when #461 cut the
+  // tunnelled collect from ~1,100 statements to ~78 and it still timed out.
+  //
+  // The breakdown has to reach all three readers, because they act on it
+  // differently and only one of them gets the mail: the block the dashboard
+  // draws, the line whoever runs the deployment greps, and the owner's alert.
+  it("names where the time went, in the block, the log line and the mail", async () => {
+    vi.useFakeTimers();
+    try {
+      const log = recorder();
+      // A pass that opens a phase and never leaves it, which is what an overrun
+      // looks like from the inside: the budget fires while the phase is running,
+      // so the report has to count a phase that has not finished.
+      const stuck = () => {
+        beginPhase("per-collection");
+        return new Promise<void>(() => {});
+      };
+
+      const running = runClusterTask("collect", CLUSTER, log.deps, stuck, 60_000);
+      await vi.advanceTimersByTimeAsync(60_000);
+      await running;
+
+      expect(at(log.blocked)).toBe(
+        `${CLUSTER}:collect:TIMED_OUT:the collect pass ran past its 60 seconds budget and ` +
+          `was abandoned — per-collection 60s/1 (still running)`,
+      );
+      // The same clause in the line an operator greps, because the reader who
+      // can raise the budget is not the reader who gets the mail.
+      expect(log.warns.join()).toContain("per-collection 60s/1 (still running)");
+      expect(log.alerts).toEqual([
+        `${CLUSTER}:collect is taking longer than Indexterity will wait`,
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // Unchanged when nothing was timed, which is every engine with no
+  // instrumentation yet and every pass abandoned before it opened a phase. The
+  // clause is appended to a sentence, so an empty breakdown must leave that
+  // sentence exactly as it was.
+  it("says nothing extra when no phase was recorded", async () => {
+    const log = recorder();
+
+    await runClusterTask("collect", CLUSTER, log.deps, () => new Promise<void>(() => {}), 20);
+
+    expect(log.blocked).toEqual([
+      `${CLUSTER}:collect:TIMED_OUT:the collect pass ran past its 20ms budget and was abandoned`,
     ]);
   });
 

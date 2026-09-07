@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { isRedundantPrefix, parseStoredSpec, rebuildKeys, rebuildOptions } from "../src/analysis";
+import { PassPhases, withPhases } from "../src/engine/phases";
 import { DatabaseInaccessibleError, type EngineSession, workloadKey } from "../src/engine/ports";
 import { ProvisionDeniedError, SCOPED_USERNAME } from "../src/engine/provision";
 import { detectEngine } from "../src/engine/registry";
@@ -535,6 +536,74 @@ describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", 
     // and one of them has been read.
     expect((specs.get("dbo.orders") ?? []).length).toBeGreaterThan(0);
     expect(Object.keys(sizes.get("dbo.orders") ?? {}).length).toBeGreaterThan(0);
+  });
+
+  // #466. A unit test with a fake collector cannot show that the phase names in
+  // the report correspond to anything real — `timePhase` is a no-op outside a
+  // pass, so an instrumentation that was never reached would look identical.
+  // This runs the actual collect inside a phase context against a live server
+  // and reads the names back.
+  it("records the phases a real collect goes through", async () => {
+    const phases = new PassPhases();
+    await withPhases(phases, () => collectSnapshots(session));
+
+    const names = phases.phases().map((phase) => phase.name);
+    // The per-database boundaries, on the engine that has all of them.
+    expect(names).toContain("listDatabaseNames");
+    expect(names).toContain("listCollectionNames");
+    expect(names).toContain("latencyByCollection");
+    expect(names).toContain("indexesByCollection");
+    expect(names).toContain("usageByCollection");
+    expect(names).toContain("indexSizesByCollection");
+    expect(names).toContain("per-collection");
+    // The split that the whole issue turns on: the numeric catalog read and the
+    // plan-XML read are separate phases, so a report can say which of the two a
+    // tunnelled collect is actually spending its budget on.
+    expect(names).toContain("queryStore:catalog");
+    // Every phase is closed by the time a collect returns — an open one here
+    // would mean the report of a HEALTHY pass carried "(still running)".
+    expect(phases.phases().filter((phase) => phase.running)).toEqual([]);
+  });
+
+  // The warmth D138 claims, and the caveat this suite found in it.
+  //
+  // The attribution cache is process memory, so a collector that has never read
+  // a store ships every plan's XML — that half holds, and it is the mechanism
+  // behind the leading explanation for the tunnelled cluster still not fitting
+  // its budget.
+  //
+  // What does NOT hold is "a warm collect is three numeric reads a database".
+  // Query Store captures the collector's OWN reads: with QUERY_CAPTURE_MODE =
+  // ALL, which this fixture sets, the catalog SELECT against
+  // `sys.query_store_plan` becomes a plan in `sys.query_store_plan`, so the next
+  // read always finds something unread and enters the XML phase again. So the
+  // phase is asserted PRESENT both times, and this comment is the reason —
+  // a later reader who "fixes" this into `not.toContain` will be chasing a
+  // fixture artefact that production may or may not share (the default capture
+  // mode is AUTO, which skips cheap one-off statements).
+  //
+  // The number that matters in production is therefore the phase's DURATION
+  // across collects, not its presence: minutes on a cold process and
+  // sub-second once the store's real plans are known.
+  it("ships plan XML on a cold read, and again while the store captures its own reads", async () => {
+    // A fresh collector, so its attribution cache is empty exactly as a
+    // restarted container's is. Built over the seeding connection because what
+    // matters is that it has never read this store, not which socket it uses.
+    const fresh = new MssqlIndexCollector(seed);
+
+    const cold = new PassPhases();
+    await withPhases(cold, () => fresh.latencyByCollection(DB));
+    expect(cold.phases().map((phase) => phase.name)).toContain("queryStore:planXml");
+    expect(cold.phases().map((phase) => phase.name)).toContain("queryStore:catalog");
+
+    const warm = new PassPhases();
+    await withPhases(warm, () => fresh.latencyByCollection(DB));
+    // Both phases again, for the self-capture reason above. What the split buys
+    // is that these are two numbers rather than one.
+    expect(warm.phases().map((phase) => phase.name)).toContain("queryStore:catalog");
+    // Every phase closed on a read that finished — an open one would mean a
+    // healthy pass reported "(still running)".
+    expect(warm.phases().filter((phase) => phase.running)).toEqual([]);
   });
 
   it("collects query shapes from Query Store plans (#201)", async () => {
