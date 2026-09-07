@@ -136,9 +136,10 @@ export class TickService implements BeforeApplicationShutdown {
     return true;
   }
 
-  // The whole tick: claim and enqueue what became due, then drain to empty.
+  // The whole tick: repair the queue, claim and enqueue what became due, then
+  // drain to empty.
   async tick(now: Date = new Date()): Promise<TickOutcome> {
-    const claim = await this.enqueueDue(now);
+    const claim = await this.repairThenClaim(now);
     const drained = await this.drainSerialized();
     return { ...claim, drained };
   }
@@ -150,7 +151,7 @@ export class TickService implements BeforeApplicationShutdown {
   // the response says drained:false and the drain carries on in-process, which
   // a re-tick resumes rather than duplicates.
   async tickWithin(deadlineMs: number, now: Date = new Date()): Promise<TickOutcome> {
-    const claim = await this.enqueueDue(now);
+    const claim = await this.repairThenClaim(now);
     const drain = this.drainSerialized();
     const drained = await raceDeadline(drain, deadlineMs);
     if (drained === null) {
@@ -160,6 +161,31 @@ export class TickService implements BeforeApplicationShutdown {
       return { ...claim, drained: false };
     }
     return { ...claim, drained };
+  }
+
+  // Repair, then dispatch — both on the CALLER's path, neither behind
+  // `drainChain`. This ordering is the whole of #460 and both halves of it
+  // matter.
+  //
+  // Off the chain, because `releaseLocks` used to open `drainOnce` and a drain
+  // that never returns is exactly the state a stale lock lives in. Measured in
+  // the hosted deployment: one `runOnce` in flight for five hours (the tick
+  // enqueues more work every five minutes and the same drain claims it, which
+  // is the property that makes one drain per tick enough), `pass:resetLocks`
+  // frozen for all five while `pass:scheduleProbe` advanced every tick, and an
+  // orphaned `classify` queue lock standing the whole time. The repair was
+  // starved by a busy queue, which is the only condition it exists for.
+  //
+  // BEFORE the dispatch, because the dispatcher reads `locked_at` to decide
+  // whether a pass is already running for a cluster and stands down if it is
+  // (dispatch.ts, #454). A lock nobody holds therefore silenced the pass
+  // permanently: nothing re-added the key, so nothing would ever notice. Freeing
+  // it first means the same tick that repairs the queue also re-dispatches what
+  // the queue was holding, instead of the pass waiting a further five minutes to
+  // be enqueued.
+  private async repairThenClaim(now: Date): Promise<BurstResult> {
+    await this.releaseLocks(now);
+    return this.enqueueDue(now);
   }
 
   // Claim-then-enqueue, through the pool this process already holds. The job
@@ -217,27 +243,38 @@ export class TickService implements BeforeApplicationShutdown {
     return next;
   }
 
-  // Free anything a dead worker is still holding, before the drain tries to
-  // claim it (#253). This is NOT a queued pass: the thing it repairs is the
-  // queue, so putting the repair inside the queue would leave it one drain
-  // behind at best and unreachable at worst. It is claimed on the same
-  // five-minute occurrence arithmetic a pass uses, which is what keeps two
-  // replicas from both running it, and it is deliberately not fatal — a tick
-  // that cannot reset locks must still drain the queues that are not stuck.
+  // Free anything a dead worker is still holding, before anything else this
+  // tick looks at the queue (#253, #460). This is NOT a queued pass: the thing
+  // it repairs is the queue, so putting the repair inside the queue would leave
+  // it one drain behind at best and unreachable at worst — and putting it at the
+  // head of the drain, which is where it used to be, made "unreachable" the
+  // steady state on a busy deployment. See repairThenClaim.
+  //
+  // It is claimed on the same five-minute occurrence arithmetic a pass uses,
+  // which is what keeps two replicas from both running it.
+  //
+  // Deliberately not fatal, and the try/catch lives HERE rather than at the call
+  // site: a tick that cannot reset locks must still dispatch and still drain,
+  // and there is now more than one caller for that promise to have to remember.
   private async releaseLocks(now: Date): Promise<void> {
-    const claimed = await claimWatermark(
-      this.database.db,
-      passKey(RESET_LOCKS_PASS),
-      everyMinutes(RESET_LOCKS_MINUTES)(now),
-      now,
-    );
-    if (!claimed) return;
-    const freed = await releaseStaleLocks(this.database.db);
-    // One line per freed queue, at warn: reaching here means a worker died
-    // holding it, and the jobs behind it have been unclaimable ever since
-    // without anything else in the system saying so.
-    for (const queue of freed) {
-      this.log.warn(`released a stale lock on ${queue} — a worker died holding it`);
+    try {
+      const claimed = await claimWatermark(
+        this.database.db,
+        passKey(RESET_LOCKS_PASS),
+        everyMinutes(RESET_LOCKS_MINUTES)(now),
+        now,
+      );
+      if (!claimed) return;
+      const freed = await releaseStaleLocks(this.database.db);
+      // One line per freed queue, at warn: reaching here means a worker died
+      // holding it, and the jobs behind it have been unclaimable ever since
+      // without anything else in the system saying so.
+      for (const queue of freed) {
+        this.log.warn(`released a stale lock on ${queue} — a worker died holding it`);
+      }
+    } catch (error) {
+      this.log.error(`releasing stale locks failed: ${String(error)}`);
+      captureError(error, { task: "releaseStaleLocks" });
     }
   }
 
@@ -245,12 +282,6 @@ export class TickService implements BeforeApplicationShutdown {
   // must not open workers against a pool that is about to close.
   private async drainOnce(): Promise<boolean> {
     if (this.stopping) return false;
-    try {
-      await this.releaseLocks(new Date());
-    } catch (error) {
-      this.log.error(`releasing stale locks failed: ${String(error)}`);
-      captureError(error, { task: "releaseStaleLocks" });
-    }
     try {
       await runOnce({
         // The api's OWN pool. runOnce takes pgPool (interfaces.d.ts:522);
