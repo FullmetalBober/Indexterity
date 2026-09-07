@@ -213,7 +213,7 @@ export class ClusterTasksService {
       // from staleness. A failure here fails the pass, which is retried.
       markBlocked: (clusterId, task, reason, detail) =>
         markBlocked(db, clusterId, task, reason, detail),
-      markUnblocked: (clusterId) => markUnblocked(db, clusterId),
+      markUnblocked: (clusterId, task) => markUnblocked(db, clusterId, task),
     };
   }
 }

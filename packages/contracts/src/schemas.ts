@@ -157,12 +157,14 @@ export const clusterBlock = z.object({
   detail: z.string(),
   // WHICH pass stopped — `collect`, `suggest`, `apply` and so on (#408).
   //
-  // A string for the same reason `reason` is one, and nullable for a second:
-  // rows written before this field existed have no pass, and a block that
-  // predates the upgrade must still render. The dashboard therefore has to have
-  // wording for "something in the pipeline" as well as for a named pass, which
-  // is the wording it used to use for everything.
-  task: z.string().nullable(),
+  // A string for the same reason `reason` is one: adding a pass should be a
+  // constant rather than a migration, which is only safe while the reader
+  // degrades, so the dashboard renders a pass it does not know by name.
+  //
+  // No longer nullable (#462). It was, because a block written before #408 had
+  // no pass — and the pass is now half the primary key of the row, so a block
+  // without one cannot exist.
+  task: z.string(),
 });
 export type ClusterBlock = z.infer<typeof clusterBlock>;
 
@@ -201,7 +203,17 @@ export const cluster = z.object({
   lastCollectedAt: instant.nullable(),
   // Null when the pipeline is running. When it is not, this is the answer to
   // "why are these numbers old", which staleness alone cannot give.
-  blocked: clusterBlock.nullable(),
+  // Every pass currently blocked, newest condition first; empty when the whole
+  // pipeline is running (#462).
+  //
+  // A LIST and not one block. It was one nullable field over four columns on the
+  // cluster, which meant six passes shared a slot: the later failure overwrote
+  // the earlier one, and any pass that got through cleared all of them. In the
+  // hosted deployment a `collect` that had been timing out for 19 hours read as
+  // healthy, because the five-minute `probe` beside it kept succeeding. A reader
+  // that wants the old single value wants `blocked[0]`, and the ordering is what
+  // makes that the longest-standing one.
+  blocked: z.array(clusterBlock),
   // Which TLS checks this cluster was connected with turned off. Read back, not
   // just written: a security concession the owner cannot see afterwards is one
   // nobody reviews.

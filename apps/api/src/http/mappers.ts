@@ -1,7 +1,7 @@
 import { ORPCError } from "@orpc/server";
 import type { Cluster, ClusterEngine, Recommendation } from "@repo/contracts";
 import { DEFAULT_OBSERVE_DAYS, proposedVetoDays } from "../analysis";
-import { clusters, recommendations } from "../db";
+import { clusterBlocks, clusters, recommendations } from "../db";
 import type { ConnectionDiagnosis as EngineConnectionDiagnosis } from "../engine/ports";
 import { revokeCommandFor } from "../engine/provision";
 import { isUnreachableError } from "../errors/unreachable";
@@ -48,6 +48,15 @@ export function toDiagnosis(engine: ClusterEngine, diagnosis: EngineConnectionDi
 export function toCluster(
   row: typeof clusters.$inferSelect,
   lastCollectedAt: Date | null = null,
+  // The blocked passes, read from `cluster_blocks` by the caller (#462) — the
+  // same shape `lastCollectedAt` already had, and for the same reason: it is not
+  // a column of this row and the mapper has no database.
+  //
+  // Defaulting to none is safe HERE and would not have been while this was four
+  // columns on the row: an empty list is what a cluster with nothing blocked
+  // looks like, and a caller that forgets to read them now under-reports rather
+  // than claiming a healthy cluster is broken. Every caller reads them.
+  blocks: readonly (typeof clusterBlocks.$inferSelect)[] = [],
 ): Cluster {
   return {
     id: row.id,
@@ -60,23 +69,21 @@ export function toCluster(
     revokeCommand: revokeCommandFor(row.engine, row.provisionedUsername, row.provisionedDatabases),
     credentialPosture: row.credentialPosture,
     lastCollectedAt: lastCollectedAt?.toISOString() ?? null,
-    // Four columns, one field: a reason with no start and no sentence is not
-    // something a screen can say anything useful with, so they travel together
-    // or not at all.
+    // One row per blocked pass (#462), longest-standing first — so a reader that
+    // only has room for one condition shows the one that has been wrong longest
+    // rather than whichever pass failed most recently.
     //
-    // The pass is the exception and stays nullable rather than joining that
-    // rule (#408) — a block written before the column existed has none, and it
-    // is still a perfectly good block. What the screen loses is the ability to
-    // name the pass, which is what it did for every block until now.
-    blocked:
-      row.blockedReason === null || row.blockedSince === null
-        ? null
-        : {
-            reason: row.blockedReason,
-            since: row.blockedSince.toISOString(),
-            detail: row.blockedDetail ?? "",
-            task: row.blockedTask,
-          },
+    // Sorted here rather than in SQL because it is at most six rows per cluster
+    // and the batched read fetches the fleet's in one query; ordering there would
+    // be an ORDER BY the grouping then has to preserve.
+    blocked: [...blocks]
+      .sort((a, b) => a.since.getTime() - b.since.getTime())
+      .map((block) => ({
+        reason: block.reason,
+        since: block.since.toISOString(),
+        detail: block.detail,
+        task: block.task,
+      })),
     tlsOverrides: row.tlsOverrides,
     observedDatabases: row.observedDatabases,
     createdAt: row.createdAt.toISOString(),

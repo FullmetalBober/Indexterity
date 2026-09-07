@@ -53,7 +53,7 @@ describe("ClusterBlockedBanner", () => {
           reason: "UNREACHABLE",
           since: ago(24 * 7),
           detail: "connect ECONNREFUSED 10.0.0.4:27017",
-          task: null,
+          task: "collect",
         }}
       />,
     );
@@ -69,7 +69,7 @@ describe("ClusterBlockedBanner", () => {
     renderInApp(
       <ClusterBlockedBanner
         clusterId={CLUSTER}
-        block={{ reason: "TUNNEL_DOWN", since: ago(3), detail: "", task: null }}
+        block={{ reason: "TUNNEL_DOWN", since: ago(3), detail: "", task: "collect" }}
       />,
     );
 
@@ -83,7 +83,7 @@ describe("ClusterBlockedBanner", () => {
     renderInApp(
       <ClusterBlockedBanner
         clusterId={CLUSTER}
-        block={{ reason: "INSECURE", since: ago(3), detail: "", task: null }}
+        block={{ reason: "INSECURE", since: ago(3), detail: "", task: "collect" }}
       />,
     );
 
@@ -95,7 +95,7 @@ describe("ClusterBlockedBanner", () => {
     renderInApp(
       <ClusterBlockedBanner
         clusterId={CLUSTER}
-        block={{ reason: "CREDENTIALS", since: ago(3), detail: "", task: null }}
+        block={{ reason: "CREDENTIALS", since: ago(3), detail: "", task: "collect" }}
       />,
     );
 
@@ -106,7 +106,7 @@ describe("ClusterBlockedBanner", () => {
     renderInApp(
       <ClusterBlockedBanner
         clusterId={CLUSTER}
-        block={{ reason: "QUOTA_EXHAUSTED", since: ago(3), detail: "", task: null }}
+        block={{ reason: "QUOTA_EXHAUSTED", since: ago(3), detail: "", task: "collect" }}
       />,
     );
 
@@ -161,19 +161,6 @@ describe("ClusterBlockedBanner", () => {
     expect(screen.getByText(/The reticulate step is failing/)).toBeInTheDocument();
   });
 
-  // A block written before the column existed. It is still a perfectly good
-  // block and must still render; what it loses is the ability to name the pass.
-  it("falls back to general wording when the block predates the pass column", () => {
-    renderInApp(
-      <ClusterBlockedBanner
-        clusterId={CLUSTER}
-        block={{ reason: "ERROR", since: ago(3), detail: "boom", task: null }}
-      />,
-    );
-
-    expect(screen.getByText(/A step in the pipeline is failing/)).toBeInTheDocument();
-  });
-
   // #407: a pass abandoned for running past its budget. Deliberately not ERROR —
   // nothing went wrong that a message can describe, and the answer is a setting
   // rather than a bug report.
@@ -200,7 +187,7 @@ describe("ClusterBlockedBanner", () => {
     renderInApp(
       <ClusterBlockedBanner
         clusterId={CLUSTER}
-        block={{ reason: "UNREACHABLE", since: ago(3), detail: "", task: null }}
+        block={{ reason: "UNREACHABLE", since: ago(3), detail: "", task: "collect" }}
       />,
     );
 

@@ -11,7 +11,9 @@ interface ClusterIdentity {
   readonly provisionedUsername: string | null;
   readonly lastCollectedAt: string | null;
   readonly tlsOverrides: TlsOverrides;
-  readonly blocked: ClusterBlock | null;
+  // Every pass currently blocked, longest-standing first, empty when the
+  // pipeline is running (#462).
+  readonly blocked: readonly ClusterBlock[];
 }
 
 // Anything older than this means the numbers on screen predate a gap in
@@ -68,8 +70,19 @@ export function ClusterHeader({ cluster }: { cluster: ClusterIdentity }) {
   // resolves after hydration rather than differing between the two renders.
   const mounted = useMounted();
   const stale = mounted ? staleness(cluster.lastCollectedAt) : null;
-  // Same reason: a duration is the reader's clock against a stored timestamp.
-  const blocked = mounted && cluster.blocked !== null ? blockedFor(cluster.blocked.since) : null;
+  // ONE badge for what may now be several blocks: the longest-standing one, which
+  // is what the api sorts them by (#462). A badge per pass would put up to six
+  // beside the four already here, and the reader's question at this altitude is
+  // "is this cluster working", not "which of the six passes".
+  //
+  // The count goes in the tooltip instead, because "collect stopped" and "collect
+  // and two other passes stopped" are different situations and the heading should
+  // not flatten them into the same six words.
+  const worst = cluster.blocked[0] ?? null;
+  // Same reason as staleness: a duration is the reader's clock against a stored
+  // timestamp, so it waits for hydration.
+  const blocked = mounted && worst !== null ? blockedFor(worst.since) : null;
+  const alsoBlocked = cluster.blocked.length - 1;
   // Not clock-dependent, so it renders on the server too — unlike staleness.
   const concessions = tlsConcessions(cluster.tlsOverrides);
 
@@ -104,20 +117,22 @@ export function ClusterHeader({ cluster }: { cluster: ClusterIdentity }) {
           </TooltipContent>
         </Tooltip>
       ) : null}
-      {cluster.blocked !== null ? (
+      {worst !== null ? (
         // Destructive rather than amber, and before the staleness badge: the two
         // are the same story, and this is the half that says why. A reader who
         // sees only "last collected 7 days ago" has to guess between a paused
         // schedule, a quiet cluster and a broken one.
         <Tooltip>
           <TooltipTrigger asChild>
-            <Badge variant="destructive">
-              ⚠ {blockedBadge(cluster.blocked.reason, cluster.blocked.task)}
-            </Badge>
+            <Badge variant="destructive">⚠ {blockedBadge(worst.reason, worst.task)}</Badge>
           </TooltipTrigger>
           <TooltipContent>
-            Collection stopped{blocked === null ? "" : ` ${blocked}`}. The banner under this heading
-            says what to do about it.
+            Stopped{blocked === null ? "" : ` ${blocked}`}
+            {alsoBlocked > 0
+              ? `, and ${alsoBlocked} other ${alsoBlocked === 1 ? "pass has" : "passes have"} stopped too`
+              : ""}
+            . The {alsoBlocked > 0 ? "banners" : "banner"} under this heading say what to do about
+            it.
           </TooltipContent>
         </Tooltip>
       ) : null}

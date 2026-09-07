@@ -114,14 +114,16 @@ const PASS: Record<string, string> = {
 // A pass this build has no wording for still has to render, for the reason a
 // reason it does not know does: the field is text so that adding a pass is a
 // constant rather than a migration, and that is only safe if the reader
-// degrades. So an unknown pass is quoted as itself, and a block written before
-// the column existed (task === null) gets the general wording — which is what
-// every block used to get.
-function errorCopy(task: string | null): Copy {
-  const known = task === null ? undefined : PASS[task];
-  const subject = known ?? (task === null ? "A step in the pipeline" : `The ${task} step`);
+// degrades. So an unknown pass is quoted as itself.
+//
+// No null case any more (#462). The pass is half the primary key of a block row,
+// so a block without one cannot exist, and the legacy rows that had none were
+// backfilled as `collect` by the migration that moved them. The general "a step
+// in the pipeline" wording it used to fall back to went with it.
+function errorCopy(task: string): Copy {
+  const subject = PASS[task] ?? `The ${task} step`;
   return {
-    badge: task === null ? "a step is failing" : `${task} failing`,
+    badge: `${task} failing`,
     title: `${subject} is failing`,
     what:
       "Something the pipeline does not have a name for went wrong, and it has been retrying. " +
@@ -139,7 +141,7 @@ function errorCopy(task: string | null): Copy {
 // that adding one is a constant rather than a migration, which is only safe if
 // an older reader degrades instead of breaking — the same rule the security
 // trail's labels follow.
-function copyFor(reason: string, task: string | null = null): Copy {
+function copyFor(reason: string, task: string): Copy {
   if (reason === "ERROR") return errorCopy(task);
   return (
     COPY[reason] ?? {
@@ -151,7 +153,7 @@ function copyFor(reason: string, task: string | null = null): Copy {
   );
 }
 
-export function blockedBadge(reason: string, task: string | null = null): string {
+export function blockedBadge(reason: string, task: string): string {
   return copyFor(reason, task).badge;
 }
 

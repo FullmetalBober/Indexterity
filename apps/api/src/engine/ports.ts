@@ -227,6 +227,31 @@ export interface IndexCollector {
     database: string,
     collections: readonly string[],
   ): Promise<ReadonlyMap<string, readonly string[]>>;
+  // The same three answers for every collection of a database in one read each
+  // (#461), on the same terms and for the same reason as the two above — but
+  // the source here is the CATALOG rather than Query Store, so the saving is
+  // round trips rather than server work.
+  //
+  // Optional, and present only on SQL Server today. `sys.indexes`,
+  // `sys.dm_db_index_usage_stats` and `sys.dm_db_partition_stats` are all
+  // database-wide views that the per-collection reads narrow with
+  // `object_id = OBJECT_ID(@qualified)`; dropping that predicate and grouping by
+  // table answers every table at once. Measured against the hosted deployment's
+  // 13-database, 362-table cluster: 1,086 statements per collect become 39, and
+  // the cluster is reached over a WireGuard tunnel where the cost of a collect is
+  // very nearly the count of its round trips.
+  //
+  // Keyed by `schema.table` — the same string `listCollectionNames` returns —
+  // because an index name is unique per TABLE and not per database. A collection
+  // absent from the map has no rowstore indexes, which is what the per-collection
+  // reads report as an empty answer.
+  //
+  // MongoDB's `listIndexes`, `$indexStats` and `$collStats` are per-collection
+  // commands with no database-wide form, so it implements none of these and the
+  // per-collection path stays exactly as it was.
+  indexesByCollection?(database: string): Promise<ReadonlyMap<string, IndexSpec[]>>;
+  usageByCollection?(database: string): Promise<ReadonlyMap<string, IndexUsageStat[]>>;
+  indexSizesByCollection?(database: string): Promise<ReadonlyMap<string, Record<string, number>>>;
   // Operations on this namespace that FAILED, at or after an instant. Null when
   // the engine has no per-namespace failure count these credentials can read.
   //

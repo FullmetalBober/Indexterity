@@ -240,6 +240,8 @@ export class ClustersController {
             observedDatabases: input.observedDatabases ?? null,
           },
         });
+        // No blocks read, and none to read: this row was inserted a few lines up,
+        // so `cluster_blocks` cannot hold anything for it (#462).
         return toCluster(row);
       },
     );
@@ -330,6 +332,7 @@ export class ClustersController {
           },
         });
         return {
+          // Freshly provisioned a line ago — nothing can be blocked yet (#462).
           cluster: toCluster(row),
           username: provisioned.username,
           connectionString: provisioned.connectionString,
@@ -460,7 +463,7 @@ export class ClustersController {
             tlsOverrides: overrides,
           },
         });
-        return toCluster(updated);
+        return toCluster(updated, null, await this.repository.blocksFor(updated.id));
       },
     );
   }
@@ -743,7 +746,7 @@ export class ClustersController {
             discardedRecommendations: discarded,
           },
         });
-        return toCluster(updated);
+        return toCluster(updated, null, await this.repository.blocksFor(updated.id));
       },
     );
   }
@@ -792,7 +795,7 @@ export class ClustersController {
         }
         const row = await this.repository.setTunnel(input.clusterId, orgId, input.tunnelId);
         if (row === undefined) throw errors.NOT_FOUND({ message: "no such cluster" });
-        return toCluster(row);
+        return toCluster(row, null, await this.repository.blocksFor(row.id));
       },
     );
   }

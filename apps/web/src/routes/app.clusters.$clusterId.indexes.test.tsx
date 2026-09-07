@@ -59,7 +59,7 @@ const cluster: Cluster = {
   revokeCommand: null,
   credentialPosture: null,
   lastCollectedAt: "2026-09-04T09:14:44.000Z",
-  blocked: null,
+  blocked: [],
   tlsOverrides: { allowInvalidCertificates: false, allowInvalidHostnames: false, insecure: false },
   observedDatabases: null,
   createdAt: "2026-08-01T00:00:00.000Z",

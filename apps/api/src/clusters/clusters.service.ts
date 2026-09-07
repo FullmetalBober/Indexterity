@@ -312,8 +312,15 @@ export class ClustersService {
 
   async list(orgId: string): Promise<Cluster[]> {
     const rows = await this.repository.listForOrg(orgId);
-    const lastByCluster = await this.repository.lastCollectedByCluster(rows.map((row) => row.id));
-    return rows.map((row) => toCluster(row, lastByCluster.get(row.id) ?? null));
+    const ids = rows.map((row) => row.id);
+    // Two batched reads for the fleet, not two per cluster (#462).
+    const [lastByCluster, blocksByCluster] = await Promise.all([
+      this.repository.lastCollectedByCluster(ids),
+      this.repository.blocksByCluster(ids),
+    ]);
+    return rows.map((row) =>
+      toCluster(row, lastByCluster.get(row.id) ?? null, blocksByCluster.get(row.id) ?? []),
+    );
   }
 
   // Everything collected is deleted and cannot be re-collected as it was, which
@@ -376,7 +383,7 @@ export class ClustersService {
       throw error;
     }
     if (row === undefined) throw errors.NOT_FOUND({ message: "cluster not found" });
-    return toCluster(row);
+    return toCluster(row, null, await this.repository.blocksFor(row.id));
   }
 
   async setMode(
@@ -400,7 +407,7 @@ export class ClustersService {
       },
       warn,
     );
-    return toCluster(row);
+    return toCluster(row, null, await this.repository.blocksFor(row.id));
   }
 
   // The lease is `allDatabases`, so the answer is what the cluster HAS rather

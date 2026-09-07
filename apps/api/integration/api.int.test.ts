@@ -42,7 +42,9 @@ import {
 } from "../src/db";
 import { workloadKey } from "../src/engine/ports";
 import { SCOPED_USERNAME } from "../src/engine/provision";
+import { at } from "../src/errors/at";
 import { applyCluster, promoteByScore } from "../src/jobs/apply";
+import { markBlocked, markUnblocked } from "../src/jobs/blocked";
 import { refreshInferredWindow } from "../src/jobs/change-window";
 import { classifyCluster } from "../src/jobs/classify";
 import { openClusterSession } from "../src/jobs/cluster-connection";
@@ -327,6 +329,83 @@ describe("cluster lifecycle", () => {
 // dial budget (10 a minute), and two more connects on the shared `owner` push the
 // scenarios below it over the line. A separate session is the cheap way to keep
 // this describe from being a 429 somewhere else.
+// #462. The route side of per-pass blocks, which is the half no unit test can
+// reach: `toCluster` has no database, so every one of its eight call sites has to
+// read `cluster_blocks` itself, and a call site that forgets reports a broken
+// cluster as a healthy one — the exact failure this change exists to remove.
+//
+// Read through the LIST and through a single-cluster mutation, because those are
+// two different call sites with two different reads behind them (one batched for
+// the fleet, one for the row) and only one of them is exercised by the page.
+describe("a cluster's blocked passes", () => {
+  let owner: Session;
+  let clusterId: string;
+
+  // The cluster as the list reports it — which is how the dashboard gets it;
+  // there is no single-cluster GET, by design (app.clusters.$clusterId.tsx).
+  async function listed(): Promise<Record<string, unknown>> {
+    const list = asRecords(await (await api("/clusters", owner)).json(), "the cluster list");
+    const mine = list.find((entry) => asString(entry.id) === clusterId);
+    if (mine === undefined) throw new Error("the fixture cluster is not in the list");
+    return mine;
+  }
+
+  const tasksOf = (cluster: Record<string, unknown>): unknown[] =>
+    asRecords(cluster.blocked, "the blocked passes").map((block) => block.task);
+
+  it("connects a cluster and reports nothing blocked", async () => {
+    owner = await signUp("blocks");
+    createdEmails.push(owner.email);
+    createdOrgIds.push(await giveRoom(owner));
+    const res = await api("/clusters", owner, {
+      method: "POST",
+      body: JSON.stringify({ name: "Int Blocks", connectionString: MONGO_URL }),
+    });
+    expect(res.status).toBe(200);
+    clusterId = asString(asRecord(await res.json()).id);
+    createdClusterIds.push(clusterId);
+
+    // The row was inserted a moment ago, so nothing can be blocked on it — the
+    // one call site that deliberately reads no blocks.
+    expect(tasksOf(await listed())).toEqual([]);
+  });
+
+  it("reports one entry per blocked pass, longest-standing first", async () => {
+    // Written through the worker's own function rather than by hand, so the
+    // route is being asked about state the pipeline would really produce.
+    await markBlocked(db, clusterId, "collect", "UNREACHABLE", "connect ECONNREFUSED");
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    await markBlocked(db, clusterId, "probe", "TIMED_OUT", "ran past its budget");
+
+    const blocked = asRecords((await listed()).blocked, "the blocked passes");
+    expect(blocked.map((block) => block.task)).toEqual(["collect", "probe"]);
+    expect(blocked.map((block) => block.reason)).toEqual(["UNREACHABLE", "TIMED_OUT"]);
+  });
+
+  // A different call site with a different read: this one answers with the row it
+  // just wrote, so it has to go and fetch the blocks for it.
+  it("carries them on the answer to a single-cluster mutation", async () => {
+    const renamed = await api(`/clusters/${clusterId}`, owner, {
+      method: "PATCH",
+      body: JSON.stringify({ name: "Int Blocks Renamed" }),
+    });
+    expect(renamed.status).toBe(200);
+
+    expect(tasksOf(asRecord(await renamed.json()))).toEqual(["collect", "probe"]);
+  });
+
+  // The whole point. In production a five-minute probe kept succeeding beside a
+  // collect that had timed out for 19 hours, and each success cleared the single
+  // slot they shared — so the cluster read as healthy on every screen.
+  it("keeps the collect block when the probe gets through", async () => {
+    await markUnblocked(db, clusterId, "probe");
+
+    const blocked = asRecords((await listed()).blocked, "the blocked passes");
+    expect(blocked.map((block) => block.task)).toEqual(["collect"]);
+    expect(asString(at(blocked).detail)).toBe("connect ECONNREFUSED");
+  });
+});
+
 describe("cluster rename", () => {
   let renamer: Session;
   let renameId: string;
