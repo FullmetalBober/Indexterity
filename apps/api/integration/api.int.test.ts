@@ -55,6 +55,7 @@ import { activeCooldownKeys, cooldownKey } from "../src/jobs/cooldowns";
 import { applyCreatesForCluster } from "../src/jobs/create";
 import { finalizeCluster } from "../src/jobs/finalize";
 import { releaseStaleLocks } from "../src/jobs/locks";
+import { compactMembers, decodeMembers, memberDictionary } from "../src/jobs/per-member";
 import { planForCluster } from "../src/jobs/plan";
 import { latestBaselines } from "../src/jobs/probe";
 import { pruneDeadLetterJobs, pruneOldSamples } from "../src/jobs/retention";
@@ -1959,6 +1960,65 @@ describe("outage resilience", () => {
   // it exists to make, the second the one it must refuse. What separates them is
   // that a run is a positive claim — we looked at last_seen_at and it was still
   // this — where an outage has nothing to say.
+  // #474. `per_member` is interned against a dictionary and travels as arrays
+  // rather than objects, which cut the largest single item in the classify read
+  // by 68%. The encoder is SQL, so only a real postgres can say whether it round
+  // trips — and a reading rebuilt wrong is a wrong `ops` handed to the gate that
+  // decides whether an index is used, which no downstream test would catch as
+  // anything but a different verdict.
+  it("round trips per-member usage through the compacted wire form", async () => {
+    const roundTripId = await bareCluster("Per Member Round Trip");
+    const now = Date.now();
+    // Several members with long Atlas-shaped hostnames, a zero reading, and one
+    // member with no `since` at all — the three shapes the decoder distinguishes.
+    const perMember = [
+      {
+        member: "atlas-7eudp5-shard-00-00.hwrel.mongodb.net:27017",
+        ops: 88388,
+        since: new Date(now - 86_400_000).toISOString(),
+      },
+      {
+        member: "atlas-7eudp5-shard-00-01.hwrel.mongodb.net:27017",
+        ops: 0,
+        since: new Date(now - 86_400_000).toISOString(),
+      },
+      { member: "atlas-7eudp5-shard-00-02.hwrel.mongodb.net:27017", ops: 42914 },
+    ];
+    await insertSnapshots(db, [
+      {
+        clusterId: roundTripId,
+        database: "inttest",
+        collection: "roundtrip",
+        indexName: "rt_1",
+        spec: { name: "rt_1", keys: [{ field: "a", direction: 1 }] },
+        sizeBytes: 4096,
+        perMember,
+        capturedAt: new Date(now - 86_400_000),
+        lastSeenAt: new Date(now),
+        observations: 24,
+      },
+    ]);
+
+    const since = new Date(now - 30 * 86_400_000);
+    const dictionary = await memberDictionary(db, roundTripId, since);
+    // Every member interned, so nothing takes the inline fallback here.
+    expect(dictionary).toEqual(perMember.map((member) => member.member).sort());
+
+    const [row] = await db
+      .select({ perMember: compactMembers(dictionary) })
+      .from(indexSnapshots)
+      .where(eq(indexSnapshots.clusterId, roundTripId));
+    const decoded = decodeMembers(row?.perMember, dictionary);
+
+    const byMember = (a: { member: string }, b: { member: string }) =>
+      a.member.localeCompare(b.member);
+    expect([...decoded].sort(byMember)).toEqual([...perMember].sort(byMember));
+    // And the point of the exercise: the wire form is materially smaller.
+    expect(JSON.stringify(row?.perMember).length).toBeLessThan(
+      JSON.stringify(perMember).length / 2,
+    );
+  });
+
   it("drops an idle index whose run is still being extended", async () => {
     // Inserted rather than connected: classifyCluster reads only postgres, and
     // dialing would spend the outbound-dial budget the later scenarios need.
