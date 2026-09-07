@@ -175,14 +175,28 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
   // because a longer series is precisely what lets the engine call an index unused.
   const since = await historyWindow(db, clusterId);
   // Identity and shape come from the dimension table now; the time series carries
-  // only what was measured. One join, and it is the whole code cost of having
-  // stopped rewriting a per-index constant on every collect.
-  const rows = await db
+  // only what was measured.
+  //
+  // TWO READS, JOINED HERE, rather than one `innerJoin` (#474). The join was the
+  // whole code cost of the dimension table and it quietly undid its point on the
+  // wire: a snapshot row carries the index's `database`, `collection`,
+  // `index_name` and `spec` — constants of the index, which is exactly why they
+  // were moved out of the time series — and the join ships them again for every
+  // snapshot of it. Measured on the hosted deployment: 1,552 dimension rows are
+  // 475 kB read once, and 12 MB read across the 42,830 snapshots that point at
+  // them, an average of 27.6 copies each. Postgres does the join no slower; the
+  // cost is bytes to the client, and this pass runs hourly per cluster over the
+  // whole retained history.
+  //
+  // Dimensions are fetched BY THE IDS THE SNAPSHOTS REFERENCE, not by cluster.
+  // That is what makes this provably the same rows the join returned: the join's
+  // only condition was `index_id = cluster_indexes.id`, and reading the
+  // cluster's dimensions instead would additionally require the two cluster ids
+  // to agree — true of every row collect writes, and still a condition the join
+  // never imposed. Same rows, in the same shape, assembled here.
+  const snapshots = await db
     .select({
-      database: clusterIndexes.database,
-      collection: clusterIndexes.collection,
-      indexName: clusterIndexes.indexName,
-      spec: clusterIndexes.spec,
+      indexId: indexSnapshots.indexId,
       sizeBytes: indexSnapshots.sizeBytes,
       perMember: indexSnapshots.perMember,
       hinted: indexSnapshots.hinted,
@@ -192,13 +206,60 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
       maxGapMs: indexSnapshots.maxGapMs,
     })
     .from(indexSnapshots)
-    .innerJoin(clusterIndexes, eq(indexSnapshots.indexId, clusterIndexes.id))
     .where(and(eq(indexSnapshots.clusterId, clusterId), gte(indexSnapshots.lastSeenAt, since)));
+  // Distinct, so the second read asks for each index once however many snapshots
+  // point at it — which is the entire saving, stated as a Set.
+  const referenced = [...new Set(snapshots.map((snapshot) => snapshot.indexId))];
+  const dimensions =
+    referenced.length === 0
+      ? []
+      : await db
+          .select({
+            id: clusterIndexes.id,
+            database: clusterIndexes.database,
+            collection: clusterIndexes.collection,
+            indexName: clusterIndexes.indexName,
+            spec: clusterIndexes.spec,
+          })
+          .from(clusterIndexes)
+          .where(inArray(clusterIndexes.id, referenced));
+  const dimensionById = new Map(dimensions.map((dimension) => [dimension.id, dimension]));
+  const rows = snapshots.flatMap(({ indexId, ...measured }) => {
+    const dimension = dimensionById.get(indexId);
+    return dimension === undefined
+      ? []
+      : [
+          {
+            database: dimension.database,
+            collection: dimension.collection,
+            indexName: dimension.indexName,
+            spec: dimension.spec,
+            ...measured,
+          },
+        ];
+  });
   // Per-collection latency counters. Two questions off one read: whether the
   // collection served enough reads for absence of usage to mean anything (the
   // activity gate), and whether an observe window on it could finish (below).
+  //
+  // NAMED COLUMNS, not `select()` (#474). The three this does not ask for — `id`,
+  // `cluster_id` and the generated `span` — are half the bytes of the row and
+  // none of them is read: the id is never used, the cluster is the filter, and
+  // `span` is a stored range derived from two columns already here. Measured on
+  // the hosted deployment: 6,797 kB as `select *` against 3,329 kB for these ten.
   const latencyRows = await db
-    .select()
+    .select({
+      database: latencySamples.database,
+      collection: latencySamples.collection,
+      readOps: latencySamples.readOps,
+      readLatencyMicros: latencySamples.readLatencyMicros,
+      writeOps: latencySamples.writeOps,
+      writeLatencyMicros: latencySamples.writeLatencyMicros,
+      capturedAt: latencySamples.capturedAt,
+      lastSeenAt: latencySamples.lastSeenAt,
+      observations: latencySamples.observations,
+      maxGapMs: latencySamples.maxGapMs,
+    })
     .from(latencySamples)
     .where(and(eq(latencySamples.clusterId, clusterId), gte(latencySamples.lastSeenAt, since)));
   const activityByCollection = new Map<string, ActivityPoint[]>();
