@@ -57,7 +57,10 @@ export interface ClusterTaskDeps {
     reason: BlockedReason,
     detail: string,
   ) => Promise<void>;
-  readonly markUnblocked: (clusterId: string) => Promise<void>;
+  // Takes the PASS as well as the cluster (#462): a pass that got through is
+  // evidence about itself and nothing else, and this used to clear every pass's
+  // block at once.
+  readonly markUnblocked: (clusterId: string, task: string) => Promise<void>;
 }
 
 // A customer cluster can be unreachable for days — maintenance, a rotated
@@ -166,9 +169,11 @@ export async function runClusterTask(
     const pass = withInFlight(inFlight, () => run(clusterId));
     await (budgetMs === null ? pass : withPassBudget(task, budgetMs, pass));
     recordClusterTask(task, clusterId, "ok");
-    // A pass that got through clears whatever stopped the last one: the state is
-    // "why the pipeline is not running", so it cannot outlive a run.
-    await deps.markUnblocked(clusterId);
+    // A pass that got through clears what stopped THIS pass last time: the state
+    // is "why this pass is not running", so it cannot outlive a run of it. Scoped
+    // to the task since #462 — clearing the lot meant a five-minute probe erased
+    // a collect that had been failing for 19 hours.
+    await deps.markUnblocked(clusterId, task);
     // Only the ok outcome: a skipped tick changed nothing, so there is nothing
     // for a dashboard to refetch. Best-effort by construction (emit.ts) — a
     // lost nudge must not turn a landed pass into a retried one.

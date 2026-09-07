@@ -1,6 +1,7 @@
 import { Injectable } from "@nestjs/common";
 import {
   and,
+  clusterBlocks,
   clusters,
   type Database,
   desc,
@@ -71,6 +72,39 @@ export class ClustersRepository {
         entry.lastCollectedAt === null ? null : new Date(entry.lastCollectedAt),
       ]),
     );
+  }
+
+  // The same thing for ONE cluster, for the routes that answer with a single
+  // one. Separate from the batched read rather than `blocksByCluster([id])`
+  // because the map-and-`?? []` dance at those call sites read as if the answer
+  // might be missing, and for one cluster it cannot be — an empty array is the
+  // answer.
+  async blocksFor(clusterId: string): Promise<(typeof clusterBlocks.$inferSelect)[]> {
+    return this.db.select().from(clusterBlocks).where(eq(clusterBlocks.clusterId, clusterId));
+  }
+
+  // Every pass currently blocked, per cluster (#462). One read for the whole
+  // list, like the freshness read above and for the same reason: the alternative
+  // is a query per cluster on the page that shows all of them.
+  //
+  // A cluster with nothing blocked is ABSENT from the map rather than mapped to
+  // an empty array, so the caller's `?? []` is the same shape as the freshness
+  // read's `?? null`.
+  async blocksByCluster(
+    clusterIds: readonly string[],
+  ): Promise<Map<string, (typeof clusterBlocks.$inferSelect)[]>> {
+    if (clusterIds.length === 0) return new Map();
+    const rows = await this.db
+      .select()
+      .from(clusterBlocks)
+      .where(inArray(clusterBlocks.clusterId, [...clusterIds]));
+    const byCluster = new Map<string, (typeof clusterBlocks.$inferSelect)[]>();
+    for (const row of rows) {
+      const found = byCluster.get(row.clusterId) ?? [];
+      found.push(row);
+      byCluster.set(row.clusterId, found);
+    }
+    return byCluster;
   }
 
   async ownedById(clusterId: string, orgId: string): Promise<ClusterRow | undefined> {

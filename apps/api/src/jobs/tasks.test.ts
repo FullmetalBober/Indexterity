@@ -60,8 +60,12 @@ function recorder(): {
         blocked.push(`${clusterId}:${task}:${reason}:${detail}`);
         return Promise.resolve();
       },
-      markUnblocked: (clusterId) => {
-        unblocked.push(clusterId);
+      markUnblocked: (clusterId, task) => {
+        // The pass is recorded for the reason markBlocked's is (#462): clearing
+        // is scoped to the pass that got through, and a task that stopped being
+        // threaded through would clear every pass's block again — silently, and
+        // that is the defect this replaces.
+        unblocked.push(`${clusterId}:${task}`);
         return Promise.resolve();
       },
     },
@@ -126,9 +130,11 @@ describe("runClusterTask", () => {
     expect(log.alerts).toHaveLength(0);
     // The landed pass is announced, so the dashboard can refetch what it wrote.
     expect(log.emitted).toEqual([`${CLUSTER}:collect`]);
-    // And whatever stopped the last pass is cleared: the stored state is "why
-    // the pipeline is not running", so it cannot survive a pass that ran.
-    expect(log.unblocked).toEqual([CLUSTER]);
+    // And whatever stopped THIS pass last time is cleared: the stored state is
+    // "why this pass is not running", so it cannot survive a run of it. Named
+    // rather than bare (#462) — clearing every pass's block on any success is
+    // how a collect that had been failing for 19 hours read as healthy.
+    expect(log.unblocked).toEqual([`${CLUSTER}:collect`]);
     expect(log.blocked).toHaveLength(0);
   });
 
@@ -471,7 +477,10 @@ describe("runClusterTask on a cluster we refuse to dial", () => {
     await running;
 
     expect(log.blocked).toHaveLength(0);
-    expect(log.unblocked).toEqual([CLUSTER]);
+    // `apply`, and named: this pass has no budget, and clearing is scoped to the
+    // pass that ran (#462), so an unbudgeted `apply` finishing says nothing about
+    // the budgeted passes beside it.
+    expect(log.unblocked).toEqual([`${CLUSTER}:apply`]);
   });
 
   // A pass inside its budget must not be touched by the machinery at all.
@@ -481,7 +490,7 @@ describe("runClusterTask on a cluster we refuse to dial", () => {
     await runClusterTask("collect", CLUSTER, log.deps, () => Promise.resolve(), 10_000);
 
     expect(log.blocked).toHaveLength(0);
-    expect(log.unblocked).toEqual([CLUSTER]);
+    expect(log.unblocked).toEqual([`${CLUSTER}:collect`]);
   });
 
   it("blames the tunnel rather than the database when the tunnel is down", async () => {

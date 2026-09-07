@@ -1,14 +1,18 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { clusters, createDatabase, eq, organizations } from "../src/db";
+import { and, clusterBlocks, clusters, createDatabase, eq, organizations } from "../src/db";
 import { markBlocked, markUnblocked } from "../src/jobs/blocked";
 import { databaseUrl } from "./helpers";
 
 // The one piece of hand-written SQL in the blocked-state feature, against a real
 // postgres.
 //
-// `blocked_since` has to answer "for how long" without a read — two passes can
-// land at once — so it is a CASE inside the UPDATE. Nothing in a unit test can
-// tell whether that expression does what its comment claims; only postgres can.
+// `since` has to answer "for how long" without a read — two passes can land at
+// once — so it is a CASE inside the upsert. Nothing in a unit test can tell
+// whether that expression does what its comment claims; only postgres can.
+//
+// The grain is the PASS since #462, and the last two tests are the whole reason
+// that changed: a probe that gets through must not clear a collect that has been
+// failing for 19 hours, which is what the single-slot version did in production.
 //
 // No api and no mongo: this drives the two functions the worker calls.
 
@@ -16,23 +20,32 @@ let db: ReturnType<typeof createDatabase>;
 let orgId: string;
 let clusterId: string;
 
-async function state(): Promise<{
-  reason: string | null;
-  since: Date | null;
-  detail: string | null;
-  task: string | null;
-}> {
+interface BlockState {
+  reason: string;
+  since: Date;
+  detail: string;
+}
+
+// One pass's block, or null when that pass is running fine.
+async function state(task: string): Promise<BlockState | null> {
   const [row] = await db
     .select({
-      reason: clusters.blockedReason,
-      since: clusters.blockedSince,
-      detail: clusters.blockedDetail,
-      task: clusters.blockedTask,
+      reason: clusterBlocks.reason,
+      since: clusterBlocks.since,
+      detail: clusterBlocks.detail,
     })
-    .from(clusters)
-    .where(eq(clusters.id, clusterId));
-  if (row === undefined) throw new Error("the fixture cluster is gone");
-  return row;
+    .from(clusterBlocks)
+    .where(and(eq(clusterBlocks.clusterId, clusterId), eq(clusterBlocks.task, task)));
+  return row ?? null;
+}
+
+// Every pass currently blocked, so a test can say what the dashboard would show.
+async function blockedTasks(): Promise<string[]> {
+  const rows = await db
+    .select({ task: clusterBlocks.task })
+    .from(clusterBlocks)
+    .where(eq(clusterBlocks.clusterId, clusterId));
+  return rows.map((row) => row.task).sort();
 }
 
 beforeAll(async () => {
@@ -68,7 +81,7 @@ afterAll(async () => {
 
 describe("recording why a cluster's pipeline stopped", () => {
   it("starts clear", async () => {
-    expect(await state()).toEqual({ reason: null, since: null, detail: null, task: null });
+    expect(await blockedTasks()).toEqual([]);
   });
 
   it("records the reason, the sentence, and when it started", async () => {
@@ -80,45 +93,28 @@ describe("recording why a cluster's pipeline stopped", () => {
       "connect ECONNREFUSED 10.0.0.4:27017",
     );
 
-    const first = await state();
-    expect(first.reason).toBe("UNREACHABLE");
-    expect(first.detail).toBe("connect ECONNREFUSED 10.0.0.4:27017");
-    expect(first.since).toBeInstanceOf(Date);
-    expect(first.task).toBe("collect");
+    const first = await state("collect");
+    expect(first?.reason).toBe("UNREACHABLE");
+    expect(first?.detail).toBe("connect ECONNREFUSED 10.0.0.4:27017");
+    expect(first?.since).toBeInstanceOf(Date);
   });
 
   it("keeps the start time while the same condition continues", async () => {
-    const before = await state();
+    const before = await state("collect");
     await new Promise((resolve) => setTimeout(resolve, 1_100));
 
     // The next tick, and the one after: an owner needs "for six days", so a
     // repeat must not reset the clock.
     await markBlocked(db, clusterId, "collect", "UNREACHABLE", "connect ETIMEDOUT 10.0.0.4:27017");
 
-    const after = await state();
-    expect(after.since?.getTime()).toBe(before.since?.getTime());
+    const after = await state("collect");
+    expect(after?.since.getTime()).toBe(before?.since.getTime());
     // The sentence DOES move: it is the latest failure, not the first.
-    expect(after.detail).toBe("connect ETIMEDOUT 10.0.0.4:27017");
+    expect(after?.detail).toBe("connect ETIMEDOUT 10.0.0.4:27017");
   });
 
-  // The pass follows the sentence rather than the clock (#408). A cluster
-  // nothing can dial fails every pass in turn, so the one worth naming is
-  // whichever just tried — while `since` still answers "for how long", which is
-  // a fact about the condition and not about the pass that noticed it.
-  it("moves the pass under an unchanged reason, without restarting the clock", async () => {
-    const before = await state();
-    expect(before.task).toBe("collect");
-
-    await markBlocked(db, clusterId, "suggest", "UNREACHABLE", "connect ETIMEDOUT 10.0.0.4:27017");
-
-    const after = await state();
-    expect(after.task).toBe("suggest");
-    expect(after.reason).toBe("UNREACHABLE");
-    expect(after.since?.getTime()).toBe(before.since?.getTime());
-  });
-
-  it("restarts the clock when the condition itself changes", async () => {
-    const before = await state();
+  it("restarts the clock when that pass's condition itself changes", async () => {
+    const before = await state("collect");
     await new Promise((resolve) => setTimeout(resolve, 1_100));
 
     // A cluster that was unreachable and is now refusing TLS is a new condition,
@@ -126,29 +122,55 @@ describe("recording why a cluster's pipeline stopped", () => {
     await markBlocked(
       db,
       clusterId,
-      "suggest",
+      "collect",
       "INSECURE",
       "the stored string would connect in plaintext",
     );
 
-    const after = await state();
-    expect(after.reason).toBe("INSECURE");
-    expect(after.task).toBe("suggest");
-    expect(after.since?.getTime() ?? 0).toBeGreaterThan(before.since?.getTime() ?? 0);
+    const after = await state("collect");
+    expect(after?.reason).toBe("INSECURE");
+    expect(after?.since.getTime() ?? 0).toBeGreaterThan(before?.since.getTime() ?? 0);
   });
 
-  it("clears on a pass that got through", async () => {
-    await markUnblocked(db, clusterId);
+  // #462. This used to overwrite: `blocked_task` was one column, so the later
+  // pass won and the earlier condition was gone. Two passes fail for two reasons
+  // and both are facts.
+  it("holds one block per pass, each with its own clock", async () => {
+    const collect = await state("collect");
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    await markBlocked(db, clusterId, "probe", "TIMED_OUT", "the probe pass ran past its budget");
 
-    expect(await state()).toEqual({ reason: null, since: null, detail: null, task: null });
+    expect(await blockedTasks()).toEqual(["collect", "probe"]);
+    const probe = await state("probe");
+    expect(probe?.reason).toBe("TIMED_OUT");
+    // The older condition keeps its own start time — which is the number the
+    // dashboard sorts on, so "failing longest" stays answerable.
+    expect(await state("collect")).toEqual(collect);
+    expect(probe?.since.getTime() ?? 0).toBeGreaterThan(collect?.since.getTime() ?? 0);
   });
 
-  it("clearing a cluster that is not blocked writes nothing", async () => {
-    // The ordinary case, six passes per cluster per tick times the fleet: the
-    // guard is what keeps that from being an UPDATE that rewrites three nulls
-    // and wakes every replica for it.
-    await markUnblocked(db, clusterId);
+  // The fix, stated as the failure it replaces: in production a five-minute
+  // probe kept succeeding beside a collect that had timed out for 19 hours, and
+  // every success cleared the collect's row. The cluster read as healthy.
+  it("clears only the pass that got through", async () => {
+    await markUnblocked(db, clusterId, "probe");
 
-    expect(await state()).toEqual({ reason: null, since: null, detail: null, task: null });
+    expect(await blockedTasks()).toEqual(["collect"]);
+    expect(await state("collect")).not.toBeNull();
+  });
+
+  it("clears the last one too, leaving the cluster clean", async () => {
+    await markUnblocked(db, clusterId, "collect");
+
+    expect(await blockedTasks()).toEqual([]);
+  });
+
+  it("clearing a pass that is not blocked writes nothing", async () => {
+    // The ordinary case, six passes per cluster per tick times the fleet: a
+    // delete that matches nothing rather than an update rewriting the same
+    // nulls and waking every replica for it.
+    await markUnblocked(db, clusterId, "collect");
+
+    expect(await blockedTasks()).toEqual([]);
   });
 });

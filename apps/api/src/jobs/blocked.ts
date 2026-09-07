@@ -1,5 +1,5 @@
 import type { BlockedReason } from "@repo/contracts";
-import { and, clusters, type Database, eq, isNotNull, sql } from "../db";
+import { and, clusterBlocks, type Database, eq, sql } from "../db";
 
 // Why a cluster's pipeline is not running, kept where a screen can read it.
 //
@@ -12,18 +12,23 @@ import { and, clusters, type Database, eq, isNotNull, sql } from "../db";
 // The vocabulary is the metric's, deliberately: one set of names for what the
 // pipeline can be stopped by, so an operator reading a gauge and an owner reading
 // a badge are looking at the same fact.
-
-// The reasons themselves live in @repo/contracts, with the screen that labels
-// them: one list, so a gauge and a badge cannot disagree about what stopped.
+//
+// ONE ROW PER PASS since #462, and the grain is the whole of that change — see
+// `clusterBlocks` in db/schema.ts for what sharing one slot cost.
 
 /**
- * Record why the pipeline stopped, which pass stopped, and when it started.
+ * Record why one pass stopped, and when it started failing this way.
  *
- * One statement, no read, because `blocked_since` has to answer "for how long"
- * without a race between two passes landing at once: the CASE keeps the existing
- * timestamp while the reason is unchanged, and starts a new one when the reason
- * itself changes — a cluster that was unreachable and is now refusing TLS is a
- * new condition, not a continuation of the old one.
+ * One statement, no read, because `since` has to answer "for how long" without a
+ * race between two passes landing at once: the CASE keeps the existing timestamp
+ * while the reason is unchanged, and starts a new one when the reason itself
+ * changes — a cluster that was unreachable and is now refusing TLS is a new
+ * condition, not a continuation of the old one.
+ *
+ * Keyed on (cluster, task), so a `probe` that has been timing out for an hour and
+ * a `collect` that has been unreachable since Tuesday are two facts and the
+ * dashboard can say both. Before this they were one column and the later pass
+ * won.
  */
 export async function markBlocked(
   db: Database,
@@ -33,31 +38,35 @@ export async function markBlocked(
   detail: string,
 ): Promise<void> {
   await db
-    .update(clusters)
-    .set({
-      blockedReason: reason,
-      blockedDetail: detail,
-      // Which pass stopped (#408). Overwritten on every blocked pass rather than
-      // kept like `blocked_since`, because it answers "what is failing now" — a
-      // cluster nobody can dial fails `collect` and `suggest` alike, and the one
-      // worth naming is the one that just tried.
-      blockedTask: task,
-      blockedSince: sql`case when ${clusters.blockedReason} = ${reason} then coalesce(${clusters.blockedSince}, now()) else now() end`,
-    })
-    .where(eq(clusters.id, clusterId));
+    .insert(clusterBlocks)
+    .values({ clusterId, task, reason, detail })
+    .onConflictDoUpdate({
+      target: [clusterBlocks.clusterId, clusterBlocks.task],
+      set: {
+        reason,
+        detail,
+        since: sql`case when ${clusterBlocks.reason} = ${reason} then ${clusterBlocks.since} else now() end`,
+      },
+    });
 }
 
 /**
- * Clear it, on any pass that got through.
+ * Clear it for the pass that got through, and for that pass only.
  *
- * Guarded on there being something to clear, so the ordinary case — six passes
- * per cluster per tick, times the fleet, all of them fine — is a SELECT that
- * matches nothing rather than an UPDATE that writes the same three nulls over
- * and over and wakes every replica for it.
+ * The `task` argument is the fix, not a refinement of it. This used to clear
+ * every column unconditionally on any pass that finished, so the five-minute
+ * `probe` erased a `collect` that had been failing for 19 hours and the cluster
+ * rendered as healthy — the state #462 was opened for. A pass can only speak for
+ * itself: reaching the end of `probe` is evidence about `probe`.
+ *
+ * A DELETE rather than nulled columns, because absence is what "this pass is
+ * fine" means here, and it keeps the ordinary case — six passes per cluster per
+ * tick, times the fleet, all of them fine — a delete that matches nothing rather
+ * than an update writing the same nulls over and over and waking every replica
+ * for it.
  */
-export async function markUnblocked(db: Database, clusterId: string): Promise<void> {
+export async function markUnblocked(db: Database, clusterId: string, task: string): Promise<void> {
   await db
-    .update(clusters)
-    .set({ blockedReason: null, blockedSince: null, blockedDetail: null, blockedTask: null })
-    .where(and(eq(clusters.id, clusterId), isNotNull(clusters.blockedReason)));
+    .delete(clusterBlocks)
+    .where(and(eq(clusterBlocks.clusterId, clusterId), eq(clusterBlocks.task, task)));
 }
