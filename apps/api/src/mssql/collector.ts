@@ -132,6 +132,69 @@ export function attributionsToRead(
   return { kept, unread };
 }
 
+/** One plan's XML as the store answers it. */
+export interface PlanXmlRow {
+  readonly planId: number;
+  readonly hash: string;
+  readonly xml: string;
+}
+
+/**
+ * Ship the unread plans' XML in chunks, remembering each chunk as it lands
+ * (#470).
+ *
+ * A function rather than inline in `planAttributions`, because the POLICY here
+ * is what broke and the policy is worth testing without a Query Store: how big a
+ * chunk is, and — the part that matters — that what completed is remembered
+ * before the next chunk is attempted. It used to write once after the loop, so a
+ * pass abandoned mid-flight had its statements cancelled (#454), the loop threw,
+ * and nothing was kept. On the production cluster that meant every pass restarted
+ * from an empty cache against the same store and died in the same place, for a
+ * day: `queryStore:planXml 268s/1 (still running)`, collect after collect.
+ *
+ * `remember` is called with the map as it stands, so a partial answer is durable.
+ * That is safe because `attributionsToRead` rebuilds `kept` from the catalog on
+ * every call — a half-attributed database is a smaller `unread` next time, never
+ * a stale answer.
+ *
+ * The failure is RETHROWN after remembering. The caller's pass is over either
+ * way; what this changes is how much of it has to be done again.
+ */
+export async function shipPlanXml(
+  unread: readonly number[],
+  kept: Map<number, PlanAttribution>,
+  fetch: (ids: readonly number[]) => Promise<readonly PlanXmlRow[]>,
+  remember: (attributed: Map<number, PlanAttribution>) => void,
+): Promise<void> {
+  for (let start = 0; start < unread.length; start += PLAN_FETCH_CHUNK) {
+    const ids = unread.slice(start, start + PLAN_FETCH_CHUNK);
+    // A phase PER CHUNK, so the call count says how many completed (#470). It
+    // used to be one span for the whole loop, which reported `268s/1` — a figure
+    // that cannot distinguish "one chunk is stuck" from "we are working through
+    // them", and those want different fixes.
+    const shipping = beginPhase("queryStore:planXml");
+    try {
+      const rows = await fetch(ids);
+      for (const [i, row] of rows.entries()) {
+        kept.set(row.planId, {
+          hash: row.hash,
+          tables: tablesOfPlan(row.xml),
+          isSelect: isReadPlan(row.xml),
+        });
+        // The same breathing the plan parsers take (./chunk.ts): this runs in
+        // the process that is also answering HTTP.
+        if (i % PLAN_PARSE_CHUNK === PLAN_PARSE_CHUNK - 1) await yieldToEventLoop();
+      }
+    } finally {
+      shipping();
+      // In the `finally`, so a chunk that was cancelled part-way still hands
+      // back whatever earlier chunks attributed. Remembering only on success
+      // would lose the run of completed chunks that a single cancellation ends.
+      remember(kept);
+    }
+  }
+}
+
 // Per-table read/write ops and duration from per-plan runtime totals, attributed
 // through what each plan names. A plan touching two tables counts for both, as
 // two per-table LIKEs would each have matched it.
@@ -199,7 +262,21 @@ export function hintsFromStore(
 // How many unread plans' XML one statement ships. Bounds the payload per
 // statement, not the total: a cold collector reads the whole store once, which
 // is what a suggest pass already ships every hour.
-const PLAN_FETCH_CHUNK = 500;
+// Plans whose XML is shipped in one statement (#470).
+//
+// Was 500, chosen when the cost of a read was assumed to be its round trip. It
+// is not: 0.20.0's phase report measured `queryStore:catalog` at 5 seconds
+// across nine databases — the numeric reads are free — against
+// `queryStore:planXml` at 268 seconds and unfinished for ONE database. The cost
+// is bytes, so the chunk is the unit of work an abandoned pass destroys, and 500
+// plans of showplan XML is a unit that may not finish at all on a slow link.
+// There is then no smaller thing to succeed at and the cache can never be
+// written, which is the whole of #470.
+//
+// Fifty trades round trips — cheap, measured — for a unit that completes. A
+// database whose store cannot be attributed inside one budget now converges over
+// several passes instead of restarting from nothing every time.
+const PLAN_FETCH_CHUNK = 50;
 
 interface IndexRow {
   readonly indexName: string;
@@ -839,10 +916,10 @@ export class MssqlIndexCollector implements IndexCollector {
     // answer the question the split exists for: is the remaining cost of a
     // tunnelled collect the round trips, or the bytes?
     //
-    // It also makes the WARMTH visible. The attribution cache lives in this
-    // process (D138), so a restarted container ships every plan again — and
-    // `queryStore:planXml` costing minutes on one collect and nothing on the
-    // next is what that looks like from the outside.
+    // It also makes the WARMTH visible, which is how #470 was found: the cache
+    // lives in this process and its session is pooled per cluster, so it should
+    // survive across passes — and `queryStore:planXml` costing four minutes on
+    // every pass said it was not surviving at all.
     const catalog = await timePhase("queryStore:catalog", () =>
       this.conn.query<{ planId: unknown; hash: unknown }>(
         `SELECT p.plan_id AS planId, CONVERT(varchar(20), p.query_plan_hash, 1) AS hash
@@ -855,32 +932,31 @@ export class MssqlIndexCollector implements IndexCollector {
         .map((row) => ({ planId: asNumber(row.planId), hash: String(row.hash) }))
         .filter((row) => Number.isInteger(row.planId)),
     );
-    // One phase across every chunk, so the figure reads "the XML cost this much
-    // in total" rather than one line per chunk of plans.
-    const shipping = unread.length === 0 ? () => undefined : beginPhase("queryStore:planXml");
-    for (let start = 0; start < unread.length; start += PLAN_FETCH_CHUNK) {
-      const ids = unread.slice(start, start + PLAN_FETCH_CHUNK);
-      // Interpolated, not bound: these are integers the server itself just
-      // answered with, kept to integers above, and a parameter per id would meet
-      // the driver's 2,100-parameter ceiling long before this list did.
-      const rows = await this.conn.query<{ planId: unknown; hash: unknown; xml: string }>(
-        `SELECT p.plan_id AS planId, CONVERT(varchar(20), p.query_plan_hash, 1) AS hash,
+    await shipPlanXml(
+      unread,
+      kept,
+      (ids) =>
+        // Interpolated, not bound: these are integers the server itself just
+        // answered with, kept to integers above, and a parameter per id would
+        // meet the driver's 2,100-parameter ceiling long before this list did.
+        this.conn
+          .query<{ planId: unknown; hash: unknown; xml: string }>(
+            `SELECT p.plan_id AS planId, CONVERT(varchar(20), p.query_plan_hash, 1) AS hash,
                 CAST(p.query_plan AS nvarchar(max)) AS xml
          FROM ${quoteIdent(database)}.sys.query_store_plan p
          WHERE p.plan_id IN (${ids.join(", ")})`,
-      );
-      for (const [i, row] of rows.entries()) {
-        kept.set(asNumber(row.planId), {
-          hash: String(row.hash),
-          tables: tablesOfPlan(row.xml),
-          isSelect: isReadPlan(row.xml),
-        });
-        // The same breathing the plan parsers take (./chunk.ts): this runs in the
-        // process that is also answering HTTP.
-        if (i % PLAN_PARSE_CHUNK === PLAN_PARSE_CHUNK - 1) await yieldToEventLoop();
-      }
-    }
-    shipping();
+          )
+          .then((rows) =>
+            rows.map((row) => ({
+              planId: asNumber(row.planId),
+              hash: String(row.hash),
+              xml: row.xml,
+            })),
+          ),
+      (attributed) => this.attributions.set(database, attributed),
+    );
+    // Set once more for the database whose store had nothing unread: the loop
+    // above never ran, so nothing has written the pruned map back.
     this.attributions.set(database, kept);
     return kept;
   }
