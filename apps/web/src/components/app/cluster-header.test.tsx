@@ -19,7 +19,7 @@ const cluster = {
   provisionedUsername: null,
   lastCollectedAt: NOW.toISOString(),
   tlsOverrides: NO_OVERRIDES,
-  blocked: null,
+  blocked: [],
 };
 
 beforeEach(() => {
@@ -140,12 +140,14 @@ describe("ClusterHeader certificate concessions", () => {
         cluster={{
           ...cluster,
           lastCollectedAt: new Date(NOW.getTime() - 7 * 24 * 3_600_000).toISOString(),
-          blocked: {
-            reason: "UNREACHABLE",
-            since: new Date(NOW.getTime() - 7 * 24 * 3_600_000).toISOString(),
-            detail: "connect ECONNREFUSED 10.0.0.4:27017",
-            task: null,
-          },
+          blocked: [
+            {
+              reason: "UNREACHABLE",
+              since: new Date(NOW.getTime() - 7 * 24 * 3_600_000).toISOString(),
+              detail: "connect ECONNREFUSED 10.0.0.4:27017",
+              task: "collect",
+            },
+          ],
         }}
       />,
     );
@@ -162,11 +164,45 @@ describe("ClusterHeader certificate concessions", () => {
       <ClusterHeader
         cluster={{
           ...cluster,
-          blocked: { reason: "QUOTA_EXHAUSTED", since: NOW.toISOString(), detail: "", task: null },
+          blocked: [
+            { reason: "QUOTA_EXHAUSTED", since: NOW.toISOString(), detail: "", task: "collect" },
+          ],
         }}
       />,
     );
 
     expect(screen.getByText("⚠ collection stopped")).toBeInTheDocument();
+  });
+
+  // #462. Six passes shared one slot until now, so the heading could only ever
+  // name one condition and the later failure overwrote the earlier one. The badge
+  // still shows ONE — the reader's question here is whether the cluster works —
+  // and it is the LONGEST-STANDING one, which is the order the api sends.
+  it("badges the longest-standing block when several passes have stopped", () => {
+    renderInApp(
+      <ClusterHeader
+        cluster={{
+          ...cluster,
+          blocked: [
+            {
+              reason: "UNREACHABLE",
+              since: new Date(NOW.getTime() - 19 * 3_600_000).toISOString(),
+              detail: "connect ECONNREFUSED 10.0.0.4:27017",
+              task: "collect",
+            },
+            {
+              reason: "TIMED_OUT",
+              since: new Date(NOW.getTime() - 5 * 60_000).toISOString(),
+              detail: "the probe pass ran past its 5 minutes budget",
+              task: "probe",
+            },
+          ],
+        }}
+      />,
+    );
+
+    // The older one, not the one that failed most recently.
+    expect(screen.getByText("⚠ cannot be reached")).toBeInTheDocument();
+    expect(screen.queryByText(/taking too long/)).not.toBeInTheDocument();
   });
 });

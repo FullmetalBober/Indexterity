@@ -11,6 +11,7 @@ import type {
 } from "../engine/ports";
 import { DatabaseInaccessibleError } from "../engine/ports";
 import type { IndexKey, IndexSpec, QueryShape, ServerHealth } from "../engine/types";
+import { present } from "../errors/at";
 import { PLAN_PARSE_CHUNK, yieldToEventLoop } from "./chunk";
 import {
   asNumber,
@@ -516,6 +517,169 @@ export class MssqlIndexCollector implements IndexCollector {
     const totals: Record<string, number> = {};
     for (const row of rows) totals[row.indexName] = asNumber(row.sizeBytes);
     return totals;
+  }
+
+  // The three catalog reads above, once per DATABASE instead of once per table
+  // (#461). Same SQL with the `object_id = OBJECT_ID(@qualified)` predicate
+  // dropped and `s.name + '.' + t.name` selected as the key, so each answers
+  // every table in one round trip. See IndexCollector for the measurement.
+  //
+  // `sys.tables` is joined in rather than the object id being turned back into a
+  // name with OBJECT_NAME(): the join also filters `is_ms_shipped = 0`, which is
+  // what keeps these maps keyed exactly like `listCollectionNames` and stops a
+  // system table appearing here as a collection nobody asked about.
+
+  async indexesByCollection(database: string): Promise<ReadonlyMap<string, IndexSpec[]>> {
+    try {
+      const rows = await this.conn.query<IndexRow & { table: string }>(
+        `SELECT
+           s.name + '.' + t.name AS [table],
+           i.name AS indexName,
+           i.type AS indexType,
+           i.is_unique AS isUnique,
+           i.is_primary_key AS isPrimaryKey,
+           i.is_unique_constraint AS isUniqueConstraint,
+           i.is_disabled AS isDisabled,
+           i.has_filter AS hasFilter,
+           i.filter_definition AS filterDefinition,
+           ic.key_ordinal AS keyOrdinal,
+           ic.is_descending_key AS isDescending,
+           ic.is_included_column AS isIncluded,
+           ic.index_column_id AS indexColumnId,
+           c.name AS columnName
+         FROM ${quoteIdent(database)}.sys.tables t
+         JOIN ${quoteIdent(database)}.sys.schemas s ON s.schema_id = t.schema_id
+         JOIN ${quoteIdent(database)}.sys.indexes i ON i.object_id = t.object_id
+         JOIN ${quoteIdent(database)}.sys.index_columns ic
+           ON ic.object_id = i.object_id AND ic.index_id = i.index_id
+         JOIN ${quoteIdent(database)}.sys.columns c
+           ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+         WHERE t.is_ms_shipped = 0
+           AND i.type IN ${ROWSTORE_TYPES}
+           AND i.is_hypothetical = 0
+           AND i.name IS NOT NULL
+         ORDER BY s.name, t.name, i.index_id, ic.index_column_id`,
+      );
+      // Grouped twice: by table, then by index within it. An index name is
+      // unique per table only, so a single flat map keyed by name would merge
+      // two tables' `IX_created_at` into one spec with both their columns.
+      const byTable = new Map<string, Map<string, IndexRow[]>>();
+      for (const row of rows) {
+        const indexes = byTable.get(row.table) ?? new Map<string, IndexRow[]>();
+        const bucket = indexes.get(row.indexName) ?? [];
+        bucket.push(row);
+        indexes.set(row.indexName, bucket);
+        byTable.set(row.table, indexes);
+      }
+      const specs = new Map<string, IndexSpec[]>();
+      for (const [table, indexes] of byTable) {
+        const forTable: IndexSpec[] = [];
+        for (const bucket of indexes.values()) {
+          const spec = toMssqlIndexSpec(bucket);
+          if (spec !== null) forTable.push(spec);
+        }
+        specs.set(table, forTable);
+      }
+      return specs;
+    } catch (error) {
+      if (isInaccessibleDatabase(error)) throw new DatabaseInaccessibleError(database, error);
+      throw error;
+    }
+  }
+
+  async usageByCollection(database: string): Promise<ReadonlyMap<string, IndexUsageStat[]>> {
+    // Still every replica, and this is where the batching pays twice: the
+    // per-table read asked each member once per table, so a two-node group with
+    // 362 tables spent 724 round trips to answer what two answer here.
+    const connections = [this.local, ...(await (this.members?.all() ?? Promise.resolve([])))];
+    const perMember = await Promise.all(
+      connections.map((conn) =>
+        // One replica failing mid-collect must not lose the others' readings —
+        // same tolerance the per-table path has always had.
+        this.usageForDatabase(conn, database).catch(() => []),
+      ),
+    );
+    const byTable = new Map<string, Map<string, IndexUsageStat>>();
+    for (const { table, stat } of perMember.flat()) {
+      const seen = byTable.get(table) ?? new Map<string, IndexUsageStat>();
+      // Keyed by index AND host inside the table, for the reason collectUsage
+      // says: the same index reports once per replica, each with its own `since`.
+      seen.set(`${stat.indexName}\u0000${stat.host}`, stat);
+      byTable.set(table, seen);
+    }
+    return new Map([...byTable].map(([table, seen]) => [table, [...seen.values()]]));
+  }
+
+  private async usageForDatabase(
+    conn: MssqlUsageMember,
+    database: string,
+  ): Promise<{ table: string; stat: IndexUsageStat }[]> {
+    const identity = await conn.serverIdentity();
+    const rows = await conn.query(
+      // LEFT JOIN for the reason usageFrom gives: an index with no row has
+      // served nothing since the counters started, and that is a reading of
+      // zero rather than a gap.
+      `SELECT
+         s.name + '.' + t.name AS [table],
+         i.name AS indexName,
+         COALESCE(s2.user_seeks, 0) + COALESCE(s2.user_scans, 0) + COALESCE(s2.user_lookups, 0)
+           AS ops
+       FROM ${quoteIdent(database)}.sys.tables t
+       JOIN ${quoteIdent(database)}.sys.schemas s ON s.schema_id = t.schema_id
+       JOIN ${quoteIdent(database)}.sys.indexes i ON i.object_id = t.object_id
+       LEFT JOIN sys.dm_db_index_usage_stats s2
+         ON s2.database_id = DB_ID(@db) AND s2.object_id = i.object_id
+        AND s2.index_id = i.index_id
+       WHERE t.is_ms_shipped = 0
+         AND i.type IN ${ROWSTORE_TYPES}
+         AND i.is_hypothetical = 0
+         AND i.name IS NOT NULL`,
+      { db: database },
+    );
+    return rows.map((row) => ({
+      // Selected by the query above, so absence is a defect in it rather than a
+      // state to tolerate — and a reading with no table cannot be attributed to
+      // one, which is the only thing this map is for.
+      table: present(row.table, "a usage row read per database names its table"),
+      stat: {
+        indexName: row.indexName,
+        host: identity.serverName,
+        ops: asNumber(row.ops),
+        since: identity.startedAt,
+      },
+    }));
+  }
+
+  async indexSizesByCollection(
+    database: string,
+  ): Promise<ReadonlyMap<string, Record<string, number>>> {
+    const rows = await this.conn.query<{
+      table: string;
+      indexName: string;
+      sizeBytes: number;
+    }>(
+      `SELECT
+         s.name + '.' + t.name AS [table],
+         i.name AS indexName,
+         COALESCE(SUM(p.used_page_count), 0) * 8192 AS sizeBytes
+       FROM ${quoteIdent(database)}.sys.tables t
+       JOIN ${quoteIdent(database)}.sys.schemas s ON s.schema_id = t.schema_id
+       JOIN ${quoteIdent(database)}.sys.indexes i ON i.object_id = t.object_id
+       LEFT JOIN ${quoteIdent(database)}.sys.dm_db_partition_stats p
+         ON p.object_id = i.object_id AND p.index_id = i.index_id
+       WHERE t.is_ms_shipped = 0
+         AND i.type IN ${ROWSTORE_TYPES}
+         AND i.is_hypothetical = 0
+         AND i.name IS NOT NULL
+       GROUP BY s.name, t.name, i.name`,
+    );
+    const byTable = new Map<string, Record<string, number>>();
+    for (const row of rows) {
+      const totals = byTable.get(row.table) ?? {};
+      totals[row.indexName] = asNumber(row.sizeBytes);
+      byTable.set(row.table, totals);
+    }
+    return byTable;
   }
 
   // Read/write ops and latency per table, from Query Store: executions and

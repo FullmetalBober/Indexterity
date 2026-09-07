@@ -1,12 +1,14 @@
 import { EventEmitter } from "node:events";
+import { Logger } from "@nestjs/common";
 import type { RunnerOptions, WorkerPool } from "graphile-worker";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadEnv } from "../config/env";
 import { createDatabase } from "../db/client";
 import { present } from "../errors/at";
 import { stub } from "../test-utils";
-import type { BurstResult } from "./burst";
+import { type BurstResult, claimDuePasses } from "./burst";
 import type { ClusterPasses } from "./cluster-tasks.service";
+import { releaseStaleLocks } from "./locks";
 import { TASK_NAMES } from "./tasks";
 import type { TickDatabase } from "./tick.service";
 import { TICK_INTERVAL_MS, TickService } from "./tick.service";
@@ -82,7 +84,7 @@ vi.mock("../errors/reporting", async (importOriginal) => ({
 // The stale-lock repair every tick performs reaches postgres twice — a watermark
 // claim and two statements — and this suite's database is a stub carrying
 // `execute` and nothing else. Unmocked, `claimWatermark` threw on the missing
-// `db.insert`, `drainOnce` caught it as designed, and the tick logged
+// `db.insert`, `releaseLocks` caught it as designed, and the tick logged
 //
 //   ERROR [TickService] releasing stale locks failed: db.insert is not a function
 //
@@ -185,6 +187,11 @@ const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 afterEach(() => {
   worker.reset();
   vi.useRealTimers();
+  // The repair suite below swaps this mock's implementation to observe ordering
+  // and to fail it once; restored here so a later test still gets the granted,
+  // nothing-to-free default the rest of this file assumes.
+  vi.mocked(releaseStaleLocks).mockReset();
+  vi.mocked(releaseStaleLocks).mockImplementation(async () => []);
 });
 
 describe("the overlap guard", () => {
@@ -230,6 +237,96 @@ describe("the overlap guard", () => {
     expect(worker.calls.length).toBe(2);
     worker.calls[1]?.resolve();
     await expect(next).resolves.toMatchObject({ drained: true });
+  });
+});
+
+describe("the stale-lock repair", () => {
+  // #460, and the failure it guards is a deadlock rather than a slowdown.
+  //
+  // The repair used to be the first statement of `drainOnce`, which is
+  // serialised behind `drainChain`. A drain that never returns is normal on a
+  // busy deployment — the tick enqueues more work every five minutes and the
+  // same runOnce claims it, which is the property that makes one drain per tick
+  // enough — so the repair simply stopped running. Measured in the hosted
+  // deployment: `pass:resetLocks` frozen for five hours while
+  // `pass:scheduleProbe` advanced every tick, and an orphaned `classify` queue
+  // lock standing for all five. The queue being busy is the only condition the
+  // repair exists for, and it was the one condition that starved it.
+  it("runs on a tick whose drain is queued behind one still in flight", async () => {
+    load({ runCronjob: true });
+    const { service } = makeService();
+    vi.mocked(releaseStaleLocks).mockClear();
+
+    const first = service.tick();
+    await settle();
+    expect(vi.mocked(releaseStaleLocks).mock.calls.length).toBe(1);
+
+    // The second tick's DRAIN waits on the first — that is the overlap guard
+    // and it is correct. Its REPAIR must not.
+    const second = service.tick();
+    await settle();
+    expect(worker.calls.length).toBe(1);
+    expect(vi.mocked(releaseStaleLocks).mock.calls.length).toBe(2);
+
+    worker.calls[0]?.resolve();
+    await settle();
+    worker.calls[1]?.resolve();
+    await expect(first).resolves.toMatchObject({ drained: true });
+    await expect(second).resolves.toMatchObject({ drained: true });
+  });
+
+  // The other half of the ordering, and the half that unwedges a cluster rather
+  // than just noticing it: the dispatcher reads `locked_at` to decide whether a
+  // pass is already running and stands down if it is (dispatch.ts, #454). A lock
+  // nobody holds silenced that pass for good, because nothing re-added the key.
+  // Freeing it BEFORE the dispatch means the tick that repairs the queue is also
+  // the tick that re-dispatches what the queue was holding.
+  it("frees locks before the dispatch that reads them", async () => {
+    load({ runCronjob: true });
+    const order: string[] = [];
+    vi.mocked(releaseStaleLocks).mockClear();
+    vi.mocked(releaseStaleLocks).mockImplementation(async () => {
+      order.push("repair");
+      return [];
+    });
+    // `claimDuePasses` IS the dispatch here — the module is mocked, so the
+    // enqueue callback it would call never reaches the database.
+    vi.mocked(claimDuePasses).mockImplementationOnce(async () => {
+      order.push("dispatch");
+      return { dispatched: ["scheduleApply"], alreadyClaimed: [] };
+    });
+    const { service } = makeService();
+
+    const tick = service.tick();
+    await settle();
+    worker.calls[0]?.resolve();
+    await tick;
+
+    expect(order[0]).toBe("repair");
+    expect(order).toContain("dispatch");
+  });
+
+  // Still not fatal, and now it has to say so from inside `releaseLocks`: the
+  // catch used to belong to `drainOnce` and there is more than one caller now.
+  // A tick that cannot reset locks must still dispatch and still drain.
+  it("dispatches and drains anyway when the repair itself fails", async () => {
+    load({ runCronjob: true });
+    vi.mocked(releaseStaleLocks).mockClear();
+    vi.mocked(releaseStaleLocks).mockRejectedValueOnce(new Error("postgres went away"));
+    // Captured rather than let through: the line is the CORRECT behaviour here,
+    // and this file's rule is that a green run prints nothing — a real failure
+    // has to be the only thing on stderr. Asserted, so the swallow stays loud
+    // somewhere.
+    const logged = vi.spyOn(Logger.prototype, "error").mockImplementation(() => {});
+    const { service } = makeService();
+
+    const tick = service.tick();
+    await settle();
+    expect(worker.calls.length).toBe(1);
+    worker.calls[0]?.resolve();
+    await expect(tick).resolves.toMatchObject({ drained: true, dispatched: ["scheduleApply"] });
+    expect(logged).toHaveBeenCalledWith("releasing stale locks failed: Error: postgres went away");
+    logged.mockRestore();
   });
 });
 

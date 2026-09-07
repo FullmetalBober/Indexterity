@@ -1283,6 +1283,53 @@ export const analysisNotes = pgTable(
   (table) => [primaryKey({ columns: [table.clusterId, table.source] })],
 );
 
+/**
+ * Why one PASS is not running against one cluster — one row per pass (#462).
+ *
+ * This was four columns on `clusters`, and four columns are one slot: six passes
+ * shared it, `markBlocked` overwrote whichever was there, and `markUnblocked`
+ * cleared it on ANY pass that got through. Measured in the hosted deployment on
+ * 2026-09-07 — a `collect` against a tunnelled 362-table cluster had timed out
+ * for 19 hours, and the cluster read as perfectly healthy on the dashboard,
+ * because the five-minute `probe` beside it kept succeeding and kept clearing the
+ * row. The condition was diagnosed, recorded, and then erased by an unrelated
+ * success, which is #24's rule arriving for the third time: a fault that renders
+ * as an absence reads as "all is well".
+ *
+ * So the grain is the pass, and the two writes are scoped to it. A probe that
+ * gets through says nothing whatever about collect and no longer claims to.
+ *
+ * The columns on `clusters` are dead as of this migration and are dropped in the
+ * next one, not this one: the pre-deploy migration runs while the OLD image is
+ * still serving, and a read of a column that has just gone takes the cluster list
+ * with it. Expand here, contract there.
+ */
+export const clusterBlocks = pgTable(
+  "cluster_blocks",
+  {
+    clusterId: uuid("cluster_id")
+      .notNull()
+      .references(() => clusters.id, { onDelete: "cascade" }),
+    // The pass — `collect`, `classify`, `suggest`, `apply`, `finalize`, `probe`.
+    // Text and not an enum for the reason the old column was text: adding a pass
+    // should be a constant rather than a migration, which is only safe while the
+    // reader degrades, and the contract types it as a string so the banner can
+    // render a pass it does not know by name.
+    task: text("task").notNull(),
+    // Text, not an enum, for the reason `security_events.event` is text: adding a
+    // reason should be a constant, not a migration.
+    reason: text("reason").notNull(),
+    // The sentence, as the owner's own alert mail words it.
+    detail: text("detail").notNull(),
+    // When THIS pass first failed this way, not when it last did — "for six days"
+    // is the part that decides whether somebody acts. Held across repeats of the
+    // same reason and restarted when the reason itself changes, because a pass
+    // that was unreachable and is now refusing TLS is a new condition.
+    since: timestamp("since", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [primaryKey({ columns: [table.clusterId, table.task] })],
+);
+
 export const latencySamples = pgTable(
   "latency_samples",
   {

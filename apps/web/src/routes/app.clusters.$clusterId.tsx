@@ -63,9 +63,14 @@ function ClusterLayout() {
   return (
     <>
       <ClusterHeader cluster={cluster} />
-      {cluster.blocked === null ? null : (
-        <ClusterBlockedBanner clusterId={clusterId} block={cluster.blocked} />
-      )}
+      {/* One banner per blocked pass (#462). It was one banner over one slot, so a
+          collect that had timed out for 19 hours was invisible behind whichever
+          pass failed most recently — and behind any pass that succeeded, which
+          cleared the slot outright. Keyed on the pass, which is half its primary
+          key. */}
+      {cluster.blocked.map((block) => (
+        <ClusterBlockedBanner key={block.task} clusterId={clusterId} block={block} />
+      ))}
       <nav aria-label="Cluster" className="mt-4 mb-6 flex gap-4 border-b text-sm">
         <Link
           to="/app/clusters/$clusterId"
