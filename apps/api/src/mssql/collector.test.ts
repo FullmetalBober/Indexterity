@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DatabaseInaccessibleError } from "../engine/ports";
+import { at } from "../errors/at";
 import {
   attributionsToRead,
   hintsFromStore,
@@ -9,6 +10,7 @@ import {
   latencyFromPlans,
   MssqlIndexCollector,
   type PlanAttribution,
+  shipPlanXml,
   tablePlanMarker,
   tablesOfPlan,
   toMssqlIndexSpec,
@@ -357,6 +359,110 @@ describe("attributionsToRead", () => {
     const { kept, unread } = attributionsToRead(new Map(), [{ planId: 7, hash: "0x7" }]);
     expect(kept.size).toBe(0);
     expect(unread).toEqual([7]);
+  });
+});
+
+// #470. The cache that makes a tunnelled collect affordable could only be
+// written by an attribution read that ran to completion, and on the production
+// cluster it never did: the budget abandoned the pass mid-loop, #454 cancelled
+// the in-flight statement, the loop threw, and nothing was remembered. Every
+// pass began again from an empty cache against the same store and died in the
+// same place — measured as `queryStore:planXml 268s/1 (still running)` on
+// collect after collect for a day.
+//
+// Driven through `shipPlanXml` rather than a fake Query Store: what broke is the
+// loop's POLICY — how much is remembered, and when — and `fetch`/`remember` are
+// a narrow port a test implements completely rather than a generic `query` it
+// would have to assert into shape.
+describe("shipping plan XML so an abandoned read leaves progress behind", () => {
+  const XML = '<Object Schema="[dbo]" Table="[orders]" /> StatementType="SELECT"';
+
+  // Answers every id asked for, until the nth chunk, which is cancelled — what a
+  // statement killed by an abandoned pass looks like from here.
+  function cancellingAfter(chunks: number) {
+    const asked: number[][] = [];
+    const fetch = (ids: readonly number[]) => {
+      asked.push([...ids]);
+      if (asked.length > chunks) return Promise.reject(new Error("Operation cancelled by user."));
+      return Promise.resolve(ids.map((planId) => ({ planId, hash: `h${planId}`, xml: XML })));
+    };
+    return { fetch, asked };
+  }
+
+  const ids = (count: number) => Array.from({ length: count }, (_, i) => i + 1);
+
+  it("remembers the chunks that completed when a later one is cancelled", async () => {
+    const store = cancellingAfter(2);
+    const remembered: Map<number, PlanAttribution>[] = [];
+    const kept = new Map<number, PlanAttribution>();
+
+    await expect(
+      shipPlanXml(ids(200), kept, store.fetch, (map) => remembered.push(new Map(map))),
+    ).rejects.toThrow("Operation cancelled");
+
+    // Two chunks landed, the third was cancelled — and the cancelled chunk still
+    // handed back what the first two attributed, which is the fix.
+    expect(store.asked).toHaveLength(3);
+    expect(at(remembered, remembered.length - 1).size).toBe(at(store.asked).length * 2);
+  });
+
+  it("hands back the completed chunks even when the FIRST chunk is cancelled", async () => {
+    // Nothing to remember, and `remember` is still called — so the caller's map
+    // is written back pruned rather than left as whatever it was.
+    const store = cancellingAfter(0);
+    const remembered: Map<number, PlanAttribution>[] = [];
+
+    await expect(
+      shipPlanXml(ids(60), new Map(), store.fetch, (map) => remembered.push(new Map(map))),
+    ).rejects.toThrow("Operation cancelled");
+
+    expect(remembered).toHaveLength(1);
+    expect(at(remembered).size).toBe(0);
+  });
+
+  it("leaves strictly less to read on every attempt, so a store converges", async () => {
+    // The production shape: one chunk gets through per pass. What must hold is
+    // that `attributionsToRead` then finds that chunk known and asks for less.
+    const catalog = ids(150).map((planId) => ({ planId, hash: `h${planId}` }));
+    let known = new Map<number, PlanAttribution>();
+    const unreadCounts: number[] = [];
+
+    for (let pass = 0; pass < 3; pass++) {
+      const { kept, unread } = attributionsToRead(known, catalog);
+      unreadCounts.push(unread.length);
+      const store = cancellingAfter(1);
+      await shipPlanXml(unread, kept, store.fetch, (map) => {
+        known = new Map(map);
+      }).catch(() => undefined);
+    }
+
+    // 150 plans, 50 a chunk, one chunk a pass: 150 unread, then 100, then 50.
+    expect(unreadCounts).toEqual([150, 100, 50]);
+  });
+
+  it("asks for chunks small enough that one can finish on a slow link", async () => {
+    // 500 was chosen when a read's cost was assumed to be its round trip. The
+    // phase report measured the opposite — `queryStore:catalog` 5s across nine
+    // databases against `queryStore:planXml` 268s for one — so the chunk is the
+    // unit an abandonment destroys and it has to be small enough to land.
+    const store = cancellingAfter(99);
+    await shipPlanXml(ids(120), new Map(), store.fetch, () => undefined);
+
+    expect(store.asked.map((chunk) => chunk.length)).toEqual([50, 50, 20]);
+  });
+
+  it("does nothing at all when the store has no unread plans", async () => {
+    const store = cancellingAfter(0);
+    let remembers = 0;
+
+    await shipPlanXml([], new Map(), store.fetch, () => {
+      remembers += 1;
+    });
+
+    expect(store.asked).toEqual([]);
+    // No chunk, so no write — `planAttributions` writes the pruned map itself on
+    // this path, which is the one case the loop cannot cover.
+    expect(remembers).toBe(0);
   });
 });
 
