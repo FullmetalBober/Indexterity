@@ -102,11 +102,40 @@ export async function collectSnapshots(session: EngineSession): Promise<CollectR
       collector.hintedByCollection === undefined
         ? null
         : await collector.hintedByCollection(database, collections);
+    // The three CATALOG reads on the same terms (#461). Same shape as the two
+    // above deliberately: a batched read if the engine has one, the
+    // per-collection read if it does not, and an absent entry means the
+    // collection has no rowstore indexes.
+    //
+    // These are the reads that made a collect cost its round trips. Query Store
+    // was two scans per table and #454 fixed that; this was three statements per
+    // table, which is cheap on a local socket and is the whole budget on a
+    // cluster reached through a tunnel — 1,086 of them on the hosted
+    // deployment's 362-table cluster, whose collect then stopped fitting in five
+    // minutes and stayed broken for 19 hours.
+    const allSpecs =
+      collector.indexesByCollection === undefined
+        ? null
+        : await collector.indexesByCollection(database);
+    const allUsage =
+      collector.usageByCollection === undefined
+        ? null
+        : await collector.usageByCollection(database);
+    const allSizes =
+      collector.indexSizesByCollection === undefined
+        ? null
+        : await collector.indexSizesByCollection(database);
     for (const collection of collections) {
       const [specs, usage, sizes, collLatency, hinted] = await Promise.all([
-        collector.listIndexes(database, collection),
-        collector.collectUsage(database, collection),
-        collector.indexSizes(database, collection),
+        allSpecs === null
+          ? collector.listIndexes(database, collection)
+          : Promise.resolve(allSpecs.get(collection) ?? []),
+        allUsage === null
+          ? collector.collectUsage(database, collection)
+          : Promise.resolve(allUsage.get(collection) ?? []),
+        allSizes === null
+          ? collector.indexSizes(database, collection)
+          : Promise.resolve(allSizes.get(collection) ?? {}),
         latencies === null
           ? collector.collectionLatency(database, collection)
           : Promise.resolve(latencies.get(collection) ?? NO_ACTIVITY),

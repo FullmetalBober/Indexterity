@@ -495,6 +495,48 @@ describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", 
     expect(await collector.latencyByCollection(DB)).toEqual(latencies);
   });
 
+  // #461, and the same claim as the test above about a different source: these
+  // three read the CATALOG rather than Query Store, so what they save is round
+  // trips — three statements per table became three per database. Agreement has
+  // to be exact for every table, because the batched read is the only one the
+  // collect will call once it exists.
+  it("reads indexes, usage and sizes once per database and agrees with the per-table reads", async () => {
+    const collector = session.collector;
+    if (
+      collector.indexesByCollection === undefined ||
+      collector.usageByCollection === undefined ||
+      collector.indexSizesByCollection === undefined
+    ) {
+      throw new Error("the SQL Server collector offers the per-database catalog reads");
+    }
+    const tables = await collector.listCollectionNames(DB);
+    expect(tables).toContain("dbo.orders");
+    const [specs, usage, sizes] = await Promise.all([
+      collector.indexesByCollection(DB),
+      collector.usageByCollection(DB),
+      collector.indexSizesByCollection(DB),
+    ]);
+    // Exactly the tables the per-collection walk would visit, and no system
+    // table smuggled in by dropping the object-id predicate.
+    expect([...specs.keys()].sort()).toEqual([...tables].sort());
+    for (const table of tables) {
+      const byName = (a: { name: string }, b: { name: string }) => a.name.localeCompare(b.name);
+      expect([...(specs.get(table) ?? [])].sort(byName)).toEqual(
+        (await collector.listIndexes(DB, table)).sort(byName),
+      );
+      expect(sizes.get(table) ?? {}).toEqual(await collector.indexSizes(DB, table));
+      // Usage carries a per-replica `since` off a cached identity, so the two
+      // reads are comparable index for index.
+      const key = (stat: { indexName: string; host: string }) => `${stat.indexName}@${stat.host}`;
+      const batched = [...(usage.get(table) ?? [])].map(key).sort();
+      expect(batched).toEqual((await collector.collectUsage(DB, table)).map(key).sort());
+    }
+    // Not an agreement between two empty answers: the fixture table has indexes
+    // and one of them has been read.
+    expect((specs.get("dbo.orders") ?? []).length).toBeGreaterThan(0);
+    expect(Object.keys(sizes.get("dbo.orders") ?? {}).length).toBeGreaterThan(0);
+  });
+
   it("collects query shapes from Query Store plans (#201)", async () => {
     const workload = await session.collector.collectWorkload([
       { database: DB, collection: "dbo.orders" },

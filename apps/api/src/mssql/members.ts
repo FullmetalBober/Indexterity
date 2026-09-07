@@ -64,6 +64,12 @@ export interface MssqlRoster {
 interface MssqlUsageRow {
   indexName: string;
   ops: number;
+  // Which table the reading is for, on the read that answers a whole database
+  // at once (#461). Absent on the per-table read, which filters by object id and
+  // therefore already knows: selecting it there would be a column repeated in
+  // every row to tell the caller what it passed in. `present` at the one call
+  // site that needs it is what earns the narrowing.
+  table?: string;
 }
 
 /**
