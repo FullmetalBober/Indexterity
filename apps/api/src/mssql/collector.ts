@@ -13,6 +13,7 @@ import type {
 import { DatabaseInaccessibleError } from "../engine/ports";
 import type { IndexKey, IndexSpec, QueryShape, ServerHealth } from "../engine/types";
 import { present } from "../errors/at";
+import { ownAttributions, type PlanAttributions } from "./attributions";
 import { PLAN_PARSE_CHUNK, yieldToEventLoop } from "./chunk";
 import {
   asNumber,
@@ -407,6 +408,13 @@ export class MssqlIndexCollector implements IndexCollector {
     // member, and saying so is what lets their tests hand over a complete
     // object instead of claiming one is a `query<T>`-shaped source.
     private readonly local: MssqlUsageMember = conn,
+    // Where attributed plans are remembered (#478). Injected because the cache
+    // must OUTLIVE this object: the collector belongs to a pooled session that
+    // `jobs/connection-pool.ts` closes after five idle minutes, and holding the
+    // map here meant re-shipping every plan's XML on very nearly every pass. A
+    // collector built outside a session gets a store of its own, which is the
+    // default and is what `diagnose` and the tests want.
+    private readonly attributions: PlanAttributions = ownAttributions(),
   ) {}
 
   // Also the accessibility probe for a database, which is why it raises
@@ -900,7 +908,6 @@ export class MssqlIndexCollector implements IndexCollector {
   // with the plans the catalog just listed, so a plan Query Store has aged out
   // is forgotten with it. A restarted process reads the whole store once, which
   // is what a suggest pass ships every hour anyway.
-  private readonly attributions = new Map<string, Map<number, PlanAttribution>>();
 
   // The plans of a database, attributed — reading XML only for the plans this
   // collector has not seen, or whose hash changed. Three reads on a warm cache:
