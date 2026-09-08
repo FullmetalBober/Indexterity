@@ -7,6 +7,11 @@ import { detectEngine } from "../src/engine/registry";
 import { present } from "../src/errors/at";
 import { collectSnapshots, serializeSpec } from "../src/mongo/snapshots";
 import { mssqlAdapter } from "../src/mssql/adapter";
+import {
+  connectionFingerprint,
+  forgetAttributions,
+  sharedAttributions,
+} from "../src/mssql/attributions";
 import { MssqlIndexCollector } from "../src/mssql/collector";
 import { withMssqlCredentials } from "../src/mssql/conn-string";
 import { asNumber, MssqlConnection } from "../src/mssql/connection";
@@ -603,6 +608,37 @@ describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", 
     expect(warm.phases().map((phase) => phase.name)).toContain("queryStore:catalog");
     // Every phase closed on a read that finished — an open one would mean a
     // healthy pass reported "(still running)".
+    expect(warm.phases().filter((phase) => phase.running)).toEqual([]);
+  });
+
+  // #478. The attribution cache used to be an instance field on the collector,
+  // and the collector belongs to a pooled session that is closed after five idle
+  // minutes — so it was discarded on very nearly every cadence the pipeline has.
+  // This is the wiring claim end to end: a real read through the SESSION's
+  // collector must leave its work in the process-wide store, where a collector
+  // rebuilt for the next pass will find it.
+  it("leaves its attributions where a rebuilt session will find them", async () => {
+    const fingerprint = connectionFingerprint(present(MSSQL_URL, "MSSQL_URL"));
+    forgetAttributions();
+    expect(sharedAttributions(fingerprint).get(DB)).toBeUndefined();
+
+    // Through the adapter's own session, so this covers adapter -> collector ->
+    // store rather than a collector a test wired up itself.
+    await session.collector.latencyByCollection?.(DB);
+
+    const remembered = sharedAttributions(fingerprint).get(DB);
+    expect(remembered?.size ?? 0).toBeGreaterThan(0);
+
+    // And what a second collector on the same target sees, which is the whole
+    // point: a new instance, as a rebuilt session would have.
+    const rebuilt = new MssqlIndexCollector(seed, undefined, seed, sharedAttributions(fingerprint));
+    const warm = new PassPhases();
+    await withPhases(warm, () => rebuilt.latencyByCollection(DB));
+    // It agrees with what the session read, without having read the XML for the
+    // plans the session already attributed.
+    expect(sharedAttributions(fingerprint).get(DB)?.size ?? 0).toBeGreaterThanOrEqual(
+      remembered?.size ?? 0,
+    );
     expect(warm.phases().filter((phase) => phase.running)).toEqual([]);
   });
 

@@ -7,6 +7,7 @@ import type {
   IndexExecutor,
   TlsOverrides,
 } from "../engine/ports";
+import { connectionFingerprint, sharedAttributions } from "./attributions";
 import { assertMssqlTlsEnforced } from "./client";
 import { MssqlIndexCollector } from "./collector";
 import { applyMssqlTlsOverrides, isMssqlConnString, mssqlHosts } from "./conn-string";
@@ -37,7 +38,17 @@ class MssqlEngineSession implements EngineSession {
     // same cluster reached one node at a time, and a certificate the owner
     // accepted for it is accepted for its replicas too.
     this.members = new MssqlMemberConnections(conn, connString, overrides, proxy, route);
-    this.collector = new MssqlIndexCollector(conn, this.members);
+    // The attribution cache is keyed by the connection target and held by the
+    // module, not by this session (#478). A session is closed after five idle
+    // minutes and rebuilt on the next pass; what a plan names does not change
+    // when that happens, and re-reading every plan's XML because it did was the
+    // whole of the cost.
+    this.collector = new MssqlIndexCollector(
+      conn,
+      this.members,
+      conn,
+      sharedAttributions(connectionFingerprint(connString)),
+    );
   }
 
   executor(readOnly: boolean): IndexExecutor {
