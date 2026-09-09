@@ -5,6 +5,7 @@ import { applyCluster } from "./apply";
 import { settleBuildsForCluster } from "./building";
 import { refreshInferredWindow } from "./change-window";
 import { classifyCluster } from "./classify";
+import { classifyChaseIsDue } from "./classify-cadence";
 import { ClusterGoneError } from "./cluster-connection";
 import { ClusterTasksService } from "./cluster-tasks.service";
 import { collectCluster } from "./collect";
@@ -16,7 +17,18 @@ import { suggestForCluster } from "./suggest";
 // The passes themselves are tested where they live. What is untested — and what a
 // registry refactor can silently break — is which pass each queue name runs and
 // what it enqueues afterwards, so that is what this pins.
-vi.mock("./collect", (): typeof import("./collect") => ({ collectCluster: vi.fn() }));
+// `collectCluster` returns what the collect learned now, and the chase reads it
+// (#483) — so the default answer has to be a real outcome rather than undefined.
+vi.mock("./collect", (): typeof import("./collect") => ({
+  collectCluster: vi.fn(async () => ({ snapshots: 3, inserted: 3, extended: 0 })),
+}));
+// The cadence gate talks to worker_watermarks, and this suite's database never
+// opens a socket. Mocked to "due", so the assertions below that are about WHICH
+// pass runs stay about that; the two that are about the gate set it explicitly.
+vi.mock("./classify-cadence", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./classify-cadence")>()),
+  classifyChaseIsDue: vi.fn(async () => true),
+}));
 vi.mock("./classify", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./classify")>()),
   classifyCluster: vi.fn(),
@@ -120,6 +132,36 @@ describe("the per-cluster passes", () => {
       "classify",
       "suggest",
     ]);
+  });
+
+  // The gate is handed WHETHER the collect learned anything, not how much. A row
+  // is inserted only when the state it records is new, so `inserted > 0` is the
+  // question — and `extended` deliberately does not enter it, or an idle cluster
+  // whose runs are being extended would read as changing every hour.
+  it("tells the cadence gate whether the collect learned anything", async () => {
+    vi.mocked(collectCluster).mockResolvedValueOnce({ snapshots: 9, inserted: 0, extended: 9 });
+    await service().collect({ clusterId: CLUSTER }, helpers());
+    expect(classifyChaseIsDue).toHaveBeenCalledWith(db, CLUSTER, false);
+
+    vi.mocked(collectCluster).mockResolvedValueOnce({ snapshots: 9, inserted: 1, extended: 8 });
+    await service().collect({ clusterId: CLUSTER }, helpers());
+    expect(classifyChaseIsDue).toHaveBeenLastCalledWith(db, CLUSTER, true);
+  });
+
+  // The saving, and the shape of it: `suggest` is NOT rate-limited with it.
+  // suggest reads the recommendations classify already wrote and can auto-approve
+  // a build, and the five-minute probe chases it directly when a collection goes
+  // slow — so slowing it down would slow the signal that has to be fast, which is
+  // the opposite of the trade this makes.
+  it("skips only the classify when the cadence gate says not yet", async () => {
+    vi.mocked(classifyChaseIsDue).mockResolvedValueOnce(false);
+    const help = helpers();
+    await service().collect({ clusterId: CLUSTER }, help);
+
+    expect(help.addJob.mock.calls.map((call: unknown[]) => call[0])).toEqual(["suggest"]);
+    // And it says so. A skipped classify that logged nothing would make "no
+    // recommendations changed today" indistinguishable from a stopped pipeline.
+    expect(help.logger.info.mock.calls.flat().join(" ")).toContain("classify is not due yet");
   });
 
   // Nothing is chased when the collect itself did not land: the enqueue happens

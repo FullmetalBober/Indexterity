@@ -252,6 +252,44 @@ const workerShape = {
   // that will sit still for it. The failure it prevents is not slowness; it is a
   // pass that can never finish holding the only slot while it fails to.
   CLUSTER_PASS_BUDGET_MS: positiveInteger(300_000),
+  // How often `classify` may be chased for one cluster when the collect that
+  // triggered it LEARNED something — a counter moved, an index appeared (#482).
+  //
+  // Six hours, down from every collect. `classify` was chased on every landed
+  // collect and the collect cadence is hourly, so it re-derived an index-usage
+  // verdict once an hour from a series that had grown by one reading. That
+  // verdict is a claim about WEEKS: the trust gate wants a long series precisely
+  // so "unused" means something, and 72 active hours is the floor for saying it
+  // at all. Re-deriving it hourly does not change the answer, it re-reads the
+  // evidence — and it is the largest consumer of network transfer in the hosted
+  // deployment, which exhausted its 5 GB monthly allowance on an 82 MB database.
+  //
+  // This is a PRODUCT number as much as a performance one, and worth saying so:
+  // it is how stale a recommendation may be. Four refreshes a day rather than
+  // twenty-four. Lower it on a self-hosted install with transfer to spare.
+  //
+  // The five-minute probe is untouched and is what makes that affordable — a
+  // missing index shows up as read latency long before the next classify would
+  // notice, and the probe chases `suggest` directly (jobs/probe.ts). So the
+  // signal that has to be fast still is; what slowed down is the re-derivation
+  // of a verdict about weeks.
+  CLASSIFY_MIN_INTERVAL_MS: positiveInteger(21_600_000),
+  // The ceiling on the same key when the collect learned NOTHING (#483).
+  //
+  // An idle cluster reports byte-identical counters, so its rows are extended
+  // rather than inserted and there is no new evidence to re-derive a verdict
+  // from. Skipping the chase entirely would be wrong, though, and this is the
+  // number that makes it safe: an extension still moves `lastSeenAt` and bumps
+  // `observations`, which is how an index that has been idle all along
+  // eventually clears the trust gate's span and count floors. A cluster left
+  // unclassified until its counters moved would never make that crossing —
+  // nothing would have moved.
+  //
+  // So daily, which is well inside every floor it could cross: `minHistoryDays`
+  // is three and `minActiveHours` seventy-two. Must be at least
+  // CLASSIFY_MIN_INTERVAL_MS to mean anything; a smaller value would make an
+  // idle cluster classify MORE often than a busy one.
+  CLASSIFY_IDLE_INTERVAL_MS: positiveInteger(86_400_000),
   // How long ONE index build may run before the engine cancels it (#410).
   //
   // Separate from every other statement budget because a build is not like any

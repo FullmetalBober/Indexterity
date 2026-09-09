@@ -266,7 +266,7 @@ describe("cluster lifecycle", () => {
     expect(rotated.status).toBe(200);
     // Run the job directly: the endpoint only queues now, so a 200 from it
     // would prove a row was inserted, not that the new string dials.
-    expect(await collectCluster(db, clusterId)).toBeGreaterThan(0);
+    expect((await collectCluster(db, clusterId)).snapshots).toBeGreaterThan(0);
     const queued = await api(`/clusters/${clusterId}/collect`, owner, {
       method: "POST",
       body: JSON.stringify({}),
@@ -445,7 +445,7 @@ describe("cluster rename", () => {
   // and connect again", so the rename has to leave it where it was.
   it("keeps everything collected about the cluster", async () => {
     const collected = await collectCluster(db, renameId);
-    expect(collected).toBeGreaterThan(0);
+    expect(collected.snapshots).toBeGreaterThan(0);
     const before = await db
       .select({ id: indexSnapshots.id })
       .from(indexSnapshots)
@@ -664,7 +664,7 @@ describe("collect, audit trail and undo", () => {
     });
     expect(res.status).toBe(200);
     expect(asRecord(await res.json()).queued).toBe(true);
-    expect(await collectCluster(db, clusterId)).toBeGreaterThan(0);
+    expect((await collectCluster(db, clusterId)).snapshots).toBeGreaterThan(0);
   });
 
   it("summarizes the per-collection index footprint", async () => {
@@ -1251,7 +1251,7 @@ describe("least-privilege provisioning", () => {
     expect(asRecord(Array.isArray(roles) ? roles[0] : {}).role).toBe("indexterityEngine");
 
     // The sealed string the engine dials is the scoped one — collect works on it.
-    expect(await collectCluster(db, provisionedId)).toBeGreaterThan(0);
+    expect((await collectCluster(db, provisionedId)).snapshots).toBeGreaterThan(0);
 
     await mongo.db("admin").command({ dropUser: username });
   });
@@ -4651,7 +4651,7 @@ describe("collecting twice writes almost nothing the second time", () => {
   it("extends the runs it has instead of inserting a row per index", async () => {
     // Two collects driven from here rather than left to the scheduler: connecting
     // only enqueues a tick, and the suite runs no worker.
-    await collectCluster(db, runClusterId);
+    const first = await collectCluster(db, runClusterId);
     const before = await db
       .select({ id: indexSnapshots.id })
       .from(indexSnapshots)
@@ -4664,7 +4664,20 @@ describe("collecting twice writes almost nothing the second time", () => {
     // The first look is a run of one for every index it saw.
     expect(dimensionsBefore.length).toBe(before.length);
 
-    await collectCluster(db, runClusterId);
+    const second = await collectCluster(db, runClusterId);
+
+    // Which of the two things each row got, as the collect reports it (#483).
+    // That is the only record of it that survives the write — an inserted row and
+    // an extended one are the same table afterwards — and it is what decides
+    // whether classify is chased at all.
+    //
+    // Nothing existed to extend on the first look, so every row it wrote was an
+    // insert. The second look extends most of them; not all, because the control
+    // plane is querying this very cluster and a few counters legitimately moved.
+    expect(first.extended).toBe(0);
+    expect(first.inserted).toBeGreaterThan(0);
+    expect(second.extended).toBeGreaterThan(0);
+    expect(second.inserted).toBeLessThan(first.inserted);
 
     const after = await db
       .select()
@@ -6384,7 +6397,7 @@ describe("choosing which databases to observe", () => {
 
     // The proof the whole feature is for: the collect walks the selection and
     // nothing else, on a cluster whose credentials can read every database.
-    expect(await collectCluster(db, observedId)).toBeGreaterThan(0);
+    expect((await collectCluster(db, observedId)).snapshots).toBeGreaterThan(0);
     const walked = await db
       .selectDistinct({ database: clusterIndexes.database })
       .from(clusterIndexes)
