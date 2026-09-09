@@ -4572,7 +4572,9 @@ describe("probe baselines", () => {
       },
     ]);
 
-    const rows = (await latestBaselines(db, clusterId)).filter((row) => row.database === "bl");
+    const rows = (await latestBaselines(db, clusterId, 10_000)).filter(
+      (row) => row.database === "bl",
+    );
 
     expect(rows).toHaveLength(2);
     const byNs = new Map(rows.map((row) => [row.collection, row]));
@@ -4581,6 +4583,43 @@ describe("probe baselines", () => {
     expect(byNs.get("a")?.readLatencyMicros).toBe(300);
     // And the 02-04 row for b, not the 02-03 one.
     expect(byNs.get("b")?.readOps).toBe(90);
+  });
+
+  // The limit moved from a JS slice into the query (#486), which puts the
+  // busiest-first ORDER BY somewhere it can be got wrong two ways: `distinct on`
+  // fixes the leading sort keys, so the order has to live on a wrapping select,
+  // and a sort on read_ops alone would leave ties in arrival order — a cluster of
+  // equally idle collections would probe a different arbitrary twenty each pass
+  // and never accumulate a comparison for any of them.
+  it("orders busiest-first and limits inside the query, breaking ties by namespace", async () => {
+    // The limit applies to the whole cluster, so the fixture has to dominate
+    // whatever the tests before this one left on it rather than hope. Read the
+    // ceiling instead of assuming one.
+    const ceiling = (await latestBaselines(db, clusterId, 10_000)).reduce(
+      (max, row) => Math.max(max, row.readOps),
+      0,
+    );
+    const busy = ceiling + 1_000;
+    const capturedAt = new Date("2026-03-01T00:00:00Z");
+    // The three columns this fixture does not vary.
+    const FLAT = { readLatencyMicros: 0, writeOps: 0, writeLatencyMicros: 0 };
+    await insertLatency(db, [
+      // Three tied at the top, inserted out of namespace order, so the tie-break
+      // is the only thing that can decide it...
+      { clusterId, database: "bz", collection: "c", readOps: busy, ...FLAT, capturedAt },
+      { clusterId, database: "bz", collection: "a", readOps: busy, ...FLAT, capturedAt },
+      { clusterId, database: "ba", collection: "b", readOps: busy, ...FLAT, capturedAt },
+      // ...and a fourth just below, so the limit is what cuts rather than the sort.
+      { clusterId, database: "ba", collection: "a", readOps: busy - 1, ...FLAT, capturedAt },
+    ]);
+
+    const rows = await latestBaselines(db, clusterId, 3);
+
+    expect(rows.map((row) => `${row.database}.${row.collection}`)).toEqual([
+      "ba.b",
+      "bz.a",
+      "bz.c",
+    ]);
   });
 });
 

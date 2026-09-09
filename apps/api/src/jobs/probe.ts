@@ -6,7 +6,7 @@ import {
   MSSQL_HEALTH,
   readPressure,
 } from "../analysis";
-import { type Database, desc, eq, latencySamples } from "../db";
+import { asc, type Database, desc, eq, latencySamples } from "../db";
 import type { ClusterEngine, CollectionLatency } from "../engine/ports";
 import type { TunnelRegistry } from "../tunnel/tunnel.registry";
 import { openClusterSession } from "./cluster-connection";
@@ -53,12 +53,31 @@ export interface PressureFinding {
   readonly reason: string;
 }
 
-// The newest stored sample per namespace, which is what "how fast was this
-// collection before" means. Exported because it is the one part of the probe that
-// can be wrong quietly: pick an older row and the comparison below is against the
-// wrong baseline, and nothing about the finding would look unusual.
-export function latestBaselines(db: Database, clusterId: string) {
-  return db
+// The newest stored sample for each of the `limit` busiest namespaces, which is
+// what "how fast were the collections that carry traffic before" means. Exported
+// because it is the one part of the probe that can be wrong quietly: pick an older
+// row and the comparison below is against the wrong baseline, and nothing about
+// the finding would look unusual.
+//
+// The limit is a PARAMETER OF THE READ, not a slice after it (#486). It used to be
+// the latter, and that made the query return one row per collection on the cluster
+// to keep twenty of them — twelve times an hour, per cluster, scaling with
+// collection count rather than with anything the probe cares about. A cluster with
+// two hundred collections shipped two hundred rows to use twenty.
+//
+// TWO SELECTS, because `distinct on` fixes the leading ORDER BY to the distinct
+// expressions — which is exactly the constraint that put the sort in JS in the
+// first place. Busiest-first cannot share that ORDER BY, so it goes on a wrapping
+// select over the inner one.
+//
+// The tie-break is not decoration. Sorting on `read_ops` alone left ties in
+// whatever order the rows arrived, which was invisible while the sort was in JS
+// over the whole set and would not be here: a cluster whose collections are all
+// equally idle would probe a different arbitrary twenty every five minutes, so
+// nothing would ever accumulate a comparison. Namespace order is arbitrary too,
+// and it is the same arbitrary order every pass.
+export function latestBaselines(db: Database, clusterId: string, limit: number) {
+  const newest = db
     .selectDistinctOn([latencySamples.database, latencySamples.collection], {
       database: latencySamples.database,
       collection: latencySamples.collection,
@@ -67,7 +86,18 @@ export function latestBaselines(db: Database, clusterId: string) {
     })
     .from(latencySamples)
     .where(eq(latencySamples.clusterId, clusterId))
-    .orderBy(latencySamples.database, latencySamples.collection, desc(latencySamples.capturedAt));
+    .orderBy(latencySamples.database, latencySamples.collection, desc(latencySamples.capturedAt))
+    .as("newest");
+  return db
+    .select({
+      database: newest.database,
+      collection: newest.collection,
+      readOps: newest.readOps,
+      readLatencyMicros: newest.readLatencyMicros,
+    })
+    .from(newest)
+    .orderBy(desc(newest.readOps), asc(newest.database), asc(newest.collection))
+    .limit(limit);
 }
 
 // Returns the collections found under read pressure. The caller decides what to
@@ -81,33 +111,52 @@ export async function probeCluster(
   // refused rather than dialled directly.
   tunnels?: TunnelRegistry,
 ): Promise<PressureFinding[]> {
-  // The most recent stored sample per collection is the baseline, and `distinct
-  // on` is the whole point here: this used to select EVERY latency_samples row for
-  // the cluster and pick the newest per namespace in JS. That is one row per
-  // collection per collect since the cluster was connected — on a year-old cluster
-  // with two hundred collections, ~292k rows read, shipped and mapped every five
-  // minutes to arrive at two hundred. Postgres picks one per namespace instead,
-  // and only the four columns the comparison below reads.
+  // The baseline is the most recent stored sample per collection, for the busiest
+  // collections only — a collection nobody reads cannot be suffering from a
+  // missing index right now.
   //
-  // `latency_samples_cluster_ns_time` is the index that makes it an ordered index
-  // scan instead of a sort: measured on 30k synthetic rows, 9.3ms against 54.8ms,
-  // and no Sort node. The planner only prefers it once a cluster is a fraction of
-  // the table, which is every deployment with more than one — with a single
-  // cluster filling the table a seq scan plus an in-memory quicksort is genuinely
-  // cheaper, and it is welcome to choose that. What this rewrite fixes either way
-  // is the part that was never the planner's call: reading every row out of
-  // postgres and building a 292k-entry Map in JS to keep two hundred of them.
+  // Both halves of that are postgres' job now (#486). The `distinct on` has been
+  // for a while: this used to select EVERY latency_samples row for the cluster and
+  // pick the newest per namespace in JS, one row per collection per collect since
+  // the cluster was connected — on a year-old cluster with two hundred
+  // collections, ~292k rows read, shipped and mapped every five minutes to arrive
+  // at two hundred. The busiest-twenty was still a JS slice after it, which left
+  // the read returning ten times what it used it: two hundred rows in, twenty out.
   //
-  // Still O(rows the cluster has written); what collapses that is storing one row
-  // per counter state rather than one per collect (#67).
-  const baselines = await latestBaselines(db, clusterId);
+  // `latency_samples_cluster_ns_time` is the index that makes the inner select an
+  // ordered index scan instead of a sort: measured on 30k synthetic rows, 9.3ms
+  // against 54.8ms, and no Sort node. The limit does not disturb that, which was
+  // the thing to check rather than assume — it is the INNER select's ORDER BY the
+  // index serves, and the wrapping sort is over one row per namespace, the set
+  // that used to be sorted in JS.
+  //
+  // Re-measured on postgres 17, 160k rows over four clusters, 120k of them on the
+  // cluster under test across 2,000 namespaces. The plan gains exactly one node:
+  //
+  //   Limit
+  //     Sort (top-N heapsort, 27 kB)
+  //       Subquery Scan
+  //         Unique
+  //           Index Scan using latency_samples_cluster_ns_time
+  //
+  // Five runs each, medians: 58.0ms unlimited against 56.9ms limited. The top-N
+  // heapsort over 2,000 rows is noise beside the 120k-row index scan both plans
+  // pay, so this is not a server-side speedup and is not claimed as one — the
+  // saving is that 20 rows cross the wire instead of 2,000, which is the cost the
+  // hosted deployment ran out of.
+  //
+  // The planner only prefers that index once a cluster is a fraction of the
+  // table, which is every deployment with more than one — with a single cluster
+  // filling the table a seq scan plus an in-memory quicksort is genuinely
+  // cheaper, and it is welcome to choose that.
+  //
+  // Still O(rows the cluster has written) to SCAN; what collapses that is storing
+  // one row per counter state rather than one per collect (#67). What the limit
+  // fixes is the part that was never the planner's call: how much of the answer
+  // crosses the wire.
+  const busiest = await latestBaselines(db, clusterId, PROBE_COLLECTIONS);
 
-  if (baselines.length === 0) return [];
-
-  // Busiest first — a collection nobody reads cannot be suffering from a missing
-  // index right now. Sorted here rather than in SQL because `distinct on` fixes
-  // the leading ORDER BY, and by this point it is two hundred rows, not 292k.
-  const busiest = [...baselines].sort((a, b) => b.readOps - a.readOps).slice(0, PROBE_COLLECTIONS);
+  if (busiest.length === 0) return [];
 
   const { session, engine, release } = await openClusterSession(db, clusterId, { tunnels });
   try {
