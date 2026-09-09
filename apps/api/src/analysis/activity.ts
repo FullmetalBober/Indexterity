@@ -54,9 +54,35 @@ const HOUR_MS = 3_600_000;
 // a collection idle for a month would report a month of activity, and idleness
 // would start funding the drops it is meant to withhold.
 export function activeHours(points: readonly ActivityPoint[]): number {
+  return activeHoursFrom(foldActivity(points));
+}
+
+// The FOLD, separated from the rule above (#484).
+//
+// Everything `activeHours` does divides in two: a sum over consecutive readings,
+// and a unit conversion. The sum is the part that costs O(retained history) to
+// compute, and it is the part postgres can do — one row per collection instead of
+// one per collection per collect, over the same window (jobs/latency-evidence.ts).
+//
+// The split exists so there is still ONE rule. A SQL query that reproduced
+// `activeHours` whole would be a second copy of the threshold arithmetic, free to
+// drift from this one with nothing in the data to notice; a query that produces
+// `activeMs` is a copy of the arithmetic that has a cross-check available, because
+// both sides can be run over the same rows and compared. `latency-evidence.int.test.ts`
+// does exactly that.
+export interface ActivityFold {
+  // Summed active time, in ms, already capped per interval.
+  readonly activeMs: number;
+  // Whether there was any interval to measure at all. A collection with one
+  // reading has no gap between two, so the median cap is undefined and the
+  // honest answer is no active time rather than zero-with-confidence.
+  readonly measurable: boolean;
+}
+
+export function foldActivity(points: readonly ActivityPoint[]): ActivityFold {
   const sorted = sortedRuns(points);
   const cap = medianObservationGap(sorted);
-  if (cap === 0) return 0;
+  if (cap === 0) return { activeMs: 0, measurable: false };
 
   let activeMs = 0;
   for (let i = 1; i < sorted.length; i++) {
@@ -66,5 +92,9 @@ export function activeHours(points: readonly ActivityPoint[]): number {
     const delta = current.readOps - previous.readOps;
     if (delta > 0) activeMs += Math.min(spanStart(current) - spanEnd(previous), cap);
   }
-  return activeMs / HOUR_MS;
+  return { activeMs, measurable: true };
+}
+
+export function activeHoursFrom(fold: ActivityFold): number {
+  return fold.measurable ? fold.activeMs / HOUR_MS : 0;
 }

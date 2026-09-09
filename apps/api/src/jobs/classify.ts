@@ -1,12 +1,10 @@
 import {
-  type ActivityPoint,
-  activeHours,
+  activeHoursFrom,
   DEFAULT_OBSERVE_DAYS,
   type IndexInput,
   isNeverDrop,
-  type LatencyReading,
   MAX_GAP_HOURS,
-  observationCanFinish,
+  observationCanFinishFrom,
   parseStoredSpec,
   type RefusalCounts,
   recommendForCollection,
@@ -15,7 +13,6 @@ import {
   type SuppressionGuard,
   usageTrustRefusal,
 } from "../analysis";
-import { runFrom } from "../analysis/types";
 import type { Database } from "../db";
 import {
   analysisNotes,
@@ -27,12 +24,13 @@ import {
   inArray,
   indexCooldowns,
   indexSnapshots,
-  latencySamples,
   policies,
   recommendations,
 } from "../db";
+import { workloadKey } from "../engine/ports";
 import { recordUsageTrust } from "../metrics";
 import { activeCooldownKeys, cooldownKey } from "./cooldowns";
+import { collectionEvidence, NO_EVIDENCE } from "./latency-evidence";
 import { compactMembers, decodeMembers, memberDictionary } from "./per-member";
 import { historyWindow } from "./plan";
 import {
@@ -247,47 +245,28 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
           },
         ];
   });
-  // Per-collection latency counters. Two questions off one read: whether the
+  // Per-collection latency evidence. Two questions off one read: whether the
   // collection served enough reads for absence of usage to mean anything (the
   // activity gate), and whether an observe window on it could finish (below).
   //
-  // NAMED COLUMNS, not `select()` (#474). The three this does not ask for — `id`,
-  // `cluster_id` and the generated `span` — are half the bytes of the row and
-  // none of them is read: the id is never used, the cluster is the filter, and
-  // `span` is a stored range derived from two columns already here. Measured on
-  // the hosted deployment: 6,797 kB as `select *` against 3,329 kB for these ten.
-  const latencyRows = await db
-    .select({
-      database: latencySamples.database,
-      collection: latencySamples.collection,
-      readOps: latencySamples.readOps,
-      readLatencyMicros: latencySamples.readLatencyMicros,
-      writeOps: latencySamples.writeOps,
-      writeLatencyMicros: latencySamples.writeLatencyMicros,
-      capturedAt: latencySamples.capturedAt,
-      lastSeenAt: latencySamples.lastSeenAt,
-      observations: latencySamples.observations,
-      maxGapMs: latencySamples.maxGapMs,
-    })
-    .from(latencySamples)
-    .where(and(eq(latencySamples.clusterId, clusterId), gte(latencySamples.lastSeenAt, since)));
-  const activityByCollection = new Map<string, ActivityPoint[]>();
-  const latencyByCollection = new Map<string, LatencyReading[]>();
-  for (const sample of latencyRows) {
-    const key = `${sample.database}\u0000${sample.collection}`;
-    const list = activityByCollection.get(key) ?? [];
-    list.push({ ...runFrom(sample), readOps: sample.readOps });
-    activityByCollection.set(key, list);
-    const readings = latencyByCollection.get(key) ?? [];
-    readings.push({
-      ...runFrom(sample),
-      readOps: sample.readOps,
-      readLatencyMicros: sample.readLatencyMicros,
-      writeOps: sample.writeOps,
-      writeLatencyMicros: sample.writeLatencyMicros,
-    });
-    latencyByCollection.set(key, readings);
-  }
+  // FOLDED IN POSTGRES, one row per collection (#484, #485). This used to select
+  // the cluster's whole retained window of raw rows and reduce them here, and
+  // `latency_samples` is the one table that run-length-collapses nothing — 76% of
+  // `index_snapshots` looks fold into runs and 0% of these do, because $collStats
+  // totals move on any operation. So the read was one row per collection per
+  // collect for the length of the entitlement, which on PRO is 183 days: the term
+  // that grows strictly linearly with time forever, and the one #474's constant
+  // factor could not touch.
+  //
+  // Both answers are folds over consecutive readings, so `lag()` expresses them
+  // exactly and the result is O(collections). The rules stay in analysis/ —
+  // `activeHoursFrom` and `observationCanFinishFrom` — so the query reproduces
+  // arithmetic that can be cross-checked and not thresholds that cannot.
+  //
+  // `since` is unchanged: the entitlement still bounds what may be CONCLUDED
+  // (D112). What #485 separated from it is how many rows have to cross the wire
+  // to conclude it, which is now the collection count rather than the window.
+  const evidence = await collectionEvidence(db, clusterId, since);
   type Row = (typeof rows)[number];
 
   const byCollection = new Map<
@@ -353,9 +332,9 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
       });
     }
     const weights = regressionWeights.get(`${entry.database} ${entry.collection}`) ?? {};
-    const active = activeHours(
-      activityByCollection.get(`${entry.database}\u0000${entry.collection}`) ?? [],
-    );
+    const collectionEvidenceFor =
+      evidence.get(workloadKey(entry.database, entry.collection)) ?? NO_EVIDENCE;
+    const active = activeHoursFrom(collectionEvidenceFor.activity);
     // What the usage gate decided, per index, before anything acts on it (#267).
     // Same eligibility the recommender applies, so the denominator is the set of
     // indexes a usage finding was actually possible for — a protected index is
@@ -433,11 +412,7 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
       // hide-and-observe path and would all churn.
       if (
         DROP_CANDIDATES.has(candidate.type) &&
-        !observationCanFinish(
-          latencyByCollection.get(`${entry.database}\u0000${entry.collection}`) ?? [],
-          "read",
-          observeDays,
-        )
+        !observationCanFinishFrom(collectionEvidenceFor.observation, observeDays)
       ) {
         suppress("unobservable");
         continue;

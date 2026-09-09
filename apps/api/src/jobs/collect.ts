@@ -41,6 +41,50 @@ import { watchKey } from "./watched";
 // to collide.
 const SEP = "\u0000";
 
+// How a write to one of the two run-length tables came out.
+//
+// `inserted` is the interesting half: a row is only inserted when the state it
+// records is NEW — a counter that moved, an index that appeared, or a run the
+// collector refused to extend across a gap. `extended` is the rest, an existing
+// row's `lastSeenAt` and `observations` moved forward because the reading was
+// byte-identical to the one already stored.
+interface WriteCounts {
+  readonly inserted: number;
+  readonly extended: number;
+}
+
+const NOTHING_WRITTEN: WriteCounts = { inserted: 0, extended: 0 };
+
+// What one collect did, as something the caller can act on (#483).
+//
+// It used to return `snapshots.length`, and that number cannot answer the
+// question the caller actually has. It is how many snapshots the collect SAW —
+// every index on the cluster, every time, whether or not anything about them
+// changed — so a collect against a completely idle cluster returns the same
+// figure as one where every counter moved.
+export interface CollectOutcome {
+  // How many index snapshots the collect saw. Unchanged in meaning, and still
+  // what the callers asserting "something was collected" are asking.
+  readonly snapshots: number;
+  // Rows inserted across BOTH series, because their state was new. Zero means
+  // the cluster reported exactly what it reported last time: nothing was
+  // learned that a verdict could turn on, so re-deriving one would re-derive
+  // the same answer from the same evidence.
+  //
+  // Summed across the two tables rather than reported per table, because the
+  // question is one boolean and both series feed it. A moved latency counter is
+  // evidence even when no index counter moved — the activity gate reads it, and
+  // "the collection served reads and this index served none of them" is exactly
+  // the claim it licenses.
+  readonly inserted: number;
+  // Runs extended, across both series. Not evidence a verdict turns on by
+  // itself, and NOT nothing either: an extension moves `lastSeenAt` and bumps
+  // `observations`, which is how an idle index eventually clears the trust
+  // gate's span and count floors. That is what the idle ceiling on the chase
+  // cadence exists for — see jobs/classify-cadence.ts.
+  readonly extended: number;
+}
+
 // An index's identity AND the shape it was in. A rebuilt index has a dimension
 // row per shape, and the one a collect belongs to is the one whose spec matches
 // what was just read off the cluster.
@@ -167,16 +211,21 @@ async function dimensionIds(
 }
 
 // Extend the run each index already has, or start a new one.
+//
+// Returns which of the two it did, per row. The counts are the only record of it
+// that survives the write: an inserted row and an extended one are the same table
+// afterwards, and the caller's question — did this collect learn anything a
+// verdict could turn on — is answerable here and nowhere later (#483).
 async function recordSnapshots(
   db: Database,
   clusterId: string,
   snapshots: readonly CollectedSnapshot[],
   now: Date,
-): Promise<void> {
-  if (snapshots.length === 0) return;
+): Promise<WriteCounts> {
+  if (snapshots.length === 0) return NOTHING_WRITTEN;
   const ids = await dimensionIds(db, clusterId, snapshots);
   const indexIds = [...ids.values()];
-  if (indexIds.length === 0) return;
+  if (indexIds.length === 0) return NOTHING_WRITTEN;
 
   // The newest run per index. `distinct on` over index_snapshots_index_time, so
   // this reads one row per index rather than the cluster's whole history.
@@ -253,6 +302,7 @@ async function recordSnapshots(
     `);
   }
   if (insert.length > 0) await db.insert(indexSnapshots).values(insert);
+  return { inserted: insert.length, extended: extend.length };
 }
 
 // The same two rules over latency_samples. No dimension half here: every column
@@ -262,8 +312,8 @@ async function recordLatency(
   clusterId: string,
   latency: readonly CollectedLatency[],
   now: Date,
-): Promise<void> {
-  if (latency.length === 0) return;
+): Promise<WriteCounts> {
+  if (latency.length === 0) return NOTHING_WRITTEN;
   const newest = await db
     .selectDistinctOn([latencySamples.database, latencySamples.collection], {
       id: latencySamples.id,
@@ -310,6 +360,7 @@ async function recordLatency(
       .where(inArray(latencySamples.id, extend));
   }
   if (insert.length > 0) await db.insert(latencySamples).values(insert);
+  return { inserted: insert.length, extended: extend.length };
 }
 
 // The roster is replaced whole, never merged: the members are one fact about
@@ -340,7 +391,7 @@ export async function collectCluster(
   // #353 needs none; a cluster WITH a tunnel_id and no registry is
   // refused rather than dialled directly.
   tunnels?: TunnelRegistry,
-): Promise<number> {
+): Promise<CollectOutcome> {
   const { session, release } = await openClusterSession(db, clusterId, { tunnels });
   try {
     // The roster costs one hello per member on connections the usage pass
@@ -356,12 +407,18 @@ export async function collectCluster(
     // Independent tables, so they go together rather than one after the
     // other — the point of this change is to make collecting more often cheap,
     // and a serialised round trip is the kind of cost that scales with cadence.
-    await Promise.all([
+    const [written, latencyWritten] = await Promise.all([
       recordSnapshots(db, clusterId, snapshots, now),
       recordLatency(db, clusterId, latency, now),
       recordRoster(db, clusterId, nodes, now),
     ]);
-    return snapshots.length;
+    // The roster is deliberately not counted. It is replaced whole on every
+    // collect and carries no history, so it is never evidence about an index.
+    return {
+      snapshots: snapshots.length,
+      inserted: written.inserted + latencyWritten.inserted,
+      extended: written.extended + latencyWritten.extended,
+    };
   } finally {
     release();
   }
