@@ -226,6 +226,14 @@ test and the port-forward in NOTES.txt all read the same number they did before.
 # a long index build runs to completion.
 - name: CLUSTER_PASS_BUDGET_MS
   value: {{ .Values.config.clusterPassBudgetMs | quote }}
+# How stale a recommendation may be: the floor between two classify passes on one
+# cluster when the collect that triggered it learned something, and the ceiling
+# when it did not. `int64` before `quote` for the same reason as the build
+# timeout below — a bare 86400000 renders as "8.64e+07" otherwise.
+- name: CLASSIFY_MIN_INTERVAL_MS
+  value: {{ .Values.config.classifyMinIntervalMs | int64 | quote }}
+- name: CLASSIFY_IDLE_INTERVAL_MS
+  value: {{ .Values.config.classifyIdleIntervalMs | int64 | quote }}
 # One index build's own budget, separate from the per-statement one a read gets.
 # Postgres and SQL Server only.
 # `int64` before `quote`, and it is load-bearing: YAML reads a bare 7200000 as a

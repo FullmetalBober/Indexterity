@@ -10,6 +10,7 @@ import { markBlocked, markUnblocked } from "./blocked";
 import { settleBuildsForCluster } from "./building";
 import { refreshInferredWindow } from "./change-window";
 import { classifyCluster } from "./classify";
+import { classifyChaseIsDue } from "./classify-cadence";
 import { collectCluster } from "./collect";
 import { applyCreatesForCluster } from "./create";
 import { enqueueClusterPass, type JobQueue, runningPasses } from "./dispatch";
@@ -75,14 +76,33 @@ export class ClusterTasksService {
 
   async collect(payload: unknown, helpers: JobQueue): Promise<void> {
     await this.onCluster("collect", payload, helpers, async (clusterId) => {
-      await collectCluster(this.database.db, clusterId, this.tunnels);
+      const collected = await collectCluster(this.database.db, clusterId, this.tunnels);
       // Only chase a collect that actually landed — re-analysing an unchanged
       // history just re-derives yesterday's answer. Enqueued the way the
       // schedulers enqueue (#454): keyed, queued per cluster, five attempts —
       // so a chased suggest dedupes against the hourly one instead of running
       // beside it with the library's default of twenty-five retries.
       const running = runningPasses(this.database.db);
-      await enqueueClusterPass(helpers, running, "classify", clusterId);
+      // That sentence was the intent from the start and this is the code for it
+      // (#482, #483). "The collect landed" is not the same claim as "the collect
+      // learned something": every collect sees every index, so it landed either
+      // way, and `classify` was chased hourly to re-derive a verdict that rests
+      // on weeks of evidence from a series one reading longer.
+      //
+      // `collected.inserted` is the honest test — a row is inserted only when
+      // the state it records is new — and jobs/classify-cadence.ts turns it into
+      // an interval, with a longer one rather than none when nothing was learned.
+      // Skipped ticks are LOGGED rather than silent: "no recommendations changed
+      // today" reads identically to a pipeline that stopped, and that is the one
+      // question this must not make harder to answer.
+      if (await classifyChaseIsDue(this.database.db, clusterId, collected.inserted > 0)) {
+        await enqueueClusterPass(helpers, running, "classify", clusterId);
+      } else {
+        helpers.logger.info(
+          `collect: cluster ${clusterId} wrote ${collected.inserted} new reading(s) ` +
+            `and extended ${collected.extended} — classify is not due yet`,
+        );
+      }
       await enqueueClusterPass(helpers, running, "suggest", clusterId);
     });
   }

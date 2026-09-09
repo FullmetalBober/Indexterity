@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createDatabase, eq, workerWatermarks } from "../src/db";
+import { chaseKey, classifyChaseIsDue } from "../src/jobs/classify-cadence";
 import { alertClaims, alertKey, claimWatermark, deferWatermark } from "../src/jobs/watermark";
 import { ALERT_COOLDOWN_MS, ALERT_RETRY_MS, raiseAlert } from "../src/mail/notify";
 import { databaseUrl } from "./helpers";
@@ -58,6 +59,77 @@ describe("claimWatermark", () => {
     expect(await claimWatermark(db, key, at(-3_600_000 + 60_000), at(60_000))).toBe(false);
     // The loser wrote nothing, which is what makes the loss safe.
     expect(await stampOf(key)).toEqual(t0);
+  });
+});
+
+// The classify chase, over the same store (#482, #483). Its rule is not
+// expressible as one interval — which threshold applies depends on whether the
+// collect that triggered it learned anything — and the two halves interlock in a
+// way only a real compare-and-set can show: a busy cluster refused inside the
+// floor, an idle one refused for longer, and neither starved.
+describe("classifyChaseIsDue", () => {
+  const intervals = { minIntervalMs: 6 * 3_600_000, idleIntervalMs: 24 * 3_600_000 };
+
+  it("classifies a cluster's first collect immediately", async () => {
+    const cluster = freshKey("chase-first");
+    keys.push(chaseKey("classify", cluster));
+    // No stamp at all is due, whether or not anything was learned: a cluster
+    // connected a minute ago has to say something before six hours are up.
+    expect(await classifyChaseIsDue(db, cluster, false, intervals, t0)).toBe(true);
+  });
+
+  it("holds a busy cluster to the floor, then lets it through", async () => {
+    const cluster = freshKey("chase-busy");
+    keys.push(chaseKey("classify", cluster));
+    expect(await classifyChaseIsDue(db, cluster, true, intervals, t0)).toBe(true);
+    // The next five hourly collects all learned something and all stand down.
+    for (const hour of [1, 2, 3, 4, 5]) {
+      expect(await classifyChaseIsDue(db, cluster, true, intervals, at(hour * 3_600_000))).toBe(
+        false,
+      );
+    }
+    expect(await classifyChaseIsDue(db, cluster, true, intervals, at(7 * 3_600_000))).toBe(true);
+  });
+
+  it("waits longer for a cluster that learned nothing, and still gets there", async () => {
+    const cluster = freshKey("chase-idle");
+    keys.push(chaseKey("classify", cluster));
+    expect(await classifyChaseIsDue(db, cluster, false, intervals, t0)).toBe(true);
+    // Past the busy floor and still not due, which is the whole of #483: there
+    // is no new evidence, so there is nothing to re-derive.
+    expect(await classifyChaseIsDue(db, cluster, false, intervals, at(7 * 3_600_000))).toBe(false);
+    // But it is not skipped forever. An extended run still moves lastSeenAt and
+    // bumps observations, which is how an index idle since we first saw it
+    // crosses the three-day span and the seventy-two active hours — a cluster
+    // never classified until its counters moved would never make that crossing.
+    expect(await classifyChaseIsDue(db, cluster, false, intervals, at(25 * 3_600_000))).toBe(true);
+  });
+
+  // The interlock the two thresholds have to have, and the one a single number
+  // would get wrong. Evidence lands inside the floor and is refused; nothing
+  // lands afterwards. The reading is against the last CLASSIFY, not the last
+  // collect, so that evidence is still unclassified and the idle ceiling picks
+  // it up rather than it waiting for the next change that may never come.
+  it("does not strand evidence that landed inside the floor", async () => {
+    const cluster = freshKey("chase-stranded");
+    keys.push(chaseKey("classify", cluster));
+    expect(await classifyChaseIsDue(db, cluster, true, intervals, t0)).toBe(true);
+    expect(await classifyChaseIsDue(db, cluster, true, intervals, at(2 * 3_600_000))).toBe(false);
+    for (const hour of [3, 4, 5]) {
+      expect(await classifyChaseIsDue(db, cluster, false, intervals, at(hour * 3_600_000))).toBe(
+        false,
+      );
+    }
+    expect(await classifyChaseIsDue(db, cluster, false, intervals, at(25 * 3_600_000))).toBe(true);
+  });
+
+  it("gives each cluster its own claim", async () => {
+    const one = freshKey("chase-one");
+    const two = freshKey("chase-two");
+    keys.push(chaseKey("classify", one), chaseKey("classify", two));
+    expect(await classifyChaseIsDue(db, one, true, intervals, t0)).toBe(true);
+    // One cluster's claim must not stand another one down.
+    expect(await classifyChaseIsDue(db, two, true, intervals, t0)).toBe(true);
   });
 });
 
