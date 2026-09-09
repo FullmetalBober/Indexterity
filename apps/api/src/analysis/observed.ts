@@ -219,17 +219,62 @@ export function observationCanFinish(
   metric: LatencyMetric,
   observeDays: number,
 ): boolean {
+  return observationCanFinishFrom(foldObservation(readings, metric), observeDays);
+}
+
+// The FOLD, separated from the rule above (#484).
+//
+// Two sums and a flag, and every one of them costs O(retained history) to compute
+// while the answer is three numbers wide. Postgres can produce them per collection
+// over the same window, which is what jobs/latency-evidence.ts does — and the rule
+// stays here, once, so a query cannot quietly hold a different opinion about what
+// "can finish" means. The multiple is read by finalize.ts too; that was already
+// the reason it is a shared constant rather than a literal.
+export interface ObservationFold {
+  // Was there any reading at all? No history is not a refusal — every other gate
+  // on the drop path already asks whether there is enough evidence, and asking it
+  // twice in two vocabularies is how the two come to disagree.
+  readonly hasHistory: boolean;
+  // First reading's start to the last reading's end, in ms.
+  readonly elapsedMs: number;
+  // Summed length of the windows that produced a usable reading, in ms — the
+  // stretches between two consecutive readings whose counters did not go
+  // backwards. This is the measured observation, as against elapsed wall clock.
+  readonly drawableMs: number;
+}
+
+export function foldObservation(
+  readings: readonly LatencyReading[],
+  metric: LatencyMetric,
+): ObservationFold {
   const windows = windowsOf(readings, metric);
   const sorted = sortedRuns(readings);
   const first = sorted[0];
   const last = sorted.at(-1);
-  // No history to judge by. Not a reason to refuse: every other gate on the drop
-  // path already asks whether there is enough evidence, and answering that
-  // question twice in two vocabularies is how they come to disagree.
-  if (first === undefined || last === undefined) return true;
-  const elapsed = spanEnd(last) - spanStart(first);
-  if (elapsed <= 0) return true;
-  const drawable = windows.reduce((sum, window) => sum + (window.endMs - window.startMs), 0);
-  if (drawable <= 0) return false;
-  return observeDays / (drawable / elapsed) <= observeDays * OBSERVE_WALLCLOCK_MULTIPLE;
+  if (first === undefined || last === undefined) {
+    return { hasHistory: false, elapsedMs: 0, drawableMs: 0 };
+  }
+  return {
+    hasHistory: true,
+    elapsedMs: spanEnd(last) - spanStart(first),
+    drawableMs: windows.reduce((sum, window) => sum + (window.endMs - window.startMs), 0),
+  };
+}
+
+// `observeDays` cancels, and it is worth saying so rather than leaving it to be
+// re-derived: the test is
+//
+//   observeDays / dutyCycle <= observeDays * MULTIPLE
+//
+// with `dutyCycle = drawable / elapsed`, which for any positive `observeDays`
+// reduces to `elapsed <= drawable * MULTIPLE`. It is kept as a parameter because
+// the zero case is not the same statement — a zero-day window finishes trivially —
+// and because the caller's question is genuinely about its own window.
+export function observationCanFinishFrom(fold: ObservationFold, observeDays: number): boolean {
+  if (!fold.hasHistory) return true;
+  if (fold.elapsedMs <= 0) return true;
+  if (fold.drawableMs <= 0) return false;
+  return (
+    observeDays / (fold.drawableMs / fold.elapsedMs) <= observeDays * OBSERVE_WALLCLOCK_MULTIPLE
+  );
 }
