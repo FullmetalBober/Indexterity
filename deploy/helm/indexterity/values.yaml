@@ -429,6 +429,31 @@ config:
   # Raise it if a cluster reports "too slow to finish" on every tick and the host
   # will sit still for longer.
   clusterPassBudgetMs: 300000
+  # How stale an index-usage recommendation may be. Milliseconds.
+  #
+  # `collect` runs hourly and chased `classify` on every landed collect, so an
+  # index-usage verdict — a claim about WEEKS, gated on three days of history and
+  # seventy-two active hours — was re-derived once an hour from a series that had
+  # grown by one reading. It read the cluster's whole retained window each time,
+  # which made it the largest consumer of network transfer in a deployment.
+  #
+  # classifyMinIntervalMs is the floor between two passes when the collect that
+  # triggered it LEARNED something: a counter moved, or an index appeared. Six
+  # hours, so recommendations refresh four times a day rather than twenty-four.
+  # This is a product number as much as a performance one.
+  #
+  # classifyIdleIntervalMs is the ceiling when it learned nothing. An idle cluster
+  # reports byte-identical counters, so its rows are extended rather than
+  # inserted and there is no new evidence to re-derive a verdict from — but an
+  # extension is exactly how an index that has been idle all along eventually
+  # clears those two floors, so it cannot be skipped forever. Daily is well
+  # inside both. Keep it at or above the floor: below it, an idle cluster would
+  # classify more often than a busy one.
+  #
+  # The five-minute probe is untouched and is what makes this safe — a missing
+  # index shows up as read latency within minutes and chases `suggest` directly.
+  classifyMinIntervalMs: 21600000
+  classifyIdleIntervalMs: 86400000
   # How long ONE index build may run before the engine cancels it. Milliseconds.
   #
   # Its own budget because a build is not like any other statement: a catalog
