@@ -34,6 +34,22 @@ export function isRecurring(shape: QueryShape, options: WorkloadOptions): boolea
 // (direction is irrelevant for point/range bounds); sort keys keep their own
 // directions so the index can serve the sort without an in-memory stage.
 // Deduped, first occurrence wins.
+//
+// THE RANGE BLOCK IS SORTED, and that is not tidiness. The order range fields
+// arrive in is `Object.entries()` over the filter document — an order the query
+// author never chose and the driver does not promise. Two recordings of one
+// query shape can therefore differ only in it, which is how the hosted cluster
+// came to have BOTH `order_1_utcDate_1_user_1` and `order_1_user_1_utcDate_1`
+// proposed against `msb-app.exercise` at the same time: one finding, two
+// indexes, from a difference that was never in the query.
+//
+// Safe because only the FIRST range field gets a tight bound; the rest are
+// filtered inside a multi-interval scan whatever order they sit in. Measured on
+// mongod 8.0, `{a:1, c:3, d:{$gt:…}}` over 20k documents: 36 keys examined
+// through `[a,c,d]`, and the same 36 documents returned through `[a,c,b,d]`
+// after examining 62 — an unbound key in the middle costs a constant, it does
+// not cost the seek. Choosing a better order needs selectivity we do not have,
+// so a STABLE order is strictly better than an arbitrary one.
 export function esrKeys(shape: QueryShape): SortKey[] {
   const ordered: SortKey[] = [];
   const seen = new Set<string>();
@@ -44,8 +60,34 @@ export function esrKeys(shape: QueryShape): SortKey[] {
   };
   for (const field of shape.equality) push(field, 1);
   for (const key of shape.sort) push(key.field, key.direction);
-  for (const field of shape.range) push(field, 1);
+  for (const field of [...shape.range].sort()) push(field, 1);
   return ordered;
+}
+
+/**
+ * `esrKeys`' output split back into its three blocks.
+ *
+ * Derived from the KEYS rather than from the shape, because esrKeys deduplicates
+ * across blocks: a field both sorted on and range-bounded is emitted once, in the
+ * sort block, and the range list still names it. Asking the shape would ask about
+ * a key the index does not have.
+ */
+interface KeyBlocks {
+  readonly equality: readonly string[];
+  readonly sort: readonly SortKey[];
+  readonly range: readonly string[];
+}
+
+function keyBlocks(shape: QueryShape, keys: readonly SortKey[]): KeyBlocks {
+  const equality = new Set(shape.equality);
+  const sorted = new Set(shape.sort.map((key) => key.field));
+  return {
+    equality: keys.filter((key) => equality.has(key.field)).map((key) => key.field),
+    sort: keys.filter((key) => !equality.has(key.field) && sorted.has(key.field)),
+    range: keys
+      .filter((key) => !equality.has(key.field) && !sorted.has(key.field))
+      .map((key) => key.field),
+  };
 }
 
 export interface CreateCandidate {
@@ -130,11 +172,104 @@ function describe(keys: readonly SortKey[]): string {
   return keys.map((key) => (key.direction === -1 ? `${key.field}: -1` : key.field)).join(", ");
 }
 
-// True when a's directed keys are a PROPER prefix of b's — an index on b
-// serves every query an index on a would.
-function isDirectedPrefix(a: readonly SortKey[], b: readonly SortKey[]): boolean {
-  if (a.length >= b.length) return false;
+// True when a's directed keys are a prefix of b's, equal lengths included — an
+// index on b serves, in order, every key an index on a would.
+function directedPrefixOrEqual(a: readonly SortKey[], b: readonly SortKey[]): boolean {
+  if (a.length > b.length) return false;
   return a.every((key, i) => b[i]?.field === key.field && b[i]?.direction === key.direction);
+}
+
+// Would ONE index serve both of these wants?
+//
+// The sequence test this replaced asked whether `narrow`'s whole key list was a
+// directed prefix of `wide`'s, which is a question about ORDER where the fact is
+// about MEMBERSHIP: an index's equality block can be permuted freely and still
+// serve every query that binds all of it. So `{complex,type,primary}` and
+// `{complex,type,primary,secondary}` never met — `secondary` sits in the middle
+// — and the hosted cluster carried both indexes, along with seven more like
+// them on one collection.
+//
+// Two ways one index covers another, and the second needed measuring rather
+// than reasoning about. Measured on mongod 8.0 over 20k documents, index
+// `[a,c,d]` against `[a,c,b,d]` for `{a:1, c:3, d:{$gt:…}}`:
+//
+//   | index                         | keys examined | plan     |
+//   |-------------------------------|---------------|----------|
+//   | [a,c,d]      the narrow want  |            36 | IXSCAN   |
+//   | [a,c,b,d]    extra key last   |            62 | IXSCAN   |
+//   | [a,b,c,d]    extra key middle |            87 | IXSCAN   |
+//   | [b,a,c,d]    extra key FIRST  |             0 | COLLSCAN |
+//
+// So an unbound key inside the equality block costs a constant and keeps the
+// seek — but an unbound key BEFORE the bound ones loses the index completely.
+// Absorbing without reordering would answer a collection-scan finding with a
+// collection scan, which is why `lead` exists and is applied to every survivor.
+//
+// A SORT is the case that does not survive it. Same server, `{a:1, c:3}` sorted
+// by `s`: `[a,c,s]` serves it with no SORT stage, `[a,c,b,s]` reintroduces one,
+// because the sort key is no longer adjacent to the bound prefix. A blocking
+// sort is the very finding the recommendation exists to remove, so a want with a
+// sort is only ever absorbed into an index with the SAME equality set.
+//
+// Partial candidates never consolidate, unchanged: a partial index only serves
+// queries matching its filter.
+function absorbs(narrow: Want, wide: Want): boolean {
+  if (narrow.partialFilter !== undefined || wide.partialFilter !== undefined) return false;
+  const wideEquality = new Set(wide.blocks.equality);
+  if (!narrow.blocks.equality.every((field) => wideEquality.has(field))) return false;
+  const sameEquality = narrow.blocks.equality.length === wide.blocks.equality.length;
+  // Where narrow's sort is served FROM. Normally the wider index's own sort
+  // block; when the wider want binds those fields as equality, from there
+  // instead — see sortSitsInEquality.
+  const sortFromEquality =
+    narrow.blocks.sort.length > 0 && sortSitsInEquality(narrow, wideEquality);
+  if (!sortFromEquality) {
+    // A narrower equality block leaves unbound keys in front of the sort key,
+    // and a sort does not survive that. Measured above.
+    if (!sameEquality && narrow.blocks.sort.length > 0) return false;
+    // SORT is compared as a sequence, because it is the one part of an index
+    // whose order the query dictates.
+    if (!directedPrefixOrEqual(narrow.blocks.sort, wide.blocks.sort)) return false;
+  }
+  // RANGE is compared as a SET, for the same reason esrKeys sorts it: the order
+  // range fields arrive in is `Object.entries()` over the filter, and the query
+  // author never chose it. A field the wider index binds as equality, or orders
+  // by, covers a range on it too.
+  const wideCovers = new Set([
+    ...wideEquality,
+    ...wide.blocks.sort.map((key) => key.field),
+    ...wide.blocks.range,
+  ]);
+  if (!narrow.blocks.range.every((field) => wideCovers.has(field))) return false;
+  // Every want already folded into `wide` must still lead it. Going narrowest
+  // first means this one is the widest so far, so it only has to CONTAIN them.
+  const narrowLeads = new Set([
+    ...narrow.blocks.equality,
+    ...(sortFromEquality ? narrow.blocks.sort.map((key) => key.field) : []),
+  ]);
+  return wide.lead.every((field) => narrowLeads.has(field));
+}
+
+// Can the wider want's equality block carry the narrower want's sort?
+function sortSitsInEquality(narrow: Want, wideEquality: ReadonlySet<string>): boolean {
+  const sort = narrow.blocks.sort;
+  if (!sort.every((key) => wideEquality.has(key.field))) return false;
+  // Equality keys are stored ascending, so a descending sort is servable only
+  // when the whole scan can run backwards — which is a single key.
+  return sort.length === 1 || sort.every((key) => key.direction === 1);
+}
+
+function distinct(fields: readonly string[]): string[] {
+  return [...new Set(fields)];
+}
+
+function leadWith(want: Want): SortKey[] {
+  if (want.lead.length === 0) return want.wantedKeys;
+  const led = new Set(want.lead);
+  const leading = want.lead.flatMap((field) =>
+    want.wantedKeys.filter((key) => key.field === field),
+  );
+  return [...leading, ...want.wantedKeys.filter((key) => !led.has(key.field))];
 }
 
 // Do two indexes cover the same documents? Both unfiltered, or both filtered on
@@ -246,8 +381,17 @@ export function sortOrderAdvisories(
 
 interface Want {
   readonly shape: QueryShape;
-  readonly wantedKeys: SortKey[];
+  wantedKeys: SortKey[];
   readonly partialFilter?: Readonly<Record<string, ConstantValue>> | undefined;
+  // `wantedKeys` split back into the three ESR blocks, AFTER the deduplication
+  // esrKeys does. Load-bearing that it is after: a field that is both sorted on
+  // and range-bounded appears once, in the earlier block, and comparing the raw
+  // shape's lists instead would ask about keys the index does not have.
+  readonly blocks: KeyBlocks;
+  // The equality fields that MUST lead this want's index, because a narrower
+  // want was folded into it and only a leading match keeps its query on the
+  // index at all. Grows as wants are absorbed; empty until one is.
+  lead: string[];
   scanning: boolean;
   absorbedCount: number;
   absorbedShapes: number;
@@ -352,6 +496,8 @@ export function recommendCreates(
       shape,
       wantedKeys,
       partialFilter,
+      blocks: keyBlocks(shape, wantedKeys),
+      lead: [],
       scanning: shape.collscan,
       absorbedCount: 0,
       absorbedShapes: 0,
@@ -361,23 +507,32 @@ export function recommendCreates(
     wants.push(want);
   }
 
-  // Consolidation: fold prefix wants into the widest want that covers them,
+  // Consolidation: fold covered wants into the widest want that covers them,
   // narrowest first so chains ({a} ⊂ {a,b} ⊂ {a,b,c}) collapse fully.
   wants.sort((a, b) => a.wantedKeys.length - b.wantedKeys.length);
   const survivors: Want[] = [];
-  for (const want of wants) {
-    const covers = wants.filter(
-      (other) =>
-        other !== want &&
-        want.partialFilter === undefined &&
-        other.partialFilter === undefined &&
-        isDirectedPrefix(want.wantedKeys, other.wantedKeys),
-    );
-    const widest = covers.at(-1);
+  for (const [index, want] of wants.entries()) {
+    // Strictly LATER in the sorted order, which is what stops two wants that
+    // cover each other from both disappearing into the other. Equal-length wants
+    // are covered by whichever the sort left second; wider ones always win.
+    const widest = wants.filter((other, at) => at > index && absorbs(want, other)).at(-1);
     if (widest !== undefined) {
+      const widestEquality = new Set(widest.blocks.equality);
       widest.absorbedCount += want.shape.count + want.absorbedCount;
       widest.absorbedShapes += 1 + want.absorbedShapes;
       widest.scanning = widest.scanning || want.scanning;
+      // The absorbed want's equality fields have to LEAD the surviving index or
+      // its query leaves the index entirely — see absorbs(). APPENDED, never
+      // replaced: everything already folded in has to keep leading too, and it
+      // only stays a prefix if nothing is inserted in front of it.
+      widest.lead = distinct([
+        ...widest.lead,
+        ...want.lead,
+        ...want.blocks.equality,
+        // A sort the wider want holds as equality has to sit right behind the
+        // bound prefix, so it leads too — see sortSitsInEquality.
+        ...want.blocks.sort.map((key) => key.field).filter((field) => widestEquality.has(field)),
+      ]);
       // The wider index serves these shapes too, so the finding for them is the
       // wider candidate — not a decline (#432).
       widest.sourceShapes.push(...want.sourceShapes);
@@ -385,6 +540,7 @@ export function recommendCreates(
     }
     survivors.push(want);
   }
+  for (const want of survivors) want.wantedKeys = leadWith(want);
 
   const candidates: CreateCandidate[] = [];
   for (const want of survivors) {
