@@ -223,6 +223,15 @@ export interface IndexCollector {
   // where they exist and the per-collection reads where they do not; a
   // collection absent from the map has no recorded activity.
   latencyByCollection?(database: string): Promise<ReadonlyMap<string, CollectionLatency>>;
+
+  // How many of the reads this engine reports for a collection were OURS.
+  //
+  // Optional because it is a MongoDB problem and not a general one: `$collStats`
+  // counts our own metadata reads against the collection they measure, while SQL
+  // Server reads DMVs and PostgreSQL reads pg_stat — neither touches the table.
+  // An engine that does not implement this is claiming a clean counter, and the
+  // analysis reads an absent implementation as zero (mongo/self-reads.ts).
+  selfReadOps?(database: string, collection: string): number;
   hintedByCollection?(
     database: string,
     collections: readonly string[],

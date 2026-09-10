@@ -24,6 +24,10 @@ export interface CollectedLatency {
   readonly readLatencyMicros: number;
   readonly writeOps: number;
   readonly writeLatencyMicros: number;
+  // How many of `readOps` this product caused — see mongo/self-reads.ts. Zero on
+  // an engine that measures a table without reading it, which is every engine
+  // but MongoDB.
+  readonly selfReadOps: number;
 }
 
 export interface CollectResult {
@@ -172,6 +176,8 @@ export async function collectSnapshots(session: EngineSession): Promise<CollectR
         readLatencyMicros: collLatency.reads.latencyMicros,
         writeOps: collLatency.writes.ops,
         writeLatencyMicros: collLatency.writes.latencyMicros,
+        // Filled in below, once the pass has finished reading this namespace.
+        selfReadOps: 0,
       });
       const usageByIndex = groupByIndex(usage);
       for (const spec of specs) {
@@ -197,5 +203,25 @@ export async function collectSnapshots(session: EngineSession): Promise<CollectR
     // honest about a loop that never finished.
     perCollection();
   }
-  return { snapshots, latency };
+  // Our own reads, counted once the pass is DONE reading — not at the moment
+  // each sample was taken.
+  //
+  // A sample is taken part-way through a namespace's reads (they run as one
+  // `Promise.all`), so an interval between two samples holds the tail of one
+  // pass, whatever ran between them, and the head of the next. Reading the tally
+  // after the pass puts the WHOLE of the later pass on one side of that boundary
+  // and none of the earlier one — the same quantity, as long as each pass issues
+  // the same calls per namespace. Which is what makes the ordering inside the
+  // `Promise.all` irrelevant instead of a race to lose. See mongo/self-reads.ts.
+  const selfReads = collector.selfReadOps?.bind(collector);
+  return {
+    snapshots,
+    latency:
+      selfReads === undefined
+        ? latency
+        : latency.map((sample) => ({
+            ...sample,
+            selfReadOps: selfReads(sample.database, sample.collection),
+          })),
+  };
 }

@@ -15,6 +15,7 @@ import { diagnoseConnection } from "./diagnose";
 import { MongoIndexExecutor } from "./executor";
 import { MemberConnections } from "./members";
 import { connStringUsername, dropUserStatement, provisionScopedUser } from "./provision";
+import { connectionFingerprint, sharedSelfReads } from "./self-reads";
 
 class MongoEngineSession implements EngineSession {
   readonly collector: IndexCollector;
@@ -33,7 +34,15 @@ class MongoEngineSession implements EngineSession {
     // reached one node at a time, and a certificate the owner accepted for it is
     // accepted for its members too.
     this.members = new MemberConnections(conn, connString, overrides, proxy, route);
-    this.collector = new MongoIndexCollector(conn, this.members);
+    // The self-read tally is keyed by the connection target and lives past this
+    // session, which is the point: sessions are pooled and swept after five idle
+    // minutes (jobs/connection-pool.ts), and a tally that died with one would
+    // reset between every pair of hourly passes and never subtract anything.
+    this.collector = new MongoIndexCollector(
+      conn,
+      this.members,
+      sharedSelfReads(connectionFingerprint(connString)),
+    );
   }
 
   executor(readOnly: boolean): IndexExecutor {
