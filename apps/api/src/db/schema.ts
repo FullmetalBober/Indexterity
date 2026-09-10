@@ -598,9 +598,22 @@ export const clusterIndexes = pgTable(
     // negligible either way; the difference is that md5's failure is reachable by
     // construction and silent when it lands, which is the wrong trade against 32
     // extra bytes on a table holding a few hundred rows.
+    //
+    // `hidden` IS EXCLUDED, because it is a state flag and not a shape. An index
+    // does not become a different index when it is hidden — that is the whole
+    // premise of hide-then-observe (D4) — and leaving it in meant this product
+    // split an index's history in half every time it acted on one. Measured on the
+    // hosted deployment: 28 duplicate identities, 26 of them differing in NOTHING
+    // ELSE, 25 on the dev cluster where a single pass hid 24 indexes. The header
+    // above justifies digest-keying on rebuilds being rare, which they are; these
+    // were not rebuilds, and their count grows with how much work the product does
+    // rather than with anything a customer did.
+    //
+    // Still STORED, just not part of the identity: `parseStoredSpec` reads it back
+    // and the rollback token in `actions` carries it.
     specDigest: text("spec_digest")
       .notNull()
-      .generatedAlwaysAs(sql`encode(sha256(spec::text::bytea), 'hex')`),
+      .generatedAlwaysAs(sql`encode(sha256((spec - 'hidden')::text::bytea), 'hex')`),
     createdAt,
   },
   (table) => [
