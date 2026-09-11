@@ -51,6 +51,10 @@ interface Fixture {
   readonly untilHours: number;
   readonly observations: number;
   readonly readOps: number;
+  // How many of `readOps` were this product's own metadata reads (#493). Absent
+  // on the fixtures written before the column existed, which is exactly what a
+  // pre-migration row looks like and worth keeping one of.
+  readonly selfReadOps?: number;
   readonly readLatencyMicros: number;
 }
 
@@ -65,6 +69,7 @@ async function insert(fixtures: readonly Fixture[]): Promise<void> {
       database: "ev",
       collection: fixture.collection,
       readOps: fixture.readOps,
+      selfReadOps: fixture.selfReadOps ?? 0,
       readLatencyMicros: fixture.readLatencyMicros,
       writeOps: 0,
       writeLatencyMicros: 0,
@@ -84,6 +89,7 @@ async function rawReadings(
   const rows = await db
     .select({
       readOps: latencySamples.readOps,
+      selfReadOps: latencySamples.selfReadOps,
       readLatencyMicros: latencySamples.readLatencyMicros,
       writeOps: latencySamples.writeOps,
       writeLatencyMicros: latencySamples.writeLatencyMicros,
@@ -96,7 +102,11 @@ async function rawReadings(
     .where(eq(latencySamples.collection, collection))
     .orderBy(asc(latencySamples.capturedAt));
   return {
-    activity: rows.map((row) => ({ ...runFrom(row), readOps: row.readOps })),
+    activity: rows.map((row) => ({
+      ...runFrom(row),
+      readOps: row.readOps,
+      selfReadOps: row.selfReadOps,
+    })),
     latency: rows.map((row) => ({
       ...runFrom(row),
       readOps: row.readOps,
@@ -236,6 +246,82 @@ const FIXTURES: readonly Fixture[] = [
     observations: 1,
     readOps: 35,
     readLatencyMicros: 350,
+  },
+
+  // OURS: the production shape #493 was about. $collStats counts our own
+  // metadata reads against the collection they measure, so an idle MongoDB
+  // collection's read_ops climbs by a constant floor — measured at exactly 8 an
+  // hour on all 102 namespaces of the hosted dev cluster. Every interval here
+  // moved and NONE of them is traffic, so both folds must credit zero active
+  // time. Interval 2 has one real read on top of the floor and is the only one
+  // that counts.
+  {
+    collection: "ours",
+    atHours: 0,
+    untilHours: 0,
+    observations: 1,
+    readOps: 1_000,
+    selfReadOps: 500,
+    readLatencyMicros: 10_000,
+  },
+  {
+    collection: "ours",
+    atHours: 1,
+    untilHours: 1,
+    observations: 1,
+    readOps: 1_008,
+    selfReadOps: 508,
+    readLatencyMicros: 10_080,
+  },
+  {
+    collection: "ours",
+    atHours: 2,
+    untilHours: 2,
+    observations: 1,
+    readOps: 1_017,
+    selfReadOps: 516,
+    readLatencyMicros: 10_170,
+  },
+  {
+    collection: "ours",
+    atHours: 3,
+    untilHours: 3,
+    observations: 1,
+    readOps: 1_025,
+    selfReadOps: 524,
+    readLatencyMicros: 10_250,
+  },
+
+  // OURS-RESET: the tally restarts under a counter that does not — a redeployed
+  // worker, or a second replica taking the next pass. The straddling interval is
+  // unknowable and buys nothing; SQL and JS have to refuse it the same way, which
+  // is the branch a `>=` written as a `>` would break in only one of them.
+  {
+    collection: "ours-reset",
+    atHours: 0,
+    untilHours: 0,
+    observations: 1,
+    readOps: 2_000,
+    selfReadOps: 900,
+    readLatencyMicros: 20_000,
+  },
+  {
+    collection: "ours-reset",
+    atHours: 1,
+    untilHours: 1,
+    observations: 1,
+    readOps: 2_008,
+    selfReadOps: 0,
+    readLatencyMicros: 20_080,
+  },
+  {
+    collection: "ours-reset",
+    atHours: 2,
+    untilHours: 2,
+    observations: 1,
+    readOps: 2_016,
+    selfReadOps: 8,
+    readLatencyMicros: 20_160,
   },
 
   // RESTART: read_ops goes BACKWARDS, which is a cumulative counter that reset.

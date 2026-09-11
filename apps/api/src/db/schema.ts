@@ -1349,6 +1349,25 @@ export const latencySamples = pgTable(
     observations: integer("observations").notNull().default(1),
     // See index_snapshots.
     maxGapMs: bigint("max_gap_ms", { mode: "number" }).notNull().default(0),
+    // How many of `read_ops` were OURS (mongo/self-reads.ts).
+    //
+    // `$collStats` counts the metadata reads this product issues against the
+    // collection they measure, so `read_ops` moved on every interval for every
+    // MongoDB collection whether or not a customer queried it — a floor measured
+    // at exactly 8 reads an hour on all 102 namespaces of the hosted dev cluster.
+    // The activity gate reads a counter that moved as traffic, so it never
+    // refused, and `collection-idle` was unreachable on the engine that writes
+    // most of these rows.
+    //
+    // Cumulative and monotonic while the worker lives. What the analysis wants is
+    // the DIFFERENCE across an interval, so a reset — a redeploy, a second
+    // replica — makes one interval's subtraction negative, and that interval is
+    // dropped as unknowable exactly as a mongod counter restart already is.
+    //
+    // Zero on every other engine and on every row written before this column
+    // existed, which is the honest default: SQL Server reads DMVs and PostgreSQL
+    // reads pg_stat, and neither touches the table it is measuring.
+    selfReadOps: bigint("self_read_ops", { mode: "number" }).notNull().default(0),
     // Same guard, keyed by namespace instead of index_id. See index_snapshots.
     span: tstzrange("span")
       .notNull()

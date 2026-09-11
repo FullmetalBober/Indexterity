@@ -449,6 +449,13 @@
       "when": 1788778266203,
       "tag": "0063_cluster_blocks",
       "breakpoints": true
+    },
+    {
+      "idx": 64,
+      "version": "7",
+      "when": 1789032737013,
+      "tag": "0064_self_read_ops",
+      "breakpoints": true
     }
   ]
 }

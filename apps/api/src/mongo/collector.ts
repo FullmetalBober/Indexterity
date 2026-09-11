@@ -29,6 +29,13 @@ import { isRecord } from "../errors/message";
 import type { MongoConnection } from "./connection";
 import { isAuthorizationError } from "./errors";
 import type { MemberConnections } from "./members";
+import {
+  ownSelfReads,
+  READS_PER_COLL_STATS_LATENCY,
+  READS_PER_COLL_STATS_STORAGE,
+  READS_PER_INDEX_STATS,
+  type SelfReads,
+} from "./self-reads";
 
 // Normalize a sort spec's values into directed keys (anything odd → ascending).
 function sortKeysOf(sortSpec: Record<string, unknown>): SortKey[] {
@@ -478,6 +485,7 @@ async function readIndexStats(
   conn: MongoConnection,
   database: string,
   collection: string,
+  selfReads: SelfReads,
 ): Promise<IndexUsageStat[]> {
   try {
     const raw = await conn
@@ -485,6 +493,10 @@ async function readIndexStats(
       .collection(collection)
       .aggregate([{ $indexStats: {} }])
       .toArray();
+    // Counted where it is paid, and only once it HAS been paid: a call that
+    // never reached the server cost the collection nothing, and subtracting a
+    // read that did not happen would suppress activity that did.
+    selfReads.add(database, collection, READS_PER_INDEX_STATS);
     return indexStat
       .array()
       .parse(raw)
@@ -503,6 +515,7 @@ async function readLatencyStats(
   conn: MongoConnection,
   database: string,
   collection: string,
+  selfReads: SelfReads,
   readPreference?: "primaryPreferred",
 ): Promise<LatencyStatsDoc[]> {
   const raw = await conn
@@ -510,6 +523,8 @@ async function readLatencyStats(
     .collection(collection)
     .aggregate([{ $collStats: { latencyStats: {} } }], readPreference ? { readPreference } : {})
     .toArray();
+  // The measurement is itself one of the reads it reports. See self-reads.ts.
+  selfReads.add(database, collection, READS_PER_COLL_STATS_LATENCY);
   return latencyStatsDoc.array().parse(raw);
 }
 
@@ -545,7 +560,21 @@ export class MongoIndexCollector implements IndexCollector {
     // Absent in tests and for one-off diagnostic connections, where the
     // primary's own counters are all that is being asked for.
     private readonly members?: MemberConnections,
+    // How many of this collection's reads were ours (self-reads.ts). Injected,
+    // not reached for: a collector built outside a session — `diagnose`, every
+    // unit test — gets a tally of its own and cannot disturb a live cluster's.
+    private readonly selfReads: SelfReads = ownSelfReads(),
   ) {}
+
+  // Our own contribution to what `$collStats` reports this collection served,
+  // as of now. Cumulative and monotonic while the process lives; the analysis
+  // differences two samples of it and drops the interval when it goes backwards
+  // (analysis/activity.ts). Optional on the port because it is a MongoDB
+  // problem: SQL Server reads DMVs and PostgreSQL reads pg_stat, and neither
+  // touches the table it is measuring.
+  selfReadOps(database: string, collection: string): number {
+    return this.selfReads.count(database, collection);
+  }
 
   // The shared `$collStats: { storageStats: {} }` read behind `collectionStorage`
   // and `indexSizes` — two projections of one document that no caller wants
@@ -559,7 +588,17 @@ export class MongoIndexCollector implements IndexCollector {
         .collection(collection)
         .aggregate([{ $collStats: { storageStats: {} } }])
         .toArray()
-        .then(readStorageStats),
+        .then((raw) => {
+          // Counted HERE, once, because there is one read here. The two callers
+          // below each used to pay for their own and each counted it; sharing
+          // the round trip has to share the tally too, or the subtraction would
+          // claim four reads where two happened. Over-subtracting withholds
+          // active time rather than inventing it, so it fails safe — and it is
+          // still wrong, and the whole argument for a tally over a constant
+          // (mongo/self-reads.ts) is that it moves with the code.
+          this.selfReads.add(database, collection, READS_PER_COLL_STATS_STORAGE);
+          return readStorageStats(raw);
+        }),
     );
   }
 
@@ -654,7 +693,7 @@ export class MongoIndexCollector implements IndexCollector {
     // from one that only serves secondary reads.
     const connections = [this.conn, ...(await (this.members?.all() ?? Promise.resolve([])))];
     const perMember = await Promise.all(
-      connections.map((conn) => readIndexStats(conn, database, collection)),
+      connections.map((conn) => readIndexStats(conn, database, collection, this.selfReads)),
     );
     // Keyed by index AND host: the same index reports once per member, and each
     // member's counter has its own `since`.
@@ -714,10 +753,16 @@ export class MongoIndexCollector implements IndexCollector {
     // Not caught: the base connection failing is a real error (a missing
     // privilege, an unreachable cluster) and the caller decides what that means.
     // A member failing is not — the others still report.
-    const primary = await readLatencyStats(this.conn, database, collection, "primaryPreferred");
+    const primary = await readLatencyStats(
+      this.conn,
+      database,
+      collection,
+      this.selfReads,
+      "primaryPreferred",
+    );
     const members = await Promise.all(
       (await (this.members?.all() ?? Promise.resolve([]))).map((conn) =>
-        readLatencyStats(conn, database, collection).catch(() => []),
+        readLatencyStats(conn, database, collection, this.selfReads).catch(() => []),
       ),
     );
     return sumLatencyStats([...primary, ...members.flat()]);
