@@ -5,17 +5,19 @@ import {
   ownSelfReads,
   READS_PER_COLL_STATS_LATENCY,
   READS_PER_COLL_STATS_STORAGE,
-  READS_PER_INDEX_STATS,
+  readsPerIndexStats,
   selfReadsHeld,
   sharedSelfReads,
 } from "./self-reads";
+
+const V8 = { major: 8, minor: 0, text: "8.0.0" };
 
 afterEach(forgetSelfReads);
 
 describe("selfReads", () => {
   it("accumulates per namespace", () => {
     const tally = ownSelfReads();
-    tally.add("app", "orders", READS_PER_INDEX_STATS);
+    tally.add("app", "orders", readsPerIndexStats(V8));
     tally.add("app", "orders", READS_PER_COLL_STATS_STORAGE);
     tally.add("app", "customers", READS_PER_COLL_STATS_LATENCY);
     expect(tally.count("app", "orders")).toBe(3);
@@ -31,7 +33,7 @@ describe("selfReads", () => {
   // the hosted dev cluster — the other half was the suggest pass.
   it("adds up to the floor a collect pass leaves", () => {
     const tally = ownSelfReads();
-    tally.add("app", "orders", READS_PER_INDEX_STATS);
+    tally.add("app", "orders", readsPerIndexStats(V8));
     tally.add("app", "orders", READS_PER_COLL_STATS_STORAGE);
     tally.add("app", "orders", READS_PER_COLL_STATS_LATENCY);
     expect(tally.count("app", "orders")).toBe(4);
@@ -77,5 +79,25 @@ describe("selfReads", () => {
     shared.add("app", "orders", 1);
     expect(shared.count("app", "orders")).toBe(1);
     expect(selfReadsHeld()).toBe(1);
+  });
+});
+
+// `$indexStats` costs the collection it reads, and what it costs depends on the
+// SERVER — measured on three, same probe, same collection: 2 on 6.0.28, 1 on
+// 7.0.39 and 8.2.9. The original table was taken on 8.0 alone, so on a 6.0
+// server this product under-counted its own reads by one per namespace per pass
+// and the activity gate stayed defeated there after #493 shipped.
+describe("readsPerIndexStats", () => {
+  it("is two on 6.0 and one from 7.0", () => {
+    expect(readsPerIndexStats({ major: 6, minor: 0, text: "6.0.28" })).toBe(2);
+    expect(readsPerIndexStats({ major: 7, minor: 0, text: "7.0.39" })).toBe(1);
+    expect(readsPerIndexStats({ major: 8, minor: 2, text: "8.2.9" })).toBe(1);
+  });
+
+  // Over-counting subtracts too much, which withholds active time and therefore
+  // withholds drops. Under-counting manufactures activity and allows them. Only
+  // one of those is survivable in a gate whose job is to refuse.
+  it("takes the higher number for a server it cannot identify", () => {
+    expect(readsPerIndexStats(null)).toBe(2);
   });
 });
