@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   dateRangeCutoff,
+  dedupePredicates,
   equalityConstants,
   lookupJoins,
   normalizeDirection,
   pipelineShape,
   readStorageStats,
+  sortIsServable,
   sumLatencyStats,
 } from "./collector";
 
@@ -239,5 +241,73 @@ describe("readStorageStats", () => {
     const stats = readStorageStats([]);
     expect(stats.storage).toEqual({ dataSizeBytes: 0, docCount: 0 });
     expect(stats.sizes).toEqual({ ok: true, value: {} });
+  });
+});
+
+// #495. `hasSortStage` says the server sorted in memory; it does not say by which
+// keys, and a pipeline whose $sort sits behind a blocking stage has none an index
+// could carry. Eighteen production shapes claimed a sort with no sort key, five
+// of them reached live CREATE recommendations, and every one of those proposed an
+// index built from equality and range against a query the planner was already
+// serving from an index.
+describe("sortIsServable", () => {
+  it("is a finding when the sort keys are known", () => {
+    expect(sortIsServable(true, [{ field: "createdAt", direction: -1 }])).toBe(true);
+  });
+
+  it("is not a finding when the server sorted by keys we cannot name", () => {
+    expect(sortIsServable(true, [])).toBe(false);
+  });
+
+  it("is not a finding when the server did not sort", () => {
+    expect(sortIsServable(false, [{ field: "createdAt", direction: 1 }])).toBe(false);
+  });
+
+  // The production case, end to end through the shape extractor: the $sort is
+  // behind a $group, so pipelineShape correctly reports no sort key — and the
+  // flag must not survive that.
+  it("drops the claim for a $sort behind a blocking stage", () => {
+    const shape = pipelineShape([
+      { $match: { status: { $eq: "?string" } } },
+      { $group: { _id: "$status" } },
+      { $sort: { total: -1 } },
+    ]);
+    expect(shape?.sort).toEqual([]);
+    expect(sortIsServable(true, shape?.sort ?? [])).toBe(false);
+  });
+});
+
+// A range on one field written as two $and clauses pushed the field twice. Every
+// consumer deduplicated on the way out, so nothing read it wrong — but the stored
+// shape is the finding a reader is shown and the digest the row is keyed by.
+describe("dedupePredicates", () => {
+  it("keeps a field once when two clauses bound it", () => {
+    const equality: string[] = [];
+    const range = ["user", "utcDate", "utcDate", "sets.outcomes"];
+    dedupePredicates(equality, range);
+    expect(range).toEqual(["user", "utcDate", "sets.outcomes"]);
+  });
+
+  it("gives a field with both predicates its equality position", () => {
+    const equality = ["tenant", "status"];
+    const range = ["status", "createdAt"];
+    dedupePredicates(equality, range);
+    expect(equality).toEqual(["tenant", "status"]);
+    expect(range).toEqual(["createdAt"]);
+  });
+
+  it("leaves a shape with nothing repeated alone", () => {
+    const equality = ["a", "b"];
+    const range = ["c"];
+    dedupePredicates(equality, range);
+    expect(equality).toEqual(["a", "b"]);
+    expect(range).toEqual(["c"]);
+  });
+
+  it("deduplicates through pipelineShape, where the two clauses arrive", () => {
+    const shape = pipelineShape([
+      { $match: { $and: [{ d: { $gte: "?date" } }, { d: { $lte: "?date" } }] } },
+    ]);
+    expect(shape).toEqual({ equality: [], sort: [], range: ["d"] });
   });
 });

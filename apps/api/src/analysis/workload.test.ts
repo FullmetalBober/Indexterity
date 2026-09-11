@@ -705,3 +705,60 @@ describe("isRecurring", () => {
     expect(recommendCreates([busy], [], rated).length).toBeGreaterThan(0);
   });
 });
+
+// #495, from the consuming end. `recommendCreates` admits a shape on
+// `collscan || sortedInMemory`, so a sort claim with no sort key was the ONLY
+// thing letting these through — and the index it then built, from equality and
+// range alone, could not have served the sort it was admitted for. All five that
+// reached production were on queries the planner already served from an index.
+describe("recommendCreates and a sort it cannot name", () => {
+  // The production shape verbatim: msb-app.exercise, five live PROPOSED rows.
+  const servedByAnIndex: QueryShape = {
+    equality: ["complex", "type", "primary"],
+    sort: [],
+    range: ["user", "utcDate", "sets.outcomes"],
+    collscan: false,
+    count: 56,
+  };
+
+  it("proposes nothing for a shape the planner already served", () => {
+    expect(
+      recommendCreates([{ ...servedByAnIndex, sortedInMemory: false }], [], options),
+    ).toHaveLength(0);
+  });
+
+  // What the collector used to hand it, kept as the record of the bug: the same
+  // shape with the claim attached produced an index with no sort component.
+  it("built a sortless index from the claim it can no longer be given", () => {
+    const out = recommendCreates([{ ...servedByAnIndex, sortedInMemory: true }], [], options);
+    expect(out).toHaveLength(1);
+    expect(out[0]?.keys.map((key) => key.field)).toEqual([
+      "complex",
+      "type",
+      "primary",
+      "user",
+      "utcDate",
+      "sets.outcomes",
+    ]);
+  });
+
+  it("still proposes for a sort it CAN name", () => {
+    const out = recommendCreates(
+      [{ ...servedByAnIndex, sort: [{ field: "utcDate", direction: -1 }], sortedInMemory: true }],
+      [],
+      options,
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]?.keys.some((key) => key.field === "utcDate" && key.direction === -1)).toBe(true);
+  });
+
+  // A scan is a finding on its own and this must not touch it.
+  it("still proposes for a collection scan with no sort at all", () => {
+    const out = recommendCreates(
+      [{ ...servedByAnIndex, collscan: true, sortedInMemory: false }],
+      [],
+      options,
+    );
+    expect(out).toHaveLength(1);
+  });
+});

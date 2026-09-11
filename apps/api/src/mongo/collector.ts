@@ -45,6 +45,57 @@ function sortKeysOf(sortSpec: Record<string, unknown>): SortKey[] {
   }));
 }
 
+// A blocking sort is a FINDING only when we know what would have prevented it.
+//
+// `hasSortStage` says the server ordered documents in memory. It does not say by
+// which keys, and the two places keys come from — a find's `command.sort` and a
+// pipeline's leading `$sort` — do not always have them. `pipelineShape` stops at
+// the first stage an index cannot serve, so `[$match, $group, $sort]` reports a
+// blocking sort and no sort key at all, correctly on both counts.
+//
+// Measured on the hosted deployment: 18 of 225 stored shapes carried
+// `sortedInMemory: true` with an empty `sort`, every one of them on the MongoDB
+// cluster, and five reached live CREATE recommendations. `recommendCreates`
+// admits a shape on `collscan || sorting` and then builds its keys from equality
+// and range (`esrKeys`), so those five were admitted FOR a sort and proposed an
+// index with no sort component — against queries the planner was already serving
+// from an index, since `collscan` was false on all of them. An index nobody
+// should build, in a queue somebody eventually approves.
+//
+// So the flag carries its own evidence: a sort we cannot name is not a sort we
+// can offer to fix. `collscan` is untouched and may still be a finding on the
+// same shape — this drops the claim, not the shape.
+export function sortIsServable(hasSortStage: boolean, sort: readonly SortKey[]): boolean {
+  return hasSortStage && sort.length > 0;
+}
+
+// One field, one place, across both lists.
+//
+// `{$and: [{d: {$gte: x}}, {d: {$lte: y}}]}` walks two clauses and pushes `d`
+// twice — which is why 23 of the 225 shapes in production carry a field listed
+// twice in `range`. `esrKeys` deduplicates on the way out, so nothing downstream
+// read it wrong; the STORED shape did, and the stored shape is the finding a
+// reader is shown and the digest the row is keyed by.
+//
+// A field with both an equality and a range predicate keeps its equality
+// position, which is what `esrKeys` already does by pushing equality first.
+// Stated here rather than left as a property of the other function.
+export function dedupePredicates(equality: string[], range: string[]): void {
+  const seen = new Set<string>();
+  const keepFirst = (fields: string[]): void => {
+    const kept: string[] = [];
+    for (const field of fields) {
+      if (seen.has(field)) continue;
+      seen.add(field);
+      kept.push(field);
+    }
+    fields.length = 0;
+    fields.push(...kept);
+  };
+  keepFirst(equality);
+  keepFirst(range);
+}
+
 function shapeMapKey(
   equality: string[],
   sort: SortKey[],
@@ -428,6 +479,7 @@ export function pipelineShape(pipeline: readonly Record<string, unknown>[]): Pip
     }
     break; // first non-$match/$sort stage ends index applicability
   }
+  dedupePredicates(equality, range);
   if (equality.length === 0 && range.length === 0 && sort.length === 0) return null;
   return { equality, sort, range };
 }
@@ -809,6 +861,7 @@ export class MongoIndexCollector implements IndexCollector {
       const filter = entry.command?.filter;
       if (filter !== undefined) {
         collectPredicates(filter, equality, range);
+        dedupePredicates(equality, range);
         sort = entry.command?.sort === undefined ? [] : sortKeysOf(entry.command.sort);
         // Profiler filters carry real literals — the partial-index signal.
         constants = equalityConstants(filter);
@@ -834,7 +887,8 @@ export class MongoIndexCollector implements IndexCollector {
       const collscan = (entry.planSummary ?? "").includes("COLLSCAN");
       // A blocking SORT: the plan found its documents through an index but had
       // to order them in memory afterwards, because no index carried the sort.
-      const sortedInMemory = entry.hasSortStage === true;
+      // Only when we know the keys — see sortIsServable.
+      const sortedInMemory = sortIsServable(entry.hasSortStage === true, sort);
       // Same reasoning as the $queryStats path: work done at a prompt is not
       // workload, so it neither counts as a sighting nor accumulates cost.
       const client: QueryClient = entry.appName === undefined ? {} : { application: entry.appName };
@@ -942,6 +996,7 @@ export class MongoIndexCollector implements IndexCollector {
       const filter = key.queryShape.filter;
       if (filter !== undefined) {
         collectPredicates(filter, equality, range);
+        dedupePredicates(equality, range);
         sort = key.queryShape.sort === undefined ? [] : sortKeysOf(key.queryShape.sort);
       } else if (key.queryShape.pipeline !== undefined) {
         lookups = lookupJoins(key.queryShape.pipeline);
@@ -974,7 +1029,8 @@ export class MongoIndexCollector implements IndexCollector {
       const collscan = (metrics.keysExamined?.sum ?? 0) === 0 && docsExamined > 0;
       // An index found the documents but none could order them, so the server
       // sorted in memory. Invisible to the collscan test — keys were examined.
-      const sortedInMemory = (metrics.hasSortStage?.true ?? 0) > 0;
+      // Only when we know the keys — see sortIsServable.
+      const sortedInMemory = sortIsServable((metrics.hasSortStage?.true ?? 0) > 0, sort);
       const interactive = classifyClient(client) === "INTERACTIVE";
       const countedExecs = interactive ? 0 : metrics.execCount;
       const countedDocs = interactive ? 0 : docsExamined;
