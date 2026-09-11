@@ -2,6 +2,7 @@ import type { BlockedReason } from "@repo/contracts";
 import type { JobHelpers } from "graphile-worker";
 import type { Database } from "../db";
 import { InFlight, withInFlight } from "../engine/inflight";
+import { PassCache, withPassCache } from "../engine/pass-cache";
 import { PassPhases, withPhases } from "../engine/phases";
 import { PoolExhaustedError } from "../engine/ports";
 import { InsecureConnectionError } from "../engine/tls";
@@ -169,8 +170,14 @@ export async function runClusterTask(
   // And where it spent its time (engine/phases.ts, #466), so a pass that ran out
   // of budget can say what it was doing rather than only that it stopped.
   const phases = new PassPhases();
+  // And what it has already read (engine/pass-cache.ts), so two steps wanting
+  // one reading of the cluster cost one round trip. Dropped with the pass, which
+  // is the point: the session outlives it and a reading must not.
+  const cache = new PassCache();
   try {
-    const pass = withPhases(phases, () => withInFlight(inFlight, () => run(clusterId)));
+    const pass = withPhases(phases, () =>
+      withInFlight(inFlight, () => withPassCache(cache, () => run(clusterId))),
+    );
     await (budgetMs === null ? pass : withPassBudget(task, budgetMs, pass));
     recordClusterTask(task, clusterId, "ok");
     // A pass that got through clears what stopped THIS pass last time: the state

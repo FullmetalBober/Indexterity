@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { classifyClient } from "../analysis";
+import { passCached } from "../engine/pass-cache";
 import {
   type ClusterNode,
   type CollectionLatency,
@@ -92,6 +93,48 @@ const collStatsDoc = z.object({
 const dataSizeDoc = z.object({
   storageStats: z.object({ size: z.coerce.number(), count: z.coerce.number() }),
 });
+
+// Both projections of one reading, and whichever of them failed.
+//
+// Kept apart rather than parsed once into a single shape, because the two
+// methods have deliberately different tolerances: `collectionStorage` skips a
+// document it cannot read and sums the rest, `indexSizes` refuses the whole
+// reading. Sharing a round trip must not quietly give either one the other's
+// behaviour, so the strict parse's failure is carried here and rethrown at the
+// method it belongs to.
+export interface StorageStats {
+  readonly storage: CollectionStorage;
+  readonly sizes:
+    | { readonly ok: true; readonly value: Record<string, number> }
+    | { readonly ok: false; readonly error: unknown };
+}
+
+// The two parses that used to sit in the two methods, unchanged, over one set
+// of documents. One doc per shard on a sharded collection, a single doc
+// otherwise; both projections sum across them.
+export function readStorageStats(raw: readonly unknown[]): StorageStats {
+  let dataSizeBytes = 0;
+  let docCount = 0;
+  for (const doc of raw) {
+    const parsed = dataSizeDoc.safeParse(doc);
+    if (parsed.success) {
+      dataSizeBytes += parsed.data.storageStats.size;
+      docCount += parsed.data.storageStats.count;
+    }
+  }
+  const storage = { dataSizeBytes, docCount };
+  try {
+    const totals: Record<string, number> = {};
+    for (const doc of collStatsDoc.array().parse(raw)) {
+      for (const [name, size] of Object.entries(doc.storageStats.indexSizes)) {
+        totals[name] = (totals[name] ?? 0) + size;
+      }
+    }
+    return { storage, sizes: { ok: true, value: totals } };
+  } catch (error) {
+    return { storage, sizes: { ok: false, error } };
+  }
+}
 
 const latencyPair = z.object({ ops: z.coerce.number(), latency: z.coerce.number() });
 const latencyStatsDoc = z.object({
@@ -504,6 +547,22 @@ export class MongoIndexCollector implements IndexCollector {
     private readonly members?: MemberConnections,
   ) {}
 
+  // The shared `$collStats: { storageStats: {} }` read behind `collectionStorage`
+  // and `indexSizes` — two projections of one document that no caller wants
+  // together, asked for in different loops of the same pass. Taken once per
+  // namespace per pass; see engine/pass-cache.ts for why the pass is the right
+  // boundary and what it costs outside one (nothing, and no caching).
+  private storageStats(database: string, collection: string): Promise<StorageStats> {
+    return passCached(`storageStats\u0000${database}\u0000${collection}`, () =>
+      this.conn
+        .db(database)
+        .collection(collection)
+        .aggregate([{ $collStats: { storageStats: {} } }])
+        .toArray()
+        .then(readStorageStats),
+    );
+  }
+
   // Also the accessibility probe for a database, the same way the SQL Server
   // collector's is (#345). A credential that can list a cluster's databases and
   // read only some of them is the ordinary shape of a scoped user, and until
@@ -608,39 +667,21 @@ export class MongoIndexCollector implements IndexCollector {
   // the maxCollectionSizeBytes build ceiling; counts feed the collection-size
   // gates. Sourced from $collStats — the `count` command would need a `find`
   // grant the scoped least-privilege user deliberately lacks.
+  //
+  // One projection of the shared read below; `indexSizes` is the other.
   async collectionStorage(database: string, collection: string): Promise<CollectionStorage> {
-    const raw = await this.conn
-      .db(database)
-      .collection(collection)
-      .aggregate([{ $collStats: { storageStats: {} } }])
-      .toArray();
-    let dataSizeBytes = 0;
-    let docCount = 0;
-    for (const doc of raw) {
-      const parsed = dataSizeDoc.safeParse(doc);
-      if (parsed.success) {
-        dataSizeBytes += parsed.data.storageStats.size;
-        docCount += parsed.data.storageStats.count;
-      }
-    }
-    return { dataSizeBytes, docCount };
+    return (await this.storageStats(database, collection)).storage;
   }
 
   // Sum index sizes across every $collStats doc — one per shard on a sharded
   // collection, a single doc otherwise.
+  //
+  // The other projection of the shared read. Its parse is stricter than
+  // `collectionStorage`'s and stays that way — see readStorageStats.
   async indexSizes(database: string, collection: string): Promise<Record<string, number>> {
-    const raw = await this.conn
-      .db(database)
-      .collection(collection)
-      .aggregate([{ $collStats: { storageStats: {} } }])
-      .toArray();
-    const totals: Record<string, number> = {};
-    for (const doc of collStatsDoc.array().parse(raw)) {
-      for (const [name, size] of Object.entries(doc.storageStats.indexSizes)) {
-        totals[name] = (totals[name] ?? 0) + size;
-      }
-    }
-    return totals;
+    const { sizes } = await this.storageStats(database, collection);
+    if (!sizes.ok) throw sizes.error;
+    return sizes.value;
   }
 
   // Cumulative read + write latency for the collection ($collStats latencyStats),

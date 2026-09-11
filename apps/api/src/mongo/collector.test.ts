@@ -5,6 +5,7 @@ import {
   lookupJoins,
   normalizeDirection,
   pipelineShape,
+  readStorageStats,
   sumLatencyStats,
 } from "./collector";
 
@@ -200,5 +201,43 @@ describe("normalizeDirection", () => {
   it("falls back to 1 for anything unrecognized", () => {
     expect(normalizeDirection("geoHaystack")).toBe(1);
     expect(normalizeDirection(2)).toBe(1);
+  });
+});
+
+// The two projections of `$collStats: { storageStats: {} }` used to be two
+// reads with two parses. Sharing the round trip must not give either method the
+// other's tolerance — which is the only way this refactor could have been wrong.
+describe("readStorageStats", () => {
+  const doc = (size: number, count: number, indexSizes: Record<string, number>) => ({
+    storageStats: { size, count, indexSizes },
+  });
+
+  it("sums both projections across shards", () => {
+    const stats = readStorageStats([
+      doc(100, 5, { _id_: 10, a_1: 20 }),
+      doc(50, 3, { _id_: 4, b_1: 7 }),
+    ]);
+    expect(stats.storage).toEqual({ dataSizeBytes: 150, docCount: 8 });
+    expect(stats.sizes).toEqual({ ok: true, value: { _id_: 14, a_1: 20, b_1: 7 } });
+  });
+
+  // collectionStorage skipped a document it could not read and summed the rest.
+  it("keeps the tolerant sum when a document has no size", () => {
+    const stats = readStorageStats([doc(100, 5, { _id_: 10 }), { storageStats: {} }]);
+    expect(stats.storage).toEqual({ dataSizeBytes: 100, docCount: 5 });
+  });
+
+  // indexSizes refused the whole reading, and still does — carried rather than
+  // thrown here, so it lands at the method it belongs to and not at the other.
+  it("carries the strict parse's failure without failing the tolerant one", () => {
+    const stats = readStorageStats([doc(100, 5, { _id_: 10 }), { storageStats: {} }]);
+    expect(stats.storage).toEqual({ dataSizeBytes: 100, docCount: 5 });
+    expect(stats.sizes.ok).toBe(false);
+  });
+
+  it("is empty rather than failing on no documents", () => {
+    const stats = readStorageStats([]);
+    expect(stats.storage).toEqual({ dataSizeBytes: 0, docCount: 0 });
+    expect(stats.sizes).toEqual({ ok: true, value: {} });
   });
 });
