@@ -151,7 +151,7 @@ export async function collectSnapshots(session: EngineSession): Promise<CollectR
     // 362 phases named after tables would be a report nobody finishes.
     const perCollection = beginPhase("per-collection");
     for (const collection of collections) {
-      const [specs, usage, sizes, collLatency, hinted] = await Promise.all([
+      const [specs, usage, sizes, hinted] = await Promise.all([
         allSpecs === null
           ? collector.listIndexes(database, collection)
           : Promise.resolve(allSpecs.get(collection) ?? []),
@@ -161,13 +161,31 @@ export async function collectSnapshots(session: EngineSession): Promise<CollectR
         allSizes === null
           ? collector.indexSizes(database, collection)
           : Promise.resolve(allSizes.get(collection) ?? {}),
-        latencies === null
-          ? collector.collectionLatency(database, collection)
-          : Promise.resolve(latencies.get(collection) ?? NO_ACTIVITY),
         hints === null
           ? collector.collectHintedIndexes(database, collection).catch(() => [])
           : Promise.resolve(hints.get(collection) ?? []),
       ]);
+      // The latency sample goes LAST, and on its own, which is the difference
+      // between a fold that works and one that works about half the time (#502).
+      //
+      // The run's identity is `readOps - selfReadOps` (jobs/runs.ts), and that
+      // is only stable across two passes if the number of our own reads issued
+      // AFTER the sample is the same both times. Inside the `Promise.all` above
+      // it is not: five requests are in flight together and which of them land
+      // after the sample is decided by response ordering. #518 shipped exactly
+      // that and `dev` went red on two of three MongoDB versions while the third
+      // passed.
+      //
+      // Sampling last makes that number zero by construction. It costs one extra
+      // SEQUENTIAL round trip per collection — the cost #454 and #461 are about —
+      // and it is affordable here for a reason worth stating rather than
+      // assuming: only MongoDB reaches this branch. SQL Server implements
+      // `latencyByCollection` and takes the batched path above, and SQL Server is
+      // the engine behind the tunnel where round trips are dear.
+      const collLatency =
+        latencies === null
+          ? await collector.collectionLatency(database, collection)
+          : (latencies.get(collection) ?? NO_ACTIVITY);
       const hintedNames = new Set(hinted);
       latency.push({
         database,
