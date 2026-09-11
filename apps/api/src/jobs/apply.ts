@@ -1,3 +1,4 @@
+import type { SQL } from "drizzle-orm";
 import {
   AUTO_APPLY_HISTORY_DAYS,
   DEFAULT_OBSERVE_DAYS,
@@ -58,6 +59,29 @@ const DROP_TYPES = new Set(["DROP_UNUSED", "DROP_REDUNDANT", "MERGE"]);
 // A hand-approved drop never reaches this function. Somebody clicking Approve on
 // three days of evidence is a person deciding, which is exactly the distinction
 // the two thresholds exist to draw.
+/**
+ * Everything that decides auto-approval EXCEPT the score comparison.
+ *
+ * Exported because the settings page has to be able to say what a threshold
+ * would do — "at 70, 57 of your 108 findings apply without asking" — and the
+ * only honest way to answer that is with the same predicate that does it. A
+ * second copy in the read path would be a claim about this function that stops
+ * being true the day either moves, and the reader would never know: the number
+ * would simply be wrong, on the screen where somebody decides how much of this
+ * runs unattended.
+ */
+export function autoApprovable(clusterId: string): SQL | undefined {
+  return and(
+    eq(recommendations.clusterId, clusterId),
+    eq(recommendations.state, "PROPOSED"),
+    notInArray(recommendations.type, ["ADVISORY_REVIEW", "REORDER"]),
+    or(
+      isNull(recommendations.evidenceDays),
+      gte(recommendations.evidenceDays, AUTO_APPLY_HISTORY_DAYS),
+    ),
+  );
+}
+
 export async function promoteByScore(
   db: Database,
   clusterId: string,
@@ -67,18 +91,7 @@ export async function promoteByScore(
   await db
     .update(recommendations)
     .set({ state: "APPROVED", updatedAt: new Date() })
-    .where(
-      and(
-        eq(recommendations.clusterId, clusterId),
-        eq(recommendations.state, "PROPOSED"),
-        gte(recommendations.score, threshold),
-        notInArray(recommendations.type, ["ADVISORY_REVIEW", "REORDER"]),
-        or(
-          isNull(recommendations.evidenceDays),
-          gte(recommendations.evidenceDays, AUTO_APPLY_HISTORY_DAYS),
-        ),
-      ),
-    );
+    .where(and(autoApprovable(clusterId), gte(recommendations.score, threshold)));
 }
 
 // What the audit trail records for the transition into the observe window. The
