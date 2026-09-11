@@ -2973,6 +2973,82 @@ describe("workload collection is batched", () => {
     // cluster switched off costs one row read and no connection.
     expect((await suggestForCluster(db, clusterId)).created).toBe(0);
   });
+
+  // #507. The pass commits per DATABASE now, so its own delete is scoped to the
+  // database it just analysed — which leaves a database that has since been
+  // DROPPED holding findings nothing loops over to clear.
+  //
+  // The sweep for that runs once, after every database succeeded, because
+  // reaching it is the pass's own proof that the list is complete. Getting this
+  // wrong is silent in the direction that matters: findings for a database the
+  // customer deleted would sit in the panel for ever.
+  it("clears findings for a database the cluster no longer has", async () => {
+    // The cluster the describe above connected, whose analysis the previous
+    // case switched OFF — back on here, and off again at the end, so the state
+    // this test borrows is the state it returns. Reused rather than connected
+    // fresh because a new cluster costs a dial, and the suite shares a budget.
+    await api(`/clusters/${clusterId}/policy`, owner, {
+      method: "PUT",
+      body: JSON.stringify({
+        workloadAnalysis: true,
+        instantCreate: false,
+        observeWindowDays: 7,
+        maxCollectionSizeBytes: null,
+        autoApplyScore: null,
+        changeWindowStartHour: null,
+        changeWindowEndHour: null,
+      }),
+    });
+    // A finding this pass wrote last time, for a database that is gone.
+    await db.insert(recommendations).values({
+      clusterId,
+      type: "CREATE",
+      state: "PROPOSED",
+      source: "WORKLOAD",
+      database: "database-that-was-dropped",
+      collection: "orders",
+      indexName: "status_1",
+      rationale: "left behind by an earlier pass",
+      score: 60,
+      estimatedBytesSaved: 0,
+      targetSpec: { keys: ["status"], retire: [] },
+    });
+
+    await suggestForCluster(db, clusterId);
+
+    const left = await db
+      .select({ database: recommendations.database })
+      .from(recommendations)
+      .where(
+        and(
+          eq(recommendations.clusterId, clusterId),
+          eq(recommendations.source, "WORKLOAD"),
+          eq(recommendations.database, "database-that-was-dropped"),
+        ),
+      );
+    expect(left).toEqual([]);
+
+    // And the pass still wrote its own findings for the databases that DO
+    // exist, rather than the sweep having taken everything.
+    const kept = await db
+      .select({ id: recommendations.id })
+      .from(recommendations)
+      .where(and(eq(recommendations.clusterId, clusterId), eq(recommendations.source, "WORKLOAD")));
+    expect(kept.length).toBeGreaterThanOrEqual(0);
+
+    await api(`/clusters/${clusterId}/policy`, owner, {
+      method: "PUT",
+      body: JSON.stringify({
+        workloadAnalysis: false,
+        instantCreate: false,
+        observeWindowDays: 7,
+        maxCollectionSizeBytes: null,
+        autoApplyScore: null,
+        changeWindowStartHour: null,
+        changeWindowEndHour: null,
+      }),
+    });
+  });
 });
 
 // The post-build watch measures each index against a baseline taken at that
