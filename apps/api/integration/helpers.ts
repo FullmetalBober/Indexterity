@@ -2,15 +2,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { connect } from "node:net";
 import path from "node:path";
-import {
-  and,
-  clusterIndexes,
-  type Database,
-  eq,
-  indexSnapshots,
-  latencySamples,
-  sql,
-} from "../src/db";
+import { and, clusterIndexes, type Database, eq, indexSnapshots, latencySamples } from "../src/db";
 
 /** A body with an id on it, checked rather than claimed. */
 function asIdentified(body: unknown): { id: string } {
@@ -305,6 +297,24 @@ export interface SnapshotFixture {
 // Identity plus shape, matching what the writer keys dimension rows by. Stated
 // once, because a fixture that keyed the map differently from the way it looks the
 // id back up fails with "no dimension row" and sends the reader to the wrong file.
+// Two specs describing the same INDEX, which is the identity `cluster_indexes`
+// keys by (#496). `hidden` is a state flag rather than a shape, and key order
+// differs across the round trip — mongo's order going out, jsonb's sorted order
+// coming back — so both are normalised away.
+function sameShape(stored: Record<string, unknown>, wanted: Record<string, unknown>): boolean {
+  return canonical(stored) === canonical(wanted);
+}
+
+function canonical(spec: unknown): string {
+  if (Array.isArray(spec)) return `[${spec.map(canonical).join(",")}]`;
+  if (spec === null || typeof spec !== "object") return JSON.stringify(spec) ?? "null";
+  return `{${Object.entries(spec)
+    .filter(([key, value]) => key !== "hidden" && value !== undefined)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, value]) => `${JSON.stringify(key)}:${canonical(value)}`)
+    .join(",")}}`;
+}
+
 function fixtureKey(fixture: SnapshotFixture): string {
   return [
     fixture.clusterId,
@@ -335,10 +345,15 @@ export async function insertSnapshots(
       })
       .onConflictDoNothing();
     // One path whether the insert won or a previous scenario already created the
-    // row, and it matches on the digest Postgres generated rather than on a
-    // canonical form reproduced here.
-    const [row] = await db
-      .select({ id: clusterIndexes.id })
+    // row. Identity columns in SQL, shape in JS — deliberately NOT the digest.
+    //
+    // This used to reproduce `sha256(spec::text)` in the predicate, which made it
+    // a twin of a generated column: the day #496 took `hidden` out of that
+    // expression, every lookup here stopped matching and thirteen tests failed
+    // with "no dimension row". A helper that has to be edited whenever the
+    // identity changes is a helper that will be forgotten.
+    const candidates = await db
+      .select({ id: clusterIndexes.id, spec: clusterIndexes.spec })
       .from(clusterIndexes)
       .where(
         and(
@@ -346,9 +361,9 @@ export async function insertSnapshots(
           eq(clusterIndexes.database, fixture.database),
           eq(clusterIndexes.collection, fixture.collection),
           eq(clusterIndexes.indexName, fixture.indexName),
-          sql`${clusterIndexes.specDigest} = encode(sha256(${JSON.stringify(fixture.spec)}::jsonb::text::bytea), 'hex')`,
         ),
       );
+    const row = candidates.find((candidate) => sameShape(candidate.spec, fixture.spec));
     if (row === undefined) throw new Error(`no dimension row for ${fixture.indexName}`);
     ids.set(key, row.id);
   }
