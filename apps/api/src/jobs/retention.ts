@@ -13,7 +13,9 @@ import {
   lt,
   organizations,
   recommendations,
+  session,
   sql,
+  verification,
   workloadShapes,
 } from "../db";
 
@@ -61,6 +63,36 @@ export async function pruneDeadLetterJobs(db: Database): Promise<number> {
   return ids.length;
 }
 
+// Expired auth rows, which nothing was deleting.
+//
+// `session` grows with every sign-in — the table's own comment in db/schema.ts
+// says so — and `verification` with every emailed link. Neither is per-cluster
+// or per-plan, so neither belongs to any of the windows below: they belong to
+// the deployment, like the dead letters above, and the rule is simply that an
+// expired row is expired. Measured on the hosted deployment, two of four session
+// rows were already past `expires_at` with nothing that would ever remove them.
+//
+// better-auth prunes its rate-limit counters on write and its own tables it does
+// not, which is defensible for an auth library — a session row is the only record
+// of a sign-in and deleting it is the application's call, not the library's.
+// This is the application making it.
+//
+// No grace period. A row past `expires_at` is one better-auth will never accept
+// again, so deleting it changes an expired session into an absent one, and both
+// are the same 401. A window would only be a number standing in for a doubt.
+export async function pruneExpiredAuthRows(db: Database): Promise<number> {
+  const now = new Date();
+  const sessions = await db
+    .delete(session)
+    .where(lt(session.expiresAt, now))
+    .returning({ id: session.id });
+  const verifications = await db
+    .delete(verification)
+    .where(lt(verification.expiresAt, now))
+    .returning({ id: verification.id });
+  return sessions.length + verifications.length;
+}
+
 // How long the time-series tables are KEPT, which is no longer the same question
 // as how much of them a customer may SEE.
 //
@@ -96,7 +128,11 @@ export async function pruneOldSamples(db: Database): Promise<number> {
     .select({ clusterId: clusters.id, plan: organizations.plan })
     .from(clusters)
     .innerJoin(organizations, eq(clusters.orgId, organizations.id));
-  if (owned.length === 0) return await pruneDeadLetterJobs(db);
+  // A deployment with no clusters still signs people in, so the auth sweep is on
+  // both paths out of here rather than only the one that had work to do.
+  if (owned.length === 0) {
+    return (await pruneDeadLetterJobs(db)) + (await pruneExpiredAuthRows(db));
+  }
   const clusterIds = owned.map((row) => row.clusterId);
 
   let pruned = 0;
@@ -195,5 +231,5 @@ export async function pruneOldSamples(db: Database): Promise<number> {
       .returning({ id: recommendations.id });
     pruned += decisions.length;
   }
-  return pruned + (await pruneDeadLetterJobs(db));
+  return pruned + (await pruneDeadLetterJobs(db)) + (await pruneExpiredAuthRows(db));
 }
