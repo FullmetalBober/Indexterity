@@ -1,7 +1,12 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { isRedundantPrefix, parseStoredSpec, rebuildKeys, rebuildOptions } from "../src/analysis";
 import { PassPhases, withPhases } from "../src/engine/phases";
-import { DatabaseInaccessibleError, type EngineSession, workloadKey } from "../src/engine/ports";
+import {
+  type CollectionLatency,
+  DatabaseInaccessibleError,
+  type EngineSession,
+  workloadKey,
+} from "../src/engine/ports";
 import { ProvisionDeniedError, SCOPED_USERNAME } from "../src/engine/provision";
 import { detectEngine } from "../src/engine/registry";
 import { present } from "../src/errors/at";
@@ -497,8 +502,22 @@ describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", 
     }
     // Something ran against the fixture table, so the agreement is not two zeros.
     expect(latencies.get("dbo.orders")?.reads.ops ?? 0).toBeGreaterThan(0);
-    // A second read remembers the plans it attributed and agrees with itself.
-    expect(await collector.latencyByCollection(DB)).toEqual(latencies);
+    // A second read remembers the plans it attributed and agrees with itself —
+    // over the tables the pipeline actually reads, which is what
+    // `listCollectionNames` returns.
+    //
+    // NOT over the whole map, which is what this asserted until #513. The Query
+    // Store also attributes plans to SYSTEM tables, and reading the DMVs is
+    // itself a query against them: on one CI run `sys.sysxlgns` went from one
+    // read to two between these two calls and failed a test that is about the
+    // plan-attribution cache. Nothing downstream ever looks at those keys —
+    // `listCollectionNames` filters on `is_ms_shipped = 0`, and the collect loop
+    // only asks the map for the tables that returned — so comparing them was
+    // asserting more than the product relies on, and the surplus is a counter
+    // our own read moves.
+    const ours = (from: ReadonlyMap<string, CollectionLatency>) =>
+      new Map(tables.flatMap((table) => (from.has(table) ? [[table, from.get(table)]] : [])));
+    expect(ours(await collector.latencyByCollection(DB))).toEqual(ours(latencies));
   });
 
   // #461, and the same claim as the test above about a different source: these
