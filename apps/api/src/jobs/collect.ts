@@ -89,7 +89,22 @@ export interface CollectOutcome {
 // row per shape, and the one a collect belongs to is the one whose spec matches
 // what was just read off the cluster.
 function shapeKey(database: string, collection: string, indexName: string, spec: unknown): string {
-  return `${watchKey(database, collection, indexName)}${SEP}${canonicalSpec(spec)}`;
+  return `${watchKey(database, collection, indexName)}${SEP}${canonicalSpec(withoutHidden(spec))}`;
+}
+
+// The spec MINUS `hidden`, which is the identity `cluster_indexes` is keyed by
+// since #496. It has to be dropped on this side too, and this is the side that
+// matters: `dimensionIds` matches stored rows to incoming ones by a key it builds
+// here, and never by the digest postgres generates. Leaving `hidden` in would
+// mean a hidden index never matching its own row, the insert conflicting on a
+// unique index that no longer separates them, and the re-read finding a row
+// under a different key — so the index would silently stop being collected, for
+// exactly the thirty days the hide exists to observe.
+function withoutHidden(spec: unknown): unknown {
+  if (spec === null || typeof spec !== "object" || Array.isArray(spec)) return spec;
+  const rest: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(spec)) if (key !== "hidden") rest[key] = value;
+  return rest;
 }
 
 // Canonical form of a spec, for comparing an incoming spec against a stored one
@@ -154,9 +169,14 @@ async function dimensionIds(
   }));
 
   const byShape = new Map<string, string>();
+  // The stored spec beside the id, so the `hidden` reconciliation below can see
+  // what the row currently claims without a second read.
+  const specByShape = new Map<string, Record<string, unknown>>();
   const remember = (rows: readonly DimensionRow[]): void => {
     for (const row of rows) {
-      byShape.set(shapeKey(row.database, row.collection, row.indexName, row.spec), row.id);
+      const key = shapeKey(row.database, row.collection, row.indexName, row.spec);
+      byShape.set(key, row.id);
+      specByShape.set(key, row.spec);
     }
   };
 
@@ -207,7 +227,33 @@ async function dimensionIds(
     const id = byShape.get(entry.shape);
     if (id !== undefined) ids.set(entry.identity, id);
   }
+
+  // `hidden` is out of the identity but still has to be TRUE of the row.
+  //
+  // It is the one field of a spec that can now change without starting a new
+  // dimension row, and the analysis reads it off the stored spec: a hidden index
+  // may not make another redundant (analysis/redundancy.ts) and does not count as
+  // serving a field (analysis/purge.ts). Left alone, the row this product hid
+  // would go on claiming to be visible for as long as it existed.
+  //
+  // Written only when it actually differs, which is once per hide and once per
+  // rollback. That keeps the property the read-first design is for — nothing is
+  // rewritten on a collect that learned nothing.
+  const stale = wanted.filter(({ shape, snapshot }) => {
+    const stored = specByShape.get(shape);
+    return stored !== undefined && hiddenOf(stored) !== hiddenOf(snapshot.spec);
+  });
+  for (const { shape, snapshot } of stale) {
+    const id = byShape.get(shape);
+    if (id === undefined) continue;
+    await db.update(clusterIndexes).set({ spec: snapshot.spec }).where(eq(clusterIndexes.id, id));
+  }
   return ids;
+}
+
+function hiddenOf(spec: unknown): boolean {
+  if (spec === null || typeof spec !== "object") return false;
+  return Object.entries(spec).some(([key, value]) => key === "hidden" && value === true);
 }
 
 // Extend the run each index already has, or start a new one.
