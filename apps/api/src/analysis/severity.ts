@@ -39,6 +39,35 @@ const CRITICAL_DOCS_PER_EXECUTION = 500_000;
 // twice a day is 700k and no longer worth an index.
 export const MIN_WEEKLY_DOCS_EXAMINED = 1_000_000;
 
+// What it takes before a PER-WEEK figure is allowed to be one (#509).
+//
+// `executionsPerWeek` divides a pass's execution count by the window that pass
+// observed, which is a sound rate estimate — `system.profile` is a capped ring,
+// so a full ring reaching back three minutes really does imply a high rate. What
+// it is not is a claim about a WEEK, and the workload page both ranks by and
+// prints the result as one.
+//
+// Measured on the hosted deployment: `msb-app.exercise-tags` ranked THIRD in the
+// customer's most-expensive-queries list at 163 million documents a week, from a
+// row two hours old, confirmed three times, on ONE execution. `msb-app.comment`
+// showed 32 million a week from a single sighting. 33 of 202 shapes carrying a
+// weekly figure had been watched for under a day or confirmed fewer than twelve
+// times; two of them were in the page's top ten.
+//
+// So the projection needs evidence that the shape RECURS, which is a different
+// question from how fast it ran while we were looking, and the answer is already
+// stored: `observations` and the span from `first_seen_at` to `last_seen_at`.
+//
+// A day, because it is the shortest span that contains a whole daily cycle — a
+// shape that only runs overnight is still seen — and twelve confirmations,
+// because the passes that write this table are hourly, so that is half a day of
+// them and it excludes the three-sighting rows above. Both are floors on OUR
+// evidence, deliberately not on the source's observation window: that window is
+// the ring's reach, its median here is 2.2 hours, and any floor on it would
+// discard the genuinely busy shapes this is meant to keep.
+export const MIN_PROJECTION_OBSERVATIONS = 12;
+export const MIN_PROJECTION_LIFETIME_HOURS = 24;
+
 export interface ScanCost {
   readonly severity: ScanSeverity;
   // Documents walked in total, as far as the workload source can see. Zero when
