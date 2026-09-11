@@ -6276,9 +6276,12 @@ describe("bounded per-cluster reads", () => {
         severity: "ROUTINE",
         outcome: "below-cost-floor",
         proposedIndex: null,
-        firstSeenAt: new Date(now - 86_400_000),
+        // Enough watching for the weekly figure to be allowed to BE one (#509,
+        // MIN_PROJECTION_*). Without it every row reads as unmeasured and this
+        // test loses the boundary it exists to page across.
+        firstSeenAt: new Date(now - 2 * 86_400_000),
         lastSeenAt: new Date(now),
-        observations: 1,
+        observations: 24,
       })),
     );
 
