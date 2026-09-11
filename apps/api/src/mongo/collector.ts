@@ -33,7 +33,7 @@ import {
   ownSelfReads,
   READS_PER_COLL_STATS_LATENCY,
   READS_PER_COLL_STATS_STORAGE,
-  READS_PER_INDEX_STATS,
+  readsPerIndexStats,
   type SelfReads,
 } from "./self-reads";
 
@@ -538,6 +538,7 @@ async function readIndexStats(
   database: string,
   collection: string,
   selfReads: SelfReads,
+  indexStatsCost: number,
 ): Promise<IndexUsageStat[]> {
   try {
     const raw = await conn
@@ -548,7 +549,7 @@ async function readIndexStats(
     // Counted where it is paid, and only once it HAS been paid: a call that
     // never reached the server cost the collection nothing, and subtracting a
     // read that did not happen would suppress activity that did.
-    selfReads.add(database, collection, READS_PER_INDEX_STATS);
+    selfReads.add(database, collection, indexStatsCost);
     return indexStat
       .array()
       .parse(raw)
@@ -744,8 +745,15 @@ export class MongoIndexCollector implements IndexCollector {
     // $indexStats is node-local, so the primary alone cannot tell a dead index
     // from one that only serves secondary reads.
     const connections = [this.conn, ...(await (this.members?.all() ?? Promise.resolve([])))];
+    // What one `$indexStats` costs the collection it reads, which is a property
+    // of the SERVER and not a constant — 2 on 6.0, 1 from 7.0 (self-reads.ts).
+    // `serverVersion` is cached on the connection, so this is free after the
+    // first ask.
+    const indexStatsCost = readsPerIndexStats(await this.conn.serverVersion());
     const perMember = await Promise.all(
-      connections.map((conn) => readIndexStats(conn, database, collection, this.selfReads)),
+      connections.map((conn) =>
+        readIndexStats(conn, database, collection, this.selfReads, indexStatsCost),
+      ),
     );
     // Keyed by index AND host: the same index reports once per member, and each
     // member's counter has its own `since`.

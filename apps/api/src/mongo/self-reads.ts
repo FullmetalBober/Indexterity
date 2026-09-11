@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { ServerVersion } from "./version";
 
 // How many of a collection's reads were OURS.
 //
@@ -54,7 +55,31 @@ import { createHash } from "node:crypto";
 // made and a new one cannot be added without answering the question.
 export const READS_PER_COLL_STATS_STORAGE = 2;
 export const READS_PER_COLL_STATS_LATENCY = 1;
-export const READS_PER_INDEX_STATS = 1;
+
+// `$indexStats` IS NOT A CONSTANT ACROSS SERVER VERSIONS, and finding that out
+// cost a shipped bug. Measured on three servers, same probe, same collection:
+//
+//   | mongod | $indexStats | storageStats | latencyStats |
+//   |--------|-------------|--------------|--------------|
+//   | 6.0.28 |           2 |            2 |            1 |
+//   | 7.0.39 |           1 |            2 |            1 |
+//   | 8.2.9  |           1 |            2 |            1 |
+//
+// The original table was taken on 8.0 alone and hard-coded 1, so on a 6.0 server
+// this product under-counts its own reads by one per namespace per pass. That is
+// not a rounding error: `analysis/activity.ts` credits an interval as active
+// when the adjusted delta is positive, and a permanent +1 makes every interval
+// of every collection positive — which is the whole of #493, still happening on
+// 6.0 after #493 shipped.
+//
+// UNKNOWN VERSIONS TAKE THE HIGHER NUMBER, deliberately. Over-counting our own
+// reads subtracts too much, which withholds active time and therefore withholds
+// drops; under-counting manufactures activity and allows them. Only one of those
+// is survivable in a gate whose job is to refuse. The cost is that a server we
+// cannot identify folds nothing, which is a saving rather than a safety.
+export function readsPerIndexStats(version: ServerVersion | null): number {
+  return version === null || version.major < 7 ? 2 : 1;
+}
 
 // A hard ceiling on namespaces held, for the same reason attributions.ts has
 // one: nothing discards this for us. A key and a number is a few dozen bytes,
