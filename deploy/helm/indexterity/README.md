@@ -295,7 +295,7 @@ helm upgrade indexterity … --set metrics.serviceMonitor.labels.release=kube-pr
 
 ### Alerts
 
-`metrics.prometheusRule.enabled=true` installs a `PrometheusRule` with 18 alerts,
+`metrics.prometheusRule.enabled=true` installs a `PrometheusRule` with 19 alerts,
 grouped by the question they answer: is the schedule running, is work piling up,
 can we still reach the clusters, is the safety pipeline meaningful, is the control
 plane healthy, and what are readers seeing. `metrics.prometheusRule.labels` is the
@@ -305,7 +305,7 @@ Every threshold is under `metrics.prometheusRule.thresholds`, and the
 stale-schedule windows are derived from `BURST_SCHEDULE` in
 `apps/api/src/jobs/schedule.ts` — if that schedule changes, these move with it.
 
-Two of them exist because the obvious rule does not work:
+Three of them exist because the obvious rule does not work:
 
 - **`IndexterityWorkerNotReporting`** (the name predates #232 folding the worker
   into the api; the alert outlives it) uses `absent_over_time`, not `increase`.
@@ -315,6 +315,11 @@ Two of them exist because the obvious rule does not work:
   per-cluster tasks. `scheduleCollect` ticks on cron whether or not a cluster
   exists; `collect` does not, so alerting on it fires the moment the last cluster
   is offboarded.
+- **`IndexterityEvidenceNotFolding`** watches a saving rather than a failure.
+  Run-length storage can stop working with nothing to show for it — a reading
+  that never repeats byte for byte folds nothing, and the time-series tables
+  quietly go back to a row per collect per index. There is no error to count, so
+  the rule looks for writes that only ever *insert*, per engine and table.
 
 ## Security defaults
 

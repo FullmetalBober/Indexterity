@@ -10,7 +10,8 @@ import {
   latencySamples,
   sql,
 } from "../db";
-import { type ClusterNode, workloadKey } from "../engine/ports";
+import { type ClusterEngine, type ClusterNode, workloadKey } from "../engine/ports";
+import { evidenceWrites } from "../metrics/instruments";
 import { type CollectedLatency, type CollectedSnapshot, collectSnapshots } from "../mongo";
 import type { TunnelRegistry } from "../tunnel/tunnel.registry";
 import { openClusterSession } from "./cluster-connection";
@@ -54,6 +55,15 @@ interface WriteCounts {
 }
 
 const NOTHING_WRITTEN: WriteCounts = { inserted: 0, extended: 0 };
+
+// One counter, two outcomes, so a scrape can divide them. Zero is reported as
+// well as non-zero: a table that folds nothing has `extended` sitting at zero
+// forever, and a series that is absent rather than flat is one an alert cannot
+// be written against.
+function recordEvidenceWrites(table: string, engine: ClusterEngine, counts: WriteCounts): void {
+  evidenceWrites.add(counts.inserted, { table, engine, outcome: "inserted" });
+  evidenceWrites.add(counts.extended, { table, engine, outcome: "extended" });
+}
 
 // What one collect did, as something the caller can act on (#483).
 //
@@ -438,7 +448,7 @@ export async function collectCluster(
   // refused rather than dialled directly.
   tunnels?: TunnelRegistry,
 ): Promise<CollectOutcome> {
-  const { session, release } = await openClusterSession(db, clusterId, { tunnels });
+  const { session, engine, release } = await openClusterSession(db, clusterId, { tunnels });
   try {
     // The roster costs one hello per member on connections the usage pass
     // opens anyway, so it rides the same session rather than its own dial.
@@ -458,6 +468,13 @@ export async function collectCluster(
       recordLatency(db, clusterId, latency, now),
       recordRoster(db, clusterId, nodes, now),
     ]);
+    // Per TABLE, before the two are summed below, because that is where the
+    // difference lives: on the hosted deployment `index_snapshots` folded at
+    // 1.26x on the MongoDB cluster while `latency_samples` folded at exactly
+    // 1.00x — never once, for sixteen days, with nothing to say so. See
+    // metrics/instruments.ts, evidenceWrites.
+    recordEvidenceWrites("index_snapshots", engine, written);
+    recordEvidenceWrites("latency_samples", engine, latencyWritten);
     // The roster is deliberately not counted. It is replaced whole on every
     // collect and carries no history, so it is never evidence about an index.
     return {
