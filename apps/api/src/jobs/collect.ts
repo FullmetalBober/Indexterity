@@ -376,8 +376,9 @@ async function recordLatency(
       database: latencySamples.database,
       collection: latencySamples.collection,
       readOps: latencySamples.readOps,
-      selfReadOps: latencySamples.selfReadOps,
+      readLatencyMicros: latencySamples.readLatencyMicros,
       writeOps: latencySamples.writeOps,
+      writeLatencyMicros: latencySamples.writeLatencyMicros,
       lastSeenAt: latencySamples.lastSeenAt,
     })
     .from(latencySamples)
@@ -392,58 +393,27 @@ async function recordLatency(
     });
   }
 
-  const extend: (CollectedLatency & { id: string })[] = [];
+  const extend: string[] = [];
   const insert: (typeof latencySamples.$inferInsert)[] = [];
   for (const sample of latency) {
     const run = current.get(workloadKey(sample.database, sample.collection));
     if (run !== undefined && extendsRun(run, latencyFingerprint(sample), now)) {
-      extend.push({ ...sample, id: run.id });
+      extend.push(run.id);
       continue;
     }
     insert.push({ clusterId, ...sample, capturedAt: now, lastSeenAt: now, observations: 1 });
   }
 
   if (extend.length > 0) {
-    // The counters travel as parallel arrays, because an extended run now
-    // CARRIES the live reading rather than freezing the one it started with.
-    //
-    // The run's identity is `readOps - selfReadOps` and `writeOps`, which by
-    // construction have not moved (jobs/runs.ts). Everything else on the row is
-    // a measurement of a moment, and the moment worth holding is the latest —
-    // the same call `recordSnapshots` makes for `size_bytes`, and here it is
-    // what keeps every difference measured across the SAME interval: the gap
-    // between one run's end and the next run's start, which is also the span
-    // `activeHours` credits. Frozen instead, a long idle run would hand the
-    // first real query afterwards a run's worth of our own microseconds divided
-    // by a handful of real operations.
-    //
-    // `readOps` and `selfReadOps` are replaced together or not at all: the
-    // analysis differences them as a pair, and a row holding one from its start
-    // and the other from its end would subtract across different intervals.
-    await db.execute(sql`
-      update ${latencySamples} as s
-      set last_seen_at = ${now},
-          observations = s.observations + 1,
-          -- See recordSnapshots: widest interior gap, against the OLD row.
-          max_gap_ms = greatest(
-            s.max_gap_ms,
-            (extract(epoch from (${now}::timestamptz - s.last_seen_at)) * 1000)::bigint
-          ),
-          read_ops = v.read_ops,
-          self_read_ops = v.self_read_ops,
-          read_latency_micros = v.read_micros,
-          write_ops = v.write_ops,
-          write_latency_micros = v.write_micros
-      from unnest(
-        ${sql.param(extend.map((row) => row.id))}::uuid[],
-        ${sql.param(extend.map((row) => row.readOps))}::bigint[],
-        ${sql.param(extend.map((row) => row.selfReadOps))}::bigint[],
-        ${sql.param(extend.map((row) => row.readLatencyMicros))}::bigint[],
-        ${sql.param(extend.map((row) => row.writeOps))}::bigint[],
-        ${sql.param(extend.map((row) => row.writeLatencyMicros))}::bigint[]
-      ) as v(id, read_ops, self_read_ops, read_micros, write_ops, write_micros)
-      where s.id = v.id
-    `);
+    await db
+      .update(latencySamples)
+      .set({
+        lastSeenAt: now,
+        observations: sql`${latencySamples.observations} + 1`,
+        // See recordSnapshots: widest interior gap, evaluated against the old row.
+        maxGapMs: sql`greatest(${latencySamples.maxGapMs}, (extract(epoch from (${now}::timestamptz - ${latencySamples.lastSeenAt})) * 1000)::bigint)`,
+      })
+      .where(inArray(latencySamples.id, extend));
   }
   if (insert.length > 0) await db.insert(latencySamples).values(insert);
   return { inserted: insert.length, extended: extend.length };

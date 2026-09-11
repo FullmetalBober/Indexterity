@@ -57,37 +57,15 @@ describe("counterFingerprint", () => {
 });
 
 describe("latencyFingerprint", () => {
-  const base = { readOps: 100, selfReadOps: 40, writeOps: 3 };
+  const base = { readOps: 1, readLatencyMicros: 2, writeOps: 3, writeLatencyMicros: 4 };
 
-  it("changes when somebody else's traffic moves", () => {
+  it("changes when any one of the four counters moves", () => {
     for (const key of keysOf(base)) {
       expect(latencyFingerprint({ ...base, [key]: base[key] + 1 })).not.toBe(
         latencyFingerprint(base),
       );
     }
   });
-
-  // The whole point (#502). `$collStats` counts the metadata reads this product
-  // issues against the collection they measure, so an idle collection's raw
-  // readOps climbs on every collect. Folding on the raw number meant folding
-  // never happened: 1.00x on both MongoDB clusters in production.
-  it("is unchanged when the only reads were ours", () => {
-    expect(latencyFingerprint({ readOps: 108, selfReadOps: 48, writeOps: 3 })).toBe(
-      latencyFingerprint(base),
-    );
-  });
-
-  it("still changes when one real read lands under the floor of ours", () => {
-    expect(latencyFingerprint({ readOps: 109, selfReadOps: 48, writeOps: 3 })).not.toBe(
-      latencyFingerprint(base),
-    );
-  });
-
-  // Neither latency total appears above, and there is no test for that because
-  // the PARAMETER no longer accepts one: read latency moves with our own reads
-  // and is carried live on the row instead, and write latency cannot move while
-  // `writeOps` stands still. A signature that will not take them is a stronger
-  // statement than a case asserting they are ignored.
 });
 
 describe("extendsRun", () => {
