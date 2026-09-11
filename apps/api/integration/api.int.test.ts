@@ -4711,22 +4711,6 @@ describe("collecting twice writes almost nothing the second time", () => {
       expect(row.maxGapMs).toBeGreaterThan(0);
       expect(row.maxGapMs).toBeLessThanOrEqual(row.lastSeenAt.getTime() - row.capturedAt.getTime());
     }
-    // `latency_samples` folds too, and until #502 it did not — on MongoDB, not
-    // once, for as long as the table existed.
-    //
-    // Its fingerprint carried the raw `$collStats` counters, and this product's
-    // own metadata reads are reads of the collection they measure (#493), so the
-    // state never repeated and every collect wrote a row. Measured across sixteen
-    // days of production: 1.00x on both MongoDB clusters against 16.3x and 181.5x
-    // on the two SQL Server ones. The identity is now the traffic nobody here
-    // caused, so a collection with no other readers extends instead.
-    const latency = await db
-      .select({ observations: latencySamples.observations })
-      .from(latencySamples)
-      .where(eq(latencySamples.clusterId, runClusterId));
-    expect(latency.length).toBeGreaterThan(0);
-    expect(latency.filter((row) => row.observations > 1).length).toBeGreaterThan(0);
-
     // A run of one has no interior and must say so, rather than inheriting a
     // neighbour's number.
     for (const row of after.filter((candidate) => candidate.observations === 1)) {

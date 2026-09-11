@@ -206,6 +206,10 @@ spec:
               with how often we look rather than with how much the cluster
               changes. Usually something new in a collect pass moving a counter
               it also reads.
+              KNOWN AND TRACKED for table=latency_samples engine=MONGODB: the
+              fingerprint still carries read_latency_micros, which this product's
+              own metadata reads move, so that one series folds at 1.00x until
+              issue #502 lands. Any other engine or table firing here is news.
 
         - alert: IndexterityRegressionsSpiking
           expr: increase(indexterity_regression_gate_decisions_total{verdict="regressed"}[24h]) > {{ $t.regressionsPerDay }}

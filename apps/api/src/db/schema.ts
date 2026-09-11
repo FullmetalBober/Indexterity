@@ -1362,19 +1362,6 @@ export const latencySamples = pgTable(
     observations: integer("observations").notNull().default(1),
     // See index_snapshots.
     maxGapMs: bigint("max_gap_ms", { mode: "number" }).notNull().default(0),
-    // The counters, which on THIS table are carried live rather than frozen at
-    // the run's start (#502).
-    //
-    // A run here means "nobody else's traffic moved" — `read_ops - self_read_ops`
-    // and `write_ops`, the fingerprint in jobs/runs.ts. The raw totals keep
-    // climbing inside a run because this product's own metadata reads are reads,
-    // so an extend replaces all five numbers with the latest. Every difference
-    // the analysis takes is then measured across the gap between one run's end
-    // and the next run's start, which is the same interval `activeHours` credits.
-    //
-    // `index_snapshots` freezes its counters instead, and the difference is not
-    // an inconsistency: there the counters ARE the identity, so they cannot move
-    // inside a run. Only `size_bytes` is carried live there, for this reason.
     // How many of `read_ops` were OURS (mongo/self-reads.ts).
     //
     // `$collStats` counts the metadata reads this product issues against the
