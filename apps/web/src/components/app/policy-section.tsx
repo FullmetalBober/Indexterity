@@ -1,4 +1,4 @@
-import { policyKnobsInput } from "@repo/contracts";
+import { type AutoApplyScoreCount, policyKnobsInput } from "@repo/contracts";
 import { ArrowRightIcon } from "lucide-react";
 import { useAppForm } from "~/components/form";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
@@ -16,6 +16,7 @@ interface PolicyView {
   readonly changeWindowStartHour: number | null;
   readonly changeWindowEndHour: number | null;
   readonly inferredWindowReason: string | null;
+  readonly autoApplyScores: readonly AutoApplyScoreCount[];
 }
 
 // Each knob's bounds come off the api's own policy schema, so a day count this
@@ -28,12 +29,31 @@ const PAYLOAD = policyKnobsInput.omit({ maxCollectionSizeBytes: true });
 // What the number under the auto-approve box means, which is the whole reason
 // the field is worth a sentence: empty and 0 are opposites, and neither reads
 // that way as a digit in a box.
-function autoScoreHint(score: number | null): string {
+// What this number would do to THIS cluster's findings, rather than in general.
+//
+// The box looks like a smooth 0-100 dial and the scores behind it are not: they
+// are a few fixed additive terms, so they pile up on a handful of values. On the
+// hosted deployment 108 recommendations took 28 distinct scores with 25 of them
+// at exactly 71 — so 70 and 72 are one apparent nudge apart and 28 findings
+// apart, and the sentence that used to be here ("Above ~85 very little
+// qualifies") was a guess that the same data contradicts.
+//
+// Counted from the cluster's own live findings, which is the only version of
+// this that stays true on the next cluster.
+function autoScoreHint(score: number | null, scores: readonly AutoApplyScoreCount[]): string {
+  const total = scores.reduce((sum, row) => sum + row.count, 0);
   if (score === null) return "Empty: nothing is approved without you. 70 is a good starting point.";
-  if (score === 0) return "0: every recommendation is approved automatically.";
-  return `Only recommendations scoring ${score} or above.${
-    score > 70 ? " Above ~85 very little qualifies." : ""
-  }`;
+  // No findings to count is not the same as a threshold that approves none, so
+  // it says neither and falls back to what the number means.
+  if (total === 0) {
+    return score === 0
+      ? "0: every recommendation is approved automatically."
+      : `Only recommendations scoring ${score} or above. Nothing is waiting right now.`;
+  }
+  const qualifying = scores.reduce((sum, row) => sum + (row.score >= score ? row.count : 0), 0);
+  const of = `of the ${total} finding${total === 1 ? "" : "s"} waiting now`;
+  if (score === 0) return `0: all ${total} ${of.slice(7)} would be approved automatically.`;
+  return `${qualifying} ${of} would be approved without you.`;
 }
 
 // One hour of the change window: in range, and set only if the other one is too.
@@ -176,7 +196,7 @@ export function PolicySection({ policy }: { policy: PolicyView }) {
                   min={0}
                   max={100}
                   placeholder="off"
-                  description={autoScoreHint(field.state.value)}
+                  description={autoScoreHint(field.state.value, policy.autoApplyScores)}
                 />
               )}
             </form.AppField>
