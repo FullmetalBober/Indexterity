@@ -290,6 +290,16 @@ metrics:
     enabled: false
     # Extra labels, for an Operator that selects PrometheusRules by label.
     labels: {}
+    # Whether this deployment is SUPPOSED to send mail.
+    #
+    # Off by default because running without SMTP is a legitimate way to run
+    # Indexterity — the dashboard shows everything the mails would have said, and
+    # a self-hosted install with one operator has nobody to notify. On an install
+    # that does intend to send, half-configured SMTP is a fault that produces no
+    # error of any kind: `sendMail` no-ops, `alertSettled` calls it settled, and
+    # every alert is dropped in silence. Setting this true is what turns that into
+    # something that fires.
+    mailRequired: false
     thresholds:
       # A runnable job nothing has claimed for this long. `apply` and `probe`
       # tick every five minutes, so fifteen means the pipeline is down or
@@ -307,6 +317,11 @@ metrics:
       # Regression gate rejections per day before it stops looking like bad luck
       # and starts looking like the engine proposing bad drops.
       regressionsPerDay: 3
+      # Share of a mail channel's send attempts the transport refused before it
+      # counts as the transport being down rather than one bad address. Deliberately
+      # near 1: a single rejected recipient is a typo in an invite, and paging on
+      # that is how an operator learns to ignore this alert.
+      mailRefusedRatio: 0.9
 
 # Error reporting to Sentry, from both workloads. The other half of the
 # picture above: the metrics say how OFTEN something failed, an error says WHAT

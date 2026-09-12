@@ -147,3 +147,34 @@ export const evidenceWrites = meter.createCounter("indexterity.evidence.writes",
     "Run-length writes to the time-series tables by table, engine and outcome (`inserted` for a new state, `extended` for a repeated one).",
   valueType: ValueType.INT,
 });
+
+// --- api and worker: outbound mail ----------------------------------------
+// Whether anything this product says ever leaves the building (#526).
+//
+// Every other way the pipeline can fail has a counter above it. Mail had none,
+// and it is the one subsystem whose failure is indistinguishable from having
+// nothing to say: a deployment with no SMTP, a transport refusing every send and
+// a week where no cluster went wrong all produce exactly the same silence.
+//
+// `disabled` is counted rather than skipped, because it is not a non-event. It
+// is the case `alertSettled` calls SETTLED — there is no transport, so no retry
+// could do better — which is correct and also means the alert is gone. On an
+// install where alerts are meant to work, half-configured SMTP is a fault, and
+// this is the only number that says so.
+//
+// What this counter CANNOT see is a relay that accepts a message the receiver
+// then rejects: `sendMail` resolves true when the transport took it, and on the
+// hosted deploy that is Resend accepting under a `p=reject` DMARC policy whose
+// only aligned authenticator is a single DKIM record. Those land in `sent`.
+// Closing that needs a `rua=` reporting address at the sending domain, which is
+// DNS and not code — #526 carries the record.
+//
+// Labelled by PURPOSE and not by recipient: the question worth alerting on is
+// which channel died, and an address label is unbounded cardinality on the one
+// counter most likely to be incremented by a stranger typing an email into a
+// sign-up form.
+export const mailSends = meter.createCounter("indexterity.mail.sends", {
+  description:
+    "Outbound mail send attempts by purpose (alert, digest, auth, invite) and outcome (`sent` when the transport accepted it, `refused` when it did not, `disabled` when there is no transport at all).",
+  valueType: ValueType.INT,
+});

@@ -221,7 +221,7 @@ export class ClusterTasksService {
       alert: async (scope, clusterId, subject, body) => {
         try {
           await raiseAlert(alertClaims(db), scope, () =>
-            this.notify.notifyClusterOwners(clusterId, subject, body),
+            this.notify.notifyClusterOwners(clusterId, subject, body, "alert"),
           );
         } catch (error) {
           helpers.logger.error(`alert for cluster ${clusterId} failed: ${String(error)}`);

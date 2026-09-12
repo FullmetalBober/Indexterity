@@ -270,6 +270,7 @@ export async function finalizeCluster(
         clusterId,
         `rolled back ${rec.indexName}`,
         `The index ${rec.indexName} on ${rec.database}.${rec.collection} slowed writes after being built, so it was dropped automatically. It is cooling down until ${day}.`,
+        "alert",
       );
       await emitClusterEvent(pgNotifier(db), { clusterId, kind: "REGRESSION_FIRED", task: null });
     }
@@ -340,6 +341,7 @@ export async function finalizeCluster(
             clusterId,
             `kept ${rec.indexName} (queries failing)`,
             `Queries on ${rec.database}.${rec.collection} started FAILING while ${rec.indexName} was hidden — ${failures.failed} of them, where none were failing before. The index has been un-hidden and the drop aborted; it is cooling down until ${day}. This is the case a latency check cannot catch, because a query that fails returns faster than one that works.`,
+            "alert",
           );
           await emitClusterEvent(pgNotifier(db), {
             clusterId,
@@ -430,6 +432,7 @@ export async function finalizeCluster(
             canHide
               ? `Hiding ${rec.indexName} on ${rec.database}.${rec.collection} slowed reads during the observe window, so the drop was aborted and the index un-hidden. It is cooling down until ${day}.`
               : `Reads on ${rec.database}.${rec.collection} slowed during ${rec.indexName}'s observe window, so the drop was aborted. The index was never hidden, so nothing had to be restored. It is cooling down until ${day}.`,
+            "alert",
           );
           await emitClusterEvent(pgNotifier(db), {
             clusterId,
@@ -521,6 +524,7 @@ export async function finalizeCluster(
         clusterId,
         `dropped ${dropped} ${dropped === 1 ? "index" : "indexes"}`,
         `${dropped} ${dropped === 1 ? "index" : "indexes"} passed the observe window and regression gates and ${dropped === 1 ? "was" : "were"} dropped, freeing ~${Math.round(freedBytes / 1024)} KB. Undo is available on the dashboard.`,
+        "alert",
       );
     }
     return dropped;
@@ -752,6 +756,7 @@ async function judgeCumulative(
       `costing you, and undoing the wrong one would be worse than telling you. Indexterity will ` +
       `not build on this collection unattended until ${day}; recommendations for it keep ` +
       `arriving and you can approve them yourself.`,
+    "alert",
   );
   await emitClusterEvent(pgNotifier(db), { clusterId, kind: "REGRESSION_FIRED", task: null });
 }
