@@ -230,7 +230,7 @@ stays off by default — the dashboard does not need it.
 | `secrets.existingSecret` | Bring your own Secret (`DATABASE_URL`, `BETTER_AUTH_SECRET`, `MASTER_KEY`, optionally `SMTP_PASS`, `GITHUB_CLIENT_SECRET`) instead of putting values in Helm |
 | `web.publicUrl` | The dashboard's public origin. Defaults to the ingress host; the api trusts it for auth and session cookies are bound to it |
 | `migrations.enabled` | The pre-install/pre-upgrade Job runs `node dist/migrate.js` before new pods start. Disable only if you migrate out of band |
-| `smtp.*` | Without a host, invites, alerts, verification and reset mails are logged and dropped |
+| `smtp.*` | Without a host, invites, alerts, verification and reset mails are logged and dropped. `indexterity_mail_sends_total{outcome="disabled"}` counts them; set `metrics.prometheusRule.mailRequired` to alert on it |
 | `config.requireEmailVerification` | Production posture. **The api refuses to boot with this on and no `secrets.smtp.host`** — an address cannot verify itself without mail, so every account on such an install is locked out, the first owner included. Turn it on in the same change as SMTP |
 | `config.storageUsdPerGbMonth` | Your storage price, for the $/month ROI headline |
 | `config.retentionDays` | Your ceiling on history, in days. Storage is your bill, so it caps both what is kept and what any plan may see. Empty means each plan's own window decides |
@@ -250,7 +250,8 @@ stays off by default — the dashboard does not need it.
 | `config.allowInsecureClusterTls` | Set `true` only when the MongoDB you manage genuinely serves no certificate and the network between is trusted. Every outbound connection requires validated TLS otherwise — including the ones the pipeline makes from stored credentials, so a cluster connected without it stops being collected and its owners are told why. Kept apart from `allowPrivateClusterTargets` on purpose: a VPC-peered or PrivateLink cluster is a private address that must still be forced to TLS |
 | `metrics.enabled` | Prometheus metrics on port `metrics.port` (9464) for all three workloads. **Off by default** — an exporter costs memory in every process, and an install with nothing scraping it was paying that for nobody. Turn it on if anything is; the endpoint is never routed by the ingress |
 | `metrics.serviceMonitor.enabled` | One Prometheus Operator ServiceMonitor per workload. Off by default — it needs the `monitoring.coreos.com` CRDs, and a chart that assumes them cannot install without them |
-| `metrics.prometheusRule.enabled` | 18 alerting rules for the failures nothing else reports. Same CRD requirement, also off by default. Thresholds under `metrics.prometheusRule.thresholds` |
+| `metrics.prometheusRule.enabled` | 20 alerting rules for the failures nothing else reports. Same CRD requirement, also off by default. Thresholds under `metrics.prometheusRule.thresholds` |
+| `metrics.prometheusRule.mailRequired` | Adds a 21st rule that fires when something tried to send mail and there was no transport. Off by default: running without SMTP is a legitimate way to run this |
 
 ## Metrics
 
@@ -295,7 +296,7 @@ helm upgrade indexterity … --set metrics.serviceMonitor.labels.release=kube-pr
 
 ### Alerts
 
-`metrics.prometheusRule.enabled=true` installs a `PrometheusRule` with 19 alerts,
+`metrics.prometheusRule.enabled=true` installs a `PrometheusRule` with 20 alerts,
 grouped by the question they answer: is the schedule running, is work piling up,
 can we still reach the clusters, is the safety pipeline meaningful, is the control
 plane healthy, and what are readers seeing. `metrics.prometheusRule.labels` is the
@@ -305,7 +306,7 @@ Every threshold is under `metrics.prometheusRule.thresholds`, and the
 stale-schedule windows are derived from `BURST_SCHEDULE` in
 `apps/api/src/jobs/schedule.ts` — if that schedule changes, these move with it.
 
-Three of them exist because the obvious rule does not work:
+Four of them exist because the obvious rule does not work:
 
 - **`IndexterityWorkerNotReporting`** (the name predates #232 folding the worker
   into the api; the alert outlives it) uses `absent_over_time`, not `increase`.
@@ -320,6 +321,17 @@ Three of them exist because the obvious rule does not work:
   that never repeats byte for byte folds nothing, and the time-series tables
   quietly go back to a row per collect per index. There is no error to count, so
   the rule looks for writes that only ever *insert*, per engine and table.
+- **`IndexterityMailFailing`** is a ratio, not a count. Mail is the one subsystem
+  whose failure is indistinguishable from having nothing to say — no exception, no
+  failed job, no empty panel — but a rule that fires on a single refusal fires on
+  a typo in an invite address, which is how an operator learns to ignore it. The
+  threshold sits near 1 so it means the transport is down for that channel.
+  Neither this nor anything else here can see a relay that ACCEPTS a message the
+  recipient's server then rejects: those count as `sent`, because that is the
+  strongest claim the sending process can make. If you send from a subdomain of a
+  strict-DMARC parent, publish a `_dmarc` record with a `rua=` address at the
+  sending domain — an inherited `sp=reject` rejects silently, with no bounce and
+  no log line anywhere in the deployment.
 
 ## Security defaults
 
@@ -500,6 +512,7 @@ every chart change:
 ```bash
 helm template rel deploy/helm/indexterity --set secrets.existingSecret=s \
   --set metrics.prometheusRule.enabled=true \
+  --set metrics.prometheusRule.mailRequired=true \
   | yq 'select(.kind == "PrometheusRule") | {"groups": .spec.groups}' > /tmp/rules.yaml
 docker run --rm --entrypoint promtool -v /tmp/rules.yaml:/rules.yaml:ro \
   prom/prometheus:v3.6.0 check rules /rules.yaml

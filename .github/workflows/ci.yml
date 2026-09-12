@@ -850,6 +850,7 @@ jobs:
             --set secrets.databaseUrl=p --set secrets.betterAuthSecret=s \
             --set secrets.masterKey=k --set config.allowInsecureAuthUrl=true \
             --set metrics.enabled=true --set metrics.prometheusRule.enabled=true \
+            --set metrics.prometheusRule.mailRequired=true \
             | python3 -c "
           import sys, yaml
           for doc in yaml.safe_load_all(sys.stdin):
