@@ -18,6 +18,7 @@ import {
   analysisNotes,
   and,
   clusterIndexes,
+  clusterRosters,
   clusters,
   eq,
   gte,
@@ -105,6 +106,36 @@ export const CLASSIFY_OPTIONS = {
 // DROP_REDUNDANT — so they are judged on the pass that proposes them.
 const DROP_CANDIDATES = new Set(["DROP_UNUSED", "DROP_REDUNDANT"]);
 
+// How many copies of an index the cluster holds, which is what a drop frees.
+//
+// Off the ROSTER rather than off a reading (#528). It used to be
+// `latest.perMember.length` — the members that answered `$indexStats` on that
+// one pass — and a member that did not answer still stores the index. Measured
+// on the production 5-node cluster: 18.1% of snapshot rows recorded a partial
+// reading, on every day of a thirteen-day window, and 460 rows held the same
+// `size_bytes` under a different member count. The estimate swung by up to 5x on
+// an index whose size had not changed by a byte.
+//
+// `mongos` is excluded because a router holds no copy. The comment at the call
+// site still stands for sharded clusters: sizes there are already cluster-wide
+// sums, so multiplying by the roster over-approximates by the shard count. This
+// change does not fix that, and makes it no worse — the roster is the same set of
+// hosts the reading was drawn from.
+//
+// `null` rather than a default, so the caller decides. A cluster with no roster
+// row has never completed a collect that reached `collectNodes`, and inventing a
+// number here would be indistinguishable from having measured one.
+async function indexCopies(db: Database, clusterId: string): Promise<number | null> {
+  const [roster] = await db
+    .select({ nodes: clusterRosters.nodes })
+    .from(clusterRosters)
+    .where(eq(clusterRosters.clusterId, clusterId))
+    .limit(1);
+  if (roster === undefined) return null;
+  const dataBearing = roster.nodes.filter((node) => node.role !== "mongos").length;
+  return dataBearing > 0 ? dataBearing : null;
+}
+
 // Read a cluster's snapshots, run the pure engine per collection, and replace
 // the cluster's PROPOSED recommendations. Returns the number proposed.
 export async function classifyCluster(db: Database, clusterId: string): Promise<number> {
@@ -122,6 +153,9 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
     .from(policies)
     .where(eq(policies.clusterId, clusterId))
     .limit(1);
+  // Once per cluster, not once per index: every index on a cluster has the same
+  // number of copies, and the roster is replaced whole on every collect.
+  const copies = await indexCopies(db, clusterId);
   // Indexes the engine built and is still watching are off the table — see
   // watchedIndexKeys. They stay in `inputs` below, because a new compound index
   // legitimately makes an older prefix redundant; they just cannot be the
@@ -308,8 +342,12 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
       // copy. (On sharded clusters members span shards while sizes are already
       // cluster-wide sums, so this over-approximates by the shard count — an
       // acceptable ceiling until per-shard member counts are tracked.)
-      const replicaFactor = Math.max(1, latest.perMember.length);
-      sizes[indexName] = latest.sizeBytes * replicaFactor;
+      //
+      // The count comes from the roster; the reading is the fallback for a
+      // cluster that has no roster row yet. See indexCopies — a reading speaks
+      // only for the members that answered, and that is a property of the pass
+      // rather than of the index (#528).
+      sizes[indexName] = latest.sizeBytes * (copies ?? Math.max(1, latest.perMember.length));
       inputs.push({
         pendingRemoval: departing.has(watchKey(entry.database, entry.collection, indexName)),
         spec: parseStoredSpec(latest.spec),
