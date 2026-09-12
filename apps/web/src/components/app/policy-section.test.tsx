@@ -44,6 +44,7 @@ const policy = {
   changeWindowStartHour: null,
   changeWindowEndHour: null,
   inferredWindowReason: null,
+  autoApplyScores: [],
 };
 
 // What was sent to the api on the last save.
@@ -149,12 +150,43 @@ describe("PolicySection", () => {
     expect(savedPayload()).toMatchObject({ autoApplyScore: 0 });
   });
 
-  it("warns that very little qualifies above the recommended threshold", async () => {
+  // #510. The box looks like a smooth dial and the scores behind it are not: on
+  // the hosted deployment 25 of 108 findings scored exactly 71, so 70 and 72 are
+  // one apparent nudge apart and 28 findings apart. The line under the box says
+  // which, from this cluster's own findings — the copy it replaced ("Above ~85
+  // very little qualifies") was a guess, and the same data contradicts it.
+  it("says how many of this cluster's findings a threshold would approve", async () => {
+    const user = userEvent.setup();
+    const scored = {
+      ...policy,
+      autoApplyScores: [
+        { score: 60, count: 20 },
+        { score: 71, count: 25 },
+        { score: 75, count: 19 },
+      ],
+    };
+    renderInApp(<PolicySection policy={scored} />);
+    const score = screen.getByLabelText("Auto-approve score ≥");
+
+    await user.type(score, "70");
+    expect(
+      screen.getByText("44 of the 64 findings waiting now would be approved without you."),
+    ).toBeInTheDocument();
+
+    // Two points up, and it is not a nudge.
+    await user.clear(score);
+    await user.type(score, "72");
+    expect(
+      screen.getByText("19 of the 64 findings waiting now would be approved without you."),
+    ).toBeInTheDocument();
+  });
+
+  it("does not read an empty queue as a threshold that approves nothing", async () => {
     const user = userEvent.setup();
     renderInApp(<PolicySection policy={policy} />);
 
-    await user.type(screen.getByLabelText("Auto-approve score ≥"), "90");
-    expect(screen.getByText(/Above ~85 very little qualifies/)).toBeInTheDocument();
+    await user.type(screen.getByLabelText("Auto-approve score ≥"), "70");
+    expect(screen.getByText(/Nothing is waiting right now/)).toBeInTheDocument();
   });
 
   // Two different failures reach here now — not an owner, or the plan does not

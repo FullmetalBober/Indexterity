@@ -129,6 +129,7 @@ function evidenceQuery(clusterId: string, since: Date) {
         database,
         collection,
         read_ops,
+        self_read_ops,
         read_latency_micros,
         captured_at,
         last_seen_at,
@@ -141,6 +142,7 @@ function evidenceQuery(clusterId: string, since: Date) {
         -- index could serve.
         lag(last_seen_at) over w as prev_end,
         lag(read_ops) over w as prev_read_ops,
+        lag(self_read_ops) over w as prev_self_read_ops,
         lag(read_latency_micros) over w as prev_read_micros
       from latency_samples
       where cluster_id = ${clusterId}::uuid
@@ -174,9 +176,19 @@ function evidenceQuery(clusterId: string, since: Date) {
                * 1000 / (observations - 1)::double precision
         end as interior_ms,
         (observations - 1)::bigint as interior_weight,
-        -- Did the read counter MOVE across this interval? That is where the
-        -- collection's traffic is.
-        prev_end is not null and read_ops - prev_read_ops > 0 as moved,
+        -- Did the read counter MOVE across this interval, once OUR OWN reads
+        -- are taken back out? That is where the collection's traffic is.
+        --
+        -- $collStats counts the metadata reads this product issues against the
+        -- collection they measure, so before self_read_ops existed this said yes
+        -- for every interval of every MongoDB collection and the gate above it
+        -- could not refuse (#493, mongo/self-reads.ts). A NEGATIVE self-delta is
+        -- a tally that restarted — a redeployed worker, a second replica — and
+        -- the interval is unknowable rather than active, which is the same
+        -- refusal foldActivity makes and for the same reason.
+        prev_end is not null
+          and self_read_ops - prev_self_read_ops >= 0
+          and read_ops - prev_read_ops - (self_read_ops - prev_self_read_ops) > 0 as moved,
         -- Was this a window a µs/op reading could be drawn from? Only a counter
         -- that went BACKWARDS disqualifies one. A window with no operations in it
         -- is still time we watched, and during which nothing could have been

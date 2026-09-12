@@ -179,6 +179,34 @@ spec:
               will ever finish. Usually a customer cluster that keeps restarting,
               or an observe window longer than their maintenance cadence.
 
+        # Run-length storage can stop working without anything failing: a
+        # reading that never repeats byte for byte folds nothing, and the
+        # time-series tables quietly go back to one row per collect per index.
+        # That is exactly what #493 was — `latency_samples` folded at 1.00x on
+        # every MongoDB cluster for as long as the table existed, because this
+        # product's own metadata reads moved the counters it was folding on,
+        # and nothing said so until somebody read a database dump.
+        #
+        # An engine whose runs are never extended is the signal. Written per
+        # engine and table because that is the granularity the failure had: the
+        # same cluster folded snapshots fine while folding no latency at all.
+        - alert: IndexterityEvidenceNotFolding
+          expr: >-
+            sum by (engine, table) (increase(indexterity_evidence_writes_total{outcome="extended"}[24h])) == 0
+            and
+            sum by (engine, table) (increase(indexterity_evidence_writes_total{outcome="inserted"}[24h])) > 0
+          for: 2h
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ "{{" }} $labels.table {{ "}}" }} is writing a row per collect on {{ "{{" }} $labels.engine {{ "}}" }}"
+            description: >-
+              Every write started a new run and none extended one, so run-length
+              storage is buying nothing on this engine and the table now grows
+              with how often we look rather than with how much the cluster
+              changes. Usually something new in a collect pass moving a counter
+              it also reads.
+
         - alert: IndexterityRegressionsSpiking
           expr: increase(indexterity_regression_gate_decisions_total{verdict="regressed"}[24h]) > {{ $t.regressionsPerDay }}
           for: 1h

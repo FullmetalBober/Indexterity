@@ -1,7 +1,11 @@
-import { Injectable } from "@nestjs/common";
+import { Inject, Injectable } from "@nestjs/common";
 import type { IndexSortKey, SortDirection, WorkloadSortKey } from "@repo/contracts";
-import type { Column, SQL } from "drizzle-orm";
-import type { LatencyReading } from "../analysis";
+import { type Column, getTableColumns, type SQL } from "drizzle-orm";
+import {
+  type LatencyReading,
+  MIN_PROJECTION_LIFETIME_HOURS,
+  MIN_PROJECTION_OBSERVATIONS,
+} from "../analysis";
 import { runFrom } from "../analysis/types";
 import {
   actions,
@@ -10,6 +14,7 @@ import {
   asc,
   clusterIndexes,
   clusterRosters,
+  type Database,
   desc,
   eq,
   gte,
@@ -83,10 +88,37 @@ const INDEX_SORTS: Record<IndexSortKey, readonly [SQL | Column, ...(SQL | Column
   totalOps: [totalOpsSql],
 };
 
+// The stored weekly figure, but only where we have watched the shape long enough
+// for "per week" to mean anything (#509, MIN_PROJECTION_* in analysis/severity).
+//
+// A `case` with no `else` yields null, which is the answer this column already
+// has a meaning for: `UNMEASURED_COST` below sorts an unknown cost BELOW every
+// known one, on the principle that unmeasured is not worst. A projection from a
+// two-hour-old row is exactly an unknown cost, and before this it sorted at the
+// top of the page instead — third place on the hosted deployment, on a single
+// execution.
+//
+// Applied on the READ rather than at the write. The stored number is an honest
+// record of what the pass measured, and the pass does not know how long the row
+// it is about to update has existed; this query has all three columns on the row
+// in front of it and needs no extra read to ask.
+//
+// `mapWith` the column it is derived from, and that is not decoration: a raw
+// `sql<number>` is undecoded, so postgres returns this bigint as a STRING and
+// the contract downstream would either reject it or print one. Borrowing the
+// column's own decoder is what keeps the gated value the same shape as the
+// ungated one — caught by the test, which asserted the number and got "50000000".
+const projectedWeeklyCost = sql<number | null>`case
+  when ${workloadShapes.observations} >= ${MIN_PROJECTION_OBSERVATIONS}
+   and ${workloadShapes.lastSeenAt} - ${workloadShapes.firstSeenAt}
+       >= make_interval(hours => ${MIN_PROJECTION_LIFETIME_HOURS})
+  then ${workloadShapes.weeklyDocsExamined}
+end`.mapWith(workloadShapes.weeklyDocsExamined);
+
 const WORKLOAD_SORTS: Record<WorkloadSortKey, readonly [SQL | Column, ...(SQL | Column)[]]> = {
   namespace: [workloadShapes.database, workloadShapes.collection],
   executions: [workloadShapes.executions],
-  weeklyDocsExamined: [sql`coalesce(${workloadShapes.weeklyDocsExamined}, ${UNMEASURED_COST})`],
+  weeklyDocsExamined: [sql`coalesce(${projectedWeeklyCost}, ${UNMEASURED_COST})`],
   severity: [workloadShapes.severity],
   outcome: [workloadShapes.outcome],
   firstSeenAt: [workloadShapes.firstSeenAt],
@@ -125,9 +157,23 @@ export interface IndexSizeDay {
 // The two heavyweight queries are here for the same reason — the day-bucketing
 // CTE and the max(last_seen_at) footprint join are each a paragraph of SQL whose
 // correctness argument is about storage, not about what the chart means.
+/**
+ * What this repository asks of the database: a drizzle client, and nothing else.
+ *
+ * Narrowed from `DatabaseService` so an integration test can pass a pool it made
+ * itself rather than construct the service — which would pull in `coreEnv()` and
+ * the shutdown hook for the sake of one field.
+ */
+export interface DatabaseHandle {
+  readonly db: Database;
+}
+
 @Injectable()
 export class InsightsRepository {
-  constructor(private readonly database: DatabaseService) {}
+  // Token is the class, type is the port — the same shape dial-budget.service.ts
+  // uses, and for the same reason: nineteen call sites want `db` and nothing
+  // else, so a test can hand over a pool without claiming to be the service.
+  constructor(@Inject(DatabaseService) private readonly database: DatabaseHandle) {}
 
   // How far back this cluster may be read.
   //
@@ -544,7 +590,9 @@ export class InsightsRepository {
     const start = total === 0 ? 0 : Math.min(offset, Math.max(0, total - 1));
     const from = Math.floor(start / limit) * limit;
     const rows = await this.database.db
-      .select()
+      // Every column, with the weekly figure replaced by the gated one so the
+      // number shown and the number ranked on are the same claim.
+      .select({ ...getTableColumns(workloadShapes), weeklyDocsExamined: projectedWeeklyCost })
       .from(workloadShapes)
       .where(and(...filters))
       // The reader's key, then the id as the tiebreak that makes the order total.

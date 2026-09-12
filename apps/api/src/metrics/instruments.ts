@@ -116,3 +116,34 @@ export const indexDrops = meter.createCounter("indexterity.index.drops", {
   description: "Drop attempts that reached the end of the pipeline (dropped, unhidden, absent).",
   valueType: ValueType.INT,
 });
+
+// Whether run-length storage is still doing anything, per table and per engine.
+//
+// `index_snapshots` and `latency_samples` write ONE row per distinct counter
+// state rather than one per collect, and the whole affordability argument for
+// collecting hourly rests on that. It can stop working without anything failing:
+// a reading that never repeats byte for byte folds nothing, and the tables go
+// back to one row per collect with no error, no log line and no test.
+//
+// Which is not hypothetical — it is what #493 was. `latency_samples` folded at
+// exactly 1.00x on both MongoDB clusters against 16.3x and 181.5x on the two SQL
+// Server ones, because this product's own metadata reads moved the counters it
+// was folding on. Sixteen days of production, and nothing said so; it took a
+// dump and a spreadsheet.
+//
+// A COUNTER at write time, not a gauge over the tables. `sum(observations) /
+// count(*)` is the same ratio and costs a full scan of a table projected at
+// millions of rows, on every scrape — the exact cost D145 and D148 were about.
+// The writer already knows both numbers per pass, so `rate(extended) /
+// rate(extended + inserted)` is the fold rate over NEW evidence, which is the
+// more useful question anyway: it answers "is folding working now" rather than
+// "did it ever work".
+//
+// Labelled by engine because that is where the difference lives, and NOT by
+// cluster: a label per cluster is unbounded cardinality, and one engine folding
+// at zero is what an alert would fire on.
+export const evidenceWrites = meter.createCounter("indexterity.evidence.writes", {
+  description:
+    "Run-length writes to the time-series tables by table, engine and outcome (`inserted` for a new state, `extended` for a repeated one).",
+  valueType: ValueType.INT,
+});

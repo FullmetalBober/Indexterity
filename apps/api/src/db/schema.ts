@@ -598,9 +598,22 @@ export const clusterIndexes = pgTable(
     // negligible either way; the difference is that md5's failure is reachable by
     // construction and silent when it lands, which is the wrong trade against 32
     // extra bytes on a table holding a few hundred rows.
+    //
+    // `hidden` IS EXCLUDED, because it is a state flag and not a shape. An index
+    // does not become a different index when it is hidden — that is the whole
+    // premise of hide-then-observe (D4) — and leaving it in meant this product
+    // split an index's history in half every time it acted on one. Measured on the
+    // hosted deployment: 28 duplicate identities, 26 of them differing in NOTHING
+    // ELSE, 25 on the dev cluster where a single pass hid 24 indexes. The header
+    // above justifies digest-keying on rebuilds being rare, which they are; these
+    // were not rebuilds, and their count grows with how much work the product does
+    // rather than with anything a customer did.
+    //
+    // Still STORED, just not part of the identity: `parseStoredSpec` reads it back
+    // and the rollback token in `actions` carries it.
     specDigest: text("spec_digest")
       .notNull()
-      .generatedAlwaysAs(sql`encode(sha256(spec::text::bytea), 'hex')`),
+      .generatedAlwaysAs(sql`encode(sha256((spec - 'hidden')::text::bytea), 'hex')`),
     createdAt,
   },
   (table) => [
@@ -1349,6 +1362,38 @@ export const latencySamples = pgTable(
     observations: integer("observations").notNull().default(1),
     // See index_snapshots.
     maxGapMs: bigint("max_gap_ms", { mode: "number" }).notNull().default(0),
+    // The counters, which on THIS table are carried live rather than frozen at
+    // the run's start (#502).
+    //
+    // A run here means "nobody else's traffic moved" — `read_ops - self_read_ops`
+    // and `write_ops`, the fingerprint in jobs/runs.ts. The raw totals keep
+    // climbing inside a run because this product's own metadata reads are reads,
+    // so an extend replaces all five numbers with the latest. Every difference
+    // the analysis takes is then measured across the gap between one run's end
+    // and the next run's start, which is the same interval `activeHours` credits.
+    //
+    // `index_snapshots` freezes its counters instead, and the difference is not
+    // an inconsistency: there the counters ARE the identity, so they cannot move
+    // inside a run. Only `size_bytes` is carried live there, for this reason.
+    // How many of `read_ops` were OURS (mongo/self-reads.ts).
+    //
+    // `$collStats` counts the metadata reads this product issues against the
+    // collection they measure, so `read_ops` moved on every interval for every
+    // MongoDB collection whether or not a customer queried it — a floor measured
+    // at exactly 8 reads an hour on all 102 namespaces of the hosted dev cluster.
+    // The activity gate reads a counter that moved as traffic, so it never
+    // refused, and `collection-idle` was unreachable on the engine that writes
+    // most of these rows.
+    //
+    // Cumulative and monotonic while the worker lives. What the analysis wants is
+    // the DIFFERENCE across an interval, so a reset — a redeploy, a second
+    // replica — makes one interval's subtraction negative, and that interval is
+    // dropped as unknowable exactly as a mongod counter restart already is.
+    //
+    // Zero on every other engine and on every row written before this column
+    // existed, which is the honest default: SQL Server reads DMVs and PostgreSQL
+    // reads pg_stat, and neither touches the table it is measuring.
+    selfReadOps: bigint("self_read_ops", { mode: "number" }).notNull().default(0),
     // Same guard, keyed by namespace instead of index_id. See index_snapshots.
     span: tstzrange("span")
       .notNull()

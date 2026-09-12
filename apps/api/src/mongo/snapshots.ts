@@ -24,6 +24,10 @@ export interface CollectedLatency {
   readonly readLatencyMicros: number;
   readonly writeOps: number;
   readonly writeLatencyMicros: number;
+  // How many of `readOps` this product caused — see mongo/self-reads.ts. Zero on
+  // an engine that measures a table without reading it, which is every engine
+  // but MongoDB.
+  readonly selfReadOps: number;
 }
 
 export interface CollectResult {
@@ -147,7 +151,7 @@ export async function collectSnapshots(session: EngineSession): Promise<CollectR
     // 362 phases named after tables would be a report nobody finishes.
     const perCollection = beginPhase("per-collection");
     for (const collection of collections) {
-      const [specs, usage, sizes, collLatency, hinted] = await Promise.all([
+      const [specs, usage, sizes, hinted] = await Promise.all([
         allSpecs === null
           ? collector.listIndexes(database, collection)
           : Promise.resolve(allSpecs.get(collection) ?? []),
@@ -157,13 +161,31 @@ export async function collectSnapshots(session: EngineSession): Promise<CollectR
         allSizes === null
           ? collector.indexSizes(database, collection)
           : Promise.resolve(allSizes.get(collection) ?? {}),
-        latencies === null
-          ? collector.collectionLatency(database, collection)
-          : Promise.resolve(latencies.get(collection) ?? NO_ACTIVITY),
         hints === null
           ? collector.collectHintedIndexes(database, collection).catch(() => [])
           : Promise.resolve(hints.get(collection) ?? []),
       ]);
+      // The latency sample goes LAST, and on its own, which is the difference
+      // between a fold that works and one that works about half the time (#502).
+      //
+      // The run's identity is `readOps - selfReadOps` (jobs/runs.ts), and that
+      // is only stable across two passes if the number of our own reads issued
+      // AFTER the sample is the same both times. Inside the `Promise.all` above
+      // it is not: five requests are in flight together and which of them land
+      // after the sample is decided by response ordering. #518 shipped exactly
+      // that and `dev` went red on two of three MongoDB versions while the third
+      // passed.
+      //
+      // Sampling last makes that number zero by construction. It costs one extra
+      // SEQUENTIAL round trip per collection — the cost #454 and #461 are about —
+      // and it is affordable here for a reason worth stating rather than
+      // assuming: only MongoDB reaches this branch. SQL Server implements
+      // `latencyByCollection` and takes the batched path above, and SQL Server is
+      // the engine behind the tunnel where round trips are dear.
+      const collLatency =
+        latencies === null
+          ? await collector.collectionLatency(database, collection)
+          : (latencies.get(collection) ?? NO_ACTIVITY);
       const hintedNames = new Set(hinted);
       latency.push({
         database,
@@ -172,6 +194,8 @@ export async function collectSnapshots(session: EngineSession): Promise<CollectR
         readLatencyMicros: collLatency.reads.latencyMicros,
         writeOps: collLatency.writes.ops,
         writeLatencyMicros: collLatency.writes.latencyMicros,
+        // Filled in below, once the pass has finished reading this namespace.
+        selfReadOps: 0,
       });
       const usageByIndex = groupByIndex(usage);
       for (const spec of specs) {
@@ -197,5 +221,25 @@ export async function collectSnapshots(session: EngineSession): Promise<CollectR
     // honest about a loop that never finished.
     perCollection();
   }
-  return { snapshots, latency };
+  // Our own reads, counted once the pass is DONE reading — not at the moment
+  // each sample was taken.
+  //
+  // A sample is taken part-way through a namespace's reads (they run as one
+  // `Promise.all`), so an interval between two samples holds the tail of one
+  // pass, whatever ran between them, and the head of the next. Reading the tally
+  // after the pass puts the WHOLE of the later pass on one side of that boundary
+  // and none of the earlier one — the same quantity, as long as each pass issues
+  // the same calls per namespace. Which is what makes the ordering inside the
+  // `Promise.all` irrelevant instead of a race to lose. See mongo/self-reads.ts.
+  const selfReads = collector.selfReadOps?.bind(collector);
+  return {
+    snapshots,
+    latency:
+      selfReads === undefined
+        ? latency
+        : latency.map((sample) => ({
+            ...sample,
+            selfReadOps: selfReads(sample.database, sample.collection),
+          })),
+  };
 }

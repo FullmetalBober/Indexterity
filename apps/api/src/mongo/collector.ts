@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { classifyClient } from "../analysis";
+import { passCached } from "../engine/pass-cache";
 import {
   type ClusterNode,
   type CollectionLatency,
@@ -28,6 +29,13 @@ import { isRecord } from "../errors/message";
 import type { MongoConnection } from "./connection";
 import { isAuthorizationError } from "./errors";
 import type { MemberConnections } from "./members";
+import {
+  ownSelfReads,
+  READS_PER_COLL_STATS_LATENCY,
+  READS_PER_COLL_STATS_STORAGE,
+  readsPerIndexStats,
+  type SelfReads,
+} from "./self-reads";
 
 // Normalize a sort spec's values into directed keys (anything odd → ascending).
 function sortKeysOf(sortSpec: Record<string, unknown>): SortKey[] {
@@ -35,6 +43,57 @@ function sortKeysOf(sortSpec: Record<string, unknown>): SortKey[] {
     field,
     direction: value === -1 ? -1 : 1,
   }));
+}
+
+// A blocking sort is a FINDING only when we know what would have prevented it.
+//
+// `hasSortStage` says the server ordered documents in memory. It does not say by
+// which keys, and the two places keys come from — a find's `command.sort` and a
+// pipeline's leading `$sort` — do not always have them. `pipelineShape` stops at
+// the first stage an index cannot serve, so `[$match, $group, $sort]` reports a
+// blocking sort and no sort key at all, correctly on both counts.
+//
+// Measured on the hosted deployment: 18 of 225 stored shapes carried
+// `sortedInMemory: true` with an empty `sort`, every one of them on the MongoDB
+// cluster, and five reached live CREATE recommendations. `recommendCreates`
+// admits a shape on `collscan || sorting` and then builds its keys from equality
+// and range (`esrKeys`), so those five were admitted FOR a sort and proposed an
+// index with no sort component — against queries the planner was already serving
+// from an index, since `collscan` was false on all of them. An index nobody
+// should build, in a queue somebody eventually approves.
+//
+// So the flag carries its own evidence: a sort we cannot name is not a sort we
+// can offer to fix. `collscan` is untouched and may still be a finding on the
+// same shape — this drops the claim, not the shape.
+export function sortIsServable(hasSortStage: boolean, sort: readonly SortKey[]): boolean {
+  return hasSortStage && sort.length > 0;
+}
+
+// One field, one place, across both lists.
+//
+// `{$and: [{d: {$gte: x}}, {d: {$lte: y}}]}` walks two clauses and pushes `d`
+// twice — which is why 23 of the 225 shapes in production carry a field listed
+// twice in `range`. `esrKeys` deduplicates on the way out, so nothing downstream
+// read it wrong; the STORED shape did, and the stored shape is the finding a
+// reader is shown and the digest the row is keyed by.
+//
+// A field with both an equality and a range predicate keeps its equality
+// position, which is what `esrKeys` already does by pushing equality first.
+// Stated here rather than left as a property of the other function.
+export function dedupePredicates(equality: string[], range: string[]): void {
+  const seen = new Set<string>();
+  const keepFirst = (fields: string[]): void => {
+    const kept: string[] = [];
+    for (const field of fields) {
+      if (seen.has(field)) continue;
+      seen.add(field);
+      kept.push(field);
+    }
+    fields.length = 0;
+    fields.push(...kept);
+  };
+  keepFirst(equality);
+  keepFirst(range);
 }
 
 function shapeMapKey(
@@ -92,6 +151,48 @@ const collStatsDoc = z.object({
 const dataSizeDoc = z.object({
   storageStats: z.object({ size: z.coerce.number(), count: z.coerce.number() }),
 });
+
+// Both projections of one reading, and whichever of them failed.
+//
+// Kept apart rather than parsed once into a single shape, because the two
+// methods have deliberately different tolerances: `collectionStorage` skips a
+// document it cannot read and sums the rest, `indexSizes` refuses the whole
+// reading. Sharing a round trip must not quietly give either one the other's
+// behaviour, so the strict parse's failure is carried here and rethrown at the
+// method it belongs to.
+export interface StorageStats {
+  readonly storage: CollectionStorage;
+  readonly sizes:
+    | { readonly ok: true; readonly value: Record<string, number> }
+    | { readonly ok: false; readonly error: unknown };
+}
+
+// The two parses that used to sit in the two methods, unchanged, over one set
+// of documents. One doc per shard on a sharded collection, a single doc
+// otherwise; both projections sum across them.
+export function readStorageStats(raw: readonly unknown[]): StorageStats {
+  let dataSizeBytes = 0;
+  let docCount = 0;
+  for (const doc of raw) {
+    const parsed = dataSizeDoc.safeParse(doc);
+    if (parsed.success) {
+      dataSizeBytes += parsed.data.storageStats.size;
+      docCount += parsed.data.storageStats.count;
+    }
+  }
+  const storage = { dataSizeBytes, docCount };
+  try {
+    const totals: Record<string, number> = {};
+    for (const doc of collStatsDoc.array().parse(raw)) {
+      for (const [name, size] of Object.entries(doc.storageStats.indexSizes)) {
+        totals[name] = (totals[name] ?? 0) + size;
+      }
+    }
+    return { storage, sizes: { ok: true, value: totals } };
+  } catch (error) {
+    return { storage, sizes: { ok: false, error } };
+  }
+}
 
 const latencyPair = z.object({ ops: z.coerce.number(), latency: z.coerce.number() });
 const latencyStatsDoc = z.object({
@@ -378,6 +479,7 @@ export function pipelineShape(pipeline: readonly Record<string, unknown>[]): Pip
     }
     break; // first non-$match/$sort stage ends index applicability
   }
+  dedupePredicates(equality, range);
   if (equality.length === 0 && range.length === 0 && sort.length === 0) return null;
   return { equality, sort, range };
 }
@@ -435,6 +537,8 @@ async function readIndexStats(
   conn: MongoConnection,
   database: string,
   collection: string,
+  selfReads: SelfReads,
+  indexStatsCost: number,
 ): Promise<IndexUsageStat[]> {
   try {
     const raw = await conn
@@ -442,6 +546,10 @@ async function readIndexStats(
       .collection(collection)
       .aggregate([{ $indexStats: {} }])
       .toArray();
+    // Counted where it is paid, and only once it HAS been paid: a call that
+    // never reached the server cost the collection nothing, and subtracting a
+    // read that did not happen would suppress activity that did.
+    selfReads.add(database, collection, indexStatsCost);
     return indexStat
       .array()
       .parse(raw)
@@ -460,6 +568,7 @@ async function readLatencyStats(
   conn: MongoConnection,
   database: string,
   collection: string,
+  selfReads: SelfReads,
   readPreference?: "primaryPreferred",
 ): Promise<LatencyStatsDoc[]> {
   const raw = await conn
@@ -467,6 +576,8 @@ async function readLatencyStats(
     .collection(collection)
     .aggregate([{ $collStats: { latencyStats: {} } }], readPreference ? { readPreference } : {})
     .toArray();
+  // The measurement is itself one of the reads it reports. See self-reads.ts.
+  selfReads.add(database, collection, READS_PER_COLL_STATS_LATENCY);
   return latencyStatsDoc.array().parse(raw);
 }
 
@@ -502,7 +613,47 @@ export class MongoIndexCollector implements IndexCollector {
     // Absent in tests and for one-off diagnostic connections, where the
     // primary's own counters are all that is being asked for.
     private readonly members?: MemberConnections,
+    // How many of this collection's reads were ours (self-reads.ts). Injected,
+    // not reached for: a collector built outside a session — `diagnose`, every
+    // unit test — gets a tally of its own and cannot disturb a live cluster's.
+    private readonly selfReads: SelfReads = ownSelfReads(),
   ) {}
+
+  // Our own contribution to what `$collStats` reports this collection served,
+  // as of now. Cumulative and monotonic while the process lives; the analysis
+  // differences two samples of it and drops the interval when it goes backwards
+  // (analysis/activity.ts). Optional on the port because it is a MongoDB
+  // problem: SQL Server reads DMVs and PostgreSQL reads pg_stat, and neither
+  // touches the table it is measuring.
+  selfReadOps(database: string, collection: string): number {
+    return this.selfReads.count(database, collection);
+  }
+
+  // The shared `$collStats: { storageStats: {} }` read behind `collectionStorage`
+  // and `indexSizes` — two projections of one document that no caller wants
+  // together, asked for in different loops of the same pass. Taken once per
+  // namespace per pass; see engine/pass-cache.ts for why the pass is the right
+  // boundary and what it costs outside one (nothing, and no caching).
+  private storageStats(database: string, collection: string): Promise<StorageStats> {
+    return passCached(`storageStats\u0000${database}\u0000${collection}`, () =>
+      this.conn
+        .db(database)
+        .collection(collection)
+        .aggregate([{ $collStats: { storageStats: {} } }])
+        .toArray()
+        .then((raw) => {
+          // Counted HERE, once, because there is one read here. The two callers
+          // below each used to pay for their own and each counted it; sharing
+          // the round trip has to share the tally too, or the subtraction would
+          // claim four reads where two happened. Over-subtracting withholds
+          // active time rather than inventing it, so it fails safe — and it is
+          // still wrong, and the whole argument for a tally over a constant
+          // (mongo/self-reads.ts) is that it moves with the code.
+          this.selfReads.add(database, collection, READS_PER_COLL_STATS_STORAGE);
+          return readStorageStats(raw);
+        }),
+    );
+  }
 
   // Also the accessibility probe for a database, the same way the SQL Server
   // collector's is (#345). A credential that can list a cluster's databases and
@@ -594,8 +745,15 @@ export class MongoIndexCollector implements IndexCollector {
     // $indexStats is node-local, so the primary alone cannot tell a dead index
     // from one that only serves secondary reads.
     const connections = [this.conn, ...(await (this.members?.all() ?? Promise.resolve([])))];
+    // What one `$indexStats` costs the collection it reads, which is a property
+    // of the SERVER and not a constant — 2 on 6.0, 1 from 7.0 (self-reads.ts).
+    // `serverVersion` is cached on the connection, so this is free after the
+    // first ask.
+    const indexStatsCost = readsPerIndexStats(await this.conn.serverVersion());
     const perMember = await Promise.all(
-      connections.map((conn) => readIndexStats(conn, database, collection)),
+      connections.map((conn) =>
+        readIndexStats(conn, database, collection, this.selfReads, indexStatsCost),
+      ),
     );
     // Keyed by index AND host: the same index reports once per member, and each
     // member's counter has its own `since`.
@@ -608,39 +766,21 @@ export class MongoIndexCollector implements IndexCollector {
   // the maxCollectionSizeBytes build ceiling; counts feed the collection-size
   // gates. Sourced from $collStats — the `count` command would need a `find`
   // grant the scoped least-privilege user deliberately lacks.
+  //
+  // One projection of the shared read below; `indexSizes` is the other.
   async collectionStorage(database: string, collection: string): Promise<CollectionStorage> {
-    const raw = await this.conn
-      .db(database)
-      .collection(collection)
-      .aggregate([{ $collStats: { storageStats: {} } }])
-      .toArray();
-    let dataSizeBytes = 0;
-    let docCount = 0;
-    for (const doc of raw) {
-      const parsed = dataSizeDoc.safeParse(doc);
-      if (parsed.success) {
-        dataSizeBytes += parsed.data.storageStats.size;
-        docCount += parsed.data.storageStats.count;
-      }
-    }
-    return { dataSizeBytes, docCount };
+    return (await this.storageStats(database, collection)).storage;
   }
 
   // Sum index sizes across every $collStats doc — one per shard on a sharded
   // collection, a single doc otherwise.
+  //
+  // The other projection of the shared read. Its parse is stricter than
+  // `collectionStorage`'s and stays that way — see readStorageStats.
   async indexSizes(database: string, collection: string): Promise<Record<string, number>> {
-    const raw = await this.conn
-      .db(database)
-      .collection(collection)
-      .aggregate([{ $collStats: { storageStats: {} } }])
-      .toArray();
-    const totals: Record<string, number> = {};
-    for (const doc of collStatsDoc.array().parse(raw)) {
-      for (const [name, size] of Object.entries(doc.storageStats.indexSizes)) {
-        totals[name] = (totals[name] ?? 0) + size;
-      }
-    }
-    return totals;
+    const { sizes } = await this.storageStats(database, collection);
+    if (!sizes.ok) throw sizes.error;
+    return sizes.value;
   }
 
   // Cumulative read + write latency for the collection ($collStats latencyStats),
@@ -673,10 +813,16 @@ export class MongoIndexCollector implements IndexCollector {
     // Not caught: the base connection failing is a real error (a missing
     // privilege, an unreachable cluster) and the caller decides what that means.
     // A member failing is not — the others still report.
-    const primary = await readLatencyStats(this.conn, database, collection, "primaryPreferred");
+    const primary = await readLatencyStats(
+      this.conn,
+      database,
+      collection,
+      this.selfReads,
+      "primaryPreferred",
+    );
     const members = await Promise.all(
       (await (this.members?.all() ?? Promise.resolve([]))).map((conn) =>
-        readLatencyStats(conn, database, collection).catch(() => []),
+        readLatencyStats(conn, database, collection, this.selfReads).catch(() => []),
       ),
     );
     return sumLatencyStats([...primary, ...members.flat()]);
@@ -723,6 +869,7 @@ export class MongoIndexCollector implements IndexCollector {
       const filter = entry.command?.filter;
       if (filter !== undefined) {
         collectPredicates(filter, equality, range);
+        dedupePredicates(equality, range);
         sort = entry.command?.sort === undefined ? [] : sortKeysOf(entry.command.sort);
         // Profiler filters carry real literals — the partial-index signal.
         constants = equalityConstants(filter);
@@ -748,7 +895,8 @@ export class MongoIndexCollector implements IndexCollector {
       const collscan = (entry.planSummary ?? "").includes("COLLSCAN");
       // A blocking SORT: the plan found its documents through an index but had
       // to order them in memory afterwards, because no index carried the sort.
-      const sortedInMemory = entry.hasSortStage === true;
+      // Only when we know the keys — see sortIsServable.
+      const sortedInMemory = sortIsServable(entry.hasSortStage === true, sort);
       // Same reasoning as the $queryStats path: work done at a prompt is not
       // workload, so it neither counts as a sighting nor accumulates cost.
       const client: QueryClient = entry.appName === undefined ? {} : { application: entry.appName };
@@ -856,6 +1004,7 @@ export class MongoIndexCollector implements IndexCollector {
       const filter = key.queryShape.filter;
       if (filter !== undefined) {
         collectPredicates(filter, equality, range);
+        dedupePredicates(equality, range);
         sort = key.queryShape.sort === undefined ? [] : sortKeysOf(key.queryShape.sort);
       } else if (key.queryShape.pipeline !== undefined) {
         lookups = lookupJoins(key.queryShape.pipeline);
@@ -888,7 +1037,8 @@ export class MongoIndexCollector implements IndexCollector {
       const collscan = (metrics.keysExamined?.sum ?? 0) === 0 && docsExamined > 0;
       // An index found the documents but none could order them, so the server
       // sorted in memory. Invisible to the collscan test — keys were examined.
-      const sortedInMemory = (metrics.hasSortStage?.true ?? 0) > 0;
+      // Only when we know the keys — see sortIsServable.
+      const sortedInMemory = sortIsServable((metrics.hasSortStage?.true ?? 0) > 0, sort);
       const interactive = classifyClient(client) === "INTERACTIVE";
       const countedExecs = interactive ? 0 : metrics.execCount;
       const countedDocs = interactive ? 0 : docsExamined;

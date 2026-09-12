@@ -1,0 +1,1 @@
+ALTER TABLE "latency_samples" ADD COLUMN "self_read_ops" bigint DEFAULT 0 NOT NULL;

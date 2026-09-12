@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   dateRangeCutoff,
+  dedupePredicates,
   equalityConstants,
   lookupJoins,
   normalizeDirection,
   pipelineShape,
+  readStorageStats,
+  sortIsServable,
   sumLatencyStats,
 } from "./collector";
 
@@ -200,5 +203,111 @@ describe("normalizeDirection", () => {
   it("falls back to 1 for anything unrecognized", () => {
     expect(normalizeDirection("geoHaystack")).toBe(1);
     expect(normalizeDirection(2)).toBe(1);
+  });
+});
+
+// The two projections of `$collStats: { storageStats: {} }` used to be two
+// reads with two parses. Sharing the round trip must not give either method the
+// other's tolerance — which is the only way this refactor could have been wrong.
+describe("readStorageStats", () => {
+  const doc = (size: number, count: number, indexSizes: Record<string, number>) => ({
+    storageStats: { size, count, indexSizes },
+  });
+
+  it("sums both projections across shards", () => {
+    const stats = readStorageStats([
+      doc(100, 5, { _id_: 10, a_1: 20 }),
+      doc(50, 3, { _id_: 4, b_1: 7 }),
+    ]);
+    expect(stats.storage).toEqual({ dataSizeBytes: 150, docCount: 8 });
+    expect(stats.sizes).toEqual({ ok: true, value: { _id_: 14, a_1: 20, b_1: 7 } });
+  });
+
+  // collectionStorage skipped a document it could not read and summed the rest.
+  it("keeps the tolerant sum when a document has no size", () => {
+    const stats = readStorageStats([doc(100, 5, { _id_: 10 }), { storageStats: {} }]);
+    expect(stats.storage).toEqual({ dataSizeBytes: 100, docCount: 5 });
+  });
+
+  // indexSizes refused the whole reading, and still does — carried rather than
+  // thrown here, so it lands at the method it belongs to and not at the other.
+  it("carries the strict parse's failure without failing the tolerant one", () => {
+    const stats = readStorageStats([doc(100, 5, { _id_: 10 }), { storageStats: {} }]);
+    expect(stats.storage).toEqual({ dataSizeBytes: 100, docCount: 5 });
+    expect(stats.sizes.ok).toBe(false);
+  });
+
+  it("is empty rather than failing on no documents", () => {
+    const stats = readStorageStats([]);
+    expect(stats.storage).toEqual({ dataSizeBytes: 0, docCount: 0 });
+    expect(stats.sizes).toEqual({ ok: true, value: {} });
+  });
+});
+
+// #495. `hasSortStage` says the server sorted in memory; it does not say by which
+// keys, and a pipeline whose $sort sits behind a blocking stage has none an index
+// could carry. Eighteen production shapes claimed a sort with no sort key, five
+// of them reached live CREATE recommendations, and every one of those proposed an
+// index built from equality and range against a query the planner was already
+// serving from an index.
+describe("sortIsServable", () => {
+  it("is a finding when the sort keys are known", () => {
+    expect(sortIsServable(true, [{ field: "createdAt", direction: -1 }])).toBe(true);
+  });
+
+  it("is not a finding when the server sorted by keys we cannot name", () => {
+    expect(sortIsServable(true, [])).toBe(false);
+  });
+
+  it("is not a finding when the server did not sort", () => {
+    expect(sortIsServable(false, [{ field: "createdAt", direction: 1 }])).toBe(false);
+  });
+
+  // The production case, end to end through the shape extractor: the $sort is
+  // behind a $group, so pipelineShape correctly reports no sort key — and the
+  // flag must not survive that.
+  it("drops the claim for a $sort behind a blocking stage", () => {
+    const shape = pipelineShape([
+      { $match: { status: { $eq: "?string" } } },
+      { $group: { _id: "$status" } },
+      { $sort: { total: -1 } },
+    ]);
+    expect(shape?.sort).toEqual([]);
+    expect(sortIsServable(true, shape?.sort ?? [])).toBe(false);
+  });
+});
+
+// A range on one field written as two $and clauses pushed the field twice. Every
+// consumer deduplicated on the way out, so nothing read it wrong — but the stored
+// shape is the finding a reader is shown and the digest the row is keyed by.
+describe("dedupePredicates", () => {
+  it("keeps a field once when two clauses bound it", () => {
+    const equality: string[] = [];
+    const range = ["user", "utcDate", "utcDate", "sets.outcomes"];
+    dedupePredicates(equality, range);
+    expect(range).toEqual(["user", "utcDate", "sets.outcomes"]);
+  });
+
+  it("gives a field with both predicates its equality position", () => {
+    const equality = ["tenant", "status"];
+    const range = ["status", "createdAt"];
+    dedupePredicates(equality, range);
+    expect(equality).toEqual(["tenant", "status"]);
+    expect(range).toEqual(["createdAt"]);
+  });
+
+  it("leaves a shape with nothing repeated alone", () => {
+    const equality = ["a", "b"];
+    const range = ["c"];
+    dedupePredicates(equality, range);
+    expect(equality).toEqual(["a", "b"]);
+    expect(range).toEqual(["c"]);
+  });
+
+  it("deduplicates through pipelineShape, where the two clauses arrive", () => {
+    const shape = pipelineShape([
+      { $match: { $and: [{ d: { $gte: "?date" } }, { d: { $lte: "?date" } }] } },
+    ]);
+    expect(shape).toEqual({ equality: [], sort: [], range: ["d"] });
   });
 });

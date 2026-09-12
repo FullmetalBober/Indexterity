@@ -705,3 +705,181 @@ describe("isRecurring", () => {
     expect(recommendCreates([busy], [], rated).length).toBeGreaterThan(0);
   });
 });
+
+// #495, from the consuming end. `recommendCreates` admits a shape on
+// `collscan || sortedInMemory`, so a sort claim with no sort key was the ONLY
+// thing letting these through — and the index it then built, from equality and
+// range alone, could not have served the sort it was admitted for. All five that
+// reached production were on queries the planner already served from an index.
+describe("recommendCreates and a sort it cannot name", () => {
+  // The production shape verbatim: msb-app.exercise, five live PROPOSED rows.
+  const servedByAnIndex: QueryShape = {
+    equality: ["complex", "type", "primary"],
+    sort: [],
+    range: ["user", "utcDate", "sets.outcomes"],
+    collscan: false,
+    count: 56,
+  };
+
+  it("proposes nothing for a shape the planner already served", () => {
+    expect(
+      recommendCreates([{ ...servedByAnIndex, sortedInMemory: false }], [], options),
+    ).toHaveLength(0);
+  });
+
+  // What the collector used to hand it, kept as the record of the bug: the same
+  // shape with the claim attached produced an index with no sort component.
+  //
+  // The range block reads alphabetically because #497 sorts it — the order range
+  // fields arrive in is `Object.entries()` over the filter and means nothing.
+  // What this case is about is the absence of a sort key, not the order of the
+  // rest.
+  it("built a sortless index from the claim it can no longer be given", () => {
+    const out = recommendCreates([{ ...servedByAnIndex, sortedInMemory: true }], [], options);
+    expect(out).toHaveLength(1);
+    expect(out[0]?.keys.map((key) => key.field)).toEqual([
+      "complex",
+      "type",
+      "primary",
+      "sets.outcomes",
+      "user",
+      "utcDate",
+    ]);
+    expect(out[0]?.keys.every((key) => key.direction === 1)).toBe(true);
+  });
+
+  it("still proposes for a sort it CAN name", () => {
+    const out = recommendCreates(
+      [{ ...servedByAnIndex, sort: [{ field: "utcDate", direction: -1 }], sortedInMemory: true }],
+      [],
+      options,
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]?.keys.some((key) => key.field === "utcDate" && key.direction === -1)).toBe(true);
+  });
+
+  // A scan is a finding on its own and this must not touch it.
+  it("still proposes for a collection scan with no sort at all", () => {
+    const out = recommendCreates(
+      [{ ...servedByAnIndex, collscan: true, sortedInMemory: false }],
+      [],
+      options,
+    );
+    expect(out).toHaveLength(1);
+  });
+});
+// #497. Consolidation asked whether one want's whole key list was a directed
+// prefix of another's — a question about ORDER where the fact is about
+// MEMBERSHIP. An index's equality block can be permuted freely, so a field
+// inserted in the middle of it hid two wants from each other, and the hosted
+// cluster carried nine overlapping proposals on one collection.
+describe("recommendCreates consolidation", () => {
+  const scan = (equality: string[], sort: SortKey[], range: string[], count = 10): QueryShape => ({
+    equality,
+    sort,
+    range,
+    collscan: true,
+    count,
+  });
+
+  // The production pair, verbatim: `secondary` sits in the middle of the wider
+  // want's equality block, so neither was a prefix of the other.
+  it("folds a want whose equality set is contained, whatever the order", () => {
+    const out = recommendCreates(
+      [
+        scan(["complex", "type", "primary"], [], ["user", "sets.videos"]),
+        scan(["complex", "type", "primary", "secondary"], [], ["user", "sets.videos"]),
+      ],
+      [],
+      options,
+    );
+    expect(out).toHaveLength(1);
+    // The absorbed want's fields lead, or its query leaves the index — the one
+    // ordering that measured COLLSCAN.
+    expect(out[0]?.keys.map((key) => key.field)).toEqual([
+      "complex",
+      "type",
+      "primary",
+      "secondary",
+      "sets.videos",
+      "user",
+    ]);
+  });
+
+  // One finding recorded twice, because `Object.entries()` walked the filter in
+  // a different order. Both were proposed against msb-app.exercise.
+  it("is one candidate for two recordings that differ only in range order", () => {
+    const out = recommendCreates(
+      [
+        scan([], [{ field: "order", direction: 1 }], ["utcDate", "user"]),
+        scan([], [{ field: "order", direction: 1 }], ["user", "utcDate"]),
+      ],
+      [],
+      options,
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]?.keys.map((key) => key.field)).toEqual(["order", "user", "utcDate"]);
+  });
+
+  // Measured: [a,c,s] serves {a,c} sorted by s with no SORT stage, [a,c,b,s]
+  // brings the SORT stage back. A blocking sort is the finding itself.
+  it("refuses to fold a sorting want into a wider equality block", () => {
+    const out = recommendCreates(
+      [
+        scan(["a", "c"], [{ field: "s", direction: 1 }], []),
+        scan(["a", "b", "c"], [{ field: "s", direction: 1 }], []),
+      ],
+      [],
+      options,
+    );
+    expect(out).toHaveLength(2);
+  });
+
+  // Unless the wider want BINDS the sort field, in which case the equality block
+  // can carry it right behind the bound prefix.
+  it("folds a sorting want when the wider want binds the sort field", () => {
+    const out = recommendCreates(
+      [
+        scan([], [{ field: "name", direction: 1 }], ["email"]),
+        scan(["name", "email"], [], ["status"]),
+      ],
+      [],
+      options,
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]?.keys[0]?.field).toBe("name");
+  });
+
+  // Two absorbed wants cannot both lead. The second is refused rather than
+  // silently served by an index its query cannot use.
+  it("keeps a want whose lead would displace one already folded in", () => {
+    const out = recommendCreates(
+      [scan(["a"], [], []), scan(["x"], [], []), scan(["a", "x", "y"], [], [])],
+      [],
+      options,
+    );
+    expect(out).toHaveLength(2);
+    const led = out.map((candidate) => candidate.keys[0]?.field);
+    expect(led).toContain("a");
+    expect(led).toContain("x");
+  });
+
+  it("still refuses to consolidate a partial candidate", () => {
+    const withConstant: QueryShape = {
+      ...scan(["tenant", "state"], [], ["at"]),
+      constants: { state: "open" },
+    };
+    const out = recommendCreates(
+      [withConstant, scan(["tenant", "state", "extra"], [], ["at"])],
+      [],
+      options,
+    );
+    expect(out).toHaveLength(2);
+  });
+
+  it("still folds a plain directed prefix, which is the case it always folded", () => {
+    const out = recommendCreates([scan(["a"], [], []), scan(["a", "b"], [], [])], [], options);
+    expect(out).toHaveLength(1);
+    expect(out[0]?.keys.map((key) => key.field)).toEqual(["a", "b"]);
+  });
+});

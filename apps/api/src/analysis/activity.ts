@@ -27,6 +27,16 @@ import { medianObservationGap, type Run, sortedRuns, spanEnd, spanStart } from "
 export interface ActivityPoint extends Run {
   // Cumulative reads for the collection, as $collStats reports them.
   readonly readOps: number;
+  // How many of those were OURS, cumulative on the same clock.
+  //
+  // Required rather than optional on purpose. `$collStats` counts this product's
+  // own metadata reads against the collection they measure (mongo/self-reads.ts),
+  // so a reading that cannot say how much of itself was synthetic cannot be
+  // judged — and an optional field defaulting to zero is exactly the reading that
+  // says "none of it" without having checked. Zero is the right answer for SQL
+  // Server and PostgreSQL, which measure a table without reading it, and it
+  // should be written down as an answer rather than reached as a default.
+  readonly selfReadOps: number;
 }
 
 const HOUR_MS = 3_600_000;
@@ -53,6 +63,22 @@ const HOUR_MS = 3_600_000;
 // seen. Crediting a run's own length would be the serious error available here:
 // a collection idle for a month would report a month of activity, and idleness
 // would start funding the drops it is meant to withhold.
+//
+// OUR OWN READS ARE NOT TRAFFIC, and for two years they were counted as it.
+// `$collStats` reports every read the collection served, and the metadata reads
+// this product issues to measure a collection are reads of it — measured at a
+// floor of exactly 8 an hour on all 102 namespaces of the hosted dev cluster,
+// with no namespace ever reading zero. So the counter moved on every interval
+// for every MongoDB collection, this function returned the full retained window
+// as active time, and `collection-idle` — the refusal above is written to
+// produce — could not fire on the engine that writes most of the rows. The
+// control group is SQL Server, which reads DMVs rather than tables: 382 idle
+// refusals there against zero across 128 MongoDB indexes.
+//
+// Subtracted rather than floored. A constant would be a number that stops being
+// true the next time a pass gains a call, silently and in the drop-happy
+// direction; the tally is kept by the code that issues the reads
+// (mongo/self-reads.ts) and moves with it.
 export function activeHours(points: readonly ActivityPoint[]): number {
   return activeHoursFrom(foldActivity(points));
 }
@@ -89,7 +115,14 @@ export function foldActivity(points: readonly ActivityPoint[]): ActivityFold {
     const previous = sorted[i - 1];
     const current = sorted[i];
     if (previous === undefined || current === undefined) continue;
-    const delta = current.readOps - previous.readOps;
+    // Ours over the same interval. A NEGATIVE count means the tally restarted —
+    // a redeployed worker, a second replica taking the next pass — and an
+    // interval nobody can account for is dropped rather than credited, exactly
+    // as a mongod counter restart is on the line below. Both refusals cost only
+    // active time, and less active time only ever withholds a drop.
+    const ours = current.selfReadOps - previous.selfReadOps;
+    if (ours < 0) continue;
+    const delta = current.readOps - previous.readOps - ours;
     if (delta > 0) activeMs += Math.min(spanStart(current) - spanEnd(previous), cap);
   }
   return { activeMs, measurable: true };

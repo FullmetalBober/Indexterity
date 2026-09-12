@@ -10,7 +10,8 @@ import {
   latencySamples,
   sql,
 } from "../db";
-import { type ClusterNode, workloadKey } from "../engine/ports";
+import { type ClusterEngine, type ClusterNode, workloadKey } from "../engine/ports";
+import { evidenceWrites } from "../metrics/instruments";
 import { type CollectedLatency, type CollectedSnapshot, collectSnapshots } from "../mongo";
 import type { TunnelRegistry } from "../tunnel/tunnel.registry";
 import { openClusterSession } from "./cluster-connection";
@@ -55,6 +56,15 @@ interface WriteCounts {
 
 const NOTHING_WRITTEN: WriteCounts = { inserted: 0, extended: 0 };
 
+// One counter, two outcomes, so a scrape can divide them. Zero is reported as
+// well as non-zero: a table that folds nothing has `extended` sitting at zero
+// forever, and a series that is absent rather than flat is one an alert cannot
+// be written against.
+function recordEvidenceWrites(table: string, engine: ClusterEngine, counts: WriteCounts): void {
+  evidenceWrites.add(counts.inserted, { table, engine, outcome: "inserted" });
+  evidenceWrites.add(counts.extended, { table, engine, outcome: "extended" });
+}
+
 // What one collect did, as something the caller can act on (#483).
 //
 // It used to return `snapshots.length`, and that number cannot answer the
@@ -89,7 +99,22 @@ export interface CollectOutcome {
 // row per shape, and the one a collect belongs to is the one whose spec matches
 // what was just read off the cluster.
 function shapeKey(database: string, collection: string, indexName: string, spec: unknown): string {
-  return `${watchKey(database, collection, indexName)}${SEP}${canonicalSpec(spec)}`;
+  return `${watchKey(database, collection, indexName)}${SEP}${canonicalSpec(withoutHidden(spec))}`;
+}
+
+// The spec MINUS `hidden`, which is the identity `cluster_indexes` is keyed by
+// since #496. It has to be dropped on this side too, and this is the side that
+// matters: `dimensionIds` matches stored rows to incoming ones by a key it builds
+// here, and never by the digest postgres generates. Leaving `hidden` in would
+// mean a hidden index never matching its own row, the insert conflicting on a
+// unique index that no longer separates them, and the re-read finding a row
+// under a different key — so the index would silently stop being collected, for
+// exactly the thirty days the hide exists to observe.
+function withoutHidden(spec: unknown): unknown {
+  if (spec === null || typeof spec !== "object" || Array.isArray(spec)) return spec;
+  const rest: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(spec)) if (key !== "hidden") rest[key] = value;
+  return rest;
 }
 
 // Canonical form of a spec, for comparing an incoming spec against a stored one
@@ -154,9 +179,14 @@ async function dimensionIds(
   }));
 
   const byShape = new Map<string, string>();
+  // The stored spec beside the id, so the `hidden` reconciliation below can see
+  // what the row currently claims without a second read.
+  const specByShape = new Map<string, Record<string, unknown>>();
   const remember = (rows: readonly DimensionRow[]): void => {
     for (const row of rows) {
-      byShape.set(shapeKey(row.database, row.collection, row.indexName, row.spec), row.id);
+      const key = shapeKey(row.database, row.collection, row.indexName, row.spec);
+      byShape.set(key, row.id);
+      specByShape.set(key, row.spec);
     }
   };
 
@@ -207,7 +237,33 @@ async function dimensionIds(
     const id = byShape.get(entry.shape);
     if (id !== undefined) ids.set(entry.identity, id);
   }
+
+  // `hidden` is out of the identity but still has to be TRUE of the row.
+  //
+  // It is the one field of a spec that can now change without starting a new
+  // dimension row, and the analysis reads it off the stored spec: a hidden index
+  // may not make another redundant (analysis/redundancy.ts) and does not count as
+  // serving a field (analysis/purge.ts). Left alone, the row this product hid
+  // would go on claiming to be visible for as long as it existed.
+  //
+  // Written only when it actually differs, which is once per hide and once per
+  // rollback. That keeps the property the read-first design is for — nothing is
+  // rewritten on a collect that learned nothing.
+  const stale = wanted.filter(({ shape, snapshot }) => {
+    const stored = specByShape.get(shape);
+    return stored !== undefined && hiddenOf(stored) !== hiddenOf(snapshot.spec);
+  });
+  for (const { shape, snapshot } of stale) {
+    const id = byShape.get(shape);
+    if (id === undefined) continue;
+    await db.update(clusterIndexes).set({ spec: snapshot.spec }).where(eq(clusterIndexes.id, id));
+  }
   return ids;
+}
+
+function hiddenOf(spec: unknown): boolean {
+  if (spec === null || typeof spec !== "object") return false;
+  return Object.entries(spec).some(([key, value]) => key === "hidden" && value === true);
 }
 
 // Extend the run each index already has, or start a new one.
@@ -320,9 +376,8 @@ async function recordLatency(
       database: latencySamples.database,
       collection: latencySamples.collection,
       readOps: latencySamples.readOps,
-      readLatencyMicros: latencySamples.readLatencyMicros,
+      selfReadOps: latencySamples.selfReadOps,
       writeOps: latencySamples.writeOps,
-      writeLatencyMicros: latencySamples.writeLatencyMicros,
       lastSeenAt: latencySamples.lastSeenAt,
     })
     .from(latencySamples)
@@ -337,27 +392,58 @@ async function recordLatency(
     });
   }
 
-  const extend: string[] = [];
+  const extend: (CollectedLatency & { id: string })[] = [];
   const insert: (typeof latencySamples.$inferInsert)[] = [];
   for (const sample of latency) {
     const run = current.get(workloadKey(sample.database, sample.collection));
     if (run !== undefined && extendsRun(run, latencyFingerprint(sample), now)) {
-      extend.push(run.id);
+      extend.push({ ...sample, id: run.id });
       continue;
     }
     insert.push({ clusterId, ...sample, capturedAt: now, lastSeenAt: now, observations: 1 });
   }
 
   if (extend.length > 0) {
-    await db
-      .update(latencySamples)
-      .set({
-        lastSeenAt: now,
-        observations: sql`${latencySamples.observations} + 1`,
-        // See recordSnapshots: widest interior gap, evaluated against the old row.
-        maxGapMs: sql`greatest(${latencySamples.maxGapMs}, (extract(epoch from (${now}::timestamptz - ${latencySamples.lastSeenAt})) * 1000)::bigint)`,
-      })
-      .where(inArray(latencySamples.id, extend));
+    // The counters travel as parallel arrays, because an extended run now
+    // CARRIES the live reading rather than freezing the one it started with.
+    //
+    // The run's identity is `readOps - selfReadOps` and `writeOps`, which by
+    // construction have not moved (jobs/runs.ts). Everything else on the row is
+    // a measurement of a moment, and the moment worth holding is the latest —
+    // the same call `recordSnapshots` makes for `size_bytes`, and here it is
+    // what keeps every difference measured across the SAME interval: the gap
+    // between one run's end and the next run's start, which is also the span
+    // `activeHours` credits. Frozen instead, a long idle run would hand the
+    // first real query afterwards a run's worth of our own microseconds divided
+    // by a handful of real operations.
+    //
+    // `readOps` and `selfReadOps` are replaced together or not at all: the
+    // analysis differences them as a pair, and a row holding one from its start
+    // and the other from its end would subtract across different intervals.
+    await db.execute(sql`
+      update ${latencySamples} as s
+      set last_seen_at = ${now},
+          observations = s.observations + 1,
+          -- See recordSnapshots: widest interior gap, against the OLD row.
+          max_gap_ms = greatest(
+            s.max_gap_ms,
+            (extract(epoch from (${now}::timestamptz - s.last_seen_at)) * 1000)::bigint
+          ),
+          read_ops = v.read_ops,
+          self_read_ops = v.self_read_ops,
+          read_latency_micros = v.read_micros,
+          write_ops = v.write_ops,
+          write_latency_micros = v.write_micros
+      from unnest(
+        ${sql.param(extend.map((row) => row.id))}::uuid[],
+        ${sql.param(extend.map((row) => row.readOps))}::bigint[],
+        ${sql.param(extend.map((row) => row.selfReadOps))}::bigint[],
+        ${sql.param(extend.map((row) => row.readLatencyMicros))}::bigint[],
+        ${sql.param(extend.map((row) => row.writeOps))}::bigint[],
+        ${sql.param(extend.map((row) => row.writeLatencyMicros))}::bigint[]
+      ) as v(id, read_ops, self_read_ops, read_micros, write_ops, write_micros)
+      where s.id = v.id
+    `);
   }
   if (insert.length > 0) await db.insert(latencySamples).values(insert);
   return { inserted: insert.length, extended: extend.length };
@@ -392,7 +478,7 @@ export async function collectCluster(
   // refused rather than dialled directly.
   tunnels?: TunnelRegistry,
 ): Promise<CollectOutcome> {
-  const { session, release } = await openClusterSession(db, clusterId, { tunnels });
+  const { session, engine, release } = await openClusterSession(db, clusterId, { tunnels });
   try {
     // The roster costs one hello per member on connections the usage pass
     // opens anyway, so it rides the same session rather than its own dial.
@@ -412,6 +498,13 @@ export async function collectCluster(
       recordLatency(db, clusterId, latency, now),
       recordRoster(db, clusterId, nodes, now),
     ]);
+    // Per TABLE, before the two are summed below, because that is where the
+    // difference lives: on the hosted deployment `index_snapshots` folded at
+    // 1.26x on the MongoDB cluster while `latency_samples` folded at exactly
+    // 1.00x — never once, for sixteen days, with nothing to say so. See
+    // metrics/instruments.ts, evidenceWrites.
+    recordEvidenceWrites("index_snapshots", engine, written);
+    recordEvidenceWrites("latency_samples", engine, latencyWritten);
     // The roster is deliberately not counted. It is replaced whole on every
     // collect and carries no history, so it is never evidence about an index.
     return {

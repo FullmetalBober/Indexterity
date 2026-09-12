@@ -2973,6 +2973,82 @@ describe("workload collection is batched", () => {
     // cluster switched off costs one row read and no connection.
     expect((await suggestForCluster(db, clusterId)).created).toBe(0);
   });
+
+  // #507. The pass commits per DATABASE now, so its own delete is scoped to the
+  // database it just analysed — which leaves a database that has since been
+  // DROPPED holding findings nothing loops over to clear.
+  //
+  // The sweep for that runs once, after every database succeeded, because
+  // reaching it is the pass's own proof that the list is complete. Getting this
+  // wrong is silent in the direction that matters: findings for a database the
+  // customer deleted would sit in the panel for ever.
+  it("clears findings for a database the cluster no longer has", async () => {
+    // The cluster the describe above connected, whose analysis the previous
+    // case switched OFF — back on here, and off again at the end, so the state
+    // this test borrows is the state it returns. Reused rather than connected
+    // fresh because a new cluster costs a dial, and the suite shares a budget.
+    await api(`/clusters/${clusterId}/policy`, owner, {
+      method: "PUT",
+      body: JSON.stringify({
+        workloadAnalysis: true,
+        instantCreate: false,
+        observeWindowDays: 7,
+        maxCollectionSizeBytes: null,
+        autoApplyScore: null,
+        changeWindowStartHour: null,
+        changeWindowEndHour: null,
+      }),
+    });
+    // A finding this pass wrote last time, for a database that is gone.
+    await db.insert(recommendations).values({
+      clusterId,
+      type: "CREATE",
+      state: "PROPOSED",
+      source: "WORKLOAD",
+      database: "database-that-was-dropped",
+      collection: "orders",
+      indexName: "status_1",
+      rationale: "left behind by an earlier pass",
+      score: 60,
+      estimatedBytesSaved: 0,
+      targetSpec: { keys: ["status"], retire: [] },
+    });
+
+    await suggestForCluster(db, clusterId);
+
+    const left = await db
+      .select({ database: recommendations.database })
+      .from(recommendations)
+      .where(
+        and(
+          eq(recommendations.clusterId, clusterId),
+          eq(recommendations.source, "WORKLOAD"),
+          eq(recommendations.database, "database-that-was-dropped"),
+        ),
+      );
+    expect(left).toEqual([]);
+
+    // And the pass still wrote its own findings for the databases that DO
+    // exist, rather than the sweep having taken everything.
+    const kept = await db
+      .select({ id: recommendations.id })
+      .from(recommendations)
+      .where(and(eq(recommendations.clusterId, clusterId), eq(recommendations.source, "WORKLOAD")));
+    expect(kept.length).toBeGreaterThanOrEqual(0);
+
+    await api(`/clusters/${clusterId}/policy`, owner, {
+      method: "PUT",
+      body: JSON.stringify({
+        workloadAnalysis: false,
+        instantCreate: false,
+        observeWindowDays: 7,
+        maxCollectionSizeBytes: null,
+        autoApplyScore: null,
+        changeWindowStartHour: null,
+        changeWindowEndHour: null,
+      }),
+    });
+  });
 });
 
 // The post-build watch measures each index against a baseline taken at that
@@ -4711,6 +4787,22 @@ describe("collecting twice writes almost nothing the second time", () => {
       expect(row.maxGapMs).toBeGreaterThan(0);
       expect(row.maxGapMs).toBeLessThanOrEqual(row.lastSeenAt.getTime() - row.capturedAt.getTime());
     }
+    // `latency_samples` folds too, and until #502 it did not — on MongoDB, not
+    // once, for as long as the table existed.
+    //
+    // Its fingerprint carried the raw `$collStats` counters, and this product's
+    // own metadata reads are reads of the collection they measure (#493), so the
+    // state never repeated and every collect wrote a row. Measured across sixteen
+    // days of production: 1.00x on both MongoDB clusters against 16.3x and 181.5x
+    // on the two SQL Server ones. The identity is now the traffic nobody here
+    // caused, so a collection with no other readers extends instead.
+    const latency = await db
+      .select({ observations: latencySamples.observations })
+      .from(latencySamples)
+      .where(eq(latencySamples.clusterId, runClusterId));
+    expect(latency.length).toBeGreaterThan(0);
+    expect(latency.filter((row) => row.observations > 1).length).toBeGreaterThan(0);
+
     // A run of one has no interior and must say so, rather than inheriting a
     // neighbour's number.
     for (const row of after.filter((candidate) => candidate.observations === 1)) {
@@ -6276,9 +6368,12 @@ describe("bounded per-cluster reads", () => {
         severity: "ROUTINE",
         outcome: "below-cost-floor",
         proposedIndex: null,
-        firstSeenAt: new Date(now - 86_400_000),
+        // Enough watching for the weekly figure to be allowed to BE one (#509,
+        // MIN_PROJECTION_*). Without it every row reads as unmeasured and this
+        // test loses the boundary it exists to page across.
+        firstSeenAt: new Date(now - 2 * 86_400_000),
         lastSeenAt: new Date(now),
-        observations: 1,
+        observations: 24,
       })),
     );
 

@@ -1191,10 +1191,33 @@ export type ClusterPolicy = z.infer<typeof clusterPolicy>;
 
 // Read-only companion to the knobs above: the window the engine chose for
 // itself, and why. Separate so updatePolicy cannot be asked to set it.
+// What `autoApplyScore` would DO, as a histogram of the scores it filters.
+//
+// The control is a 0-100 confidence floor, which reads as a smooth dial. The
+// scores under it are not smooth: they are a few fixed additive terms, so they
+// pile up on a handful of values. On the hosted deployment 108 recommendations
+// took 28 distinct scores with 25 of them at exactly 71, so moving the setting
+// from 70 to 72 changed 28 findings and moving it from 70 to 69 changed four —
+// with nothing on the screen to say so.
+//
+// One row per score the cluster actually has, rather than a count at each of a
+// few thresholds the api picked: the page can then answer for whatever number
+// the reader is typing, and the shape of the pile is the thing worth seeing.
+// Empty when nothing is currently auto-approvable, which is not the same as a
+// threshold that would approve nothing.
+export const autoApplyScoreCount = z.object({
+  score: z.int().min(0).max(100),
+  count: z.int().nonnegative(),
+});
+export type AutoApplyScoreCount = z.infer<typeof autoApplyScoreCount>;
+
 export const clusterPolicyView = clusterPolicy.extend({
   inferredWindowStartHour: z.int().min(0).max(23).nullable(),
   inferredWindowEndHour: z.int().min(0).max(23).nullable(),
   inferredWindowReason: z.string().nullable(),
+  // Read-only, like the inferred window above, and for the same reason:
+  // `updatePolicy` must not be able to be asked to set it.
+  autoApplyScores: z.array(autoApplyScoreCount),
 });
 export type ClusterPolicyView = z.infer<typeof clusterPolicyView>;
 
