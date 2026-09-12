@@ -744,22 +744,81 @@ export class MongoIndexCollector implements IndexCollector {
     // Every member, not just the one the driver picked. See mongo/members.ts:
     // $indexStats is node-local, so the primary alone cannot tell a dead index
     // from one that only serves secondary reads.
-    const connections = [this.conn, ...(await (this.members?.all() ?? Promise.resolve([])))];
+    // Dials rather than connections, because each one carries the ADDRESS it was
+    // opened on and that is the name the rest of the product uses (#524).
+    const dials = await (this.members?.dials() ?? Promise.resolve([]));
+    const members = dials.flatMap((dial) =>
+      dial.connection === null ? [] : [{ dialledAs: dial.host, conn: dial.connection }],
+    );
     // What one `$indexStats` costs the collection it reads, which is a property
     // of the SERVER and not a constant — 2 on 6.0, 1 from 7.0 (self-reads.ts).
     // `serverVersion` is cached on the connection, so this is free after the
     // first ask.
     const indexStatsCost = readsPerIndexStats(await this.conn.serverVersion());
-    const perMember = await Promise.all(
-      connections.map((conn) =>
-        readIndexStats(conn, database, collection, this.selfReads, indexStatsCost),
-      ),
-    );
+    const read = (conn: MongoConnection): Promise<IndexUsageStat[]> =>
+      readIndexStats(conn, database, collection, this.selfReads, indexStatsCost);
+    const [fromBase, fromMembers] = await Promise.all([
+      read(this.conn),
+      Promise.all(members.map((member) => read(member.conn))),
+    ]);
     // Keyed by index AND host: the same index reports once per member, and each
     // member's counter has its own `since`.
     const seen = new Map<string, IndexUsageStat>();
-    for (const stat of perMember.flat()) seen.set(`${stat.indexName}\u0000${stat.host}`, stat);
-    return [...seen.values()];
+    for (const stat of [...fromBase, ...fromMembers.flat()]) {
+      seen.set(`${stat.indexName}\u0000${stat.host}`, stat);
+    }
+    // The pairing, taken where it is free: every reading in `fromMembers[i]`
+    // came off the connection `members[i]` was dialled on, so one says what
+    // mongod calls the node and the other says what we reached it at.
+    const dialledAs = new Map<string, string>();
+    fromMembers.forEach((stats, index) => {
+      const member = members[index];
+      if (member === undefined) return;
+      for (const stat of stats) dialledAs.set(stat.host, member.dialledAs);
+    });
+    return [...seen.values()].map((stat) => ({
+      ...stat,
+      host: this.nameOf(stat.host, dialledAs, members.length),
+    }));
+  }
+
+  // What to CALL the node a reading came from.
+  //
+  // `$indexStats` reports the host mongod knows itself by, and the rest of the
+  // product names a node by the address it was reached at — the roster from
+  // `hello.hosts`, the panel from the roster. On anything hosted those differ,
+  // and they differed on both MongoDB clusters of the hosted deployment:
+  //
+  //   replica set   roster msb-db-shard-00-0N.hwrel…   readings atlas-7eudp5-shard-00-0N.hwrel…
+  //   standalone    roster mongodb.dev.mystrengthbook.com:27017   readings mongodb-0:27017
+  //
+  // Nothing joined them, so `usageSplit` in the dashboard matched no reading to
+  // any roster node and every index row read "N not reported" while all N had
+  // reported — the same node listed twice, once with its operations and once as
+  // a blind spot.
+  //
+  // Fixed HERE rather than by matching names in the reader, because this is the
+  // one place both identities are in hand at once: the dial address came from
+  // the connection we issued the read on. Matching later would mean
+  // reconstructing mongod's own formatting — it appends the port only when it is
+  // non-default, while the stats always carry it (measured on 8.2) — and this
+  // repo has been bitten once already by reproducing something the server
+  // generates.
+  private nameOf(
+    statsHost: string,
+    dialledAs: ReadonlyMap<string, string>,
+    members: number,
+  ): string {
+    const dialled = dialledAs.get(statsHost);
+    if (dialled !== undefined) return dialled;
+    // A standalone and a mongos name no members, and `collectNodes` falls back
+    // to `conn.address()` for exactly that case — so using it here makes the two
+    // agree by construction rather than by coincidence.
+    if (members === 0) return this.conn.address() ?? statsHost;
+    // A member the base connection reached but whose own dial was refused has
+    // no address to borrow. Its own name is the honest answer; inventing one
+    // would put a node in the panel under a name nothing else uses.
+    return statsHost;
   }
 
   // Uncompressed data size + document count, summed across shards. Sizes feed
