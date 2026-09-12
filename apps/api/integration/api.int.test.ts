@@ -19,6 +19,7 @@ import {
   analysisNotes,
   and,
   clusterIndexes,
+  clusterRosters,
   clusters,
   createDatabase,
   desc,
@@ -296,6 +297,41 @@ describe("cluster lifecycle", () => {
     const foreign = asRecord(await (await api(`/clusters/${clusterId}/nodes`, stranger)).json());
     expect(foreign.collectedAt).toBeNull();
     expect(foreign.nodes).toEqual([]);
+  });
+
+  // #524. The dashboard subtracts the members a reading speaks for from the
+  // roster and calls the remainder blind spots, so the two have to use the SAME
+  // names for the same nodes — and they did not.
+  //
+  // `$indexStats` reports the host mongod knows itself by; the roster names a
+  // node by the address it was reached at. On anything hosted those differ, and
+  // both MongoDB clusters of the hosted deployment were affected by different
+  // routes: a replica set whose members answer as `atlas-*` while the roster
+  // says `msb-db-*`, and a standalone answering as `mongodb-0:27017` against a
+  // roster saying `mongodb.dev.mystrengthbook.com:27017`. Every index row read
+  // "N not reported" while all N had reported.
+  //
+  // This suite's mongod is the standalone case: it answers as its container
+  // hostname and is reached at 127.0.0.1. So the assertion is the property the
+  // bug violated — every roster node is spoken for by the reading.
+  it("names the nodes in a reading the way the roster names them", async () => {
+    const roster = await db
+      .select({ nodes: clusterRosters.nodes })
+      .from(clusterRosters)
+      .where(eq(clusterRosters.clusterId, clusterId));
+    const hosts = (roster[0]?.nodes ?? []).map((node) => node.host);
+    expect(hosts.length).toBeGreaterThan(0);
+
+    const snapshots = await db
+      .select({ perMember: indexSnapshots.perMember })
+      .from(indexSnapshots)
+      .where(eq(indexSnapshots.clusterId, clusterId));
+    const reported = new Set(snapshots.flatMap((row) => row.perMember.map((m) => m.member)));
+    expect(reported.size).toBeGreaterThan(0);
+
+    // Exactly `usageSplit`'s blind-spot computation, which is what the cell and
+    // the tooltip are built from.
+    expect(hosts.filter((host) => !reported.has(host))).toEqual([]);
   });
 
   it("serves policy defaults and round-trips an update", async () => {
