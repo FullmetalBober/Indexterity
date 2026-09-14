@@ -1419,6 +1419,38 @@ export const latencySamples = pgTable(
   ],
 );
 
+// The ten columns a latency reading is built from, as one projection both
+// readers share.
+//
+// `select()` with no projection reads all fourteen, and the four it does not
+// use are most of the bytes: `span` is a generated tstzrange rendering both
+// bounds a second time, `id` and `cluster_id` are 36 characters of uuid each on
+// a row whose payload is four counters, and `self_read_ops` belongs to the
+// collector's own bookkeeping. Measured with `EXPLAIN (ANALYZE, SERIALIZE
+// TEXT)` over production rows — bytes to the client, which plain EXPLAIN does
+// not show — at 28,278 rows for one cluster: 7,613 kB against 3,531 kB, a 53.6%
+// cut. A floor rather than the figure, because the fixture predates
+// `self_read_ops` and carried its default.
+//
+// Named once rather than inlined twice because the two readers must agree:
+// `runFrom` needs exactly four of these and `LatencyReading` the other six, so a
+// projection that drifts on one side is a type error on that side alone and a
+// silently different query on the other. Same measurement and the same three
+// columns as D145, which fixed this on the classify side; these two were missed
+// because they read the table through a different path.
+export const latencyReadingColumns = {
+  database: latencySamples.database,
+  collection: latencySamples.collection,
+  capturedAt: latencySamples.capturedAt,
+  lastSeenAt: latencySamples.lastSeenAt,
+  observations: latencySamples.observations,
+  maxGapMs: latencySamples.maxGapMs,
+  readOps: latencySamples.readOps,
+  readLatencyMicros: latencySamples.readLatencyMicros,
+  writeOps: latencySamples.writeOps,
+  writeLatencyMicros: latencySamples.writeLatencyMicros,
+};
+
 // --- the security trail --------------------------------------------------
 //
 // `actions` is the other half of this: an immutable record of every index

@@ -20,6 +20,7 @@ import {
   eq,
   gte,
   inArray,
+  latencyReadingColumns,
   latencySamples,
   policies,
   recommendations,
@@ -75,7 +76,7 @@ async function collectionLatencyHistory(
   since: Date,
 ): Promise<LatencyReading[]> {
   const rows = await db
-    .select()
+    .select(latencyReadingColumns)
     .from(latencySamples)
     .where(
       and(

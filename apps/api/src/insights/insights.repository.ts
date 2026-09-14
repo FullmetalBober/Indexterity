@@ -22,6 +22,7 @@ import {
   indexCooldowns,
   indexSnapshots,
   LIVE_STATES,
+  latencyReadingColumns,
   latencySamples,
   ne,
   or,
@@ -188,7 +189,7 @@ export class InsightsRepository {
 
   async latencyReadings(clusterId: string, since: Date): Promise<Map<string, LatencyGroup>> {
     const rows = await this.database.db
-      .select()
+      .select(latencyReadingColumns)
       .from(latencySamples)
       .where(and(eq(latencySamples.clusterId, clusterId), gte(latencySamples.lastSeenAt, since)));
     const groups = new Map<
