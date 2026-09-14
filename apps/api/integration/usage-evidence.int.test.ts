@@ -243,6 +243,18 @@ const SHAPES: readonly Shape[] = [
   },
 ];
 
+// Every field of the fold, so the comparison below names what it compares.
+const FOLD_FIELDS: readonly (keyof UsageFold)[] = [
+  "runs",
+  "observations",
+  "activeRuns",
+  "trustedWatchMs",
+  "newestEndMs",
+  "latestActivityMs",
+  "maxInteriorGapMs",
+  "maxBetweenGapMs",
+];
+
 let db: ReturnType<typeof createDatabase>;
 const indexIdByShape = new Map<string, string>();
 
@@ -353,7 +365,12 @@ describe("the usage fold, in postgres and in JS", () => {
         disagreements.push(`${shape.name}: postgres folded nothing`);
         continue;
       }
-      for (const key of Object.keys(jsFold) as (keyof UsageFold)[]) {
+      // Named rather than asserted off `Object.keys`, which the compiler cannot
+      // check (scripts/lint-assertions.ts). The guard below keeps the list
+      // honest: a field added to `UsageFold` and not compared here would
+      // otherwise be a field the twin silently stops holding.
+      expect(FOLD_FIELDS.length).toBe(Object.keys(jsFold).length);
+      for (const key of FOLD_FIELDS) {
         if (sqlFold[key] !== jsFold[key]) {
           disagreements.push(
             `${shape.name} (${shape.why}) — ${key}: js ${String(jsFold[key])} vs sql ${String(sqlFold[key])}`,
