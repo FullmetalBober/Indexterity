@@ -679,6 +679,49 @@ export const indexSnapshots = pgTable(
     perMember: jsonb("per_member")
       .$type<Array<{ member: string; ops: number; since?: string }>>()
       .notNull(),
+    // The ACTIVITY this run stands for, and the counter total it was read from.
+    //
+    // `per_member` is the run's identity and the raw cumulative counters; these
+    // two are what the analysis actually asks of it. `$indexStats.accesses.ops`
+    // is cumulative, so activity is a DIFFERENCE between consecutive runs, and
+    // computing it on read is what forced every reader to load `per_member` for
+    // the whole retained window and to see each run's neighbour (#534). On the
+    // five-node production cluster `per_member` measured 60.5% of the bytes
+    // classify reads — 4.51 MB of 7.45 MB over twelve days.
+    //
+    // Written by the collector, which already holds both sides: it loads the run
+    // it is about to extend or replace in order to fingerprint it (jobs/collect.ts).
+    // `opsDelta` is `activityBetween(previous, current)` — analysis/usage.ts owns
+    // that rule and this stores its answer, rather than restating it.
+    //
+    // `opsTotal` is the same sum with nothing to difference against, and it is
+    // not redundant: the OLDEST run inside a retention window has no predecessor
+    // the window can see, and the engine deliberately reads it in full — "the
+    // latest instant it could have happened, the conservative end, and the only
+    // one the data supports". A stored delta alone would silently narrow that to
+    // a difference against a row the window excludes, which is a real change to
+    // what the drop gate believes, in the direction that costs a drop somebody
+    // regrets.
+    //
+    // Nullable because rows written before this column existed have neither, and
+    // the backfill computes both from `per_member`; a reader that finds null
+    // falls back to differencing, which is what it did before.
+    opsDelta: bigint("ops_delta", { mode: "number" }),
+    opsTotal: bigint("ops_total", { mode: "number" }),
+    // The other two questions the analysis asks of `per_member`, so that it can
+    // stop asking for `per_member` at all.
+    //
+    // `countersRestarted` is `restartedBetween(previous, this)` — a member's
+    // counter went backwards, or its `since` moved forward. `countersStartedAt`
+    // is the latest `since` across this run's members: an epoch cannot testify to
+    // anything before its counters began, however long we had been watching.
+    //
+    // Both belong to the WRITER for the same reason the activity does — it holds
+    // the run it is replacing — and both are facts about a run relative to its
+    // predecessor, which is precisely the dependency that stopped the read side
+    // being an aggregate (analysis/classify.ts, counterEpochs).
+    countersRestarted: boolean("counters_restarted"),
+    countersStartedAt: timestamp("counters_started_at", { withTimezone: true }),
     // Seen as the target of a hint() in the profiler window. A hinted index
     // cannot be hidden — mongod rejects the hint — so the observe stage would
     // break those queries instead of slowing them, and the latency gate would

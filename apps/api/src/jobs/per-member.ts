@@ -63,6 +63,27 @@ export async function memberDictionary(
  * `jsonb_agg` over an empty array returns NULL rather than `[]`, so the coalesce
  * is what keeps an index with no members reading as none rather than as absent.
  */
+// The same thing, but only for rows that still need it (#534).
+//
+// The collector now stores what the analysis asks of `per_member` — the activity
+// across a run, and whether its counters restarted — so a row that carries those
+// has no reason to ship an array of member counters at all. After the backfill
+// that is every row, and the expression below evaluates to `null` on all of
+// them: the saving is the whole column, not a smaller encoding of it.
+//
+// Conditional rather than simply dropped, and this is the point of doing it in
+// SQL. During a rolling deploy an api that predates the columns can still insert
+// a row without them, and a reader that had stopped projecting `per_member`
+// would see neither the stored activity nor the counters to derive it — and read
+// the run as idle, which is the direction that costs a drop somebody regrets.
+// This way such a row brings its members with it and the engine differences them
+// exactly as it used to.
+export function compactMembersWhenUnpriced(dictionary: readonly string[]) {
+  return sql<unknown>`case when ${indexSnapshots.opsDelta} is null
+    then ${compactMembers(dictionary)}
+    else null end`;
+}
+
 export function compactMembers(dictionary: readonly string[]) {
   // A bound JSON OBJECT mapping name to position, not a `text[]` and not a
   // delimited string. Three reasons, and the first is that the obvious spellings

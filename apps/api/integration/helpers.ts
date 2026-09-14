@@ -2,6 +2,12 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { connect } from "node:net";
 import path from "node:path";
+import {
+  activityBetween,
+  activityInFull,
+  countersRestartedBetween,
+  latestCounterStart,
+} from "../src/analysis/usage";
 import { and, clusterIndexes, type Database, eq, indexSnapshots, latencySamples } from "../src/db";
 
 /** A body with an id on it, checked rather than claimed. */
@@ -309,6 +315,10 @@ export interface SnapshotFixture {
   readonly capturedAt: Date;
   readonly lastSeenAt?: Date;
   readonly observations?: number;
+  // Write the row the way an api predating the activity columns would have
+  // (#534): counters and nothing derived from them. For the one test that has to
+  // prove the fallback still reads such a row correctly.
+  readonly unpriced?: boolean;
 }
 
 // Identity plus shape, matching what the writer keys dimension rows by. Stated
@@ -385,15 +395,45 @@ export async function insertSnapshots(
     ids.set(key, row.id);
   }
 
+  // Priced the way the collector prices them (#534).
+  //
+  // The columns are nullable, so a fixture that left them out would still be
+  // read — through the fallback that differences `per_member`. Every test in the
+  // suite would then pass while exercising the path production does NOT take,
+  // which is the one shape of test that cannot fail. So the default is priced,
+  // and `unpriced: true` is how a test asks for the fallback on purpose.
+  //
+  // Per index and in captured order, because a delta is against the run before
+  // it and fixtures arrive in whatever order the scenario reads best.
+  const byIndex = new Map<string, SnapshotFixture[]>();
+  for (const fixture of fixtures) {
+    const key = fixtureKey(fixture);
+    const group = byIndex.get(key) ?? [];
+    group.push(fixture);
+    byIndex.set(key, group);
+  }
+  const priced = new Map<SnapshotFixture, ReturnType<typeof priceRun>>();
+  for (const group of byIndex.values()) {
+    const ordered = [...group].sort((a, b) => a.capturedAt.getTime() - b.capturedAt.getTime());
+    let previous: ReadonlyMap<string, { member: string; ops: number; since?: string }> | null =
+      null;
+    for (const fixture of ordered) {
+      priced.set(fixture, priceRun(previous, fixture.perMember));
+      previous = new Map(fixture.perMember.map((member) => [member.member, member]));
+    }
+  }
+
   await db.insert(indexSnapshots).values(
     fixtures.map((fixture) => {
       const indexId = ids.get(fixtureKey(fixture));
       if (indexId === undefined) throw new Error(`no dimension row for ${fixture.indexName}`);
+      const activity = fixture.unpriced === true ? UNPRICED : priced.get(fixture);
       return {
         clusterId: fixture.clusterId,
         indexId,
         sizeBytes: fixture.sizeBytes,
         perMember: fixture.perMember,
+        ...activity,
         hinted: fixture.hinted ?? false,
         capturedAt: fixture.capturedAt,
         lastSeenAt: fixture.lastSeenAt ?? fixture.capturedAt,
@@ -401,6 +441,29 @@ export async function insertSnapshots(
       };
     }),
   );
+}
+
+// What a row written before the columns existed looks like.
+const UNPRICED = {
+  opsDelta: null,
+  opsTotal: null,
+  countersRestarted: null,
+  countersStartedAt: null,
+};
+
+// Through the engine's own rules rather than a second copy of them, so a fixture
+// cannot describe a run the collector could never have written.
+function priceRun(
+  previous: ReadonlyMap<string, { member: string; ops: number; since?: string }> | null,
+  perMember: readonly { member: string; ops: number; since?: string }[],
+) {
+  const startedAt = latestCounterStart(perMember);
+  return {
+    opsDelta: activityBetween(previous, perMember),
+    opsTotal: activityInFull(perMember),
+    countersRestarted: countersRestartedBetween(previous, perMember),
+    countersStartedAt: startedAt === null ? null : new Date(startedAt),
+  };
 }
 
 // The same for latency_samples, which has no dimension half but does have the

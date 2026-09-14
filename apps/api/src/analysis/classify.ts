@@ -8,7 +8,7 @@ import {
   totalObservations,
   type UsageSnapshot,
 } from "./types";
-import { usageSeries } from "./usage";
+import { countersRestartedBetween, latestCounterStart, usageSeries } from "./usage";
 
 export interface ClassifyOptions {
   // How far back "recent" reaches when deciding alive vs dead, in hours.
@@ -109,28 +109,25 @@ export interface CounterEpoch {
 }
 
 // Did this run's counters restart relative to the one before it?
+//
+// Stored by the collector where it exists (#534) — it is a fact about a run and
+// its predecessor, and computing it here is what made every reader load
+// `perMember` for the whole window. Rows written before the column answer the
+// old way, from the counters themselves.
 function restartedBetween(previous: UsageSnapshot, next: UsageSnapshot): boolean {
-  const before = new Map(previous.perMember.map((member) => [member.member, member]));
-  for (const member of next.perMember) {
-    const prior = before.get(member.member);
-    if (prior === undefined) continue;
-    if (member.ops < prior.ops) return true;
-    const was = parseTime(prior.since);
-    const now = parseTime(member.since);
-    if (was !== null && now !== null && now > was) return true;
-  }
-  return false;
+  if (next.countersRestarted != null) return next.countersRestarted;
+  return countersRestartedBetween(
+    new Map((previous.perMember ?? []).map((member) => [member.member, member])),
+    next.perMember ?? [],
+  );
 }
 
 // The latest instant any of this run's counters claims to have started. An epoch
 // cannot testify to anything before it, however long we had been watching.
 function countersStartedAt(run: UsageSnapshot): number | null {
-  let latest: number | null = null;
-  for (const member of run.perMember) {
-    const since = parseTime(member.since);
-    if (since !== null && (latest === null || since > latest)) latest = since;
-  }
-  return latest;
+  const stored = parseTime(run.countersStartedAt ?? undefined);
+  if (stored !== null) return stored;
+  return parseTime(latestCounterStart(run.perMember ?? []) ?? undefined);
 }
 
 export function counterEpochs(history: readonly UsageSnapshot[]): CounterEpoch[] {
