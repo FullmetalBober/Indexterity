@@ -67,27 +67,29 @@ import { workloadKey } from "../engine/ports";
 //
 // WHAT IS NOT CUT, and why (#485's enumeration). Each gate over `index_snapshots`
 // asked what its minimum evidence is, since a gate quietly reading less than it
-// thinks it does is a wrong verdict with no symptom:
+// thinks it does is a wrong verdict with no symptom. TWO OF THE THREE ANSWERS
+// HAVE SINCE CHANGED, and `jobs/usage-evidence.ts` is where that went:
 //
-//   `usageTrustRefusal`'s observation and span floors — summarisable in principle:
-//   they count observations and sum epoch spans. Not worth summarising, because
-//   `index_snapshots` run-length-collapses (76% measured) and its rows are
-//   therefore proportional to how much the cluster CHANGES, not to how long we
-//   have watched.
+//   `usageTrustRefusal`'s observation and span floors — summarisable in
+//   principle, and declined here on the premise that `index_snapshots`
+//   run-length-collapses (76% measured) so its rows are proportional to how much
+//   the cluster CHANGES rather than to how long we have watched. MEASURED FALSE
+//   on the busiest production cluster, which folds at 1.26x and grows by 2,493
+//   rows a day (#534). They are folded now.
 //
 //   `usageTrustRefusal`'s two gap checks and `counterEpochs`/`restartedBetween` —
-//   NOT summarisable. They compare ADJACENT runs, member by member, on `ops` and
-//   `since`. A summary that carried anything less would silently stop detecting a
-//   counter restart, and a restart undetected is a differenced series read across
-//   a reset.
+//   declared NOT summarisable, because they compare ADJACENT runs member by
+//   member on `ops` and `since`. True until #537 moved those facts onto the row
+//   at write time, where the collector already held both sides. They are folded
+//   now too.
 //
-//   `classifyUsage` — NOT truncatable, which is the one that decides this. A
-//   truncated history cannot see a cadence, so a monthly job's index reads
-//   FLAT_ZERO (score 50, droppable, the most confident verdict the engine has)
-//   where the full series reads PERIODIC_ALIVE (not droppable at all). Wrong
-//   answer, MORE confident, on LESS evidence, and nothing about the resulting
-//   finding looks unusual. That is D96's objection and the reason this file folds
-//   over the whole window instead of reading part of it.
+//   `classifyUsage` — NOT truncatable, which is the one that still decides this
+//   and is unchanged. A truncated history cannot see a cadence, so a monthly
+//   job's index reads FLAT_ZERO (score 50, droppable, the most confident verdict
+//   the engine has) where the full series reads PERIODIC_ALIVE (not droppable at
+//   all). Wrong answer, MORE confident, on LESS evidence, and nothing about the
+//   resulting finding looks unusual. That is D96's objection, and it is why both
+//   files fold over the whole window instead of reading part of it.
 
 /** Both folds for one collection, keyed by `workloadKey`. */
 export interface CollectionEvidence {

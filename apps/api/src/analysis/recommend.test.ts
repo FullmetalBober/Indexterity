@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { IndexKey, IndexSpec } from "../engine/types";
+import { foldUsage } from "./classify";
 import { type IndexInput, parseStoredSpec, recommendForCollection } from "./recommend";
 import type { UsageSnapshot } from "./types";
 
@@ -31,7 +32,10 @@ function input(indexSpec: IndexSpec, activityPerSnapshot: number[]): IndexInput 
       perMember: [{ member: "m", ops: counter, since: "" }],
     };
   });
-  return { spec: indexSpec, history };
+  // Through `foldUsage`, which is the definition the SQL twin is held to — so a
+  // fixture here still describes a HISTORY and the engine still sees only what
+  // the gates ask of it.
+  return { spec: indexSpec, usage: foldUsage(history) };
 }
 
 const options = {

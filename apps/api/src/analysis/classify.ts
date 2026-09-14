@@ -192,6 +192,78 @@ export function trustedWatchDays(history: readonly UsageSnapshot[]): number {
 // evidence is a human deciding, which is the whole distinction.
 export const AUTO_APPLY_HISTORY_DAYS = 7;
 
+// Everything the two gates below ask of an index's history, as numbers.
+//
+// The gates used to walk the run array directly, which is why `classify` had to
+// ship every run in the retention window — 183 days on PRO, re-read hourly per
+// cluster. Every one of these is a sum, a count, a max or a pass over consecutive
+// pairs, so postgres can compute them over the same window and send this instead
+// (jobs/usage-evidence.ts).
+//
+// NOTHING IS TRUNCATED, which is the distinction D96 turns on. The objection
+// there is to reading fewer DAYS: a truncated history cannot see a cadence, so a
+// monthly job's index reads FLAT_ZERO — droppable, and the most confident verdict
+// the engine has — where the full series reads PERIODIC_ALIVE. Folding the whole
+// window has no such property. What shrinks is the wire, not the evidence.
+//
+// The RULES stay here. This is arithmetic; `usageTrustRefusalFrom` and
+// `classifyUsageFrom` below decide what it means, so a query reproducing the
+// thresholds would be a second copy of them, free to drift. A query that
+// reproduces the arithmetic can be cross-checked against `foldUsage` over the
+// same rows, which is what usage-evidence.int.test.ts does.
+export interface UsageFold {
+  /** How many runs there are at all. Zero is `no-history`. */
+  readonly runs: number;
+  /** Collects, not rows — an index idle for a year is one run and many looks. */
+  readonly observations: number;
+  /** Looks that saw the counters MOVE. `usageSeries` credits a run exactly one. */
+  readonly activeRuns: number;
+  /** Summed over counter epochs, so a restart costs its blind window, not the lot. */
+  readonly trustedWatchMs: number;
+  /** When the newest run was last confirmed. NaN when there are no runs. */
+  readonly newestEndMs: number;
+  /** When the newest run that moved BEGAN — the instant its burst is dated to. */
+  readonly latestActivityMs: number | null;
+  /** The worst hole inside any one run, and the worst between two. */
+  readonly maxInteriorGapMs: number;
+  readonly maxBetweenGapMs: number;
+}
+
+// The reference implementation, and the shape the SQL twin is held to.
+export function foldUsage(history: readonly UsageSnapshot[]): UsageFold {
+  const sorted = sortedRuns(history);
+  const series = usageSeries(sorted);
+  let maxInteriorGapMs = 0;
+  let maxBetweenGapMs = 0;
+  for (const [i, run] of sorted.entries()) {
+    maxInteriorGapMs = Math.max(maxInteriorGapMs, interiorGap(run));
+    const next = sorted[i + 1];
+    if (next === undefined) continue;
+    maxBetweenGapMs = Math.max(maxBetweenGapMs, spanStart(next) - spanEnd(run));
+  }
+  // Read off the SERIES and not the runs, because that is what the gate did: a
+  // run that moved contributes one active look and its tail is idle time, and the
+  // burst is dated to the run's start rather than to its end.
+  let activeRuns = 0;
+  let latestActivityMs: number | null = null;
+  for (const point of series) {
+    if (point.ops <= 0) continue;
+    activeRuns += observationsOf(point);
+    const at = spanEnd(point);
+    if (latestActivityMs === null || at > latestActivityMs) latestActivityMs = at;
+  }
+  return {
+    runs: sorted.length,
+    observations: totalObservations(series),
+    activeRuns,
+    trustedWatchMs: trustedWatchMs(sorted),
+    newestEndMs: sorted.length === 0 ? Number.NaN : Math.max(...sorted.map(spanEnd)),
+    latestActivityMs,
+    maxInteriorGapMs,
+    maxBetweenGapMs,
+  };
+}
+
 // Is this history good enough to claim an index is UNUSED? Absence of evidence
 // only counts when we were actually watching: too few snapshots, too short a
 // span, a hole in the series, or counters that restarted underneath us, and a
@@ -232,23 +304,34 @@ export function usageTrustRefusal(
   // closed, since older data has no way to supply it.
   collectionActiveHours?: number,
 ): UsageTrustRefusal | null {
-  const runs = sortedRuns(history);
+  return usageTrustRefusalFrom(foldUsage(history), options, now, collectionActiveHours);
+}
+
+// The same rule over the same numbers, however they were arrived at — walked in
+// JS here, or folded in postgres over the identical window. Every threshold and
+// every ORDER between them lives here and only here: the refusal kind is what
+// metrics count and what the customer sentence names, so two implementations
+// that agreed on "untrustworthy" while disagreeing on WHY would be a silent
+// divergence in the thing an operator reads.
+export function usageTrustRefusalFrom(
+  fold: UsageFold,
+  options: ClassifyOptions,
+  now: Date,
+  collectionActiveHours?: number,
+): UsageTrustRefusal | null {
   // Collects, not rows. An index idle for a year is a single run, and counting
   // rows here would refuse the very finding the run-length storage exists to
   // make cheap.
-  if (totalObservations(runs) < options.minHistory) return { kind: "too-few-collects" };
-  const first = runs[0];
-  const last = runs.at(-1);
-  if (first === undefined || last === undefined) return { kind: "no-history" };
+  if (fold.observations < options.minHistory) return { kind: "too-few-collects" };
+  if (fold.runs === 0) return { kind: "no-history" };
   // The span we actually watched, summed over the counter epochs rather than
   // measured first-to-last. The two are the same number on a cluster that never
   // restarted; where one did, the difference is that a restart now costs the
   // blind window it opened instead of the whole history (see counterEpochs).
   //
-  // `first` and `last` are still the ones the staleness and gap checks below
-  // read, because those ask when we last HEARD from the cluster, which a restart
-  // does not change.
-  if (trustedWatchMs(runs) < options.minHistoryDays * 24 * HOUR_MS) {
+  // The staleness check below still reads the newest confirmation, because it
+  // asks when we last HEARD from the cluster, which a restart does not change.
+  if (fold.trustedWatchMs < options.minHistoryDays * 24 * HOUR_MS) {
     return { kind: "span-too-short" };
   }
   // "This index served none of the reads" is only a claim when there were reads
@@ -257,34 +340,37 @@ export function usageTrustRefusal(
     return { kind: "collection-idle" };
   }
   const maxGap = options.maxGapHours * HOUR_MS;
-  // Two kinds of hole, and both have to be checked. A restart's blind window is
-  // a third name for the first kind and needs no check of its own: it runs from
-  // our last reading to the instant the counter restarted, which is a
-  // sub-interval of the gap to the next run, so anything long enough to matter
-  // trips `gap-between-runs` first.
+  // Two kinds of hole, and both have to be checked.
+  //
+  // INSIDE a run is the one that is easy to miss. A run asserts the state held
+  // throughout its span, so it looks by construction hole-free; that assertion is
+  // only as good as the collector's refusal to extend across a gap this function
+  // would object to. Trusting it meant a safety property rested on MAX_GAP_HOURS
+  // meaning the same thing in two modules forever, with nothing in the data to
+  // check against — so each run carries its own worst interior gap and is asked
+  // rather than believed. Rows written before the column report zero and are
+  // trusted exactly as they were.
   //
   // BETWEEN runs, the obvious one: from the moment a state was last confirmed to
-  // the moment the next was first seen. Differencing run STARTS instead would read
-  // the length of a quiet run as an outage and throw away every idle index — the
-  // exact inversion of the bug this guard exists for.
+  // the moment the next was first seen. Differencing run STARTS instead would
+  // read the length of a quiet run as an outage and throw away every idle index —
+  // the exact inversion of the bug this guard exists for.
   //
-  // And INSIDE a run, which is the one that is easy to miss. A run asserts the
-  // state held throughout its span, so it looks by construction hole-free; that
-  // assertion is only as good as the collector's refusal to extend across a gap
-  // this function would object to. Trusting it meant a safety property rested on
-  // MAX_GAP_HOURS meaning the same thing in two modules forever, with nothing in
-  // the data to check against — so each run now carries its own worst interior gap
-  // and is asked rather than believed. Rows written before the column existed
-  // report zero and are trusted exactly as they were.
-  for (const [i, run] of runs.entries()) {
-    if (interiorGap(run) > maxGap) return { kind: "gap-inside-run" };
-    const next = runs[i + 1];
-    if (next === undefined) continue;
-    if (spanStart(next) - spanEnd(run) > maxGap) return { kind: "gap-between-runs" };
-  }
+  // A restart's blind window needs no check of its own: it runs from our last
+  // reading to the instant the counter restarted, a sub-interval of the gap to
+  // the next run, so anything long enough to matter trips `gap-between-runs`.
+  //
+  // WHICH KIND is reported when a history has both is the one thing that changed
+  // when these became maxima rather than a walk. The walk reported whichever came
+  // first in run order; this reports the interior one. Both are true of such a
+  // history and the VERDICT is identical either way — the kind is a label on the
+  // same refusal, which is why it was not worth carrying two ordinals through the
+  // fold to preserve an order nothing had chosen on purpose.
+  if (fold.maxInteriorGapMs > maxGap) return { kind: "gap-inside-run" };
+  if (fold.maxBetweenGapMs > maxGap) return { kind: "gap-between-runs" };
   // And the newest confirmation must itself be recent, or we are reasoning about
   // a cluster we have not seen in a while.
-  if (now.getTime() - spanEnd(last) > maxGap) return { kind: "history-stale" };
+  if (now.getTime() - fold.newestEndMs > maxGap) return { kind: "history-stale" };
   return null;
 }
 
@@ -297,6 +383,23 @@ export function usageHistoryIsTrustworthy(
   collectionActiveHours?: number,
 ): boolean {
   return usageTrustRefusal(history, options, now, collectionActiveHours) === null;
+}
+
+// The same, over the fold. One function behind both, so a refusal reported to
+// metrics and a refusal acted on cannot diverge.
+export function usageHistoryIsTrustworthyFrom(
+  fold: UsageFold,
+  options: ClassifyOptions,
+  now: Date,
+  collectionActiveHours?: number,
+): boolean {
+  return usageTrustRefusalFrom(fold, options, now, collectionActiveHours) === null;
+}
+
+// Whole days of trusted watch time, off the fold. Floored, so a span is never
+// rounded up into eligibility it has not earned.
+export function trustedWatchDaysFrom(fold: UsageFold): number {
+  return Math.floor(fold.trustedWatchMs / (24 * HOUR_MS));
 }
 
 // Classify an index from its usage history. Pure; no I/O.
@@ -318,32 +421,29 @@ export function classifyUsage(
   history: readonly UsageSnapshot[],
   options: ClassifyOptions,
 ): UsageClass {
-  // Collects, not rows, on both sides of the comparison below — usageSeries
-  // preserves the count across the split it makes, so the two agree by
-  // construction rather than by coincidence.
-  const series = usageSeries(history);
-  const observations = totalObservations(series);
-  if (observations < options.minHistory) return "FLAT_ZERO";
+  return classifyUsageFrom(foldUsage(history), options);
+}
 
+// The same rule over the fold. Reads ACTIVITY and never the counters (#265):
+// `$indexStats.accesses.ops` is cumulative, so "this snapshot has ops" is true of
+// every index used even once since the member's `since` — under which
+// `activeRuns === observations` held for anything ever used, and CONTINUOUS was
+// the verdict on an index that had served nothing for months.
+export function classifyUsageFrom(fold: UsageFold, options: ClassifyOptions): UsageClass {
+  // Collects on both sides of the comparison below — the fold preserves the count
+  // across the split `usageSeries` makes, so the two agree by construction rather
+  // than by coincidence.
+  if (fold.observations < options.minHistory) return "FLAT_ZERO";
   // Weighted by observation count, not by row count. A run is one row standing
   // for many identical collects, and "was the counter moving every time we
   // looked" is a question about the looks. Counting rows would make a single
   // quiet run outweigh three hundred busy collects it happens to sit beside.
-  const activeCount = series.reduce(
-    (sum, point) => (point.ops > 0 ? sum + observationsOf(point) : sum),
-    0,
-  );
-  if (activeCount === 0) return "FLAT_ZERO";
-  if (activeCount === observations) return "CONTINUOUS";
-
-  // Everything still standing within recentHours of the newest confirmation,
-  // however many rows that turns out to be. A run counts as recent when its END
-  // falls inside the window: that is when the state was last confirmed, and a
-  // long run reaching into the window was true inside it. For an activity
-  // point that end IS the instant the counter jumped, which is the moment the
-  // burst has to be dated to.
-  const newest = Math.max(...series.map(spanEnd));
-  const cutoff = newest - options.recentHours * HOUR_MS;
-  const recentlyActive = series.some((point) => spanEnd(point) >= cutoff && point.ops > 0);
+  if (fold.activeRuns === 0) return "FLAT_ZERO";
+  if (fold.activeRuns === fold.observations) return "CONTINUOUS";
+  // Everything still standing within recentHours of the newest confirmation. A
+  // burst is dated to the instant the counter jumped, which is the run's own
+  // start, and that is the moment this compares.
+  const cutoff = fold.newestEndMs - options.recentHours * HOUR_MS;
+  const recentlyActive = fold.latestActivityMs !== null && fold.latestActivityMs >= cutoff;
   return recentlyActive ? "PERIODIC_ALIVE" : "PERIODIC_DEAD";
 }
