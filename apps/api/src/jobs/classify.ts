@@ -11,7 +11,7 @@ import {
   regressionWeight,
   type SuppressionCounts,
   type SuppressionGuard,
-  usageTrustRefusal,
+  usageTrustRefusalFrom,
 } from "../analysis";
 import type { Database } from "../db";
 import {
@@ -21,20 +21,17 @@ import {
   clusterRosters,
   clusters,
   eq,
-  gte,
   inArray,
   indexCooldowns,
-  indexSnapshots,
   policies,
   recommendations,
-  sql,
 } from "../db";
 import { workloadKey } from "../engine/ports";
 import { recordUsageTrust } from "../metrics";
 import { activeCooldownKeys, cooldownKey } from "./cooldowns";
 import { collectionEvidence, NO_EVIDENCE } from "./latency-evidence";
-import { compactMembersWhenUnpriced, decodeMembers, memberDictionary } from "./per-member";
 import { historyWindow } from "./plan";
+import { usageEvidence } from "./usage-evidence";
 import {
   DROP_TYPES,
   pendingRemovalKeys,
@@ -228,39 +225,17 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
   // cluster's dimensions instead would additionally require the two cluster ids
   // to agree — true of every row collect writes, and still a condition the join
   // never imposed. Same rows, in the same shape, assembled here.
-  // The member names this window will mention, so the rows below can ship a
-  // position instead of a 47-character hostname on every reading (#474). One
-  // extra statement returning five rows, against 8.7 MB saved on the next one.
-  const dictionary = await memberDictionary(db, clusterId, since);
-  const snapshots = await db
-    .select({
-      indexId: indexSnapshots.indexId,
-      sizeBytes: indexSnapshots.sizeBytes,
-      // Null on every row the collector priced, which after the backfill is all
-      // of them — see compactMembersWhenUnpriced for why it is a case expression
-      // and not simply an absent column.
-      perMember: compactMembersWhenUnpriced(dictionary),
-      // How many members the reading spoke for, as a NUMBER rather than by
-      // counting an array this query no longer ships. Only the roster-less
-      // fallback below reads it (#528), and losing it to the projection above
-      // would silently make that fallback 1 — the exact understatement #528 was
-      // opened for.
-      memberCount: sql<number>`jsonb_array_length(${indexSnapshots.perMember})`,
-      opsDelta: indexSnapshots.opsDelta,
-      opsTotal: indexSnapshots.opsTotal,
-      countersRestarted: indexSnapshots.countersRestarted,
-      countersStartedAt: indexSnapshots.countersStartedAt,
-      hinted: indexSnapshots.hinted,
-      capturedAt: indexSnapshots.capturedAt,
-      lastSeenAt: indexSnapshots.lastSeenAt,
-      observations: indexSnapshots.observations,
-      maxGapMs: indexSnapshots.maxGapMs,
-    })
-    .from(indexSnapshots)
-    .where(and(eq(indexSnapshots.clusterId, clusterId), gte(indexSnapshots.lastSeenAt, since)));
-  // Distinct, so the second read asks for each index once however many snapshots
-  // point at it — which is the entire saving, stated as a Set.
-  const referenced = [...new Set(snapshots.map((snapshot) => snapshot.indexId))];
+  // Everything this pass asks of `index_snapshots`, folded in postgres — one row
+  // per index rather than one per run (#534, jobs/usage-evidence.ts).
+  //
+  // The window is unchanged: still the plan's full entitlement, because a
+  // truncated history cannot see a cadence (D96). What changed is that the
+  // arithmetic happens where the rows are. On the busiest production cluster
+  // that read was 29,892 rows for 190 indexes.
+  const usage = await usageEvidence(db, clusterId, since);
+  // Distinct by construction now — the fold returns one entry per index — so the
+  // dimension read is one row per index and no longer needs a Set to say so.
+  const referenced = [...usage.keys()];
   const dimensions =
     referenced.length === 0
       ? []
@@ -274,10 +249,9 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
           })
           .from(clusterIndexes)
           .where(inArray(clusterIndexes.id, referenced));
-  const dimensionById = new Map(dimensions.map((dimension) => [dimension.id, dimension]));
-  const rows = snapshots.flatMap(({ indexId, perMember, ...measured }) => {
-    const dimension = dimensionById.get(indexId);
-    return dimension === undefined
+  const rows = dimensions.flatMap((dimension) => {
+    const evidence = usage.get(dimension.id);
+    return evidence === undefined
       ? []
       : [
           {
@@ -285,14 +259,11 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
             collection: dimension.collection,
             indexName: dimension.indexName,
             spec: dimension.spec,
-            // Rebuilt into the shape the analysis is written for, checked
-            // element by element — see per-member.ts for why the wire form is
-            // not the stored form. Absent on a priced row, which is the saving.
-            perMember: perMember === null ? undefined : decodeMembers(perMember, dictionary),
-            ...measured,
+            ...evidence,
           },
         ];
   });
+
   // Per-collection latency evidence. Two questions off one read: whether the
   // collection served enough reads for absence of usage to mean anything (the
   // activity gate), and whether an observe window on it could finish (below).
@@ -319,7 +290,7 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
 
   const byCollection = new Map<
     string,
-    { database: string; collection: string; byIndex: Map<string, Row[]> }
+    { database: string; collection: string; byIndex: Map<string, Row> }
   >();
   for (const row of rows) {
     const key = `${row.database}\u0000${row.collection}`;
@@ -328,9 +299,7 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
       entry = { database: row.database, collection: row.collection, byIndex: new Map() };
       byCollection.set(key, entry);
     }
-    const list = entry.byIndex.get(row.indexName) ?? [];
-    list.push(row);
-    entry.byIndex.set(row.indexName, list);
+    entry.byIndex.set(row.indexName, row);
   }
 
   // Indexes the application pins with hint(). Hiding one makes mongod reject
@@ -348,10 +317,7 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
   for (const entry of byCollection.values()) {
     const inputs: IndexInput[] = [];
     const sizes: Record<string, number> = {};
-    for (const [indexName, snaps] of entry.byIndex) {
-      const sorted = [...snaps].sort((a, b) => a.capturedAt.getTime() - b.capturedAt.getTime());
-      const latest = sorted.at(-1);
-      if (latest === undefined) continue;
+    for (const [indexName, row] of entry.byIndex) {
       // A dropped index frees its bytes on every replica-set member, not one
       // copy. (On sharded clusters members span shards while sizes are already
       // cluster-wide sums, so this over-approximates by the shard count — an
@@ -361,34 +327,15 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
       // cluster that has no roster row yet. See indexCopies — a reading speaks
       // only for the members that answered, and that is a property of the pass
       // rather than of the index (#528).
-      sizes[indexName] = latest.sizeBytes * (copies ?? Math.max(1, latest.memberCount));
+      sizes[indexName] = row.sizeBytes * (copies ?? Math.max(1, row.memberCount));
       inputs.push({
         pendingRemoval: departing.has(watchKey(entry.database, entry.collection, indexName)),
-        spec: parseStoredSpec(latest.spec),
-        history: sorted.map((snap) => ({
-          capturedAt: snap.capturedAt.toISOString(),
-          // The row covers an interval, not an instant: this state held from
-          // capturedAt to lastSeenAt and was confirmed `observations` times
-          // inside it. Handing the engine only the start would read every quiet
-          // run as a hole and refuse to judge the index at all.
-          lastSeenAt: snap.lastSeenAt.toISOString(),
-          observations: snap.observations,
-          // What the analysis asks of the counters, as the collector priced it
-          // (#534). `perMember` rides along only on a row that carries none of
-          // this — see compactMembersWhenUnpriced — and the engine differences
-          // it there exactly as it always did.
-          opsDelta: snap.opsDelta,
-          opsTotal: snap.opsTotal,
-          countersRestarted: snap.countersRestarted,
-          countersStartedAt: snap.countersStartedAt?.toISOString() ?? null,
-          perMember: snap.perMember?.map((member) => ({
-            member: member.member,
-            ops: member.ops,
-            // Real counter-start time when the snapshot has one; snapshots
-            // taken before it was persisted simply omit it.
-            ...(member.since === undefined ? {} : { since: member.since }),
-          })),
-        })),
+        spec: parseStoredSpec(row.spec),
+        // The fold, not the runs. Everything the gates ask of the history is a
+        // number postgres computed over the same window (#534) — the window is
+        // unchanged and so is every threshold; what is gone is shipping each run
+        // here to add it up again.
+        usage: row.usage,
       });
     }
     const weights = regressionWeights.get(`${entry.database} ${entry.collection}`) ?? {};
@@ -402,7 +349,7 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
     const decidedAt = new Date();
     for (const index of inputs) {
       if (isNeverDrop(index.spec)) continue;
-      const refusal = usageTrustRefusal(index.history, CLASSIFY_OPTIONS, decidedAt, active);
+      const refusal = usageTrustRefusalFrom(index.usage, CLASSIFY_OPTIONS, decidedAt, active);
       recordUsageTrust(engine, refusal);
       consideredIndexes += 1;
       if (refusal === null) trustedIndexes += 1;
@@ -528,10 +475,10 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
   // the length of the retention window. Every index present at the last collect
   // had its run extended or started then, so they share that timestamp exactly —
   // the same fact getCollections leans on.
-  const newestSeen = rows.reduce((latest, row) => Math.max(latest, row.lastSeenAt.getTime()), 0);
+  const newestSeen = rows.reduce((latest, row) => Math.max(latest, row.usage.newestEndMs), 0);
   const live = new Set(
     rows
-      .filter((row) => row.lastSeenAt.getTime() === newestSeen)
+      .filter((row) => row.usage.newestEndMs === newestSeen)
       .map((row) => watchKey(row.database, row.collection, row.indexName)),
   );
   const stale = await db
