@@ -27,12 +27,13 @@ import {
   indexSnapshots,
   policies,
   recommendations,
+  sql,
 } from "../db";
 import { workloadKey } from "../engine/ports";
 import { recordUsageTrust } from "../metrics";
 import { activeCooldownKeys, cooldownKey } from "./cooldowns";
 import { collectionEvidence, NO_EVIDENCE } from "./latency-evidence";
-import { compactMembers, decodeMembers, memberDictionary } from "./per-member";
+import { compactMembersWhenUnpriced, decodeMembers, memberDictionary } from "./per-member";
 import { historyWindow } from "./plan";
 import {
   DROP_TYPES,
@@ -235,7 +236,20 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
     .select({
       indexId: indexSnapshots.indexId,
       sizeBytes: indexSnapshots.sizeBytes,
-      perMember: compactMembers(dictionary),
+      // Null on every row the collector priced, which after the backfill is all
+      // of them — see compactMembersWhenUnpriced for why it is a case expression
+      // and not simply an absent column.
+      perMember: compactMembersWhenUnpriced(dictionary),
+      // How many members the reading spoke for, as a NUMBER rather than by
+      // counting an array this query no longer ships. Only the roster-less
+      // fallback below reads it (#528), and losing it to the projection above
+      // would silently make that fallback 1 — the exact understatement #528 was
+      // opened for.
+      memberCount: sql<number>`jsonb_array_length(${indexSnapshots.perMember})`,
+      opsDelta: indexSnapshots.opsDelta,
+      opsTotal: indexSnapshots.opsTotal,
+      countersRestarted: indexSnapshots.countersRestarted,
+      countersStartedAt: indexSnapshots.countersStartedAt,
       hinted: indexSnapshots.hinted,
       capturedAt: indexSnapshots.capturedAt,
       lastSeenAt: indexSnapshots.lastSeenAt,
@@ -273,8 +287,8 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
             spec: dimension.spec,
             // Rebuilt into the shape the analysis is written for, checked
             // element by element — see per-member.ts for why the wire form is
-            // not the stored form.
-            perMember: decodeMembers(perMember, dictionary),
+            // not the stored form. Absent on a priced row, which is the saving.
+            perMember: perMember === null ? undefined : decodeMembers(perMember, dictionary),
             ...measured,
           },
         ];
@@ -347,7 +361,7 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
       // cluster that has no roster row yet. See indexCopies — a reading speaks
       // only for the members that answered, and that is a property of the pass
       // rather than of the index (#528).
-      sizes[indexName] = latest.sizeBytes * (copies ?? Math.max(1, latest.perMember.length));
+      sizes[indexName] = latest.sizeBytes * (copies ?? Math.max(1, latest.memberCount));
       inputs.push({
         pendingRemoval: departing.has(watchKey(entry.database, entry.collection, indexName)),
         spec: parseStoredSpec(latest.spec),
@@ -359,7 +373,15 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
           // run as a hole and refuse to judge the index at all.
           lastSeenAt: snap.lastSeenAt.toISOString(),
           observations: snap.observations,
-          perMember: snap.perMember.map((member) => ({
+          // What the analysis asks of the counters, as the collector priced it
+          // (#534). `perMember` rides along only on a row that carries none of
+          // this — see compactMembersWhenUnpriced — and the engine differences
+          // it there exactly as it always did.
+          opsDelta: snap.opsDelta,
+          opsTotal: snap.opsTotal,
+          countersRestarted: snap.countersRestarted,
+          countersStartedAt: snap.countersStartedAt?.toISOString() ?? null,
+          perMember: snap.perMember?.map((member) => ({
             member: member.member,
             ops: member.ops,
             // Real counter-start time when the snapshot has one; snapshots
