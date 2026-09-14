@@ -46,6 +46,7 @@ export async function runDigest(db: Database): Promise<number> {
       cluster.id,
       "weekly digest — what we would have done",
       lines.join("\n"),
+      "digest",
     );
     sent += 1;
   }

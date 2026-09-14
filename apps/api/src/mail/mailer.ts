@@ -1,5 +1,6 @@
 import { createTransport, type Transporter } from "nodemailer";
 import { workerEnv } from "../config/env";
+import { mailSends } from "../metrics/instruments";
 
 // Outbound mail (invites, alerts). Configured entirely from SMTP_* env; with no
 // SMTP_HOST, sending is a logged no-op so dev environments work without SMTP.
@@ -43,6 +44,20 @@ const SOCKET_TIMEOUT_MS = 20_000;
 // on 2587, SMTP2GO implicit on 8465 and STARTTLS on 2525. So the escape from a
 // blocked port was also a coin flip on whether mail worked at all.
 const IMPLICIT_TLS_PORTS = new Set([465, 2465, 8465]);
+
+// Which channel a send belongs to, as the counter labels it (#526).
+//
+// Required rather than defaulted, on every sender. A default would make the
+// label a property of whoever forgot to pass one, and the whole reason to carry
+// it is that "no mail has left this deployment in a day" means something very
+// different for a password reset than for a weekly digest — the first is an
+// outage, the second is a Tuesday.
+//
+// Four values and no more: this is a metric label, so the set has to be small,
+// closed, and about the AUDIENCE rather than the call site. `alert` is anything
+// the pipeline tells a cluster's owners about; `auth` is everything the account
+// itself depends on, which is the set a reader is locked out by.
+export type MailPurpose = "alert" | "digest" | "auth" | "invite";
 
 function getTransporter(): Transporter | null {
   if (transporter !== undefined) return transporter;
@@ -93,9 +108,20 @@ export function closeMailTransport(): void {
 // years as a return nobody reads, and `sendMailDetached` below is still built on
 // the fact that nothing is learned by AWAITING one — which is a different
 // statement, and still true.
-export async function sendMail(to: string, subject: string, text: string): Promise<boolean> {
+export async function sendMail(
+  to: string,
+  subject: string,
+  text: string,
+  purpose: MailPurpose,
+): Promise<boolean> {
   const transport = getTransporter();
   if (transport === null) {
+    // Counted, not merely logged. This branch is the one that returns false
+    // WITHOUT anything having gone wrong, so it is invisible to every other
+    // signal: `alertSettled` reads it as settled, no exception is thrown, and
+    // the console line is the only trace. A deployment that is supposed to send
+    // and silently does not looks exactly like a quiet week (#526).
+    mailSends.add(1, { purpose, outcome: "disabled" });
     console.warn(`mail disabled (no SMTP config); skipped "${subject}" to ${to}`);
     return false;
   }
@@ -103,8 +129,12 @@ export async function sendMail(to: string, subject: string, text: string): Promi
   const from = MAIL_FROM ?? SMTP_USER ?? "";
   try {
     await transport.sendMail({ from: `Indexterity <${from}>`, to, subject, text });
+    // `sent` is what the TRANSPORT accepted, which is the strongest claim this
+    // process can make and is weaker than "delivered" — see mailSends.
+    mailSends.add(1, { purpose, outcome: "sent" });
     return true;
   } catch (error) {
+    mailSends.add(1, { purpose, outcome: "refused" });
     console.error(`mail send failed ("${subject}" to ${to}):`, error);
     return false;
   }
@@ -129,9 +159,14 @@ export async function sendMail(to: string, subject: string, text: string): Promi
 // A JOB that mails still awaits, and the difference is real: a task must not
 // report success with its mail in flight, because the queue may have nothing
 // else to run and the process is free to stop.
-export function sendMailDetached(to: string, subject: string, text: string): void {
+export function sendMailDetached(
+  to: string,
+  subject: string,
+  text: string,
+  purpose: MailPurpose,
+): void {
   // No `.catch` because `sendMail` cannot reject — it catches and logs inside.
   // If that ever changes, this is the line that turns a mail fault into an
   // unhandled rejection, so the two belong to each other.
-  void sendMail(to, subject, text);
+  void sendMail(to, subject, text, purpose);
 }

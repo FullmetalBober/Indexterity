@@ -1,6 +1,6 @@
 import { Injectable } from "@nestjs/common";
 import { clusters, type Database, eq, members, user } from "../db";
-import { mailEnabled, sendMail } from "./mailer";
+import { type MailPurpose, mailEnabled, sendMail } from "./mailer";
 import { alertSettled } from "./notify";
 
 // Who to tell, which needs the pool (#354).
@@ -32,7 +32,12 @@ export class NotifyService {
   //
   // Which of the four cases mean what is `alertSettled`'s own comment; this
   // method's job is to count the sends it made and ask.
-  async notifyClusterOwners(clusterId: string, subject: string, text: string): Promise<boolean> {
+  async notifyClusterOwners(
+    clusterId: string,
+    subject: string,
+    text: string,
+    purpose: MailPurpose,
+  ): Promise<boolean> {
     const rows = await this.db
       .select({ email: user.email, role: members.role, clusterName: clusters.name })
       .from(clusters)
@@ -43,7 +48,8 @@ export class NotifyService {
     const owners = rows.filter((row) => row.role === "owner");
     let delivered = 0;
     for (const row of owners) {
-      if (await sendMail(row.email, `[Indexterity] ${clusterName}: ${subject}`, text)) delivered++;
+      if (await sendMail(row.email, `[Indexterity] ${clusterName}: ${subject}`, text, purpose))
+        delivered++;
     }
     return alertSettled(owners.length, delivered, mailEnabled());
   }

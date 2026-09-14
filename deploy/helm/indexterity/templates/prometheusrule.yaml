@@ -270,4 +270,69 @@ spec:
               Its loaders swallow this and render empty panels, so readers see a
               blank dashboard rather than an error. status="unreachable" means the
               api never answered — check the api pods and the Service.
+
+    # Does anything this product says ever leave the building?
+    - name: indexterity.mail
+      rules:
+        # Mail is the only subsystem whose failure is indistinguishable from
+        # having nothing to say (#526). A transport refusing every send, a
+        # deployment with no SMTP, and a week where no cluster went wrong all
+        # produce the same silence — no exception, no failed job, no empty panel.
+        #
+        # Per PURPOSE rather than in total, because the channels fail separately
+        # and mean different things: `auth` refusing is a reader who cannot
+        # reset their password, `alert` refusing is a drop nobody was told about,
+        # and one healthy channel would otherwise mask the other.
+        #
+        # A RATIO rather than a count of refusals. One rejected recipient is a
+        # typo in an invite address, and a rule that fires on it is one an
+        # operator learns to ignore; the threshold sits near 1 so this means the
+        # transport is down for that channel rather than one address being bad.
+        - alert: IndexterityMailFailing
+          expr: >-
+            sum by (purpose) (increase(indexterity_mail_sends_total{outcome="refused"}[1h]))
+            /
+            sum by (purpose) (increase(indexterity_mail_sends_total[1h]))
+            > {{ $t.mailRefusedRatio }}
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "the SMTP transport is refusing {{ `{{ $labels.purpose }}` }} mail"
+            description: >-
+              Nearly every send on this channel was refused by the transport. The
+              api log has the underlying error. Usual causes: expired or revoked
+              SMTP credentials, a provider suspending the account, or a host that
+              blocks the submission ports — Render's free tier blocks 25, 465 and
+              587, which is why SMTP_PORT here is a provider's high-port duplicate.
+              Alerts refused this way are NOT lost: raiseAlert hands most of the
+              cooldown back, so they retry. Auth mail is not retried by anything.
+
+        # What the counter above cannot see: a relay that ACCEPTS a message the
+        # recipient's server then rejects. Those are counted `sent` — the strongest
+        # claim the process can make is that the transport took it — and the only
+        # channel that reports them is a DMARC `rua=` address at the sending
+        # domain. If you send from a subdomain of a strict-DMARC parent, publish
+        # one: an inherited `sp=reject` rejects silently, with no bounce and no log
+        # line anywhere in this deployment.
+        {{- if .Values.metrics.prometheusRule.mailRequired }}
+        # Half-configured SMTP, on an install that means to send. `disabled` is
+        # the branch where sending is a no-op and nothing reports a fault:
+        # alertSettled correctly calls it SETTLED, because no retry could do
+        # better, which also means the alert is simply gone.
+        - alert: IndexterityMailDisabled
+          expr: sum(increase(indexterity_mail_sends_total{outcome="disabled"}[1h])) > 0
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "mail is not configured, and this install is set to require it"
+            description: >-
+              Something tried to send and there was no transport to send it with,
+              so it was dropped with a log line and nothing else. SMTP_HOST,
+              SMTP_USER and SMTP_PASS are a group — the api refuses to boot on a
+              partial one, so this means none of them are set. Unset
+              metrics.prometheusRule.mailRequired if this install is deliberately
+              running without mail.
+        {{- end }}
 {{- end }}

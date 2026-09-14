@@ -111,6 +111,23 @@ export async function startApi(
       // The compose mongo serves no TLS; the suite dials it on purpose.
       ALLOW_INSECURE_CLUSTER_TLS: "true",
       SIGNUP_MODE: "open",
+      // No transport, whatever the developer's shell has in it.
+      //
+      // `...process.env` above means a machine with SMTP_* exported — sourcing
+      // the repo's own .env is enough — makes the suite SEND. Every signUp()
+      // helper triggers `emailVerification.sendOnSignUp`, so a full run mails a
+      // few dozen `@int.test` addresses through whatever relay is configured,
+      // and every one of them bounces against the sending domain's reputation.
+      //
+      // Blank rather than absent because these are inherited, and a key cannot
+      // be un-set by spreading over it. config/schema.ts strips blanks before
+      // validating (withoutBlanks), so all three read as unset — which is a
+      // COMPLETE group, not a partial one, and boots. It also makes the mail
+      // path deterministic: `outcome="disabled"` is the branch these tests
+      // assert on, and it was a property of the developer's environment before.
+      SMTP_HOST: "",
+      SMTP_USER: "",
+      SMTP_PASS: "",
       // The suite signs up an account per scenario from one address, which the
       // brute-force budget is right to distrust in production and wrong to
       // here. Same reason the e2e suite raises it.

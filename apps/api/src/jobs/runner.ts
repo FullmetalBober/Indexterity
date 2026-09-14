@@ -73,6 +73,7 @@ export function wireRunnerEvents(db: Database, events: WorkerEvents): void {
           `Last error: ${String(error)}\n\n` +
           `Usual causes: the cluster is unreachable, the connection string changed, or the ` +
           `Indexterity user was removed. It will be retried on the next schedule tick.`,
+        "alert",
       ),
     ).catch((failure: unknown) => {
       captureError(failure, { task: job.task_identifier, clusterId });

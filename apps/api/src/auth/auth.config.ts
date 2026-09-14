@@ -319,6 +319,7 @@ export function createAuth(config: AuthConfig) {
               `${user.email} to ${newEmail}.\n\nApprove it here:\n${url}\n\n` +
               `After you approve, ${newEmail} receives its own verification link. ` +
               `If this wasn't you, do NOT click the link — change your password instead.`,
+            "auth",
           );
         },
       },
@@ -351,6 +352,7 @@ export function createAuth(config: AuthConfig) {
                 `It expires in ${OTP_PERIOD_MINUTES} minutes and works once.\n\n` +
                 `If you did not just try to sign in, someone has your password — ` +
                 `change it now.`,
+              "auth",
             );
           },
           period: OTP_PERIOD_MINUTES,
@@ -453,6 +455,7 @@ export function createAuth(config: AuthConfig) {
                 `${newEmail} was just requested from a signed-in session.\n\n` +
                 `If this was you, nothing else to do. If it wasn't, someone has ` +
                 `your session or password — reset it now.`,
+              "auth",
             );
           }
           return;
@@ -595,6 +598,7 @@ export function createAuth(config: AuthConfig) {
           `Someone (hopefully you) asked to reset the password for ${user.email}.\n\n` +
             `Reset it here:\n${url}\n\nIf this wasn't you, ignore this email — ` +
             `nothing changes until the link is used.`,
+          "auth",
         );
       },
     },
@@ -636,10 +640,10 @@ export function createAuth(config: AuthConfig) {
           `Welcome to Indexterity!\n\nConfirm this address:\n${link}\n\n` +
           `If you didn't create an account, ignore this email.`;
         if (!isResendRequest(request)) {
-          sendMailDetached(user.email, subject, body);
+          sendMailDetached(user.email, subject, body, "auth");
           return;
         }
-        if (await sendMail(user.email, subject, body)) return;
+        if (await sendMail(user.email, subject, body, "auth")) return;
         // Deliberately blunt about whose problem it is. The reader cannot fix a
         // transport and should not be left rereading their own address for a
         // typo — the operator's log has the actual error (mail/mailer.ts logs

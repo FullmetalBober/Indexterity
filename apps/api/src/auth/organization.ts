@@ -144,6 +144,7 @@ export function organizationPlugin(db: Database, config: OrganizationPluginConfi
           `${config.webOrigin}/app/org\n\n` +
           `It expires ${invitation.expiresAt.toISOString().slice(0, 10)}. ` +
           `Only ${email} can accept it.`,
+        "invite",
       );
     },
     schema: {

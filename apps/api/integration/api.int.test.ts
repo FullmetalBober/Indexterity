@@ -19,6 +19,7 @@ import {
   analysisNotes,
   and,
   clusterIndexes,
+  clusterRosters,
   clusters,
   createDatabase,
   desc,
@@ -296,6 +297,41 @@ describe("cluster lifecycle", () => {
     const foreign = asRecord(await (await api(`/clusters/${clusterId}/nodes`, stranger)).json());
     expect(foreign.collectedAt).toBeNull();
     expect(foreign.nodes).toEqual([]);
+  });
+
+  // #524. The dashboard subtracts the members a reading speaks for from the
+  // roster and calls the remainder blind spots, so the two have to use the SAME
+  // names for the same nodes — and they did not.
+  //
+  // `$indexStats` reports the host mongod knows itself by; the roster names a
+  // node by the address it was reached at. On anything hosted those differ, and
+  // both MongoDB clusters of the hosted deployment were affected by different
+  // routes: a replica set whose members answer as `atlas-*` while the roster
+  // says `msb-db-*`, and a standalone answering as `mongodb-0:27017` against a
+  // roster saying `mongodb.dev.mystrengthbook.com:27017`. Every index row read
+  // "N not reported" while all N had reported.
+  //
+  // This suite's mongod is the standalone case: it answers as its container
+  // hostname and is reached at 127.0.0.1. So the assertion is the property the
+  // bug violated — every roster node is spoken for by the reading.
+  it("names the nodes in a reading the way the roster names them", async () => {
+    const roster = await db
+      .select({ nodes: clusterRosters.nodes })
+      .from(clusterRosters)
+      .where(eq(clusterRosters.clusterId, clusterId));
+    const hosts = (roster[0]?.nodes ?? []).map((node) => node.host);
+    expect(hosts.length).toBeGreaterThan(0);
+
+    const snapshots = await db
+      .select({ perMember: indexSnapshots.perMember })
+      .from(indexSnapshots)
+      .where(eq(indexSnapshots.clusterId, clusterId));
+    const reported = new Set(snapshots.flatMap((row) => row.perMember.map((m) => m.member)));
+    expect(reported.size).toBeGreaterThan(0);
+
+    // Exactly `usageSplit`'s blind-spot computation, which is what the cell and
+    // the tooltip are built from.
+    expect(hosts.filter((host) => !reported.has(host))).toEqual([]);
   });
 
   it("serves policy defaults and round-trips an update", async () => {
@@ -2079,6 +2115,87 @@ describe("outage resilience", () => {
     // And the score reflects a hundred and twenty collects of evidence, not the
     // one row holding them.
     expect(proposal?.score ?? 0).toBeGreaterThan(70);
+  });
+
+  // What a drop frees is one copy per node that HOLDS the index. The factor used
+  // to come from the reading — the members that answered `$indexStats` on the
+  // snapshot classify happened to price off — which is a property of that pass
+  // and not of the index. Measured on the production 5-node cluster: 18.1% of
+  // snapshot rows recorded a partial reading, and 460 of them held the same
+  // `size_bytes` under a different member count, swinging the estimate by up to
+  // 5x on an index whose size had not moved a byte (#528).
+  it("prices a drop by the copies the roster holds, not the members that answered", async () => {
+    const replicaId = await bareCluster("Replica Pricing Cluster");
+    // Five data-bearing members, two of which did not answer this pass, plus a
+    // router that holds no copy of anything.
+    await db.insert(clusterRosters).values({
+      clusterId: replicaId,
+      nodes: [
+        { host: "m1:27017", role: "primary", state: "answered" },
+        { host: "m2:27017", role: "secondary", state: "answered" },
+        { host: "m3:27017", role: "secondary", state: "answered" },
+        { host: "m4:27017", role: "secondary", state: "unreachable" },
+        { host: "m5:27017", role: "secondary", state: "unreachable" },
+        { host: "router:27017", role: "mongos", state: "answered" },
+      ],
+      collectedAt: new Date(),
+    });
+
+    const now = Date.now();
+    const monthAgo = now - 30 * 86_400_000;
+    await insertSnapshots(db, [
+      {
+        clusterId: replicaId,
+        database: "inttest",
+        collection: "replicapricing",
+        indexName: "replica_priced_1",
+        spec: {
+          name: "replica_priced_1",
+          keys: [{ field: "idle", direction: 1 }],
+          unique: false,
+          ttl: false,
+          partial: false,
+          partialFilter: null,
+          sparse: false,
+          hidden: false,
+          isShardKey: false,
+          collation: null,
+        },
+        sizeBytes: 8192,
+        // Three of the five answered, so the reading speaks for three.
+        perMember: ["m1", "m2", "m3"].map((member) => ({
+          member,
+          ops: 0,
+          since: new Date(monthAgo - 86_400_000).toISOString(),
+        })),
+        capturedAt: new Date(monthAgo),
+        lastSeenAt: new Date(now),
+        observations: 120,
+      },
+    ]);
+    await insertLatency(
+      db,
+      Array.from({ length: 120 }, (_, i) => ({
+        clusterId: replicaId,
+        database: "inttest",
+        collection: "replicapricing",
+        readOps: (i + 1) * 1000,
+        readLatencyMicros: (i + 1) * 100,
+        writeOps: 0,
+        writeLatencyMicros: 0,
+        capturedAt: new Date(monthAgo + i * 6 * 3_600_000),
+      })),
+    );
+
+    expect(await classifyCluster(db, replicaId)).toBe(1);
+    const [proposal] = await db
+      .select()
+      .from(recommendations)
+      .where(eq(recommendations.clusterId, replicaId));
+    expect(proposal?.type).toBe("DROP_UNUSED");
+    // Five copies, not the three the reading saw and not the six the roster
+    // lists — the router stores no index.
+    expect(proposal?.estimatedBytesSaved).toBe(8192 * 5);
   });
 
   it("refuses the same index when its run stopped being extended", async () => {
