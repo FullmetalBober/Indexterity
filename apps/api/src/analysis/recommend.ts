@@ -3,14 +3,14 @@ import { z } from "zod";
 import type { IndexSpec } from "../engine/types";
 import {
   type ClassifyOptions,
-  classifyUsage,
-  trustedWatchDays,
-  usageHistoryIsTrustworthy,
+  classifyUsageFrom,
+  trustedWatchDaysFrom,
+  type UsageFold,
+  usageHistoryIsTrustworthyFrom,
 } from "./classify";
 import { coversIncludes, isKeyPrefix, isRedundantPrefix, servedByBackwardWalk } from "./redundancy";
 import { hideBreaksQueries, isNeverDrop } from "./safety";
 import { dropScore } from "./score";
-import { totalObservations, type UsageSnapshot } from "./types";
 
 const directionSchema = z.union([
   z.literal(1),
@@ -51,7 +51,12 @@ export function parseStoredSpec(value: unknown): IndexSpec {
 
 export interface IndexInput {
   readonly spec: IndexSpec;
-  readonly history: readonly UsageSnapshot[];
+  // What the gates ask of this index's history, as numbers (#534). The runs
+  // themselves never reach here any more: `foldUsage` is the definition and
+  // `jobs/usage-evidence.ts` computes the same arithmetic in postgres over the
+  // same window, so the engine stays pure and the wire stops carrying a row per
+  // collect per index.
+  readonly usage: UsageFold;
   // This index already has a drop on the way — proposed, approved or hidden.
   // It still exists, so it stays in the input list, but it must not be the
   // reason another index is dropped: "covered by X" stops being true the moment
@@ -106,7 +111,7 @@ export function recommendForCollection(
   // Usage-based findings need a history we can trust; redundancy is structural
   // and stands on its own.
   const trusted = (index: IndexInput): boolean =>
-    usageHistoryIsTrustworthy(index.history, options, now, activeHours);
+    usageHistoryIsTrustworthyFrom(index.usage, options, now, activeHours);
 
   for (const candidate of eligible) {
     const covering = indexes.find(
@@ -124,7 +129,7 @@ export function recommendForCollection(
           : `Key-prefix of ${covering.spec.name}, which already covers it.`,
         score: dropScore({
           usageClass: null,
-          snapshots: totalObservations(candidate.history),
+          snapshots: candidate.usage.observations,
           redundant: true,
           sizeBytes: sizes[candidate.spec.name] ?? 0,
           regressionWeight: regressionWeights[candidate.spec.name] ?? 0,
@@ -140,7 +145,7 @@ export function recommendForCollection(
     // A hole in the series (cluster unreachable, collector down) makes a busy
     // index look exactly like a dead one — say nothing rather than guess.
     if (!trusted(index)) continue;
-    const usageClass = classifyUsage(index.history, options);
+    const usageClass = classifyUsageFrom(index.usage, options);
     if (usageClass !== "FLAT_ZERO" && usageClass !== "PERIODIC_DEAD") continue;
     candidates.push({
       type: "DROP_UNUSED",
@@ -152,13 +157,13 @@ export function recommendForCollection(
           : "No recorded usage across the observation window.",
       score: dropScore({
         usageClass,
-        snapshots: totalObservations(index.history),
+        snapshots: index.usage.observations,
         redundant: false,
         sizeBytes: sizes[index.spec.name] ?? 0,
         regressionWeight: regressionWeights[index.spec.name] ?? 0,
       }),
       estimatedBytesSaved: sizes[index.spec.name] ?? 0,
-      evidenceDays: trustedWatchDays(index.history),
+      evidenceDays: trustedWatchDaysFrom(index.usage),
     });
   }
 
@@ -182,7 +187,7 @@ export function recommendForCollection(
   for (const index of indexes) {
     if (!hideBreaksQueries(index.spec)) continue;
     if (!trusted(index)) continue;
-    const usageClass = classifyUsage(index.history, options);
+    const usageClass = classifyUsageFrom(index.usage, options);
     if (usageClass !== "FLAT_ZERO" && usageClass !== "PERIODIC_DEAD") continue;
     advised.add(index.spec.name);
     candidates.push({
@@ -192,13 +197,13 @@ export function recommendForCollection(
       rationale: advisoryRationale(index.spec),
       score: dropScore({
         usageClass,
-        snapshots: totalObservations(index.history),
+        snapshots: index.usage.observations,
         redundant: false,
         sizeBytes: sizes[index.spec.name] ?? 0,
         regressionWeight: regressionWeights[index.spec.name] ?? 0,
       }),
       estimatedBytesSaved: sizes[index.spec.name] ?? 0,
-      evidenceDays: trustedWatchDays(index.history),
+      evidenceDays: trustedWatchDaysFrom(index.usage),
     });
   }
 
@@ -233,7 +238,7 @@ export function recommendForCollection(
         `and dropping this one. Never auto-dropped.`,
       score: dropScore({
         usageClass: null,
-        snapshots: totalObservations(index.history),
+        snapshots: index.usage.observations,
         redundant: true,
         sizeBytes: sizes[index.spec.name] ?? 0,
         regressionWeight: regressionWeights[index.spec.name] ?? 0,

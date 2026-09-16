@@ -1,3 +1,10 @@
+import type { MemberUsage } from "../analysis/types";
+import {
+  activityBetween,
+  activityInFull,
+  countersRestartedBetween,
+  latestCounterStart,
+} from "../analysis/usage";
 import {
   and,
   clusterIndexes,
@@ -295,12 +302,19 @@ async function recordSnapshots(
     .from(indexSnapshots)
     .where(inArray(indexSnapshots.indexId, indexIds))
     .orderBy(indexSnapshots.indexId, desc(indexSnapshots.capturedAt));
-  const current = new Map<string, CurrentRun & { id: string }>();
+  // Keyed by member name, which is how `activityBetween` asks for them.
+  type MemberMap = ReadonlyMap<string, MemberUsage>;
+  // The previous run's members travel with it, because a new run is priced
+  // against them: what the analysis wants of `per_member` is the activity across
+  // the run, and this is the only moment both sides are in hand (#534). The row
+  // was already being read to fingerprint it, so this costs nothing new.
+  const current = new Map<string, CurrentRun & { id: string; members: MemberMap }>();
   for (const row of newest) {
     current.set(row.indexId, {
       id: row.id,
       fingerprint: counterFingerprint(row.perMember),
       lastSeenAt: row.lastSeenAt,
+      members: new Map(row.perMember.map((member) => [member.member, member])),
     });
   }
 
@@ -314,11 +328,24 @@ async function recordSnapshots(
       extend.push({ id: run.id, sizeBytes: snapshot.sizeBytes, hinted: snapshot.hinted });
       continue;
     }
+    // An index with no previous run has nothing to difference against, and
+    // `activityBetween(null, …)` reads it in full — which is what `opsTotal`
+    // says on every row, so the two agree here by construction rather than by
+    // coincidence.
+    const previousMembers = run?.members ?? null;
+    const startedAt = latestCounterStart(snapshot.perMember);
     insert.push({
       clusterId,
       indexId,
       sizeBytes: snapshot.sizeBytes,
       perMember: snapshot.perMember,
+      opsDelta: activityBetween(previousMembers, snapshot.perMember),
+      opsTotal: activityInFull(snapshot.perMember),
+      countersRestarted: countersRestartedBetween(previousMembers, snapshot.perMember),
+      // A timestamptz column, and `since` is an ISO string off the wire — parsed
+      // here rather than stored as text, so a reader gets the same type every
+      // other stamp on the row has.
+      countersStartedAt: startedAt === null ? null : new Date(startedAt),
       hinted: snapshot.hinted,
       capturedAt: now,
       lastSeenAt: now,

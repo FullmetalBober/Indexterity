@@ -186,5 +186,27 @@ export function medianObservationGap(runs: readonly Run[]): number {
 }
 
 export interface UsageSnapshot extends Run {
-  readonly perMember: readonly MemberUsage[];
+  // The raw cumulative counters. OPTIONAL since #534: what the analysis wants of
+  // them is the activity across the run, and the collector now stores that, so a
+  // reader that projects the two numbers below need not ship an array of member
+  // counters for every run in the retained window to get it.
+  //
+  // Still here, and still read, for rows written before those columns existed
+  // and for the one caller that wants the members themselves rather than their
+  // arithmetic (the replica factor's fallback, jobs/classify.ts).
+  readonly perMember?: readonly MemberUsage[] | undefined;
+  // Activity across this run, as `activityBetween` computed it against the run
+  // before it — and, for a run with no predecessor, the same sum read in full.
+  //
+  // Two numbers rather than one because the window's OLDEST run has no
+  // predecessor it can see: `analysis/usage.ts` explains which it takes and why
+  // the difference is not cosmetic. Absent on rows the backfill has not reached,
+  // where `perMember` answers instead.
+  readonly opsDelta?: number | null | undefined;
+  readonly opsTotal?: number | null | undefined;
+  // Whether this run's counters restarted relative to the run before it, and the
+  // latest instant any of its members claims its counter began. The other two
+  // things `counterEpochs` asks of `perMember`, stored for the same reason.
+  readonly countersRestarted?: boolean | null | undefined;
+  readonly countersStartedAt?: string | null | undefined;
 }

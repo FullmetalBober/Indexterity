@@ -56,7 +56,6 @@ import { activeCooldownKeys, cooldownKey } from "../src/jobs/cooldowns";
 import { applyCreatesForCluster } from "../src/jobs/create";
 import { finalizeCluster } from "../src/jobs/finalize";
 import { releaseStaleLocks } from "../src/jobs/locks";
-import { compactMembers, decodeMembers, memberDictionary } from "../src/jobs/per-member";
 import { planForCluster } from "../src/jobs/plan";
 import { latestBaselines } from "../src/jobs/probe";
 import { pruneDeadLetterJobs, pruneOldSamples } from "../src/jobs/retention";
@@ -1990,71 +1989,6 @@ describe("outage resilience", () => {
     await mongo.db("inttest").collection("blindcoll").drop();
   });
 
-  // The Definition of Done of the change that made storage independent of the
-  // collect cadence. An idle index and a cluster we lost both stop producing new
-  // rows, and the engine has to keep telling them apart: the first is the finding
-  // it exists to make, the second the one it must refuse. What separates them is
-  // that a run is a positive claim — we looked at last_seen_at and it was still
-  // this — where an outage has nothing to say.
-  // #474. `per_member` is interned against a dictionary and travels as arrays
-  // rather than objects, which cut the largest single item in the classify read
-  // by 68%. The encoder is SQL, so only a real postgres can say whether it round
-  // trips — and a reading rebuilt wrong is a wrong `ops` handed to the gate that
-  // decides whether an index is used, which no downstream test would catch as
-  // anything but a different verdict.
-  it("round trips per-member usage through the compacted wire form", async () => {
-    const roundTripId = await bareCluster("Per Member Round Trip");
-    const now = Date.now();
-    // Several members with long Atlas-shaped hostnames, a zero reading, and one
-    // member with no `since` at all — the three shapes the decoder distinguishes.
-    const perMember = [
-      {
-        member: "atlas-7eudp5-shard-00-00.hwrel.mongodb.net:27017",
-        ops: 88388,
-        since: new Date(now - 86_400_000).toISOString(),
-      },
-      {
-        member: "atlas-7eudp5-shard-00-01.hwrel.mongodb.net:27017",
-        ops: 0,
-        since: new Date(now - 86_400_000).toISOString(),
-      },
-      { member: "atlas-7eudp5-shard-00-02.hwrel.mongodb.net:27017", ops: 42914 },
-    ];
-    await insertSnapshots(db, [
-      {
-        clusterId: roundTripId,
-        database: "inttest",
-        collection: "roundtrip",
-        indexName: "rt_1",
-        spec: { name: "rt_1", keys: [{ field: "a", direction: 1 }] },
-        sizeBytes: 4096,
-        perMember,
-        capturedAt: new Date(now - 86_400_000),
-        lastSeenAt: new Date(now),
-        observations: 24,
-      },
-    ]);
-
-    const since = new Date(now - 30 * 86_400_000);
-    const dictionary = await memberDictionary(db, roundTripId, since);
-    // Every member interned, so nothing takes the inline fallback here.
-    expect(dictionary).toEqual(perMember.map((member) => member.member).sort());
-
-    const [row] = await db
-      .select({ perMember: compactMembers(dictionary) })
-      .from(indexSnapshots)
-      .where(eq(indexSnapshots.clusterId, roundTripId));
-    const decoded = decodeMembers(row?.perMember, dictionary);
-
-    const byMember = (a: { member: string }, b: { member: string }) =>
-      a.member.localeCompare(b.member);
-    expect([...decoded].sort(byMember)).toEqual([...perMember].sort(byMember));
-    // And the point of the exercise: the wire form is materially smaller.
-    expect(JSON.stringify(row?.perMember).length).toBeLessThan(
-      JSON.stringify(perMember).length / 2,
-    );
-  });
-
   it("drops an idle index whose run is still being extended", async () => {
     // Inserted rather than connected: classifyCluster reads only postgres, and
     // dialing would spend the outbound-dial budget the later scenarios need.
@@ -2196,6 +2130,120 @@ describe("outage resilience", () => {
     // Five copies, not the three the reading saw and not the six the roster
     // lists — the router stores no index.
     expect(proposal?.estimatedBytesSaved).toBe(8192 * 5);
+  });
+
+  // The collector now stores what the analysis asks of `per_member` — the
+  // activity across a run, and whether its counters restarted — and classify
+  // reads those instead of shipping an array of member counters for every run in
+  // the retained window (#534). Two paths to the same verdict, and the fallback
+  // is not dead code: during a rolling deploy an api predating the columns can
+  // still write a row without them.
+  //
+  // So the test is that they AGREE, on data with a counter restart in it, which
+  // is the case the two compute most differently.
+  it("classifies a priced history and an unpriced one the same way", async () => {
+    const now = Date.now();
+    const monthAgo = now - 30 * 86_400_000;
+    const spec = {
+      name: "priced_1",
+      keys: [{ field: "priced", direction: 1 }],
+      unique: false,
+      ttl: false,
+      partial: false,
+      partialFilter: null,
+      sparse: false,
+      hidden: false,
+      isShardKey: false,
+      collation: null,
+    };
+    // An IDLE index, so the pass actually proposes something and the comparison
+    // below has two non-empty answers to compare — an equality between two empty
+    // arrays would pass whatever the engine did.
+    //
+    // The counter never moves, but the member restarts halfway: `since` jumps and
+    // the count returns to zero. That is the case the two paths compute most
+    // differently — the stored flag says so outright, the fallback has to notice
+    // it in the counters — and it is what splits the history into epochs, which
+    // is what `evidenceDays` is measured over.
+    //
+    // CONTIGUOUS runs, each ending where the next begins. MAX_GAP_HOURS is 48,
+    // and a run every few days with an hour-long span would be read as a series
+    // of outages — the trust gate would refuse the history and the pass would
+    // propose nothing, which is how the first version of this test managed to
+    // compare two empty arrays.
+    //
+    // A millisecond of daylight between each run and the next: the stored span is
+    // `tstzrange(captured_at, last_seen_at, '[]')` and the table refuses
+    // overlapping spans for one index, so runs that shared a boundary instant
+    // would be rejected by the exclusion constraint rather than judged.
+    const DAY = 86_400_000;
+    const SINCE = "2026-07-01T00:00:00.000Z";
+    // A CLIMBING counter, which is the shape that makes a delta mean something a
+    // total does not. Activity across these four runs is 100, 500, 50, 0 — the
+    // index went quiet — while the raw counter reads 100, 600, 650, 650.
+    //
+    // The last run is SIX HOURS long and ends now, which is what makes the two
+    // readings disagree rather than merely differ: `recentHours` is 12, so a
+    // reader taking the totals sees a burst inside the recency window and calls
+    // the index PERIODIC_ALIVE, where the activity says PERIODIC_DEAD. An idle
+    // fixture cannot tell those apart, because every delta in one is zero.
+    const shape = [
+      { at: monthAgo, until: monthAgo + 10 * DAY - 1, ops: 100, since: SINCE },
+      { at: monthAgo + 10 * DAY, until: monthAgo + 20 * DAY - 1, ops: 600, since: SINCE },
+      { at: monthAgo + 20 * DAY, until: now - 6 * 3_600_000 - 1, ops: 650, since: SINCE },
+      { at: now - 6 * 3_600_000, until: now, ops: 650, since: SINCE },
+    ];
+
+    const verdicts: unknown[] = [];
+    for (const unpriced of [false, true]) {
+      const clusterId = await bareCluster(`Priced ${unpriced ? "fallback" : "stored"}`);
+      await insertSnapshots(
+        db,
+        shape.map((point) => ({
+          clusterId,
+          database: "inttest",
+          collection: "priced",
+          indexName: "priced_1",
+          spec: { ...spec },
+          sizeBytes: 8192,
+          perMember: [{ member: "m1", ops: point.ops, since: point.since }],
+          capturedAt: new Date(point.at),
+          lastSeenAt: new Date(point.until),
+          observations: 168,
+          unpriced,
+        })),
+      );
+      await insertLatency(
+        db,
+        Array.from({ length: 120 }, (_, i) => ({
+          clusterId,
+          database: "inttest",
+          collection: "priced",
+          readOps: (i + 1) * 1000,
+          readLatencyMicros: (i + 1) * 100,
+          writeOps: 0,
+          writeLatencyMicros: 0,
+          capturedAt: new Date(monthAgo + i * 6 * 3_600_000),
+        })),
+      );
+      await classifyCluster(db, clusterId);
+      const rows = await db
+        .select({
+          type: recommendations.type,
+          usageClass: recommendations.usageClass,
+          score: recommendations.score,
+          evidenceDays: recommendations.evidenceDays,
+        })
+        .from(recommendations)
+        .where(eq(recommendations.clusterId, clusterId));
+      verdicts.push(rows);
+    }
+
+    const [stored, fallback] = verdicts;
+    // Non-vacuous first. Two empty arrays are equal, and an engine that proposed
+    // nothing at all would satisfy the comparison below while proving nothing.
+    expect(stored).toHaveLength(1);
+    expect(stored).toEqual(fallback);
   });
 
   it("refuses the same index when its run stopped being extended", async () => {
