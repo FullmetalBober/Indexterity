@@ -29,6 +29,20 @@ export async function settleBuildsForCluster(
   if (building.length === 0) return 0;
   const { session, release } = await openClusterSession(db, clusterId, { tunnels });
   try {
+    // Writable regardless of the cluster's mode, which is the one place in this
+    // pass that needs an argument.
+    //
+    // A BUILDING row means we already started an asynchronous build, and on
+    // postgres — the only engine with a `settleBuild` — settling it calls the
+    // pg_cron finish function to remove the job we scheduled. That is a write,
+    // and an owner who flipped the cluster to read-only mid-build would
+    // otherwise leave it scheduled forever with nothing to clear it.
+    //
+    // Read-only means "do not change the customer's indexes", not "abandon your
+    // own bookkeeping half-done". Same reading as clusters/offboard.ts, which
+    // un-hides what we hid while disconnecting. Nothing here touches an index:
+    // the failure path below only moves our own rows back to APPROVED, and the
+    // finish call is swallowed if it fails, so the next pass retries.
     const executor = session.executor(false);
     const settle = executor.settleBuild?.bind(executor);
     // An engine with no asynchronous build cannot answer for these rows. Left
