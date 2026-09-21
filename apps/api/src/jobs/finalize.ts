@@ -26,6 +26,7 @@ import {
   recommendations,
   roiMetrics,
 } from "../db";
+import { messageOf } from "../errors/message";
 import { emitClusterEvent, pgNotifier } from "../events/emit";
 import { NotifyService } from "../mail/notify.service";
 import { recordDrop, recordRegressionVerdict } from "../metrics";
@@ -153,9 +154,11 @@ export async function finalizeCluster(
     );
   if (due.length === 0 && watched.length === 0) return 0;
 
-  const { session, readOnly, canHide, release } = await openClusterSession(db, clusterId, {
-    tunnels,
-  });
+  const { session, readOnly, observedDatabases, canHide, release } = await openClusterSession(
+    db,
+    clusterId,
+    { tunnels },
+  );
   try {
     // Read-only clusters never execute writes.
     if (readOnly) return 0;
@@ -163,6 +166,20 @@ export async function finalizeCluster(
     const executor = session.executor(readOnly);
     let dropped = 0;
     let freedBytes = 0;
+
+    // Databases the owner has told us to stop looking at (#541, #244).
+    //
+    // `apply` refuses to HIDE outside the selection and `discardProposalsOutsideScope`
+    // deletes the open proposals when it narrows — but not the HIDDEN ones, and
+    // deliberately so: a hidden row is the only record that an index was altered
+    // and needs restoring, and deleting it would strand a hidden index on the
+    // customer's cluster with nothing left to un-hide it. Silent, and strictly
+    // worse than the drop it was trying to prevent.
+    //
+    // So the restoring belongs here. Nothing outside the selection is dropped,
+    // and anything already hidden there is put back the way it was found.
+    const inScope = (database: string): boolean =>
+      observedDatabases === null || observedDatabases.includes(database);
 
     // Collections this pass has already reported a cumulative regression for
     // (#282). Several builds on one collection can come due in the same pass, and
@@ -174,6 +191,11 @@ export async function finalizeCluster(
     // Post-build watch: a freshly built index that slows the collection's writes
     // gets dropped and cooled down; one that survives the window graduates.
     for (const rec of watched) {
+      // Left ACTIVE rather than graduated or rolled back: graduating retires the
+      // originals it superseded, and rolling back DROPS the index we built —
+      // both writes, and neither is ours to make in a database that has left the
+      // selection. The watch resumes if the database comes back.
+      if (!inScope(rec.database)) continue;
       if (
         rec.builtAt === null ||
         rec.baselineWriteOps === null ||
@@ -276,6 +298,47 @@ export async function finalizeCluster(
       await emitClusterEvent(pgNotifier(db), { clusterId, kind: "REGRESSION_FIRED", task: null });
     }
     for (const rec of due) {
+      // Out of scope: put it back and stop, before any gate gets a say.
+      //
+      // Un-hidden and returned to PROPOSED — the same treatment preflightDrop
+      // gives a drop it refuses — because that is the state the cluster was in
+      // before we touched it, and leaving the selection is a request to be back
+      // there. Not deleted: the row is what the dashboard shows the owner, and a
+      // proposal for a database nobody observes simply never advances.
+      //
+      // No owner mail. The owner did this themselves, seconds ago, on the
+      // screen that lists these indexes — telling them about it is noise, and
+      // the alert budget is spent on things they did not cause (mail/notify.ts).
+      if (!inScope(rec.database)) {
+        // The un-hide is TRIED, not assumed. Every other restoring path here
+        // sits behind `preflightDrop`, which has already established the index
+        // is there; this one runs before any gate on purpose, so the index may
+        // have been dropped or un-hidden by hand in the meantime and `collMod`
+        // answers `cannot find index`. Failing the pass over that would leave
+        // every other row unprocessed to no purpose, so what happened goes in
+        // the trail instead — the row returns to PROPOSED either way, because a
+        // proposal for an unobserved database simply never advances.
+        let restored = "un-hidden";
+        if (canHide && rec.hiddenAt !== null) {
+          try {
+            await executor.unhide(rec.database, rec.collection, rec.indexName);
+          } catch (error) {
+            restored = `could not un-hide (${messageOf(error)})`;
+          }
+        }
+        recordDrop("unhidden");
+        await db
+          .update(recommendations)
+          .set({ state: "PROPOSED", hiddenAt: null, updatedAt: new Date() })
+          .where(eq(recommendations.id, rec.id));
+        await db.insert(actions).values({
+          recommendationId: rec.id,
+          kind: "DROP",
+          actor: "system",
+          result: `aborted + ${restored}: ${rec.database} is no longer an observed database`,
+        });
+        continue;
+      }
       // Regression gate: did hiding this index slow the collection's reads
       // during observe? If so, un-hide and re-propose instead of dropping.
       //

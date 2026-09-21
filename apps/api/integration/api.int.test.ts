@@ -1938,6 +1938,74 @@ describe("outage resilience", () => {
     expect(retirement?.state).toBe("PROPOSED");
   });
 
+  // An owner narrowing the observed databases is telling us to stop touching the
+  // ones they removed. `apply` already refuses to HIDE outside the selection, and
+  // the narrowing discards the open proposals — but not the HIDDEN ones, because
+  // a hidden row is the only record that an index needs un-hiding and deleting it
+  // would strand the index with nothing left to restore it (#541).
+  //
+  // So the restoring happens here, and the assertion is the whole point: the
+  // index is still THERE and no longer hidden.
+  it("restores a hidden index instead of dropping it once its database leaves the selection", async () => {
+    // Its OWN database, so narrowing the selection below takes this row out of
+    // scope and leaves every other hidden row in this suite untouched.
+    const coll = mongo.db("scopetest").collection("scoped");
+    await coll.insertOne({ scoped: 1 });
+    await coll.createIndex({ scoped: 1 }, { name: "scoped_1" });
+    await mongo
+      .db("scopetest")
+      .command({ collMod: "scoped", index: { name: "scoped_1", hidden: true } });
+
+    const hiddenAt = new Date(Date.now() - 30 * 86_400_000);
+    const [rec] = await db
+      .insert(recommendations)
+      .values({
+        clusterId,
+        type: "DROP_UNUSED",
+        state: "HIDDEN",
+        database: "scopetest",
+        collection: "scoped",
+        indexName: "scoped_1",
+        rationale: "scope integration test",
+        estimatedBytesSaved: 0,
+        hiddenAt,
+        observeDays: 1,
+      })
+      .returning();
+    if (rec === undefined) throw new Error("failed to insert recommendation");
+
+    // The narrowing. `scopetest` is deliberately not in the list.
+    //
+    // Both the selection and the fixture database are restored in `finally`: a
+    // failure here used to leave `scopetest` behind, and the sibling test that
+    // enumerates a cluster's databases then failed too — one broken assertion
+    // reported as two, with the second one pointing nowhere useful.
+    await db
+      .update(clusters)
+      .set({ observedDatabases: ["inttest"] })
+      .where(eq(clusters.id, clusterId));
+    try {
+      await finalizeCluster(db, clusterId);
+
+      const live = await coll.indexes();
+      const spec = live.find((candidate) => candidate.name === "scoped_1");
+      // Still on the cluster, and no longer hidden — the state it was in before
+      // we touched it, which is what leaving the selection asks for.
+      expect(spec).toBeDefined();
+      expect(spec?.hidden ?? false).toBe(false);
+
+      const [after] = await db.select().from(recommendations).where(eq(recommendations.id, rec.id));
+      expect(after?.state).toBe("PROPOSED");
+      expect(after?.hiddenAt).toBeNull();
+
+      const trail = await db.select().from(actions).where(eq(actions.recommendationId, rec.id));
+      expect(trail.some((row) => row.result.includes("no longer an observed database"))).toBe(true);
+    } finally {
+      await db.update(clusters).set({ observedDatabases: null }).where(eq(clusters.id, clusterId));
+      await mongo.db("scopetest").dropDatabase();
+    }
+  });
+
   it("un-hides an index whose window cannot fill, rather than leaving it hidden", async () => {
     process.env.MASTER_KEY =
       process.env.MASTER_KEY ?? Buffer.from("0123456789abcdef0123456789abcdef").toString("base64");
