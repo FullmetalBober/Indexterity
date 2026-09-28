@@ -470,6 +470,13 @@
       "when": 1789121091019,
       "tag": "0066_snapshot_activity",
       "breakpoints": true
+    },
+    {
+      "idx": 67,
+      "version": "7",
+      "when": 1790593062639,
+      "tag": "0067_trim_superseded_per_member",
+      "breakpoints": true
     }
   ]
 }

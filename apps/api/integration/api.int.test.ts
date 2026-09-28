@@ -5273,6 +5273,40 @@ describe("collecting twice writes almost nothing the second time", () => {
       );
     expect(left.map((row) => row.collection)).toEqual(["live"]);
   });
+
+  // #550: a collect that supersedes a run empties the old run's `per_member`,
+  // and the run that replaced it keeps its own, because the next collect is
+  // priced against it. Driven for real, against the live mongo: an index of our
+  // own, looked at once, used once through a hint so its counter moves, and
+  // looked at again. Scoped to that one index, because the case above seeds rows
+  // by hand that no collector wrote.
+  it("empties per_member on the run a collect supersedes and keeps the newest", async () => {
+    const coll = mongo.db("inttest").collection("orders");
+    await coll.createIndex({ supersede: 1 }, { name: "supersede_1" });
+    try {
+      await collectCluster(db, runClusterId);
+      await coll.find({ supersede: 1 }).hint("supersede_1").toArray();
+      await collectCluster(db, runClusterId);
+
+      const runs = await db
+        .select({ perMember: indexSnapshots.perMember, capturedAt: indexSnapshots.capturedAt })
+        .from(indexSnapshots)
+        .innerJoin(clusterIndexes, eq(indexSnapshots.indexId, clusterIndexes.id))
+        .where(
+          and(
+            eq(indexSnapshots.clusterId, runClusterId),
+            eq(clusterIndexes.indexName, "supersede_1"),
+          ),
+        )
+        .orderBy(indexSnapshots.capturedAt);
+      expect(runs).toHaveLength(2);
+      expect(runs[0]?.perMember).toEqual([]);
+      expect(runs[1]?.perMember.length).toBeGreaterThan(0);
+      expect(runs[1]?.perMember.some((member) => member.ops > 0)).toBe(true);
+    } finally {
+      await coll.dropIndex("supersede_1");
+    }
+  });
 });
 
 describe("the control plane's own indexes", () => {

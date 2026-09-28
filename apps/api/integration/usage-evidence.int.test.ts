@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { foldUsage, type UsageFold } from "../src/analysis";
 import type { MemberUsage, UsageSnapshot } from "../src/analysis/types";
@@ -14,6 +16,7 @@ import {
   eq,
   indexSnapshots,
   organizations,
+  sql,
 } from "../src/db";
 import { usageEvidence } from "../src/jobs/usage-evidence";
 import { databaseUrl } from "./helpers";
@@ -241,6 +244,44 @@ const SHAPES: readonly Shape[] = [
       },
     ],
   },
+  {
+    name: "half_priced_no_since",
+    why: "the same rolling deploy on an engine whose counters carry no since, so nothing but the stored columns says the older row still needs its counters",
+    runs: [
+      {
+        startMs: BASE,
+        endMs: BASE + 7 * DAY,
+        observations: 168,
+        members: one(100),
+        unpriced: true,
+      },
+      {
+        startMs: BASE + 7 * DAY + 1000,
+        endMs: BASE + 14 * DAY,
+        observations: 168,
+        members: one(900),
+      },
+    ],
+  },
+  {
+    name: "priced_then_unpriced",
+    why: "a rollback, caught mid-flight: the newer row came from an older api and is differenced against the older row's counters",
+    runs: [
+      {
+        startMs: BASE,
+        endMs: BASE + 7 * DAY,
+        observations: 168,
+        members: one(100, SINCE_A),
+      },
+      {
+        startMs: BASE + 7 * DAY + 1000,
+        endMs: BASE + 14 * DAY,
+        observations: 168,
+        members: one(900, SINCE_A),
+        unpriced: true,
+      },
+    ],
+  },
 ];
 
 // Every field of the fold, so the comparison below names what it compares.
@@ -389,4 +430,70 @@ describe("the usage fold, in postgres and in JS", () => {
     const runs = SHAPES.reduce((sum, shape) => sum + shape.runs.length, 0);
     expect(runs).toBeGreaterThan(folded.size);
   });
+
+  // #550. Migration 0067 empties `per_member` on superseded runs, and the
+  // collector does the same from then on. The fold must not move by one field
+  // for it, in postgres or in JS, and the rows it leaves alone are exactly the
+  // ones a fallback still reads. LAST in this block, because it rewrites the
+  // rows every case above folds. It runs the migration's own file, so the rule
+  // under test is the one that shipped rather than a copy of it.
+  it("folds identically after migration 0067 trims the superseded runs", async () => {
+    const window = new Date(BASE - DAY);
+    const before = await usageEvidence(db, CLUSTER, window);
+    const migration = readFileSync(
+      path.resolve(__dirname, "../drizzle/0067_trim_superseded_per_member.sql"),
+      "utf8",
+    );
+    await db.execute(sql.raw(migration));
+    expect(await usageEvidence(db, CLUSTER, window)).toEqual(before);
+
+    const rows = await db
+      .select()
+      .from(indexSnapshots)
+      .where(eq(indexSnapshots.clusterId, CLUSTER));
+    let trimmed = 0;
+    const disagreements: string[] = [];
+    for (const shape of SHAPES) {
+      const indexId = indexIdByShape.get(shape.name);
+      if (indexId === undefined) throw new Error(`no index id for ${shape.name}`);
+      const stored = rows
+        .filter((row) => row.indexId === indexId)
+        .sort((a, b) => a.capturedAt.getTime() - b.capturedAt.getTime());
+      shape.runs.forEach((run, i) => {
+        const next = shape.runs[i + 1];
+        // The rule: superseded, and both it and its successor priced.
+        const expected =
+          next !== undefined && run.unpriced !== true && next.unpriced !== true ? [] : run.members;
+        if (expected.length === 0 && run.members.length > 0) trimmed += 1;
+        expect(stored[i]?.perMember, `${shape.name} run ${i}`).toEqual(expected);
+      });
+      // The JS fold over the rows as they now stand, which is what apply.ts and
+      // the recommendation detail read, against the fold over the untrimmed
+      // fixture.
+      const fromRows: UsageSnapshot[] = stored.map((row) => ({
+        capturedAt: row.capturedAt.toISOString(),
+        lastSeenAt: row.lastSeenAt.toISOString(),
+        observations: row.observations,
+        maxGapMs: row.maxGapMs,
+        perMember: row.perMember,
+        opsDelta: row.opsDelta,
+        opsTotal: row.opsTotal,
+        countersRestarted: row.countersRestarted,
+        countersStartedAt: row.countersStartedAt?.toISOString() ?? null,
+      }));
+      const untrimmed = foldUsage(historyOf(shape.runs));
+      const now = foldUsage(fromRows);
+      for (const key of FOLD_FIELDS) {
+        if (now[key] !== untrimmed[key]) {
+          disagreements.push(
+            `${shape.name} — ${key}: untrimmed ${String(untrimmed[key])} vs trimmed ${String(now[key])}`,
+          );
+        }
+      }
+    }
+    expect(disagreements).toEqual([]);
+    // A guard on the fixture: the equality above says nothing if the rule never
+    // fired.
+    expect(trimmed).toBeGreaterThan(5);
+  }, 60_000);
 });
