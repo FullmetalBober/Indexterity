@@ -7,7 +7,6 @@ import {
   entitledAutomation,
   entitlementsFor,
   isPlan,
-  maxRetentionDays,
   PLANS,
   type Plan,
   planFrom,
@@ -166,33 +165,24 @@ describe("retention", () => {
     expect(entitlementsFor("PRO").retentionDays).toBe(183);
   });
 
-  // Two questions with different answers now: how much a plan may SEE, and how
-  // long rows are actually KEPT. Deletion runs one cutoff for the whole
-  // deployment so it can sweep a contiguous range; the plan's own window is
-  // applied on every read instead (jobs/plan.ts).
-  it("keeps rows for the longest window any plan could claim", () => {
-    const longest = Math.max(...PLANS.map((plan) => entitlementsFor(plan).retentionDays));
-    expect(maxRetentionDays(NO_CEILING)).toBe(longest);
-    // And nobody can be entitled to a row that has been deleted — the whole
-    // safety property of splitting the two.
-    for (const plan of PLANS) {
-      expect(effectiveRetentionDays(plan, NO_CEILING)).toBeLessThanOrEqual(
-        maxRetentionDays(NO_CEILING),
-      );
-    }
+  // One window per plan, for keeping and for seeing alike (#549): the sweep
+  // deletes past it and every read filters by it.
+  it("keeps each plan's history for that plan's own window", () => {
+    expect(effectiveRetentionDays("FREE", NO_CEILING)).toBe(90);
+    expect(effectiveRetentionDays("PRO", NO_CEILING)).toBe(183);
+    expect(effectiveRetentionDays("SCALE", NO_CEILING)).toBe(365);
+    expect(effectiveRetentionDays("SELF_HOSTED", NO_CEILING)).toBe(365);
   });
 
-  it("lets the operator's ceiling cap both halves", () => {
+  it("lets the operator's ceiling cap every plan", () => {
     // Storage is the operator's bill, so RETENTION_DAYS caps what is kept AND
-    // what any plan may see. A ceiling that capped only visibility would keep
-    // paying for rows nobody may read.
-    expect(maxRetentionDays(30)).toBe(30);
+    // what any plan may see, whichever plan it is.
     expect(effectiveRetentionDays("SCALE", 30)).toBe(30);
     expect(effectiveRetentionDays("FREE", 30)).toBe(30);
   });
 
   it("ignores a ceiling above the plans, rather than extending them", () => {
-    expect(maxRetentionDays(10_000)).toBe(365);
+    expect(effectiveRetentionDays("SCALE", 10_000)).toBe(365);
     expect(effectiveRetentionDays("FREE", 10_000)).toBe(90);
   });
 });

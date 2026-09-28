@@ -85,9 +85,10 @@ const ENTITLEMENTS: Record<Plan, Entitlements> = {
   },
 };
 
-// How much history a plan may SEE. Applied at every read of the time-series
-// tables (jobs/plan.ts → historyWindow), because history depth is the thing a
-// paid plan buys: a longer series is what lets the engine call an index unused at
+// How much history a plan KEEPS and may SEE. The daily sweep deletes past it
+// (jobs/retention.ts, #549), and every read of the time-series tables filters by
+// it (jobs/plan.ts → historyWindow), because history depth is the thing a paid
+// plan buys: a longer series is what lets the engine call an index unused at
 // all, so it has to be enforced rather than advertised.
 //
 // `ceilingDays` is the operator's cap (RETENTION_DAYS, via config/env.ts →
@@ -97,24 +98,6 @@ const ENTITLEMENTS: Record<Plan, Entitlements> = {
 // it being.
 export function effectiveRetentionDays(plan: Plan, ceilingDays: number): number {
   return Math.min(entitlementsFor(plan).retentionDays, ceilingDays);
-}
-
-// How long rows are actually KEPT, for every org on the deployment.
-//
-// One number, not one per plan, and that is the point. Physical deletion used to
-// run a different cutoff per plan, which meant deleting individual rows scattered
-// through the table; visibility is a read filter now, so the only thing deletion
-// has to guarantee is that nobody can be entitled to a row that is gone. The
-// longest any plan may see satisfies that for all of them at once, and it lets a
-// deployment prune by dropping whole time ranges instead of hunting rows.
-//
-// It also means an upgrade returns the customer's history immediately, rather
-// than their having to wait out the new window to accumulate it — the rows were
-// there all along, merely out of view. Cheap because of run-length storage: an
-// idle index is one row whether it is kept for ninety days or a year.
-export function maxRetentionDays(ceilingDays: number): number {
-  const longest = Math.max(...PLANS.map((plan) => entitlementsFor(plan).retentionDays));
-  return Math.min(longest, ceilingDays);
 }
 
 export function entitlementsFor(plan: Plan): Entitlements {
