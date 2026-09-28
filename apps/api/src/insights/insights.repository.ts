@@ -34,6 +34,7 @@ import {
 } from "../db";
 import { DatabaseService } from "../db/database.service";
 import { clearCooldown } from "../jobs/cooldowns";
+import { namespaceNames } from "../jobs/namespaces";
 import { historyWindow } from "../jobs/plan";
 
 // One collection's latency counters over the window, grouped by namespace.
@@ -192,28 +193,32 @@ export class InsightsRepository {
       .select(latencyReadingColumns)
       .from(latencySamples)
       .where(and(eq(latencySamples.clusterId, clusterId), gte(latencySamples.lastSeenAt, since)));
-    const groups = new Map<
-      string,
-      { database: string; collection: string; readings: LatencyReading[] }
-    >();
+    // Grouped by the namespace's id, and named once per group afterwards. The
+    // names are not on the sample rows any more (#551), and joining them back
+    // per row would ship them once per sample, which is the D145 mistake.
+    const byNamespace = new Map<number, LatencyReading[]>();
     for (const row of rows) {
-      const key = `${row.database} ${row.collection}`;
-      const group = groups.get(key) ?? {
-        database: row.database,
-        collection: row.collection,
-        readings: [],
-      };
+      const readings = byNamespace.get(row.namespaceId) ?? [];
       // A row stands for every collect that read these same four counters, so
       // the trend and the chart get the interval and the count rather than
       // inferring a single look from a single row.
-      group.readings.push({
+      readings.push({
         ...runFrom(row),
         readOps: row.readOps,
         readLatencyMicros: row.readLatencyMicros,
         writeOps: row.writeOps,
         writeLatencyMicros: row.writeLatencyMicros,
       });
-      groups.set(key, group);
+      byNamespace.set(row.namespaceId, readings);
+    }
+    const names = await namespaceNames(this.database.db, byNamespace.keys());
+    const groups = new Map<string, LatencyGroup>();
+    for (const [namespaceId, readings] of byNamespace) {
+      const name = names.get(namespaceId);
+      // A namespace deleted between the two reads, which only the retention
+      // sweep does, and only once nothing references it.
+      if (name === undefined) continue;
+      groups.set(`${name.database} ${name.collection}`, { ...name, readings });
     }
     return groups;
   }

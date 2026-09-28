@@ -477,6 +477,20 @@
       "when": 1790593062639,
       "tag": "0067_trim_superseded_per_member",
       "breakpoints": true
+    },
+    {
+      "idx": 68,
+      "version": "7",
+      "when": 1790593890743,
+      "tag": "0068_latency_namespaces",
+      "breakpoints": true
+    },
+    {
+      "idx": 69,
+      "version": "7",
+      "when": 1790593950172,
+      "tag": "0069_latency_namespaces_contract",
+      "breakpoints": true
     }
   ]
 }

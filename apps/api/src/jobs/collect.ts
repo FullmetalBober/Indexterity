@@ -8,6 +8,7 @@ import {
 import {
   and,
   clusterIndexes,
+  clusterNamespaces,
   clusterRosters,
   type Database,
   desc,
@@ -22,6 +23,7 @@ import { evidenceWrites } from "../metrics/instruments";
 import { type CollectedLatency, type CollectedSnapshot, collectSnapshots } from "../mongo";
 import type { TunnelRegistry } from "../tunnel/tunnel.registry";
 import { openClusterSession } from "./cluster-connection";
+import { namespaceIds } from "./namespaces";
 import { type CurrentRun, counterFingerprint, extendsRun, latencyFingerprint } from "./runs";
 import { watchKey } from "./watched";
 
@@ -422,8 +424,10 @@ async function trimSupersededMembers(db: Database, ids: readonly string[]): Prom
   `);
 }
 
-// The same two rules over latency_samples. No dimension half here: every column
-// is a measurement, so the namespace stays on the row.
+// The same two rules over latency_samples, keyed by the namespace's id (#551).
+//
+// The dimension half is the namespace alone: every other column is a
+// measurement. Resolved before the run lookup, because the lookup is by id.
 async function recordLatency(
   db: Database,
   clusterId: string,
@@ -431,22 +435,39 @@ async function recordLatency(
   now: Date,
 ): Promise<WriteCounts> {
   if (latency.length === 0) return NOTHING_WRITTEN;
-  const newest = await db
-    .selectDistinctOn([latencySamples.database, latencySamples.collection], {
+  const ids = await namespaceIds(db, clusterId, latency);
+  // The newest run per namespace, one index probe each. A lateral join from the
+  // cluster's namespaces with LIMIT 1 walks `latency_samples_namespace_time` once
+  // per namespace and stops, where `distinct on` over the samples read every run
+  // the cluster had ever written to pick the newest of each.
+  const newestRun = db
+    .select({
       id: latencySamples.id,
-      database: latencySamples.database,
-      collection: latencySamples.collection,
       readOps: latencySamples.readOps,
       selfReadOps: latencySamples.selfReadOps,
       writeOps: latencySamples.writeOps,
       lastSeenAt: latencySamples.lastSeenAt,
     })
     .from(latencySamples)
-    .where(eq(latencySamples.clusterId, clusterId))
-    .orderBy(latencySamples.database, latencySamples.collection, desc(latencySamples.capturedAt));
-  const current = new Map<string, CurrentRun & { id: string }>();
+    .where(eq(latencySamples.namespaceId, clusterNamespaces.id))
+    .orderBy(desc(latencySamples.capturedAt))
+    .limit(1)
+    .as("newest_run");
+  const newest = await db
+    .select({
+      namespaceId: clusterNamespaces.id,
+      id: newestRun.id,
+      readOps: newestRun.readOps,
+      selfReadOps: newestRun.selfReadOps,
+      writeOps: newestRun.writeOps,
+      lastSeenAt: newestRun.lastSeenAt,
+    })
+    .from(clusterNamespaces)
+    .crossJoinLateral(newestRun)
+    .where(eq(clusterNamespaces.clusterId, clusterId));
+  const current = new Map<number, CurrentRun & { id: string }>();
   for (const row of newest) {
-    current.set(workloadKey(row.database, row.collection), {
+    current.set(row.namespaceId, {
       id: row.id,
       fingerprint: latencyFingerprint(row),
       lastSeenAt: row.lastSeenAt,
@@ -456,12 +477,25 @@ async function recordLatency(
   const extend: (CollectedLatency & { id: string })[] = [];
   const insert: (typeof latencySamples.$inferInsert)[] = [];
   for (const sample of latency) {
-    const run = current.get(workloadKey(sample.database, sample.collection));
+    const namespaceId = ids.get(workloadKey(sample.database, sample.collection));
+    if (namespaceId === undefined) continue;
+    const run = current.get(namespaceId);
     if (run !== undefined && extendsRun(run, latencyFingerprint(sample), now)) {
       extend.push({ ...sample, id: run.id });
       continue;
     }
-    insert.push({ clusterId, ...sample, capturedAt: now, lastSeenAt: now, observations: 1 });
+    insert.push({
+      clusterId,
+      namespaceId,
+      readOps: sample.readOps,
+      selfReadOps: sample.selfReadOps,
+      readLatencyMicros: sample.readLatencyMicros,
+      writeOps: sample.writeOps,
+      writeLatencyMicros: sample.writeLatencyMicros,
+      capturedAt: now,
+      lastSeenAt: now,
+      observations: 1,
+    });
   }
 
   if (extend.length > 0) {
