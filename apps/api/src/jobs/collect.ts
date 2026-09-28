@@ -320,6 +320,9 @@ async function recordSnapshots(
 
   const extend: { id: string; sizeBytes: number; hinted: boolean }[] = [];
   const insert: (typeof indexSnapshots.$inferInsert)[] = [];
+  // The runs this collect supersedes: an index that had a run and did not extend
+  // it. Each is priced against below, and after that its counters are history.
+  const superseded: string[] = [];
   for (const snapshot of snapshots) {
     const indexId = ids.get(watchKey(snapshot.database, snapshot.collection, snapshot.indexName));
     if (indexId === undefined) continue;
@@ -328,6 +331,7 @@ async function recordSnapshots(
       extend.push({ id: run.id, sizeBytes: snapshot.sizeBytes, hinted: snapshot.hinted });
       continue;
     }
+    if (run !== undefined) superseded.push(run.id);
     // An index with no previous run has nothing to difference against, and
     // `activityBetween(null, …)` reads it in full — which is what `opsTotal`
     // says on every row, so the two agree here by construction rather than by
@@ -385,7 +389,37 @@ async function recordSnapshots(
     `);
   }
   if (insert.length > 0) await db.insert(indexSnapshots).values(insert);
+  // After the insert, not before: a trim that landed and an insert that failed
+  // would leave the next collect differencing against an empty run.
+  if (superseded.length > 0) await trimSupersededMembers(db, superseded);
   return { inserted: insert.length, extended: extend.length };
+}
+
+// Empty `per_member` on runs a newer one has superseded (#550).
+//
+// The newest run keeps its copy, because the next collect is priced against it
+// and the live readers read the last collect's batch. A superseded one is read
+// only as history, and history reads the stored columns and touches
+// `per_member` only where they are missing. So the copy is dead weight, 48% of
+// each row's bytes on a three-member replica set.
+//
+// Guarded to leave exactly that fallback intact. A row with a stored column
+// missing, which only an api predating #537 writes, still differences its own
+// counters, so it keeps them. The row that supersedes this one is the one just
+// inserted above, which always carries the columns, so it needs nothing from
+// here. `counters_started_at` needs no guard: it is written from this same JSON,
+// so a null already means there was no `since` to fall back to. Migration 0067
+// applies the same rule to the history stored before this.
+async function trimSupersededMembers(db: Database, ids: readonly string[]): Promise<void> {
+  await db.execute(sql`
+    update ${indexSnapshots}
+    set per_member = '[]'::jsonb
+    where id = any(${sql.param(ids)}::uuid[])
+      and per_member <> '[]'::jsonb
+      and ops_delta is not null
+      and ops_total is not null
+      and counters_restarted is not null
+  `);
 }
 
 // The same two rules over latency_samples. No dimension half here: every column

@@ -676,6 +676,16 @@ export const indexSnapshots = pgTable(
     //
     // This is the run's identity: two collects belong to the same row when this
     // value is byte-identical.
+    //
+    // Only the NEWEST run per index keeps it (#550). The next collect needs it,
+    // to fingerprint the run it may extend and to difference the one it may
+    // replace, and so do the live readers, which read the last collect's batch.
+    // Once a newer run supersedes it, the columns below carry everything the
+    // history is asked, and the copy was 48% of each row's bytes. So the
+    // collector empties it to `[]`, as migration 0067 did for the history before
+    // it. It does so only when this row and its successor both carry those
+    // columns, since a row an older api wrote without them still needs the
+    // counters it is differenced from.
     perMember: jsonb("per_member")
       .$type<Array<{ member: string; ops: number; since?: string }>>()
       .notNull(),
