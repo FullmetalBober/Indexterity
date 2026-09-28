@@ -3,7 +3,6 @@ import {
   allowsAutoApply,
   allowsWorkloadAnalysis,
   DEFAULT_PLAN,
-  effectiveRetentionDays,
   entitledAutomation,
   entitlementsFor,
   isPlan,
@@ -154,35 +153,17 @@ describe("entitlements", () => {
 // Half a year on PRO: long enough for a quarterly job to show up twice, which
 // is what makes "this index is only used at quarter end" provable rather than
 // a guess.
-//
-// The operator's ceiling is an argument now, not a read of RETENTION_DAYS —
-// this file promises to be pure, and config/schema.test.ts is where the variable
-// itself is pinned. NO_CEILING is what an unset one means.
-const NO_CEILING = Number.POSITIVE_INFINITY;
-
 describe("retention", () => {
   it("gives PRO half a year", () => {
     expect(entitlementsFor("PRO").retentionDays).toBe(183);
   });
 
-  // One window per plan, for keeping and for seeing alike (#549): the sweep
-  // deletes past it and every read filters by it.
+  // One window per plan, for keeping and for seeing alike: the sweep deletes
+  // past it and every read filters by it.
   it("keeps each plan's history for that plan's own window", () => {
-    expect(effectiveRetentionDays("FREE", NO_CEILING)).toBe(90);
-    expect(effectiveRetentionDays("PRO", NO_CEILING)).toBe(183);
-    expect(effectiveRetentionDays("SCALE", NO_CEILING)).toBe(365);
-    expect(effectiveRetentionDays("SELF_HOSTED", NO_CEILING)).toBe(365);
-  });
-
-  it("lets the operator's ceiling cap every plan", () => {
-    // Storage is the operator's bill, so RETENTION_DAYS caps what is kept AND
-    // what any plan may see, whichever plan it is.
-    expect(effectiveRetentionDays("SCALE", 30)).toBe(30);
-    expect(effectiveRetentionDays("FREE", 30)).toBe(30);
-  });
-
-  it("ignores a ceiling above the plans, rather than extending them", () => {
-    expect(effectiveRetentionDays("SCALE", 10_000)).toBe(365);
-    expect(effectiveRetentionDays("FREE", 10_000)).toBe(90);
+    expect(entitlementsFor("FREE").retentionDays).toBe(90);
+    expect(entitlementsFor("PRO").retentionDays).toBe(183);
+    expect(entitlementsFor("SCALE").retentionDays).toBe(365);
+    expect(entitlementsFor("SELF_HOSTED").retentionDays).toBe(365);
   });
 });

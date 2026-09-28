@@ -264,10 +264,3 @@ export function requireOwnerTwoFactor(): boolean {
 export function defaultOrgPlan(): Plan {
   return workerEnv().DEFAULT_ORG_PLAN;
 }
-
-// RETENTION_DAYS is the operator's ceiling, not the plan's number. Storage is
-// the operator's bill, so they can cap it; a plan may keep less than the cap but
-// never more. Unset means the plan decides on its own.
-export function operatorCeilingDays(): number {
-  return workerEnv().RETENTION_DAYS ?? Number.POSITIVE_INFINITY;
-}

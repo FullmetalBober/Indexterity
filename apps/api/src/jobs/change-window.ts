@@ -28,9 +28,9 @@ export async function refreshInferredWindow(
   // summer. A run that started before the cutoff and is still live has a recent
   // last_seen_at, so it is still included, span and all.
   // The later of the two bounds: the inference's own month, and whatever the plan
-  // is entitled to see. Normally the month wins — no plan retains less than that —
-  // but an operator who set RETENTION_DAYS lower must not have the window inferred
-  // from history nobody is allowed to read.
+  // is entitled to see. The month wins on every plan there is, since none keeps
+  // less than ninety days, but a read of history goes through the plan's window
+  // regardless (jobs/plan.ts), so a plan shorter than a month would still bound it.
   const entitled = await historyWindow(db, clusterId);
   const cutoff = new Date(
     Math.max(Date.now() - INFERENCE_WINDOW_DAYS * 86_400_000, entitled.getTime()),

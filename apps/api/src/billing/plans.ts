@@ -40,8 +40,12 @@ export interface Entitlements {
   // hide, observe, regression-gate, roll back — is what makes unattended
   // changes safe to run, and it is the hard part.
   readonly autoApply: boolean;
-  // How much history the time-series tables keep for this org, in days. Longer
-  // history is what makes a usage claim trustworthy — see analysis/classify.ts.
+  // How much history the time-series tables keep for this org, in days, and how
+  // much of it the org may see. The daily sweep deletes past it
+  // (jobs/retention.ts), and every read of those tables filters by it
+  // (jobs/plan.ts → historyWindow). History depth is the thing a paid plan buys:
+  // a longer series is what lets the engine call an index unused at all, so it
+  // has to be enforced rather than advertised (analysis/classify.ts).
   readonly retentionDays: number;
 }
 
@@ -84,21 +88,6 @@ const ENTITLEMENTS: Record<Plan, Entitlements> = {
     retentionDays: 365,
   },
 };
-
-// How much history a plan KEEPS and may SEE. The daily sweep deletes past it
-// (jobs/retention.ts, #549), and every read of the time-series tables filters by
-// it (jobs/plan.ts → historyWindow), because history depth is the thing a paid
-// plan buys: a longer series is what lets the engine call an index unused at
-// all, so it has to be enforced rather than advertised.
-//
-// `ceilingDays` is the operator's cap (RETENTION_DAYS, via config/env.ts →
-// operatorCeilingDays), passed in rather than read: storage is the operator's
-// bill, so they can cap what any plan keeps, and Infinity means they have not.
-// This file promises to be pure — reading the environment here is what stopped
-// it being.
-export function effectiveRetentionDays(plan: Plan, ceilingDays: number): number {
-  return Math.min(entitlementsFor(plan).retentionDays, ceilingDays);
-}
 
 export function entitlementsFor(plan: Plan): Entitlements {
   return ENTITLEMENTS[plan];

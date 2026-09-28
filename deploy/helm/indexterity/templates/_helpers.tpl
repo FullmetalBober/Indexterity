@@ -256,10 +256,6 @@ test and the port-forward in NOTES.txt all read the same number they did before.
 - name: ALLOW_UNTESTED_DATABASE_VERSION
   value: "true"
 {{- end }}
-{{- if .Values.config.retentionDays }}
-- name: RETENTION_DAYS
-  value: {{ .Values.config.retentionDays | quote }}
-{{- end }}
 {{- end -}}
 
 {{/*

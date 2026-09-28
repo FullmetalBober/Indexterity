@@ -189,8 +189,6 @@ async function main(): Promise<void> {
   // nothing later will say it. The daily sweep deletes on each plan's own window
   // (jobs/retention.ts, #549), so a shorter window is a deletion scheduled for
   // 03:00 UTC, and moving the org back up does not return what went.
-  // RETENTION_DAYS caps both sides equally; if it already keeps less than the
-  // new plan, nothing further goes.
   const kept = entitlementsFor(before).retentionDays;
   if (limits.retentionDays < kept) {
     console.log(

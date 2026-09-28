@@ -43,7 +43,8 @@ function positive(fallback: number): z.ZodType<number, string | undefined> {
 }
 
 // The same, without a default: unset means "the caller decides", which is not
-// the same as zero (RETENTION_DAYS unset is no ceiling, not no history).
+// the same as zero (STORAGE_USD_PER_GB_MONTH unset hides the dollar figure; it
+// does not price storage at nothing).
 function optionalPositive(): z.ZodType<number | undefined, string | undefined> {
   return z
     .string()
@@ -226,9 +227,6 @@ const workerShape = {
   // rotation's one unrecoverable mistake.
   MASTER_KEY_VERSION: positiveInteger(1),
   DEFAULT_ORG_PLAN: z.enum(PLANS).default("FREE"),
-  // The operator's retention ceiling. Unset means no ceiling — the plan decides
-  // — which is why this one has no default.
-  RETENTION_DAYS: optionalPositive(),
   STORAGE_USD_PER_GB_MONTH: optionalPositive(),
   // The LOOPBACK port the tunnel service listens on (#353, D113). The same
   // variable the service itself reads, so the two cannot be configured into
