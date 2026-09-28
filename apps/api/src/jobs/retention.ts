@@ -4,6 +4,7 @@ import { coreEnv, operatorCeilingDays } from "../config/env";
 import {
   and,
   clusterIndexes,
+  clusterNamespaces,
   clusters,
   type Database,
   eq,
@@ -191,6 +192,20 @@ async function pruneHistory(db: Database, clusterIds: string[], cutoff: Date): P
       ),
     )
     .returning({ id: clusterIndexes.id });
+  // The namespaces the latency deletion stranded (#551), on the rule the index
+  // dimension just followed and for the same two reasons. Nothing cascades this
+  // way, and a collect writes the namespace before the sample that points at it,
+  // so only a namespace older than the cutoff AND unreferenced can go.
+  const namespaces = await db
+    .delete(clusterNamespaces)
+    .where(
+      and(
+        inArray(clusterNamespaces.clusterId, clusterIds),
+        lt(clusterNamespaces.createdAt, cutoff),
+        sql`not exists (select 1 from ${latencySamples} where ${latencySamples.namespaceId} = ${clusterNamespaces.id})`,
+      ),
+    )
+    .returning({ id: clusterNamespaces.id });
   // Scanning query shapes (#432). By `last_seen_at` for the same reason the
   // two series above are: the row is a standing statement — first seen then,
   // still true at last_seen_at — so a shape the workload still runs is not
@@ -203,7 +218,7 @@ async function pruneHistory(db: Database, clusterIds: string[], cutoff: Date): P
       and(inArray(workloadShapes.clusterId, clusterIds), lt(workloadShapes.lastSeenAt, cutoff)),
     )
     .returning({ id: workloadShapes.id });
-  return samples.length + snapshots.length + dimensions.length + shapes.length;
+  return samples.length + snapshots.length + dimensions.length + namespaces.length + shapes.length;
 }
 
 // Finished decisions, on the same clock as the history they were made from.

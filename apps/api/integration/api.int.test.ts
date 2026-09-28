@@ -19,6 +19,7 @@ import {
   analysisNotes,
   and,
   clusterIndexes,
+  clusterNamespaces,
   clusterRosters,
   clusters,
   createDatabase,
@@ -1858,11 +1859,20 @@ describe("outage resilience", () => {
     // The suite does not reset the database between runs, and both tables reject
     // a second copy of this fixture — latency_samples on its no-overlap
     // exclusion, recommendations on the one-live-claim index.
-    await db
-      .delete(latencySamples)
-      .where(
-        and(eq(latencySamples.clusterId, clusterId), eq(latencySamples.collection, "graduates")),
-      );
+    await db.delete(latencySamples).where(
+      inArray(
+        latencySamples.namespaceId,
+        db
+          .select({ id: clusterNamespaces.id })
+          .from(clusterNamespaces)
+          .where(
+            and(
+              eq(clusterNamespaces.clusterId, clusterId),
+              eq(clusterNamespaces.collection, "graduates"),
+            ),
+          ),
+      ),
+    );
     await db
       .delete(recommendations)
       .where(
@@ -4555,6 +4565,61 @@ describe("retention follows the plan", () => {
     // 120 days: past FREE's 90, inside SCALE's 365.
     expect(await rowsOf(clusterOf.free)).toHaveLength(0);
     expect(await rowsOf(clusterOf.scale)).toHaveLength(1);
+  });
+
+  // #551: a namespace goes with the history it named, and only once nothing
+  // references it, the rule the index dimension follows.
+  it("prunes a namespace once its samples have aged out, and keeps one still in use", async () => {
+    const session = await signUp("retention-namespaces");
+    createdEmails.push(session.email);
+    const orgId = await giveRoom(session);
+    const created = await api("/clusters", session, {
+      method: "POST",
+      body: JSON.stringify({ name: "Namespace Retention", connectionString: MONGO_URL }),
+    });
+    const namespaceClusterId = asString(asRecord(await created.json()).id);
+    createdClusterIds.push(namespaceClusterId);
+    await db.update(organizations).set({ plan: "FREE" }).where(eq(organizations.id, orgId));
+
+    const old = new Date(Date.now() - 120 * 86_400_000);
+    const FLAT = { readOps: 1, readLatencyMicros: 1, writeOps: 0, writeLatencyMicros: 0 };
+    await insertLatency(db, [
+      {
+        clusterId: namespaceClusterId,
+        database: "ns",
+        collection: "gone",
+        ...FLAT,
+        capturedAt: old,
+      },
+      {
+        clusterId: namespaceClusterId,
+        database: "ns",
+        collection: "kept",
+        ...FLAT,
+        capturedAt: old,
+      },
+      // A current run, so this namespace is still referenced after the sweep.
+      {
+        clusterId: namespaceClusterId,
+        database: "ns",
+        collection: "kept",
+        ...FLAT,
+        capturedAt: new Date(),
+      },
+    ]);
+    // Dated as production dates them, to the namespace's first sample: the
+    // fixtures are backdated, and the resolver stamps a namespace when it is made.
+    await db
+      .update(clusterNamespaces)
+      .set({ createdAt: old })
+      .where(eq(clusterNamespaces.clusterId, namespaceClusterId));
+
+    await pruneOldSamples(db);
+    const left = await db
+      .select({ collection: clusterNamespaces.collection })
+      .from(clusterNamespaces)
+      .where(eq(clusterNamespaces.clusterId, namespaceClusterId));
+    expect(left.map((row) => row.collection)).toEqual(["kept"]);
   });
 
   it("deletes what nobody could ever be entitled to", async () => {

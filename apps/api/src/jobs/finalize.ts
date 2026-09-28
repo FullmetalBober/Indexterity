@@ -17,6 +17,7 @@ import type { Database } from "../db";
 import {
   actions,
   and,
+  clusterNamespaces,
   eq,
   gte,
   inArray,
@@ -76,14 +77,26 @@ async function collectionLatencyHistory(
   collection: string,
   since: Date,
 ): Promise<LatencyReading[]> {
+  // The namespace by its names, inside the same statement: one namespace, so a
+  // subquery resolving it costs one index probe, and the rows that come back
+  // carry no names at all (#551).
+  const namespace = db
+    .select({ id: clusterNamespaces.id })
+    .from(clusterNamespaces)
+    .where(
+      and(
+        eq(clusterNamespaces.clusterId, clusterId),
+        eq(clusterNamespaces.database, database),
+        eq(clusterNamespaces.collection, collection),
+      ),
+    );
   const rows = await db
     .select(latencyReadingColumns)
     .from(latencySamples)
     .where(
       and(
         eq(latencySamples.clusterId, clusterId),
-        eq(latencySamples.database, database),
-        eq(latencySamples.collection, collection),
+        inArray(latencySamples.namespaceId, namespace),
         gte(latencySamples.lastSeenAt, since),
       ),
     );

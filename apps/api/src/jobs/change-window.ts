@@ -1,7 +1,6 @@
 import { inferChangeWindow, type TrafficSample } from "../analysis";
 import { runFrom } from "../analysis/types";
 import { and, type Database, eq, gte, latencySamples, policies, sql } from "../db";
-import { workloadKey } from "../engine/ports";
 import { historyWindow } from "./plan";
 
 // How much history the inference reads. See the comment on the query below.
@@ -38,8 +37,9 @@ export async function refreshInferredWindow(
   );
   const rows = await db
     .select({
-      database: latencySamples.database,
-      collection: latencySamples.collection,
+      // The id, not the names: this groups by namespace and never names one, so
+      // the names would be bytes on every row for nothing (#551).
+      namespaceId: latencySamples.namespaceId,
       capturedAt: latencySamples.capturedAt,
       lastSeenAt: latencySamples.lastSeenAt,
       observations: latencySamples.observations,
@@ -57,12 +57,11 @@ export async function refreshInferredWindow(
   // contributes no row at the boundary, and the summed total would collapse and
   // recover at every one of them. inferChangeWindow reduces each namespace on its
   // own timeline and sums the rates at the end, where they are comparable.
-  const byNamespace = new Map<string, TrafficSample[]>();
+  const byNamespace = new Map<number, TrafficSample[]>();
   for (const row of rows) {
-    const key = workloadKey(row.database, row.collection);
-    const series = byNamespace.get(key) ?? [];
+    const series = byNamespace.get(row.namespaceId) ?? [];
     series.push({ ...runFrom(row), ops: Number(row.ops) });
-    byNamespace.set(key, series);
+    byNamespace.set(row.namespaceId, series);
   }
   const inferred = inferChangeWindow([...byNamespace.values()]);
 

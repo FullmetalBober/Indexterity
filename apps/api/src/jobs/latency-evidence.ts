@@ -126,10 +126,13 @@ function evidenceQuery(clusterId: string, since: Date) {
   return sql`
     -- One pass over the window, sorted once, with every reading's neighbour
     -- alongside it.
+    --
+    -- Partitioned by the namespace's id rather than its two names (#551), which
+    -- the samples no longer carry. The names join on once, at the very end, where
+    -- there is one row per namespace to put them on.
     with readings as (
       select
-        database,
-        collection,
+        namespace_id,
         read_ops,
         self_read_ops,
         read_latency_micros,
@@ -149,7 +152,7 @@ function evidenceQuery(clusterId: string, since: Date) {
       from latency_samples
       where cluster_id = ${clusterId}::uuid
         and last_seen_at >= ${since.toISOString()}::timestamptz
-      window w as (partition by database, collection order by captured_at)
+      window w as (partition by namespace_id order by captured_at)
     ),
     -- Everything either fold needs from one reading and the one before it,
     -- derived once. Two consumers below, so postgres materialises this and reads
@@ -158,8 +161,7 @@ function evidenceQuery(clusterId: string, since: Date) {
     -- consumers meant four passes over the cluster's whole window; two means two.
     steps as (
       select
-        database,
-        collection,
+        namespace_id,
         captured_at,
         last_seen_at,
         -- The interval between two consecutive readings: from the moment a state
@@ -228,17 +230,17 @@ function evidenceQuery(clusterId: string, since: Date) {
     -- by the sort and window over the whole retained window; it is chosen on that
     -- margin and on not planning a per-row loop, not on a large difference.
     buckets as (
-      select database, collection, ms, sum(weight) as weight
+      select namespace_id, ms, sum(weight) as weight
       from (
-        select database, collection, interior_ms as ms, interior_weight as weight
+        select namespace_id, interior_ms as ms, interior_weight as weight
         from steps
         where interior_ms is not null and interior_ms > 0
         union all
-        select database, collection, between_ms as ms, 1::bigint as weight
+        select namespace_id, between_ms as ms, 1::bigint as weight
         from steps
         where between_ms is not null and between_ms > 0
       ) as gap
-      group by database, collection, ms
+      group by namespace_id, ms
     ),
     -- The weighted median of those intervals, which is the per-interval cap on
     -- credited activity. Weighted because collapsing a hundred quiet collects
@@ -246,32 +248,30 @@ function evidenceQuery(clusterId: string, since: Date) {
     -- cadence (analysis/types.ts, medianObservationGap).
     ranked as (
       select
-        database,
-        collection,
+        namespace_id,
         ms,
         sum(weight) over (
-          partition by database, collection
+          partition by namespace_id
           order by ms
           rows between unbounded preceding and current row
         ) as cumulative,
-        sum(weight) over (partition by database, collection) as total,
-        lead(ms) over (partition by database, collection order by ms) as next_ms
+        sum(weight) over (partition by namespace_id) as total,
+        lead(ms) over (partition by namespace_id order by ms) as next_ms
       from buckets
     ),
     -- The first interval at or past the halfway mark. Landing EXACTLY on it is
     -- the even-count case, where the median is the mean of the two middle values
     -- — the same rule the JS applies, and the reason next_ms is carried.
     median as (
-      select distinct on (database, collection)
-        database,
-        collection,
+      select distinct on (namespace_id)
+        namespace_id,
         case
           when cumulative * 2 = total and next_ms is not null then (ms + next_ms) / 2
           else ms
         end as cap_ms
       from ranked
       where cumulative * 2 >= total
-      order by database, collection, cumulative
+      order by namespace_id, cumulative
     )
     -- Both folds, in one grouped pass over steps.
     --
@@ -288,8 +288,8 @@ function evidenceQuery(clusterId: string, since: Date) {
     -- which in postgres IGNORES a null argument and would silently credit the
     -- interval uncapped.
     select
-      steps.database,
-      steps.collection,
+      names.database,
+      names.collection,
       max(median.cap_ms) as cap_ms,
       sum(
         case
@@ -301,9 +301,9 @@ function evidenceQuery(clusterId: string, since: Date) {
         * 1000 as elapsed_ms,
       sum(case when steps.drawable then steps.between_ms end) as drawable_ms
     from steps
-    left join median
-      on median.database = steps.database and median.collection = steps.collection
-    group by steps.database, steps.collection
+    join cluster_namespaces names on names.id = steps.namespace_id
+    left join median on median.namespace_id = steps.namespace_id
+    group by steps.namespace_id, names.database, names.collection
   `;
 }
 

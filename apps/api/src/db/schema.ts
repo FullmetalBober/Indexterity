@@ -1396,6 +1396,43 @@ export const clusterBlocks = pgTable(
   (table) => [primaryKey({ columns: [table.clusterId, table.task] })],
 );
 
+// The namespaces a cluster's latency has been read for, one row each (#551).
+//
+// `latency_samples` used to carry `database` and `collection` as text on every
+// row, and again in two of its indexes, when both are constants of the namespace
+// rather than observations of it: the argument `cluster_indexes` made for
+// `index_snapshots`. Measured on synthetic rows shaped like production, the
+// namespace btree was 145 bytes a row and the GiST behind the no-overlap
+// constraint 223, both keyed on those two strings, on a row whose payload is
+// four counters.
+//
+// An INTEGER key, where every other table here uses a uuid, and deliberately.
+// This is the one key repeated on every row of a table that grows with each
+// collect, and in both of its indexes. A uuid is 16 bytes stored and 36
+// characters on the wire (D145). This is 4 bytes and a few characters, so the
+// readers that return a row per sample can return it instead of a name.
+export const clusterNamespaces = pgTable(
+  "cluster_namespaces",
+  {
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+    clusterId: uuid("cluster_id")
+      .notNull()
+      .references(() => clusters.id, { onDelete: "cascade" }),
+    database: text("database").notNull(),
+    collection: text("collection").notNull(),
+    createdAt,
+  },
+  (table) => [
+    // The collector's upsert target, and every read of a cluster's names goes
+    // through its leading column.
+    uniqueIndex("cluster_namespaces_identity").on(
+      table.clusterId,
+      table.database,
+      table.collection,
+    ),
+  ],
+);
+
 export const latencySamples = pgTable(
   "latency_samples",
   {
@@ -1403,8 +1440,13 @@ export const latencySamples = pgTable(
     clusterId: uuid("cluster_id")
       .notNull()
       .references(() => clusters.id, { onDelete: "cascade" }),
-    database: text("database").notNull(),
-    collection: text("collection").notNull(),
+    // Which namespace, through `cluster_namespaces`. Beside `cluster_id` rather
+    // than instead of it: every history read and the retention sweep are scoped
+    // to a cluster and a time range, and `latency_samples_cluster_time` answers
+    // that without a join.
+    namespaceId: integer("namespace_id")
+      .notNull()
+      .references(() => clusterNamespaces.id, { onDelete: "cascade" }),
     readOps: bigint("read_ops", { mode: "number" }).notNull(),
     readLatencyMicros: bigint("read_latency_micros", { mode: "number" }).notNull(),
     writeOps: bigint("write_ops", { mode: "number" }).notNull(),
@@ -1447,53 +1489,52 @@ export const latencySamples = pgTable(
     // existed, which is the honest default: SQL Server reads DMVs and PostgreSQL
     // reads pg_stat, and neither touches the table it is measuring.
     selfReadOps: bigint("self_read_ops", { mode: "number" }).notNull().default(0),
-    // Same guard, keyed by namespace instead of index_id. See index_snapshots.
-    span: tstzrange("span")
-      .notNull()
-      .generatedAlwaysAs(sql`tstzrange(captured_at, last_seen_at, '[]')`),
+    // No stored `span` here, unlike index_snapshots (#551). The no-overlap
+    // constraint that needed one is written over the expression instead,
+    // `EXCLUDE USING gist (namespace_id WITH =, tstzrange(captured_at,
+    // last_seen_at, '[]') WITH &&)` in migration 0069. The guard is the same, and
+    // the row no longer stores both bounds a second time. drizzle has no builder
+    // for exclusion constraints, so the migration is where it lives.
   },
   (table) => [
     // By run end, for the same reason as index_snapshots.
     index("latency_samples_cluster_time").on(table.clusterId, table.lastSeenAt),
-    // The five-minute probe wants the newest sample per namespace, which is a
-    // `distinct on (database, collection) order by … captured_at desc`. Without
-    // this the planner sorts every row the cluster has ever written, on every
-    // probe. Leading with cluster_id because that is always the equality filter.
+    // The probe and the collector want the newest sample per namespace, which is
+    // a `distinct on (namespace_id) order by … captured_at desc`. Without this
+    // the planner sorts every row the cluster has ever written, on every probe.
+    // It also serves the foreign key, which needs an index led by its column.
     //
     // Still captured_at, not last_seen_at: runs for one namespace are appended
     // in time order and never overlap, so the newest run START is the newest run,
     // and its counters are the current ones however long it has been extended.
-    index("latency_samples_cluster_ns_time").on(
-      table.clusterId,
-      table.database,
-      table.collection,
-      table.capturedAt.desc(),
-    ),
+    index("latency_samples_namespace_time").on(table.namespaceId, table.capturedAt.desc()),
   ],
 );
 
-// The ten columns a latency reading is built from, as one projection both
+// The nine columns a latency reading is built from, as one projection both
 // readers share.
 //
-// `select()` with no projection reads all fourteen, and the four it does not
-// use are most of the bytes: `span` is a generated tstzrange rendering both
-// bounds a second time, `id` and `cluster_id` are 36 characters of uuid each on
+// `select()` with no projection reads all twelve, and the three it does not use
+// are most of the bytes: `id` and `cluster_id` are 36 characters of uuid each on
 // a row whose payload is four counters, and `self_read_ops` belongs to the
 // collector's own bookkeeping. Measured with `EXPLAIN (ANALYZE, SERIALIZE
-// TEXT)` over production rows — bytes to the client, which plain EXPLAIN does
-// not show — at 28,278 rows for one cluster: 7,613 kB against 3,531 kB, a 53.6%
-// cut. A floor rather than the figure, because the fixture predates
-// `self_read_ops` and carried its default.
+// TEXT)` over production rows, bytes to the client, which plain EXPLAIN does not
+// show: at 28,278 rows for one cluster, 7,613 kB against 3,531 kB, a 53.6% cut.
+// That was while the table still carried the generated `span` (gone since #551),
+// and before `self_read_ops` existed, so it is a floor rather than the figure.
+//
+// `namespace_id` rather than the names, which the table no longer holds. It is
+// an integer, a few characters on the wire, and the reader resolves the names
+// once per namespace (jobs/namespaces.ts) instead of once per row.
 //
 // Named once rather than inlined twice because the two readers must agree:
-// `runFrom` needs exactly four of these and `LatencyReading` the other six, so a
+// `runFrom` needs exactly four of these and `LatencyReading` four more, so a
 // projection that drifts on one side is a type error on that side alone and a
 // silently different query on the other. Same measurement and the same three
 // columns as D145, which fixed this on the classify side; these two were missed
 // because they read the table through a different path.
 export const latencyReadingColumns = {
-  database: latencySamples.database,
-  collection: latencySamples.collection,
+  namespaceId: latencySamples.namespaceId,
   capturedAt: latencySamples.capturedAt,
   lastSeenAt: latencySamples.lastSeenAt,
   observations: latencySamples.observations,
