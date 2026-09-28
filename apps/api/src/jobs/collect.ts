@@ -8,6 +8,7 @@ import {
 import {
   and,
   clusterIndexes,
+  clusterNamespaces,
   clusterRosters,
   type Database,
   desc,
@@ -22,6 +23,7 @@ import { evidenceWrites } from "../metrics/instruments";
 import { type CollectedLatency, type CollectedSnapshot, collectSnapshots } from "../mongo";
 import type { TunnelRegistry } from "../tunnel/tunnel.registry";
 import { openClusterSession } from "./cluster-connection";
+import { namespaceIds } from "./namespaces";
 import { type CurrentRun, counterFingerprint, extendsRun, latencyFingerprint } from "./runs";
 import { watchKey } from "./watched";
 
@@ -320,6 +322,9 @@ async function recordSnapshots(
 
   const extend: { id: string; sizeBytes: number; hinted: boolean }[] = [];
   const insert: (typeof indexSnapshots.$inferInsert)[] = [];
+  // The runs this collect supersedes: an index that had a run and did not extend
+  // it. Each is priced against below, and after that its counters are history.
+  const superseded: string[] = [];
   for (const snapshot of snapshots) {
     const indexId = ids.get(watchKey(snapshot.database, snapshot.collection, snapshot.indexName));
     if (indexId === undefined) continue;
@@ -328,6 +333,7 @@ async function recordSnapshots(
       extend.push({ id: run.id, sizeBytes: snapshot.sizeBytes, hinted: snapshot.hinted });
       continue;
     }
+    if (run !== undefined) superseded.push(run.id);
     // An index with no previous run has nothing to difference against, and
     // `activityBetween(null, …)` reads it in full — which is what `opsTotal`
     // says on every row, so the two agree here by construction rather than by
@@ -385,11 +391,43 @@ async function recordSnapshots(
     `);
   }
   if (insert.length > 0) await db.insert(indexSnapshots).values(insert);
+  // After the insert, not before: a trim that landed and an insert that failed
+  // would leave the next collect differencing against an empty run.
+  if (superseded.length > 0) await trimSupersededMembers(db, superseded);
   return { inserted: insert.length, extended: extend.length };
 }
 
-// The same two rules over latency_samples. No dimension half here: every column
-// is a measurement, so the namespace stays on the row.
+// Empty `per_member` on runs a newer one has superseded (#550).
+//
+// The newest run keeps its copy, because the next collect is priced against it
+// and the live readers read the last collect's batch. A superseded one is read
+// only as history, and history reads the stored columns and touches
+// `per_member` only where they are missing. So the copy is dead weight, 48% of
+// each row's bytes on a three-member replica set.
+//
+// Guarded to leave exactly that fallback intact. A row with a stored column
+// missing, which only an api predating #537 writes, still differences its own
+// counters, so it keeps them. The row that supersedes this one is the one just
+// inserted above, which always carries the columns, so it needs nothing from
+// here. `counters_started_at` needs no guard: it is written from this same JSON,
+// so a null already means there was no `since` to fall back to. Migration 0067
+// applies the same rule to the history stored before this.
+async function trimSupersededMembers(db: Database, ids: readonly string[]): Promise<void> {
+  await db.execute(sql`
+    update ${indexSnapshots}
+    set per_member = '[]'::jsonb
+    where id = any(${sql.param(ids)}::uuid[])
+      and per_member <> '[]'::jsonb
+      and ops_delta is not null
+      and ops_total is not null
+      and counters_restarted is not null
+  `);
+}
+
+// The same two rules over latency_samples, keyed by the namespace's id (#551).
+//
+// The dimension half is the namespace alone: every other column is a
+// measurement. Resolved before the run lookup, because the lookup is by id.
 async function recordLatency(
   db: Database,
   clusterId: string,
@@ -397,22 +435,39 @@ async function recordLatency(
   now: Date,
 ): Promise<WriteCounts> {
   if (latency.length === 0) return NOTHING_WRITTEN;
-  const newest = await db
-    .selectDistinctOn([latencySamples.database, latencySamples.collection], {
+  const ids = await namespaceIds(db, clusterId, latency);
+  // The newest run per namespace, one index probe each. A lateral join from the
+  // cluster's namespaces with LIMIT 1 walks `latency_samples_namespace_time` once
+  // per namespace and stops, where `distinct on` over the samples read every run
+  // the cluster had ever written to pick the newest of each.
+  const newestRun = db
+    .select({
       id: latencySamples.id,
-      database: latencySamples.database,
-      collection: latencySamples.collection,
       readOps: latencySamples.readOps,
       selfReadOps: latencySamples.selfReadOps,
       writeOps: latencySamples.writeOps,
       lastSeenAt: latencySamples.lastSeenAt,
     })
     .from(latencySamples)
-    .where(eq(latencySamples.clusterId, clusterId))
-    .orderBy(latencySamples.database, latencySamples.collection, desc(latencySamples.capturedAt));
-  const current = new Map<string, CurrentRun & { id: string }>();
+    .where(eq(latencySamples.namespaceId, clusterNamespaces.id))
+    .orderBy(desc(latencySamples.capturedAt))
+    .limit(1)
+    .as("newest_run");
+  const newest = await db
+    .select({
+      namespaceId: clusterNamespaces.id,
+      id: newestRun.id,
+      readOps: newestRun.readOps,
+      selfReadOps: newestRun.selfReadOps,
+      writeOps: newestRun.writeOps,
+      lastSeenAt: newestRun.lastSeenAt,
+    })
+    .from(clusterNamespaces)
+    .crossJoinLateral(newestRun)
+    .where(eq(clusterNamespaces.clusterId, clusterId));
+  const current = new Map<number, CurrentRun & { id: string }>();
   for (const row of newest) {
-    current.set(workloadKey(row.database, row.collection), {
+    current.set(row.namespaceId, {
       id: row.id,
       fingerprint: latencyFingerprint(row),
       lastSeenAt: row.lastSeenAt,
@@ -422,12 +477,25 @@ async function recordLatency(
   const extend: (CollectedLatency & { id: string })[] = [];
   const insert: (typeof latencySamples.$inferInsert)[] = [];
   for (const sample of latency) {
-    const run = current.get(workloadKey(sample.database, sample.collection));
+    const namespaceId = ids.get(workloadKey(sample.database, sample.collection));
+    if (namespaceId === undefined) continue;
+    const run = current.get(namespaceId);
     if (run !== undefined && extendsRun(run, latencyFingerprint(sample), now)) {
       extend.push({ ...sample, id: run.id });
       continue;
     }
-    insert.push({ clusterId, ...sample, capturedAt: now, lastSeenAt: now, observations: 1 });
+    insert.push({
+      clusterId,
+      namespaceId,
+      readOps: sample.readOps,
+      selfReadOps: sample.selfReadOps,
+      readLatencyMicros: sample.readLatencyMicros,
+      writeOps: sample.writeOps,
+      writeLatencyMicros: sample.writeLatencyMicros,
+      capturedAt: now,
+      lastSeenAt: now,
+      observations: 1,
+    });
   }
 
   if (extend.length > 0) {

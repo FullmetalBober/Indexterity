@@ -234,6 +234,9 @@ test and the port-forward in NOTES.txt all read the same number they did before.
   value: {{ .Values.config.classifyMinIntervalMs | int64 | quote }}
 - name: CLASSIFY_IDLE_INTERVAL_MS
   value: {{ .Values.config.classifyIdleIntervalMs | int64 | quote }}
+# The fast passes' cadence, in whole minutes dividing sixty.
+- name: FAST_PASS_INTERVAL_MINUTES
+  value: {{ .Values.config.fastPassIntervalMinutes | int64 | quote }}
 # One index build's own budget, separate from the per-statement one a read gets.
 # Postgres and SQL Server only.
 # `int64` before `quote`, and it is load-bearing: YAML reads a bare 7200000 as a
@@ -252,10 +255,6 @@ test and the port-forward in NOTES.txt all read the same number they did before.
 {{- if .Values.config.allowUntestedDatabaseVersion }}
 - name: ALLOW_UNTESTED_DATABASE_VERSION
   value: "true"
-{{- end }}
-{{- if .Values.config.retentionDays }}
-- name: RETENTION_DAYS
-  value: {{ .Values.config.retentionDays | quote }}
 {{- end }}
 {{- end -}}
 

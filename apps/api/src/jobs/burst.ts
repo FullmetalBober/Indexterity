@@ -1,5 +1,5 @@
 import { type Database, inArray, workerWatermarks } from "../db";
-import { BURST_SCHEDULE, duePasses } from "./schedule";
+import { BURST_SCHEDULE, type Cadence, DEFAULT_CADENCE, duePasses } from "./schedule";
 import type { TaskName } from "./tasks";
 import { claimWatermark, passKey } from "./watermark";
 
@@ -58,6 +58,7 @@ export async function claimDuePasses(
   claims: PassClaims,
   addJob: (task: TaskName) => Promise<unknown>,
   now: Date = new Date(),
+  cadence: Cadence = DEFAULT_CADENCE,
 ): Promise<BurstResult> {
   const tasks = BURST_SCHEDULE.map((pass) => pass.task);
   const rows = await claims.watermarks(tasks.map((task) => passKey(task)));
@@ -66,7 +67,7 @@ export async function claimDuePasses(
 
   const dispatched: TaskName[] = [];
   const alreadyClaimed: TaskName[] = [];
-  for (const { pass, occurrence } of duePasses(now, lastDispatchedAt)) {
+  for (const { pass, occurrence } of duePasses(now, lastDispatchedAt, BURST_SCHEDULE, cadence)) {
     // Claim BEFORE enqueueing. The other order would let two ticks both enqueue
     // and then both stamp, and the cost of the failure is asymmetric: a claim
     // that succeeds and then fails to enqueue loses ONE occurrence of a pass

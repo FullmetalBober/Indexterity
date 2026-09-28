@@ -10,10 +10,20 @@ import {
   observationCanFinishFrom,
 } from "../src/analysis";
 import { runFrom } from "../src/analysis/types";
-import { asc, clusters, createDatabase, eq, latencySamples, organizations } from "../src/db";
+import {
+  and,
+  asc,
+  clusterNamespaces,
+  clusters,
+  createDatabase,
+  eq,
+  inArray,
+  latencySamples,
+  organizations,
+} from "../src/db";
 import { workloadKey } from "../src/engine/ports";
 import { collectionEvidence } from "../src/jobs/latency-evidence";
-import { databaseUrl } from "./helpers";
+import { databaseUrl, insertLatency } from "./helpers";
 
 // The fold that used to happen in JS, now happening in postgres (#484, #485) —
 // held to the JS by running both over the same rows.
@@ -63,7 +73,8 @@ function stamp(hours: number): Date {
 }
 
 async function insert(fixtures: readonly Fixture[]): Promise<void> {
-  await db.insert(latencySamples).values(
+  await insertLatency(
+    db,
     fixtures.map((fixture) => ({
       clusterId: CLUSTER,
       database: "ev",
@@ -99,7 +110,20 @@ async function rawReadings(
       maxGapMs: latencySamples.maxGapMs,
     })
     .from(latencySamples)
-    .where(eq(latencySamples.collection, collection))
+    .where(
+      inArray(
+        latencySamples.namespaceId,
+        db
+          .select({ id: clusterNamespaces.id })
+          .from(clusterNamespaces)
+          .where(
+            and(
+              eq(clusterNamespaces.clusterId, CLUSTER),
+              eq(clusterNamespaces.collection, collection),
+            ),
+          ),
+      ),
+    )
     .orderBy(asc(latencySamples.capturedAt));
   return {
     activity: rows.map((row) => ({

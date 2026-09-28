@@ -6,7 +6,7 @@ import {
   MSSQL_HEALTH,
   readPressure,
 } from "../analysis";
-import { asc, type Database, desc, eq, latencySamples } from "../db";
+import { asc, clusterNamespaces, type Database, desc, eq, latencySamples } from "../db";
 import type { ClusterEngine, CollectionLatency } from "../engine/ports";
 import type { TunnelRegistry } from "../tunnel/tunnel.registry";
 import { openClusterSession } from "./cluster-connection";
@@ -65,10 +65,13 @@ export interface PressureFinding {
 // collection count rather than with anything the probe cares about. A cluster with
 // two hundred collections shipped two hundred rows to use twenty.
 //
-// TWO SELECTS, because `distinct on` fixes the leading ORDER BY to the distinct
-// expressions — which is exactly the constraint that put the sort in JS in the
-// first place. Busiest-first cannot share that ORDER BY, so it goes on a wrapping
-// select over the inner one.
+// ONE SELECT over the cluster's namespaces, each joined LATERALLY to its newest
+// sample (#551). `distinct on` over the samples used to pick the newest per
+// namespace, and it fixed the leading ORDER BY to the distinct expressions, which
+// is why busiest-first needed a wrapping select around it. Driving from the
+// namespaces instead leaves the ORDER BY free, and it changes what the read costs:
+// one `latency_samples_namespace_time` probe per namespace, stopping at the first
+// row, where the `distinct on` walked every run the cluster had ever written.
 //
 // The tie-break is not decoration. Sorting on `read_ops` alone left ties in
 // whatever order the rows arrived, which was invisible while the sort was in JS
@@ -78,25 +81,30 @@ export interface PressureFinding {
 // and it is the same arbitrary order every pass.
 export function latestBaselines(db: Database, clusterId: string, limit: number) {
   const newest = db
-    .selectDistinctOn([latencySamples.database, latencySamples.collection], {
-      database: latencySamples.database,
-      collection: latencySamples.collection,
+    .select({
       readOps: latencySamples.readOps,
       readLatencyMicros: latencySamples.readLatencyMicros,
     })
     .from(latencySamples)
-    .where(eq(latencySamples.clusterId, clusterId))
-    .orderBy(latencySamples.database, latencySamples.collection, desc(latencySamples.capturedAt))
+    .where(eq(latencySamples.namespaceId, clusterNamespaces.id))
+    .orderBy(desc(latencySamples.capturedAt))
+    .limit(1)
     .as("newest");
   return db
     .select({
-      database: newest.database,
-      collection: newest.collection,
+      database: clusterNamespaces.database,
+      collection: clusterNamespaces.collection,
       readOps: newest.readOps,
       readLatencyMicros: newest.readLatencyMicros,
     })
-    .from(newest)
-    .orderBy(desc(newest.readOps), asc(newest.database), asc(newest.collection))
+    .from(clusterNamespaces)
+    .crossJoinLateral(newest)
+    .where(eq(clusterNamespaces.clusterId, clusterId))
+    .orderBy(
+      desc(newest.readOps),
+      asc(clusterNamespaces.database),
+      asc(clusterNamespaces.collection),
+    )
     .limit(limit);
 }
 
@@ -123,37 +131,34 @@ export async function probeCluster(
   // at two hundred. The busiest-twenty was still a JS slice after it, which left
   // the read returning ten times what it used it: two hundred rows in, twenty out.
   //
-  // `latency_samples_cluster_ns_time` is the index that makes the inner select an
-  // ordered index scan instead of a sort: measured on 30k synthetic rows, 9.3ms
-  // against 54.8ms, and no Sort node. The limit does not disturb that, which was
-  // the thing to check rather than assume — it is the INNER select's ORDER BY the
-  // index serves, and the wrapping sort is over one row per namespace, the set
-  // that used to be sorted in JS.
+  // Since #551 the read drives from the cluster's NAMESPACES, each joined
+  // laterally to its newest sample: one probe of `latency_samples_namespace_time`
+  // that stops at the first row. It used to be a `distinct on` over the samples,
+  // an ordered scan of `latency_samples_cluster_ns_time` through every run the
+  // cluster had written, to keep the newest of each.
   //
-  // Re-measured on postgres 17, 160k rows over four clusters, 120k of them on the
-  // cluster under test across 2,000 namespaces. The plan gains exactly one node:
+  // Measured on postgres 18 on the shape the old plan was measured on: 160k rows
+  // over four clusters, 120k of them on the cluster under test across 2,000
+  // namespaces, the same data loaded into both schemas.
   //
   //   Limit
   //     Sort (top-N heapsort, 27 kB)
-  //       Subquery Scan
-  //         Unique
-  //           Index Scan using latency_samples_cluster_ns_time
+  //       Nested Loop
+  //         Seq Scan on cluster_namespaces (2,000 rows for this cluster)
+  //         Limit
+  //           Index Scan using latency_samples_namespace_time (2,000 loops, 1 row)
   //
-  // Five runs each, medians: 58.0ms unlimited against 56.9ms limited. The top-N
-  // heapsort over 2,000 rows is noise beside the 120k-row index scan both plans
-  // pay, so this is not a server-side speedup and is not claimed as one — the
-  // saving is that 20 rows cross the wire instead of 2,000, which is the cost the
-  // hosted deployment ran out of.
+  // Medians of five: 8.3ms, against 34.4ms for the `distinct on`. It touches more
+  // buffers (8,026 against 4,815, one index descent per namespace) and reads 60
+  // times fewer rows. What matters more than either number is that its cost
+  // follows the namespace count and no longer grows with every collect the
+  // cluster has had. The seq scan over the namespaces is the planner's choice
+  // with 2,000 of 2,201 rows matching; with a cluster that is a smaller share of
+  // the table, it takes `cluster_namespaces_identity` instead.
   //
-  // The planner only prefers that index once a cluster is a fraction of the
-  // table, which is every deployment with more than one — with a single cluster
-  // filling the table a seq scan plus an in-memory quicksort is genuinely
-  // cheaper, and it is welcome to choose that.
-  //
-  // Still O(rows the cluster has written) to SCAN; what collapses that is storing
-  // one row per counter state rather than one per collect (#67). What the limit
-  // fixes is the part that was never the planner's call: how much of the answer
-  // crosses the wire.
+  // The limit is still the part that was never the planner's call: 20 rows cross
+  // the wire rather than one per namespace, which was the cost the hosted
+  // deployment ran out of (#486).
   const busiest = await latestBaselines(db, clusterId, PROBE_COLLECTIONS);
 
   if (busiest.length === 0) return [];

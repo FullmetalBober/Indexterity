@@ -215,8 +215,8 @@ describe("the test suites spawn processes the schema accepts", () => {
 });
 
 // Everything the api declares has SOME home, or it is a knob only its own source
-// mentions — which is how RETENTION_DAYS and the rate limits spent a release
-// being settable by nothing but `extraEnv`.
+// mentions — which is how the rate limits spent a release being settable by
+// nothing but `extraEnv`.
 it("every declared variable is reachable from at least one home", () => {
   const homes = new Set([...(chartEnv.api ?? []), ...composeEnv("api"), ...exampleEnv()]);
   const orphans = declaredVars("api").filter(

@@ -12,13 +12,13 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { judgeFailures } from "../src/analysis";
 import { outcomeOf } from "../src/analysis/workload-outcome";
 import { entitledAutomation } from "../src/billing/plans";
-import { loadEnv } from "../src/config/env";
 import {
   account,
   actions,
   analysisNotes,
   and,
   clusterIndexes,
+  clusterNamespaces,
   clusterRosters,
   clusters,
   createDatabase,
@@ -1858,11 +1858,20 @@ describe("outage resilience", () => {
     // The suite does not reset the database between runs, and both tables reject
     // a second copy of this fixture — latency_samples on its no-overlap
     // exclusion, recommendations on the one-live-claim index.
-    await db
-      .delete(latencySamples)
-      .where(
-        and(eq(latencySamples.clusterId, clusterId), eq(latencySamples.collection, "graduates")),
-      );
+    await db.delete(latencySamples).where(
+      inArray(
+        latencySamples.namespaceId,
+        db
+          .select({ id: clusterNamespaces.id })
+          .from(clusterNamespaces)
+          .where(
+            and(
+              eq(clusterNamespaces.clusterId, clusterId),
+              eq(clusterNamespaces.collection, "graduates"),
+            ),
+          ),
+      ),
+    );
     await db
       .delete(recommendations)
       .where(
@@ -4459,13 +4468,11 @@ describe("plan limits", () => {
 // has to be enforced rather than advertised. Two orgs on different plans keep
 // different amounts of the same kind of row.
 describe("retention follows the plan", () => {
-  // Retention is two separate things now, and this pins both.
-  //
-  // DELETION runs one cutoff for the whole deployment — the longest any plan may
-  // see — so rows outlive the window a given org is entitled to. VISIBILITY is the
-  // per-plan window, applied on every read. That split is what lets an upgrade hand
-  // a customer their history back at once instead of making them wait it out.
-  it("keeps a downgraded org's rows but stops showing them", async () => {
+  // Deletion and visibility run on ONE window per plan (#549, D172): the daily
+  // sweep deletes past it, and every read filters by it for the day a row can
+  // sit past it between sweeps. A downgrade therefore loses history for good,
+  // and this pins both halves of that.
+  it("hides a downgraded org's old rows at once and deletes them at the sweep", async () => {
     const session = await signUp("retention");
     createdEmails.push(session.email);
     const orgId = await giveRoom(session);
@@ -4490,6 +4497,8 @@ describe("retention follows the plan", () => {
         capturedAt: captured,
       },
     ]);
+    const kept = async () =>
+      db.select().from(latencySamples).where(eq(latencySamples.clusterId, retentionClusterId));
 
     const visibleCollections = async (): Promise<string[]> => {
       const body = asRecord(
@@ -4501,29 +4510,115 @@ describe("retention follows the plan", () => {
 
     // On SCALE the row is inside the entitlement, so it is both kept and shown.
     await pruneOldSamples(db);
-    expect(
-      await db
-        .select()
-        .from(latencySamples)
-        .where(eq(latencySamples.clusterId, retentionClusterId)),
-    ).toHaveLength(1);
+    expect(await kept()).toHaveLength(1);
     expect(await visibleCollections()).toContain("aged");
 
-    // Downgrade. The row is now outside what FREE may see, but well inside the
-    // deployment's physical window — so it stays on disk and stops being served.
+    // Downgrade. Before any sweep the row is still on disk, and already out of
+    // view: the read filter is what covers the day between a change and 03:00.
     await db.update(organizations).set({ plan: "FREE" }).where(eq(organizations.id, orgId));
-    await pruneOldSamples(db);
-    expect(
-      await db
-        .select()
-        .from(latencySamples)
-        .where(eq(latencySamples.clusterId, retentionClusterId)),
-    ).toHaveLength(1);
+    expect(await kept()).toHaveLength(1);
     expect(await visibleCollections()).not.toContain("aged");
 
-    // Upgrading again returns it immediately — the point of keeping it.
+    // The sweep then deletes it, on FREE's own window.
+    await pruneOldSamples(db);
+    expect(await kept()).toHaveLength(0);
+
+    // And moving back up does not bring it back. That is the trade #549 made.
     await db.update(organizations).set({ plan: "SCALE" }).where(eq(organizations.id, orgId));
-    expect(await visibleCollections()).toContain("aged");
+    expect(await visibleCollections()).not.toContain("aged");
+  });
+
+  // The point of the change: two orgs, rows of the same age, one sweep — and
+  // each keeps what its own plan says, not what the longest plan would.
+  it("sweeps each cluster on its own plan's window in the same pass", async () => {
+    const clusterOf = { free: "", scale: "" };
+    for (const plan of ["FREE", "SCALE"] as const) {
+      const session = await signUp(`retention-${plan.toLowerCase()}`);
+      createdEmails.push(session.email);
+      const orgId = await giveRoom(session);
+      const created = await api("/clusters", session, {
+        method: "POST",
+        body: JSON.stringify({ name: `${plan} Retention`, connectionString: MONGO_URL }),
+      });
+      const clusterId = asString(asRecord(await created.json()).id);
+      createdClusterIds.push(clusterId);
+      await db.update(organizations).set({ plan }).where(eq(organizations.id, orgId));
+      await insertLatency(db, [
+        {
+          clusterId,
+          database: "retention",
+          collection: "same_age",
+          readOps: 1,
+          readLatencyMicros: 1,
+          writeOps: 0,
+          writeLatencyMicros: 0,
+          capturedAt: new Date(Date.now() - 120 * 86_400_000),
+        },
+      ]);
+      clusterOf[plan === "FREE" ? "free" : "scale"] = clusterId;
+    }
+
+    await pruneOldSamples(db);
+    const rowsOf = async (clusterId: string) =>
+      db.select().from(latencySamples).where(eq(latencySamples.clusterId, clusterId));
+    // 120 days: past FREE's 90, inside SCALE's 365.
+    expect(await rowsOf(clusterOf.free)).toHaveLength(0);
+    expect(await rowsOf(clusterOf.scale)).toHaveLength(1);
+  });
+
+  // #551: a namespace goes with the history it named, and only once nothing
+  // references it, the rule the index dimension follows.
+  it("prunes a namespace once its samples have aged out, and keeps one still in use", async () => {
+    const session = await signUp("retention-namespaces");
+    createdEmails.push(session.email);
+    const orgId = await giveRoom(session);
+    const created = await api("/clusters", session, {
+      method: "POST",
+      body: JSON.stringify({ name: "Namespace Retention", connectionString: MONGO_URL }),
+    });
+    const namespaceClusterId = asString(asRecord(await created.json()).id);
+    createdClusterIds.push(namespaceClusterId);
+    await db.update(organizations).set({ plan: "FREE" }).where(eq(organizations.id, orgId));
+
+    const old = new Date(Date.now() - 120 * 86_400_000);
+    const FLAT = { readOps: 1, readLatencyMicros: 1, writeOps: 0, writeLatencyMicros: 0 };
+    await insertLatency(db, [
+      {
+        clusterId: namespaceClusterId,
+        database: "ns",
+        collection: "gone",
+        ...FLAT,
+        capturedAt: old,
+      },
+      {
+        clusterId: namespaceClusterId,
+        database: "ns",
+        collection: "kept",
+        ...FLAT,
+        capturedAt: old,
+      },
+      // A current run, so this namespace is still referenced after the sweep.
+      {
+        clusterId: namespaceClusterId,
+        database: "ns",
+        collection: "kept",
+        ...FLAT,
+        capturedAt: new Date(),
+      },
+    ]);
+    // Dated as production dates them, to the namespace's first sample: the
+    // fixtures are backdated, and the resolver stamps a namespace when it is made.
+    await db
+      .update(clusterNamespaces)
+      .set({ createdAt: old })
+      .where(eq(clusterNamespaces.clusterId, namespaceClusterId));
+
+    await pruneOldSamples(db);
+    const left = await db
+      .select({ collection: clusterNamespaces.collection })
+      .from(clusterNamespaces)
+      .where(eq(clusterNamespaces.clusterId, namespaceClusterId));
+    expect(left.map((row) => row.collection)).toEqual(["kept"]);
   });
 
   it("deletes what nobody could ever be entitled to", async () => {
@@ -4553,50 +4648,6 @@ describe("retention follows the plan", () => {
     await pruneOldSamples(db);
     expect(
       await db.select().from(latencySamples).where(eq(latencySamples.clusterId, hardId)),
-    ).toHaveLength(0);
-  });
-
-  it("lets the operator cap a plan that would keep more", async () => {
-    const session = await signUp("retention-cap");
-    createdEmails.push(session.email);
-    await giveRoom(session);
-    const created = await api("/clusters", session, {
-      method: "POST",
-      body: JSON.stringify({ name: "Capped Cluster", connectionString: MONGO_URL }),
-    });
-    const cappedClusterId = asString(asRecord(await created.json()).id);
-    createdClusterIds.push(cappedClusterId);
-
-    await insertLatency(db, [
-      {
-        clusterId: cappedClusterId,
-        database: "inttest",
-        collection: "orders",
-        readOps: 1,
-        readLatencyMicros: 1,
-        writeOps: 0,
-        writeLatencyMicros: 0,
-        capturedAt: new Date(Date.now() - 120 * 86_400_000),
-      },
-    ]);
-
-    // The ceiling is read from the validated environment, which this process
-    // parsed at startup (vitest.integration.setup.ts) — so setting it means
-    // saying when the process read it, and putting it back means saying so
-    // again.
-    const previous = process.env.RETENTION_DAYS;
-    process.env.RETENTION_DAYS = "7";
-    loadEnv("api");
-    try {
-      await pruneOldSamples(db);
-    } finally {
-      if (previous === undefined) delete process.env.RETENTION_DAYS;
-      else process.env.RETENTION_DAYS = previous;
-      loadEnv("api");
-    }
-    // SCALE would have kept it for a year; the operator's ceiling wins.
-    expect(
-      await db.select().from(latencySamples).where(eq(latencySamples.clusterId, cappedClusterId)),
     ).toHaveLength(0);
   });
 });
@@ -5241,6 +5292,40 @@ describe("collecting twice writes almost nothing the second time", () => {
         and(eq(indexSnapshots.clusterId, runClusterId), eq(clusterIndexes.database, "retain")),
       );
     expect(left.map((row) => row.collection)).toEqual(["live"]);
+  });
+
+  // #550: a collect that supersedes a run empties the old run's `per_member`,
+  // and the run that replaced it keeps its own, because the next collect is
+  // priced against it. Driven for real, against the live mongo: an index of our
+  // own, looked at once, used once through a hint so its counter moves, and
+  // looked at again. Scoped to that one index, because the case above seeds rows
+  // by hand that no collector wrote.
+  it("empties per_member on the run a collect supersedes and keeps the newest", async () => {
+    const coll = mongo.db("inttest").collection("orders");
+    await coll.createIndex({ supersede: 1 }, { name: "supersede_1" });
+    try {
+      await collectCluster(db, runClusterId);
+      await coll.find({ supersede: 1 }).hint("supersede_1").toArray();
+      await collectCluster(db, runClusterId);
+
+      const runs = await db
+        .select({ perMember: indexSnapshots.perMember, capturedAt: indexSnapshots.capturedAt })
+        .from(indexSnapshots)
+        .innerJoin(clusterIndexes, eq(indexSnapshots.indexId, clusterIndexes.id))
+        .where(
+          and(
+            eq(indexSnapshots.clusterId, runClusterId),
+            eq(clusterIndexes.indexName, "supersede_1"),
+          ),
+        )
+        .orderBy(indexSnapshots.capturedAt);
+      expect(runs).toHaveLength(2);
+      expect(runs[0]?.perMember).toEqual([]);
+      expect(runs[1]?.perMember.length).toBeGreaterThan(0);
+      expect(runs[1]?.perMember.some((member) => member.ops > 0)).toBe(true);
+    } finally {
+      await coll.dropIndex("supersede_1");
+    }
   });
 });
 

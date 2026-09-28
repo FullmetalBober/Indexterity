@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { BURST_SCHEDULE, duePasses } from "./schedule";
+import {
+  BURST_SCHEDULE,
+  type Cadence,
+  DEFAULT_CADENCE,
+  duePasses,
+  occurrenceMoved,
+} from "./schedule";
 import { TASK_NAMES } from "./tasks";
 
 const at = (iso: string): Date => new Date(iso);
@@ -28,10 +34,10 @@ describe("BURST_SCHEDULE", () => {
 });
 
 describe("occurrences", () => {
-  const occurrenceOf = (task: string, now: string): string => {
+  const occurrenceOf = (task: string, now: string, cadence: Cadence = DEFAULT_CADENCE): string => {
     const pass = BURST_SCHEDULE.find((entry) => entry.task === task);
     if (pass === undefined) throw new Error(`no pass ${task}`);
-    return pass.occurrenceAt(at(now)).toISOString();
+    return pass.occurrenceAt(at(now), cadence).toISOString();
   };
 
   it("floors a five-minute pass to its bucket", () => {
@@ -97,5 +103,56 @@ describe("duePasses", () => {
     );
     expect(due).toHaveLength(1);
     expect(due[0]?.occurrence.toISOString()).toBe("2026-08-15T10:05:00.000Z");
+  });
+});
+
+describe("a fifteen-minute fast cadence", () => {
+  const fifteen: Cadence = { fastMinutes: 15 };
+  const occurrenceOf = (task: string, now: string, cadence: Cadence): string => {
+    const pass = BURST_SCHEDULE.find((entry) => entry.task === task);
+    if (pass === undefined) throw new Error(`no pass ${task}`);
+    return pass.occurrenceAt(at(now), cadence).toISOString();
+  };
+
+  it("floors apply and the probe to quarter hours", () => {
+    expect(occurrenceOf("scheduleApply", "2026-08-15T10:07:31.500Z", fifteen)).toBe(
+      "2026-08-15T10:00:00.000Z",
+    );
+    expect(occurrenceOf("scheduleProbe", "2026-08-15T10:29:59.000Z", fifteen)).toBe(
+      "2026-08-15T10:15:00.000Z",
+    );
+  });
+
+  // The slow passes answer to their own clocks and must not follow the fast one.
+  it("leaves the hourly and daily passes where they were", () => {
+    for (const task of ["scheduleCollect", "scheduleFinalize", "retention"]) {
+      expect(occurrenceOf(task, "2026-08-15T10:44:00.000Z", fifteen)).toBe(
+        occurrenceOf(task, "2026-08-15T10:44:00.000Z", DEFAULT_CADENCE),
+      );
+    }
+  });
+
+  // What an external ping every five minutes sees under it: two pings in three
+  // find nothing new, which is the whole reason the cadence is configurable.
+  it("reports no new occurrence between quarter-hour boundaries", () => {
+    const claimed = at("2026-08-15T10:00:04.000Z");
+    expect(occurrenceMoved(claimed, at("2026-08-15T10:05:02.000Z"), fifteen)).toBe(false);
+    expect(occurrenceMoved(claimed, at("2026-08-15T10:10:03.000Z"), fifteen)).toBe(false);
+    expect(occurrenceMoved(claimed, at("2026-08-15T10:15:01.000Z"), fifteen)).toBe(true);
+  });
+
+  it("still sees the hour turn, whatever the fast cadence is", () => {
+    const claimed = at("2026-08-15T10:50:00.000Z");
+    expect(occurrenceMoved(claimed, at("2026-08-15T10:59:59.000Z"), { fastMinutes: 60 })).toBe(
+      false,
+    );
+    expect(occurrenceMoved(claimed, at("2026-08-15T11:00:00.000Z"), { fastMinutes: 60 })).toBe(
+      true,
+    );
+  });
+
+  it("sees every five-minute boundary under the default", () => {
+    const claimed = at("2026-08-15T10:00:04.000Z");
+    expect(occurrenceMoved(claimed, at("2026-08-15T10:05:02.000Z"), DEFAULT_CADENCE)).toBe(true);
   });
 });

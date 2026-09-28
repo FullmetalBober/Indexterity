@@ -5,7 +5,7 @@
 // beside the cache to drift from it (#22, and the note in #12): reacting to an
 // event IS `invalidateQueries`, so everything about how data renders, fails
 // and defaults stays exactly where it is.
-import type { ClusterEvent } from "@repo/contracts";
+import { type ClusterEvent, clusterEvent, clusterTask } from "@repo/contracts";
 import { type QueryClient, useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 import { api } from "../api";
@@ -150,14 +150,82 @@ async function listen(
   }
 }
 
+// Every event the stream can carry, read off the contract rather than listed
+// here, so a kind or a task added there is covered without anyone having to
+// remember this. PASS_FINISHED is the only kind that names a task; the
+// transitions carry none.
+const EVERY_EVENT: readonly ClusterEvent[] = clusterEvent.shape.kind.options.flatMap(
+  (kind): ClusterEvent[] =>
+    kind === "PASS_FINISHED"
+      ? clusterTask.options.map((task) => ({ kind, task }))
+      : [{ kind, task: null }],
+);
+
+// What the tab has to refetch when it starts listening again: everything any
+// event could have moved, once each. Invalidation matches by prefix, so a key
+// that two events share is one refetch however many events name it.
+export function resumeKeys(clusterId: string): readonly (readonly unknown[])[] {
+  const seen = new Map<string, readonly unknown[]>();
+  for (const event of EVERY_EVENT) {
+    for (const queryKey of invalidationKeys(clusterId, event)) {
+      seen.set(JSON.stringify(queryKey), queryKey);
+    }
+  }
+  return [...seen.values()];
+}
+
+// `hidden` and nothing else, because the other value a browser has reported is
+// `prerender`, and a page being prerendered is about to be shown.
+function tabHidden(): boolean {
+  return document.visibilityState === "hidden";
+}
+
 // Browser-only by construction (an effect), which is right: SSR renders once
 // and leaves; a subscription is for a page that stays.
+//
+// And only while the tab is SHOWN (#548). An open stream is not free to the
+// api's database. The api ends it every five minutes to re-check ownership,
+// the reopen queries postgres, and the listener holds a `LISTEN` session
+// throughout. A database that suspends after five idle minutes therefore never
+// suspends while a tab sits in the background with a cluster open. So a hidden
+// tab closes its stream, and showing it reopens the stream and refetches what
+// the events would have said. The refetch is needed, not a nicety: the stream
+// replays nothing (a missed event is simply gone), and TanStack Query's own
+// focus refetch covers only queries both mounted and past their 30 s
+// `staleTime`, so a short hide would leave a landed collect unseen.
 export function useLiveClusterEvents(clusterId: string | null): void {
   const queryClient = useQueryClient();
   useEffect(() => {
     if (clusterId === null) return;
-    const controller = new AbortController();
-    void listen(queryClient, clusterId, controller.signal);
-    return () => controller.abort();
+    let controller: AbortController | null = null;
+    const start = () => {
+      controller = new AbortController();
+      void listen(queryClient, clusterId, controller.signal);
+    };
+    const stop = () => {
+      controller?.abort();
+      controller = null;
+    };
+    const onVisibility = () => {
+      if (tabHidden()) {
+        stop();
+        return;
+      }
+      // A visibilitychange that leaves the tab shown — or a second one — must
+      // not open a second stream beside the first.
+      if (controller !== null) return;
+      start();
+      for (const queryKey of resumeKeys(clusterId)) {
+        void queryClient.invalidateQueries({ queryKey });
+      }
+    };
+    // A tab opened in the background waits to be looked at. What it loaded is
+    // current as of its mount, and the refetch on first showing covers the rest.
+    if (!tabHidden()) start();
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      stop();
+    };
   }, [clusterId, queryClient]);
 }

@@ -9,6 +9,8 @@ import {
   latestCounterStart,
 } from "../src/analysis/usage";
 import { and, clusterIndexes, type Database, eq, indexSnapshots, latencySamples } from "../src/db";
+import { workloadKey } from "../src/engine/ports";
+import { namespaceIds } from "../src/jobs/namespaces";
 
 /** A body with an id on it, checked rather than claimed. */
 function asIdentified(body: unknown): { id: string } {
@@ -482,6 +484,7 @@ export interface LatencyFixture {
   readonly capturedAt: Date;
   readonly lastSeenAt?: Date;
   readonly observations?: number;
+  readonly selfReadOps?: number;
 }
 
 export async function insertLatency(
@@ -489,12 +492,31 @@ export async function insertLatency(
   fixtures: readonly LatencyFixture[],
 ): Promise<void> {
   if (fixtures.length === 0) return;
+  // Through the collector's own resolver, so a fixture's namespace lands in the
+  // dimension exactly as a collect would put it there, rather than through a
+  // second copy of that rule (#551).
+  const ids = new Map<string, Map<string, number>>();
+  for (const clusterId of new Set(fixtures.map((fixture) => fixture.clusterId))) {
+    ids.set(
+      clusterId,
+      await namespaceIds(
+        db,
+        clusterId,
+        fixtures.filter((fixture) => fixture.clusterId === clusterId),
+      ),
+    );
+  }
   await db.insert(latencySamples).values(
-    fixtures.map((fixture) => ({
-      ...fixture,
-      lastSeenAt: fixture.lastSeenAt ?? fixture.capturedAt,
-      observations: fixture.observations ?? 1,
-    })),
+    fixtures.map(({ database, collection, ...fixture }) => {
+      const namespaceId = ids.get(fixture.clusterId)?.get(workloadKey(database, collection));
+      if (namespaceId === undefined) throw new Error(`no namespace for ${database}.${collection}`);
+      return {
+        ...fixture,
+        namespaceId,
+        lastSeenAt: fixture.lastSeenAt ?? fixture.capturedAt,
+        observations: fixture.observations ?? 1,
+      };
+    }),
   );
 }
 

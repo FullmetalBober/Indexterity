@@ -181,10 +181,21 @@ async function main(): Promise<void> {
     `  clusters ${describeLimit(limits.maxClusters)}, members ${describeLimit(limits.maxMembers)}, ` +
       `workload analysis ${limits.workloadAnalysis ? "on" : "off"}, history ${limits.retentionDays}d`,
   );
-  // Downgrades do not delete anything. An org over its new limit keeps what it
-  // has and simply cannot add more — taking a customer's clusters away because
-  // an invoice is late is not a decision a script should make.
+  // A downgrade takes no clusters or members away. An org over its new limit
+  // keeps what it has and simply cannot add more — taking a customer's clusters
+  // away because an invoice is late is not a decision a script should make.
   console.log("  existing clusters and members are left alone; only new ones are gated");
+  // History is the exception, and the operator has to hear it here, because
+  // nothing later will say it. The daily sweep deletes on each plan's own window
+  // (jobs/retention.ts, #549), so a shorter window is a deletion scheduled for
+  // 03:00 UTC, and moving the org back up does not return what went.
+  const kept = entitlementsFor(before).retentionDays;
+  if (limits.retentionDays < kept) {
+    console.log(
+      `  history: the next retention sweep (03:00 UTC) deletes what is older than ` +
+        `${limits.retentionDays}d, where ${before} kept ${kept}d — an upgrade does not bring it back`,
+    );
+  }
 }
 
 main()
