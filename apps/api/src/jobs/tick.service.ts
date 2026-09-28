@@ -8,17 +8,19 @@ import { captureError } from "../errors/reporting";
 import { type BurstResult, claimDuePasses, dbPassClaims } from "./burst";
 import { type ClusterPasses, ClusterTasksService } from "./cluster-tasks.service";
 import { releaseStaleLocks } from "./locks";
+import { clearQueuedWork, noteQueuedWork, queuedWorkPending } from "./queued";
 import { wireRunnerEvents } from "./runner";
-import { everyMinutes } from "./schedule";
+import { type Cadence, DEFAULT_CADENCE, everyMinutes, occurrenceMoved } from "./schedule";
 import { createTaskList } from "./tasks";
 import { claimWatermark, passKey } from "./watermark";
 
 // How often the in-process clock ticks, when this process owns the schedule.
 //
 // Thirty seconds, and the number is bounded from both sides. The tightest pass
-// in BURST_SCHEDULE is five minutes, and the occurrence arithmetic does the
-// actual timing — the timer only has to be finer-grained than the tightest
-// bucket, so anything under a minute or two changes nothing about the schedule.
+// in BURST_SCHEDULE recurs every FAST_PASS_INTERVAL_MINUTES — five by default,
+// never under one — and the occurrence arithmetic does the actual timing: the
+// timer only has to be finer-grained than the tightest bucket, so anything under
+// a minute changes nothing about the schedule.
 // What sets the floor is user-visible latency: with no resident runner there is
 // no `LISTEN "jobs:insert"` any more, so the dashboard's collect button waits
 // for the next drain instead of starting at once (#229, risk 3), and this
@@ -28,12 +30,13 @@ import { claimWatermark, passKey } from "./watermark";
 // times a day.
 export const TICK_INTERVAL_MS = 30_000;
 
-// The stale-lock reset's own cadence, claimed through worker_watermarks like a
-// pass so replicas do not duplicate it. Five minutes because the reset only
-// forgives locks four hours old — running it oftener buys nothing, and the
-// five-minute grid already exists for scheduleApply and scheduleProbe.
+// The stale-lock reset, claimed through worker_watermarks like a pass so
+// replicas do not duplicate it. It rides the FAST grid that scheduleApply and
+// scheduleProbe use, whatever FAST_PASS_INTERVAL_MINUTES makes that: the reset
+// only forgives locks four hours old, so running it oftener buys nothing, and a
+// separate five-minute clock would be the one thing that still woke a database
+// the fast cadence had been raised to let sleep.
 const RESET_LOCKS_PASS = "resetLocks";
-const RESET_LOCKS_MINUTES = 5;
 
 // One tick, reported honestly: what this call enqueued, what another tick beat
 // it to, and whether the queue was actually drained afterwards — false means
@@ -50,6 +53,11 @@ export interface TickOutcome {
   readonly dispatched: readonly string[];
   readonly alreadyClaimed: readonly string[];
   readonly drained: boolean;
+  // Answered from memory, with no query at all: nothing became due since the
+  // last complete tick, that tick's drain finished, and nothing was queued out
+  // of band since (tickWithin). `drained` is then the previous drain's verdict,
+  // which is the most this process can honestly say without asking postgres.
+  readonly idle?: boolean;
 }
 
 // The tick function of #229/#231: work out what became due, enqueue it, drain
@@ -102,6 +110,16 @@ export class TickService implements BeforeApplicationShutdown {
   private activePool: WorkerPool | null = null;
   private interval: NodeJS.Timeout | null = null;
   private stopping = false;
+  // What an external tick needs to know to leave the database alone.
+  //
+  // `resolvedAt` is the moment of the last claim round that ran to completion:
+  // at that instant every pass's occurrence was resolved, so no newer occurrence
+  // means nothing newly due. `drainsInFlight` and `lastDrainComplete` are the
+  // queue's half of the same question — a drain still running, or one that
+  // ended short, may have left runnable work behind.
+  private resolvedAt: Date | null = null;
+  private drainsInFlight = 0;
+  private lastDrainComplete = false;
 
   constructor(
     @Inject(DatabaseService) private readonly database: TickDatabase,
@@ -115,6 +133,15 @@ export class TickService implements BeforeApplicationShutdown {
     // is the only thing that executes jobs, so it is always the one that must
     // answer for the dead-letter capture, the owner alerts and the counters.
     wireRunnerEvents(database.db, this.events);
+    // A failed attempt with retries left is queued work the schedule cannot see,
+    // the same as a collect a request handler queued: graphile-worker puts it
+    // back with a backoff of seconds (e^attempts), so the next ping must drain it
+    // rather than answer from memory. `job:error` fires on every failed attempt
+    // and `job:failed` only on the last (graphile-worker's worker.js), so the
+    // attempts check is what separates the two.
+    this.events.on("job:error", ({ job }) => {
+      if (job.attempts < job.max_attempts) noteQueuedWork();
+    });
   }
 
   // Trigger 1: the in-process clock, on when this process owns the schedule
@@ -151,6 +178,19 @@ export class TickService implements BeforeApplicationShutdown {
   // the response says drained:false and the drain carries on in-process, which
   // a re-tick resumes rather than duplicates.
   async tickWithin(deadlineMs: number, now: Date = new Date()): Promise<TickOutcome> {
+    // The whole reason FAST_PASS_INTERVAL_MINUTES is worth raising (#546).
+    // Every other path below queries postgres — the lock-repair claim, the pass
+    // claims, and graphile-worker's poll of the queue — and a database that
+    // suspends after five idle minutes never suspends under a clock that queries
+    // every five. So once the cadence is raised, a ping that can KNOW nothing is
+    // due answers without asking.
+    //
+    // The external trigger only. The in-process interval ticks every thirty
+    // seconds on a host that does not sleep, which is not a deployment this
+    // serves; it keeps asking, exactly as before.
+    if (this.nothingToDo(now)) {
+      return { dispatched: [], alreadyClaimed: [], drained: this.lastDrainComplete, idle: true };
+    }
     const claim = await this.repairThenClaim(now);
     const drain = this.drainSerialized();
     const drained = await raceDeadline(drain, deadlineMs);
@@ -185,7 +225,43 @@ export class TickService implements BeforeApplicationShutdown {
   // be enqueued.
   private async repairThenClaim(now: Date): Promise<BurstResult> {
     await this.releaseLocks(now);
-    return this.enqueueDue(now);
+    const claim = await this.enqueueDue(now);
+    // Only after the round completed: a claim that threw resolved nothing, and
+    // the next ping must go back to the database rather than trust it.
+    this.resolvedAt = now;
+    return claim;
+  }
+
+  // Whether a tick at `now` may answer without asking postgres anything.
+  //
+  // Never at the default cadence, or below it. What an answer from memory costs
+  // is everything the process cannot see from where it sits — a job another
+  // REPLICA queued out of band, a retry whose backoff outlived the ping after
+  // its failure, a watermark changed by hand — and each of those waits for the
+  // next occurrence instead of the next ping. Raising the cadence is the operator
+  // choosing that trade for a database that suspends; a five-minute install made
+  // no such choice, so it asks on every ping exactly as it always has.
+  //
+  // Past that, four conditions, and all of them are needed. A claim round has
+  // run since boot, or nothing is known. No pass has a newer occurrence than it
+  // had then — the stale-lock repair shares the fast grid, so the same arithmetic
+  // covers it. No drain is running and the last one finished rather than ending
+  // at a deadline, or runnable work may be waiting. And nothing was queued since
+  // that the schedule cannot see (jobs/queued.ts): a collect a request handler
+  // added, or a failed attempt put back for a retry.
+  private nothingToDo(now: Date): boolean {
+    const cadence = this.cadence();
+    if (cadence.fastMinutes <= DEFAULT_CADENCE.fastMinutes) return false;
+    if (this.resolvedAt === null) return false;
+    if (this.drainsInFlight > 0 || !this.lastDrainComplete) return false;
+    if (queuedWorkPending()) return false;
+    return !occurrenceMoved(this.resolvedAt, now, cadence);
+  }
+
+  // Resolved per tick rather than cached, so the value read is the one the
+  // environment was validated with — and a test that loads a different one gets it.
+  private cadence(): Cadence {
+    return { fastMinutes: workerEnv().FAST_PASS_INTERVAL_MINUTES };
   }
 
   // Claim-then-enqueue, through the pool this process already holds. The job
@@ -203,6 +279,7 @@ export class TickService implements BeforeApplicationShutdown {
                 job_key_mode => 'preserve_run_at')`,
         ),
       now,
+      this.cadence(),
     );
   }
 
@@ -235,7 +312,22 @@ export class TickService implements BeforeApplicationShutdown {
   }
 
   private drainSerialized(): Promise<boolean> {
-    const next = this.drainChain.then(() => this.drainOnce());
+    this.drainsInFlight += 1;
+    const next = this.drainChain
+      .then(() => this.drainOnce())
+      .then(
+        (drained) => {
+          this.lastDrainComplete = drained;
+          return drained;
+        },
+        (error: unknown) => {
+          this.lastDrainComplete = false;
+          throw error;
+        },
+      )
+      .finally(() => {
+        this.drainsInFlight -= 1;
+      });
     // The chain must survive a failed drain — a rejected tail would reject
     // every later tick before it ran — so the tail swallows what the caller's
     // copy of `next` still reports.
@@ -250,7 +342,7 @@ export class TickService implements BeforeApplicationShutdown {
   // head of the drain, which is where it used to be, made "unreachable" the
   // steady state on a busy deployment. See repairThenClaim.
   //
-  // It is claimed on the same five-minute occurrence arithmetic a pass uses,
+  // It is claimed on the fast passes' occurrence arithmetic, the same a pass uses,
   // which is what keeps two replicas from both running it.
   //
   // Deliberately not fatal, and the try/catch lives HERE rather than at the call
@@ -261,7 +353,7 @@ export class TickService implements BeforeApplicationShutdown {
       const claimed = await claimWatermark(
         this.database.db,
         passKey(RESET_LOCKS_PASS),
-        everyMinutes(RESET_LOCKS_MINUTES)(now),
+        everyMinutes(this.cadence().fastMinutes)(now),
         now,
       );
       if (!claimed) return;
@@ -282,6 +374,10 @@ export class TickService implements BeforeApplicationShutdown {
   // must not open workers against a pool that is about to close.
   private async drainOnce(): Promise<boolean> {
     if (this.stopping) return false;
+    // Whatever was queued out of band before this drain began is this drain's to
+    // take; anything queued while it runs is still picked up, since runOnce
+    // drains to depth.
+    clearQueuedWork();
     try {
       await runOnce({
         // The api's OWN pool. runOnce takes pgPool (interfaces.d.ts:522);

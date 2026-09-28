@@ -88,7 +88,8 @@ export class TickController {
   async tick(
     @Headers("authorization") authorization?: string,
   ): Promise<
-    { dispatched: string[]; alreadyClaimed: string[]; drained: boolean } | { error: string }
+    | { dispatched: string[]; alreadyClaimed: string[]; drained: boolean; idle?: true }
+    | { error: string }
   > {
     const env = apiEnv();
     // Off unless the schedule is external. Answering here while the in-process
@@ -109,6 +110,9 @@ export class TickController {
       dispatched: [...outcome.dispatched],
       alreadyClaimed: [...outcome.alreadyClaimed],
       drained: outcome.drained,
+      // Present only when true, so a pinger's log shows the ticks that never
+      // reached postgres — the ones that let a suspend-on-idle database sleep.
+      ...(outcome.idle === true ? { idle: true as const } : {}),
     };
   }
 }
