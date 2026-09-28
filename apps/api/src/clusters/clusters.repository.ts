@@ -14,6 +14,7 @@ import {
   sql,
 } from "../db";
 import { DatabaseService } from "../db/database.service";
+import { noteQueuedWork } from "../jobs/queued";
 
 export type ClusterRow = typeof clusters.$inferSelect;
 
@@ -223,5 +224,7 @@ export class ClustersRepository {
     await this.db.execute(
       sql`select graphile_worker.add_job('collect', json_build_object('clusterId', ${clusterId}::text), max_attempts => 3)`,
     );
+    // The next tick must drain rather than answer from memory — see jobs/queued.ts.
+    noteQueuedWork();
   }
 }

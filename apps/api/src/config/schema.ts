@@ -67,6 +67,30 @@ function positiveInteger(fallback: number): z.ZodType<number, string | undefined
     .transform(Number);
 }
 
+// Whole minutes that divide an hour.
+//
+// The occurrence arithmetic floors the minute to a multiple of the interval
+// WITHIN each hour (jobs/schedule.ts, everyMinutes), so an interval that does
+// not divide sixty silently produces a short gap at every top of the hour — 7
+// yields :00, :07 … :56 and then :00 again four minutes later. Refused at boot
+// instead, with the values that work.
+function minutesDividingAnHour(fallback: number): z.ZodType<number, string | undefined> {
+  return z
+    .string()
+    .default(String(fallback))
+    .refine(
+      (value) => {
+        const minutes = Number(value);
+        return Number.isInteger(minutes) && minutes > 0 && 60 % minutes === 0;
+      },
+      {
+        message:
+          "expected a whole number of minutes that divides 60: 1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30 or 60",
+      },
+    )
+    .transform(Number);
+}
+
 // Exactly "true" or "false". Not truthiness: `REQUIRE_OWNER_2FA=1` reading as
 // OFF is precisely the kind of silence this file exists to remove, and every
 // producer in the repo (the chart quotes its booleans, compose quotes its
@@ -252,6 +276,28 @@ const workerShape = {
   // that will sit still for it. The failure it prevents is not slowness; it is a
   // pass that can never finish holding the only slot while it fails to.
   CLUSTER_PASS_BUDGET_MS: positiveInteger(300_000),
+  // How often the FAST passes recur: `apply`, the read-pressure `probe`, and the
+  // stale-lock repair that shares their clock. The hourly and daily passes keep
+  // their own schedules whatever this is.
+  //
+  // Five is the product's promise — an approved drop hides within minutes, and a
+  // missing index shows up as read latency before the next hourly collect — and
+  // every self-hosted install should keep it.
+  //
+  // Raise it for a database that bills compute by the hour and suspends when
+  // idle (#546). Neon suspends after five minutes with NO queries, so at five
+  // every occurrence lands inside the previous one's idle window and the
+  // database never sleeps: about 182 CU-hours a month against the Free plan's
+  // 100. At fifteen, an external clock can go on pinging every five minutes —
+  // which keeps a free web host awake — while two pings in three find nothing
+  // due and answer without touching the database at all (jobs/tick.service.ts).
+  // The cost is exactly that cadence: apply and the probe run every fifteen
+  // minutes.
+  //
+  // Keep it at least CLUSTER_PASS_BUDGET_MS. Shorter is not unsafe — the
+  // dispatcher stands a pass down while the previous one still holds its lock
+  // (dispatch.ts) — but it spends dispatches that can only ever stand down.
+  FAST_PASS_INTERVAL_MINUTES: minutesDividingAnHour(5),
   // How often `classify` may be chased for one cluster when the collect that
   // triggered it LEARNED something — a counter moved, an index appeared (#482).
   //

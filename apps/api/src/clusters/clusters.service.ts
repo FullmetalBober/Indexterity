@@ -20,6 +20,7 @@ import { InsecureConnectionError } from "../engine/tls";
 import { DialBudgetService } from "../errors/dial-budget.service";
 import { mapClusterError, toCluster } from "../http/mappers";
 import { ClusterGoneError, openClusterSession } from "../jobs/cluster-connection";
+import { noteQueuedWork } from "../jobs/queued";
 import { TunnelRegistry } from "../tunnel/tunnel.registry";
 import { type ClusterRow, ClustersRepository } from "./clusters.repository";
 import { restoreHiddenIndexes } from "./offboard";
@@ -231,6 +232,8 @@ export class ClustersService {
       await this.database.db.execute(
         sql`select graphile_worker.add_job('collect', json_build_object('clusterId', ${row.id}::text), max_attempts => 3)`,
       );
+      // The next tick must drain rather than answer from memory — jobs/queued.ts.
+      noteQueuedWork();
     } catch (error) {
       this.log.warn(
         `could not queue the first collect for cluster ${row.id}: ${

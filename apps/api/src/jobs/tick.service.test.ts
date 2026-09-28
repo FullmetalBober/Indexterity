@@ -9,9 +9,11 @@ import { stub } from "../test-utils";
 import { type BurstResult, claimDuePasses } from "./burst";
 import type { ClusterPasses } from "./cluster-tasks.service";
 import { releaseStaleLocks } from "./locks";
+import { clearQueuedWork, noteQueuedWork } from "./queued";
 import { TASK_NAMES } from "./tasks";
 import type { TickDatabase } from "./tick.service";
 import { TICK_INTERVAL_MS, TickService } from "./tick.service";
+import { claimWatermark } from "./watermark";
 
 // The drain, as something the tests can hold open. Each runOnce call parks
 // until the test releases it, because every property worth testing here — the
@@ -451,5 +453,157 @@ describe("shutdown", () => {
     const late = await service.tick();
     expect(late.drained).toBe(false);
     expect(worker.runOnce).not.toHaveBeenCalled();
+  });
+});
+
+// The external tick answering from memory (#546). What this suite pins is that
+// it does so ONLY when it provably has nothing to do — every case below that is
+// not the first is a way the database would otherwise have been skipped wrongly.
+describe("the idle tick", () => {
+  const T0 = new Date("2026-08-15T10:00:04.000Z");
+  const later = (minutes: number) => new Date(T0.getTime() + minutes * 60_000);
+  // How many times the tick went to postgres: each of these is a query path.
+  const asked = () => ({
+    claims: vi.mocked(claimDuePasses).mock.calls.length,
+    lockClaims: vi.mocked(claimWatermark).mock.calls.length,
+    drains: worker.runOnce.mock.calls.length,
+  });
+
+  afterEach(() => {
+    vi.mocked(claimDuePasses).mockClear();
+    vi.mocked(claimWatermark).mockClear();
+    clearQueuedWork();
+  });
+
+  // One complete tick, so the service has resolved every occurrence at `at`.
+  async function completeTickAt(service: TickService, at: Date) {
+    const tick = service.tickWithin(5_000, at);
+    await settle();
+    worker.calls.at(-1)?.resolve();
+    return tick;
+  }
+
+  it("answers a ping inside the same fifteen-minute occurrence without touching postgres", async () => {
+    load({ runCronjob: false }, { FAST_PASS_INTERVAL_MINUTES: "15" });
+    const { service } = makeService();
+    await expect(completeTickAt(service, T0)).resolves.toMatchObject({ drained: true });
+    const before = asked();
+
+    const idle = await service.tickWithin(5_000, later(5));
+    expect(idle).toEqual({ dispatched: [], alreadyClaimed: [], drained: true, idle: true });
+    // Not one query: no pass claim, no lock-repair claim, no queue poll.
+    expect(asked()).toEqual(before);
+  });
+
+  it("goes back to postgres as soon as an occurrence has moved", async () => {
+    load({ runCronjob: false }, { FAST_PASS_INTERVAL_MINUTES: "15" });
+    const { service } = makeService();
+    await completeTickAt(service, T0);
+    const before = asked();
+
+    const next = await completeTickAt(service, later(15));
+    expect(next.idle).toBeUndefined();
+    expect(asked().claims).toBe(before.claims + 1);
+    expect(asked().drains).toBe(before.drains + 1);
+  });
+
+  // A drain that ended at the deadline is still running, and may leave runnable
+  // work behind it — so nothing about the queue is known.
+  it("keeps asking while the last drain has not finished", async () => {
+    load({ runCronjob: false }, { FAST_PASS_INTERVAL_MINUTES: "15" });
+    const { service } = makeService();
+    const cut = await service.tickWithin(20, T0);
+    expect(cut.drained).toBe(false);
+
+    const next = service.tickWithin(20, later(5));
+    await settle();
+    await expect(next).resolves.not.toHaveProperty("idle");
+    for (const call of worker.calls) call.resolve();
+    await settle();
+  });
+
+  // The dashboard's "collect now": invisible to the schedule, so it has to be
+  // said out loud or the collect waits for the next quarter hour.
+  it("drains after a request handler queued work out of band", async () => {
+    load({ runCronjob: false }, { FAST_PASS_INTERVAL_MINUTES: "15" });
+    const { service } = makeService();
+    await completeTickAt(service, T0);
+    const before = asked();
+
+    noteQueuedWork();
+    const next = await completeTickAt(service, later(5));
+    expect(next.idle).toBeUndefined();
+    expect(asked().drains).toBe(before.drains + 1);
+    // And the drain took it, so the ping after that may rest again.
+    await expect(service.tickWithin(5_000, later(6))).resolves.toMatchObject({ idle: true });
+  });
+
+  it("asks on the first ping after boot, when nothing has been resolved yet", async () => {
+    load({ runCronjob: false }, { FAST_PASS_INTERVAL_MINUTES: "15" });
+    const { service } = makeService();
+    const first = await completeTickAt(service, T0);
+    expect(first.idle).toBeUndefined();
+    expect(asked().claims).toBe(1);
+  });
+
+  // The default is what every self-hosted install runs, and it must be exactly
+  // what it was — including under a clock that pings more often than the
+  // cadence, where a skip would stop the install seeing what the process cannot:
+  // a watermark rewound by hand, a collect another replica queued. Pings a minute
+  // apart, inside one five-minute occurrence, because that is the case a skip
+  // would take; tick.int.test.ts rewinds a watermark between two such pings.
+  it("never answers from memory at the default cadence, even between pings a minute apart", async () => {
+    load({ runCronjob: false });
+    const { service } = makeService();
+    await completeTickAt(service, T0);
+    const next = await completeTickAt(service, later(1));
+    expect(next.idle).toBeUndefined();
+    expect(asked()).toMatchObject({ claims: 2, drains: 2 });
+  });
+
+  // A failed attempt with retries left is back on the queue behind a backoff of
+  // seconds, where the schedule cannot see it.
+  it("drains on the ping after a job failed with retries left", async () => {
+    load({ runCronjob: false }, { FAST_PASS_INTERVAL_MINUTES: "15" });
+    const { service } = makeService();
+    const tick = service.tickWithin(5_000, T0);
+    await settle();
+    const drain = present(worker.calls.at(-1), "the first drain");
+    drain.events.emit("job:error", { job: { attempts: 1, max_attempts: 5 } });
+    drain.resolve();
+    await tick;
+
+    const next = await completeTickAt(service, later(5));
+    expect(next.idle).toBeUndefined();
+    expect(asked().drains).toBe(2);
+  });
+
+  // The last attempt is not coming back, so it is no reason to wake anything.
+  it("rests after a job burned its last attempt", async () => {
+    load({ runCronjob: false }, { FAST_PASS_INTERVAL_MINUTES: "15" });
+    const { service } = makeService();
+    const tick = service.tickWithin(5_000, T0);
+    await settle();
+    const drain = present(worker.calls.at(-1), "the first drain");
+    drain.events.emit("job:error", { job: { attempts: 5, max_attempts: 5 } });
+    drain.resolve();
+    await tick;
+
+    await expect(service.tickWithin(5_000, later(5))).resolves.toMatchObject({ idle: true });
+    expect(asked().drains).toBe(1);
+  });
+
+  // The in-process clock ticks every thirty seconds on a host that does not
+  // sleep. It keeps asking, as it always did.
+  it("leaves the in-process tick asking every time", async () => {
+    load({ runCronjob: true }, { FAST_PASS_INTERVAL_MINUTES: "15" });
+    const { service } = makeService();
+    for (const at of [T0, later(1)]) {
+      const tick = service.tick(at);
+      await settle();
+      worker.calls.at(-1)?.resolve();
+      await tick;
+    }
+    expect(asked().claims).toBe(2);
   });
 });

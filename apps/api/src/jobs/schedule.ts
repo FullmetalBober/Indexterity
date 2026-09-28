@@ -27,9 +27,27 @@ export interface ScheduledPass {
   readonly task: TaskName;
   // The cron entry this stands for, so the two can be read side by side.
   readonly cron: string;
-  // The most recent time this was due at or before `now`.
-  readonly occurrenceAt: (now: Date) => Date;
+  // The most recent time this was due at or before `now`, under `cadence` —
+  // which only the fast passes read.
+  readonly occurrenceAt: (now: Date, cadence: Cadence) => Date;
 }
+
+// How often the FAST passes recur: `apply`, `probe`, and the stale-lock repair
+// that shares their clock (tick.service.ts).
+//
+// An argument rather than an environment read, so this module stays what it
+// was — occurrence arithmetic a test can hand any clock to. The tick resolves it
+// from FAST_PASS_INTERVAL_MINUTES and passes it down.
+//
+// Five by default, which is what the product promises and every self-hosted
+// install keeps. Fifteen is the number for a database that bills compute by the
+// hour and suspends after five idle minutes: at five, every occurrence lands
+// inside the previous one's idle window and the database never sleeps.
+export interface Cadence {
+  readonly fastMinutes: number;
+}
+
+export const DEFAULT_CADENCE: Cadence = { fastMinutes: 5 };
 
 // Truncate to a whole number of `minutes` past the hour, in UTC.
 // Exported because the stale-lock reset is claimed on the same arithmetic
@@ -96,11 +114,15 @@ export const BURST_SCHEDULE = [
   // minute in a resident worker. A burst tick has one moment to work with, so
   // it is read as "hourly" rather than faked.
   { task: "scheduleSuggest", cron: "30 * * * *", occurrenceAt: everyMinutes(60) },
-  { task: "scheduleApply", cron: "*/5 * * * *", occurrenceAt: everyMinutes(5) },
+  {
+    task: "scheduleApply",
+    cron: "*/5 * * * *",
+    occurrenceAt: (now, cadence) => everyMinutes(cadence.fastMinutes)(now),
+  },
   {
     task: "scheduleProbe",
     cron: "2,7,12,17,22,27,32,37,42,47,52,57 * * * *",
-    occurrenceAt: everyMinutes(5),
+    occurrenceAt: (now, cadence) => everyMinutes(cadence.fastMinutes)(now),
   },
   { task: "scheduleFinalize", cron: "0 * * * *", occurrenceAt: everyMinutes(60) },
   { task: "retention", cron: "0 3 * * *", occurrenceAt: dailyAt(3, 0) },
@@ -118,12 +140,33 @@ export function duePasses(
   now: Date,
   lastDispatchedAt: ReadonlyMap<string, Date>,
   schedule: readonly ScheduledPass[] = BURST_SCHEDULE,
+  cadence: Cadence = DEFAULT_CADENCE,
 ): { pass: ScheduledPass; occurrence: Date }[] {
   const due: { pass: ScheduledPass; occurrence: Date }[] = [];
   for (const pass of schedule) {
-    const occurrence = pass.occurrenceAt(now);
+    const occurrence = pass.occurrenceAt(now, cadence);
     const last = lastDispatchedAt.get(pass.task);
     if (last === undefined || last < occurrence) due.push({ pass, occurrence });
   }
   return due;
+}
+
+// Whether any pass has a NEWER occurrence at `now` than it had at `since`.
+//
+// The question an external tick needs answered before it may leave the database
+// alone. Once a claim round has run at `since`, every pass's occurrence at that
+// moment is resolved — claimed here, already claimed by another replica, or not
+// due — so if no occurrence has moved since, nothing can have become due and
+// there is no claim to make. The same arithmetic `duePasses` does, asked the
+// other way round, and pure for the same reason.
+export function occurrenceMoved(
+  since: Date,
+  now: Date,
+  cadence: Cadence,
+  schedule: readonly ScheduledPass[] = BURST_SCHEDULE,
+): boolean {
+  return schedule.some(
+    (pass) =>
+      pass.occurrenceAt(now, cadence).getTime() > pass.occurrenceAt(since, cadence).getTime(),
+  );
 }

@@ -39,12 +39,20 @@ spec:
         {{/*
         One rule per cron entry in jobs/runner.ts. The window is the interval plus
         room for one missed tick, so a single slow pass does not page anyone.
+
+        apply and probe run on config.fastPassIntervalMinutes rather than a fixed
+        five, so their window is three intervals and never less than the thirty
+        minutes it has always been — a fifteen-minute cadence under a 30m window
+        would page on one late tick.
         */}}
+        {{- $fast := int .Values.config.fastPassIntervalMinutes }}
+        {{- $fastWindow := printf "%dm" (max 30 (mul 3 $fast)) }}
+        {{- $fastEvery := printf "%d minutes" $fast }}
         {{- range $task := list
           (dict "task" "scheduleCollect" "window" "8h"  "every" "6 hours")
           (dict "task" "scheduleSuggest" "window" "3h"  "every" "hour")
-          (dict "task" "scheduleApply"   "window" "30m" "every" "5 minutes")
-          (dict "task" "scheduleProbe"   "window" "30m" "every" "5 minutes")
+          (dict "task" "scheduleApply"   "window" $fastWindow "every" $fastEvery)
+          (dict "task" "scheduleProbe"   "window" $fastWindow "every" $fastEvery)
           (dict "task" "scheduleFinalize" "window" "3h" "every" "hour")
           (dict "task" "retention"       "window" "30h" "every" "day")
         }}
