@@ -22,12 +22,12 @@ export async function planForCluster(db: Database, clusterId: string): Promise<P
 
 // The oldest history this cluster is entitled to, as a cutoff to filter reads by.
 //
-// Rows now outlive the window they are visible in — deletion runs one uniform
-// cutoff for the whole deployment (billing/plans.ts → maxRetentionDays) while what
-// a plan may SEE is enforced here, on the way out. Every read of index_snapshots
-// and latency_samples that reasons about HISTORY goes through this, engine and api
-// alike: a longer series is what lets the engine call an index unused, so leaving
-// the filter off the engine would quietly hand a free org paid-tier analysis.
+// The daily sweep deletes on the same window (jobs/retention.ts), but a row can
+// sit up to a day past it between two sweeps, so what a plan may SEE is enforced
+// here too, on the way out. Every read of index_snapshots and latency_samples
+// that reasons about HISTORY goes through this, engine and api alike: a longer
+// series is what lets the engine call an index unused, so leaving the filter off
+// the engine would quietly hand a free org paid-tier analysis for that day.
 //
 // Filter on last_seen_at, never captured_at. A run that began before the cutoff
 // and is still being extended is the CURRENT state of a live index; excluding it

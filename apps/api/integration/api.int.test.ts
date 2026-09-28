@@ -4459,13 +4459,11 @@ describe("plan limits", () => {
 // has to be enforced rather than advertised. Two orgs on different plans keep
 // different amounts of the same kind of row.
 describe("retention follows the plan", () => {
-  // Retention is two separate things now, and this pins both.
-  //
-  // DELETION runs one cutoff for the whole deployment — the longest any plan may
-  // see — so rows outlive the window a given org is entitled to. VISIBILITY is the
-  // per-plan window, applied on every read. That split is what lets an upgrade hand
-  // a customer their history back at once instead of making them wait it out.
-  it("keeps a downgraded org's rows but stops showing them", async () => {
+  // Deletion and visibility run on ONE window per plan (#549, D172): the daily
+  // sweep deletes past it, and every read filters by it for the day a row can
+  // sit past it between sweeps. A downgrade therefore loses history for good,
+  // and this pins both halves of that.
+  it("hides a downgraded org's old rows at once and deletes them at the sweep", async () => {
     const session = await signUp("retention");
     createdEmails.push(session.email);
     const orgId = await giveRoom(session);
@@ -4490,6 +4488,8 @@ describe("retention follows the plan", () => {
         capturedAt: captured,
       },
     ]);
+    const kept = async () =>
+      db.select().from(latencySamples).where(eq(latencySamples.clusterId, retentionClusterId));
 
     const visibleCollections = async (): Promise<string[]> => {
       const body = asRecord(
@@ -4501,29 +4501,60 @@ describe("retention follows the plan", () => {
 
     // On SCALE the row is inside the entitlement, so it is both kept and shown.
     await pruneOldSamples(db);
-    expect(
-      await db
-        .select()
-        .from(latencySamples)
-        .where(eq(latencySamples.clusterId, retentionClusterId)),
-    ).toHaveLength(1);
+    expect(await kept()).toHaveLength(1);
     expect(await visibleCollections()).toContain("aged");
 
-    // Downgrade. The row is now outside what FREE may see, but well inside the
-    // deployment's physical window — so it stays on disk and stops being served.
+    // Downgrade. Before any sweep the row is still on disk, and already out of
+    // view: the read filter is what covers the day between a change and 03:00.
     await db.update(organizations).set({ plan: "FREE" }).where(eq(organizations.id, orgId));
-    await pruneOldSamples(db);
-    expect(
-      await db
-        .select()
-        .from(latencySamples)
-        .where(eq(latencySamples.clusterId, retentionClusterId)),
-    ).toHaveLength(1);
+    expect(await kept()).toHaveLength(1);
     expect(await visibleCollections()).not.toContain("aged");
 
-    // Upgrading again returns it immediately — the point of keeping it.
+    // The sweep then deletes it, on FREE's own window.
+    await pruneOldSamples(db);
+    expect(await kept()).toHaveLength(0);
+
+    // And moving back up does not bring it back. That is the trade #549 made.
     await db.update(organizations).set({ plan: "SCALE" }).where(eq(organizations.id, orgId));
-    expect(await visibleCollections()).toContain("aged");
+    expect(await visibleCollections()).not.toContain("aged");
+  });
+
+  // The point of the change: two orgs, rows of the same age, one sweep — and
+  // each keeps what its own plan says, not what the longest plan would.
+  it("sweeps each cluster on its own plan's window in the same pass", async () => {
+    const clusterOf = { free: "", scale: "" };
+    for (const plan of ["FREE", "SCALE"] as const) {
+      const session = await signUp(`retention-${plan.toLowerCase()}`);
+      createdEmails.push(session.email);
+      const orgId = await giveRoom(session);
+      const created = await api("/clusters", session, {
+        method: "POST",
+        body: JSON.stringify({ name: `${plan} Retention`, connectionString: MONGO_URL }),
+      });
+      const clusterId = asString(asRecord(await created.json()).id);
+      createdClusterIds.push(clusterId);
+      await db.update(organizations).set({ plan }).where(eq(organizations.id, orgId));
+      await insertLatency(db, [
+        {
+          clusterId,
+          database: "retention",
+          collection: "same_age",
+          readOps: 1,
+          readLatencyMicros: 1,
+          writeOps: 0,
+          writeLatencyMicros: 0,
+          capturedAt: new Date(Date.now() - 120 * 86_400_000),
+        },
+      ]);
+      clusterOf[plan === "FREE" ? "free" : "scale"] = clusterId;
+    }
+
+    await pruneOldSamples(db);
+    const rowsOf = async (clusterId: string) =>
+      db.select().from(latencySamples).where(eq(latencySamples.clusterId, clusterId));
+    // 120 days: past FREE's 90, inside SCALE's 365.
+    expect(await rowsOf(clusterOf.free)).toHaveLength(0);
+    expect(await rowsOf(clusterOf.scale)).toHaveLength(1);
   });
 
   it("deletes what nobody could ever be entitled to", async () => {
