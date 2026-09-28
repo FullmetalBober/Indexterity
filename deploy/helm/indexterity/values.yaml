@@ -414,10 +414,6 @@ config:
   # PostgreSQL past 18. An operator running two engines should not have to set two
   # variables to say one thing.
   allowUntestedDatabaseVersion: false
-  # The operator's retention ceiling, in days. Storage is your bill, so this caps
-  # what any plan keeps AND what any plan may see. Empty means no ceiling — each
-  # plan's own window decides.
-  retentionDays: ""
   # Sockets the MongoDB driver may open against ONE connected cluster. The
   # driver's own default is 100, which is the wrong number twice here: a session
   # is held per cluster, so the worst case multiplies by the size of the fleet,

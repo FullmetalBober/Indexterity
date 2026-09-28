@@ -12,7 +12,6 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { judgeFailures } from "../src/analysis";
 import { outcomeOf } from "../src/analysis/workload-outcome";
 import { entitledAutomation } from "../src/billing/plans";
-import { loadEnv } from "../src/config/env";
 import {
   account,
   actions,
@@ -4649,50 +4648,6 @@ describe("retention follows the plan", () => {
     await pruneOldSamples(db);
     expect(
       await db.select().from(latencySamples).where(eq(latencySamples.clusterId, hardId)),
-    ).toHaveLength(0);
-  });
-
-  it("lets the operator cap a plan that would keep more", async () => {
-    const session = await signUp("retention-cap");
-    createdEmails.push(session.email);
-    await giveRoom(session);
-    const created = await api("/clusters", session, {
-      method: "POST",
-      body: JSON.stringify({ name: "Capped Cluster", connectionString: MONGO_URL }),
-    });
-    const cappedClusterId = asString(asRecord(await created.json()).id);
-    createdClusterIds.push(cappedClusterId);
-
-    await insertLatency(db, [
-      {
-        clusterId: cappedClusterId,
-        database: "inttest",
-        collection: "orders",
-        readOps: 1,
-        readLatencyMicros: 1,
-        writeOps: 0,
-        writeLatencyMicros: 0,
-        capturedAt: new Date(Date.now() - 120 * 86_400_000),
-      },
-    ]);
-
-    // The ceiling is read from the validated environment, which this process
-    // parsed at startup (vitest.integration.setup.ts) — so setting it means
-    // saying when the process read it, and putting it back means saying so
-    // again.
-    const previous = process.env.RETENTION_DAYS;
-    process.env.RETENTION_DAYS = "7";
-    loadEnv("api");
-    try {
-      await pruneOldSamples(db);
-    } finally {
-      if (previous === undefined) delete process.env.RETENTION_DAYS;
-      else process.env.RETENTION_DAYS = previous;
-      loadEnv("api");
-    }
-    // SCALE would have kept it for a year; the operator's ceiling wins.
-    expect(
-      await db.select().from(latencySamples).where(eq(latencySamples.clusterId, cappedClusterId)),
     ).toHaveLength(0);
   });
 });

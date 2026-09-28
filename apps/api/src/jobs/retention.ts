@@ -1,6 +1,6 @@
 import { makeWorkerUtils } from "graphile-worker";
-import { effectiveRetentionDays, type Plan, planFrom } from "../billing/plans";
-import { coreEnv, operatorCeilingDays } from "../config/env";
+import { entitlementsFor, type Plan, planFrom } from "../billing/plans";
+import { coreEnv } from "../config/env";
 import {
   and,
   clusterIndexes,
@@ -25,11 +25,12 @@ const DAY_MS = 86_400_000;
 // a transaction open over a hundred thousand rows.
 const MAX_DEAD_LETTERS_PER_RUN = 5000;
 
-// Dead letters are not per-org — they belong to the deployment, so they age out
-// on the operator's window, or a generous default when there is none.
+// Dead letters are not per-org — they belong to the deployment, so no plan's
+// window applies to them. They age out on a window of their own.
+const DEAD_LETTER_DAYS = 90;
+
 function deadLetterCutoff(): Date {
-  const days = Number.isFinite(operatorCeilingDays()) ? operatorCeilingDays() : 90;
-  return new Date(Date.now() - days * DAY_MS);
+  return new Date(Date.now() - DEAD_LETTER_DAYS * DAY_MS);
 }
 
 // A job that burns its last attempt keeps its row, as the record of what went
@@ -38,9 +39,8 @@ function deadLetterCutoff(): Date {
 // control-plane database permanently — the same unbounded growth the
 // time-series tables were pruned for, in the one table nobody was watching.
 //
-// Old failures are not diagnostics, they are debris: past the retention window
-// nobody is going to read them. Removed on the same schedule and the same knob
-// as everything else.
+// Old failures are not diagnostics, they are debris: ninety days on, nobody is
+// going to read them. Removed on the same daily schedule as everything else.
 //
 // `graphile_worker.jobs` is the public view; `_private_jobs` is private and its
 // shape moves between releases. completeJobs() is the supported way to delete a
@@ -94,8 +94,8 @@ export async function pruneExpiredAuthRows(db: Database): Promise<number> {
   return sessions.length + verifications.length;
 }
 
-// How long the time-series tables are KEPT: each cluster's own plan window,
-// capped by the operator's RETENTION_DAYS (#549, D172).
+// How long the time-series tables are KEPT: each cluster's own plan window
+// (#549, D172).
 //
 // It used to be one cutoff for the whole deployment, the longest window any plan
 // may see, with each org's own window applied on the way out (jobs/plan.ts →
@@ -142,9 +142,7 @@ export async function pruneOldSamples(db: Database): Promise<number> {
   }
   let pruned = 0;
   for (const [plan, clusterIds] of byPlan) {
-    const days = effectiveRetentionDays(plan, operatorCeilingDays());
-    if (!Number.isFinite(days)) continue;
-    const cutoff = new Date(Date.now() - days * DAY_MS);
+    const cutoff = new Date(Date.now() - entitlementsFor(plan).retentionDays * DAY_MS);
     pruned += await pruneHistory(db, clusterIds, cutoff);
     pruned += await pruneDecisions(db, clusterIds, cutoff);
   }
