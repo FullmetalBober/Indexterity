@@ -44,10 +44,11 @@ describe("meetsVersionFloor", () => {
   });
 });
 
-// Verified live: absent on 6.0.28 and 7.0.39, present on 8.2.9.
+// Verified live: absent on 6.0.28 and 7.0.39, present on 8.2.9 and 8.3.11, and
+// present on 9.0.2 in the nested layout the collector now also reads.
 describe("hasQueryStatsPlanMetrics", () => {
   it("is true from 8.0 upwards", () => {
-    for (const v of ["8.0.0", "8.2.9"]) {
+    for (const v of ["8.0.0", "8.2.9", "8.3.11", "9.0.2"]) {
       expect(hasQueryStatsPlanMetrics(parseServerVersion(v))).toBe(true);
     }
   });
@@ -78,21 +79,21 @@ afterEach(() => {
 
 describe("version ceiling", () => {
   it("accepts the tested range", () => {
-    for (const v of ["6.0.28", "7.0.39", "8.2.9"]) {
+    for (const v of ["6.0.28", "7.0.39", "8.2.9", "8.3.11", "9.0.2"]) {
       expect(versionRefusal(parseServerVersion(v))).toBeNull();
     }
   });
 
   it("refuses a major series newer than anything tested", () => {
-    const refusal = versionRefusal(parseServerVersion("9.0.0"));
-    expect(refusal).toContain("newer than the 8.x series");
+    const refusal = versionRefusal(parseServerVersion("10.0.0"));
+    expect(refusal).toContain("newer than the 9.x series");
     expect(refusal).toContain("ALLOW_UNTESTED_DATABASE_VERSION");
   });
 
   it("lets an operator opt in to an untested release", () => {
     process.env.ALLOW_UNTESTED_DATABASE_VERSION = "true";
     loadEnv("api");
-    expect(versionRefusal(parseServerVersion("9.0.0"))).toBeNull();
+    expect(versionRefusal(parseServerVersion("10.0.0"))).toBeNull();
     // The floor is NOT overridable — the ceiling escape hatch does not open it.
     expect(versionRefusal(parseServerVersion("5.0.33"))).toContain("end-of-life");
   });

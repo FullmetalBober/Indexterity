@@ -215,32 +215,58 @@ describe("evaluateProvisioning", () => {
   });
 });
 
-// $queryStats is off by default on every version, and before 8.0 it cannot
-// report whether a query scanned. Both are silent failures without this.
+// $queryStats is off by default before 9.0, samples 1% by default on 9.0, and
+// before 8.0 it cannot report whether a query scanned. All three are silent
+// failures without this.
 describe("queryStatsAdvisory", () => {
+  const v9 = parseServerVersion("9.0.2");
   const v8 = parseServerVersion("8.2.9");
   const v7 = parseServerVersion("7.0.39");
+  const limit = (rateLimit: number, sampleRate: number | null = null) => ({
+    rateLimit,
+    sampleRate,
+  });
 
   it("says nothing when the store is sampling on a version that reports plans", () => {
-    expect(queryStatsAdvisory(-1, v8)).toBeNull();
-    expect(queryStatsAdvisory(100, v8)).toBeNull();
+    expect(queryStatsAdvisory(limit(-1), v8)).toBeNull();
+    expect(queryStatsAdvisory(limit(100), v8)).toBeNull();
+    // A sample rate of 0 leaves the rate limit in charge, as on 8.x.
+    expect(queryStatsAdvisory(limit(-1, 0), v9)).toBeNull();
+    // And a rate of 1 counts everything.
+    expect(queryStatsAdvisory(limit(-1, 1), v9)).toBeNull();
   });
 
   it("names the parameter when sampling is off", () => {
-    const advisory = queryStatsAdvisory(0, v8);
+    const advisory = queryStatsAdvisory(limit(0), v8);
     expect(advisory).toContain("internalQueryStatsRateLimit");
     expect(advisory).toContain("profiler");
   });
 
   it("explains that a pre-8.0 store counts executions but cannot see scans", () => {
-    const advisory = queryStatsAdvisory(-1, v7);
+    const advisory = queryStatsAdvisory(limit(-1), v7);
     expect(advisory).toContain("7.0.39");
     expect(advisory).toContain("execution counts only");
     expect(advisory).toContain("profiler");
   });
 
   it("prefers the sampling problem, which makes the version moot", () => {
-    expect(queryStatsAdvisory(0, v7)).toContain("internalQueryStatsRateLimit");
+    expect(queryStatsAdvisory(limit(0), v7)).toContain("internalQueryStatsRateLimit");
+  });
+
+  // 9.0's default: the store fills, and holds a hundredth of the workload.
+  it("says so when 9.0 is counting a sample of executions", () => {
+    const advisory = queryStatsAdvisory(limit(-1, 0.01), v9);
+    expect(advisory).toContain("internalQueryStatsSampleRate is 0.01");
+    expect(advisory).toContain("about 1% of executions");
+    expect(advisory).toContain("Set it to 1");
+  });
+
+  // A sample rate above 0 governs whatever the rate limit says (measured on
+  // 9.0.2), so a rate limit of 0 is not "recording nothing" there.
+  it("reads a sample rate as recording even when the rate limit is 0", () => {
+    const advisory = queryStatsAdvisory(limit(0, 0.5), v9);
+    expect(advisory).toContain("about 50% of executions");
+    expect(advisory).not.toContain("not sampling");
   });
 
   it("stays quiet when the parameter could not be read", () => {

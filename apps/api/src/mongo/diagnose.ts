@@ -177,22 +177,40 @@ export const PROVISION_PRIVILEGES: readonly RequiredPrivilege[] = [
 ];
 
 const rateLimitDoc = z.object({ internalQueryStatsRateLimit: z.coerce.number() });
+const sampleRateDoc = z.object({ internalQueryStatsSampleRate: z.coerce.number() });
+
+// What decides whether the store records anything, as the two server parameters
+// that decide it.
+//
+// `rateLimit` is internalQueryStatsRateLimit: -1 records everything, a positive
+// value caps recording per second, and 0 records nothing. `sampleRate` is
+// internalQueryStatsSampleRate, on the servers that have it (8.3 and 9.0 do,
+// 7.0 does not). Above 0 it governs instead, and records that fraction of
+// executions whatever the rate limit says. Measured on 9.0.2: with a rate limit
+// of 0 and a sample rate of 0.5, 200 runs were counted 107 times. 9.0 ships it
+// at 0.01 where 8.3 ships 0, which is the difference that matters here.
+export interface QueryStatsSampling {
+  readonly rateLimit: number;
+  readonly sampleRate: number | null;
+}
 
 // Holding the $queryStats privilege is not the same as the store having
-// anything in it. `internalQueryStatsRateLimit` is 0 on a stock server of every
-// version, and at 0 the server records nothing — so the grant can look perfect
-// while the store stays permanently empty, and nobody would know why.
+// anything in it. Before 9.0 `internalQueryStatsRateLimit` is 0 on a stock
+// server, and at 0 the server records nothing — so the grant can look perfect
+// while the store stays permanently empty, and nobody would know why. 9.0
+// records by default, but only a 1% sample, which is quieter still: the store
+// fills, the counts look plausible, and they are a hundredth of the workload.
 //
-// Returns the advisory to show, or null when there is nothing to say. -1 means
-// record everything; any positive value is a per-second sampling cap. `null`
-// sampling means the parameter could not be read, which is not evidence either
+// Returns the advisory to show, or null when there is nothing to say. `null`
+// sampling means the parameters could not be read, which is not evidence either
 // way. Pure, so the wording is testable without a server.
 export function queryStatsAdvisory(
-  sampling: number | null,
+  sampling: QueryStatsSampling | null,
   version: ServerVersion | null,
 ): string | null {
   if (sampling === null) return null;
-  if (sampling === 0) {
+  const sampleRate = sampling.sampleRate ?? 0;
+  if (sampleRate <= 0 && sampling.rateLimit === 0) {
     return (
       "$queryStats is available but not sampling — internalQueryStatsRateLimit is 0, the " +
       "default, so the server records no query shapes. Set it (-1 records every shape) or " +
@@ -207,17 +225,36 @@ export function queryStatsAdvisory(
       "upgrade to 8.0 where the store carries plan metrics."
     );
   }
+  if (sampleRate > 0 && sampleRate < 1) {
+    return (
+      `$queryStats is recording a sample — internalQueryStatsSampleRate is ${sampleRate}, ` +
+      `so about ${Math.round(sampleRate * 1000) / 10}% of executions are counted (0.01 is the ` +
+      "MongoDB 9.0 default). Counts are read as they are, so index suggestions come out weaker " +
+      "than the workload warrants, and a query that runs rarely may never appear. Set it to 1 " +
+      "to count every execution."
+    );
+  }
   return null;
 }
 
-// The parameter is unreadable without the cluster-wide `getParameter` action,
+// The parameters are unreadable without the cluster-wide `getParameter` action,
 // which is not one the engine asks for. Silence is the honest answer then.
-async function readQueryStatsSampling(admin: Admin): Promise<number | null> {
+//
+// Two reads rather than one: asking for a parameter a server does not have
+// fails the whole command, and the sample rate is newer than the rate limit.
+async function readQueryStatsSampling(admin: Admin): Promise<QueryStatsSampling | null> {
+  let rateLimit: number;
   try {
     const raw = await admin.command({ getParameter: 1, internalQueryStatsRateLimit: 1 });
-    return rateLimitDoc.parse(raw).internalQueryStatsRateLimit;
+    rateLimit = rateLimitDoc.parse(raw).internalQueryStatsRateLimit;
   } catch {
     return null;
+  }
+  try {
+    const raw = await admin.command({ getParameter: 1, internalQueryStatsSampleRate: 1 });
+    return { rateLimit, sampleRate: sampleRateDoc.parse(raw).internalQueryStatsSampleRate };
+  } catch {
+    return { rateLimit, sampleRate: null };
   }
 }
 
