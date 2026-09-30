@@ -35,12 +35,20 @@ export const MIN_VERSION_TEXT = `${MIN_MAJOR}.${MIN_MINOR}`;
 // the work and never will. Too new probably works — but "probably" is the wrong
 // footing for something that drops indexes on a production database, and a
 // major release is exactly when command semantics and stat shapes move.
-export const MAX_MAJOR = 8;
+//
+// 9.0 proved the point the day it shipped (#560). Its `$queryStats` moved the
+// plan metrics under `metrics.queryExec` and `metrics.queryPlanner`, and the
+// collector, reading them where 8.x puts them, would have found none and gone
+// quietly silent on every create suggestion. That was caught by probing 9.0.2
+// before this number moved. The self-read costs and hidden indexes were checked
+// on the same server and are unchanged.
+export const MAX_MAJOR = 9;
 export const MAX_VERSION_TEXT = `${MAX_MAJOR}.x`;
 
 // `$queryStats` exists from 6.0, but until 8.0 its per-shape metrics are
 // execution counts and timings only — no `keysExamined`, `docsExamined` or
-// `hasSortStage` (verified absent on 6.0.28 and 7.0.39, present on 8.2.9).
+// `hasSortStage` (verified absent on 6.0.28 and 7.0.39, present on 8.2.9 and
+// 8.3.11, and present on 9.0.2 under `queryExec` and `queryPlanner`).
 //
 // That is the difference between knowing a query ran and knowing it scanned, so
 // on 6.0 and 7.0 the store cannot drive a single create recommendation and the
