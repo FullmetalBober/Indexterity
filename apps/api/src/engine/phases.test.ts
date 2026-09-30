@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { beginPhase, PassPhases, timePhase, withPhases } from "./phases";
 
 // A phase whose elapsed time is decided by the test rather than by the clock:
@@ -7,6 +7,21 @@ import { beginPhase, PassPhases, timePhase, withPhases } from "./phases";
 function at(phases: PassPhases, now: number) {
   return phases.summary(4, now);
 }
+
+// The clock held still, for the tests that assert an EXACT duration. The class
+// reads `Date.now()` itself when a phase is entered, so a millisecond ticking
+// between the test's own read and that one turns 20,000 into 19,999, which is
+// how this failed on CI. Only `Date.now` is pinned, and no timers are faked, for
+// the AsyncLocalStorage reason above.
+function pinClock(): number {
+  const now = Date.now();
+  vi.spyOn(Date, "now").mockReturnValue(now);
+  return now;
+}
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe("recording where a pass spent its time", () => {
   it("aggregates repeats of one phase into a single total and a call count", () => {
@@ -42,7 +57,7 @@ describe("recording where a pass spent its time", () => {
   // slow loop out of every report it mattered in.
   it("counts a phase that has not finished, and says that it has not", () => {
     const phases = new PassPhases();
-    const started = Date.now();
+    const started = pinClock();
     phases.enter("per-collection");
 
     const [only] = phases.phases(started + 210_000);
@@ -69,7 +84,7 @@ describe("recording where a pass spent its time", () => {
 
   it("counts two overlapping calls of one phase separately", () => {
     const phases = new PassPhases();
-    const started = Date.now();
+    const started = pinClock();
     // What a Promise.all over the same read looks like: taking only the latest
     // start would report half the cost.
     phases.enter("usageByCollection");
