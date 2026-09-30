@@ -64,6 +64,8 @@ export const READS_PER_COLL_STATS_LATENCY = 1;
 //   | 6.0.28 |           2 |            2 |            1 |
 //   | 7.0.39 |           1 |            2 |            1 |
 //   | 8.2.9  |           1 |            2 |            1 |
+//   | 8.3.11 |           1 |            2 |            1 |
+//   | 9.0.2  |           1 |            2 |            1 |
 //
 // The original table was taken on 8.0 alone and hard-coded 1, so on a 6.0 server
 // this product under-counts its own reads by one per namespace per pass. That is

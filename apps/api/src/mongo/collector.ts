@@ -241,6 +241,51 @@ const serverStatusDoc = z.object({
   mem: z.object({ resident: z.coerce.number() }).partial().optional(),
 });
 
+// A summed metric, and the true/false tally $queryStats keeps for a boolean one.
+const summedMetric = z.object({ sum: z.coerce.number() });
+const tallyMetric = z.object({ true: z.coerce.number() }).partial();
+
+// The per-execution plan metrics, wherever a release keeps them (#560).
+//
+// 8.x carries `keysExamined`, `docsExamined` and `hasSortStage` at the top of
+// `metrics`. 9.0 files the first two under `queryExec` and the third under
+// `queryPlanner`, verified on 9.0.2, with the timings and `execCount` left where
+// they were. Both layouts are parsed and read through `planMetricsOf`, so
+// nothing past it knows there are two.
+const queryStatsMetrics = z.object({
+  execCount: z.coerce.number(),
+  // When this shape entered the store. The store keeps entries for the life
+  // of the server (or until eviction), so `now - firstSeen` is how long the
+  // shape has been watchable — the denominator that separates "ran five times
+  // this hour" from "ran five times since March".
+  firstSeenTimestamp: z.coerce.date().optional(),
+  // Absent before 8.0 — see collectQueryStats. `keysExamined` is the marker
+  // the capability check reads, because it is the one that decides whether a
+  // shape was scanning.
+  keysExamined: summedMetric.optional(),
+  docsExamined: summedMetric.optional(),
+  // Executions that ran a blocking in-memory SORT, and those that did not.
+  hasSortStage: tallyMetric.optional(),
+  queryExec: z
+    .object({ keysExamined: summedMetric.optional(), docsExamined: summedMetric.optional() })
+    .optional(),
+  queryPlanner: z.object({ hasSortStage: tallyMetric.optional() }).optional(),
+});
+
+export interface PlanMetrics {
+  readonly keysExamined: z.infer<typeof summedMetric> | undefined;
+  readonly docsExamined: z.infer<typeof summedMetric> | undefined;
+  readonly hasSortStage: z.infer<typeof tallyMetric> | undefined;
+}
+
+export function planMetricsOf(metrics: z.infer<typeof queryStatsMetrics>): PlanMetrics {
+  return {
+    keysExamined: metrics.keysExamined ?? metrics.queryExec?.keysExamined,
+    docsExamined: metrics.docsExamined ?? metrics.queryExec?.docsExamined,
+    hasSortStage: metrics.hasSortStage ?? metrics.queryPlanner?.hasSortStage,
+  };
+}
+
 // One $queryStats entry (mongo 6.0+). Filters are shapified ({field: {$eq: "?number"}}),
 // metrics arrive as Longs the driver promotes. Lenient: entries for other command
 // shapes are skipped via safeParse.
@@ -264,21 +309,7 @@ const queryStatsDoc = z.object({
   // the rate denominator — a control plane whose clock has drifted from the
   // cluster's should not turn that drift into a workload measurement.
   asOf: z.coerce.date().optional(),
-  metrics: z.object({
-    execCount: z.coerce.number(),
-    // When this shape entered the store. The store keeps entries for the life
-    // of the server (or until eviction), so `now - firstSeen` is how long the
-    // shape has been watchable — the denominator that separates "ran five times
-    // this hour" from "ran five times since March".
-    firstSeenTimestamp: z.coerce.date().optional(),
-    // Absent before 8.0 — see collectQueryStats. `keysExamined` is the marker
-    // the capability check reads, because it is the one that decides whether a
-    // shape was scanning.
-    keysExamined: z.object({ sum: z.coerce.number() }).optional(),
-    docsExamined: z.object({ sum: z.coerce.number() }).optional(),
-    // Executions that ran a blocking in-memory SORT, and those that did not.
-    hasSortStage: z.object({ true: z.coerce.number() }).partial().optional(),
-  }),
+  metrics: queryStatsMetrics,
 });
 
 const HOUR_MS = 3_600_000;
@@ -1005,9 +1036,16 @@ export class MongoIndexCollector implements IndexCollector {
   }
 
   // Query shapes from $queryStats (mongo 6.0+): no profiler needed. COLLSCAN is
-  // inferred from zero keys examined alongside docs examined. Requires
-  // internalQueryStatsRateLimit != 0 on the server — it is 0 by default, so a
-  // stock cluster has an empty store however privileged the credentials are.
+  // inferred from zero keys examined alongside docs examined. Before 9.0 the
+  // store needs internalQueryStatsRateLimit != 0 on the server — it is 0 by
+  // default, so a stock cluster has an empty store however privileged the
+  // credentials are. 9.0 records by default, but only a sample:
+  // internalQueryStatsSampleRate is 0.01, so a shape's counts are about 1% of
+  // its executions (measured on 9.0.2: 400 runs counted 41 at 0.1, 208 at 0.5).
+  // They are read as they are, not scaled back up. Too low a count only ever
+  // withholds a create suggestion, while an estimate scaled from one sampled
+  // execution could manufacture one. The diagnose advisory tells the operator
+  // how to get full counts.
   //
   // Before 8.0 the store reports execution counts and timings only: no
   // `keysExamined`, no `docsExamined`, no `hasSortStage`. Every shape would
@@ -1050,7 +1088,9 @@ export class MongoIndexCollector implements IndexCollector {
     });
     // Server-wide capability, so any one entry answers it. An empty store says
     // nothing either way and falls through to the same empty result.
-    if (!entries.some((entry) => entry.metrics.keysExamined !== undefined)) return new Map();
+    if (!entries.some((entry) => planMetricsOf(entry.metrics).keysExamined !== undefined)) {
+      return new Map();
+    }
     // The server's clock, from whichever entry carries it.
     const asOf = entries.find((entry) => entry.asOf !== undefined)?.asOf ?? null;
     for (const { key, metrics } of entries) {
@@ -1086,18 +1126,19 @@ export class MongoIndexCollector implements IndexCollector {
       // and namespace, not the client), so otherwise a developer running the
       // same query the app runs inflates both the execution count that gates
       // instant apply and the examined-document count that drives severity.
-      const docsExamined = metrics.docsExamined?.sum ?? 0;
+      const plan = planMetricsOf(metrics);
+      const docsExamined = plan.docsExamined?.sum ?? 0;
       const client: QueryClient = {
         ...(key.client?.application?.name === undefined
           ? {}
           : { application: key.client.application.name }),
         ...(key.client?.driver?.name === undefined ? {} : { driver: key.client.driver.name }),
       };
-      const collscan = (metrics.keysExamined?.sum ?? 0) === 0 && docsExamined > 0;
+      const collscan = (plan.keysExamined?.sum ?? 0) === 0 && docsExamined > 0;
       // An index found the documents but none could order them, so the server
       // sorted in memory. Invisible to the collscan test — keys were examined.
       // Only when we know the keys — see sortIsServable.
-      const sortedInMemory = sortIsServable((metrics.hasSortStage?.true ?? 0) > 0, sort);
+      const sortedInMemory = sortIsServable((plan.hasSortStage?.true ?? 0) > 0, sort);
       const interactive = classifyClient(client) === "INTERACTIVE";
       const countedExecs = interactive ? 0 : metrics.execCount;
       const countedDocs = interactive ? 0 : docsExamined;

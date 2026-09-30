@@ -131,7 +131,7 @@ const FAQ = [
   {
     question: "Which deployments does it work with?",
     answer:
-      "MongoDB 6.0 to 8.x — Atlas, self-hosted and sharded — PostgreSQL 14 and newer, and SQL Server 2016 and newer. Sharded clusters are handled explicitly: statistics are summed across shards, and shard-key backing indexes are protected from removal. Replicas are read one node at a time, because a replica-set member and an availability-group secondary each keep their own usage counters, and an index idle on the primary may be the one a reporting replica lives on. On Atlas, user management belongs to Atlas, so you create the scoped role there and connect with its string; self-hosted MongoDB and SQL Server can have Indexterity create the user for you.",
+      "MongoDB 6.0 to 9.x — Atlas, self-hosted and sharded — PostgreSQL 14 and newer, and SQL Server 2016 and newer. Sharded clusters are handled explicitly: statistics are summed across shards, and shard-key backing indexes are protected from removal. Replicas are read one node at a time, because a replica-set member and an availability-group secondary each keep their own usage counters, and an index idle on the primary may be the one a reporting replica lives on. On Atlas, user management belongs to Atlas, so you create the scoped role there and connect with its string; self-hosted MongoDB and SQL Server can have Indexterity create the user for you.",
   },
   {
     question: "Which PostgreSQL privileges does it need?",
@@ -187,7 +187,7 @@ function Landing() {
             </Button>
           </div>
           <p className="mt-4 text-muted-foreground text-sm">
-            MongoDB 6.0 to 8.x, PostgreSQL 14+ and SQL Server 2016+. Hosted, or self-host the same
+            MongoDB 6.0 to 9.x, PostgreSQL 14+ and SQL Server 2016+. Hosted, or self-host the same
             image.
           </p>
           {/* The pipeline as a real ordered list rather than a string of

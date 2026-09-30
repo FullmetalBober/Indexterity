@@ -6,6 +6,7 @@ import {
   lookupJoins,
   normalizeDirection,
   pipelineShape,
+  planMetricsOf,
   readStorageStats,
   sortIsServable,
   sumLatencyStats,
@@ -309,5 +310,48 @@ describe("dedupePredicates", () => {
       { $match: { $and: [{ d: { $gte: "?date" } }, { d: { $lte: "?date" } }] } },
     ]);
     expect(shape).toEqual({ equality: [], sort: [], range: ["d"] });
+  });
+});
+
+// Where the plan metrics live moved in 9.0 (#560), and a collector reading only
+// the 8.x place found none on 9.0 and reported "cannot tell" for every shape,
+// which silently ends every create suggestion that source could have made.
+// Shapes below are the ones the servers returned, trimmed to what is read.
+describe("planMetricsOf", () => {
+  it("reads 8.x's metrics where 8.x keeps them", () => {
+    const plan = planMetricsOf({
+      execCount: 5,
+      keysExamined: { sum: 145 },
+      docsExamined: { sum: 145 },
+      hasSortStage: { true: 5 },
+    });
+    expect(plan).toEqual({
+      keysExamined: { sum: 145 },
+      docsExamined: { sum: 145 },
+      hasSortStage: { true: 5 },
+    });
+  });
+
+  it("reads 9.0's metrics from its subsections", () => {
+    const plan = planMetricsOf({
+      execCount: 5,
+      queryExec: { keysExamined: { sum: 0 }, docsExamined: { sum: 1000 } },
+      queryPlanner: { hasSortStage: { true: 0 } },
+    });
+    expect(plan).toEqual({
+      keysExamined: { sum: 0 },
+      docsExamined: { sum: 1000 },
+      hasSortStage: { true: 0 },
+    });
+  });
+
+  // 6.0 and 7.0: counts and timings only, which the capability check has to be
+  // able to see as absent rather than as zero.
+  it("reports nothing when the server keeps no plan metrics at all", () => {
+    expect(planMetricsOf({ execCount: 5 })).toEqual({
+      keysExamined: undefined,
+      docsExamined: undefined,
+      hasSortStage: undefined,
+    });
   });
 });

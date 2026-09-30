@@ -130,6 +130,20 @@ beforeAll(async () => {
 
 // Move a session's org onto the top plan, so quota is never what a test fails
 // on unless that is the test.
+// $queryStats records every execution, whichever release is under test.
+//
+// Two parameters, because they govern on different releases (#560). Before 9.0
+// the rate limit decides, and it is 0 by default, so nothing is recorded. 9.0
+// decides by the sample rate whenever it is above 0, and ships it at 0.01, so
+// the rate limit alone would leave a test counting one execution in a hundred.
+// Each is set on its own and allowed to fail, because a server rejects a
+// parameter it does not have, and 7.0 has no sample rate.
+async function recordEveryQueryShape(): Promise<void> {
+  const admin = mongo.db("admin");
+  await admin.command({ setParameter: 1, internalQueryStatsRateLimit: -1 }).catch(() => {});
+  await admin.command({ setParameter: 1, internalQueryStatsSampleRate: 1 }).catch(() => {});
+}
+
 async function giveRoom(session: Session): Promise<string> {
   const orgId = asString(asRecord(await (await api("/org", session)).json()).id);
   await db.update(organizations).set({ plan: "SCALE" }).where(eq(organizations.id, orgId));
@@ -3106,10 +3120,7 @@ describe("workload collection is batched", () => {
 
   it("keeps each namespace's shapes to itself, and drives a real suggest run", async () => {
     // $queryStats records nothing until the sampling rate is lifted.
-    await mongo
-      .db("admin")
-      .command({ setParameter: 1, internalQueryStatsRateLimit: -1 })
-      .catch(() => {});
+    await recordEveryQueryShape();
 
     // Two collections, both over the trivial-size floor so the eligibility pass
     // reads a workload for them, each queried on a DIFFERENT field. Four
@@ -4241,10 +4252,7 @@ describe("workload source follows the server version", () => {
   it("finds an in-memory sort via $queryStats on 8.0+, via the profiler below it", async () => {
     const build = await mongo.db("admin").command({ buildInfo: 1 });
     const version = parseServerVersion(asRecord(build).version);
-    await mongo
-      .db("admin")
-      .command({ setParameter: 1, internalQueryStatsRateLimit: -1 })
-      .catch(() => {});
+    await recordEveryQueryShape();
     await mongo
       .db("inttest")
       .command({ profile: 2 })
