@@ -263,6 +263,38 @@ describe("TRUST_PROXY", () => {
   });
 });
 
+// #574. The header a trusted proxy names the client in, believed instead of
+// x-forwarded-for — and only ever from a peer TRUST_PROXY trusts.
+describe("CLIENT_IP_HEADER", () => {
+  it("is unset by default, which keeps x-forwarded-for", () => {
+    expect(parse("api", API).CLIENT_IP_HEADER).toBeUndefined();
+  });
+
+  it("reads a header name in any case", () => {
+    expect(
+      parse("api", { ...API, TRUST_PROXY: "127.0.0.1", CLIENT_IP_HEADER: " CF-Connecting-IP " })
+        .CLIENT_IP_HEADER,
+    ).toBe("cf-connecting-ip");
+  });
+
+  // With nothing trusted it would be believed from every caller, which is the
+  // forgery it exists to end.
+  it("refuses to be believed with no trusted proxy", () => {
+    expect(refusal("api", { ...API, CLIENT_IP_HEADER: "cf-connecting-ip" })).toContain(
+      "CLIENT_IP_HEADER",
+    );
+  });
+
+  it("refuses what is not one header name, and x-forwarded-for itself", () => {
+    for (const value of ["cf-connecting-ip, true-client-ip", "x forwarded", "x-forwarded-for"]) {
+      expect(
+        refusal("api", { ...API, TRUST_PROXY: "127.0.0.1", CLIENT_IP_HEADER: value }),
+        value,
+      ).toContain("CLIENT_IP_HEADER");
+    }
+  });
+});
+
 // The list dialect, entry by entry. The schema above refuses a whole value on one
 // entry this drops, because a list that keeps only its good ranges reads as a
 // configured proxy and trusts less than the operator wrote.

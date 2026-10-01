@@ -12,9 +12,10 @@ import { AppModule } from "./app.module";
 import { auth } from "./auth";
 import { authRequestHeaders } from "./auth/http";
 import { sessionCookiesFor } from "./auth/session";
-import { apiEnv, trustProxySetting } from "./config/env";
+import { apiEnv, clientIpHeader, trustProxySetting } from "./config/env";
 import { probeNotifyOrExit } from "./db/notify-probe";
 import { captureAuthFailure } from "./errors/reporting";
+import { believeClientAddressHeader } from "./http/client-address";
 import { quietProbes } from "./http/quiet-probes";
 import { securityHeaders } from "./http/security-headers";
 import { TickService } from "./jobs/tick.service";
@@ -49,6 +50,16 @@ async function bootstrap(): Promise<void> {
   // whose every read 404s.
   app.setGlobalPrefix("api");
   const fastify = app.getHttpAdapter().getInstance();
+  // Ahead of everything that resolves a client address, Fastify itself
+  // included: on a proxy that appends to X-Forwarded-For, the header it names
+  // is the only address that is not the caller's to choose (#574).
+  const addressHeader = clientIpHeader();
+  if (addressHeader !== undefined) {
+    believeClientAddressHeader(fastify.server, addressHeader);
+    fastify.log.info(
+      `client addresses come from ${addressHeader}, believed from peers TRUST_PROXY trusts`,
+    );
+  }
   // Before the routes exist, so the hooks see oRPC, better-auth and the health
   // check alike. That breadth is the whole point for the headers: better-auth
   // registers straight on Fastify, outside Nest, so anything scoped to a
