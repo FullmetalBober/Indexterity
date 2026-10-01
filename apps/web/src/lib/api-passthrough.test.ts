@@ -73,6 +73,19 @@ describe("headers on the way to the api", () => {
     const headers = forwardedRequestHeaders(new Headers({ "x-forwarded-for": "1.2.3.4" }), true);
     expect(headers.get("x-forwarded-for")).toBe("1.2.3.4");
   });
+
+  // #574. The api can be told to believe one of these instead of
+  // x-forwarded-for, so they are a forwarding header like the rest: dropped from
+  // a caller with nothing trusted in front, and carried through from Cloudflare.
+  it("treats the Cloudflare client headers the same way", () => {
+    const sent = new Headers({ "cf-connecting-ip": "1.2.3.4", "true-client-ip": "1.2.3.4" });
+    const direct = forwardedRequestHeaders(sent, false);
+    expect(direct.get("cf-connecting-ip")).toBeNull();
+    expect(direct.get("true-client-ip")).toBeNull();
+    const proxied = forwardedRequestHeaders(sent, true);
+    expect(proxied.get("cf-connecting-ip")).toBe("1.2.3.4");
+    expect(proxied.get("true-client-ip")).toBe("1.2.3.4");
+  });
 });
 
 describe("headers on the way back", () => {

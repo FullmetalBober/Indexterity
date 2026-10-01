@@ -240,6 +240,12 @@ export function trustProxySetting(): TrustProxy {
   return apiEnv().TRUST_PROXY;
 }
 
+// The header a trusted proxy names the client in, believed instead of
+// X-Forwarded-For (http/client-address.ts), or undefined to keep that one.
+export function clientIpHeader(): string | undefined {
+  return apiEnv().CLIENT_IP_HEADER;
+}
+
 export function trustsProxy(): boolean {
   return trustProxySetting() !== false;
 }

@@ -536,6 +536,15 @@ config:
   # claim to be someone else, so on a CNI that gives pods VPC addresses it is
   # every workload in the VPC, not just the ingress.
   trustProxy: ""
+  # The one header a trusted proxy sets to the client's address, believed
+  # instead of X-Forwarded-For. Leave it empty unless a CDN in front APPENDS to
+  # X-Forwarded-For rather than replacing it, which leaves the leftmost entry
+  # the caller's to write. Behind Cloudflare, "cf-connecting-ip": Cloudflare
+  # sets it itself, and trusting Cloudflare's ranges in trustProxy instead would
+  # let a Cloudflare Worker forge the chain, because a Worker's own address is
+  # among them. Believed only from a peer trustProxy trusts, so it needs
+  # trustProxy set, and the chart refuses it without.
+  clientIpHeader: ""
   # The plan a newly created organization lands on.
   #
   # SELF_HOSTED is the BUSL Additional Use Grant expressed as entitlements: one
