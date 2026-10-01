@@ -13,6 +13,7 @@ import {
   and,
   asc,
   clusterIndexes,
+  clusterPassTimings,
   clusterRosters,
   type Database,
   desc,
@@ -682,6 +683,17 @@ export class InsightsRepository {
       .where(eq(clusterRosters.clusterId, clusterId))
       .limit(1);
     return row;
+  }
+
+  // Every pass's last run against the cluster, one row each (#571). Ordered by
+  // name so the answer is the same on every read; the panel decides the order a
+  // reader sees.
+  async passTimings(clusterId: string) {
+    return this.database.db
+      .select()
+      .from(clusterPassTimings)
+      .where(eq(clusterPassTimings.clusterId, clusterId))
+      .orderBy(asc(clusterPassTimings.task));
   }
 
   async recentActions(clusterId: string, limit: number) {

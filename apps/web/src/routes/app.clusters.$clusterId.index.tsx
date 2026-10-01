@@ -15,6 +15,7 @@ import { fmtBytes } from "~/components/app/format";
 import { latencyCharts } from "~/components/app/latency-series";
 import { NodesPanel } from "~/components/app/nodes-panel";
 import { ParkedPanel } from "~/components/app/parked-panel";
+import { PassesPanel } from "~/components/app/passes-panel";
 import { RecommendationsTable } from "~/components/app/recommendations-table";
 import { Unavailable, UnavailableFigure } from "~/components/app/unavailable";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
@@ -37,11 +38,13 @@ import {
   latencyQuery,
   latencySeriesQuery,
   nodesQuery,
+  passesQuery,
   useCollections,
   useIndexSizeSeries,
   useLatency,
   useLatencySeries,
   useNodes,
+  usePasses,
 } from "~/lib/queries/telemetry";
 import { LineChart, SERIES_PALETTE } from "../components/latency-chart";
 
@@ -51,7 +54,7 @@ export const Route = createFileRoute("/app/clusters/$clusterId/")({
   // read one entry. First paint does not wait for the browser to boot and ask
   // again.
   //
-  // Nine reads, and only the nine this page draws. The policy is not among them
+  // Ten reads, and only the ten this page draws. The policy is not among them
   // any more: it belongs to the settings tab, which warms it in its own loader.
   //
   // No resolving of "which cluster" left to do — the param is the answer, which
@@ -62,7 +65,7 @@ export const Route = createFileRoute("/app/clusters/$clusterId/")({
   // Every warm is allowed to fail. A rejection here would take out the whole
   // route instead of the one panel it belongs to; allSettled leaves the error on
   // its own query, where the component reading that query says it could not load
-  // and the eight beside it are unaffected.
+  // and the nine beside it are unaffected.
   //
   // That last clause used to read "draws an empty panel", which was the whole of
   // #289: the panel it drew was the reassuring one, so a 500 on one read
@@ -79,6 +82,7 @@ export const Route = createFileRoute("/app/clusters/$clusterId/")({
       context.queryClient.ensureQueryData(collectionsQuery(id)),
       context.queryClient.ensureQueryData(indexSizeSeriesQuery(id)),
       context.queryClient.ensureQueryData(nodesQuery(id)),
+      context.queryClient.ensureQueryData(passesQuery(id)),
       context.queryClient.ensureQueryData(cooldownsQuery(id)),
     ]);
     // Awaited on the server, deliberately not in the browser.
@@ -101,7 +105,7 @@ export const Route = createFileRoute("/app/clusters/$clusterId/")({
     // skeleton of its own.
     //
     // The server still waits, because its render IS the payload. Not awaiting
-    // there would flush a shell of nine skeletons and stream the data in behind
+    // there would flush a shell of ten skeletons and stream the data in behind
     // it, which is a worse first paint than the one this page has today.
     if (import.meta.env.SSR) await warm;
   },
@@ -129,6 +133,7 @@ function ClusterOverview() {
   const collectionStats = useCollections(id);
   const footprint = useIndexSizeSeries(id);
   const nodes = useNodes(id);
+  const passes = usePasses(id);
   const cooldowns = useCooldowns(id);
   const clearCooldown = useClearCooldown(id);
 
@@ -379,6 +384,22 @@ function ClusterOverview() {
             <Unavailable what="the node roster" onRetry={nodes.retry} />
           ) : (
             <NodesPanel roster={nodes.data} loading={nodes.pending} />
+          )}
+        </div>
+      </section>
+
+      <section className="mt-8">
+        <h2 className="font-semibold text-lg">Passes</h2>
+        <p className="text-muted-foreground text-sm">
+          How long each of Indexterity's passes last took against this cluster, against what it was
+          allowed. A pass that does not finish inside its budget is abandoned and tried again on the
+          next schedule.
+        </p>
+        <div className="mt-3">
+          {passes.failed ? (
+            <Unavailable what="the pass timings" onRetry={passes.retry} />
+          ) : (
+            <PassesPanel passes={passes.data} loading={passes.pending} />
           )}
         </div>
       </section>

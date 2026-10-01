@@ -27,6 +27,7 @@ import {
   clusterLatency,
   clusterLatencySeries,
   clusterNodes,
+  clusterPasses,
   clusterPolicyView,
   clusterPrivileges,
   clusterRecommendations,
@@ -211,6 +212,16 @@ export const contract = {
     })
     .input(clusterId)
     .output(clusterNodes),
+
+  getPasses: oc
+    .route({
+      method: "GET",
+      path: "/clusters/{clusterId}/passes",
+      summary:
+        "How long each pass last took against the cluster, against what budget, how it ended, and where the time went",
+    })
+    .input(clusterId)
+    .output(clusterPasses),
 
   listActions: oc
     .route({

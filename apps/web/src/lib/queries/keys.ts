@@ -74,6 +74,9 @@ export const queryKeys = {
   // draws them in different places.
   indexSizeSeries: (clusterId: string | null) => ["index-size-series", clusterId] as const,
   nodes: (clusterId: string | null) => ["nodes", clusterId] as const,
+  // How long each pass last took (#571). Its own key because every pass moves
+  // it, including the probe, which moves nothing else on the page.
+  passes: (clusterId: string | null) => ["passes", clusterId] as const,
   // One page of the cluster's index inventory (#431). The WHOLE request is in the
   // key — namespace scope, offset, limit, sort, direction and filter — for the
   // reason the security trail's filter and cursor are: they are what the api was

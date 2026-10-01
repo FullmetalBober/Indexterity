@@ -60,6 +60,7 @@ import { planForCluster } from "../src/jobs/plan";
 import { latestBaselines } from "../src/jobs/probe";
 import { pruneDeadLetterJobs, pruneOldSamples } from "../src/jobs/retention";
 import { suggestForCluster } from "../src/jobs/suggest";
+import { recordPassTiming } from "../src/jobs/timings";
 import { isScanning } from "../src/jobs/workload-shapes";
 import { MongoConnection, MongoIndexCollector } from "../src/mongo";
 import { hasQueryStatsPlanMetrics, parseServerVersion } from "../src/mongo/version";
@@ -310,6 +311,56 @@ describe("cluster lifecycle", () => {
     const foreign = asRecord(await (await api(`/clusters/${clusterId}/nodes`, stranger)).json());
     expect(foreign.collectedAt).toBeNull();
     expect(foreign.nodes).toEqual([]);
+  });
+
+  // #571. How long each pass last took, written the way the runner writes it and
+  // read back through the route the passes panel uses. Twice for one pass,
+  // because the row is the LAST run and an upsert that inserted would leave the
+  // panel two collects to choose between.
+  it("serves how long each pass last took, one row per pass", async () => {
+    const startedAt = new Date("2026-10-01T12:00:00.000Z");
+    await recordPassTiming(db, clusterId, "collect", {
+      startedAt,
+      durationMs: 300_000,
+      outcome: "timed-out",
+      budgetMs: 300_000,
+      phases: [{ name: "per-collection", totalMs: 299_000, calls: 1, running: true }],
+    });
+    await recordPassTiming(db, clusterId, "collect", {
+      startedAt: new Date(startedAt.getTime() + 3_600_000),
+      durationMs: 4_200,
+      outcome: "ok",
+      budgetMs: 300_000,
+      phases: [{ name: "per-collection", totalMs: 4_000, calls: 1, running: false }],
+    });
+    await recordPassTiming(db, clusterId, "apply", {
+      startedAt,
+      durationMs: 800,
+      outcome: "ok",
+      budgetMs: null,
+      phases: [],
+    });
+
+    const res = await api(`/clusters/${clusterId}/passes`, owner);
+    expect(res.status).toBe(200);
+    const passes = asRecords(asRecord(await res.json()).passes, "body.passes");
+    expect(passes.map((pass) => pass.task)).toEqual(["apply", "collect"]);
+    expect(passes[1]).toEqual({
+      task: "collect",
+      startedAt: "2026-10-01T13:00:00.000Z",
+      durationMs: 4_200,
+      outcome: "ok",
+      budgetMs: 300_000,
+      phases: [{ name: "per-collection", totalMs: 4_000, calls: 1, running: false }],
+    });
+    expect(passes[0]?.budgetMs).toBeNull();
+
+    // Another tenant's cluster answers empty, as the roster does.
+    const stranger = await signUp("passes-stranger");
+    createdEmails.push(stranger.email);
+    createdOrgIds.push(asString(asRecord(await (await api("/org", stranger)).json()).id));
+    const foreign = asRecord(await (await api(`/clusters/${clusterId}/passes`, stranger)).json());
+    expect(foreign.passes).toEqual([]);
   });
 
   // #524. The dashboard subtracts the members a reading speaks for from the

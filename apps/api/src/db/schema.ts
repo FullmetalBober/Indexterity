@@ -1396,6 +1396,56 @@ export const clusterBlocks = pgTable(
   (table) => [primaryKey({ columns: [table.clusterId, table.task] })],
 );
 
+/** One phase of a pass as `PassPhases` reported it (engine/phases.ts). */
+export interface PassPhaseRecord {
+  readonly name: string;
+  readonly totalMs: number;
+  readonly calls: number;
+  // Still open when the pass ended — the phase a budget cut off, so its total
+  // is a floor rather than a measurement.
+  readonly running: boolean;
+}
+
+/**
+ * How long one PASS last took against one cluster, and how it ended (#571).
+ *
+ * Nothing recorded this before. A cluster whose collect needs longer than its
+ * budget was abandoned every hour with a sentence and nothing else, the phase
+ * breakdown (#466) lived in process memory and reached only the block's detail,
+ * and the block is deleted by the next pass that gets through — so a collect
+ * that took four minutes of a five-minute budget, and was one bad hour from
+ * failing, looked exactly like one that took four seconds.
+ *
+ * The LAST run, one row per pass and overwritten, for the grain `cluster_blocks`
+ * has: the question is how this pass behaves on this cluster now, and a history
+ * would grow by a row per pass per cluster per tick to answer one nobody has
+ * asked yet. Every outcome is recorded, not only success: how long a pass took
+ * to be abandoned is the budget, and how long it took to find a cluster
+ * unreachable is the dial timeout — both are what the pass cost the worker.
+ */
+export const clusterPassTimings = pgTable(
+  "cluster_pass_timings",
+  {
+    clusterId: uuid("cluster_id")
+      .notNull()
+      .references(() => clusters.id, { onDelete: "cascade" }),
+    // The pass, as `cluster_blocks.task` names it, and text for the same reason.
+    task: text("task").notNull(),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+    durationMs: integer("duration_ms").notNull(),
+    // The metric's vocabulary (metrics/jobs.ts ClusterTaskOutcome): `ok`,
+    // `timed-out`, `unreachable` and the rest. Text, not an enum, so adding an
+    // outcome is a constant rather than a migration.
+    outcome: text("outcome").notNull(),
+    // The wall clock the pass ran against, null for a pass with none (`apply`,
+    // `finalize`) — so "took 4 minutes" can be read against what it was allowed.
+    budgetMs: integer("budget_ms"),
+    // Where the time went, most expensive first.
+    phases: jsonb("phases").$type<PassPhaseRecord[]>().notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.clusterId, table.task] })],
+);
+
 // The namespaces a cluster's latency has been read for, one row each (#551).
 //
 // `latency_samples` used to carry `database` and `collection` as text on every

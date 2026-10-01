@@ -8,6 +8,7 @@ import type {
   ClusterLatency,
   ClusterLatencySeries,
   ClusterNodes,
+  ClusterPasses,
   ClusterRoi,
   ClusterWorkload,
   IndexRecommendationLink,
@@ -20,6 +21,7 @@ import {
   instant,
   LATENCY_SERIES_MAX_COLLECTIONS,
   LATENCY_SERIES_WINDOW_DAYS,
+  passPhase,
   type SortDirection,
   WORKLOAD_SHAPES_PAGE,
   type WorkloadSortKey,
@@ -561,6 +563,24 @@ export class InsightsService {
       clusterId,
       collectedAt: roster.collectedAt.toISOString(),
       nodes: z.array(clusterNode).parse(roster.nodes),
+    };
+  }
+
+  async passes(clusterId: string, orgId: string): Promise<ClusterPasses> {
+    if (!(await this.tenancy.ownsCluster(clusterId, orgId))) return { clusterId, passes: [] };
+    const rows = await this.repo.passTimings(clusterId);
+    return {
+      clusterId,
+      passes: rows.map((row) => ({
+        task: row.task,
+        startedAt: row.startedAt.toISOString(),
+        durationMs: row.durationMs,
+        outcome: row.outcome,
+        budgetMs: row.budgetMs,
+        // Parsed rather than asserted, for the roster's reason above: jsonb
+        // proves nothing about its shape.
+        phases: z.array(passPhase).parse(row.phases),
+      })),
     };
   }
 
