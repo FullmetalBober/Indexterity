@@ -19,6 +19,7 @@ import { clusterIdFromPayload } from "./payload";
 import { probeCluster } from "./probe";
 import { suggestForCluster } from "./suggest";
 import { BUDGETED_PASSES, type ClusterTaskDeps, runClusterTask, withPassBudget } from "./tasks";
+import { recordPassTiming } from "./timings";
 import { alertClaims } from "./watermark";
 
 // The per-cluster half of the graphile-worker task registry, as a provider
@@ -234,6 +235,19 @@ export class ClusterTasksService {
       markBlocked: (clusterId, task, reason, detail) =>
         markBlocked(db, clusterId, task, reason, detail),
       markUnblocked: (clusterId, task) => markUnblocked(db, clusterId, task),
+      // Best-effort, the opposite call to `markBlocked`'s and for the opposite
+      // reason (#571): a block is the only copy of why the pipeline stopped, and
+      // a timing is a measurement of a pass that has already done its work. A
+      // write that fails leaves a gap on a screen, not a pass to retry.
+      recordTiming: async (clusterId, task, timing) => {
+        try {
+          await recordPassTiming(db, clusterId, task, timing);
+        } catch (error) {
+          helpers.logger.error(
+            `${task}: recording the timing for cluster ${clusterId} failed: ${String(error)}`,
+          );
+        }
+      },
     };
   }
 }

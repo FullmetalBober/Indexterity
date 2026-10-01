@@ -13,6 +13,7 @@ import type {
   ClusterIndexSizeSeries,
   ClusterLatencySeries,
   ClusterNodes,
+  ClusterPasses,
   ClusterWorkload,
   ClusterWorkloadInput,
   CollectionStat,
@@ -180,6 +181,15 @@ export function nodesQuery(clusterId: string | null) {
   });
 }
 
+// How long each pass last took against the cluster (#571).
+export function passesQuery(clusterId: string | null) {
+  return queryOptions({
+    queryKey: queryKeys.passes(clusterId),
+    queryFn: async (): Promise<ClusterPasses | null> =>
+      clusterId === null ? null : api().getPasses({ clusterId }),
+  });
+}
+
 // Each returns the payload AND whether this is the first fetch — see read.ts for
 // why the bare payload was not enough.
 export function useLatency(clusterId: string | null): Read<LatencySummary[]> {
@@ -214,6 +224,11 @@ export function useIndexSizeSeries(clusterId: string | null): Read<ClusterIndexS
 
 export function useNodes(clusterId: string | null): Read<ClusterNodes | null> {
   const { data = null, isPending, isError, refetch } = useQuery(nodesQuery(clusterId));
+  return { data, pending: isPending, failed: isError, retry: () => void refetch() };
+}
+
+export function usePasses(clusterId: string | null): Read<ClusterPasses | null> {
+  const { data = null, isPending, isError, refetch } = useQuery(passesQuery(clusterId));
   return { data, pending: isPending, failed: isError, retry: () => void refetch() };
 }
 

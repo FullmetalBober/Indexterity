@@ -85,6 +85,7 @@ describe("invalidationKeys", () => {
       queryKeys.latencySeries(CLUSTER),
       queryKeys.nodes(CLUSTER),
       queryKeys.clusters(),
+      queryKeys.passes(CLUSTER),
     ]);
   });
 
@@ -97,6 +98,7 @@ describe("invalidationKeys", () => {
         queryKeys.recommendations(CLUSTER),
         queryKeys.clusterIndexesAll(CLUSTER),
         queryKeys.clusterWorkloadAll(CLUSTER),
+        queryKeys.passes(CLUSTER),
       ]);
     }
   });
@@ -111,13 +113,17 @@ describe("invalidationKeys", () => {
         queryKeys.roi(CLUSTER),
         queryKeys.cooldowns(CLUSTER),
         queryKeys.clusterIndexesAll(CLUSTER),
+        queryKeys.passes(CLUSTER),
       ]);
     }
   });
 
-  // Probe writes nothing itself — it queues a suggest, whose own event follows.
-  it("a probe moves nothing", () => {
-    expect(invalidationKeys(CLUSTER, { kind: "PASS_FINISHED", task: "probe" })).toEqual([]);
+  // Probe writes nothing itself — it queues a suggest, whose own event follows —
+  // except how long it took (#571), which every pass records.
+  it("a probe moves only its own timing", () => {
+    expect(invalidationKeys(CLUSTER, { kind: "PASS_FINISHED", task: "probe" })).toEqual([
+      queryKeys.passes(CLUSTER),
+    ]);
   });
 
   it("every transition event moves the pipeline", () => {
@@ -166,6 +172,7 @@ describe("resumeKeys", () => {
           queryKeys.activity(CLUSTER),
           queryKeys.roi(CLUSTER),
           queryKeys.cooldowns(CLUSTER),
+          queryKeys.passes(CLUSTER),
         ].map((key) => JSON.stringify(key)),
       ),
     );

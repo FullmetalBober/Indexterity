@@ -106,6 +106,13 @@ export class InsightsController {
     );
   }
 
+  @Implement(contract.getPasses)
+  getPasses(@Req() req: FastifyRequest) {
+    return route(this.tenancy, contract.getPasses, req, "member").handler(({ input, context }) =>
+      this.insights.passes(input.clusterId, context.member.orgId),
+    );
+  }
+
   @Implement(contract.listActions)
   listActions(@Req() req: FastifyRequest) {
     return route(this.tenancy, contract.listActions, req, "member").handler(({ input, context }) =>

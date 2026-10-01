@@ -30,13 +30,13 @@ function stalledClient() {
 }
 
 describe("cluster route loaders", () => {
-  // Nine reads, none of which the reader has to wait on to see the page.
+  // Ten reads, none of which the reader has to wait on to see the page.
   it("hands over the overview before its reads answer", async () => {
     const queryClient = stalledClient();
     await runLoader(OverviewRoute, { params: { clusterId: "c1" }, context: { queryClient } });
     // Returning early is only half of it — a loader that warmed nothing would
     // also return early, and every panel would then fetch on mount instead.
-    expect(queryClient.ensureQueryData).toHaveBeenCalledTimes(9);
+    expect(queryClient.ensureQueryData).toHaveBeenCalledTimes(10);
   });
 
   // The one that mattered most: the second read here dials the customer's

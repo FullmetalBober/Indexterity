@@ -13,6 +13,7 @@ import { applyCreatesForCluster } from "./create";
 import type { JobQueue } from "./dispatch";
 import { probeCluster } from "./probe";
 import { suggestForCluster } from "./suggest";
+import { recordPassTiming } from "./timings";
 
 // The passes themselves are tested where they live. What is untested — and what a
 // registry refactor can silently break — is which pass each queue name runs and
@@ -61,6 +62,11 @@ vi.mock("./dispatch", async (importOriginal) => ({
 vi.mock("./blocked", (): typeof import("./blocked") => ({
   markBlocked: vi.fn(),
   markUnblocked: vi.fn(),
+}));
+// The same for how long each pass took (#571): tasks.test.ts owns what is
+// recorded, and against this suite's empty db the write could only fail.
+vi.mock("./timings", (): typeof import("./timings") => ({
+  recordPassTiming: vi.fn(),
 }));
 vi.mock("../events/emit", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../events/emit")>()),
@@ -132,6 +138,25 @@ describe("the per-cluster passes", () => {
       "classify",
       "suggest",
     ]);
+  });
+
+  // #571. Best-effort, unlike the block: the collect did its work, and a timing
+  // that could not be stored is a gap on a screen rather than a pass to retry.
+  it("keeps a landed pass landed when its timing cannot be written", async () => {
+    vi.mocked(recordPassTiming).mockRejectedValueOnce(new Error("connection terminated"));
+    const help = helpers();
+
+    await expect(service().collect({ clusterId: CLUSTER }, help)).resolves.toBeUndefined();
+
+    expect(recordPassTiming).toHaveBeenCalledWith(
+      db,
+      CLUSTER,
+      "collect",
+      expect.objectContaining({ outcome: "ok" }),
+    );
+    expect(help.logger.error).toHaveBeenCalledWith(
+      expect.stringContaining("recording the timing for cluster"),
+    );
   });
 
   // The gate is handed WHETHER the collect learned anything, not how much. A row

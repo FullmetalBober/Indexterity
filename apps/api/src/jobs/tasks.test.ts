@@ -8,7 +8,8 @@ import { at } from "../errors/at";
 import { asClusterUnreachable } from "../errors/unreachable";
 import { TunnelUnavailableError } from "../tunnel/resolve";
 import { ClusterCredentialsError, ClusterGoneError } from "./cluster-connection";
-import { type ClusterTaskDeps, runClusterTask } from "./tasks";
+import { type ClusterTaskDeps, PassBudgetExceededError, runClusterTask } from "./tasks";
+import type { PassTiming } from "./timings";
 
 const CLUSTER = "11111111-1111-1111-1111-111111111111";
 
@@ -20,6 +21,7 @@ function recorder(): {
   emitted: string[];
   blocked: string[];
   unblocked: string[];
+  timings: { clusterId: string; task: string; timing: PassTiming }[];
 } {
   const warns: string[] = [];
   const errors: string[] = [];
@@ -27,6 +29,7 @@ function recorder(): {
   const emitted: string[] = [];
   const blocked: string[] = [];
   const unblocked: string[] = [];
+  const timings: { clusterId: string; task: string; timing: PassTiming }[] = [];
   const claimed = new Set<string>();
   return {
     warns,
@@ -35,6 +38,7 @@ function recorder(): {
     emitted,
     blocked,
     unblocked,
+    timings,
     deps: {
       logger: {
         warn: (message) => void warns.push(message),
@@ -68,6 +72,10 @@ function recorder(): {
         // threaded through would clear every pass's block again — silently, and
         // that is the defect this replaces.
         unblocked.push(`${clusterId}:${task}`);
+        return Promise.resolve();
+      },
+      recordTiming: (clusterId, task, timing) => {
+        timings.push({ clusterId, task, timing });
         return Promise.resolve();
       },
     },
@@ -603,5 +611,113 @@ describe("runClusterTask on a cluster we refuse to dial", () => {
     ).rejects.toThrow("something nobody has classified");
 
     expect(log.blocked).toEqual([`${CLUSTER}:collect:ERROR:something nobody has classified`]);
+  });
+});
+
+// What each run cost (#571). Every outcome a pass can end in is recorded, because
+// the number that was missing is what a pass costs the worker whether or not it
+// lands — an abandoned collect spent its whole budget, and that is the case the
+// pacing this feeds exists for.
+describe("runClusterTask's timing", () => {
+  it("records how long a landed pass took, against the budget it ran under", async () => {
+    vi.useFakeTimers();
+    try {
+      const log = recorder();
+      const running = runClusterTask(
+        "collect",
+        CLUSTER,
+        log.deps,
+        async () => {
+          const done = beginPhase("indexes");
+          await new Promise((resolve) => setTimeout(resolve, 4_000));
+          done();
+        },
+        60_000,
+      );
+      await vi.advanceTimersByTimeAsync(4_000);
+      await running;
+
+      const { clusterId, task, timing } = at(log.timings, 0);
+      expect([clusterId, task]).toEqual([CLUSTER, "collect"]);
+      expect(timing).toMatchObject({ outcome: "ok", durationMs: 4_000, budgetMs: 60_000 });
+      expect(timing.phases).toEqual([
+        { name: "indexes", totalMs: 4_000, calls: 1, running: false },
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // The abandoned pass is the row that matters: it says the pass needed at least
+  // its budget, and which phase was still open when the clock ran out.
+  it("records an abandoned pass at its budget, with the phase that was running", async () => {
+    vi.useFakeTimers();
+    try {
+      const log = recorder();
+      const stuck = () => {
+        beginPhase("per-collection");
+        return new Promise<void>(() => {});
+      };
+
+      const running = runClusterTask("collect", CLUSTER, log.deps, stuck, 60_000);
+      await vi.advanceTimersByTimeAsync(60_000);
+      await running;
+
+      const { timing } = at(log.timings, 0);
+      expect(timing).toMatchObject({ outcome: "timed-out", durationMs: 60_000, budgetMs: 60_000 });
+      expect(timing.phases).toEqual([
+        { name: "per-collection", totalMs: 60_000, calls: 1, running: true },
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // `suggest` is handed no budget here and enforces its own inside the pass, so
+  // the budget that fired is only known from the error.
+  it("records the budget a pass enforced on itself", async () => {
+    const log = recorder();
+
+    await runClusterTask("suggest", CLUSTER, log.deps, () =>
+      Promise.reject(new PassBudgetExceededError("suggest", 300_000)),
+    );
+
+    expect(at(log.timings, 0).timing).toMatchObject({ outcome: "timed-out", budgetMs: 300_000 });
+  });
+
+  it("records a pass that could not reach the cluster", async () => {
+    const log = recorder();
+
+    await runClusterTask("probe", CLUSTER, log.deps, () => Promise.reject(unreachable()), 300_000);
+
+    expect(log.timings.map(({ task, timing }) => [task, timing.outcome, timing.budgetMs])).toEqual([
+      ["probe", "unreachable", 300_000],
+    ]);
+  });
+
+  it("records an unexpected failure before rethrowing it", async () => {
+    const log = recorder();
+
+    await expect(
+      runClusterTask("apply", CLUSTER, log.deps, () => {
+        throw new Error("something nobody has classified");
+      }),
+    ).rejects.toThrow("something nobody has classified");
+
+    expect(log.timings.map(({ timing }) => [timing.outcome, timing.budgetMs])).toEqual([
+      ["error", null],
+    ]);
+  });
+
+  // The cluster's rows went with it, by cascade, and a write for it would fail on
+  // the foreign key.
+  it("records nothing for a cluster that was deleted", async () => {
+    const log = recorder();
+
+    await runClusterTask("collect", CLUSTER, log.deps, () => {
+      throw new ClusterGoneError(CLUSTER);
+    });
+
+    expect(log.timings).toEqual([]);
   });
 });
