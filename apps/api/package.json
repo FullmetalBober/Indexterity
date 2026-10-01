@@ -4,7 +4,7 @@
   "private": true,
   "type": "commonjs",
   "scripts": {
-    "build": "rm -rf dist && swc src -d dist --strip-leading-paths --ignore '**/*.test.ts'",
+    "build": "rm -rf dist && swc src -d dist --strip-leading-paths --ignore '**/*.test.ts' && node scripts/bundle.mts",
     "dev": "node --watch -r @swc-node/register src/main.ts",
     "start": "node dist/main.js",
     "typecheck": "tsc --noEmit && tsc --noEmit -p integration",
@@ -51,6 +51,7 @@
     "@types/mssql": "^12.3.0",
     "@types/pg": "^8.20.0",
     "drizzle-kit": "^0.31.10",
+    "esbuild": "^0.28.1",
     "vitest": "^4.1.10"
   },
   "license": "BUSL-1.1"
