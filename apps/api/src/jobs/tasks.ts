@@ -478,9 +478,26 @@ export function createTaskList(
     },
     // Paced (#571): a cluster whose collect does not fit an hour is collected
     // every two or four hours instead, so only the ones due this hour go out.
+    //
+    // A pace that cannot be read sends everybody, which is the hourly schedule
+    // as it was before pacing — for the same reason a collect that cannot read
+    // its own pace runs unpaced (cluster-tasks.service.ts, paceOf).
     scheduleCollect: async (_payload: unknown, helpers: JobHelpers): Promise<void> => {
-      await dispatchToAllClusters(clusterRoster(db), "collect", helpers, runningPasses(db), (ids) =>
-        collectsDue(db, ids, new Date()),
+      await dispatchToAllClusters(
+        clusterRoster(db),
+        "collect",
+        helpers,
+        runningPasses(db),
+        async (ids) => {
+          try {
+            return await collectsDue(db, ids, new Date());
+          } catch (error) {
+            helpers.logger.error(
+              `scheduler: reading collect paces failed, dispatching every cluster: ${String(error)}`,
+            );
+            return new Set(ids);
+          }
+        },
       );
     },
     scheduleSuggest: async (_payload: unknown, helpers: JobHelpers): Promise<void> => {

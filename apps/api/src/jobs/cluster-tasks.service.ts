@@ -197,8 +197,7 @@ export class ClusterTasksService {
     const base = workerEnv().CLUSTER_PASS_BUDGET_MS;
     // Except that `collect` is paced per cluster (#571): one that does not fit
     // runs less often with proportionally longer, by the tier its last run left.
-    const tier =
-      task === "collect" ? (await collectPaceOf(this.database.db, clusterId)).tier : null;
+    const tier = task === "collect" ? await this.paceOf(clusterId, helpers) : null;
     const budgetMs =
       tier !== null ? collectBudgetMs(tier, base) : BUDGETED_PASSES.has(task) ? base : null;
     return runClusterTask(task, clusterId, this.depsFor(helpers, tier, base), run, budgetMs);
@@ -207,6 +206,26 @@ export class ClusterTasksService {
   // The database is CLOSED OVER here, not exposed: these three functions need it
   // and `runClusterTask` does not. Keeping it out of ClusterTaskDeps is what keeps
   // that interface three functions wide and testable with no database at all.
+  // The pace a collect runs at, or the unpaced one when it cannot be read.
+  //
+  // Advisory, so it must never be what stops a collect: a pace that cannot be
+  // read is the hourly collect at the base budget, which is exactly what every
+  // cluster had before pacing existed. The case that matters is a deploy that
+  // lands before its migration — on a host with no pre-deploy hook the table may
+  // be a few minutes behind the code, and every collect failing for it would be
+  // a regression bought by an optimisation. Logged as an error, because it is
+  // one, rather than swallowed.
+  private async paceOf(clusterId: string, helpers: JobQueue): Promise<number> {
+    try {
+      return (await collectPaceOf(this.database.db, clusterId)).tier;
+    } catch (error) {
+      helpers.logger.error(
+        `collect: reading the pace for cluster ${clusterId} failed, running it unpaced: ${String(error)}`,
+      );
+      return 0;
+    }
+  }
+
   // `tier` is the pace the pass was run at, or null for a pass that is not
   // paced; the timing records the tier the NEXT run gets, decided from this one.
   private depsFor(helpers: JobQueue, tier: number | null, baseMs: number): ClusterTaskDeps {

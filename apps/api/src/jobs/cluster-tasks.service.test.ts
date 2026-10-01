@@ -188,6 +188,27 @@ describe("the per-cluster passes", () => {
     expect(help.logger.info).toHaveBeenCalledWith(expect.stringContaining("from tier 1 to 0"));
   });
 
+  // Advisory: a pace that cannot be read — a deploy that landed before its
+  // migration — is the unpaced collect, not a failed one.
+  it("runs a collect unpaced when its pace cannot be read", async () => {
+    vi.mocked(collectPaceOf).mockRejectedValueOnce(
+      new Error('relation "cluster_pass_timings" does not exist'),
+    );
+    const help = helpers();
+
+    await expect(service().collect({ clusterId: CLUSTER }, help)).resolves.toBeUndefined();
+
+    expect(collectCluster).toHaveBeenCalled();
+    expect(recordPassTiming).toHaveBeenCalledWith(
+      db,
+      CLUSTER,
+      "collect",
+      expect.objectContaining({ outcome: "ok", budgetMs: 300_000 }),
+      0,
+    );
+    expect(help.logger.error).toHaveBeenCalledWith(expect.stringContaining("running it unpaced"));
+  });
+
   // Only the collect is paced. Every other pass keeps the base budget, and its
   // row keeps tier 0.
   it("does not read a pace for a pass that is not paced", async () => {
