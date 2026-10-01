@@ -46,6 +46,9 @@
     "zod": "^4.4.3",
     "typescript": "^6.0.3"
   },
+  "overrides": {
+    "fastify": "^5.12.5"
+  },
   "allowScripts": {
     "esbuild": true,
     "@swc/core": true,

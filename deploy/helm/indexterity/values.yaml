@@ -509,9 +509,9 @@ config:
   # Whether a trusted proxy sits in front of the api. Behind an ingress or a
   # Service, every request arrives from the proxy, so the per-IP rate limits
   # collapse into one shared bucket unless the forwarded address is trusted.
-  # "true", a hop count ("1"), or a CIDR list are all accepted. Leave it empty
-  # when the api is directly exposed: trusting a forwarded header then lets any
-  # client forge an address.
+  # "true" and a CIDR list are both accepted. Leave it empty when the api is
+  # directly exposed: trusting a forwarded header then lets any client forge an
+  # address.
   #
   # REQUIRED with ingress.enabled, and nothing is inferred. This was derived
   # from ingress.enabled once and was wrong both ways — with an ingress it chose

@@ -8,7 +8,7 @@ import { isTrustProxyValue, proxyTrustedBy } from "./env";
 // behind it — the exact failure #54 is about, on the other side of the hop.
 describe("proxyTrustedBy", () => {
   it("trusts every dialect that names a proxy", () => {
-    for (const value of ["true", "1", "2", "10.0.0.0/8", "10.0.0.0/8,192.168.0.0/16"]) {
+    for (const value of ["true", "10.0.0.0/8", "10.0.0.0/8,192.168.0.0/16"]) {
       expect(proxyTrustedBy(value), value).toBe(true);
     }
   });
@@ -24,14 +24,14 @@ describe("proxyTrustedBy", () => {
 // typo here is not a smaller version of "no proxy": it is a deployment that
 // believes it configured one.
 describe("isTrustProxyValue", () => {
-  it("accepts the three dialects", () => {
-    for (const value of ["true", "false", "1", "10.0.0.0/8", "fd00::/8", "10.4.1.7"]) {
+  it("accepts every dialect", () => {
+    for (const value of ["true", "false", "10.0.0.0/8", "fd00::/8", "10.4.1.7"]) {
       expect(isTrustProxyValue(value), value).toBe(true);
     }
   });
 
   it("refuses what is none of them", () => {
-    for (const value of ["ture", "yes", "0", "10.0.0.0/8,nonsense", "-1"]) {
+    for (const value of ["ture", "yes", "0", "1", "10.0.0.0/8,nonsense", "-1"]) {
       expect(isTrustProxyValue(value), value).toBe(false);
     }
   });

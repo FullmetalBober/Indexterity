@@ -17,7 +17,7 @@ import { z } from "zod";
 // Same rule as the api's schema (apps/api/src/config/schema.ts): **absent is
 // fine, malformed is fatal.**
 
-// Fastify's trustProxy dialect: "true", "false", a hop count, or a CIDR list.
+// Fastify's trustProxy dialect: "true", "false", or a CIDR list.
 //
 // The web server only needs the yes/no — whether something in front is known to
 // set x-forwarded-for, which decides whether the passthrough may forward the
@@ -30,8 +30,6 @@ const CIDR = /^[0-9a-fA-F.:]+(\/\d{1,3})?$/;
 export function isTrustProxyValue(raw: string): boolean {
   const value = raw.trim();
   if (value === "true" || value === "false") return true;
-  const hops = Number(value);
-  if (Number.isInteger(hops) && hops > 0) return true;
   const entries = value.split(",").map((entry) => entry.trim());
   return entries.every((entry) => CIDR.test(entry) && /[.:]/.test(entry));
 }
@@ -52,8 +50,7 @@ export const env = createEnv({
     // from vite.config.ts and never reads this.
     PORT: z.coerce.number().int().positive().default(3000),
     TRUST_PROXY: z.string().trim().default("false").refine(isTrustProxyValue, {
-      message:
-        'expected "true", "false", a hop count ("1"), or a comma-separated CIDR list ("10.0.0.0/8")',
+      message: 'expected "true", "false", or a comma-separated CIDR list ("10.0.0.0/8")',
     }),
     // Overrides the canonical URL in the landing page's SEO tags. Left unset
     // outside a fork or a separately-indexed staging copy.

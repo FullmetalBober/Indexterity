@@ -135,33 +135,29 @@ export function cidrEntries(raw: string | undefined): string[] {
     .filter((entry) => /^[0-9a-fA-F.:]+(\/\d{1,3})?$/.test(entry) && /[.:]/.test(entry));
 }
 
-// Fastify's trustProxy: "true", a hop count ("1" — trust the last N proxies), or
-// a CIDR list ("10.0.0.0/8,192.168.0.0/16").
+// Fastify's trustProxy: "true", or a CIDR list ("10.0.0.0/8,192.168.0.0/16") of
+// the addresses a proxy connects from (D177).
 //
 // Off by default and opt-in on purpose: trusting X-Forwarded-For while directly
 // exposed is worse than not resolving the address at all, because then any
 // client can forge a fresh IP per request and never hit a limit.
-export type TrustProxy = boolean | number | string;
+export type TrustProxy = boolean | string;
 
 export function trustProxyFrom(raw: string): TrustProxy {
   const value = raw.trim();
   if (value === "false") return false;
   if (value === "true") return true;
-  const hops = Number(value);
-  if (Number.isInteger(hops) && hops > 0) return hops;
   return value;
 }
 
-// Well-formed means one of the three dialects above — and for the list dialect,
-// that EVERY entry is address-shaped. The old reader kept the address-shaped
-// entries of a mixed list and threw the rest away, so `TRUST_PROXY=ture` and a
-// list with one bad range both read as "no proxy in front" and the deployment
-// served on with one shared rate-limit bucket.
+// Well-formed means "true", "false", or a list in which EVERY entry is
+// address-shaped. The old reader kept the address-shaped entries of a mixed list
+// and threw the rest away, so `TRUST_PROXY=ture` and a list with one bad range
+// both read as "no proxy in front" and the deployment served on with one shared
+// rate-limit bucket.
 function isTrustProxyValue(raw: string): boolean {
   const value = raw.trim();
   if (value === "true" || value === "false") return true;
-  const hops = Number(value);
-  if (Number.isInteger(hops) && hops > 0) return true;
   const entries = value.split(",").map((entry) => entry.trim());
   return entries.length > 0 && entries.every((entry) => cidrEntries(entry).length === 1);
 }
@@ -172,7 +168,7 @@ function trustProxy(): z.ZodType<TrustProxy, string | undefined> {
     .default("false")
     .refine(isTrustProxyValue, {
       message:
-        'expected "true", "false", a hop count ("1"), or a comma-separated CIDR list ("10.0.0.0/8,192.168.0.0/16")',
+        'expected "true", "false", or a comma-separated CIDR list ("10.0.0.0/8,192.168.0.0/16")',
     })
     .transform(trustProxyFrom);
 }
