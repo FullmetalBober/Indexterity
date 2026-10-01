@@ -22,6 +22,7 @@ function recorder(): {
   blocked: string[];
   unblocked: string[];
   timings: { clusterId: string; task: string; timing: PassTiming }[];
+  alertBodies: string[];
 } {
   const warns: string[] = [];
   const errors: string[] = [];
@@ -30,6 +31,7 @@ function recorder(): {
   const blocked: string[] = [];
   const unblocked: string[] = [];
   const timings: { clusterId: string; task: string; timing: PassTiming }[] = [];
+  const alertBodies: string[] = [];
   const claimed = new Set<string>();
   return {
     warns,
@@ -39,6 +41,7 @@ function recorder(): {
     blocked,
     unblocked,
     timings,
+    alertBodies,
     deps: {
       logger: {
         warn: (message) => void warns.push(message),
@@ -49,10 +52,11 @@ function recorder(): {
       // and a claimed scope records nothing. What the WINDOW is, and what a
       // failed SEND does to the claim, belong to mail/notify.test.ts; what a
       // task alerts about belongs here.
-      alert: (scope, clusterId, subject) => {
+      alert: (scope, clusterId, subject, body) => {
         if (claimed.has(scope)) return Promise.resolve();
         claimed.add(scope);
         alerts.push(`${clusterId}:${subject}`);
+        alertBodies.push(body);
         return Promise.resolve();
       },
       emitPassFinished: (clusterId, task) => {
@@ -707,6 +711,22 @@ describe("runClusterTask's timing", () => {
     expect(log.timings.map(({ timing }) => [timing.outcome, timing.budgetMs])).toEqual([
       ["error", null],
     ]);
+  });
+
+  // #571. A collect that does not fit is paced, so the mail says the first answer
+  // is already under way — and keeps the operator's for a cluster past the cap.
+  // Every other budgeted pass is not paced, and its mail is as it was.
+  it("tells the owners a timed-out collect is now paced, and only a collect", async () => {
+    const collect = recorder();
+    const probe = recorder();
+
+    await runClusterTask("collect", CLUSTER, collect.deps, () => new Promise<void>(() => {}), 20);
+    await runClusterTask("probe", CLUSTER, probe.deps, () => new Promise<void>(() => {}), 20);
+
+    expect(at(collect.alertBodies)).toContain("runs it less often");
+    expect(at(collect.alertBodies)).toContain("CLUSTER_PASS_BUDGET_MS");
+    expect(at(probe.alertBodies)).not.toContain("less often");
+    expect(at(probe.alertBodies)).toContain("CLUSTER_PASS_BUDGET_MS");
   });
 
   // The cluster's rows went with it, by cascade, and a write for it would fail on

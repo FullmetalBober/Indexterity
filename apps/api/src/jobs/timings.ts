@@ -36,14 +36,20 @@ function nonNegative(ms: number): number {
  * One statement and no read, like `markBlocked`: two runs of different passes
  * land on different rows, and two runs of the SAME pass cannot overlap, because
  * each pass has its own queue per cluster (dispatch.ts).
+ *
+ * `tier` is the pace the NEXT run of this pass gets (jobs/pacing.ts) — decided
+ * from this run and written with it, so a timing and the pace it implies are one
+ * row and cannot be read apart. Zero for every pass that is not paced.
  */
 export async function recordPassTiming(
   db: Database,
   clusterId: string,
   task: string,
   timing: PassTiming,
+  tier = 0,
 ): Promise<void> {
   const row = {
+    tier,
     startedAt: timing.startedAt,
     // Clamped, because a wall clock can step backwards under a pass, and the
     // panel's contract refuses a negative duration — one bad sample would take

@@ -105,6 +105,17 @@ function whereTheTimeWent(timing: PassTiming): string | null {
     .join("; ");
 }
 
+// How a paced pass runs from now on (#571), said as the trade it is: the
+// collect here needs longer than an hourly one is given, so it gets longer and
+// runs less often, by the same factor.
+function paceNote(timing: PassTiming): string | null {
+  if (timing.pace === null) return null;
+  return (
+    `Paced: runs every ${timing.pace.everyHours} hours with ${fmtDuration(timing.pace.budgetMs)}, ` +
+    `because a ${timing.task} here needs longer than an hourly one is given.`
+  );
+}
+
 export function PassesPanel({
   passes,
   loading,
@@ -132,16 +143,21 @@ export function PassesPanel({
     <ul className="space-y-2">
       {ordered.map((timing) => {
         const breakdown = whereTheTimeWent(timing);
+        const pace = paceNote(timing);
         return (
           <li key={timing.task} className="text-sm">
             <div className="flex flex-wrap items-center gap-2">
               <code className="font-mono text-xs">{timing.task}</code>
               <span>{took(timing)}</span>
               {outcomeBadge(timing)}
+              {timing.pace === null ? null : (
+                <Badge variant="outline">every {timing.pace.everyHours} h</Badge>
+              )}
               <span className="text-muted-foreground">
                 — started <LocalTime iso={timing.startedAt} options={RAN_AT} />
               </span>
             </div>
+            {pace === null ? null : <p className="text-muted-foreground text-xs">{pace}</p>}
             {breakdown === null ? null : (
               <p className="text-muted-foreground text-xs">Where the time went: {breakdown}</p>
             )}

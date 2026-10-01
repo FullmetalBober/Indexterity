@@ -105,6 +105,22 @@ function bucketOf(time: number): number {
 // earns its covered hours AND a mark of coverage, whatever time of day we
 // happened to be looking.
 function creditQuietRun(tally: BucketTally, from: number, to: number): void {
+  creditSpan(tally, from, to, 0);
+}
+
+// Spread `ops` over the slots [from, to) covers, in proportion to the hours it
+// spends in each, and credit each slot those hours. A quiet run is the case with
+// no ops; a gap between two readings is the case with some.
+//
+// Proportional for a gap because the traffic in it could be anywhere inside it,
+// and even is the only assumption that does not favour one slot. It used to all
+// go to the slot the gap STARTED in, which was sound while a gap was an hour and
+// could not cross a six-hour boundary by enough to matter. A paced cluster's gaps
+// are two or four hours (#571, D179), and a four-hour gap starting at 04:00 put
+// two hours of the 06-12 slot's traffic into the 00-06 slot's rate.
+function creditSpan(tally: BucketTally, from: number, to: number, ops: number): void {
+  const total = to - from;
+  if (total <= 0) return;
   let cursor = from;
   for (let step = 0; step < MAX_BUCKET_STEPS && cursor < to; step++) {
     const bucket = bucketOf(cursor);
@@ -115,6 +131,7 @@ function creditQuietRun(tally: BucketTally, from: number, to: number): void {
     const slot = tally[bucket];
     if (slot === undefined) return;
     slot.hours += (until - cursor) / HOUR_MS;
+    slot.ops += (ops * (until - cursor)) / total;
     cursor = until;
   }
 }
@@ -134,16 +151,10 @@ function tallyNamespace(samples: readonly TrafficSample[]): BucketTally {
     const delta = next.ops - run.ops;
     if (delta < 0) continue;
     const from = spanEnd(run);
-    const spanHours = (spanStart(next) - from) / HOUR_MS;
+    const to = spanStart(next);
+    const spanHours = (to - from) / HOUR_MS;
     if (spanHours <= 0 || spanHours > MAX_INTERVAL_HOURS) continue;
-    // Attribute the traffic to where the interval started. Sound here in a way
-    // it would not be for a run, because the writer keeps this gap under the
-    // collect cadence's own tolerance — it cannot span more than one slot by
-    // enough to matter.
-    const slot = tally[bucketOf(from)];
-    if (slot === undefined) continue;
-    slot.ops += delta;
-    slot.hours += spanHours;
+    creditSpan(tally, from, to, delta);
   }
   return tally;
 }

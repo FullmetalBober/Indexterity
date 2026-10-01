@@ -10,6 +10,7 @@ import {
   pgEnum,
   pgTable,
   primaryKey,
+  smallint,
   text,
   timestamp,
   unique,
@@ -1442,6 +1443,11 @@ export const clusterPassTimings = pgTable(
     budgetMs: integer("budget_ms"),
     // Where the time went, most expensive first.
     phases: jsonb("phases").$type<PassPhaseRecord[]>().notNull(),
+    // How far this pass is paced on this cluster (#571, D179): it runs every
+    // 2^tier hours with 2^tier times the base budget. Only `collect` is paced,
+    // and every other pass keeps 0. Written with the run that decided it, from
+    // the tier that run was given, so the two cannot disagree.
+    tier: smallint("tier").notNull().default(0),
   },
   (table) => [primaryKey({ columns: [table.clusterId, table.task] })],
 );

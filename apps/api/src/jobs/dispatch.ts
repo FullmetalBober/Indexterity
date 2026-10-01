@@ -147,23 +147,40 @@ async function enqueueUnlessRunning(
   return true;
 }
 
-/** Fan a per-cluster data-plane task out to every connected cluster. Returns how many were queued. */
+/**
+ * Fan a per-cluster data-plane task out to every connected cluster. Returns how
+ * many were queued.
+ *
+ * `due`, when given, narrows the fan-out to the clusters whose pass is due on
+ * this occurrence — the collect's pacing (jobs/pacing.ts). It narrows AFTER the
+ * fleet is observed, never before: the fleet is the whole roster, and a paced
+ * cluster that is simply not due this hour has not been offboarded.
+ */
 export async function dispatchToAllClusters(
   roster: ClusterRoster,
   task: string,
   helpers: JobQueue,
   running: RunningPasses,
+  due?: (clusterIds: readonly string[]) => Promise<ReadonlySet<string>>,
 ): Promise<number> {
   const ids = await roster.ids();
   // The fleet as it stands, so the unreachable gauge forgets a cluster that was
   // offboarded while we could not reach it.
   observeClusterFleet(ids);
+  const eligible = due === undefined ? null : await due(ids);
   // One read for the whole fleet rather than one per cluster.
   const locked = await running.locked(task);
   let queued = 0;
   for (const id of ids) {
+    if (eligible !== null && !eligible.has(id)) continue;
     if (await enqueueUnlessRunning(helpers, locked, task, id)) queued += 1;
   }
-  helpers.logger.info(`scheduler: dispatched ${task} to ${queued} of ${ids.length} cluster(s)`);
+  const paced =
+    eligible === null || eligible.size === ids.length
+      ? ""
+      : `; ${ids.length - eligible.size} paced and not due on this occurrence`;
+  helpers.logger.info(
+    `scheduler: dispatched ${task} to ${queued} of ${ids.length} cluster(s)${paced}`,
+  );
   return queued;
 }

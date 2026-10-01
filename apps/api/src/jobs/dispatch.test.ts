@@ -24,9 +24,12 @@ const idle = running();
 // saying so is what makes this fake plain enough to write without asserting
 // past anything.
 const roster: ClusterRoster = { ids: async () => CLUSTERS.map((cluster) => cluster.id) };
+// What the unreachable gauge is told the fleet is, so the paced fan-out below can
+// show it still sees every cluster.
+const observedFleet = vi.hoisted(() => vi.fn((_ids: readonly string[]) => undefined));
 vi.mock("../metrics", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../metrics")>()),
-  observeClusterFleet: () => undefined,
+  observeClusterFleet: observedFleet,
 }));
 
 function helpers() {
@@ -86,6 +89,30 @@ describe("dispatchToAllClusters", () => {
     // The five-minute probe must not queue behind a collect walking ten thousand
     // collections, so the two tasks are deliberately on different queues.
     expect(queueOf(collect.spy).queueName).not.toBe(queueOf(probe.spy).queueName);
+  });
+
+  // #571. A paced cluster's collect is not due every hour, so the dispatcher is
+  // told which ones are and sends only those.
+  it("narrows the fan-out to the clusters that are due", async () => {
+    const { spy, helpers: h } = helpers();
+    const due = vi.fn(async (_ids: readonly string[]) => new Set(["cluster-b"]));
+
+    await expect(dispatchToAllClusters(roster, "collect", h, idle, due)).resolves.toBe(1);
+
+    expect(due).toHaveBeenCalledWith(["cluster-a", "cluster-b"]);
+    expect(spy.mock.calls.map((call) => call[1])).toEqual([{ clusterId: "cluster-b" }]);
+  });
+
+  // A cluster that is not due this hour has not been offboarded. Told the
+  // narrowed list, the unreachable gauge would forget a paced cluster it cannot
+  // reach every hour it is skipped, and relearn it at the next probe.
+  it("still tells the gauge about every cluster, due or not", async () => {
+    observedFleet.mockClear();
+    const { helpers: h } = helpers();
+
+    await dispatchToAllClusters(roster, "collect", h, idle, async () => new Set());
+
+    expect(observedFleet).toHaveBeenCalledWith(["cluster-a", "cluster-b"]);
   });
 
   it("still dedupes a pending job rather than piling them up", async () => {

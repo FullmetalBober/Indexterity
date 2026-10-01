@@ -437,8 +437,11 @@ config:
   # excluded, so a long index build runs to completion. What bounds those is the
   # per-statement timeout in each engine adapter.
   #
-  # Raise it if a cluster reports "too slow to finish" on every tick and the host
-  # will sit still for longer.
+  # A collect that does not fit is paced rather than abandoned every hour: it
+  # gets twice this every two hours, then four times every four, so its share of
+  # the worker never grows. Raise this only for a cluster that times out even at
+  # four budgets every four hours, and a host that will sit still for longer —
+  # it raises the base of every pass, and the paced ceiling with it.
   clusterPassBudgetMs: 300000
   # How stale an index-usage recommendation may be. Milliseconds.
   #

@@ -21,8 +21,23 @@
 // silently buys less evidence: at fifteen minutes, twelve intervals is three
 // HOURS, and the engine would start calling indexes dead on it — with no code
 // change and no test failure. Hours mean the same thing at every cadence.
+//
+// Except that an interval can only ever say the collection was read SOMEWHERE in
+// it, and the longer the interval the less that says. Crediting it its whole
+// length up to the median gap was sound while every cluster was collected hourly,
+// because the median was an hour. A paced cluster (#571, D179) is collected every
+// two or four hours, its median follows, and one read anywhere in four hours
+// would earn four active hours — the 72-hour gate before an "unused" verdict
+// would clear up to four times faster for intermittent traffic, on less evidence,
+// which is the direction that drops an index somebody uses. So no interval is
+// credited more than an hour, whatever the cadence. An hourly cluster is
+// untouched, because its median already was an hour; a paced one reaches its
+// verdicts later, and never on less.
 
 import { medianObservationGap, type Run, sortedRuns, spanEnd, spanStart } from "./types";
+
+/** The most active time one interval may earn, whatever the cadence (#571). */
+export const MAX_ACTIVE_CREDIT_MS = 3_600_000;
 
 export interface ActivityPoint extends Run {
   // Cumulative reads for the collection, as $collStats reports them.
@@ -107,8 +122,9 @@ export interface ActivityFold {
 
 export function foldActivity(points: readonly ActivityPoint[]): ActivityFold {
   const sorted = sortedRuns(points);
-  const cap = medianObservationGap(sorted);
-  if (cap === 0) return { activeMs: 0, measurable: false };
+  const median = medianObservationGap(sorted);
+  if (median === 0) return { activeMs: 0, measurable: false };
+  const cap = Math.min(median, MAX_ACTIVE_CREDIT_MS);
 
   let activeMs = 0;
   for (let i = 1; i < sorted.length; i++) {
