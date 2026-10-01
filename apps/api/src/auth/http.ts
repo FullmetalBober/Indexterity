@@ -18,9 +18,9 @@ export function toWebHeaders(raw: IncomingHttpHeaders): Headers {
 // under the Request main.ts builds for it — and its own chain-walking wants the
 // CIDR ranges of every hop in front. Fastify has already answered that exact
 // question, through proxy-addr, in whichever dialect TRUST_PROXY is written in
-// (`true`, a hop count, or a range list). So the resolved address is handed over
-// as a one-entry chain and both limiters agree by construction rather than by two
-// configurations being kept in step.
+// (`true` or a range list). So the resolved address is handed over as a one-entry
+// chain and both limiters agree by construction rather than by two configurations
+// being kept in step.
 //
 // Two failures this closes, one in each posture (#54 left both open):
 //
