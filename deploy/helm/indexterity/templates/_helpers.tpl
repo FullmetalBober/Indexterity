@@ -455,6 +455,12 @@ one flat list per container is what makes the env homes readable
 {{- end }}
 - name: TRUST_PROXY
   value: {{ include "indexterity.trustProxy" . | quote }}
+{{- with .Values.config.clientIpHeader }}
+# The header a trusted proxy names the client in, believed instead of
+# X-Forwarded-For (values.yaml config.clientIpHeader).
+- name: CLIENT_IP_HEADER
+  value: {{ . | quote }}
+{{- end }}
 # Per-IP request budgets, per minute and PER REPLICA — the counters live in each
 # api process's memory, so two replicas allow twice this and a rolling deploy
 # hands every bucket back at zero.
@@ -578,6 +584,9 @@ about. Routing arranged outside it cannot be detected here, which is why the
 value is reported at install rather than only validated.
 */}}
 {{- define "indexterity.validateTrustProxy" -}}
+{{- if and .Values.config.clientIpHeader (not .Values.config.trustProxy) -}}
+{{- fail "config.clientIpHeader is believed only from a proxy config.trustProxy trusts, and config.trustProxy is empty — set it to the address that proxy connects from, or the header would be believed from every caller." -}}
+{{- end -}}
 {{- if and .Values.ingress.enabled (not .Values.config.trustProxy) -}}
 {{- fail "config.trustProxy is required when ingress.enabled — every request then arrives from the ingress, and without it each per-IP rate limit collapses into one bucket shared by every caller. Set it to the pod network's CIDR, usually \"10.0.0.0/8\" (k3s 10.42.0.0/16, Calico 192.168.0.0/16, an EKS default VPC 172.31.0.0/16 — check yours rather than pasting). Prefer a range over \"true\": better-auth attributes a forwarded header only from ranges, and with \"true\" it resolves nothing once the ingress has appended itself, which leaves the auth limits shared." -}}
 {{- end -}}

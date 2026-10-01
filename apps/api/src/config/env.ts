@@ -234,10 +234,16 @@ export function currentKeyVersion(): number {
 // better-auth's — collapse from per-client budgets into one global bucket.
 //
 // One setting for both: better-auth is handed the address Fastify resolved from
-// this rather than resolving its own (auth/http.ts), so `true`, a hop count and a
-// range list each mean the same thing to both limiters.
+// this rather than resolving its own (auth/http.ts), so `true` and a range list
+// each mean the same thing to both limiters.
 export function trustProxySetting(): TrustProxy {
   return apiEnv().TRUST_PROXY;
+}
+
+// The header a trusted proxy names the client in, believed instead of
+// X-Forwarded-For (http/client-address.ts), or undefined to keep that one.
+export function clientIpHeader(): string | undefined {
+  return apiEnv().CLIENT_IP_HEADER;
 }
 
 export function trustsProxy(): boolean {

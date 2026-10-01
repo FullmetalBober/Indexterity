@@ -437,8 +437,11 @@ config:
   # excluded, so a long index build runs to completion. What bounds those is the
   # per-statement timeout in each engine adapter.
   #
-  # Raise it if a cluster reports "too slow to finish" on every tick and the host
-  # will sit still for longer.
+  # A collect that does not fit is paced rather than abandoned every hour: it
+  # gets twice this every two hours, then four times every four, so its share of
+  # the worker never grows. Raise this only for a cluster that times out even at
+  # four budgets every four hours, and a host that will sit still for longer —
+  # it raises the base of every pass, and the paced ceiling with it.
   clusterPassBudgetMs: 300000
   # How stale an index-usage recommendation may be. Milliseconds.
   #
@@ -509,9 +512,9 @@ config:
   # Whether a trusted proxy sits in front of the api. Behind an ingress or a
   # Service, every request arrives from the proxy, so the per-IP rate limits
   # collapse into one shared bucket unless the forwarded address is trusted.
-  # "true", a hop count ("1"), or a CIDR list are all accepted. Leave it empty
-  # when the api is directly exposed: trusting a forwarded header then lets any
-  # client forge an address.
+  # "true" and a CIDR list are both accepted. Leave it empty when the api is
+  # directly exposed: trusting a forwarded header then lets any client forge an
+  # address.
   #
   # REQUIRED with ingress.enabled, and nothing is inferred. This was derived
   # from ingress.enabled once and was wrong both ways — with an ingress it chose
@@ -533,6 +536,15 @@ config:
   # claim to be someone else, so on a CNI that gives pods VPC addresses it is
   # every workload in the VPC, not just the ingress.
   trustProxy: ""
+  # The one header a trusted proxy sets to the client's address, believed
+  # instead of X-Forwarded-For. Leave it empty unless a CDN in front APPENDS to
+  # X-Forwarded-For rather than replacing it, which leaves the leftmost entry
+  # the caller's to write. Behind Cloudflare, "cf-connecting-ip": Cloudflare
+  # sets it itself, and trusting Cloudflare's ranges in trustProxy instead would
+  # let a Cloudflare Worker forge the chain, because a Worker's own address is
+  # among them. Believed only from a peer trustProxy trusts, so it needs
+  # trustProxy set, and the chart refuses it without.
+  clientIpHeader: ""
   # The plan a newly created organization lands on.
   #
   # SELF_HOSTED is the BUSL Additional Use Grant expressed as entitlements: one

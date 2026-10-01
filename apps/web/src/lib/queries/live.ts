@@ -25,6 +25,8 @@ import { queryKeys } from "./keys";
 //                      moved with them
 //   probe              writes nothing itself — it queues a suggest, whose own
 //                      pass event follows
+//   every pass         its own timing (#571), so the passes panel moves on
+//                      every one of them, probe included
 //
 // The three transition events land mid-pass, so the dashboard moves when the
 // row does rather than when the loop ends; the pass event closing the same
@@ -36,50 +38,7 @@ export function invalidationKeys(
 ): readonly (readonly unknown[])[] {
   switch (event.kind) {
     case "PASS_FINISHED":
-      switch (event.task) {
-        case "collect":
-          return [
-            queryKeys.collections(clusterId),
-            // Every page of the index inventory, by prefix (#431): a collect
-            // moves every index's size and counters, not the page in view.
-            queryKeys.clusterIndexesAll(clusterId),
-            queryKeys.indexSizeSeries(clusterId),
-            queryKeys.latency(clusterId),
-            queryKeys.latencySeries(clusterId),
-            queryKeys.nodes(clusterId),
-            queryKeys.clusters(),
-          ];
-        case "classify":
-        case "suggest":
-          // The inventory's last column is "is something proposing to change
-          // this index", so a pass that rewrites the proposals moves it too —
-          // even though not one measurement on the page has changed.
-          return [
-            queryKeys.recommendations(clusterId),
-            queryKeys.clusterIndexesAll(clusterId),
-            // The scanning workload is REWRITTEN by the suggest pass — every
-            // shape's outcome is decided there — so this is the event that
-            // moves it, not the collect (#432).
-            queryKeys.clusterWorkloadAll(clusterId),
-          ];
-        case "apply":
-        case "finalize":
-          return [
-            queryKeys.recommendations(clusterId),
-            queryKeys.activity(clusterId),
-            queryKeys.roi(clusterId),
-            // finalize is where both regression gates run, and each of them
-            // parks an index (#159). apply shares this arm and writes no
-            // cooldown of its own — an invalidation that refetches an unchanged
-            // list is cheaper than two arms that have to be kept apart.
-            queryKeys.cooldowns(clusterId),
-            // Same column: a drop that executes takes its row out of the live
-            // states, and a build that graduates puts one in.
-            queryKeys.clusterIndexesAll(clusterId),
-          ];
-        default:
-          return [];
-      }
+      return [...passKeys(clusterId, event.task), queryKeys.passes(clusterId)];
     case "DROP_HIDDEN":
     case "BUILD_GRADUATED":
       return [
@@ -104,6 +63,54 @@ export function invalidationKeys(
         // column has to stop pointing at it.
         queryKeys.clusterIndexesAll(clusterId),
       ];
+  }
+}
+
+// What one landed pass moved besides its own timing, which every pass moves.
+function passKeys(clusterId: string, task: ClusterEvent["task"]): readonly (readonly unknown[])[] {
+  switch (task) {
+    case "collect":
+      return [
+        queryKeys.collections(clusterId),
+        // Every page of the index inventory, by prefix (#431): a collect
+        // moves every index's size and counters, not the page in view.
+        queryKeys.clusterIndexesAll(clusterId),
+        queryKeys.indexSizeSeries(clusterId),
+        queryKeys.latency(clusterId),
+        queryKeys.latencySeries(clusterId),
+        queryKeys.nodes(clusterId),
+        queryKeys.clusters(),
+      ];
+    case "classify":
+    case "suggest":
+      // The inventory's last column is "is something proposing to change
+      // this index", so a pass that rewrites the proposals moves it too —
+      // even though not one measurement on the page has changed.
+      return [
+        queryKeys.recommendations(clusterId),
+        queryKeys.clusterIndexesAll(clusterId),
+        // The scanning workload is REWRITTEN by the suggest pass — every
+        // shape's outcome is decided there — so this is the event that
+        // moves it, not the collect (#432).
+        queryKeys.clusterWorkloadAll(clusterId),
+      ];
+    case "apply":
+    case "finalize":
+      return [
+        queryKeys.recommendations(clusterId),
+        queryKeys.activity(clusterId),
+        queryKeys.roi(clusterId),
+        // finalize is where both regression gates run, and each of them
+        // parks an index (#159). apply shares this arm and writes no
+        // cooldown of its own — an invalidation that refetches an unchanged
+        // list is cheaper than two arms that have to be kept apart.
+        queryKeys.cooldowns(clusterId),
+        // Same column: a drop that executes takes its row out of the live
+        // states, and a build that graduates puts one in.
+        queryKeys.clusterIndexesAll(clusterId),
+      ];
+    default:
+      return [];
   }
 }
 

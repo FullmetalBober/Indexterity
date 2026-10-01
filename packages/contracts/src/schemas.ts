@@ -822,6 +822,55 @@ export const clusterNodes = z.object({
 });
 export type ClusterNodes = z.infer<typeof clusterNodes>;
 
+// How long one pass last took against the cluster, and how it ended (#571).
+//
+// `task` and `outcome` are strings for the reason a block's `task` is one:
+// adding a pass or an outcome should be a constant rather than a migration,
+// which is only safe while the reader degrades — so the panel draws a pass or
+// an outcome it does not know by its name.
+export const passPhase = z.object({
+  name: z.string(),
+  totalMs: z.number().int().nonnegative(),
+  calls: z.number().int().nonnegative(),
+  // Still open when the pass ended: the phase a budget cut off, whose total is
+  // a floor and not a measurement.
+  running: z.boolean(),
+});
+export type PassPhase = z.infer<typeof passPhase>;
+
+export const passTiming = z.object({
+  task: z.string(),
+  startedAt: instant,
+  durationMs: z.number().int().nonnegative(),
+  // `ok`, `timed-out`, `unreachable`, `tunnel-down`, `credentials`, `insecure`,
+  // `unsupported` or `error` — the pipeline metric's own vocabulary.
+  outcome: z.string(),
+  // What the pass was allowed, or null for one with no wall clock (`apply`,
+  // `finalize`), so a duration can be read against its ceiling.
+  budgetMs: z.number().int().positive().nullable(),
+  // Most expensive first; empty for a pass that timed nothing.
+  phases: z.array(passPhase),
+  // How this pass runs from now on when it is paced (#571): every `everyHours`
+  // hours against `budgetMs`. Null for a pass that is not — every pass but a
+  // `collect` that did not fit an hour. Decided by the run above, so it can
+  // differ from the budget that run had.
+  pace: z
+    .object({
+      everyHours: z.number().int().positive(),
+      budgetMs: z.number().int().positive(),
+    })
+    .nullable(),
+});
+export type PassTiming = z.infer<typeof passTiming>;
+
+// Every pass that has run against the cluster since timings were kept, one entry
+// each. Empty before the first one has.
+export const clusterPasses = z.object({
+  clusterId: z.uuid(),
+  passes: z.array(passTiming),
+});
+export type ClusterPasses = z.infer<typeof clusterPasses>;
+
 // One index the engine has agreed not to touch, and until when (#159).
 //
 // Written from three places — the regression gate when reads got worse after a

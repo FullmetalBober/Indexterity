@@ -241,31 +241,63 @@ describe("TRUST_PROXY", () => {
     expect(parse("api", API).TRUST_PROXY).toBe(false);
   });
 
-  it("reads the three dialects Fastify accepts", () => {
+  it("reads the dialects Fastify accepts", () => {
     expect(parse("api", { ...API, TRUST_PROXY: "true" }).TRUST_PROXY).toBe(true);
-    expect(parse("api", { ...API, TRUST_PROXY: "2" }).TRUST_PROXY).toBe(2);
     expect(parse("api", { ...API, TRUST_PROXY: "10.0.0.0/8,192.168.0.0/16" }).TRUST_PROXY).toBe(
       "10.0.0.0/8,192.168.0.0/16",
     );
   });
 
   // The failure this replaces. `ture` and a list with one bad range both read as
-  // "nothing in front", and the deployment served on with one shared bucket.
+  // "nothing in front", and the deployment served on with one shared bucket. A
+  // bare number is no address, and Fastify would trust nothing for it (D177).
   it("refuses a value that is none of them", () => {
     expect(refusal("api", { ...API, TRUST_PROXY: "ture" })).toContain("TRUST_PROXY");
     expect(refusal("api", { ...API, TRUST_PROXY: "10.0.0.0/8,nonsense" })).toContain("TRUST_PROXY");
+    expect(refusal("api", { ...API, TRUST_PROXY: "1" })).toContain("TRUST_PROXY");
   });
 
   it("trims before deciding", () => {
     expect(parse("api", { ...API, TRUST_PROXY: " true " }).TRUST_PROXY).toBe(true);
-    expect(trustProxyFrom(" 2 ")).toBe(2);
+    expect(trustProxyFrom(" 10.0.0.0/8 ")).toBe("10.0.0.0/8");
   });
 });
 
-// The same variable, read a second way. Fastify takes "true" and a hop count;
-// better-auth takes neither and needs the ranges by name, or it cannot tell the
-// client from the proxy in a two-hop X-Forwarded-For and puts every caller in one
-// rate-limit bucket (#54).
+// #574. The header a trusted proxy names the client in, believed instead of
+// x-forwarded-for — and only ever from a peer TRUST_PROXY trusts.
+describe("CLIENT_IP_HEADER", () => {
+  it("is unset by default, which keeps x-forwarded-for", () => {
+    expect(parse("api", API).CLIENT_IP_HEADER).toBeUndefined();
+  });
+
+  it("reads a header name in any case", () => {
+    expect(
+      parse("api", { ...API, TRUST_PROXY: "127.0.0.1", CLIENT_IP_HEADER: " CF-Connecting-IP " })
+        .CLIENT_IP_HEADER,
+    ).toBe("cf-connecting-ip");
+  });
+
+  // With nothing trusted it would be believed from every caller, which is the
+  // forgery it exists to end.
+  it("refuses to be believed with no trusted proxy", () => {
+    expect(refusal("api", { ...API, CLIENT_IP_HEADER: "cf-connecting-ip" })).toContain(
+      "CLIENT_IP_HEADER",
+    );
+  });
+
+  it("refuses what is not one header name, and x-forwarded-for itself", () => {
+    for (const value of ["cf-connecting-ip, true-client-ip", "x forwarded", "x-forwarded-for"]) {
+      expect(
+        refusal("api", { ...API, TRUST_PROXY: "127.0.0.1", CLIENT_IP_HEADER: value }),
+        value,
+      ).toContain("CLIENT_IP_HEADER");
+    }
+  });
+});
+
+// The list dialect, entry by entry. The schema above refuses a whole value on one
+// entry this drops, because a list that keeps only its good ranges reads as a
+// configured proxy and trusts less than the operator wrote.
 describe("cidrEntries", () => {
   it("keeps the ranges of a CIDR list", () => {
     expect(cidrEntries("10.0.0.0/8, 192.168.0.0/16")).toEqual(["10.0.0.0/8", "192.168.0.0/16"]);
@@ -279,8 +311,8 @@ describe("cidrEntries", () => {
     expect(cidrEntries("fd00::/8")).toEqual(["fd00::/8"]);
   });
 
-  // "true" and "2" are Fastify's dialects, and handing either to better-auth as a
-  // range would be a list it silently never matches.
+  // "true" is a dialect of its own and "2" is no address; read as a range, either
+  // would be a list that silently never matches.
   it("drops what is not an address at all", () => {
     for (const value of ["true", "false", "2", "", "  "]) {
       expect(cidrEntries(value)).toEqual([]);

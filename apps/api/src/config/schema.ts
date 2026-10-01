@@ -135,33 +135,29 @@ export function cidrEntries(raw: string | undefined): string[] {
     .filter((entry) => /^[0-9a-fA-F.:]+(\/\d{1,3})?$/.test(entry) && /[.:]/.test(entry));
 }
 
-// Fastify's trustProxy: "true", a hop count ("1" — trust the last N proxies), or
-// a CIDR list ("10.0.0.0/8,192.168.0.0/16").
+// Fastify's trustProxy: "true", or a CIDR list ("10.0.0.0/8,192.168.0.0/16") of
+// the addresses a proxy connects from (D177).
 //
 // Off by default and opt-in on purpose: trusting X-Forwarded-For while directly
 // exposed is worse than not resolving the address at all, because then any
 // client can forge a fresh IP per request and never hit a limit.
-export type TrustProxy = boolean | number | string;
+export type TrustProxy = boolean | string;
 
 export function trustProxyFrom(raw: string): TrustProxy {
   const value = raw.trim();
   if (value === "false") return false;
   if (value === "true") return true;
-  const hops = Number(value);
-  if (Number.isInteger(hops) && hops > 0) return hops;
   return value;
 }
 
-// Well-formed means one of the three dialects above — and for the list dialect,
-// that EVERY entry is address-shaped. The old reader kept the address-shaped
-// entries of a mixed list and threw the rest away, so `TRUST_PROXY=ture` and a
-// list with one bad range both read as "no proxy in front" and the deployment
-// served on with one shared rate-limit bucket.
+// Well-formed means "true", "false", or a list in which EVERY entry is
+// address-shaped. The old reader kept the address-shaped entries of a mixed list
+// and threw the rest away, so `TRUST_PROXY=ture` and a list with one bad range
+// both read as "no proxy in front" and the deployment served on with one shared
+// rate-limit bucket.
 function isTrustProxyValue(raw: string): boolean {
   const value = raw.trim();
   if (value === "true" || value === "false") return true;
-  const hops = Number(value);
-  if (Number.isInteger(hops) && hops > 0) return true;
   const entries = value.split(",").map((entry) => entry.trim());
   return entries.length > 0 && entries.every((entry) => cidrEntries(entry).length === 1);
 }
@@ -172,9 +168,38 @@ function trustProxy(): z.ZodType<TrustProxy, string | undefined> {
     .default("false")
     .refine(isTrustProxyValue, {
       message:
-        'expected "true", "false", a hop count ("1"), or a comma-separated CIDR list ("10.0.0.0/8,192.168.0.0/16")',
+        'expected "true", "false", or a comma-separated CIDR list ("10.0.0.0/8,192.168.0.0/16")',
     })
     .transform(trustProxyFrom);
+}
+
+// The one header a trusted proxy sets to the client's address, believed INSTEAD
+// of X-Forwarded-For (#574, D180).
+//
+// For a host whose proxy appends to X-Forwarded-For rather than replacing it —
+// Render, which Cloudflare sits in front of — no TRUST_PROXY value resolves the
+// client. `true` takes the leftmost entry, which the caller writes. Cloudflare's
+// published ranges do not close it either: a Worker's request arrives from
+// 2a06:98c0:3600::103, inside 2a06:98c0::/29, so the walk trusts it and reads on
+// into whatever the Worker wrote. `cf-connecting-ip` is the answer there:
+// Cloudflare sets it to the address that connected, and pins it to that Worker
+// address for Worker traffic.
+//
+// A header name, lowercased, and never x-forwarded-for itself, which is the
+// thing being replaced.
+function clientIpHeader() {
+  return z
+    .string()
+    .trim()
+    .toLowerCase()
+    .refine((value) => /^[a-z0-9-]+$/.test(value), {
+      message: 'expected one header name, such as "cf-connecting-ip"',
+    })
+    .refine((value) => value !== "x-forwarded-for", {
+      message:
+        "this names the header believed INSTEAD of x-forwarded-for — leave it unset to keep that one",
+    })
+    .optional();
 }
 
 // Every process reads these. `migrate` is the floor rather than a convenience:
@@ -273,6 +298,11 @@ const workerShape = {
   // Raise it for a self-hosted install with genuinely large clusters and a host
   // that will sit still for it. The failure it prevents is not slowness; it is a
   // pass that can never finish holding the only slot while it fails to.
+  //
+  // It is the BASE for `collect`, which is paced per cluster (#571,
+  // jobs/pacing.ts): one that does not fit gets two of these every two hours,
+  // then four every four. So raising it is for a cluster past that ceiling, and
+  // it raises the ceiling with it.
   CLUSTER_PASS_BUDGET_MS: positiveInteger(300_000),
   // How often the FAST passes recur: `apply`, the read-pressure `probe`, and the
   // stale-lock repair that shares their clock. The hourly and daily passes keep
@@ -391,6 +421,7 @@ const apiShape = {
   REQUIRE_OWNER_2FA: flag(false),
   SIGNUP_MODE: z.enum(["invite", "open", "closed"]).default("invite"),
   TRUST_PROXY: trustProxy(),
+  CLIENT_IP_HEADER: clientIpHeader(),
   RATE_LIMIT_MAX: positive(300),
   AUTH_RATE_LIMIT_MAX: positive(20),
   // Whether THIS process owns the recurring schedule. The one topology question
@@ -556,6 +587,20 @@ function checkCronTrigger(value: Record<string, unknown>, ctx: z.RefinementCtx):
 
 export const MIN_CRON_SECRET_LENGTH = 32;
 
+// A header is only as trustworthy as the peer that sent it, and TRUST_PROXY is
+// what says which peers those are. With nothing trusted, CLIENT_IP_HEADER would
+// be believed from every caller — the exact forgery it exists to end.
+function checkClientIpHeader(value: Record<string, unknown>, ctx: z.RefinementCtx): void {
+  if (value.CLIENT_IP_HEADER === undefined || value.TRUST_PROXY !== false) return;
+  ctx.addIssue({
+    code: "custom",
+    path: ["CLIENT_IP_HEADER"],
+    message:
+      "believed only from a proxy TRUST_PROXY trusts, and TRUST_PROXY trusts none — set it to " +
+      "the address that proxy connects from (127.0.0.1 when the dashboard forwards /api)",
+  });
+}
+
 export const migrateEnvSchema = z.looseObject(migrateShape);
 export const workerEnvSchema = z
   .looseObject(workerShape)
@@ -566,7 +611,8 @@ export const apiEnvSchema = z
   .superRefine(checkRotationKeys)
   .superRefine(checkMailGroup)
   .superRefine(checkVerificationNeedsMail)
-  .superRefine(checkCronTrigger);
+  .superRefine(checkCronTrigger)
+  .superRefine(checkClientIpHeader);
 
 export const PROCESS_SCHEMAS = {
   api: apiEnvSchema,

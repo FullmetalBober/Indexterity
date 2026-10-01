@@ -1,4 +1,4 @@
-import type { ActivityFold, ObservationFold } from "../analysis";
+import { type ActivityFold, MAX_ACTIVE_CREDIT_MS, type ObservationFold } from "../analysis";
 import { type Database, sql } from "../db";
 import { workloadKey } from "../engine/ports";
 
@@ -284,7 +284,10 @@ function evidenceQuery(clusterId: string, since: Date) {
     --
     -- The cap is what stops one outage manufacturing evidence: what a long
     -- interval tells you is that the collection was used SOMEWHERE in it, not
-    -- throughout. cap_ms is not null is checked rather than left to least,
+    -- throughout. And never more than an hour, whatever the median: a paced
+    -- cluster's intervals are two or four hours long (#571), and crediting one
+    -- read with four of them would clear the active-hours gate on a quarter of
+    -- the evidence (analysis/activity.ts, MAX_ACTIVE_CREDIT_MS). cap_ms is not null is checked rather than left to least,
     -- which in postgres IGNORES a null argument and would silently credit the
     -- interval uncapped.
     select
@@ -294,7 +297,7 @@ function evidenceQuery(clusterId: string, since: Date) {
       sum(
         case
           when steps.moved and median.cap_ms is not null
-          then least(steps.between_ms, median.cap_ms)
+          then least(steps.between_ms, median.cap_ms, ${MAX_ACTIVE_CREDIT_MS}::double precision)
         end
       ) as active_ms,
       extract(epoch from (max(steps.last_seen_at) - min(steps.captured_at)))::double precision

@@ -56,10 +56,12 @@ import { activeCooldownKeys, cooldownKey } from "../src/jobs/cooldowns";
 import { applyCreatesForCluster } from "../src/jobs/create";
 import { finalizeCluster } from "../src/jobs/finalize";
 import { releaseStaleLocks } from "../src/jobs/locks";
+import { collectPaceOf, collectsDue } from "../src/jobs/pacing";
 import { planForCluster } from "../src/jobs/plan";
 import { latestBaselines } from "../src/jobs/probe";
 import { pruneDeadLetterJobs, pruneOldSamples } from "../src/jobs/retention";
 import { suggestForCluster } from "../src/jobs/suggest";
+import { recordPassTiming } from "../src/jobs/timings";
 import { isScanning } from "../src/jobs/workload-shapes";
 import { MongoConnection, MongoIndexCollector } from "../src/mongo";
 import { hasQueryStatsPlanMetrics, parseServerVersion } from "../src/mongo/version";
@@ -310,6 +312,101 @@ describe("cluster lifecycle", () => {
     const foreign = asRecord(await (await api(`/clusters/${clusterId}/nodes`, stranger)).json());
     expect(foreign.collectedAt).toBeNull();
     expect(foreign.nodes).toEqual([]);
+  });
+
+  // #571. How long each pass last took, written the way the runner writes it and
+  // read back through the route the passes panel uses. Twice for one pass,
+  // because the row is the LAST run and an upsert that inserted would leave the
+  // panel two collects to choose between.
+  it("serves how long each pass last took, one row per pass", async () => {
+    const startedAt = new Date("2026-10-01T12:00:00.000Z");
+    await recordPassTiming(db, clusterId, "collect", {
+      startedAt,
+      durationMs: 300_000,
+      outcome: "timed-out",
+      budgetMs: 300_000,
+      phases: [{ name: "per-collection", totalMs: 299_000, calls: 1, running: true }],
+    });
+    await recordPassTiming(db, clusterId, "collect", {
+      startedAt: new Date(startedAt.getTime() + 3_600_000),
+      durationMs: 4_200,
+      outcome: "ok",
+      budgetMs: 300_000,
+      phases: [{ name: "per-collection", totalMs: 4_000, calls: 1, running: false }],
+    });
+    await recordPassTiming(db, clusterId, "apply", {
+      startedAt,
+      durationMs: 800,
+      outcome: "ok",
+      budgetMs: null,
+      phases: [],
+    });
+
+    const res = await api(`/clusters/${clusterId}/passes`, owner);
+    expect(res.status).toBe(200);
+    const passes = asRecords(asRecord(await res.json()).passes, "body.passes");
+    expect(passes.map((pass) => pass.task)).toEqual(["apply", "collect"]);
+    expect(passes[1]).toEqual({
+      task: "collect",
+      startedAt: "2026-10-01T13:00:00.000Z",
+      durationMs: 4_200,
+      outcome: "ok",
+      budgetMs: 300_000,
+      phases: [{ name: "per-collection", totalMs: 4_000, calls: 1, running: false }],
+      pace: null,
+    });
+    expect(passes[0]?.budgetMs).toBeNull();
+
+    // Another tenant's cluster answers empty, as the roster does.
+    const stranger = await signUp("passes-stranger");
+    createdEmails.push(stranger.email);
+    createdOrgIds.push(asString(asRecord(await (await api("/org", stranger)).json()).id));
+    const foreign = asRecord(await (await api(`/clusters/${clusterId}/passes`, stranger)).json());
+    expect(foreign.passes).toEqual([]);
+  });
+
+  // #571. A collect that did not fit is paced, and the pace is written with the
+  // run that decided it. The dispatcher's read over the real table, and the
+  // route's, have to agree with what was written — and the row goes back to "not
+  // paced" afterwards, because every test below shares this cluster.
+  it("paces a collect that did not fit, and dispatches it only when it is due", async () => {
+    const hourAgo = new Date(Date.now() - 3_600_000);
+    await recordPassTiming(
+      db,
+      clusterId,
+      "collect",
+      {
+        startedAt: hourAgo,
+        durationMs: 300_000,
+        outcome: "timed-out",
+        budgetMs: 300_000,
+        phases: [],
+      },
+      2,
+    );
+    try {
+      expect(await collectPaceOf(db, clusterId)).toEqual({ tier: 2, lastStartedAt: hourAgo });
+      // Every fourth hour at the second pace: an hour on, it is not due; a
+      // cluster with no collect on record always is.
+      const fresh = "00000000-0000-4000-8000-000000000571";
+      expect([...(await collectsDue(db, [clusterId, fresh], new Date()))]).toEqual([fresh]);
+      const later = new Date(hourAgo.getTime() + 4 * 3_600_000);
+      expect([...(await collectsDue(db, [clusterId], later))]).toEqual([clusterId]);
+
+      const res = await api(`/clusters/${clusterId}/passes`, owner);
+      const collect = asRecords(asRecord(await res.json()).passes, "body.passes").find(
+        (pass) => pass.task === "collect",
+      );
+      expect(collect?.pace).toEqual({ everyHours: 4, budgetMs: 1_200_000 });
+    } finally {
+      await recordPassTiming(
+        db,
+        clusterId,
+        "collect",
+        { startedAt: hourAgo, durationMs: 4_200, outcome: "ok", budgetMs: 300_000, phases: [] },
+        0,
+      );
+    }
   });
 
   // #524. The dashboard subtracts the members a reading speaks for from the
@@ -3493,18 +3590,20 @@ describe("an index the engine is still watching", () => {
     );
 
     // The collection has to have been genuinely queried, or the activity gate
-    // (correctly) refuses any usage claim about its indexes.
+    // (correctly) refuses any usage claim about its indexes. Hourly, as a collect
+    // reads it: since #571 an interval earns at most an hour of activity, so the
+    // twelve-hour readings this used to write bought nineteen hours, not 228.
     await insertLatency(
       db,
-      Array.from({ length: 20 }, (_, i) => ({
+      Array.from({ length: 240 }, (_, i) => ({
         clusterId: watchId,
         database: "inttest",
         collection: "orders",
-        readOps: (i + 1) * 500,
+        readOps: (i + 1) * 50,
         readLatencyMicros: 100,
         writeOps: 0,
         writeLatencyMicros: 0,
-        capturedAt: new Date(base + i * 43_200_000),
+        capturedAt: new Date(base + i * 3_600_000),
       })),
     );
 
@@ -4183,14 +4282,17 @@ describe("a worker that died holding a queue", () => {
   //
   // `apply` keeps the four hours, and must: it has no budget precisely because a
   // build legitimately runs for tens of minutes (#410).
+  //
+  // A `probe` stands for the budgeted passes here rather than a `collect`, which
+  // is paced since #571 and has a longer interval of its own (the test below).
   it("frees a budgeted pass sooner than an unbudgeted one", async () => {
     const utils = await makeWorkerUtils({ connectionString: databaseUrl() });
-    const budgetedQueue = `collect:${clusterId}:budgeted`;
+    const budgetedQueue = `probe:${clusterId}:budgeted`;
     const buildQueue = `apply:${clusterId}:build`;
     let budgetedId: string;
     let buildId: string;
     try {
-      budgetedId = (await utils.addJob("collect", { clusterId }, { queueName: budgetedQueue })).id;
+      budgetedId = (await utils.addJob("probe", { clusterId }, { queueName: budgetedQueue })).id;
       buildId = (await utils.addJob("apply", { clusterId }, { queueName: buildQueue })).id;
     } finally {
       await utils.release();
@@ -4237,6 +4339,53 @@ describe("a worker that died holding a queue", () => {
     await db.execute(
       sql`delete from graphile_worker._private_job_queues
           where queue_name in (${budgetedQueue}, ${buildQueue})`,
+    );
+  });
+
+  // #571. A paced collect runs against up to four budgets — twenty minutes at the
+  // default — so twenty minutes in it may well be working, and freeing its lock
+  // would start a second collect beside it. It is held to three of its LONGEST
+  // budget instead: an hour, not a quarter of one.
+  it("gives a collect three of its longest paced budget before freeing it", async () => {
+    const utils = await makeWorkerUtils({ connectionString: databaseUrl() });
+    const workingQueue = `collect:${clusterId}:paced`;
+    const goneQueue = `collect:${clusterId}:gone`;
+    let workingId: string;
+    let goneId: string;
+    try {
+      workingId = (await utils.addJob("collect", { clusterId }, { queueName: workingQueue })).id;
+      goneId = (await utils.addJob("collect", { clusterId }, { queueName: goneQueue })).id;
+    } finally {
+      await utils.release();
+    }
+    const hold = (queue: string, jobId: string, age: string) =>
+      db
+        .execute(
+          sql`update graphile_worker._private_job_queues
+              set locked_at = now() - ${sql.raw(`interval '${age}'`)}, locked_by = 'gone'
+              where queue_name = ${queue}`,
+        )
+        .then(() =>
+          db.execute(
+            sql`update graphile_worker._private_jobs
+                set locked_at = now() - ${sql.raw(`interval '${age}'`)}, locked_by = 'gone'
+                where id::text = ${jobId}`,
+          ),
+        );
+    await hold(workingQueue, workingId, "20 minutes");
+    await hold(goneQueue, goneId, "70 minutes");
+
+    const freed = await releaseStaleLocks(db);
+
+    expect(freed).toContain(goneQueue);
+    expect(freed).not.toContain(workingQueue);
+
+    await db.execute(
+      sql`delete from graphile_worker._private_jobs where id::text in (${workingId}, ${goneId})`,
+    );
+    await db.execute(
+      sql`delete from graphile_worker._private_job_queues
+          where queue_name in (${workingQueue}, ${goneQueue})`,
     );
   });
 });

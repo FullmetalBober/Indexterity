@@ -38,7 +38,18 @@ const HOP_BY_HOP = new Set([
 // request and never reach a limit — the exact hole the api's own comment warns
 // about. So they are stripped unless this server is itself behind a proxy that
 // sets them, which is a thing the deployment has to say out loud.
-const CLIENT_SPOOFABLE = ["x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "x-real-ip"];
+//
+// The two Cloudflare names belong here since #574: the api can be told to
+// believe one of them in place of x-forwarded-for (CLIENT_IP_HEADER), and from
+// a caller with nothing in front of it, they are as much the caller's to write.
+const CLIENT_SPOOFABLE = [
+  "x-forwarded-for",
+  "x-forwarded-host",
+  "x-forwarded-proto",
+  "x-real-ip",
+  "cf-connecting-ip",
+  "true-client-ip",
+];
 
 export function isApiRequest(pathname: string): boolean {
   return pathname === "/api" || pathname.startsWith("/api/");
