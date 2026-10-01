@@ -15,6 +15,7 @@ import { ClusterCredentialsError, ClusterGoneError } from "./cluster-connection"
 import type { ClusterPasses } from "./cluster-tasks.service";
 import { runDigest } from "./digest";
 import { clusterRoster, dispatchToAllClusters, runningPasses } from "./dispatch";
+import { collectsDue } from "./pacing";
 import { pruneOldSamples } from "./retention";
 import type { PassTiming } from "./timings";
 
@@ -369,9 +370,16 @@ export async function runClusterTask(
         `The ${task} step against this cluster ${how}, so it did nothing. Nothing was ` +
           `executed and nothing was lost.\n\n` +
           `This usually means the cluster is very large, very busy, or reached over a slow ` +
-          `link — the step is not failing so much as not fitting. Whoever runs this ` +
-          `Indexterity can raise the budget (CLUSTER_PASS_BUDGET_MS) if the cluster genuinely ` +
-          `needs longer.` +
+          `link — the step is not failing so much as not fitting. ` +
+          // The collect paces itself (#571, jobs/pacing.ts), so the first answer
+          // is already under way; the operator's is for a cluster past the cap.
+          (task === "collect"
+            ? `Indexterity now gives this cluster's collect longer and runs it less often, ` +
+              `by the same factor, up to four times the budget every four hours — the ` +
+              `cluster's Passes panel shows where it stands. If even that does not fit, ` +
+              `whoever runs this Indexterity can raise the budget (CLUSTER_PASS_BUDGET_MS).`
+            : `Whoever runs this Indexterity can raise the budget (CLUSTER_PASS_BUDGET_MS) if ` +
+              `the cluster genuinely needs longer.`) +
           (spent === "" ? "" : `\n\nWhere the time went: ${spent}.`),
       );
       return;
@@ -468,8 +476,29 @@ export function createTaskList(
     scheduleProbe: async (_payload: unknown, helpers: JobHelpers): Promise<void> => {
       await dispatchToAllClusters(clusterRoster(db), "probe", helpers, runningPasses(db));
     },
+    // Paced (#571): a cluster whose collect does not fit an hour is collected
+    // every two or four hours instead, so only the ones due this hour go out.
+    //
+    // A pace that cannot be read sends everybody, which is the hourly schedule
+    // as it was before pacing — for the same reason a collect that cannot read
+    // its own pace runs unpaced (cluster-tasks.service.ts, paceOf).
     scheduleCollect: async (_payload: unknown, helpers: JobHelpers): Promise<void> => {
-      await dispatchToAllClusters(clusterRoster(db), "collect", helpers, runningPasses(db));
+      await dispatchToAllClusters(
+        clusterRoster(db),
+        "collect",
+        helpers,
+        runningPasses(db),
+        async (ids) => {
+          try {
+            return await collectsDue(db, ids, new Date());
+          } catch (error) {
+            helpers.logger.error(
+              `scheduler: reading collect paces failed, dispatching every cluster: ${String(error)}`,
+            );
+            return new Set(ids);
+          }
+        },
+      );
     },
     scheduleSuggest: async (_payload: unknown, helpers: JobHelpers): Promise<void> => {
       await dispatchToAllClusters(clusterRoster(db), "suggest", helpers, runningPasses(db));

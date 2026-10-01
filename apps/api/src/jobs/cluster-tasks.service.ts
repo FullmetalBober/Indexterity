@@ -15,6 +15,7 @@ import { collectCluster } from "./collect";
 import { applyCreatesForCluster } from "./create";
 import { enqueueClusterPass, type JobQueue, runningPasses } from "./dispatch";
 import { finalizeCluster } from "./finalize";
+import { collectBudgetMs, collectPaceOf, nextCollectTier } from "./pacing";
 import { clusterIdFromPayload } from "./payload";
 import { probeCluster } from "./probe";
 import { suggestForCluster } from "./suggest";
@@ -183,29 +184,51 @@ export class ClusterTasksService {
     });
   }
 
-  private onCluster(
+  private async onCluster(
     task: string,
     payload: unknown,
     helpers: JobQueue,
     run: (clusterId: string) => Promise<unknown>,
   ): Promise<void> {
+    const clusterId = clusterIdFromPayload(payload);
     // The budget applies to the read-only passes only — see BUDGETED_PASSES for
     // why `apply` and `finalize` are not among them. Resolved per call rather
     // than cached, so an operator raising it does not need a restart to mean it.
-    const budgetMs = BUDGETED_PASSES.has(task) ? workerEnv().CLUSTER_PASS_BUDGET_MS : null;
-    return runClusterTask(
-      task,
-      clusterIdFromPayload(payload),
-      this.depsFor(helpers),
-      run,
-      budgetMs,
-    );
+    const base = workerEnv().CLUSTER_PASS_BUDGET_MS;
+    // Except that `collect` is paced per cluster (#571): one that does not fit
+    // runs less often with proportionally longer, by the tier its last run left.
+    const tier = task === "collect" ? await this.paceOf(clusterId, helpers) : null;
+    const budgetMs =
+      tier !== null ? collectBudgetMs(tier, base) : BUDGETED_PASSES.has(task) ? base : null;
+    return runClusterTask(task, clusterId, this.depsFor(helpers, tier, base), run, budgetMs);
   }
 
   // The database is CLOSED OVER here, not exposed: these three functions need it
   // and `runClusterTask` does not. Keeping it out of ClusterTaskDeps is what keeps
   // that interface three functions wide and testable with no database at all.
-  private depsFor(helpers: JobQueue): ClusterTaskDeps {
+  // The pace a collect runs at, or the unpaced one when it cannot be read.
+  //
+  // Advisory, so it must never be what stops a collect: a pace that cannot be
+  // read is the hourly collect at the base budget, which is exactly what every
+  // cluster had before pacing existed. The case that matters is a deploy that
+  // lands before its migration — on a host with no pre-deploy hook the table may
+  // be a few minutes behind the code, and every collect failing for it would be
+  // a regression bought by an optimisation. Logged as an error, because it is
+  // one, rather than swallowed.
+  private async paceOf(clusterId: string, helpers: JobQueue): Promise<number> {
+    try {
+      return (await collectPaceOf(this.database.db, clusterId)).tier;
+    } catch (error) {
+      helpers.logger.error(
+        `collect: reading the pace for cluster ${clusterId} failed, running it unpaced: ${String(error)}`,
+      );
+      return 0;
+    }
+  }
+
+  // `tier` is the pace the pass was run at, or null for a pass that is not
+  // paced; the timing records the tier the NEXT run gets, decided from this one.
+  private depsFor(helpers: JobQueue, tier: number | null, baseMs: number): ClusterTaskDeps {
     const db = this.database.db;
     return {
       logger: helpers.logger,
@@ -240,8 +263,16 @@ export class ClusterTasksService {
       // a timing is a measurement of a pass that has already done its work. A
       // write that fails leaves a gap on a screen, not a pass to retry.
       recordTiming: async (clusterId, task, timing) => {
+        const next =
+          tier === null ? 0 : nextCollectTier(tier, timing.outcome, timing.durationMs, baseMs);
+        if (tier !== null && next !== tier) {
+          helpers.logger.info(
+            `${task}: cluster ${clusterId} took ${Math.round(timing.durationMs / 1000)}s ` +
+              `(${timing.outcome}) — pacing it from tier ${tier} to ${next}`,
+          );
+        }
         try {
-          await recordPassTiming(db, clusterId, task, timing);
+          await recordPassTiming(db, clusterId, task, timing, next);
         } catch (error) {
           helpers.logger.error(
             `${task}: recording the timing for cluster ${clusterId} failed: ${String(error)}`,

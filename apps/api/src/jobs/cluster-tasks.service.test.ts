@@ -11,6 +11,7 @@ import { ClusterTasksService } from "./cluster-tasks.service";
 import { collectCluster } from "./collect";
 import { applyCreatesForCluster } from "./create";
 import type { JobQueue } from "./dispatch";
+import { collectPaceOf } from "./pacing";
 import { probeCluster } from "./probe";
 import { suggestForCluster } from "./suggest";
 import { recordPassTiming } from "./timings";
@@ -67,6 +68,13 @@ vi.mock("./blocked", (): typeof import("./blocked") => ({
 // recorded, and against this suite's empty db the write could only fail.
 vi.mock("./timings", (): typeof import("./timings") => ({
   recordPassTiming: vi.fn(),
+}));
+// A collect reads its own pace before it runs (#571), and this suite's db never
+// opens a socket — so the read answers "not paced", and the policy beside it
+// stays real.
+vi.mock("./pacing", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./pacing")>()),
+  collectPaceOf: vi.fn(async () => ({ tier: 0, lastStartedAt: null })),
 }));
 vi.mock("../events/emit", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../events/emit")>()),
@@ -153,9 +161,66 @@ describe("the per-cluster passes", () => {
       CLUSTER,
       "collect",
       expect.objectContaining({ outcome: "ok" }),
+      0,
     );
     expect(help.logger.error).toHaveBeenCalledWith(
       expect.stringContaining("recording the timing for cluster"),
+    );
+  });
+
+  // #571. The pace a collect ran at decides the one the next collect gets, and
+  // the two travel together: a paced collect that came back in no time at all
+  // has room to spare at the tier below, so it is recorded one tier down.
+  it("records the pace the next collect gets, decided from this one", async () => {
+    vi.mocked(collectPaceOf).mockResolvedValueOnce({ tier: 1, lastStartedAt: null });
+    const help = helpers();
+
+    await service().collect({ clusterId: CLUSTER }, help);
+
+    expect(collectPaceOf).toHaveBeenCalledWith(db, CLUSTER);
+    expect(recordPassTiming).toHaveBeenCalledWith(
+      db,
+      CLUSTER,
+      "collect",
+      expect.objectContaining({ outcome: "ok", budgetMs: 600_000 }),
+      0,
+    );
+    expect(help.logger.info).toHaveBeenCalledWith(expect.stringContaining("from tier 1 to 0"));
+  });
+
+  // Advisory: a pace that cannot be read — a deploy that landed before its
+  // migration — is the unpaced collect, not a failed one.
+  it("runs a collect unpaced when its pace cannot be read", async () => {
+    vi.mocked(collectPaceOf).mockRejectedValueOnce(
+      new Error('relation "cluster_pass_timings" does not exist'),
+    );
+    const help = helpers();
+
+    await expect(service().collect({ clusterId: CLUSTER }, help)).resolves.toBeUndefined();
+
+    expect(collectCluster).toHaveBeenCalled();
+    expect(recordPassTiming).toHaveBeenCalledWith(
+      db,
+      CLUSTER,
+      "collect",
+      expect.objectContaining({ outcome: "ok", budgetMs: 300_000 }),
+      0,
+    );
+    expect(help.logger.error).toHaveBeenCalledWith(expect.stringContaining("running it unpaced"));
+  });
+
+  // Only the collect is paced. Every other pass keeps the base budget, and its
+  // row keeps tier 0.
+  it("does not read a pace for a pass that is not paced", async () => {
+    await service().classify({ clusterId: CLUSTER }, helpers());
+
+    expect(collectPaceOf).not.toHaveBeenCalled();
+    expect(recordPassTiming).toHaveBeenCalledWith(
+      db,
+      CLUSTER,
+      "classify",
+      expect.objectContaining({ budgetMs: 300_000 }),
+      0,
     );
   });
 

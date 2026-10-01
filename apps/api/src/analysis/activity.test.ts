@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { type ActivityPoint, activeHours } from "./activity";
 
-// Cumulative readOps, one point per collect, `hoursApart` between them.
+// Cumulative readOps, one point per collect, `hoursApart` between them — hourly
+// unless a test is about the cadence, because hourly is what a collect is.
 //
 // `ourReadsPerCollect` is what the collect pass itself costs the collection —
 // zero on an engine that measures a table without reading it, and on MongoDB the
@@ -10,7 +11,7 @@ import { type ActivityPoint, activeHours } from "./activity";
 // in our own tally, and only the difference is somebody else's traffic.
 function series(
   readsPerInterval: readonly number[],
-  hoursApart = 6,
+  hoursApart = 1,
   ourReadsPerCollect = 0,
 ): ActivityPoint[] {
   const points: ActivityPoint[] = [];
@@ -35,9 +36,9 @@ function series(
 
 describe("activeHours", () => {
   it("counts only the time in which the collection did something", () => {
-    // A dev cluster: busy for one stretch, idle the rest of the week. Two active
-    // intervals at six hours each.
-    expect(activeHours(series([0, 0, 40, 12, 0, 0, 0, 0]))).toBe(12);
+    // A dev cluster: busy for one stretch, idle the rest of the day. Two active
+    // intervals at an hour each.
+    expect(activeHours(series([0, 0, 40, 12, 0, 0, 0, 0]))).toBe(2);
   });
 
   it("is zero for a cluster that is up but never queried", () => {
@@ -45,18 +46,18 @@ describe("activeHours", () => {
   });
 
   it("counts the whole span for a continuously busy collection", () => {
-    expect(activeHours(series([5, 5, 5, 5]))).toBe(24);
+    expect(activeHours(series([5, 5, 5, 5]))).toBe(4);
   });
 
   it("drops an interval whose counter restarted rather than guessing", () => {
     const points: ActivityPoint[] = [
       { capturedAt: "2026-01-01T00:00:00Z", readOps: 900, selfReadOps: 0 },
-      { capturedAt: "2026-01-01T06:00:00Z", readOps: 1000, selfReadOps: 0 },
+      { capturedAt: "2026-01-01T01:00:00Z", readOps: 1000, selfReadOps: 0 },
       // mongod restarted: the counter is back near zero.
-      { capturedAt: "2026-01-01T12:00:00Z", readOps: 5, selfReadOps: 0 },
-      { capturedAt: "2026-01-01T18:00:00Z", readOps: 60, selfReadOps: 0 },
+      { capturedAt: "2026-01-01T02:00:00Z", readOps: 5, selfReadOps: 0 },
+      { capturedAt: "2026-01-01T03:00:00Z", readOps: 60, selfReadOps: 0 },
     ];
-    expect(activeHours(points)).toBe(12);
+    expect(activeHours(points)).toBe(2);
   });
 
   it("needs two points before any interval exists", () => {
@@ -71,7 +72,6 @@ describe("activeHours", () => {
   // while an interval was six hours. Twelve intervals at fifteen minutes is three
   // HOURS, and nothing in the engine or its tests would have noticed.
   it.each([
-    ["6h", 6],
     ["1h", 1],
     ["15m", 0.25],
   ])("reports the same active time at a %s cadence", (_label, hours) => {
@@ -81,6 +81,26 @@ describe("activeHours", () => {
     expect(activeHours(series(busy, hours))).toBeCloseTo(24, 6);
   });
 
+  // #571. A paced cluster is collected every two or four hours, and an interval
+  // only says the collection was read SOMEWHERE in it. Credited its full length,
+  // one read in four hours would earn four active hours and clear the 72-hour
+  // gate on a quarter of the evidence — so no interval earns more than an hour.
+  // Sparser looks therefore UNDER-count a busy collection, which only delays a
+  // verdict, and never over-count an intermittent one, which would hasten a drop.
+  it.each([
+    ["2h", 2, 12],
+    ["4h", 4, 6],
+    ["6h", 6, 4],
+  ])("credits each interval at most an hour at a %s cadence", (_label, hours, credited) => {
+    const intervals = Math.round(24 / hours);
+    const busy = Array.from({ length: intervals }, () => 5);
+    expect(activeHours(series(busy, hours))).toBeCloseTo(credited, 6);
+  });
+
+  it("credits one read in a four-hour interval as an hour, not four", () => {
+    expect(activeHours(series([0, 1, 0, 0, 0, 0], 4))).toBe(1);
+  });
+
   // Without the cap, one outage could manufacture the evidence a drop needs: the
   // counter moved somewhere inside a 30-hour hole, so the hole would be credited
   // as 30 hours of traffic. What is known is that the collection was used
@@ -88,24 +108,24 @@ describe("activeHours", () => {
   it("credits a long hole at the usual cadence, not at its own length", () => {
     const points: ActivityPoint[] = [
       { capturedAt: "2026-01-01T00:00:00Z", readOps: 0, selfReadOps: 0 },
-      { capturedAt: "2026-01-01T06:00:00Z", readOps: 10, selfReadOps: 0 },
-      { capturedAt: "2026-01-01T12:00:00Z", readOps: 20, selfReadOps: 0 },
+      { capturedAt: "2026-01-01T01:00:00Z", readOps: 10, selfReadOps: 0 },
+      { capturedAt: "2026-01-01T02:00:00Z", readOps: 20, selfReadOps: 0 },
       // Went dark for thirty hours, and traffic happened at some point in there.
-      { capturedAt: "2026-01-02T18:00:00Z", readOps: 30, selfReadOps: 0 },
+      { capturedAt: "2026-01-02T08:00:00Z", readOps: 30, selfReadOps: 0 },
     ];
-    // Three active intervals, the last capped at the 6h median rather than 30h.
-    expect(activeHours(points)).toBe(18);
+    // Three active intervals, the last capped at the hourly median, not 30h.
+    expect(activeHours(points)).toBe(3);
   });
 
   it("still counts a short interval at its real length", () => {
     const points: ActivityPoint[] = [
       { capturedAt: "2026-01-01T00:00:00Z", readOps: 0, selfReadOps: 0 },
-      { capturedAt: "2026-01-01T06:00:00Z", readOps: 10, selfReadOps: 0 },
-      { capturedAt: "2026-01-01T12:00:00Z", readOps: 20, selfReadOps: 0 },
-      // A catch-up collect an hour later: an hour of activity, not six.
-      { capturedAt: "2026-01-01T13:00:00Z", readOps: 25, selfReadOps: 0 },
+      { capturedAt: "2026-01-01T01:00:00Z", readOps: 10, selfReadOps: 0 },
+      { capturedAt: "2026-01-01T02:00:00Z", readOps: 20, selfReadOps: 0 },
+      // A catch-up collect a quarter of an hour later: that, not an hour.
+      { capturedAt: "2026-01-01T02:15:00Z", readOps: 25, selfReadOps: 0 },
     ];
-    expect(activeHours(points)).toBe(13);
+    expect(activeHours(points)).toBe(2.25);
   });
   // Run-length storage: the collector stops writing a row per collect once the
   // counter holds still, and extends the one it has instead.
@@ -134,20 +154,20 @@ describe("activeHours", () => {
         {
           capturedAt: "2026-01-01T00:00:00Z",
           lastSeenAt: "2026-01-02T00:00:00Z",
-          observations: 5,
+          observations: 25,
           readOps: 0,
           selfReadOps: 0,
         },
         {
-          capturedAt: "2026-01-02T06:00:00Z",
-          lastSeenAt: "2026-01-03T06:00:00Z",
-          observations: 5,
+          capturedAt: "2026-01-02T01:00:00Z",
+          lastSeenAt: "2026-01-03T01:00:00Z",
+          observations: 25,
           readOps: 40,
           selfReadOps: 0,
         },
       ];
-      // One active interval, the 6h gap between the runs.
-      expect(activeHours(points)).toBe(6);
+      // One active interval, the hour between the runs.
+      expect(activeHours(points)).toBe(1);
     });
 
     it("matches the point-reading answer for a series with nothing to collapse", () => {
@@ -187,18 +207,20 @@ describe("activeHours", () => {
     it("takes the cadence from the collects inside a run, not from its length", () => {
       // Without weighting the median by observation count, this run's span would
       // vote once as a 30-day "gap" and the cap would balloon, letting the one
-      // real interval be credited far past the cadence.
+      // real interval be credited far past the cadence. Fifteen-minute collects,
+      // so the cadence it must find sits under the hour every interval is
+      // capped at anyway.
       const points: ActivityPoint[] = [
         {
           capturedAt: "2026-01-01T00:00:00Z",
           lastSeenAt: "2026-01-31T00:00:00Z",
-          observations: 121,
+          observations: 2881,
           readOps: 0,
           selfReadOps: 0,
         },
-        { capturedAt: "2026-01-31T06:00:00Z", readOps: 99, selfReadOps: 0 },
+        { capturedAt: "2026-01-31T00:30:00Z", readOps: 99, selfReadOps: 0 },
       ];
-      expect(activeHours(points)).toBe(6);
+      expect(activeHours(points)).toBe(0.25);
     });
   });
 });

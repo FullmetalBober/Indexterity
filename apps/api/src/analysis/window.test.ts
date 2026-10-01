@@ -75,7 +75,37 @@ function quietRun(from: Date, to: Date, ops: number): TrafficSample {
   };
 }
 
+// A paced cluster's readings (#571): every four hours, with `trafficAt` the ops
+// each four-hour gap carries, by the hour it STARTS at.
+function everyFourHours(
+  days: number,
+  trafficAt: Readonly<Record<number, number>>,
+): TrafficSample[] {
+  const samples: TrafficSample[] = [];
+  let ops = 0;
+  for (let day = 0; day < days; day++) {
+    for (let hour = 0; hour < 24; hour += 4) {
+      const date = new Date(Date.UTC(2026, 6, 1 + day, hour, 0, 0));
+      samples.push({ capturedAt: date.toISOString(), ops });
+      ops += trafficAt[hour] ?? 0;
+    }
+  }
+  return samples;
+}
+
 describe("inferChangeWindow", () => {
+  // #571. A four-hour gap crosses a six-hour slot boundary, and the traffic in it
+  // could be anywhere inside it. Credited whole to the slot it started in, the
+  // 04:00–08:00 gap's traffic all landed in 00–06 — so the slot that actually
+  // carried it read as idle, and was named the quietest: the engine would have
+  // scheduled elective changes into the busiest part of the day. Spread by hours,
+  // each slot gets its share, and the truly idle afternoon is the answer.
+  it("spreads a gap's traffic over the slots it covers, not the one it starts in", () => {
+    const inferred = inferChangeWindow([everyFourHours(6, { 4: 1_000 })]);
+    expect(inferred?.startHour).toBe(12);
+    expect(inferred?.endHour).toBe(18);
+  });
+
   it("names the quietest six hours", () => {
     // Busy in the working day, near-idle overnight.
     const inferred = inferChangeWindow([series(5, [50, 800, 1000, 600])]);

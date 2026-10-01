@@ -11,6 +11,7 @@ function timing(overrides: Partial<PassTiming>): PassTiming {
     outcome: "ok",
     budgetMs: 300_000,
     phases: [],
+    pace: null,
     ...overrides,
   };
 }
@@ -123,6 +124,33 @@ describe("PassesPanel", () => {
       .getAllByText(/^(collect|suggest|probe|apply)$/)
       .map((node) => node.textContent);
     expect(names).toEqual(["collect", "suggest", "probe", "apply"]);
+  });
+
+  // #571. The trade said as a trade: longer, and less often, by the same factor.
+  it("says how a paced collect runs from now on", () => {
+    render(
+      <PassesPanel
+        passes={passes(
+          timing({
+            outcome: "timed-out",
+            durationMs: 300_000,
+            pace: { everyHours: 2, budgetMs: 600_000 },
+          }),
+        )}
+        loading={false}
+      />,
+    );
+    expect(screen.getByText("every 2 h")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Paced: runs every 2 hours with 10 min, because a collect here needs longer than an hourly one is given.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("says nothing about pace for a pass that is not paced", () => {
+    render(<PassesPanel passes={passes(timing({}))} loading={false} />);
+    expect(screen.queryByText(/^Paced:/)).not.toBeInTheDocument();
   });
 
   it("says nothing has been timed before the first pass", () => {
