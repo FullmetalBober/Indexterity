@@ -13,6 +13,11 @@
 # web build pulled in. It returns 0 there too since #182 stopped installing the
 # dashboard's dependencies into a runtime that resolves nothing from them.
 #
+# One since Sentry 11 (D181), and still nothing to recompile: oxc-parser's
+# prebuilt linux-x64-musl binding, brought in by the SDK's build-time bundler
+# plugins and loaded by nothing this image runs. It is published for musl, so
+# the base swap stands either way.
+#
 # The risk worth naming is musl's resolver, not the packages: this product dials
 # customer clusters by hostname, and `mongodb+srv://` is an SRV lookup. See D76 for
 # what was tested — three mongo majors' integration suites through a real

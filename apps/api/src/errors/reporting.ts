@@ -30,8 +30,16 @@ export function initErrorReporting(service: Service): void {
   // integrations. A self-hosted install ships nothing anywhere by default.
   if (!errorReportingEnabled()) return;
 
+  // Without `beforeSendTransaction`, which Sentry 11 ignores and says so at
+  // every init: it streams spans instead of transactions. The dashboard's
+  // Sentry 10 still reads it. Tracing is off here (tracesSampleRate 0), so
+  // there is no span to scrub in its place either.
+  const { beforeSendTransaction: _ignoredBySentry11, ...defaults } = sentryDefaults({
+    service,
+    release: APP_VERSION,
+  });
   Sentry.init({
-    ...sentryDefaults({ service, release: APP_VERSION }),
+    ...defaults,
     // Default integrations are kept, and two of them are the point: the SDK's
     // onUncaughtException / onUnhandledRejection handlers are the "no
     // unhandled-rejection sink" half of #31, and they cover the paths no filter
