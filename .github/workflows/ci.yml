@@ -155,11 +155,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 9.0 went GA on 2026-09-29 and the official `mongo` image had no 9.x tag
-        # yet, so that leg runs MongoDB's own image; the expression below picks it
-        # and leaves every other leg on the official one (#560). Its entrypoint
-        # refuses Linux 6.19+ (a tcmalloc issue), which the runners are below; a
-        # runner that is not would fail this leg at start-up, saying so.
+        # Every leg on the official `mongo` image. MongoDB's own
+        # `mongodb/mongodb-community-server` is no stand-in for a major the
+        # official image has not published yet: its entrypoint refuses Linux 6.19
+        # and newer (a tcmalloc check), and ubuntu-latest moves past that kernel
+        # on 2026-10-19 (#566). The official one runs there — `mongo:9.0` was
+        # checked on 7.2.
         mongo: ["6.0", "7.0", "8", "9.0"]
     services:
       postgres:
@@ -176,7 +177,7 @@ jobs:
           --health-timeout 5s
           --health-retries 10
       mongo:
-        image: ${{ matrix.mongo == '9.0' && 'mongodb/mongodb-community-server:9.0-ubuntu2204' || format('mongo:{0}', matrix.mongo) }}
+        image: mongo:${{ matrix.mongo }}
         ports:
           - "27017:27017"
       # A second mongod with authentication ON, the way the e2e job runs one. The
@@ -184,7 +185,7 @@ jobs:
       # database these credentials cannot read cannot exist — so the per-database
       # refusal #345 is about had nowhere to be measured.
       mongo-auth:
-        image: ${{ matrix.mongo == '9.0' && 'mongodb/mongodb-community-server:9.0-ubuntu2204' || format('mongo:{0}', matrix.mongo) }}
+        image: mongo:${{ matrix.mongo }}
         env:
           MONGO_INITDB_ROOT_USERNAME: root
           MONGO_INITDB_ROOT_PASSWORD: int-root
