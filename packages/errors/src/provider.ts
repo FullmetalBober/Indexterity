@@ -60,6 +60,11 @@ export interface SentryDefaults {
     httpBodies: never[];
     stackFrameVariables: boolean;
     databaseQueryData: boolean;
+    httpHeaders: { request: { deny: string[] }; response: { deny: string[] } };
+    urlQueryParams: { deny: string[] };
+    genAI: { inputs: boolean; outputs: boolean };
+    queues: boolean;
+    graphQL: { document: boolean; variables: boolean };
   };
   // `T extends object` because that is what the three hooks are handed — an
   // event, a transaction and a breadcrumb — and it is what lets the scrubber
@@ -76,6 +81,11 @@ export interface SentryDefaults {
 
 // The options every workload sets identically. Spread into the app's own
 // `Sentry.init`, which adds its framework integrations on top.
+// Substrings of the header names that carry where a request came from, as
+// Sentry's own v10 default denied them. Matched as substrings by the SDK, so
+// "-ip" covers cf-connecting-ip, true-client-ip and x-real-ip.
+const ADDRESS_HEADERS = ["forwarded", "-ip", "remote-", "via", "-user"];
+
 export function sentryDefaults(options: SentryDefaultsOptions): SentryDefaults {
   return {
     dsn: sentryDsn(),
@@ -91,7 +101,10 @@ export function sentryDefaults(options: SentryDefaultsOptions): SentryDefaults {
     // terms, not a default that arrives with the SDK.
     tracesSampleRate: 0,
 
-    // The SDK's own switch for IP addresses and user identity.
+    // The SDK's own switch for IP addresses and user identity — in Sentry 10,
+    // which the dashboard runs. Sentry 11, which the api runs since Nest 12
+    // required it (D181), removed the option and reads `dataCollection` below
+    // for all of it.
     sendDefaultPii: false,
 
     // …which does NOT cover what its name suggests, and this was measured rather
@@ -110,6 +123,10 @@ export function sentryDefaults(options: SentryDefaultsOptions): SentryDefaults {
     //   databaseQueryData   the clusters table is selected by every job, and
     //                       sealed_dek / sealed_data are columns on it
     //   cookies             the session cookie is a bearer credential
+    //
+    // EVERY key is stated, not only the ones that matter today. Sentry 11 made
+    // an omitted key mean "collect" rather than "do not", so a key left out is a
+    // category switched on by the next major without a line changing here.
     dataCollection: {
       userInfo: false,
       cookies: false,
@@ -118,7 +135,20 @@ export function sentryDefaults(options: SentryDefaultsOptions): SentryDefaults {
       databaseQueryData: false,
       // Headers are kept: they are most of what makes a report actionable
       // (method, content type, user agent), the SDK filters known credential
-      // headers itself, and `scrub` drops the rest by name.
+      // headers itself, and `scrub` drops the rest by name. Except the ones
+      // that carry a client's ADDRESS — x-forwarded-for, cf-connecting-ip,
+      // true-client-ip — which `scrub` has no rule for and Sentry 10 dropped by
+      // default with this exact list; Sentry 11 collects them unless told.
+      httpHeaders: {
+        request: { deny: [...ADDRESS_HEADERS] },
+        response: { deny: [...ADDRESS_HEADERS] },
+      },
+      urlQueryParams: { deny: [...ADDRESS_HEADERS] },
+      // Nothing here calls a model, reads a queue Sentry instruments, or speaks
+      // GraphQL — off rather than left to a default that collects them.
+      genAI: { inputs: false, outputs: false },
+      queues: false,
+      graphQL: { document: false, variables: false },
     },
 
     // The last thing that runs before an event leaves. Deep-scrubbed on all

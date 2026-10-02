@@ -60,6 +60,9 @@ const EXTERNAL = [
   "class-transformer",
   "@fastify/view",
   "@fastify/static",
+  // Loaded by Nest 12's Fastify adapter only for multipart bodies, which no
+  // route here accepts.
+  "@fastify/multipart",
   // cosmiconfig, which graphile-worker uses to look for a config file, requires
   // TypeScript to read a `.ts` one. This app has none, and TypeScript is a
   // devDependency that the runtime image does not install. Bundled, it was 9.5 of

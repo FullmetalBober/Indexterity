@@ -1,4 +1,6 @@
 import type * as contract from "@repo/contracts";
+import type { SentryDefaults } from "@repo/errors";
+import type { NodeOptions } from "@sentry/nestjs";
 import { describe, expectTypeOf, it } from "vitest";
 import type { Membership } from "./auth/tenancy";
 import type * as ports from "./engine/ports";
@@ -124,5 +126,19 @@ describe("the shapes that exist twice", () => {
     expectTypeOf<Mutable<ports.ConnectionDiagnosis>>().toEqualTypeOf<
       Omit<contract.ConnectionDiagnosis, "engine">
     >();
+  });
+});
+
+// Sentry 11 made an omitted `dataCollection` key mean "collect" (D181), so a key
+// the defaults leave out is a category of request data switched on without a
+// line changing in this repo. Exact equality, both ways: a key a future SDK adds
+// fails here until somebody decides it, and a key the defaults name that the SDK
+// does not have is a typo collecting nothing. `frameContextLines` is a count of
+// source lines around a frame, not a category of anybody's data.
+describe("the error-reporting defaults", () => {
+  it("decide every category of data the SDK can collect", () => {
+    type Offered = Exclude<keyof NonNullable<NodeOptions["dataCollection"]>, "frameContextLines">;
+    type Decided = keyof SentryDefaults["dataCollection"];
+    expectTypeOf<Offered>().toEqualTypeOf<Decided>();
   });
 });
