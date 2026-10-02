@@ -94,11 +94,26 @@ const JSON_SECRET = new RegExp(
   "gi",
 );
 
+// The values of a query that failed (#579). Drizzle words a failed query as
+// `Failed query: <sql>` and then `params: <values>` on the next line, and the
+// values are whatever the query was about: the email a sign-in looked up, a
+// session token, a verification code. better-auth logs that message on every
+// database error, and the console integration turns the log line into a
+// breadcrumb — measured, the signing-in user's email in the last two
+// breadcrumbs of a sign-in's 500. The SQL is kept: it says which query failed,
+// and it holds placeholders, not values.
+//
+// To the end of the line and no further, so a stack trace after it survives. A
+// newline may be a real one (a console line) or an escaped `\n` (an error
+// serialised into JSON), and either ends the values.
+const QUERY_PARAMS = /((?:^|\n|\\n)params: )(?:(?!\\n)[^\n])*/g;
+
 export function scrubString(value: string): string {
   return value
     .replace(DATABASE_URI, REDACTED)
     .replace(URI_CREDENTIALS, `$1${REDACTED}@`)
-    .replace(JSON_SECRET, `$1"${REDACTED}"`);
+    .replace(JSON_SECRET, `$1"${REDACTED}"`)
+    .replace(QUERY_PARAMS, `$1${REDACTED}`);
 }
 
 // Deep rather than field-by-field, and that is the decision here. A list of
