@@ -1,4 +1,5 @@
 import { loadEnv } from "./src/config/env";
+import { mailEnabled } from "./src/mail/mailer";
 
 // The integration runner is a process too. It opens its own MongoConnection to
 // seed and assert (integration/api.int.test.ts), and that path reads the
@@ -13,3 +14,12 @@ process.env.MASTER_KEY ??= Buffer.from("0123456789abcdef0123456789abcdef").toStr
 process.env.BETTER_AUTH_SECRET ??= "integration-secret";
 
 loadEnv("api");
+
+// Checked, not assumed: the blanks in vitest.integration.config.ts are all that
+// keeps this process from mailing anyone, and a mail setting they do not name —
+// a new variable, a renamed one — would arm it again without a word (#584).
+if (mailEnabled()) {
+  throw new Error(
+    "the integration runner would send real mail: blank whatever configured it in vitest.integration.config.ts `env`",
+  );
+}

@@ -35,5 +35,5 @@
     "sourceMap": false,
     "types": ["node"]
   },
-  "include": ["scripts/**/*.ts", "deploy/**/*.ts", "deploy/**/*.mts"]
+  "include": ["scripts/**/*.ts", "deploy/**/*.ts"]
 }
