@@ -2,6 +2,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { connect } from "node:net";
 import path from "node:path";
+import { inject } from "vitest";
 import {
   activityBetween,
   activityInFull,
@@ -93,16 +94,26 @@ function accepts(port: number): Promise<boolean> {
   });
 }
 
+/**
+ * A built entrypoint, from the copy global-setup.ts staged outside the
+ * repository: what this suite runs is what an image runs, with no node_modules
+ * to fall back on (D182).
+ */
+export function builtEntry(name: "main" | "migrate"): string {
+  const root = inject("builtApi");
+  if (root === "") {
+    throw new Error("dist/main.js missing — run `turbo run build` before the integration suite");
+  }
+  return path.join(root, "dist", `${name}.js`);
+}
+
 // Spawn the built api and wait for /api/health. The caller owns teardown.
 // extraEnv/port let a test drive a second instance with different guards.
 export async function startApi(
   extraEnv: Record<string, string> = {},
   port: number = API_PORT,
 ): Promise<ChildProcess> {
-  const entry = path.resolve(__dirname, "../dist/main.js");
-  if (!existsSync(entry)) {
-    throw new Error("dist/main.js missing — run `turbo run build` before the integration suite");
-  }
+  const entry = builtEntry("main");
   const child = spawn("node", [entry], {
     env: {
       ...process.env,

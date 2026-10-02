@@ -1,8 +1,7 @@
 import { type ChildProcess, spawnSync } from "node:child_process";
-import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createDatabase, sql } from "../src/db";
-import { API_PORT, databaseUrl, startApi, stopApi } from "./helpers";
+import { API_PORT, builtEntry, databaseUrl, startApi, stopApi } from "./helpers";
 
 // The externally-driven schedule, end to end against a real Postgres: what the
 // tick claims, what it stamps into worker_watermarks, and — since #232 made the
@@ -171,8 +170,7 @@ async function admin(statement: string): Promise<void> {
 // reason that has nothing to do with the endpoint. DATABASE_URL is all it needs
 // (see the note in src/migrate.ts).
 function migrateScratch(): void {
-  const entry = path.resolve(__dirname, "../dist/migrate.js");
-  const result = spawnSync("node", [entry], {
+  const result = spawnSync("node", [builtEntry("migrate")], {
     env: { ...process.env, DATABASE_URL: urlFor(SCRATCH_DB) },
     encoding: "utf8",
   });

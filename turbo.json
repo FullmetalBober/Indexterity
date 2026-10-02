@@ -87,12 +87,11 @@
     // workspace would go unchecked, which is how it got here (D53).
     "//#typecheck:scripts": {
       // deploy/ as well as scripts/: tsconfig.json checks both, so leaving it out
-      // of the cache key made an edit to the supervisor or the manifest rewriter a
-      // FULL TURBO hit on a check that never read it.
+      // of the cache key made an edit to the supervisor a FULL TURBO hit on a
+      // check that never read it.
       "inputs": [
         "scripts/**/*.ts",
         "deploy/**/*.ts",
-        "deploy/**/*.mts",
         "tsconfig.json",
         "packages/config/tsconfig.base.json"
       ]
