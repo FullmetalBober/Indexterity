@@ -43,6 +43,15 @@ const apiEnv = {
   ALLOW_INSECURE_CLUSTER_TLS: "true",
   // Verification would send mail and block sign-in on a link nobody can click.
   REQUIRE_EMAIL_VERIFICATION: "false",
+  // And no mail transport at all, whatever the developer's shell has in it
+  // (#584). Every sign-up sends a verification mail whether or not one is
+  // required (auth.config.ts `sendOnSignUp`), and running this suite locally
+  // means sourcing the repo's .env — so each test's account was mailed through
+  // the developer's real relay, to an address that bounces. Blank reads as
+  // unset (config/schema.ts withoutBlanks), so mail is off, as it is in CI.
+  SMTP_HOST: "",
+  SMTP_USER: "",
+  SMTP_PASS: "",
   // The scheduler would start collecting from the test clusters mid-assertion —
   // since #232 every api runs the pipeline, so quiet means handing the clock to
   // an external tick nothing here ever sends. The secret is required with it.
