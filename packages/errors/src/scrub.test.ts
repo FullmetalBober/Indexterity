@@ -70,6 +70,44 @@ describe("scrubString", () => {
     );
   });
 
+  // #579. Drizzle's own wording of a failed query, as better-auth logs it on a
+  // sign-in whose database went away: the values are the user's email, and
+  // the console integration made the line a breadcrumb.
+  it("removes the values of a failed query and keeps the query", () => {
+    const logged =
+      'ERROR [Better Auth]: Error Error: Failed query: select "id", "email" from "user" where "user"."email" = $1\n' +
+      "params: probe@example.invalid";
+    const scrubbed = scrubString(logged);
+    expect(scrubbed).not.toContain("probe@example.invalid");
+    expect(scrubbed).toContain('where "user"."email" = $1');
+    expect(scrubbed.endsWith(`params: ${REDACTED}`)).toBe(true);
+  });
+
+  it("stops at the end of the values, so the stack after them survives", () => {
+    const scrubbed = scrubString(
+      "Failed query: insert into session values ($1, $2)\nparams: tok_live_123,42\n    at query (db.js:7:3)",
+    );
+    expect(scrubbed).toBe(
+      `Failed query: insert into session values ($1, $2)\nparams: ${REDACTED}\n    at query (db.js:7:3)`,
+    );
+  });
+
+  // The same message serialised into JSON: the newline is the two characters
+  // `\n`, and the values still end there.
+  it("finds the values in a failed query serialised into json", () => {
+    const scrubbed = scrubString(
+      JSON.stringify({ message: "Failed query: select 1\nparams: tok_live_123\n at y" }),
+    );
+    expect(scrubbed).not.toContain("tok_live_123");
+    expect(scrubbed).toContain(" at y");
+  });
+
+  it("leaves the word params alone anywhere but the start of a line", () => {
+    expect(scrubString("check the params: they look fine")).toBe(
+      "check the params: they look fine",
+    );
+  });
+
   it("leaves an ordinary url alone — over-redacting hides the fault", () => {
     expect(scrubString("GET https://api.example.com/v1/clusters failed with 502")).toBe(
       "GET https://api.example.com/v1/clusters failed with 502",
