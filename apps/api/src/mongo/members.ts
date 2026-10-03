@@ -144,3 +144,20 @@ export class MemberConnections {
     this.dialled = null;
   }
 }
+
+// The nodes whose profiler answers for a cluster (#596). The profiler is per node —
+// on a 7.0 replica set a filter set through the set's connection reached the
+// primary alone, and a failing read routed to a secondary landed in that
+// secondary's ring and no other — so each member is its own connection. A
+// standalone or a mongos is the base connection; a member that cannot be dialled
+// is serving no reads, so it has nothing to record either.
+export async function profiledNodes(
+  base: MongoConnection,
+  members: MemberConnections | undefined,
+): Promise<readonly { readonly host: string; readonly conn: MongoConnection }[]> {
+  const dials = members === undefined ? [] : await members.dials();
+  const answered = dials.flatMap((dial) =>
+    dial.connection === null ? [] : [{ host: dial.host, conn: dial.connection }],
+  );
+  return answered.length > 0 ? answered : [{ host: base.address() ?? "the cluster", conn: base }];
+}

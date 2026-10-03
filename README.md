@@ -10,8 +10,10 @@ gated behind an observe window, a pre-flight check, a read-latency regression
 test, and a check that the workload did not start FAILING while the index was
 hidden — which is a separate question, because a query that fails returns faster
 than one that works and a latency test reads it as an improvement. That check
-needs a record of failed operations — the MongoDB profiler, SQL Server's Query
-Store — and where there is none, the audit trail says it was skipped and why.
+needs a record of failed operations: on MongoDB, Indexterity turns the profiler
+on itself for the window — failures and hints only, the slow-query log kept as it
+was, the settings given back — and on SQL Server it reads Query Store. Where
+there is no record, the audit trail says the check was skipped and why.
 Everything before the drop is reversible, and the dashboard says which is which.
 
 **Some indexes are never dropped automatically, whatever they score.** That gate

@@ -25,6 +25,7 @@ import {
   createDatabase,
   desc,
   eq,
+  failureWatches,
   inArray,
   indexCooldowns,
   indexSnapshots,
@@ -55,6 +56,7 @@ import { pendingBuildsByCollection } from "../src/jobs/collection-budget";
 import { drainPool } from "../src/jobs/connection-pool";
 import { activeCooldownKeys, cooldownKey } from "../src/jobs/cooldowns";
 import { applyCreatesForCluster } from "../src/jobs/create";
+import { FAILURE_BASELINE_MS } from "../src/jobs/failure-watch";
 import { finalizeCluster } from "../src/jobs/finalize";
 import { releaseStaleLocks } from "../src/jobs/locks";
 import { paceOf, pacesDue } from "../src/jobs/pacing";
@@ -65,6 +67,7 @@ import { suggestForCluster } from "../src/jobs/suggest";
 import { recordPassTiming } from "../src/jobs/timings";
 import { isScanning } from "../src/jobs/workload-shapes";
 import { MongoConnection, MongoIndexCollector } from "../src/mongo";
+import { markerOf, watchFilter } from "../src/mongo/profiler";
 import { hasQueryStatsPlanMetrics, parseServerVersion } from "../src/mongo/version";
 import {
   API_BASE,
@@ -1900,7 +1903,15 @@ describe("dynamic observe window", () => {
       .returning();
     if (rec === undefined) throw new Error("failed to insert recommendation");
 
-    expect(await applyCluster(db, clusterId)).toBe(1);
+    // A profiler that already records every operation, so the hide has its
+    // failure baseline already and does not wait a day for one (#596) — the
+    // wait has its own coverage in failure-watch.int.test.ts.
+    await mongo.db("inttest").command({ profile: 2 });
+    try {
+      expect(await applyCluster(db, clusterId)).toBe(1);
+    } finally {
+      await mongo.db("inttest").command({ profile: 0 });
+    }
     const [hidden] = await db.select().from(recommendations).where(eq(recommendations.id, rec.id));
     expect(hidden?.state).toBe("HIDDEN");
     expect(hidden?.observeDays).toBe(40);
@@ -1910,6 +1921,103 @@ describe("dynamic observe window", () => {
       .db("inttest")
       .command({ collMod: "orders", index: { name: "dyn_1", hidden: false } });
     await mongo.db("inttest").collection("orders").dropIndex("dyn_1");
+  });
+});
+
+// The hide that waits for its failure baseline (#596, D183). The server here
+// runs without auth, so the watch may set the profiler, as a role holding
+// enableProfiler may.
+describe("a drop waits for a day of failures before it is hidden", () => {
+  it("turns the profiler on, waits, then hides with the baseline in", async () => {
+    process.env.MASTER_KEY =
+      process.env.MASTER_KEY ?? Buffer.from("0123456789abcdef0123456789abcdef").toString("base64");
+    const inttest = mongo.db("inttest");
+    await inttest.command({ profile: 0, filter: "unset" });
+    await inttest.collection("orders").createIndex({ waits: 1 }, { name: "waits_1" });
+    const [rec] = await db
+      .insert(recommendations)
+      .values({
+        clusterId,
+        type: "DROP_UNUSED",
+        state: "APPROVED",
+        database: "inttest",
+        collection: "orders",
+        indexName: "waits_1",
+        rationale: "failure baseline test",
+        estimatedBytesSaved: 0,
+      })
+      .returning();
+    if (rec === undefined) throw new Error("failed to insert recommendation");
+    const trail = async () =>
+      (
+        await db
+          .select({ result: actions.result })
+          .from(actions)
+          .where(eq(actions.recommendationId, rec.id))
+          .orderBy(actions.createdAt)
+      ).map((row) => row.result);
+    try {
+      // The first pass turns the watch on and hides nothing.
+      expect(await applyCluster(db, clusterId)).toBe(0);
+      const [waiting] = await db
+        .select()
+        .from(recommendations)
+        .where(eq(recommendations.id, rec.id));
+      expect(waiting?.state).toBe("APPROVED");
+      expect(await trail()).toEqual([
+        expect.stringMatching(/^waiting: recording failed operations on inttest\.orders until /),
+      ]);
+      const settings = await inttest.command({ profile: -1 });
+      expect(settings.was).toBe(1);
+      const marker = markerOf(settings.filter);
+      expect(marker?.hints).toEqual({ "inttest.orders": ["waits_1"] });
+      const listed = await db
+        .select()
+        .from(failureWatches)
+        .where(eq(failureWatches.clusterId, clusterId));
+      expect(listed.map((row) => row.database)).toEqual(["inttest"]);
+
+      // A second pass the same day still waits, and says nothing new.
+      expect(await applyCluster(db, clusterId)).toBe(0);
+      expect(await trail()).toHaveLength(1);
+
+      // A day on: the watch as the next pass would find it, begun a day ago.
+      if (marker === null) throw new Error("expected a marker");
+      const dayAgo = Date.now() - FAILURE_BASELINE_MS - 60_000;
+      await inttest.command({
+        profile: 1,
+        filter: watchFilter({
+          ...marker,
+          watch: Object.fromEntries(Object.keys(marker.watch).map((ns) => [ns, dayAgo])),
+        }),
+      });
+      expect(await applyCluster(db, clusterId)).toBe(1);
+      const [hidden] = await db
+        .select()
+        .from(recommendations)
+        .where(eq(recommendations.id, rec.id));
+      expect(hidden?.state).toBe("HIDDEN");
+      // Counted from the watch's start, never further back: before it a fast
+      // failure was recorded nowhere. The reach is the start or, where the ring's
+      // oldest entry is younger — it may have turned over — that entry, which
+      // claims less rather than more.
+      expect(hidden?.baselineFailedOps).toBe(0);
+      expect(hidden?.baselineFailedReachMs).toBeGreaterThanOrEqual(dayAgo);
+      expect((await trail()).at(-1)).toMatch(
+        /^ok; observing \d+ days.*; failed operations watched since .* UTC, by the profiler Indexterity turned on$/,
+      );
+    } finally {
+      await inttest
+        .command({ collMod: "orders", index: { name: "waits_1", hidden: false } })
+        .catch(() => undefined);
+      await inttest
+        .collection("orders")
+        .dropIndex("waits_1")
+        .catch(() => undefined);
+      await db.delete(recommendations).where(eq(recommendations.id, rec.id));
+      await inttest.command({ profile: 0, filter: "unset" });
+      await db.delete(failureWatches).where(eq(failureWatches.clusterId, clusterId));
+    }
   });
 });
 

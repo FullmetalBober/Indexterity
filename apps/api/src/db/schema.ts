@@ -1351,6 +1351,29 @@ export const analysisNotes = pgTable(
 );
 
 /**
+ * The databases on which Indexterity has turned a cluster's profiler on (#596).
+ *
+ * The state of a watch lives on the cluster, in the profiler filter itself:
+ * what was there before, and since when each collection has been watched
+ * (mongo/profiler.ts). What the cluster cannot say is where to LOOK once
+ * nothing needs the watch — the last drop in a database graduates or is rolled
+ * back, and the next pass has no recommendation pointing there. This is that
+ * list, and nothing more: a row is written while any node carries our filter
+ * and deleted once every node has been given back what it had.
+ */
+export const failureWatches = pgTable(
+  "failure_watches",
+  {
+    clusterId: uuid("cluster_id")
+      .notNull()
+      .references(() => clusters.id, { onDelete: "cascade" }),
+    database: text("database").notNull(),
+    since: timestamp("since", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [primaryKey({ columns: [table.clusterId, table.database] })],
+);
+
+/**
  * Why one PASS is not running against one cluster — one row per pass (#462).
  *
  * This was four columns on `clusters`, and four columns are one slot: six passes

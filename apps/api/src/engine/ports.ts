@@ -513,10 +513,56 @@ export interface EngineCapabilities {
   readonly partialIndexFromConstants: boolean;
 }
 
+// One drop in flight whose failures the engine should watch (#596).
+export interface WatchTarget {
+  readonly database: string;
+  readonly collection: string;
+  readonly indexName: string;
+  // Not hidden yet, so hint() at it is recorded too. A hint at a HIDDEN index
+  // fails and is caught as a failure — but by then it is an outage, and a hint
+  // seen before the hide stops the hide instead.
+  readonly beforeHide: boolean;
+}
+
+// What one database's watch came to on every node that serves it.
+export type DatabaseWatch =
+  // Failures on each namespace are recorded on every node, from the instant given
+  // (epoch ms) — the latest of the nodes', since that is when all of them were.
+  | {
+      readonly kind: "WATCHED";
+      readonly since: ReadonlyMap<string, number>;
+      // Whether Indexterity's own filter is in place on any node, which is what a
+      // later pass has to give back.
+      readonly ours: boolean;
+    }
+  | { readonly kind: "UNWATCHED"; readonly reason: string; readonly ours: boolean }
+  // Nothing is wanted here any more, and what was ours has been given back — or,
+  // with `ours` still true, could not be on some node, for a later pass to retry.
+  | { readonly kind: "RELEASED"; readonly ours: boolean };
+
+// Keeping a profiler on for the drops in flight (#596) — optional, and MongoDB
+// only. Its profiler is the one failure source a role can be granted the right to
+// turn on: SQL Server's Query Store is a database option that needs ALTER on the
+// database, and PostgreSQL has no source at all.
+export interface FailureWatch {
+  // Bring every node in line: watch the databases `targets` are in, and give back
+  // those in `release` that no target needs any more. `owner` is the cluster
+  // registration asking, so two registrations of one cluster never take each
+  // other's watch for their own.
+  reconcile(
+    owner: string,
+    targets: readonly WatchTarget[],
+    release: readonly string[],
+  ): Promise<ReadonlyMap<string, DatabaseWatch>>;
+}
+
 // One live, pooled connection to a customer cluster.
 export interface EngineSession {
   readonly collector: IndexCollector;
   executor(readOnly: boolean): IndexExecutor;
+  // Where the engine can keep a failure source on for an observe window; null on
+  // the engines that cannot.
+  readonly failureWatch: FailureWatch | null;
   // User databases only. The rule, which "its own system namespaces" was too
   // vague to keep the three adapters honest about (#347):
   //

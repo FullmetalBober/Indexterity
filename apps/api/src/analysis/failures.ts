@@ -130,3 +130,8 @@ export function describeWatch(reading: FailedOpsReading): string {
     ? ""
     : `failed operations only partly watched: ${reading.blindSpot}`;
 }
+
+// "2026-10-03 14:05 UTC" — an instant in an audit line, readable in any zone.
+export function utcMinute(ms: number): string {
+  return `${new Date(ms).toISOString().slice(0, 16).replace("T", " ")} UTC`;
+}

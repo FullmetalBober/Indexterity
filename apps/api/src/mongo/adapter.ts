@@ -3,6 +3,7 @@ import type {
   DialProxy,
   EngineAdapter,
   EngineSession,
+  FailureWatch,
   IndexCollector,
   IndexExecutor,
   TlsOverrides,
@@ -13,12 +14,14 @@ import { isMongoConnString, mongoHosts } from "./conn-string";
 import { MongoConnection } from "./connection";
 import { diagnoseConnection } from "./diagnose";
 import { MongoIndexExecutor } from "./executor";
+import { MongoFailureWatch } from "./failure-watch";
 import { MemberConnections } from "./members";
 import { connStringUsername, dropUserStatement, provisionScopedUser } from "./provision";
 import { connectionFingerprint, sharedSelfReads } from "./self-reads";
 
 class MongoEngineSession implements EngineSession {
   readonly collector: IndexCollector;
+  readonly failureWatch: FailureWatch;
   private readonly members: MemberConnections;
 
   constructor(
@@ -43,6 +46,7 @@ class MongoEngineSession implements EngineSession {
       this.members,
       sharedSelfReads(connectionFingerprint(connString)),
     );
+    this.failureWatch = new MongoFailureWatch(conn, this.members);
   }
 
   executor(readOnly: boolean): IndexExecutor {

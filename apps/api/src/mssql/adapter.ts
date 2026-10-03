@@ -23,6 +23,9 @@ import {
 
 class MssqlEngineSession implements EngineSession {
   readonly collector: IndexCollector;
+  // Query Store is the failure source here, and turning it on is ALTER DATABASE —
+  // not a right the scoped user has, or should (#596).
+  readonly failureWatch = null;
   private readonly members: MssqlMemberConnections;
 
   constructor(

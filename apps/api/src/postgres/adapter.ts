@@ -16,6 +16,8 @@ import { dropRoleStatements, provisionPostgresScopedUser } from "./provision";
 
 class PostgresEngineSession implements EngineSession {
   readonly collector: IndexCollector;
+  // PostgreSQL records failed statements nowhere a role can read (#438).
+  readonly failureWatch = null;
 
   constructor(private readonly conn: PostgresConnection) {
     this.collector = new PostgresIndexCollector(conn);

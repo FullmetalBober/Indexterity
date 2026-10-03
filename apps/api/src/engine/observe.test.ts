@@ -35,6 +35,7 @@ function session(names: string[]): EngineSession {
   return {
     collector: REFUSING_COLLECTOR,
     executor: () => REFUSING_EXECUTOR,
+    failureWatch: null,
     listDatabaseNames: vi.fn(async () => names),
     ping: vi.fn(async () => undefined),
     close: vi.fn(async () => undefined),

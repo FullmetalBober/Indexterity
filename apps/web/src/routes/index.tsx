@@ -141,7 +141,7 @@ const FAQ = [
   {
     question: "Which MongoDB privileges does it need?",
     answer:
-      "listDatabases, listCollections, listIndexes, indexStats and collStats to analyze; createIndex, dropIndex and collMod to apply changes; optionally system.profile or $queryStats for workload analysis, and serverStatus for the health probe. serverStatus is the one that reads beyond index metadata — it also exposes connection counts and storage-engine internals — so it is optional and a cluster without it works fine. Before storing anything, Indexterity checks the connection string and tells you exactly which of these are missing and what each one enables.",
+      "listDatabases, listCollections, listIndexes, indexStats and collStats to analyze; createIndex, dropIndex and collMod to apply changes; optionally system.profile or $queryStats for workload analysis, serverStatus for the health probe, and enableProfiler so Indexterity can turn the profiler on while a hidden index is observed and see any query the hide makes fail. serverStatus is the one that reads beyond index metadata — it also exposes connection counts and storage-engine internals — so it is optional and a cluster without it works fine. Before storing anything, Indexterity checks the connection string and tells you exactly which of these are missing and what each one enables.",
   },
   {
     question: "Which SQL Server permissions does it need?",

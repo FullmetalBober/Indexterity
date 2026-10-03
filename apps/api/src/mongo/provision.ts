@@ -42,6 +42,9 @@ export const ENGINE_PRIVILEGES: readonly RolePrivilege[] = [
       "createIndex",
       "dropIndex",
       "collMod",
+      // Turning the profiler on for a hidden index's observe window, so a query
+      // the hide breaks is seen failing (#596). Reading its settings needs none.
+      "enableProfiler",
     ],
   },
   { resource: { db: "", collection: "system.profile" }, actions: ["find"] },

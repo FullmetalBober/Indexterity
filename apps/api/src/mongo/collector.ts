@@ -28,8 +28,8 @@ import type {
 import { isRecord, messageOf } from "../errors/message";
 import type { MongoConnection } from "./connection";
 import { isAuthorizationError } from "./errors";
-import type { MemberConnections } from "./members";
-import { failedOpsReading, type ProfilerSettings, profilerSettings } from "./profiler";
+import { type MemberConnections, profiledNodes } from "./members";
+import { combineReadings, failedOpsReading, profilerSettingsOn } from "./profiler";
 import {
   ownSelfReads,
   READS_PER_COLL_STATS_LATENCY,
@@ -1247,7 +1247,25 @@ export class MongoIndexCollector implements IndexCollector {
     collection: string,
     sinceMs: number,
   ): Promise<FailedOpsReading> {
-    const ring = this.conn.db(database).collection("system.profile");
+    const nodes = await profiledNodes(this.conn, this.members);
+    return combineReadings(
+      await Promise.all(
+        nodes.map(async ({ host, conn }) => ({
+          host,
+          reading: await this.failedOpsOn(conn, database, collection, sinceMs),
+        })),
+      ),
+    );
+  }
+
+  // One node's ring and settings, read for the failed-operations check.
+  private async failedOpsOn(
+    conn: MongoConnection,
+    database: string,
+    collection: string,
+    sinceMs: number,
+  ): Promise<FailedOpsReading> {
+    const ring = conn.db(database).collection("system.profile");
     let failed: number;
     try {
       failed = await ring.countDocuments({
@@ -1264,7 +1282,7 @@ export class MongoIndexCollector implements IndexCollector {
       };
     }
     const [settings, oldest, self] = await Promise.all([
-      this.profilerSettings(database),
+      profilerSettingsOn(conn, database),
       ring
         .find({}, { projection: { _id: 0, ts: 1 } })
         .sort({ $natural: 1 })
@@ -1272,27 +1290,17 @@ export class MongoIndexCollector implements IndexCollector {
         .toArray()
         .then((docs) => profileDoc.pick({ ts: true }).safeParse(docs[0]).data?.ts ?? null)
         .catch(() => null),
-      this.conn.helloNode(),
+      conn.helloNode(),
     ]);
     return failedOpsReading({
       database,
+      collection,
       failed,
+      sinceMs,
       oldest,
       settings,
       throughMongos: self?.role === "mongos",
     });
-  }
-
-  // The profiler's settings on one database, or null when they cannot be read.
-  // `profile: -1` needs no privilege the role does not already have — probed with
-  // the engine role on mongod 6.0 to 9.0; only SETTING the level needs
-  // `enableProfiler`.
-  private async profilerSettings(database: string): Promise<ProfilerSettings | null> {
-    try {
-      return profilerSettings.parse(await this.conn.db(database).command({ profile: -1 }));
-    } catch {
-      return null;
-    }
   }
 
   // Indexes the application names explicitly with hint().
@@ -1307,12 +1315,26 @@ export class MongoIndexCollector implements IndexCollector {
   // one-way signal: a hint seen means hands off, a hint unseen means nothing.
   async collectHintedIndexes(database: string, collection: string): Promise<string[]> {
     const ns = `${database}.${collection}`;
-    const raw = await this.conn
-      .db(database)
-      .collection("system.profile")
-      .find({ ns })
-      .toArray()
-      .catch(() => []);
+    // Every member's ring, for the reason collectFailedOps reads every member: a
+    // hint on reads routed to a secondary is recorded there and nowhere else. And
+    // only the entries that carry a hint, filtered on the server, where this used
+    // to ship the namespace's whole ring to read one field of it.
+    const nodes = await profiledNodes(this.conn, this.members);
+    const raw = (
+      await Promise.all(
+        nodes.map(({ conn }) =>
+          conn
+            .db(database)
+            .collection("system.profile")
+            .find(
+              { ns, "command.hint": { $exists: true } },
+              { projection: { _id: 0, ns: 1, "command.hint": 1 } },
+            )
+            .toArray()
+            .catch(() => []),
+        ),
+      )
+    ).flat();
     const named = new Set<string>();
     const patterns: Record<string, unknown>[] = [];
     for (const doc of raw) {
@@ -1320,7 +1342,14 @@ export class MongoIndexCollector implements IndexCollector {
       if (!parsed.success) continue;
       const hint = parsed.data.command?.hint;
       if (typeof hint === "string") named.add(hint);
-      else if (isRecord(hint)) patterns.push(hint);
+      else if (isRecord(hint)) {
+        // An update or a delete keeps a hint by NAME wrapped — `{$hint: "a_1"}`,
+        // probed on 6.0 and 9.0 — and read as a key pattern that named a field
+        // called `$hint` and matched no index, so those hints were never seen.
+        const wrapped = hint.$hint;
+        if (typeof wrapped === "string") named.add(wrapped);
+        else patterns.push(hint);
+      }
     }
     // A key-pattern hint ({b: 1}) names an index by shape, so it has to be
     // matched against the real index list to get a name.
