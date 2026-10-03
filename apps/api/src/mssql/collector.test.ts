@@ -451,6 +451,30 @@ describe("shipping plan XML so an abandoned read leaves progress behind", () => 
     expect(store.asked.map((chunk) => chunk.length)).toEqual([50, 50, 20]);
   });
 
+  // #588. What is kept of a plan is the caller's to say: the attribution for the
+  // collect and the probe, the attribution with suggest's facts for suggest —
+  // the same chunks and the same durability either way.
+  it("keeps what the caller describes each plan as", async () => {
+    const store = cancellingAfter(Number.POSITIVE_INFINITY);
+    const kept = new Map<number, PlanAttribution>();
+    await shipPlanXml(
+      ids(3),
+      kept,
+      store.fetch,
+      () => undefined,
+      (row) => ({
+        hash: row.hash,
+        tables: ["dbo.described"],
+        isSelect: false,
+      }),
+    );
+    expect([...kept.values()].map((entry) => entry.tables)).toEqual([
+      ["dbo.described"],
+      ["dbo.described"],
+      ["dbo.described"],
+    ]);
+  });
+
   it("does nothing at all when the store has no unread plans", async () => {
     const store = cancellingAfter(0);
     let remembers = 0;

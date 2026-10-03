@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { PLAN_PARSE_CHUNK } from "./chunk";
-import { deletePatternsFromPlans, retentionSecondsFrom } from "./delete-patterns";
+import {
+  deletePatternsFromFacts,
+  deletePatternsFromPlans,
+  purgesOfPlan,
+  retentionSecondsFrom,
+} from "./delete-patterns";
+import { parsePlanXml } from "./workload";
 
 // Cut down from real plans captured off a 2022 CU26, keeping the elements this
 // reads: the statement type, the Compare with its CompareOp, the qualified
@@ -201,5 +207,46 @@ describe("deletePatternsFromPlans", () => {
       spinning = false;
     }
     expect(turns).toBeGreaterThan(0);
+  });
+});
+
+// #588. The purges are read once per plan for every table it names and kept
+// with the plan's other facts, so a warm suggest folds without parsing — and
+// the fold over kept facts has to be the fold over the XML, table by table.
+describe("purges kept per plan", () => {
+  // Two purge jobs in one batch, against two tables.
+  const twoTables = deletePlan(DATEADD).replace(
+    "</Statements>",
+    `${deletePlan("[shop].[dbo].[audit].[at]&lt;dateadd(day,(-7),sysutcdatetime())", {
+      table: "audit",
+      column: "at",
+    })
+      .replace(/^[\s\S]*<Statements>/, "")
+      .replace(/<\/Statements>[\s\S]*$/, "")}</Statements>`,
+  );
+
+  it("reads every table's purges from one parse", () => {
+    expect(purgesOfPlan(parsePlanXml(twoTables), "shop")).toEqual([
+      { table: "dbo.events", field: "created_at", retentionSeconds: 7_776_000 },
+      { table: "dbo.audit", field: "at", retentionSeconds: 604_800 },
+    ]);
+  });
+
+  it("folds kept purges to exactly what the XML folds to", async () => {
+    const rows = [
+      { planXml: deletePlan(DATEADD), execs: 5 },
+      { planXml: deletePlan(PARAMETERISED), execs: 2 },
+      { planXml: deletePlan(DATEADD, { statementType: "SELECT" }), execs: 9 },
+      { planXml: twoTables, execs: 4 },
+    ];
+    const facts = rows.map((row) => ({
+      purges: purgesOfPlan(parsePlanXml(row.planXml), "shop"),
+      execs: row.execs,
+    }));
+    for (const table of ["dbo.events", "dbo.audit", "dbo.orders"]) {
+      expect(await deletePatternsFromFacts(facts, table)).toEqual(
+        await deletePatternsFromPlans(rows, "shop", table),
+      );
+    }
   });
 });

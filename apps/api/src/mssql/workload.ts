@@ -33,6 +33,22 @@ const parser = new XMLParser({
   parseTagValue: false,
 });
 
+/**
+ * One showplan XML document as a tree, or null when it does not parse.
+ *
+ * Parsed once per plan and handed to every reader of it — the shapes below and
+ * the purges in delete-patterns.ts — because the parse is the expensive part,
+ * and a plan's XML is shipped to be read by both (#588). An unparseable plan
+ * yields no tree, which every reader takes as "nothing here".
+ */
+export function parsePlanXml(planXml: string): unknown {
+  try {
+    return parser.parse(planXml);
+  } catch {
+    return null;
+  }
+}
+
 export type XmlNode = Record<string, unknown>;
 
 function asArray(value: unknown): XmlNode[] {
@@ -105,10 +121,10 @@ interface TableShape {
   constants: Record<string, ConstantValue>;
 }
 
-interface MissingIndexSuggestion {
+export interface MissingIndexSuggestion {
   readonly table: string;
-  readonly equality: string[];
-  readonly range: string[];
+  readonly equality: readonly string[];
+  readonly range: readonly string[];
 }
 
 export interface PlanShapes {
@@ -138,15 +154,14 @@ const DML_STATEMENT_TYPES = new Set(["SELECT", "INSERT", "UPDATE", "DELETE", "ME
 // Extract per-table shape facts from one showplan XML document, for objects
 // living in `database` (see tableOf for why the filter exists).
 export function parseShowplanShapes(planXml: string, database: string): PlanShapes {
+  return shapesOfPlan(parsePlanXml(planXml), database);
+}
+
+// The same, from a plan already parsed. An unparseable plan arrives as null and
+// contributes no shape — never a failed collect.
+export function shapesOfPlan(root: unknown, database: string): PlanShapes {
   const perTable = new Map<string, TableShape>();
   const missing: MissingIndexSuggestion[] = [];
-  let root: unknown;
-  try {
-    root = parser.parse(planXml);
-  } catch {
-    // An unparseable plan contributes no shape — never a failed collect.
-    return { perTable, missing };
-  }
 
   // Only DML plans describe the workload. Query Store also captures DDL —
   // CREATE INDEX's own plan is a full scan feeding a sort, which would hand
@@ -302,6 +317,50 @@ export function parseShowplanShapes(planXml: string, database: string): PlanShap
   return { perTable, missing };
 }
 
+/**
+ * One table's shape in one plan, in the form kept per plan (#588): arrays
+ * rather than sets, and only the tables the fold would use — a shape with no
+ * predicate, no sort and no scan says nothing about an index and is dropped
+ * here rather than carried and skipped on every pass.
+ */
+export interface PlanTableShape {
+  readonly table: string;
+  readonly equality: readonly string[];
+  readonly range: readonly string[];
+  readonly sort: readonly SortKey[];
+  readonly collscan: boolean;
+  readonly sortedInMemory: boolean;
+  readonly constants?: Readonly<Record<string, ConstantValue>>;
+}
+
+/** What the workload fold needs from one plan, independent of its executions. */
+export interface PlanShapeFacts {
+  readonly shapes: readonly PlanTableShape[];
+  readonly missing: readonly MissingIndexSuggestion[];
+}
+
+// The per-table shapes the fold would use, in the order the plan gave them —
+// the order is part of the result, because a merged shape keeps the first
+// sample's column order.
+export function compactShapes(shapes: PlanShapes): PlanShapeFacts {
+  const out: PlanTableShape[] = [];
+  for (const [table, shape] of shapes.perTable) {
+    if (shape.equality.size + shape.range.size + shape.sort.length === 0 && !shape.collscan) {
+      continue;
+    }
+    out.push({
+      table,
+      equality: [...shape.equality],
+      range: [...shape.range],
+      sort: shape.sort,
+      collscan: shape.collscan,
+      sortedInMemory: shape.sortedInMemory,
+      ...(Object.keys(shape.constants).length > 0 ? { constants: shape.constants } : {}),
+    });
+  }
+  return { shapes: out, missing: shapes.missing };
+}
+
 // One Query Store plan with its lifetime runtime aggregate.
 export interface PlanRow {
   readonly planXml: string;
@@ -357,6 +416,31 @@ export async function shapesFromPlans(
   rows: readonly PlanRow[],
   now: Date,
 ): Promise<Map<string, QueryShape[]>> {
+  const facts: FactRow[] = [];
+  for (const [index, row] of rows.entries()) {
+    // The parse is the expensive half, so it is the half that breathes.
+    if (index > 0 && index % PLAN_PARSE_CHUNK === 0) await yieldToEventLoop();
+    facts.push({ ...row, facts: compactShapes(parseShowplanShapes(row.planXml, database)) });
+  }
+  return shapesFromFacts(targets, database, facts, now);
+}
+
+/** A plan's shape facts with the runtime aggregate they are weighted by. */
+export interface FactRow {
+  readonly facts: PlanShapeFacts;
+  readonly execs: number;
+  readonly totalIo: number;
+  readonly firstSeen: Date | string | null;
+}
+
+// The fold itself, over facts already extracted — what the collector keeps per
+// plan (#588), so a warm suggest folds without parsing anything.
+export async function shapesFromFacts(
+  targets: readonly WorkloadTarget[],
+  database: string,
+  rows: readonly FactRow[],
+  now: Date,
+): Promise<Map<string, QueryShape[]>> {
   const wanted = new Map<string, string>(); // "schema.table" -> workloadKey
   for (const target of targets) {
     if (target.database === database) {
@@ -375,7 +459,7 @@ export async function shapesFromPlans(
       sortedInMemory: boolean;
       constants?: Record<string, ConstantValue>;
     },
-    row: PlanRow,
+    row: FactRow,
   ): void => {
     const byShape = accumulators.get(key) ?? new Map<string, Accumulated>();
     accumulators.set(key, byShape);
@@ -419,31 +503,16 @@ export async function shapesFromPlans(
   for (const [index, row] of rows.entries()) {
     // Every accumulator lives outside this loop, so there is no half-built
     // state a pause could be observed in — the fold is identical whether the
-    // 5,000 plans are parsed in one breath or in fifty.
+    // 5,000 plans are folded in one breath or in fifty.
     if (index > 0 && index % PLAN_PARSE_CHUNK === 0) await yieldToEventLoop();
-    const { perTable, missing } = parseShowplanShapes(row.planXml, database);
-    for (const [table, shape] of perTable) {
-      const key = wanted.get(table);
+    for (const shape of row.facts.shapes) {
+      const key = wanted.get(shape.table);
       if (key === undefined) continue;
-      if (shape.equality.size + shape.range.size + shape.sort.length === 0 && !shape.collscan) {
-        continue;
-      }
-      fold(
-        key,
-        {
-          equality: [...shape.equality],
-          sort: shape.sort,
-          range: [...shape.range],
-          collscan: shape.collscan,
-          sortedInMemory: shape.sortedInMemory,
-          constants: shape.constants,
-        },
-        row,
-      );
+      fold(key, shape, row);
     }
     // The embedded suggestion rides the same execution counts as the plan it
     // came from, so the recurrence gate reads it like any observed shape.
-    for (const suggestion of missing) {
+    for (const suggestion of row.facts.missing) {
       const key = wanted.get(suggestion.table);
       if (key === undefined) continue;
       fold(
