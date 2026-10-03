@@ -69,6 +69,7 @@ const session: EngineSession = {
   collector,
   executor: () => executor,
   failureWatch: null,
+  checkPrivileges: async () => null,
   listDatabaseNames: async () => ["PlatformPlan"],
   ping: async () => undefined,
   close: async () => undefined,

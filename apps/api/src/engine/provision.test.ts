@@ -84,12 +84,24 @@ describe("revokeCommandFor", () => {
 
 // What a release added since a cluster's credentials were set up (#599).
 describe("newPrivilegesFor", () => {
+  // Checked, and found missing — the one state a notice is for.
   const row = (overrides: Partial<Parameters<typeof newPrivilegesFor>[0]> = {}) => ({
     engine: "MONGODB" as const,
     credentialPosture: "PROVISIONED" as const,
     provisionedUsername: SCOPED_USERNAME,
     privilegesRevision: 0,
+    privilegesCheckedRevision: currentPrivilegesRevision("MONGODB"),
     ...overrides,
+  });
+
+  // Unknown is not missing: atlasAdmin carries enableProfiler, and a cluster on it
+  // must not be told to grant what it holds just because nobody has asked yet.
+  it("says nothing about a change nobody has checked", () => {
+    expect(newPrivilegesFor(row({ privilegesCheckedRevision: 0 }))).toEqual({
+      pending: [],
+      command: null,
+      canUpgrade: false,
+    });
   });
 
   it("lists what changed, with the statement and the upgrade, on a role of ours", () => {

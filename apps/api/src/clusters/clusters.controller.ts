@@ -462,6 +462,10 @@ export class ClustersController {
                     row.privilegesRevision,
                     heldPrivilegesRevision(row.engine, diagnosis.privileges),
                   ),
+            privilegesCheckedRevision:
+              diagnosis === null
+                ? row.privilegesCheckedRevision
+                : currentPrivilegesRevision(row.engine),
           },
           errors,
         );
@@ -569,7 +573,11 @@ export class ClustersController {
             ? heldPrivilegesRevision(cluster.engine, diagnosis.privileges)
             : null;
         if (verified !== null) {
-          await this.clusters.raisePrivilegesRevision(cluster.id, verified);
+          await this.clusters.raisePrivilegesRevision(
+            cluster.id,
+            verified,
+            currentPrivilegesRevision(cluster.engine),
+          );
         }
         await this.record(req, {
           event: "CLUSTER_ROLE_UPGRADED",
@@ -599,7 +607,8 @@ export class ClustersController {
       async ({ input, errors, context }) => {
         const orgId = context.member.orgId;
         const row = await this.clusters.ownedById(input.clusterId, orgId, errors);
-        await this.clusters.raisePrivilegesRevision(row.id, currentPrivilegesRevision(row.engine));
+        const current = currentPrivilegesRevision(row.engine);
+        await this.clusters.raisePrivilegesRevision(row.id, current, current);
         const updated = await this.clusters.ownedById(row.id, orgId, errors);
         return toCluster(updated, null, await this.repository.blocksFor(updated.id));
       },
@@ -780,6 +789,7 @@ export class ClustersController {
           await this.clusters.raisePrivilegesRevision(
             cluster.id,
             heldPrivilegesRevision(cluster.engine, diagnosis.privileges),
+            currentPrivilegesRevision(cluster.engine),
           );
         }
         return {

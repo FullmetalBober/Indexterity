@@ -81,6 +81,12 @@ export class ObservedSession implements EngineSession {
     return this.inner.failureWatch;
   }
 
+  checkPrivileges(
+    observedDatabases: readonly string[] | null,
+  ): ReturnType<EngineSession["checkPrivileges"]> {
+    return this.inner.checkPrivileges(observedDatabases);
+  }
+
   // Strict intersection, in the cluster's own order, with no fallback — see
   // scopeForDiagnosis above for why the diagnosis rule differs. A selected
   // database that no longer exists drops out silently: a drop or a rename is a

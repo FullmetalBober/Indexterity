@@ -563,6 +563,13 @@ export interface EngineSession {
   // Where the engine can keep a failure source on for an observe window; null on
   // the engines that cannot.
   readonly failureWatch: FailureWatch | null;
+  // What the credentials this session runs as hold, against what the engine needs
+  // — the diagnosis's checks, asked over the open connection rather than a new
+  // dial (#599). Null when it cannot be told, and on an engine whose role has
+  // never changed, since then there is nothing a check could find out.
+  checkPrivileges(
+    observedDatabases: readonly string[] | null,
+  ): Promise<readonly PrivilegeCheck[] | null>;
   // User databases only. The rule, which "its own system namespaces" was too
   // vague to keep the three adapters honest about (#347):
   //

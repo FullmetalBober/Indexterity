@@ -106,15 +106,21 @@ interface PrivilegesRow {
   readonly credentialPosture: "PROVISIONED" | "ADMIN" | "SCOPED" | null;
   readonly provisionedUsername: string | null;
   readonly privilegesRevision: number;
+  readonly privilegesCheckedRevision: number;
 }
 
 // What a release has added since this cluster's credentials were set up, and that
-// they are not known to hold. Never anything on admin credentials, which hold
-// every action there is.
+// they are KNOWN not to hold: past what they hold, and no further than what has
+// been checked. A change nobody has checked yet is not shown, because the
+// credentials may well have it — Atlas's atlasAdmin carries enableProfiler through
+// dbAdminAnyDatabase — and telling an owner to grant what they hold is the notice
+// teaching them to ignore it. The collect checks within the hour (jobs/collect.ts).
+// Never anything on admin credentials, which hold every action there is.
 export function newPrivilegesFor(row: PrivilegesRow): {
   readonly pending: readonly PrivilegeChange[];
   // The statement that grants them, when the role is Indexterity's own and its
-  // name is therefore known; null on a role somebody made by hand (#246).
+  // name is therefore known; null on a role somebody made by hand (#246). It
+  // brings the role all the way to today's, as the upgrade does.
   readonly command: string | null;
   // Whether the role can be upgraded here with an admin string.
   readonly canUpgrade: boolean;
@@ -123,7 +129,11 @@ export function newPrivilegesFor(row: PrivilegesRow): {
   const pending =
     row.credentialPosture === "ADMIN"
       ? []
-      : adapter.privilegeChanges.filter((change) => change.revision > row.privilegesRevision);
+      : adapter.privilegeChanges.filter(
+          (change) =>
+            change.revision > row.privilegesRevision &&
+            change.revision <= row.privilegesCheckedRevision,
+        );
   const ours = row.provisionedUsername !== null && pending.length > 0;
   return {
     pending,
