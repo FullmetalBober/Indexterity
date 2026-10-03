@@ -140,6 +140,11 @@ function WithObserveReason({
 // window at all. So the state is named where the date used to be: still no
 // promise about when, which is the part we cannot honestly make, but no longer
 // silence about whether anything is pending.
+//
+// Both lines WRAP. They sit under the score in a 104px column, and the table
+// primitive sets `whitespace-nowrap` and clips a fixed column, so the overdue
+// sentence was cut to "due — waiting or" on every row it applied to. A row grows
+// to fit — the table measures each one — where a clipped sentence says nothing.
 export function DropsOn({
   rec,
 }: {
@@ -157,13 +162,15 @@ export function DropsOn({
   if (new Date(due).getTime() <= Date.now()) {
     return (
       <WithObserveReason reason={reason}>
-        <span className="block text-muted-foreground">due — waiting on the change window</span>
+        <span className="block whitespace-normal text-muted-foreground">
+          due — waiting on the change window
+        </span>
       </WithObserveReason>
     );
   }
   return (
     <WithObserveReason reason={reason}>
-      <span className="block text-muted-foreground">
+      <span className="block whitespace-normal text-muted-foreground">
         drops <LocalTime iso={due} options={DROPS_ON} dateOnly />
       </span>
     </WithObserveReason>
