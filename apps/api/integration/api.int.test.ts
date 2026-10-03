@@ -9,7 +9,7 @@ import {
 } from "@repo/contracts";
 import { makeWorkerUtils } from "graphile-worker";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { judgeFailures } from "../src/analysis";
+import { describeFailures, judgeFailures } from "../src/analysis";
 import { outcomeOf } from "../src/analysis/workload-outcome";
 import { entitledAutomation } from "../src/billing/plans";
 import {
@@ -3146,6 +3146,7 @@ describe("the observe window can see a query that fails", () => {
   // `ok: 0` on a profiler document, and nothing about $collStats records it.
   const DB = "intfail";
   const QUIET_DB = "intfail_quiet";
+  const SLOW_DB = "intfail_slow";
   const COLL = "fail_probe";
 
   // Its own databases, because system.profile is per-database and inttest's ring
@@ -3159,6 +3160,10 @@ describe("the observe window can see a query that fails", () => {
       .catch(() => undefined);
     await mongo
       .db(QUIET_DB)
+      .dropDatabase()
+      .catch(() => undefined);
+    await mongo
+      .db(SLOW_DB)
       .dropDatabase()
       .catch(() => undefined);
   });
@@ -3177,8 +3182,9 @@ describe("the observe window can see a query that fails", () => {
       // empty ring.
       expect(await db_.collection(COLL).countDocuments({ $text: { $search: "beans" } })).toBe(1);
       const before = await collector.collectFailedOps(DB, COLL, 0);
-      expect(before).not.toBeNull();
-      expect(before?.failed).toBe(0);
+      // Level 2 records every operation, so this window has no blind spot.
+      expect(before).toMatchObject({ kind: "WINDOW", failed: 0, blindSpot: null });
+      if (before.kind !== "WINDOW") throw new Error("expected a window");
 
       // Hide the text index and the same query stops working. Not slows —
       // NoQueryExecutionPlans (291), "need exactly one text index for $text query".
@@ -3191,22 +3197,23 @@ describe("the observe window can see a query that fails", () => {
       }
 
       const after = await collector.collectFailedOps(DB, COLL, hiddenAt - 1000);
-      expect(after?.failed).toBeGreaterThanOrEqual(3);
+      if (after.kind !== "WINDOW") throw new Error(`expected a window: ${after.reason}`);
+      expect(after.failed).toBeGreaterThanOrEqual(3);
       // The ring reaches back at least to the working query, so its zero above was
       // an observation rather than a blind spot.
-      expect(after?.reachMs).toBeLessThanOrEqual(hiddenAt);
+      expect(after.reachMs).toBeLessThanOrEqual(hiddenAt);
 
       // And the `since` filter is real: nothing failed after the future.
       const later = await collector.collectFailedOps(DB, COLL, Date.now() + 60_000);
-      expect(later?.failed).toBe(0);
+      expect(later).toMatchObject({ kind: "WINDOW", failed: 0 });
 
       // The verdict the pipeline actually acts on.
       const verdict = judgeFailures(
-        { failed: before?.failed ?? 0, reachMs: before?.reachMs ?? 0 },
+        { failed: before.failed, reachMs: before.reachMs },
         after,
         hiddenAt,
       );
-      expect(verdict).toMatchObject({ kind: "INTRODUCED", failed: after?.failed });
+      expect(verdict).toMatchObject({ kind: "INTRODUCED", failed: after.failed });
     } finally {
       await db_.command({ profile: 0 }).catch(() => undefined);
       await db_
@@ -3216,11 +3223,57 @@ describe("the observe window can see a query that fails", () => {
   });
 
   // Nothing turned the profiler on, which is the state most clusters are in — and
-  // it must read as "no source", never as "no failures" (D19).
+  // it must read as "no source", never as "no failures" (D19), and say so in words
+  // an owner can act on (#596).
   it("reports no source rather than a clean window when the profiler is off", async () => {
     const collector = new MongoIndexCollector(mongo);
     await mongo.db(QUIET_DB).collection("untouched").insertOne({ n: 1 });
-    expect(await collector.collectFailedOps(QUIET_DB, "untouched", 0)).toBeNull();
+    expect(await collector.collectFailedOps(QUIET_DB, "untouched", 0)).toEqual({
+      kind: "NO_SOURCE",
+      reason: `the profiler is off on ${QUIET_DB}`,
+    });
+  });
+
+  // The window that used to read as clean (#596). Level 1 keeps operations slower
+  // than slowms, a hint at a hidden index fails in 0 ms, and so the ring holds the
+  // slow query and not one of the failures.
+  it("names what a slow-only profiler cannot see", async () => {
+    const collector = new MongoIndexCollector(mongo);
+    const db_ = mongo.db(SLOW_DB);
+    await db_.collection(COLL).insertMany([{ n: 1 }, { n: 2 }]);
+    await db_.collection(COLL).createIndex({ n: 1 }, { name: "n_1" });
+    await db_.command({ profile: 1 });
+    try {
+      const slowms = Number((await db_.command({ profile: -1 })).slowms);
+      // Slow enough to be kept, so the ring is not empty and the reading is a window.
+      await db_
+        .collection(COLL)
+        .find({ $where: `sleep(${slowms + 50}) || true`, n: 1 })
+        .toArray();
+      await db_.command({ collMod: COLL, index: { name: "n_1", hidden: true } });
+      const hiddenAt = Date.now() - 1000;
+      for (let i = 0; i < 3; i += 1) {
+        await expect(db_.collection(COLL).find({ n: 1 }).hint("n_1").toArray()).rejects.toThrow();
+      }
+      const reading = await collector.collectFailedOps(SLOW_DB, COLL, hiddenAt);
+      expect(reading).toMatchObject({
+        kind: "WINDOW",
+        failed: 0,
+        blindSpot: `the profiler on ${SLOW_DB} keeps only operations slower than ${slowms} ms, and a failed one is fast`,
+      });
+      // So the drop line says the window was blind, not that it was clean.
+      expect(
+        describeFailures(judgeFailures({ failed: 0, reachMs: 0 }, reading, hiddenAt)),
+      ).toContain(`slower than ${slowms} ms`);
+      // And a collection with nothing in the ring is read against the whole ring's
+      // reach rather than reported as having no source.
+      expect(await collector.collectFailedOps(SLOW_DB, "never_queried", 0)).toMatchObject({
+        kind: "WINDOW",
+        failed: 0,
+      });
+    } finally {
+      await db_.command({ profile: 0 }).catch(() => undefined);
+    }
   });
 });
 

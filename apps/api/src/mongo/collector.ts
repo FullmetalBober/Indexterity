@@ -7,7 +7,7 @@ import {
   type CollectionStorage,
   DatabaseInaccessibleError,
   type DeletePattern,
-  type FailedOpsWindow,
+  type FailedOpsReading,
   type IndexCollector,
   type IndexUsageStat,
   type LatencyPair,
@@ -25,10 +25,11 @@ import type {
   ServerHealth,
   SortKey,
 } from "../engine/types";
-import { isRecord } from "../errors/message";
+import { isRecord, messageOf } from "../errors/message";
 import type { MongoConnection } from "./connection";
 import { isAuthorizationError } from "./errors";
 import type { MemberConnections } from "./members";
+import { type ProfilerSettings, profilerBlindSpot, profilerSettings } from "./profiler";
 import {
   ownSelfReads,
   READS_PER_COLL_STATS_LATENCY,
@@ -1230,37 +1231,74 @@ export class MongoIndexCollector implements IndexCollector {
   //
   // Reports the ring's reach rather than assuming it, for the same reason
   // collectSlowQueries does: system.profile is capped, so a count of zero means
-  // "nothing seen since reachMs" and never "nothing happened".
+  // "nothing seen since reachMs" and never "nothing happened". The reach is the
+  // whole ring's, not this namespace's: one ring per database holds every
+  // collection's operations, so its oldest entry bounds them all, and a quiet
+  // collection with nothing in it has had nothing recorded since then — which
+  // used to read as no source at all.
+  //
+  // And it reads the profiler's SETTINGS, because the ring alone cannot say what
+  // it was set up to miss (#596). At level 1 the profiler keeps operations slower
+  // than `slowms`, and a failed one is fast: on mongod 6.0 to 9.0 a hint at a
+  // hidden index fails in 0 ms, and a level-1 profiler with no filter recorded
+  // nothing of it. That window used to read as clean.
   async collectFailedOps(
     database: string,
     collection: string,
     sinceMs: number,
-  ): Promise<FailedOpsWindow | null> {
-    const ns = `${database}.${collection}`;
-    const raw = await this.conn
-      .db(database)
-      .collection("system.profile")
-      .find({ ns })
-      .toArray()
-      .catch(() => null);
-    if (raw === null) return null;
-    let failed = 0;
-    let reachMs: number | null = null;
-    for (const doc of raw) {
-      const parsed = profileDoc.safeParse(doc);
-      if (!parsed.success) continue;
-      const ts = parsed.data.ts;
-      if (ts === undefined) continue;
-      const at = ts.getTime();
-      reachMs = reachMs === null ? at : Math.min(reachMs, at);
-      const isFailure = parsed.data.ok === 0 || parsed.data.errCode !== undefined;
-      if (isFailure && at >= sinceMs) failed += 1;
+  ): Promise<FailedOpsReading> {
+    const ring = this.conn.db(database).collection("system.profile");
+    let failed: number;
+    try {
+      failed = await ring.countDocuments({
+        ns: `${database}.${collection}`,
+        ts: { $gte: new Date(sinceMs) },
+        $or: [{ ok: 0 }, { errCode: { $exists: true } }],
+      });
+    } catch (error) {
+      return {
+        kind: "NO_SOURCE",
+        reason: isAuthorizationError(error)
+          ? `these credentials cannot read system.profile on ${database}`
+          : `system.profile on ${database} could not be read (${messageOf(error)})`,
+      };
     }
-    // Nothing in the ring for this namespace is not the same as a clean namespace:
-    // the profiler is opt-in, so the usual reason to see nothing is that nobody
-    // turned it on. Null, so the caller cannot spell it "all clear" (D19).
-    if (reachMs === null) return null;
-    return { failed, reachMs };
+    const [settings, oldest] = await Promise.all([
+      this.profilerSettings(database),
+      ring
+        .find({}, { projection: { _id: 0, ts: 1 } })
+        .sort({ $natural: 1 })
+        .limit(1)
+        .toArray()
+        .then((docs) => profileDoc.pick({ ts: true }).safeParse(docs[0]).data?.ts ?? null)
+        .catch(() => null),
+    ]);
+    // Off, and nothing from when it was on says otherwise. Failures recorded
+    // before somebody turned it off are still failures, so those still count.
+    if (settings?.was === 0 && failed === 0) {
+      return { kind: "NO_SOURCE", reason: `the profiler is off on ${database}` };
+    }
+    if (oldest === null) {
+      return { kind: "NO_SOURCE", reason: `the profiler on ${database} has recorded nothing yet` };
+    }
+    return {
+      kind: "WINDOW",
+      failed,
+      reachMs: oldest.getTime(),
+      blindSpot: profilerBlindSpot(database, settings),
+    };
+  }
+
+  // The profiler's settings on one database, or null when they cannot be read.
+  // `profile: -1` needs no privilege the role does not already have — probed with
+  // the engine role on mongod 6.0 to 9.0; only SETTING the level needs
+  // `enableProfiler`.
+  private async profilerSettings(database: string): Promise<ProfilerSettings | null> {
+    try {
+      return profilerSettings.parse(await this.conn.db(database).command({ profile: -1 }));
+    } catch {
+      return null;
+    }
   }
 
   // Indexes the application names explicitly with hint().

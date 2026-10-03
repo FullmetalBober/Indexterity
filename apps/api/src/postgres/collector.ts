@@ -3,7 +3,7 @@ import {
   type ClusterNode,
   DatabaseInaccessibleError,
   type DeletePattern,
-  type FailedOpsWindow,
+  type FailedOpsReading,
   type IndexCollector,
   type IndexUsageStat,
   type LatencyPair,
@@ -342,12 +342,15 @@ export class PostgresIndexCollector implements IndexCollector {
   // per-statement error record is `log_min_error_statement` output in the server
   // log, which is not a relation this can read.
   //
-  // Null and not zero, which matters here more than anywhere: this engine has no
-  // reversible hide either (§9.3), so the observe window runs with the index still
-  // serving and a broken query is not among the things that can happen. Reporting
-  // zero would still be a claim, and it is not ours to make.
-  async collectFailedOps(): Promise<FailedOpsWindow | null> {
-    return null;
+  // No source and not zero, which matters here more than anywhere: this engine has
+  // no reversible hide either (§9.3), so the observe window runs with the index
+  // still serving and a broken query is not among the things that can happen.
+  // Reporting zero would still be a claim, and it is not ours to make.
+  async collectFailedOps(): Promise<FailedOpsReading> {
+    return {
+      kind: "NO_SOURCE",
+      reason: "PostgreSQL keeps no per-table record of failed statements",
+    };
   }
 
   // Every namespace at once, which is why the port batches this: the workload

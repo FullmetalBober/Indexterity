@@ -5,7 +5,7 @@ import type {
   CollectionLatency,
   CollectionStorage,
   DeletePattern,
-  FailedOpsWindow,
+  FailedOpsReading,
   IndexCollector,
   IndexUsageStat,
   LatencyPair,
@@ -411,6 +411,18 @@ function isInaccessibleDatabase(error: unknown): boolean {
   }
   const message = error instanceof Error ? error.message : String(error);
   return /is not able to access the database/i.test(message);
+}
+
+// One database's Query Store, as far as the readers here need it. `readable`
+// false is a store whose options could not be read — an error, or the empty
+// answer a catalog view gives a login without the permission to see it — which
+// every caller has always treated as off; the failed-operations line says which
+// (#596).
+interface QueryStoreOptions {
+  readonly readable: boolean;
+  readonly enabled: boolean;
+  // ALL, AUTO, CUSTOM or NONE: which queries the store keeps at all.
+  readonly captureMode: string;
 }
 
 export class MssqlIndexCollector implements IndexCollector {
@@ -867,8 +879,17 @@ export class MssqlIndexCollector implements IndexCollector {
     database: string,
     collection: string,
     sinceMs: number,
-  ): Promise<FailedOpsWindow | null> {
-    if (!(await this.queryStoreEnabled(database))) return null;
+  ): Promise<FailedOpsReading> {
+    const store = await this.queryStoreOptions(database);
+    if (!store.readable) {
+      return {
+        kind: "NO_SOURCE",
+        reason: `Query Store's settings on ${database} could not be read`,
+      };
+    }
+    if (!store.enabled) {
+      return { kind: "NO_SOURCE", reason: `Query Store is off on ${database}` };
+    }
     const rows = await this.conn.query<{ failed: number | null; reach: Date | null }>(
       `SELECT
          COALESCE(SUM(CASE WHEN rs.execution_type = 4
@@ -887,8 +908,22 @@ export class MssqlIndexCollector implements IndexCollector {
     const row = rows[0];
     // No retained row for this table is not a clean table — it is Query Store
     // holding nothing about it, which says nothing either way.
-    if (row === undefined || row.reach === null) return null;
-    return { failed: asNumber(row.failed) ?? 0, reachMs: row.reach.getTime() };
+    if (row === undefined || row.reach === null) {
+      return {
+        kind: "NO_SOURCE",
+        reason: `Query Store on ${database} holds no plan that reads ${collection}`,
+      };
+    }
+    return {
+      kind: "WINDOW",
+      failed: asNumber(row.failed) ?? 0,
+      reachMs: row.reach.getTime(),
+      // The capture-mode limit above, said in the audit line rather than only here.
+      blindSpot:
+        store.captureMode === "ALL"
+          ? null
+          : `Query Store on ${database} keeps only the queries its ${store.captureMode} capture mode selects, and an infrequent failing one may not be among them`,
+    };
   }
 
   // Indexes named explicitly in the workload: `WITH (INDEX(…))` hints in Query
@@ -1260,23 +1295,31 @@ export class MssqlIndexCollector implements IndexCollector {
     return collectMssqlServerHealth(this.conn);
   }
 
-  private readonly queryStoreState = new Map<string, boolean>();
+  private readonly queryStoreState = new Map<string, QueryStoreOptions>();
 
   private async queryStoreEnabled(database: string): Promise<boolean> {
+    return (await this.queryStoreOptions(database)).enabled;
+  }
+
+  private async queryStoreOptions(database: string): Promise<QueryStoreOptions> {
     const cached = this.queryStoreState.get(database);
     if (cached !== undefined) return cached;
-    let enabled = false;
+    let options: QueryStoreOptions = { readable: false, enabled: false, captureMode: "NONE" };
     try {
-      const rows = await this.conn.query<{ state: number }>(
+      const rows = await this.conn.query<{ state: number; captureMode: string }>(
         // 1 = READ_ONLY (history still readable), 2 = READ_WRITE.
-        `SELECT actual_state AS state
+        `SELECT actual_state AS state, query_capture_mode_desc AS captureMode
          FROM ${quoteIdent(database)}.sys.database_query_store_options`,
       );
-      enabled = rows[0] !== undefined && rows[0].state > 0;
+      const row = rows[0];
+      if (row !== undefined) {
+        options = { readable: true, enabled: row.state > 0, captureMode: row.captureMode };
+      }
     } catch {
-      enabled = false;
+      // Unreadable reads as off, as it always has: every caller treats Query
+      // Store as optional.
     }
-    this.queryStoreState.set(database, enabled);
-    return enabled;
+    this.queryStoreState.set(database, options);
+    return options;
   }
 }

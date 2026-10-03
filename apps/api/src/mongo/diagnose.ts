@@ -121,7 +121,14 @@ export const REQUIRED_PRIVILEGES: readonly RequiredPrivilege[] = [
   {
     key: "profiler",
     label: "Read system.profile",
-    enables: "workload analysis fallback, partial-index and TTL detection",
+    // The two drop safeguards are the half that matters most and was not said
+    // (#596): only the profiler records a hint() or a failed operation, so without
+    // it a hide that breaks queries is caught by neither — and only while the
+    // profiler is on, which reading it does not do.
+    enables:
+      "workload analysis fallback, partial-index and TTL detection, and two drop safeguards — " +
+      "spotting indexes named by hint() and rolling back a hide that makes queries fail — " +
+      "while the profiler is on",
     tier: "WORKLOAD",
     actions: ["find"],
     scope: { kind: "anyDb", collection: "system.profile" },

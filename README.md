@@ -9,8 +9,10 @@ freed bytes and latency.
 gated behind an observe window, a pre-flight check, a read-latency regression
 test, and a check that the workload did not start FAILING while the index was
 hidden — which is a separate question, because a query that fails returns faster
-than one that works and a latency test reads it as an improvement. Everything
-before the drop is reversible, and the dashboard says which is which.
+than one that works and a latency test reads it as an improvement. That check
+needs a record of failed operations — the MongoDB profiler, SQL Server's Query
+Store — and where there is none, the audit trail says it was skipped and why.
+Everything before the drop is reversible, and the dashboard says which is which.
 
 **Some indexes are never dropped automatically, whatever they score.** That gate
 is a measurement, and a measurement needs the experiment to be survivable. A

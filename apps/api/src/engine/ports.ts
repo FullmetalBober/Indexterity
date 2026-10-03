@@ -289,22 +289,40 @@ export interface IndexCollector {
   // A ONE-WAY signal, exactly like collectHintedIndexes above: failures seen are
   // evidence, failures unseen are nothing. `reachMs` is how far back the source
   // can see at all, so absence is only a claim within it.
+  //
+  // And when there is no window, the reading says WHY (#596). The causes differ
+  // per engine and have different remedies — a privilege to grant, a profiler to
+  // turn on, a Query Store holding nothing for the table — and the audit line
+  // used to collapse all of them into "could not be read", which reads like an
+  // error and names none of them.
   collectFailedOps(
     database: string,
     collection: string,
     sinceMs: number,
-  ): Promise<FailedOpsWindow | null>;
+  ): Promise<FailedOpsReading>;
 }
 
-// Failed operations on one namespace, over the window the source can see.
+// Failed operations on one namespace, over the window the source can see — or the
+// reason there is no such window, in words the audit line can carry.
+export type FailedOpsReading =
+  | ({ readonly kind: "WINDOW" } & FailedOpsWindow)
+  | { readonly kind: "NO_SOURCE"; readonly reason: string };
+
 export interface FailedOpsWindow {
   // Operations that returned an error at or after the requested instant.
   readonly failed: number;
   // The oldest observation the source can still produce, epoch ms. On MongoDB this
-  // is the profiler ring's reach — a busy collection fills it in minutes and a
+  // is the profiler ring's reach — a busy database fills it in minutes and a
   // quiet one holds weeks — so a count of zero means "nothing seen since here",
   // never "nothing happened".
   readonly reachMs: number;
+  // What the source is set up NOT to record, as a clause, or null when it records
+  // every operation. A window can be real and still blind to the very thing this
+  // asks about: a MongoDB profiler at level 1 keeps operations slower than
+  // `slowms`, and a failed operation is fast — measured on mongod 6.0 to 9.0, a
+  // hint at a hidden index fails in 0 ms and the level-1 profiler records nothing
+  // of it. Zero failures read through that is not a clean window.
+  readonly blindSpot: string | null;
 }
 
 export interface CreateIndexOptions {
