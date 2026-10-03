@@ -129,6 +129,7 @@ export class ClustersService {
       provisionedDatabases: string[] | null;
       credentialPosture: typeof clusters.$inferSelect.credentialPosture;
       privilegesRevision: number;
+      privilegesCheckedRevision: number;
     },
     errors: NotFound,
   ): Promise<ClusterRow> {
@@ -151,13 +152,17 @@ export class ClustersService {
     return updated;
   }
 
-  // Raise how far along its engine's privilege changes a cluster is known to be
-  // (#599). GREATEST in the statement rather than a read and a write, so two
-  // passes that learn different things cannot lower it between them.
-  async raisePrivilegesRevision(clusterId: string, revision: number): Promise<void> {
+  // Raise how far along its engine's privilege changes a cluster is known to be,
+  // and how far it has been checked (#599). GREATEST in the statement rather than a
+  // read and a write, so two passes that learn different things cannot lower
+  // either between them.
+  async raisePrivilegesRevision(clusterId: string, held: number, checked: number): Promise<void> {
     await this.database.db
       .update(clusters)
-      .set({ privilegesRevision: sql`greatest(${clusters.privilegesRevision}, ${revision})` })
+      .set({
+        privilegesRevision: sql`greatest(${clusters.privilegesRevision}, ${held})`,
+        privilegesCheckedRevision: sql`greatest(${clusters.privilegesCheckedRevision}, ${checked})`,
+      })
       .where(eq(clusters.id, clusterId));
   }
 
@@ -214,6 +219,7 @@ export class ClustersService {
           // just been shown every privilege there is, optional ones included, and a
           // provisioned role holds them all. Only what a LATER release adds is news.
           privilegesRevision: currentPrivilegesRevision(engine),
+          privilegesCheckedRevision: currentPrivilegesRevision(engine),
           tlsOverrides,
           observedDatabases,
           tunnelId,

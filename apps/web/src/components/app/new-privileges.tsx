@@ -56,8 +56,8 @@ export function NewPrivilegesBanner({
       <AlertTitle>New privileges Indexterity can use</AlertTitle>
       <AlertDescription className="space-y-2">
         <p>
-          A release since this cluster was connected can do more with privileges its credentials are
-          not known to hold. Nothing has stopped working without them.
+          A release since this cluster was connected can do more with privileges its credentials do
+          not have. Nothing has stopped working without them.
         </p>
         <Changes pending={newPrivileges.pending} />
         <Link to="/app/clusters/$clusterId/settings" params={{ clusterId }} className="underline">

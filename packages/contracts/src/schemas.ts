@@ -210,7 +210,7 @@ export const cluster = z.object({
   // an empty state (#289).
   credentialPosture: z.enum(["PROVISIONED", "ADMIN", "SCOPED"]).nullable(),
   // Privileges a release has added since these credentials were set up, that they
-  // are not known to hold (#599). A role is created once from an admin string
+  // were checked and found not to hold (#599) — never one nobody has checked yet. A role is created once from an admin string
   // that is never stored, so a later release cannot add to it — this is how the
   // owner learns there is something to add, and how to.
   newPrivileges: z.object({

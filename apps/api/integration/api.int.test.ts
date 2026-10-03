@@ -1539,8 +1539,8 @@ describe("a role a release added to", () => {
       .find((entry) => entry.id === clusterIdOf);
     return asRecord(found?.newPrivileges);
   };
-  // What a cluster provisioned by 0.28.0 has: the role without enableProfiler,
-  // and a revision from before the change.
+  // What a cluster provisioned by 0.28.0 has: the role without enableProfiler, and
+  // a revision from before the change that nobody has checked yet.
   const asIfProvisionedBefore = async () => {
     await mongo.db("admin").command({
       updateRole: "indexterityEngine",
@@ -1549,7 +1549,14 @@ describe("a role a release added to", () => {
         actions: privilege.actions.filter((action) => action !== "enableProfiler"),
       })),
     });
-    await db.update(clusters).set({ privilegesRevision: 0 }).where(eq(clusters.id, clusterIdOf));
+    await db
+      .update(clusters)
+      .set({ privilegesRevision: 0, privilegesCheckedRevision: 0 })
+      .where(eq(clusters.id, clusterIdOf));
+  };
+  // The hourly collect, which is what asks the cluster in the ordinary run of things.
+  const collectNow = async () => {
+    await collectCluster(db, clusterIdOf);
   };
   const roleActions = async (): Promise<string[]> => {
     const info = asRecord(
@@ -1575,9 +1582,12 @@ describe("a role a release added to", () => {
     expect(await roleActions()).toContain("enableProfiler");
   });
 
-  it("tells a cluster provisioned before the change, and upgrades its role", async () => {
+  it("tells a cluster only once a check finds the privilege missing, and upgrades its role", async () => {
     await asIfProvisionedBefore();
     expect(await roleActions()).not.toContain("enableProfiler");
+    // Unknown is not missing: nothing is shown until somebody has asked.
+    expect(asRecord(await newPrivilegesOf()).pending).toEqual([]);
+    await collectNow();
     const told = await newPrivilegesOf();
     expect(told.canUpgrade).toBe(true);
     expect(asString(told.command)).toContain('grantPrivilegesToRole("indexterityEngine"');
@@ -1613,6 +1623,8 @@ describe("a role a release added to", () => {
 
   it("goes when the owner has seen it, and nothing on the cluster changes", async () => {
     await asIfProvisionedBefore();
+    await collectNow();
+    expect(asRecord(await newPrivilegesOf()).pending).not.toEqual([]);
     const res = await api(`/clusters/${clusterIdOf}/privileges/review`, upgrader, {
       method: "POST",
     });
@@ -1621,14 +1633,30 @@ describe("a role a release added to", () => {
     expect(await roleActions()).not.toContain("enableProfiler");
   });
 
-  // The owner who ran the grant by hand: checking the credentials clears it — and
-  // only then, because the check reads what the role really holds.
-  it("clears itself when the credentials turn out to hold it", async () => {
+  // The owner who ran the grant by hand: the next collect sees it and the notice
+  // goes, with nobody opening anything — and only then, because the check reads
+  // what the role really holds.
+  it("clears itself at the next collect once the credentials hold it", async () => {
     await asIfProvisionedBefore();
-    expect((await api(`/clusters/${clusterIdOf}/privileges`, upgrader)).status).toBe(200);
+    await collectNow();
+    expect(asRecord(await newPrivilegesOf()).pending).not.toEqual([]);
+    await collectNow();
     expect(asRecord(await newPrivilegesOf()).pending).not.toEqual([]);
 
     // The statement the notice hands over, as the driver spells it.
+    await mongo.db("admin").command({
+      grantPrivilegesToRole: "indexterityEngine",
+      privileges: [{ resource: { db: "", collection: "" }, actions: ["enableProfiler"] }],
+    });
+    await collectNow();
+    expect(asRecord(await newPrivilegesOf()).pending).toEqual([]);
+  });
+
+  // The credentials card is a check too, and the one an owner can run on demand.
+  it("is checked, both ways, when the credentials card asks", async () => {
+    await asIfProvisionedBefore();
+    expect((await api(`/clusters/${clusterIdOf}/privileges`, upgrader)).status).toBe(200);
+    expect(asRecord(await newPrivilegesOf()).pending).not.toEqual([]);
     await mongo.db("admin").command({
       grantPrivilegesToRole: "indexterityEngine",
       privileges: [{ resource: { db: "", collection: "" }, actions: ["enableProfiler"] }],
@@ -1640,8 +1668,15 @@ describe("a role a release added to", () => {
   // Once per cluster per revision, however many weekly runs see it.
   it("is mailed once", async () => {
     await asIfProvisionedBefore();
+    // Nothing to mail about a change nobody has checked.
     await runPrivilegeNotices(db);
     const key = `privileges:${clusterIdOf}:1`;
+    expect(await db.select().from(workerWatermarks).where(eq(workerWatermarks.key, key))).toEqual(
+      [],
+    );
+    // Checked and found missing: mailed now, and only now.
+    await collectNow();
+    await runPrivilegeNotices(db);
     const [claimed] = await db.select().from(workerWatermarks).where(eq(workerWatermarks.key, key));
     expect(claimed).toBeDefined();
     const at = claimed?.at.getTime();
@@ -1655,7 +1690,12 @@ describe("a role a release added to", () => {
   it("is not upgraded where the role is not ours", async () => {
     await db
       .update(clusters)
-      .set({ provisionedUsername: null, credentialPosture: "SCOPED", privilegesRevision: 0 })
+      .set({
+        provisionedUsername: null,
+        credentialPosture: "SCOPED",
+        privilegesRevision: 0,
+        privilegesCheckedRevision: 1,
+      })
       .where(eq(clusters.id, clusterIdOf));
     const told = await newPrivilegesOf();
     expect(told).toMatchObject({ command: null, canUpgrade: false });

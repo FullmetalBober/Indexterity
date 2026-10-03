@@ -19,6 +19,11 @@ class PostgresEngineSession implements EngineSession {
   // PostgreSQL records failed statements nowhere a role can read (#438).
   readonly failureWatch = null;
 
+  // Its role has never changed (#599), so there is nothing for a check to find.
+  async checkPrivileges(): Promise<null> {
+    return null;
+  }
+
   constructor(private readonly conn: PostgresConnection) {
     this.collector = new PostgresIndexCollector(conn);
   }

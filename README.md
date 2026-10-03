@@ -35,9 +35,9 @@ to provision its own least-privilege one instead — `indexterity`, holding inde
 metadata and statistics and no read privilege at all. The server enforces that;
 it is not a promise we make. The admin string is used once and never stored.
 When a later release can use one more privilege, it is optional — that one
-feature stays off, with its reason, until it is granted — and each cluster is
-told once, with the statement that grants it or an upgrade that takes an admin
-string the same way, once.
+feature stays off, with its reason, until it is granted — and a cluster whose
+credentials are checked and found to lack it is told once, with the statement
+that grants it or an upgrade that takes an admin string the same way, once.
 
 **It shows you what it looked at, not only what it proposes.** Every index a
 cluster has, with its size, its flags and which replica-set member is actually
