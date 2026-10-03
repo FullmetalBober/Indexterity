@@ -1,7 +1,6 @@
-import { XMLParser } from "fast-xml-parser";
 import type { DeletePattern } from "../engine/ports";
 import { PLAN_PARSE_CHUNK, yieldToEventLoop } from "./chunk";
-import { attr, collect, isNode, tableOf, type XmlNode } from "./workload";
+import { attr, collect, isNode, parsePlanXml, tableOf, type XmlNode } from "./workload";
 
 // Recurring age-based DELETEs, from Query Store plans (#206).
 //
@@ -22,13 +21,6 @@ import { attr, collect, isNode, tableOf, type XmlNode } from "./workload";
 //
 // All three are recorded with their own query_id, execution counts and
 // first/last execution times, which is everything the recurrence gate needs.
-
-const parser = new XMLParser({
-  ignoreAttributes: false,
-  attributeNamePrefix: "@",
-  parseAttributeValue: false,
-  parseTagValue: false,
-});
 
 // An age-based purge compares the column with `<` or `<=`. `>` is not a purge —
 // it is a query for RECENT rows — and equality is not age-based at all.
@@ -87,12 +79,27 @@ function childrenOf(node: XmlNode, key: string): XmlNode[] {
   return isNode(child) ? [child] : [];
 }
 
-// The column this element compares, when it is a column of the target table.
-function targetColumn(node: XmlNode, database: string, collection: string): string | null {
-  const reference = collect(node, "ColumnReference").find(
-    (candidate) => tableOf(candidate, database) === collection,
-  );
-  return reference === undefined ? null : attr(reference, "Column");
+// The column each table compares under `node` — the FIRST reference to the table
+// decides, as it did when this was asked for one table at a time, and a first
+// reference with no column contributes nothing for that table.
+function columnsByTable(node: XmlNode, database: string): { table: string; field: string }[] {
+  const first = new Map<string, string | null>();
+  for (const reference of collect(node, "ColumnReference")) {
+    const table = tableOf(reference, database);
+    if (table === null || first.has(table)) continue;
+    first.set(table, attr(reference, "Column"));
+  }
+  const out: { table: string; field: string }[] = [];
+  for (const [table, field] of first) if (field !== null) out.push({ table, field });
+  return out;
+}
+
+/** One age-based purge a DELETE plan performs: the table, its column, how far back. */
+export interface PlanPurge {
+  readonly table: string;
+  readonly field: string;
+  // Null when the cutoff is a parameter, or a unit this cannot read.
+  readonly retentionSeconds: number | null;
 }
 
 // Age predicates under a DELETE statement, in the two shapes the plan writes
@@ -111,18 +118,12 @@ function targetColumn(node: XmlNode, database: string, collection: string): stri
 // Reading only the first would report an unindexed purge and go silent the
 // moment somebody indexed it — which is exactly when the table is big enough
 // for the second half of the advice to matter.
-function agePredicatesIn(
-  planXml: string,
-  database: string,
-  collection: string,
-): { field: string; retentionSeconds: number | null }[] {
-  let tree: unknown;
-  try {
-    tree = parser.parse(planXml);
-  } catch {
-    return [];
-  }
-  const out: { field: string; retentionSeconds: number | null }[] = [];
+//
+// For every table of `database` the plan names, from the plan already parsed —
+// so one parse serves every table, and the purges can be remembered with the
+// plan's other facts (#588) instead of being re-read per table per pass.
+export function purgesOfPlan(tree: unknown, database: string): PlanPurge[] {
+  const out: PlanPurge[] = [];
   // Per STATEMENT, not per plan: a batch can hold a DELETE and a SELECT, and
   // the SELECT's `created_at < @x` is a query, not a purge.
   for (const statement of collect(tree, "StmtSimple")) {
@@ -132,29 +133,32 @@ function agePredicatesIn(
       for (const compare of childrenOf(operator, "Compare")) {
         const op = attr(compare, "CompareOp");
         if (op === null || !OLDER_THAN.has(op)) continue;
-        const field = targetColumn(compare, database, collection);
-        if (field === null) continue;
-        out.push({
-          field,
-          retentionSeconds: scalarString === null ? null : retentionSecondsFrom(scalarString),
-        });
+        for (const { table, field } of columnsByTable(compare, database)) {
+          out.push({
+            table,
+            field,
+            retentionSeconds: scalarString === null ? null : retentionSecondsFrom(scalarString),
+          });
+        }
       }
     }
     for (const range of collect(statement, "EndRange")) {
       const scanType = attr(range, "ScanType");
       if (scanType === null || !OLDER_THAN.has(scanType)) continue;
       const columns = childrenOf(range, "RangeColumns")[0];
-      const field = columns === undefined ? null : targetColumn(columns, database, collection);
-      if (field === null) continue;
+      if (columns === undefined) continue;
       const expressions = childrenOf(range, "RangeExpressions")[0];
       const cutoff =
         expressions === undefined ? null : childrenOf(expressions, "ScalarOperator")[0];
       const scalarString =
         cutoff === undefined || cutoff === null ? null : attr(cutoff, "ScalarString");
-      out.push({
-        field,
-        retentionSeconds: scalarString === null ? null : retentionSecondsFrom(scalarString),
-      });
+      for (const { table, field } of columnsByTable(columns, database)) {
+        out.push({
+          table,
+          field,
+          retentionSeconds: scalarString === null ? null : retentionSecondsFrom(scalarString),
+        });
+      }
     }
   }
   return out;
@@ -175,6 +179,21 @@ export async function deletePatternsFromPlans(
   database: string,
   collection: string,
 ): Promise<DeletePattern[]> {
+  const facts: { purges: readonly PlanPurge[]; execs: number }[] = [];
+  for (const [index, row] of rows.entries()) {
+    // The parse is the expensive half, so it is the half that breathes.
+    if (index > 0 && index % PLAN_PARSE_CHUNK === 0) await yieldToEventLoop();
+    facts.push({ purges: purgesOfPlan(parsePlanXml(row.planXml), database), execs: row.execs });
+  }
+  return deletePatternsFromFacts(facts, collection);
+}
+
+// The same fold over purges already extracted — what the collector keeps per
+// plan (#588), so a warm suggest folds without parsing anything.
+export async function deletePatternsFromFacts(
+  rows: readonly { readonly purges: readonly PlanPurge[]; readonly execs: number }[],
+  collection: string,
+): Promise<DeletePattern[]> {
   const byField = new Map<string, { count: number; retentions: number[] }>();
   for (const [index, row] of rows.entries()) {
     // byField is the only state, and it lives outside the loop, so pausing
@@ -183,9 +202,10 @@ export async function deletePatternsFromPlans(
     // One statement may compare the same column twice (a BETWEEN-shaped purge
     // window). That is one purge, so the column is counted once per plan.
     const fields = new Map<string, number | null>();
-    for (const predicate of agePredicatesIn(row.planXml, database, collection)) {
-      const held = fields.get(predicate.field);
-      fields.set(predicate.field, held ?? predicate.retentionSeconds);
+    for (const purge of row.purges) {
+      if (purge.table !== collection) continue;
+      const held = fields.get(purge.field);
+      fields.set(purge.field, held ?? purge.retentionSeconds);
     }
     for (const [field, retention] of fields) {
       const bucket = byField.get(field) ?? { count: 0, retentions: [] };
