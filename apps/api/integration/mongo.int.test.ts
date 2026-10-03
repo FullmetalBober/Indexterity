@@ -4,6 +4,7 @@ import { DatabaseInaccessibleError } from "../src/engine/ports";
 import { present } from "../src/errors/at";
 import { MongoIndexCollector } from "../src/mongo/collector";
 import { MongoConnection } from "../src/mongo/connection";
+import { privilegesOnConnection } from "../src/mongo/diagnose";
 import { scopedConnString, upgradeEngineRole } from "../src/mongo/provision";
 import { ENGINE_PRIVILEGES, ENGINE_ROLE } from "../src/mongo/role";
 
@@ -186,5 +187,80 @@ describe.skipIf(MONGO_ADMIN_URL === undefined)("upgrading the provisioned role",
   it("brings the role to today's privileges with userAdminAnyDatabase", async () => {
     await upgradeEngineRole(asUser(ANY_DB));
     expect(await actionsOfEngineRole()).toContain("enableProfiler");
+  }, 60_000);
+});
+
+// What a live connection's credentials hold, asked without a new dial (#599) —
+// the check that decides whether a cluster is told about a privilege at all.
+// Atlas's atlasAdmin carries enableProfiler through dbAdminAnyDatabase, and a
+// cluster on it must read as holding it, not as missing it.
+describe.skipIf(MONGO_ADMIN_URL === undefined)("checking a live connection's privileges", () => {
+  let admin: MongoClient;
+  const LIKE_ATLAS_ADMIN = "indexterity_int_like_atlas_admin";
+  const WITHOUT = "indexterity_int_without_profiler";
+  const READ_ONLY_ROLE = "indexterityIntListOnly";
+
+  const connectAs = async (user: string): Promise<MongoConnection> => {
+    const conn = new MongoConnection(
+      scopedConnString(present(MONGO_ADMIN_URL, "MONGO_ADMIN_URL"), user, "probe"),
+    );
+    await conn.connect();
+    return conn;
+  };
+  const profiler = async (user: string) => {
+    const conn = await connectAs(user);
+    try {
+      const checks = await privilegesOnConnection(conn, null);
+      return checks?.find((check) => check.key === "enableProfiler")?.granted ?? null;
+    } finally {
+      await conn.close();
+    }
+  };
+  const cleanup = async () => {
+    const adminDb = admin.db("admin");
+    for (const user of [LIKE_ATLAS_ADMIN, WITHOUT]) {
+      await adminDb.command({ dropUser: user }).catch(() => {});
+    }
+    await adminDb.command({ dropRole: READ_ONLY_ROLE }).catch(() => {});
+  };
+
+  beforeAll(async () => {
+    admin = new MongoClient(present(MONGO_ADMIN_URL, "MONGO_ADMIN_URL"));
+    await admin.connect();
+    await cleanup();
+    // A database to be judged against: anyDb checks need one in scope.
+    await admin.db("indexterity_int_check").collection("widgets").insertOne({ n: 1 });
+    const adminDb = admin.db("admin");
+    await adminDb.command({
+      createRole: READ_ONLY_ROLE,
+      privileges: [
+        { resource: { cluster: true }, actions: ["listDatabases"] },
+        { resource: { db: "", collection: "" }, actions: ["listIndexes"] },
+      ],
+      roles: [],
+    });
+    await adminDb.command({
+      createUser: LIKE_ATLAS_ADMIN,
+      pwd: "probe",
+      roles: ["dbAdminAnyDatabase", "clusterMonitor"],
+    });
+    await adminDb.command({ createUser: WITHOUT, pwd: "probe", roles: [READ_ONLY_ROLE] });
+  });
+
+  afterAll(async () => {
+    await cleanup();
+    await admin
+      .db("indexterity_int_check")
+      .dropDatabase()
+      .catch(() => {});
+    await admin.close();
+  });
+
+  it("finds enableProfiler held by dbAdminAnyDatabase, as atlasAdmin holds it", async () => {
+    expect(await profiler(LIKE_ATLAS_ADMIN)).toBe(true);
+  }, 60_000);
+
+  it("finds it missing from a role without it", async () => {
+    expect(await profiler(WITHOUT)).toBe(false);
   }, 60_000);
 });

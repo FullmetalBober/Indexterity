@@ -26,6 +26,11 @@ class MssqlEngineSession implements EngineSession {
   // Query Store is the failure source here, and turning it on is ALTER DATABASE —
   // not a right the scoped user has, or should (#596).
   readonly failureWatch = null;
+
+  // Its role has never changed (#599), so there is nothing for a check to find.
+  async checkPrivileges(): Promise<null> {
+    return null;
+  }
   private readonly members: MssqlMemberConnections;
 
   constructor(

@@ -14,7 +14,7 @@ import { applyTlsOverrides, assertTlsEnforced } from "./client";
 import { MongoIndexCollector } from "./collector";
 import { isMongoConnString, mongoHosts } from "./conn-string";
 import { MongoConnection } from "./connection";
-import { diagnoseConnection, REQUIRED_PRIVILEGES } from "./diagnose";
+import { diagnoseConnection, privilegesOnConnection, REQUIRED_PRIVILEGES } from "./diagnose";
 import { MongoIndexExecutor } from "./executor";
 import { MongoFailureWatch } from "./failure-watch";
 import { MemberConnections } from "./members";
@@ -59,6 +59,10 @@ class MongoEngineSession implements EngineSession {
 
   executor(readOnly: boolean): IndexExecutor {
     return new MongoIndexExecutor(this.conn, readOnly);
+  }
+
+  checkPrivileges(observedDatabases: readonly string[] | null) {
+    return privilegesOnConnection(this.conn, observedDatabases);
   }
 
   // System databases are excluded inside listDatabaseNames itself, the way the

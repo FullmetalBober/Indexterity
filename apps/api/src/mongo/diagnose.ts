@@ -9,7 +9,7 @@ import type {
   TlsOverrides,
 } from "../engine/ports";
 import { mongoClient } from "./client";
-import { withoutSystemDatabases } from "./connection";
+import { type MongoConnection, withoutSystemDatabases } from "./connection";
 import { ENGINE_ROLE } from "./role";
 import {
   hasQueryStatsPlanMetrics,
@@ -595,6 +595,34 @@ function failure(message: string): ConnectionDiagnosis {
     // unreachable cluster must not report the databases a previous answer found.
     databases: [],
   });
+}
+
+// What the credentials a live connection runs as hold, against what the engine
+// needs, without dialling anything new (#599): the evaluation the connect form and
+// the credentials card make, asked over a connection a pass already has open. Null
+// when it cannot be told — the probe failed, or the database list it is judged
+// against could not be read — so a caller never takes "could not ask" for
+// "missing".
+export async function privilegesOnConnection(
+  conn: MongoConnection,
+  observedDatabases: readonly string[] | null,
+): Promise<readonly PrivilegeCheck[] | null> {
+  try {
+    const admin = conn.db("admin");
+    const status = connectionStatusDoc.parse(
+      await admin.command({ connectionStatus: 1, showPrivileges: true }),
+    );
+    // Authentication off: everything is permitted, as diagnoseConnection says.
+    if (status.authInfo.authenticatedUsers[0] === undefined) return allGranted(true);
+    const result = await admin.admin().listDatabases();
+    const userDatabases = withoutSystemDatabases(result.databases.map((entry) => entry.name));
+    return evaluatePrivileges(
+      status.authInfo.authenticatedUserPrivileges ?? [],
+      scopeForDiagnosis(userDatabases, observedDatabases),
+    );
+  } catch {
+    return null;
+  }
 }
 
 // Ask the cluster what these credentials may actually do, and translate it into

@@ -520,6 +520,13 @@ export const clusters = pgTable(
     // review; and to what a live diagnosis shows held. Every row that predates the
     // column starts at 0, before the first change.
     privilegesRevision: integer("privileges_revision").notNull().default(0),
+    // How far along the same list the credentials have been CHECKED: the engine's
+    // revision when Indexterity last asked the cluster what they hold. A change past
+    // `privilegesRevision` and up to here is known to be missing, and only that is
+    // shown; a change past this is unknown, and nobody is told about a privilege
+    // their credentials may well have — admin-like built-in roles such as Atlas's
+    // atlasAdmin hold most of what a release adds.
+    privilegesCheckedRevision: integer("privileges_checked_revision").notNull().default(0),
     // Which TLS checks the owner turned off when connecting, as checkboxes on the
     // connect form. Held HERE and not inferred from the sealed string, for two
     // reasons: every dial is then verified against a recorded decision rather

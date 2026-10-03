@@ -56,7 +56,7 @@ export async function runDigest(db: Database): Promise<number> {
   return sent;
 }
 
-// A release asked for privileges a cluster's credentials are not known to hold
+// A release asked for privileges a cluster's credentials were checked and found not to hold
 // (#599): told once per cluster per revision, by mail, alongside the weekly digest
 // and on any cluster, live or read-only. The dashboard says it too, for as long
 // as it stands; the mail is for the owner who is not looking.
@@ -99,7 +99,7 @@ export function privilegeNoticeText(
   canUpgrade: boolean,
 ): string {
   const lines = [
-    "A release since this cluster was connected can use privileges its credentials are not known to hold.",
+    "A release since this cluster was connected can use privileges its credentials do not have.",
     "Nothing has stopped working without them: each one turns on one feature, which stays off — with its reason in the activity trail — until it is granted.",
     "",
     ...pending.map((change) => `  ${change.key} (new in ${change.release}) — ${change.enables}`),

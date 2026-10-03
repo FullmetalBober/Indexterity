@@ -24,6 +24,7 @@ import { type CollectedLatency, type CollectedSnapshot, collectSnapshots } from 
 import type { TunnelRegistry } from "../tunnel/tunnel.registry";
 import { openClusterSession } from "./cluster-connection";
 import { namespaceIds } from "./namespaces";
+import { checkNewPrivileges } from "./privilege-check";
 import { type CurrentRun, counterFingerprint, extendsRun, latencyFingerprint } from "./runs";
 import { watchKey } from "./watched";
 
@@ -573,7 +574,9 @@ export async function collectCluster(
   // refused rather than dialled directly.
   tunnels?: TunnelRegistry,
 ): Promise<CollectOutcome> {
-  const { session, engine, release } = await openClusterSession(db, clusterId, { tunnels });
+  const { session, engine, observedDatabases, release } = await openClusterSession(db, clusterId, {
+    tunnels,
+  });
   try {
     // The roster costs one hello per member on connections the usage pass
     // opens anyway, so it rides the same session rather than its own dial.
@@ -602,6 +605,10 @@ export async function collectCluster(
     recordEvidenceWrites("latency_samples", engine, latencyWritten);
     // The roster is deliberately not counted. It is replaced whole on every
     // collect and carries no history, so it is never evidence about an index.
+    //
+    // Last, and unable to fail the collect: whether these credentials already hold
+    // what a release added, so its owner is told only about what is missing (#599).
+    await checkNewPrivileges(db, clusterId, session, observedDatabases).catch(() => undefined);
     return {
       snapshots: snapshots.length,
       inserted: written.inserted + latencyWritten.inserted,

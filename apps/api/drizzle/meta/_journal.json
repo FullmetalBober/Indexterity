@@ -519,6 +519,13 @@
       "when": 1791044085893,
       "tag": "0073_privileges_revision",
       "breakpoints": true
+    },
+    {
+      "idx": 74,
+      "version": "7",
+      "when": 1791051661870,
+      "tag": "0074_privileges_checked",
+      "breakpoints": true
     }
   ]
 }
