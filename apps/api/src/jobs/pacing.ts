@@ -3,13 +3,13 @@ import type { ClusterTaskOutcome } from "../metrics";
 
 // Pacing a cluster whose pass does not fit (#571, D179; `suggest` since #588).
 //
-// A collect that needs longer than CLUSTER_PASS_BUDGET_MS used to be abandoned
-// every hour, forever: the same five minutes against the same cluster, the same
-// TIMED_OUT block, nothing collected, and the owner mailed about it once a day.
-// The budget is five minutes because the worker has ONE slot and the schedule
-// ticks every five, so a pass longer than that keeps every other cluster's probe
-// and apply waiting behind it — raising the budget for everybody to fit the
-// slowest cluster would spend the fleet's slot on one cluster's link.
+// A collect that needs longer than its budget used to be abandoned every hour,
+// forever: the same five minutes against the same cluster, the same TIMED_OUT
+// block, nothing collected, and the owner mailed about it once a day. The budget
+// is five minutes because the worker has ONE slot and the schedule ticks every
+// five, so a pass longer than that keeps every other cluster's probe and apply
+// waiting behind it — raising the budget for everybody to fit the slowest
+// cluster would spend the fleet's slot on one cluster's link.
 //
 // So the slow cluster is given longer AND asked less often, by the same factor.
 // At tier k its pass gets 2^k budgets every 2^k hours, so the share of the slot
@@ -28,6 +28,28 @@ import type { ClusterTaskOutcome } from "../metrics";
 // And for both: the queue alert (prometheusrule.yaml) fires on a job waiting
 // fifteen minutes for ten, and a twenty-minute pass holding the slot clears it
 // where a forty-minute one would not.
+
+/**
+ * How long one read-only pass may run before it is abandoned (#407), at the
+ * base pace.
+ *
+ * Five minutes because that is the tick interval: a pass that cannot outlive
+ * the schedule that dispatched it cannot let ticks pile up behind one cluster.
+ * Healthy passes finish in seconds, so this only ever bites the pathological
+ * case — which, measured in the hosted deployment, was a `suggest` against a
+ * tunnelled MSSQL cluster with 13 observed databases running for HOURS: the
+ * per-query budget is 15 minutes and there was no budget for the pass at all,
+ * so it could not finish inside the life of the process running it. It died
+ * mid-pass instead, orphaning its job lock for the ~4 hours graphile-worker
+ * waits before reclaiming one, and WORKER_CONCURRENCY is 1, so nothing else in
+ * the pipeline drained meanwhile.
+ *
+ * A constant and not a setting, because what a slow cluster needs is not a
+ * longer budget for everybody: a paced pass gets up to four of these, and a pass
+ * that still does not fit keeps what it shipped (#470, #588) and finishes over
+ * the passes after it.
+ */
+export const PASS_BUDGET_MS = 300_000;
 
 /** The passes that are paced per cluster. */
 export const PACED_PASSES: ReadonlySet<string> = new Set(["collect", "suggest"]);
@@ -59,8 +81,8 @@ function clamped(tier: number): number {
 }
 
 /** The wall clock a paced pass at `tier` runs against. */
-export function pacedBudgetMs(tier: number, baseMs: number): number {
-  return baseMs * 2 ** clamped(tier);
+export function pacedBudgetMs(tier: number): number {
+  return PASS_BUDGET_MS * 2 ** clamped(tier);
 }
 
 /** How many hours apart a paced pass at `tier` runs. */
@@ -81,17 +103,12 @@ export function pacedEveryHours(tier: number): number {
  * pass; a suggest's budget covers its analysis and not the instant build after
  * it (ClusterTasksService.suggest), so a long build cannot pace the analysis.
  */
-export function nextTier(
-  tier: number,
-  outcome: ClusterTaskOutcome,
-  durationMs: number,
-  baseMs: number,
-): number {
+export function nextTier(tier: number, outcome: ClusterTaskOutcome, durationMs: number): number {
   const current = clamped(tier);
   if (outcome === "timed-out") return clamped(current + 1);
   if (outcome !== "ok") return current;
-  if (durationMs >= STEP_UP_SHARE * pacedBudgetMs(current, baseMs)) return clamped(current + 1);
-  if (current > 0 && durationMs <= STEP_DOWN_SHARE * pacedBudgetMs(current - 1, baseMs)) {
+  if (durationMs >= STEP_UP_SHARE * pacedBudgetMs(current)) return clamped(current + 1);
+  if (current > 0 && durationMs <= STEP_DOWN_SHARE * pacedBudgetMs(current - 1)) {
     return current - 1;
   }
   return current;

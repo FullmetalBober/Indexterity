@@ -713,10 +713,10 @@ describe("runClusterTask's timing", () => {
     ]);
   });
 
-  // #571. A collect that does not fit is paced, so the mail says the first answer
-  // is already under way — and keeps the operator's for a cluster past the cap.
-  // Every other budgeted pass is not paced, and its mail is as it was.
-  it("tells the owners a timed-out collect is now paced, and only a collect", async () => {
+  // #571. A collect that does not fit is paced, so the mail says the answer is
+  // already under way. A pass that is not paced is tried again on the next tick,
+  // and its mail says that instead.
+  it("tells the owners a timed-out collect is now paced, and only a paced pass", async () => {
     const collect = recorder();
     const probe = recorder();
 
@@ -724,9 +724,8 @@ describe("runClusterTask's timing", () => {
     await runClusterTask("probe", CLUSTER, probe.deps, () => new Promise<void>(() => {}), 20);
 
     expect(at(collect.alertBodies)).toContain("runs it less often");
-    expect(at(collect.alertBodies)).toContain("CLUSTER_PASS_BUDGET_MS");
     expect(at(probe.alertBodies)).not.toContain("less often");
-    expect(at(probe.alertBodies)).toContain("CLUSTER_PASS_BUDGET_MS");
+    expect(at(probe.alertBodies)).toContain("tried again on the next tick");
   });
 
   // The cluster's rows went with it, by cascade, and a write for it would fail on

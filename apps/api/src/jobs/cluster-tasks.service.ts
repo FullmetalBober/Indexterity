@@ -1,5 +1,4 @@
 import { Inject, Injectable } from "@nestjs/common";
-import { workerEnv } from "../config/env";
 import { DatabaseService } from "../db/database.service";
 import { timePhase } from "../engine/phases";
 import { emitPassFinished, pgNotifier } from "../events/emit";
@@ -20,6 +19,7 @@ import {
   isDue,
   isPaced,
   nextTier,
+  PASS_BUDGET_MS,
   type Pace,
   pacedBudgetMs,
   pacedEveryHours,
@@ -222,12 +222,9 @@ export class ClusterTasksService {
   ): Promise<void> {
     const clusterId = clusterIdFromPayload(payload);
     // The budget applies to the read-only passes only — see BUDGETED_PASSES for
-    // why `apply` and `finalize` are not among them. Resolved per call rather
-    // than cached, so an operator raising it does not need a restart to mean it.
-    const base = workerEnv().CLUSTER_PASS_BUDGET_MS;
-    // Except that `collect` and `suggest` are paced per cluster (#571, #588):
-    // one that does not fit runs less often with proportionally longer, by the
-    // tier its last run left.
+    // why `apply` and `finalize` are not among them. And `collect` and `suggest`
+    // are paced per cluster (#571, #588): one that does not fit runs less often
+    // with proportionally longer, by the tier its last run left.
     const pace = isPaced(task) ? await this.paceOf(task, clusterId, helpers) : null;
     // A suggest that is paced and not due stands down HERE, not only at the
     // dispatcher. It has two other triggers — the end of every collect, and any
@@ -246,7 +243,7 @@ export class ClusterTasksService {
       return;
     }
     const passBudgetMs =
-      pace !== null ? pacedBudgetMs(pace.tier, base) : BUDGETED_PASSES.has(task) ? base : null;
+      pace !== null ? pacedBudgetMs(pace.tier) : BUDGETED_PASSES.has(task) ? PASS_BUDGET_MS : null;
     // How long the part under the budget took, when the pass applies its budget
     // itself (`suggest`) — the evidence its next tier is decided on. Null for
     // every other pass, whose budget covers the whole run.
@@ -254,7 +251,7 @@ export class ClusterTasksService {
     const pass: PassRun = {
       budgeted: async (work) => {
         const started = Date.now();
-        const result = await withPassBudget(task, passBudgetMs ?? base, work);
+        const result = await withPassBudget(task, passBudgetMs ?? PASS_BUDGET_MS, work);
         budgetedMs = Date.now() - started;
         return result;
       },
@@ -262,7 +259,7 @@ export class ClusterTasksService {
     return runClusterTask(
       task,
       clusterId,
-      this.depsFor(helpers, pace?.tier ?? null, base, () => budgetedMs),
+      this.depsFor(helpers, pace?.tier ?? null, () => budgetedMs),
       (id) => run(id, pass),
       // `suggest` budgets itself (above), so the runner gives it no wall clock —
       // and reports the one it applied.
@@ -301,7 +298,6 @@ export class ClusterTasksService {
   private depsFor(
     helpers: JobQueue,
     tier: number | null,
-    baseMs: number,
     budgetedMs: () => number | null,
   ): ClusterTaskDeps {
     const db = this.database.db;
@@ -339,9 +335,7 @@ export class ClusterTasksService {
       // write that fails leaves a gap on a screen, not a pass to retry.
       recordTiming: async (clusterId, task, timing) => {
         const next =
-          tier === null
-            ? 0
-            : nextTier(tier, timing.outcome, budgetedMs() ?? timing.durationMs, baseMs);
+          tier === null ? 0 : nextTier(tier, timing.outcome, budgetedMs() ?? timing.durationMs);
         if (tier !== null && next !== tier) {
           helpers.logger.info(
             `${task}: cluster ${clusterId} took ${Math.round(timing.durationMs / 1000)}s ` +
