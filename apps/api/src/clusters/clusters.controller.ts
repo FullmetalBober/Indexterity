@@ -9,7 +9,12 @@ import { clusters } from "../db";
 import { DatabaseService } from "../db/database.service";
 import type { TunnelRoute } from "../engine/net-guard";
 import { type DialProxy, NO_TLS_OVERRIDES, type ProvisionedUser } from "../engine/ports";
-import { ProvisionDeniedError } from "../engine/provision";
+import {
+  currentPrivilegesRevision,
+  heldPrivilegesRevision,
+  newPrivilegesFor,
+  ProvisionDeniedError,
+} from "../engine/provision";
 import { adapterFor, detectEngine, supportedEngineOptions } from "../engine/registry";
 import { messageOf } from "../errors/message";
 import { mapClusterError, toCluster, toDiagnosis } from "../http/mappers";
@@ -446,6 +451,17 @@ export class ClustersController {
             // user this cluster no longer runs as (#338).
             provisionedDatabases: provisionedUsername === null ? null : row.provisionedDatabases,
             credentialPosture,
+            // Raised to what the new credentials are seen to hold, never lowered
+            // (#599): an owner who was told about a privilege has been told, and a
+            // rotation onto a string that has it clears the notice. Unchanged when
+            // there is no diagnosis — the same provisioned user keeps the same role.
+            privilegesRevision:
+              diagnosis === null
+                ? row.privilegesRevision
+                : Math.max(
+                    row.privilegesRevision,
+                    heldPrivilegesRevision(row.engine, diagnosis.privileges),
+                  ),
           },
           errors,
         );
@@ -463,6 +479,128 @@ export class ClustersController {
             tlsOverrides: overrides,
           },
         });
+        return toCluster(updated, null, await this.repository.blocksFor(updated.id));
+      },
+    );
+  }
+
+  // Bring the role Indexterity provisioned up to today's privileges (#599).
+  //
+  // The only road a release's new privilege has to a role that already exists:
+  // the role was made from an admin string we did not keep, so the owner hands
+  // one over for this and it is forgotten again — provisioning's terms exactly,
+  // and `freshOwner` for rotation's reason, since it widens what a credential we
+  // hold may do. Verified afterwards with the credentials Indexterity actually
+  // runs as, which is the only evidence that counts.
+  @Implement(contract.upgradeClusterRole)
+  upgradeClusterRole(@Req() req: FastifyRequest) {
+    return route(this.tenancy, contract.upgradeClusterRole, req, "freshOwner").handler(
+      async ({ input, errors, context }) => {
+        const orgId = context.member.orgId;
+        await this.tenancy.assertOwnsCluster(input.clusterId, orgId, errors);
+        let cluster: typeof clusters.$inferSelect;
+        let stored: string;
+        try {
+          const unsealed = await unsealCluster(this.database.db, input.clusterId);
+          cluster = unsealed.cluster;
+          stored = unsealed.connectionString;
+        } catch (error) {
+          if (error instanceof ClusterGoneError) {
+            throw errors.NOT_FOUND({ message: "cluster not found" });
+          }
+          throw error;
+        }
+        const adapter = adapterFor(cluster.engine);
+        const upgrade = adapter.upgradeScopedUser;
+        const before = newPrivilegesFor(cluster);
+        if (cluster.provisionedUsername === null) {
+          throw errors.BAD_REQUEST({
+            message:
+              "Only a role Indexterity provisioned can be upgraded here. Grant the new " +
+              "privileges to the role you created for it yourself.",
+          });
+        }
+        if (!before.canUpgrade || upgrade === undefined) {
+          throw errors.BAD_REQUEST({ message: "This cluster's role already has every privilege." });
+        }
+        const overrides = cluster.tlsOverrides;
+        const adminValue = adapter.applySecureTransport(input.adminConnectionString, overrides);
+        // The same cluster, by at least one host in common: an admin string for
+        // another server would upgrade THAT server's role, if it had one, and then
+        // fail to verify here — a change on the wrong database with nothing to show
+        // for it. A subset is fine; a seed list naming only the primary is the
+        // usual admin string.
+        const { hosts: adminHosts } = adapter.hostsOf(adminValue);
+        const { hosts: storedHosts } = adapter.hostsOf(stored);
+        const lower = (host: string) => host.toLowerCase();
+        if (!adminHosts.some((host) => storedHosts.map(lower).includes(lower(host)))) {
+          throw errors.BAD_REQUEST({
+            message:
+              `That admin string names ${adminHosts.join(", ") || "no host"}, and this cluster ` +
+              `is connected through ${storedHosts.join(", ")}. Use an admin string for the same hosts.`,
+          });
+        }
+        const routed = await this.resolveTunnel(cluster.tunnelId, orgId, errors);
+        await this.clusters.guardDial(
+          context.userId,
+          cluster.engine,
+          adminValue,
+          errors,
+          overrides,
+          routed.route,
+        );
+        try {
+          await upgrade(adminValue, overrides, routed.proxy);
+        } catch (error) {
+          if (error instanceof ProvisionDeniedError) {
+            throw new ORPCError("PROVISION_DENIED", { status: 422, message: error.message });
+          }
+          mapClusterError(error);
+        }
+        // Verified with the stored credentials, not assumed from the upgrade having
+        // returned. A role change can take a moment to reach a mongos (its user
+        // cache refreshes every 30 s), so a check that comes back short leaves the
+        // notice up rather than failing the call — the upgrade itself happened.
+        const diagnosis = await adapter
+          .diagnose(stored, overrides, cluster.observedDatabases, routed.proxy)
+          .catch(() => null);
+        const verified =
+          diagnosis?.reachable === true
+            ? heldPrivilegesRevision(cluster.engine, diagnosis.privileges)
+            : null;
+        if (verified !== null) {
+          await this.clusters.raisePrivilegesRevision(cluster.id, verified);
+        }
+        await this.record(req, {
+          event: "CLUSTER_ROLE_UPGRADED",
+          orgId,
+          clusterId: cluster.id,
+          target: cluster.name,
+          metadata: {
+            provisionedUsername: cluster.provisionedUsername,
+            granted: before.pending.map((change) => change.key),
+            from: cluster.privilegesRevision,
+            verified,
+          },
+        });
+        const updated = await this.clusters.ownedById(cluster.id, orgId, errors);
+        return toCluster(updated, null, await this.repository.blocksFor(updated.id));
+      },
+    );
+  }
+
+  // The owner has seen what a release added and is not granting it (#599). The
+  // notice goes; the cluster is untouched, and the feature each privilege serves
+  // stays off with its reason, as it already was. Plain `owner`: it changes what
+  // we SAY, not what anything may do.
+  @Implement(contract.reviewClusterPrivileges)
+  reviewClusterPrivileges(@Req() req: FastifyRequest) {
+    return route(this.tenancy, contract.reviewClusterPrivileges, req, "owner").handler(
+      async ({ input, errors, context }) => {
+        const orgId = context.member.orgId;
+        const row = await this.clusters.ownedById(input.clusterId, orgId, errors);
+        await this.clusters.raisePrivilegesRevision(row.id, currentPrivilegesRevision(row.engine));
+        const updated = await this.clusters.ownedById(row.id, orgId, errors);
         return toCluster(updated, null, await this.repository.blocksFor(updated.id));
       },
     );
@@ -633,6 +771,16 @@ export class ClustersController {
             required: [],
             surplus: [],
           };
+        }
+        // A live answer is the best evidence there is about what the credentials
+        // hold, so a notice about privileges they turn out to have is cleared
+        // here (#599) — the owner who ran the grant by hand opens this card and
+        // the banner goes. Raised, never lowered: having been told stays told.
+        if (diagnosis.reachable) {
+          await this.clusters.raisePrivilegesRevision(
+            cluster.id,
+            heldPrivilegesRevision(cluster.engine, diagnosis.privileges),
+          );
         }
         return {
           clusterId: input.clusterId,

@@ -40,6 +40,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import ts from "typescript";
 import { z } from "zod";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -289,9 +290,103 @@ function check(expected?: string): void {
   );
 }
 
+// What this release adds to the role Indexterity provisions (#599), said at the
+// moment it is numbered — because the release notes have to say it too, and the
+// notes are written by hand.
+//
+// And one refusal, which is the part that cannot be left to memory: every change
+// in the tree ships in the release being numbered, so a change labelled with a
+// LATER release is labelled wrong — its owners would be told "new in 0.30.0"
+// about a privilege 0.29.0 already asks for. Checked here, before anything is
+// written, rather than in `check`, which runs on every pull request against a
+// tree whose version is still the last release's.
+function privilegeChangesFor(version: string): string[] {
+  const changes = roleChanges();
+  const parts = (value: string) => value.split(/[.-]/).slice(0, 3).map(Number);
+  const later = (a: string, b: string) => {
+    const [x, y] = [parts(a), parts(b)];
+    for (let i = 0; i < 3; i += 1) {
+      if ((x[i] ?? 0) !== (y[i] ?? 0)) return (x[i] ?? 0) > (y[i] ?? 0);
+    }
+    return false;
+  };
+  const mislabelled = changes.filter((change) => later(change.release, version));
+  if (mislabelled.length > 0) {
+    console.error(
+      `role changes labelled for a release after ${version}, though they ship in it:\n  ` +
+        mislabelled.map((change) => `${change.check} (says ${change.release})`).join("\n  ") +
+        `\nrelabel them ${version} in ${ROLE_FILE}`,
+    );
+    process.exit(1);
+  }
+  return changes.filter((change) => change.release === version).map((change) => change.check);
+}
+
+// ROLE_CHANGES as written, read off the syntax tree: the api is a CommonJS
+// package, so its TypeScript cannot be imported from here, and a regex over the
+// file is the thing lint-assertions.ts already explains is not good enough.
+const ROLE_FILE = "apps/api/src/mongo/role.ts";
+
+function roleChanges(): { check: string; release: string }[] {
+  const path = join(ROOT, ROLE_FILE);
+  const source = ts.createSourceFile(
+    path,
+    readFileSync(path, "utf8"),
+    ts.ScriptTarget.Latest,
+    true,
+  );
+  const found: { check: string; release: string }[] = [];
+  let seen = false;
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isVariableDeclaration(node) &&
+      node.name.getText(source) === "ROLE_CHANGES" &&
+      node.initializer !== undefined &&
+      ts.isArrayLiteralExpression(node.initializer)
+    ) {
+      seen = true;
+      for (const element of node.initializer.elements) {
+        if (!ts.isObjectLiteralExpression(element)) continue;
+        const field = (name: string): string | null => {
+          for (const property of element.properties) {
+            if (
+              ts.isPropertyAssignment(property) &&
+              property.name.getText(source) === name &&
+              ts.isStringLiteral(property.initializer)
+            ) {
+              return property.initializer.text;
+            }
+          }
+          return null;
+        };
+        const check = field("check");
+        const release = field("release");
+        if (check !== null && release !== null) found.push({ check, release });
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  // Silence here would be the failure that matters: a rename that hides the list
+  // from this reader would let every later privilege ship unannounced.
+  if (!seen) {
+    console.error(`could not find ROLE_CHANGES in ${ROLE_FILE} — update scripts/set-version.ts`);
+    process.exit(1);
+  }
+  return found;
+}
+
 const [command, value] = process.argv.slice(2);
-if (command === "set") set(value ?? "");
-else if (command === "check") check(value);
+if (command === "set") {
+  const added = privilegeChangesFor(value ?? "");
+  set(value ?? "");
+  if (added.length > 0) {
+    console.log(
+      `this release adds to the MongoDB role: ${added.join(", ")} — name each in the release ` +
+        "notes, with what it turns on and that nothing breaks without it",
+    );
+  }
+} else if (command === "check") check(value);
 else {
   console.error("usage: set-version.ts set <version> | check [expected]");
   process.exit(1);

@@ -157,6 +157,11 @@ export const rotateConnectionInput = z.object({
   tlsOverrides: tlsOverrides.optional(),
 });
 
+// An admin string for one operation and then forgotten (#599): bringing the role
+// Indexterity provisioned up to today's definition. Same field as provisioning's,
+// and the same promise — used once, never stored.
+export const upgradeClusterRoleInput = z.object({ adminConnectionString: connectionString });
+
 // The same field as the connect form's, deliberately: a name the create form
 // accepts and the rename form refuses (or the reverse) is the drift this file
 // exists to stop.

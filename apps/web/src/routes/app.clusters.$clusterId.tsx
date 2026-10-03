@@ -14,6 +14,7 @@
 import { createFileRoute, Link, Navigate, Outlet, redirect } from "@tanstack/react-router";
 import { ClusterBlockedBanner } from "~/components/app/cluster-blocked";
 import { ClusterHeader } from "~/components/app/cluster-header";
+import { NewPrivilegesBanner } from "~/components/app/new-privileges";
 import { useLiveClusterEvents } from "~/lib/queries/live";
 import { clustersQuery, useCluster, useShell } from "~/lib/queries/shell";
 
@@ -71,6 +72,8 @@ function ClusterLayout() {
       {cluster.blocked.map((block) => (
         <ClusterBlockedBanner key={block.task} clusterId={clusterId} block={block} />
       ))}
+      {/* After the blocked passes: those stop work, this only offers more of it. */}
+      <NewPrivilegesBanner clusterId={clusterId} newPrivileges={cluster.newPrivileges} />
       <nav aria-label="Cluster" className="mt-4 mb-6 flex gap-4 border-b text-sm">
         <Link
           to="/app/clusters/$clusterId"

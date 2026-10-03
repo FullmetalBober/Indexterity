@@ -1,4 +1,4 @@
-import type { ClusterEngine } from "./ports";
+import type { ClusterEngine, PrivilegeChange } from "./ports";
 import { adapterFor } from "./registry";
 
 // Scoped-user provisioning, in the part of it that is the same on every engine.
@@ -67,4 +67,67 @@ export function revokeCommandFor(
 ): string | null {
   if (provisionedUsername === null) return null;
   return adapterFor(engine).revokeStatements(provisionedUsername, databases ?? []);
+}
+
+// ---------------------------------------------------------------------------
+// Privileges a release added after a cluster was connected (#599).
+//
+// A role is created once, from an admin string that is never stored, so a
+// release that asks for one more action cannot reach roles already out there.
+// What it can do is know: each adapter lists what its role gained and when
+// (`privilegeChanges`), and every cluster records how far along that list its
+// credentials are (`clusters.privileges_revision`). The difference is what the
+// owner is told, once.
+// ---------------------------------------------------------------------------
+
+// The revision a cluster is at when its credentials hold — or its owner has been
+// shown — every change there is.
+export function currentPrivilegesRevision(engine: ClusterEngine): number {
+  return adapterFor(engine).privilegeChanges.at(-1)?.revision ?? 0;
+}
+
+// How far along the list a diagnosis shows these credentials to be: every change
+// up to the first one not granted. In order, because a revision is a claim about
+// everything before it.
+export function heldPrivilegesRevision(
+  engine: ClusterEngine,
+  checks: readonly { readonly key: string; readonly granted: boolean }[],
+): number {
+  let held = 0;
+  for (const change of adapterFor(engine).privilegeChanges) {
+    if (checks.find((check) => check.key === change.key)?.granted !== true) break;
+    held = change.revision;
+  }
+  return held;
+}
+
+interface PrivilegesRow {
+  readonly engine: ClusterEngine;
+  readonly credentialPosture: "PROVISIONED" | "ADMIN" | "SCOPED" | null;
+  readonly provisionedUsername: string | null;
+  readonly privilegesRevision: number;
+}
+
+// What a release has added since this cluster's credentials were set up, and that
+// they are not known to hold. Never anything on admin credentials, which hold
+// every action there is.
+export function newPrivilegesFor(row: PrivilegesRow): {
+  readonly pending: readonly PrivilegeChange[];
+  // The statement that grants them, when the role is Indexterity's own and its
+  // name is therefore known; null on a role somebody made by hand (#246).
+  readonly command: string | null;
+  // Whether the role can be upgraded here with an admin string.
+  readonly canUpgrade: boolean;
+} {
+  const adapter = adapterFor(row.engine);
+  const pending =
+    row.credentialPosture === "ADMIN"
+      ? []
+      : adapter.privilegeChanges.filter((change) => change.revision > row.privilegesRevision);
+  const ours = row.provisionedUsername !== null && pending.length > 0;
+  return {
+    pending,
+    command: ours ? adapter.grantChangesStatement(row.privilegesRevision) : null,
+    canUpgrade: ours && adapter.upgradeScopedUser !== undefined,
+  };
 }

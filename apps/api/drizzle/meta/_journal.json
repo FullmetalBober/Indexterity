@@ -512,6 +512,13 @@
       "when": 1791040499081,
       "tag": "0072_failure_watches",
       "breakpoints": true
+    },
+    {
+      "idx": 73,
+      "version": "7",
+      "when": 1791044085893,
+      "tag": "0073_privileges_revision",
+      "breakpoints": true
     }
   ]
 }

@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { revokeCommandFor, SCOPED_USERNAME } from "./provision";
+import {
+  currentPrivilegesRevision,
+  heldPrivilegesRevision,
+  newPrivilegesFor,
+  revokeCommandFor,
+  SCOPED_USERNAME,
+} from "./provision";
 import { supportedEngines } from "./registry";
 
 // The scoped user is the one thing Indexterity leaves behind on a customer's
@@ -73,5 +79,69 @@ describe("revokeCommandFor", () => {
     expect(
       new Set(supportedEngines().map((e) => revokeCommandFor(e, SCOPED_USERNAME, databases))),
     ).toHaveProperty("size", supportedEngines().length);
+  });
+});
+
+// What a release added since a cluster's credentials were set up (#599).
+describe("newPrivilegesFor", () => {
+  const row = (overrides: Partial<Parameters<typeof newPrivilegesFor>[0]> = {}) => ({
+    engine: "MONGODB" as const,
+    credentialPosture: "PROVISIONED" as const,
+    provisionedUsername: SCOPED_USERNAME,
+    privilegesRevision: 0,
+    ...overrides,
+  });
+
+  it("lists what changed, with the statement and the upgrade, on a role of ours", () => {
+    const view = newPrivilegesFor(row());
+    expect(view.pending.map((change) => change.key)).toEqual(["enableProfiler"]);
+    expect(view.pending[0]?.release).toBe("0.29.0");
+    expect(view.command).toContain('grantPrivilegesToRole("indexterityEngine"');
+    expect(view.canUpgrade).toBe(true);
+  });
+
+  // #246: a role made by hand has a name we do not know, so no template with a
+  // blank in it — the change is listed and the guide does the rest.
+  it("lists what changed with no statement on a role made by hand", () => {
+    const view = newPrivilegesFor(row({ credentialPosture: "SCOPED", provisionedUsername: null }));
+    expect(view.pending).toHaveLength(1);
+    expect(view.command).toBeNull();
+    expect(view.canUpgrade).toBe(false);
+  });
+
+  // Admin credentials hold every action there is.
+  it("has nothing new for admin credentials", () => {
+    expect(
+      newPrivilegesFor(row({ credentialPosture: "ADMIN", provisionedUsername: null })),
+    ).toEqual({
+      pending: [],
+      command: null,
+      canUpgrade: false,
+    });
+  });
+
+  it("has nothing new once the cluster is current", () => {
+    expect(
+      newPrivilegesFor(row({ privilegesRevision: currentPrivilegesRevision("MONGODB") })),
+    ).toEqual({
+      pending: [],
+      command: null,
+      canUpgrade: false,
+    });
+  });
+
+  // An engine whose role never changed tells nobody anything.
+  it("has nothing new on an engine whose role never changed", () => {
+    expect(newPrivilegesFor(row({ engine: "POSTGRESQL" })).pending).toEqual([]);
+    expect(currentPrivilegesRevision("MSSQL")).toBe(0);
+  });
+});
+
+describe("heldPrivilegesRevision", () => {
+  it("is as far as the diagnosis shows every change granted", () => {
+    expect(heldPrivilegesRevision("MONGODB", [{ key: "enableProfiler", granted: true }])).toBe(1);
+    expect(heldPrivilegesRevision("MONGODB", [{ key: "enableProfiler", granted: false }])).toBe(0);
+    // Not reported at all is not granted.
+    expect(heldPrivilegesRevision("MONGODB", [])).toBe(0);
   });
 });

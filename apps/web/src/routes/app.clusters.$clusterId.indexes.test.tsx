@@ -58,6 +58,7 @@ const cluster: Cluster = {
   provisionedUsername: null,
   revokeCommand: null,
   credentialPosture: null,
+  newPrivileges: { pending: [], command: null, canUpgrade: false },
   lastCollectedAt: "2026-09-04T09:14:44.000Z",
   blocked: [],
   tlsOverrides: { allowInvalidCertificates: false, allowInvalidHostnames: false, insecure: false },

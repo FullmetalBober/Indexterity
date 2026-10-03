@@ -670,6 +670,38 @@ export interface EngineAdapter {
   // The username a string authenticates as, so rotation can tell whether the
   // stored "this is a provisioned user" marker still describes the new one.
   connStringUsername(value: string): string | null;
+  // Every privilege a release has added to this engine's provisioned role since
+  // the first, oldest first (#599). A cluster records how far along this list its
+  // credentials are, which is how one connected before a change is told about
+  // it. Empty on an engine whose role has never changed — both SQL engines, so far.
+  readonly privilegeChanges: readonly PrivilegeChange[];
+  // The statement granting the provisioned role every change after `revision`,
+  // for an owner to run as an admin, or null when there is none. Only for the
+  // role Indexterity created: its name is known, so nothing in it is left blank.
+  grantChangesStatement(revision: number): string | null;
+  // Bring the provisioned role up to today's definition with an admin string used
+  // once and never stored — provisioning's terms (#599). Required of any engine
+  // whose `privilegeChanges` is not empty (registry.test.ts holds them to it), so
+  // an owner who is told about a change can always be offered the upgrade.
+  // Throws ProvisionDeniedError when the credentials cannot.
+  upgradeScopedUser?(
+    adminConnectionString: string,
+    overrides?: TlsOverrides,
+    proxy?: DialProxy,
+  ): Promise<void>;
+}
+
+// A privilege a release added to an engine's provisioned role (#599).
+export interface PrivilegeChange {
+  // 1, 2, 3 … per engine: how far along the list a cluster's credentials are.
+  readonly revision: number;
+  // The release that first asked for it.
+  readonly release: string;
+  // The diagnose check that reports it, and that check's own words for what it
+  // is and what it enables.
+  readonly key: string;
+  readonly label: string;
+  readonly enables: string;
 }
 
 export interface ProvisionedUser {

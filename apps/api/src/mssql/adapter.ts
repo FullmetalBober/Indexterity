@@ -113,4 +113,8 @@ export const mssqlAdapter: EngineAdapter = {
   provisionScopedUser: provisionMssqlScopedUser,
   revokeStatements: dropLoginStatements,
   connStringUsername: mssqlConnStringUsername,
+  // The login this engine provisions has not changed since it was first written
+  // (#599): nothing to tell a connected cluster, and nothing to upgrade.
+  privilegeChanges: [],
+  grantChangesStatement: () => null,
 };
