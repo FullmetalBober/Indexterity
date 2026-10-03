@@ -10,7 +10,7 @@ import type {
 } from "../engine/ports";
 import { mongoClient } from "./client";
 import { withoutSystemDatabases } from "./connection";
-import { ENGINE_ROLE } from "./provision";
+import { ENGINE_ROLE } from "./role";
 import {
   hasQueryStatsPlanMetrics,
   parseServerVersion,
@@ -19,7 +19,7 @@ import {
 } from "./version";
 
 // What the engine needs, expressed as (actions, where) pairs. Mirrors
-// ENGINE_PRIVILEGES in provision.ts — the role we CREATE is exactly the set we
+// ENGINE_PRIVILEGES in role.ts — the role we CREATE is exactly the set we
 // CHECK for, so a provisioned cluster always diagnoses clean.
 interface RequiredPrivilege {
   readonly key: string;

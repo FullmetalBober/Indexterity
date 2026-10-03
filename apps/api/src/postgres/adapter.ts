@@ -90,4 +90,8 @@ export const postgresAdapter: EngineAdapter = {
   provisionScopedUser: provisionPostgresScopedUser,
   revokeStatements: dropRoleStatements,
   connStringUsername: pgConnStringUsername,
+  // The role this engine provisions has not changed since it was first written
+  // (#599): nothing to tell a connected cluster, and nothing to upgrade.
+  privilegeChanges: [],
+  grantChangesStatement: () => null,
 };

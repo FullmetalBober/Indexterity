@@ -6,17 +6,25 @@ import type {
   FailureWatch,
   IndexCollector,
   IndexExecutor,
+  PrivilegeChange,
   TlsOverrides,
 } from "../engine/ports";
+import { present } from "../errors/at";
 import { applyTlsOverrides, assertTlsEnforced } from "./client";
 import { MongoIndexCollector } from "./collector";
 import { isMongoConnString, mongoHosts } from "./conn-string";
 import { MongoConnection } from "./connection";
-import { diagnoseConnection } from "./diagnose";
+import { diagnoseConnection, REQUIRED_PRIVILEGES } from "./diagnose";
 import { MongoIndexExecutor } from "./executor";
 import { MongoFailureWatch } from "./failure-watch";
 import { MemberConnections } from "./members";
-import { connStringUsername, dropUserStatement, provisionScopedUser } from "./provision";
+import {
+  connStringUsername,
+  dropUserStatement,
+  provisionScopedUser,
+  upgradeEngineRole,
+} from "./provision";
+import { grantChangesStatement, ROLE_CHANGES } from "./role";
 import { connectionFingerprint, sharedSelfReads } from "./self-reads";
 
 class MongoEngineSession implements EngineSession {
@@ -69,6 +77,22 @@ class MongoEngineSession implements EngineSession {
   }
 }
 
+// The role's changes in the words its diagnose checks already use — one
+// description of each privilege, not one here and one on the connect form.
+const PRIVILEGE_CHANGES: readonly PrivilegeChange[] = ROLE_CHANGES.map((change) => {
+  const check = present(
+    REQUIRED_PRIVILEGES.find((required) => required.key === change.check),
+    `the diagnose check for role change ${change.revision}`,
+  );
+  return {
+    revision: change.revision,
+    release: change.release,
+    key: check.key,
+    label: check.label,
+    enables: check.enables,
+  };
+});
+
 // The reference EngineAdapter (the wiki's Architecture page, Engine ports).
 export const mongoAdapter: EngineAdapter = {
   engine: "MONGODB",
@@ -96,4 +120,7 @@ export const mongoAdapter: EngineAdapter = {
   provisionScopedUser,
   revokeStatements: dropUserStatement,
   connStringUsername,
+  privilegeChanges: PRIVILEGE_CHANGES,
+  grantChangesStatement,
+  upgradeScopedUser: upgradeEngineRole,
 };

@@ -9,7 +9,7 @@ import {
   type MongoRole,
   queryStatsAdvisory,
 } from "./diagnose";
-import { ENGINE_PRIVILEGES } from "./provision";
+import { ENGINE_PRIVILEGES } from "./role";
 import { parseServerVersion } from "./version";
 
 // The privilege set our own provisioned role grants — IMPORTED, not restated.

@@ -168,6 +168,17 @@ export const clusterBlock = z.object({
 });
 export type ClusterBlock = z.infer<typeof clusterBlock>;
 
+// A privilege a release added to the role Indexterity provisions on an engine
+// (#599), in the words of the diagnose check that reports it.
+export const privilegeChange = z.object({
+  key: z.string(),
+  label: z.string(),
+  enables: z.string(),
+  // The release that first asked for it — "new in 0.29.0".
+  release: z.string(),
+});
+export type PrivilegeChange = z.infer<typeof privilegeChange>;
+
 export const cluster = z.object({
   id: z.uuid(),
   name: z.string(),
@@ -198,6 +209,19 @@ export const cluster = z.object({
   // recorded" rather than as a guess, for the same reason a failed read is not
   // an empty state (#289).
   credentialPosture: z.enum(["PROVISIONED", "ADMIN", "SCOPED"]).nullable(),
+  // Privileges a release has added since these credentials were set up, that they
+  // are not known to hold (#599). A role is created once from an admin string
+  // that is never stored, so a later release cannot add to it — this is how the
+  // owner learns there is something to add, and how to.
+  newPrivileges: z.object({
+    // Empty when there is nothing new, and always on admin credentials.
+    pending: z.array(privilegeChange),
+    // The statement that grants them, when the role is the one Indexterity
+    // provisioned and its name is known; null on a role made by hand (#246).
+    command: z.string().nullable(),
+    // Whether the role can be upgraded from the dashboard with an admin string.
+    canUpgrade: z.boolean(),
+  }),
   // Newest index snapshot, or null before the first collect. The dashboard
   // flags stale data so numbers from before an outage cannot read as current.
   lastCollectedAt: instant.nullable(),
@@ -1315,6 +1339,9 @@ export const SECURITY_EVENTS = [
   "CLUSTER_CONNECTED",
   "CLUSTER_DISCONNECTED",
   "CLUSTER_CREDENTIALS_ROTATED",
+  // The provisioned role brought up to today's privileges with an admin string
+  // used once (#599): what a credential we hold may do, widened.
+  "CLUSTER_ROLE_UPGRADED",
   "CLUSTER_MODE_CHANGED",
   // Which of a customer's databases the control plane reads (#244). The same class
   // of act as the three above: it does not change what we hold, it changes how

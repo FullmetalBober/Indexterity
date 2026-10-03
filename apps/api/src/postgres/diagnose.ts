@@ -1,4 +1,10 @@
-import type { ConnectionDiagnosis, DialProxy, PrivilegeCheck, TlsOverrides } from "../engine/ports";
+import type {
+  ConnectionDiagnosis,
+  DialProxy,
+  PrivilegeCheck,
+  PrivilegeTier,
+  TlsOverrides,
+} from "../engine/ports";
 import { messageOf } from "../errors/message";
 import { pgConnStringUsername } from "./conn-string";
 import { PostgresConnection } from "./connection";
@@ -48,6 +54,20 @@ export interface WritableSchema {
   readonly tables: number;
 }
 
+// Every check this diagnosis makes of what the engine needs, and its tier — in
+// one table rather than spelled at each check, so the rule that a privilege added
+// later is never required (#599) can be held over this engine as it is over the
+// other two (engine/registry.test.ts).
+export const POSTGRES_PRIVILEGE_TIERS = {
+  connect: "CORE",
+  pg_monitor: "CORE",
+  pg_stat_statements: "WORKLOAD",
+  table_owner: "APPLY",
+  cron_apply: "APPLY",
+  createrole: "PROVISION",
+  grant_monitor: "PROVISION",
+} as const satisfies Record<string, PrivilegeTier>;
+
 export async function diagnosePostgresConnection(
   connectionString: string,
   overrides?: TlsOverrides,
@@ -87,7 +107,7 @@ export async function diagnosePostgresConnection(
         label: "CONNECT on every database in scope",
         enables:
           "reaching each database at all — a database it cannot connect to contributes nothing",
-        tier: "CORE",
+        tier: POSTGRES_PRIVILEGE_TIERS.connect,
         granted: connectable.missing.length === 0,
         command:
           connectable.missing.length === 0
@@ -106,7 +126,7 @@ export async function diagnosePostgresConnection(
         label: "membership in pg_monitor",
         enables:
           "index usage, sizes, row counts and latency — every statistic the analysis needs, and none of the data in your tables",
-        tier: "CORE",
+        tier: POSTGRES_PRIVILEGE_TIERS.pg_monitor,
         granted: probe.in_pg_monitor,
         command: probe.in_pg_monitor ? null : `GRANT pg_monitor TO ${quoteIdent(probe.whoami)};`,
       },
@@ -115,7 +135,7 @@ export async function diagnosePostgresConnection(
         label: "the pg_stat_statements extension",
         enables:
           "query shapes, so missing indexes can be proposed and age-based purges spotted. Without it the drop side works as normal and there are simply no create-side recommendations",
-        tier: "WORKLOAD",
+        tier: POSTGRES_PRIVILEGE_TIERS.pg_stat_statements,
         granted: probe.pgss,
         command: probe.pgss
           ? null
@@ -126,7 +146,7 @@ export async function diagnosePostgresConnection(
         label: "ownership of the tables it manages",
         enables:
           "creating and dropping indexes. PostgreSQL has no grantable index privilege — only a table's owner may change its indexes, and an owner can also read the table. That is why analysis and applying are separate credentials here, unlike on MongoDB and SQL Server",
-        tier: "APPLY",
+        tier: POSTGRES_PRIVILEGE_TIERS.table_owner,
         granted: ownership.owned > 0 && ownership.unowned === 0,
         command:
           ownership.unowned === 0
@@ -138,7 +158,7 @@ export async function diagnosePostgresConnection(
         label: "the pg_cron apply function",
         enables:
           "creating and dropping indexes WITHOUT owning the tables or holding an owner connection string. A SECURITY DEFINER function owned by the table owner schedules the build through pg_cron, which runs it as that owner — so this role keeps its read refusal and can still apply. An alternative to owning the tables, not an addition to it",
-        tier: "APPLY",
+        tier: POSTGRES_PRIVILEGE_TIERS.cron_apply,
         granted: cron.installed && cron.executable,
         command:
           cron.installed && cron.executable ? null : cronApplySetup("<table_owner>", probe.whoami),
@@ -147,7 +167,7 @@ export async function diagnosePostgresConnection(
         key: "createrole",
         label: "CREATEROLE",
         enables: "creating the read-only role Indexterity would rather run as",
-        tier: "PROVISION",
+        tier: POSTGRES_PRIVILEGE_TIERS.createrole,
         granted: probe.can_createrole || probe.is_super,
         command:
           probe.can_createrole || probe.is_super
@@ -158,7 +178,7 @@ export async function diagnosePostgresConnection(
         key: "grant_monitor",
         label: "the right to grant pg_monitor",
         enables: "giving that role its statistics access",
-        tier: "PROVISION",
+        tier: POSTGRES_PRIVILEGE_TIERS.grant_monitor,
         granted: probe.can_grant_monitor || probe.is_super,
         command:
           probe.can_grant_monitor || probe.is_super

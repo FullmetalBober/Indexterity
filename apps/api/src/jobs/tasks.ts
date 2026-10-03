@@ -13,7 +13,7 @@ import { type ClusterTaskOutcome, recordClusterTask } from "../metrics";
 import { TunnelUnavailableError } from "../tunnel/resolve";
 import { ClusterCredentialsError, ClusterGoneError } from "./cluster-connection";
 import type { ClusterPasses } from "./cluster-tasks.service";
-import { runDigest } from "./digest";
+import { runDigest, runPrivilegeNotices } from "./digest";
 import { clusterRoster, dispatchToAllClusters, runningPasses } from "./dispatch";
 import { isPaced, pacesDue } from "./pacing";
 import { pruneOldSamples } from "./retention";
@@ -535,6 +535,7 @@ export function createTaskList(
     },
     digest: async (): Promise<void> => {
       await runDigest(db);
+      await runPrivilegeNotices(db);
     },
   };
 }

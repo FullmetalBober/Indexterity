@@ -47,6 +47,7 @@ const LABELS: Record<string, string> = {
   CLUSTER_CONNECTED: "Cluster connected",
   CLUSTER_DISCONNECTED: "Cluster disconnected",
   CLUSTER_CREDENTIALS_ROTATED: "Credentials rotated",
+  CLUSTER_ROLE_UPGRADED: "Role upgraded",
   CLUSTER_MODE_CHANGED: "Mode changed",
   CLUSTER_OBSERVED_DATABASES_CHANGED: "Observed databases changed",
   ORG_POLICY_CHANGED: "Organization policy changed",
@@ -67,6 +68,9 @@ const SEVERE = new Set([
   "ORG_DELETED",
   "CLUSTER_DISCONNECTED",
   "CLUSTER_CREDENTIALS_ROTATED",
+  // What a credential the control plane holds may do, widened — the act an
+  // incident reads the trail to find, even though the owner asked for it.
+  "CLUSTER_ROLE_UPGRADED",
   "CLUSTER_MODE_CHANGED",
   // Severe in the direction that matters: widening it is how the control plane
   // starts reading a database it was not reading yesterday.
@@ -112,6 +116,13 @@ function detailFor(event: SecurityEvent): string | null {
   }
   if (event.event === "CLUSTER_CONNECTED") {
     return metadata.provisioned === true ? "with a provisioned user" : null;
+  }
+  if (event.event === "CLUSTER_ROLE_UPGRADED") {
+    // What the role can do now that it could not, which is the whole act.
+    const granted = metadata.granted;
+    return Array.isArray(granted) && granted.length > 0
+      ? `granted ${granted.filter((key) => typeof key === "string").join(", ")}`
+      : null;
   }
   if (event.event === "ORG_POLICY_CHANGED") {
     // Which way it went, which is the whole content of this row — the label

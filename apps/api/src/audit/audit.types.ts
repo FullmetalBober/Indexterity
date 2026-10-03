@@ -72,6 +72,15 @@ export interface SecurityEventMetadata {
     keptScopedUser: boolean;
     tlsOverrides: TlsOverrides;
   };
+  // Which privileges the role gained — the keys of the changes it was brought
+  // through — and how far along the engine's list it now is, as verified with
+  // the stored credentials afterwards (null when that check could not be made).
+  CLUSTER_ROLE_UPGRADED: {
+    provisionedUsername: string;
+    granted: string[];
+    from: number;
+    verified: number | null;
+  };
   CLUSTER_MODE_CHANGED: { readOnly: boolean };
   // Both sides again, for the same reason the observe change records both: the
   // question an incident asks is what the rule WAS when a given cluster was

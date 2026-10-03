@@ -24,6 +24,8 @@ const MODE_FAILED = "Mode change failed (owner only)";
 const DISCONNECT_FAILED = "Disconnect failed (owner only)";
 const ROTATION_FAILED = "rotation failed";
 const RENAME_FAILED = "Rename failed (owner only)";
+const UPGRADE_FAILED = "Role upgrade failed (owner only)";
+const REVIEW_FAILED = "Could not mark the new privileges as reviewed (owner only)";
 const OBSERVE_FAILED = "Could not change which databases are observed (owner only)";
 
 // A cluster's name, mode and provisioned user all live in the cluster list, so
@@ -171,6 +173,56 @@ export function useRotateConnection(
     },
   });
   return mutation;
+}
+
+// Bring the role Indexterity provisioned up to today's privileges with an admin
+// string used once (#599). The returned cluster says whether the stored
+// credentials now show them: a role change can take a moment to reach a mongos,
+// so "upgraded, not visible yet" is a success that keeps the notice up.
+export function useUpgradeClusterRole(
+  clusterId: string,
+  { onUpgraded, onStale }: { onUpgraded: () => void; onStale: (retry: () => void) => void },
+) {
+  const queryClient = useQueryClient();
+  const invalidateClusters = useInvalidateClusters();
+  const mutation = useMutation({
+    mutationFn: (adminConnectionString: string) =>
+      api().upgradeClusterRole({ clusterId, adminConnectionString }),
+    onSuccess: async (cluster) => {
+      if (cluster.newPrivileges.pending.length === 0) {
+        toast.success("Role upgraded — the stored credentials now hold every privilege");
+      } else {
+        toast.success(
+          "Role upgraded. The stored credentials do not show it yet — a mongos can take half a minute; check the credentials again shortly.",
+        );
+      }
+      onUpgraded();
+      await invalidateClusters();
+      // What the credentials hold just changed, so the panel describing them is
+      // stale — removed rather than refetched, for rotation's reason.
+      queryClient.removeQueries({ queryKey: queryKeys.clusterPrivileges(clusterId) });
+    },
+    // 400 says the string or the cluster does not fit, 422 that the admin string
+    // cannot change roles, 502 that the cluster could not be dialled with it.
+    onError: (error, adminConnectionString) => {
+      if (isSessionStale(error)) onStale(() => mutation.mutate(adminConnectionString));
+      else if (isTwoFactorRequired(error)) toast.error(apiMessage(error, UPGRADE_FAILED));
+      else toast.error(apiMessage(error, UPGRADE_FAILED, [400, 404, 422, 502]));
+    },
+  });
+  return mutation;
+}
+
+// The owner has seen the new privileges and is not granting them (#599).
+export function useReviewClusterPrivileges(clusterId: string) {
+  const invalidateClusters = useInvalidateClusters();
+  return useMutation({
+    mutationFn: () => api().reviewClusterPrivileges({ clusterId }),
+    onSuccess: async () => {
+      await invalidateClusters();
+    },
+    onError: (error) => toast.error(apiMessage(error, REVIEW_FAILED, [404])),
+  });
 }
 
 // Offboard a cluster: the api restores in-flight hidden indexes, deletes all

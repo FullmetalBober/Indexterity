@@ -2,6 +2,7 @@ import { type ClusterEngine, canHideIndexes } from "@repo/contracts";
 import { useState } from "react";
 import { CONNECTION_SCHEME } from "~/components/app/connection-dialect";
 import { CredentialPrivilegesPanel } from "~/components/app/credential-privileges";
+import { NewPrivilegesSection } from "~/components/app/new-privileges";
 import { ReauthDialog } from "~/components/app/reauth-dialog";
 import { ConfirmButton } from "~/components/confirm-button";
 import { Alert, AlertDescription, AlertTitle } from "~/components/ui/alert";
@@ -27,6 +28,17 @@ interface ClusterConnectionInfo {
   // exactly when provisionedUsername is.
   readonly revokeCommand: string | null;
   readonly credentialPosture: "PROVISIONED" | "ADMIN" | "SCOPED" | null;
+  // What a release added since these credentials were set up (#599).
+  readonly newPrivileges: {
+    readonly pending: readonly {
+      readonly key: string;
+      readonly label: string;
+      readonly enables: string;
+      readonly release: string;
+    }[];
+    readonly command: string | null;
+    readonly canUpgrade: boolean;
+  };
 }
 
 // What the stored credentials COULD do, as against what read-only mode ALLOWS
@@ -224,6 +236,14 @@ export function ClusterConnection({
             setPrivilegesAsked(true);
           }}
           read={privileges}
+        />
+
+        {/* Under the panel that checks the credentials, because checking them is
+            one of the ways this clears (#599). */}
+        <NewPrivilegesSection
+          clusterId={cluster.id}
+          newPrivileges={cluster.newPrivileges}
+          onStale={onStale}
         />
 
         <Separator />

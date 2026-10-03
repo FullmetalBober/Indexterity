@@ -471,9 +471,6 @@ export const clusters = pgTable(
     // selection's unreadable-database refusal already explains). Null on every
     // row that predates this column, and on rows with no provisioned user.
     provisionedDatabases: text("provisioned_databases").array(),
-    // Set at connect and re-evaluated on every rotation, because rotating is
-    // exactly when it changes: swapping an admin string for a scoped one is a
-    // narrowing somebody should be able to see happened.
     // Why the pipeline is not running against this cluster, or null when it is.
     //
     // Stored rather than derived, which is the whole point. A cluster nobody can
@@ -509,7 +506,20 @@ export const clusters = pgTable(
     // the reader degrades — so the contract types it as a string and the banner
     // renders a pass it does not know by name.
     blockedTask: text("blocked_task"),
+    // Set at connect and re-evaluated on every rotation, because rotating is
+    // exactly when it changes: swapping an admin string for a scoped one is a
+    // narrowing somebody should be able to see happened.
     credentialPosture: credentialPosture("credential_posture"),
+    // How far along its engine's privilege changes these credentials are known to
+    // be (#599, engine/provision.ts). A release that adds a privilege to the
+    // provisioned role cannot add it to roles already created, so the cluster
+    // remembers where it stood, and the difference is what its owner is told.
+    //
+    // Only ever raised: to the engine's current revision at connect (the owner has
+    // just seen every privilege there is), at provisioning, an upgrade and a
+    // review; and to what a live diagnosis shows held. Every row that predates the
+    // column starts at 0, before the first change.
+    privilegesRevision: integer("privileges_revision").notNull().default(0),
     // Which TLS checks the owner turned off when connecting, as checkboxes on the
     // connect form. Held HERE and not inferred from the sealed string, for two
     // reasons: every dial is then verified against a recorded decision rather

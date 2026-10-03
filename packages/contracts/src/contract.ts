@@ -14,6 +14,7 @@ import {
   renameClusterInput,
   rotateConnectionInput,
   updateTunnelInput,
+  upgradeClusterRoleInput,
 } from "./inputs.js";
 import {
   auditAction,
@@ -414,6 +415,10 @@ export const contract = {
   // a credential on somebody's production database is permitted to do, which is
   // half of what an attacker would want to know before using it.
   //
+  // And one write, deliberately (#599): an answer showing the credentials now hold
+  // privileges a release added clears the notice about them. It only ever raises
+  // what is known, so asking twice cannot undo anything.
+  //
   // Not prefetched by the settings route's loader, unlike the database list beside
   // it. Both dial, and this one has no second purpose — the reader opens the card
   // and asks. Costing every settings page view a round trip to a production
@@ -429,6 +434,37 @@ export const contract = {
     .errors({ NOT_FOUND: {}, BAD_REQUEST: {} })
     .input(clusterId)
     .output(clusterPrivileges),
+
+  // Bring the role Indexterity provisioned on this cluster up to today's
+  // definition, with an admin string used ONCE and never stored (#599). The only
+  // way a release's new privilege reaches a role that already exists: the role
+  // was made from an admin string we did not keep, so it cannot be done for the
+  // owner without one. Owner-only and on a fresh session, like rotating, because
+  // it changes what a credential on somebody's database may do.
+  upgradeClusterRole: oc
+    .route({
+      method: "POST",
+      path: "/clusters/{clusterId}/role/upgrade",
+      summary:
+        "Upgrade the provisioned role to today's privileges with an admin string used once (owner only) — verified with the stored credentials afterwards",
+    })
+    .errors({ NOT_FOUND: {}, BAD_REQUEST: {} })
+    .input(clusterId.extend(upgradeClusterRoleInput.shape))
+    .output(cluster),
+
+  // The owner has seen the privileges a release added and is not granting them
+  // (#599). The notice goes; nothing on the cluster changes, and the feature each
+  // one serves stays off with its reason, as it already was.
+  reviewClusterPrivileges: oc
+    .route({
+      method: "POST",
+      path: "/clusters/{clusterId}/privileges/review",
+      summary:
+        "Mark the privileges a release added as seen (owner only) — the notice goes, nothing is granted",
+    })
+    .errors({ NOT_FOUND: {} })
+    .input(clusterId)
+    .output(cluster),
 
   triggerCollect: oc
     .route({

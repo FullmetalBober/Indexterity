@@ -41,6 +41,7 @@ import {
   sql,
   user,
   verification,
+  workerWatermarks,
   workloadShapes,
 } from "../src/db";
 import { workloadKey } from "../src/engine/ports";
@@ -56,6 +57,7 @@ import { pendingBuildsByCollection } from "../src/jobs/collection-budget";
 import { drainPool } from "../src/jobs/connection-pool";
 import { activeCooldownKeys, cooldownKey } from "../src/jobs/cooldowns";
 import { applyCreatesForCluster } from "../src/jobs/create";
+import { runPrivilegeNotices } from "../src/jobs/digest";
 import { FAILURE_BASELINE_MS } from "../src/jobs/failure-watch";
 import { finalizeCluster } from "../src/jobs/finalize";
 import { releaseStaleLocks } from "../src/jobs/locks";
@@ -68,6 +70,7 @@ import { recordPassTiming } from "../src/jobs/timings";
 import { isScanning } from "../src/jobs/workload-shapes";
 import { MongoConnection, MongoIndexCollector } from "../src/mongo";
 import { markerOf, watchFilter } from "../src/mongo/profiler";
+import { ENGINE_PRIVILEGES } from "../src/mongo/role";
 import { hasQueryStatsPlanMetrics, parseServerVersion } from "../src/mongo/version";
 import {
   API_BASE,
@@ -1502,6 +1505,165 @@ describe("provisioning the same cluster twice", () => {
         .command({ dropUser: username })
         .catch(() => {});
     }
+  });
+});
+
+// A release that adds a privilege, told to the clusters connected before it and
+// granted in one step (#599). The integration mongod runs without auth, so the
+// upgrade's verification sees every privilege granted — what is proved here is
+// the round trip: the role really changes, the revision really moves, and the
+// notice comes and goes for the reasons it should.
+//
+// Its own account: provisioning, upgrading and verifying all dial.
+describe("a role a release added to", () => {
+  let upgrader: Session;
+  let clusterIdOf: string;
+
+  beforeAll(async () => {
+    upgrader = await signUp("roleupgrade");
+    createdEmails.push(upgrader.email);
+    createdOrgIds.push(await giveRoom(upgrader));
+  });
+
+  afterAll(async () => {
+    await mongo
+      .db("admin")
+      .command({ dropUser: SCOPED_USERNAME })
+      .catch(() => {});
+  });
+
+  const newPrivilegesOf = async (): Promise<Record<string, unknown>> => {
+    const list = await (await api("/clusters", upgrader)).json();
+    const found = (Array.isArray(list) ? list : [])
+      .map((entry) => asRecord(entry))
+      .find((entry) => entry.id === clusterIdOf);
+    return asRecord(found?.newPrivileges);
+  };
+  // What a cluster provisioned by 0.28.0 has: the role without enableProfiler,
+  // and a revision from before the change.
+  const asIfProvisionedBefore = async () => {
+    await mongo.db("admin").command({
+      updateRole: "indexterityEngine",
+      privileges: ENGINE_PRIVILEGES.map((privilege) => ({
+        resource: privilege.resource,
+        actions: privilege.actions.filter((action) => action !== "enableProfiler"),
+      })),
+    });
+    await db.update(clusters).set({ privilegesRevision: 0 }).where(eq(clusters.id, clusterIdOf));
+  };
+  const roleActions = async (): Promise<string[]> => {
+    const info = asRecord(
+      await mongo.db("admin").command({ rolesInfo: "indexterityEngine", showPrivileges: true }),
+    );
+    const roles = Array.isArray(info.roles) ? info.roles : [];
+    const privileges = asRecord(roles[0]).privileges;
+    return (Array.isArray(privileges) ? privileges : []).flatMap((privilege) => {
+      const actions = asRecord(privilege).actions;
+      return Array.isArray(actions) ? actions.filter((action) => typeof action === "string") : [];
+    });
+  };
+
+  it("is current when provisioned today", async () => {
+    const res = await api("/clusters/provision", upgrader, {
+      method: "POST",
+      body: JSON.stringify({ name: "Role Upgrade", adminConnectionString: MONGO_URL }),
+    });
+    expect(res.status).toBe(200);
+    clusterIdOf = asString(asRecord(asRecord(await res.json()).cluster).id);
+    createdClusterIds.push(clusterIdOf);
+    expect(await newPrivilegesOf()).toEqual({ pending: [], command: null, canUpgrade: false });
+    expect(await roleActions()).toContain("enableProfiler");
+  });
+
+  it("tells a cluster provisioned before the change, and upgrades its role", async () => {
+    await asIfProvisionedBefore();
+    expect(await roleActions()).not.toContain("enableProfiler");
+    const told = await newPrivilegesOf();
+    expect(told.canUpgrade).toBe(true);
+    expect(asString(told.command)).toContain('grantPrivilegesToRole("indexterityEngine"');
+    expect(Array.isArray(told.pending) && asRecord(told.pending[0]).key).toBe("enableProfiler");
+
+    // An admin string for other hosts is refused before anything is dialled.
+    const elsewhere = await api(`/clusters/${clusterIdOf}/role/upgrade`, upgrader, {
+      method: "POST",
+      body: JSON.stringify({ adminConnectionString: "mongodb://other.example:27017" }),
+    });
+    expect(elsewhere.status).toBe(400);
+    expect(await roleActions()).not.toContain("enableProfiler");
+
+    const res = await api(`/clusters/${clusterIdOf}/role/upgrade`, upgrader, {
+      method: "POST",
+      body: JSON.stringify({ adminConnectionString: MONGO_URL }),
+    });
+    expect(res.status).toBe(200);
+    expect(asRecord(asRecord(await res.json()).newPrivileges).pending).toEqual([]);
+    expect(await roleActions()).toContain("enableProfiler");
+
+    const [event] = await db
+      .select()
+      .from(securityEvents)
+      .where(
+        and(
+          eq(securityEvents.clusterId, clusterIdOf),
+          eq(securityEvents.event, "CLUSTER_ROLE_UPGRADED"),
+        ),
+      );
+    expect(event?.metadata).toMatchObject({ granted: ["enableProfiler"], from: 0, verified: 1 });
+  });
+
+  it("goes when the owner has seen it, and nothing on the cluster changes", async () => {
+    await asIfProvisionedBefore();
+    const res = await api(`/clusters/${clusterIdOf}/privileges/review`, upgrader, {
+      method: "POST",
+    });
+    expect(res.status).toBe(200);
+    expect(asRecord(asRecord(await res.json()).newPrivileges).pending).toEqual([]);
+    expect(await roleActions()).not.toContain("enableProfiler");
+  });
+
+  // The owner who ran the grant by hand: checking the credentials clears it — and
+  // only then, because the check reads what the role really holds.
+  it("clears itself when the credentials turn out to hold it", async () => {
+    await asIfProvisionedBefore();
+    expect((await api(`/clusters/${clusterIdOf}/privileges`, upgrader)).status).toBe(200);
+    expect(asRecord(await newPrivilegesOf()).pending).not.toEqual([]);
+
+    // The statement the notice hands over, as the driver spells it.
+    await mongo.db("admin").command({
+      grantPrivilegesToRole: "indexterityEngine",
+      privileges: [{ resource: { db: "", collection: "" }, actions: ["enableProfiler"] }],
+    });
+    expect((await api(`/clusters/${clusterIdOf}/privileges`, upgrader)).status).toBe(200);
+    expect(asRecord(await newPrivilegesOf()).pending).toEqual([]);
+  });
+
+  // Once per cluster per revision, however many weekly runs see it.
+  it("is mailed once", async () => {
+    await asIfProvisionedBefore();
+    await runPrivilegeNotices(db);
+    const key = `privileges:${clusterIdOf}:1`;
+    const [claimed] = await db.select().from(workerWatermarks).where(eq(workerWatermarks.key, key));
+    expect(claimed).toBeDefined();
+    const at = claimed?.at.getTime();
+    await runPrivilegeNotices(db);
+    const [again] = await db.select().from(workerWatermarks).where(eq(workerWatermarks.key, key));
+    expect(again?.at.getTime()).toBe(at);
+    await db.delete(workerWatermarks).where(eq(workerWatermarks.key, key));
+  });
+
+  // A pasted string's role is somebody else's to change.
+  it("is not upgraded where the role is not ours", async () => {
+    await db
+      .update(clusters)
+      .set({ provisionedUsername: null, credentialPosture: "SCOPED", privilegesRevision: 0 })
+      .where(eq(clusters.id, clusterIdOf));
+    const told = await newPrivilegesOf();
+    expect(told).toMatchObject({ command: null, canUpgrade: false });
+    const res = await api(`/clusters/${clusterIdOf}/role/upgrade`, upgrader, {
+      method: "POST",
+      body: JSON.stringify({ adminConnectionString: MONGO_URL }),
+    });
+    expect(res.status).toBe(400);
   });
 });
 
