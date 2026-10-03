@@ -505,6 +505,13 @@
       "when": 1790873434903,
       "tag": "0071_pass_pacing",
       "breakpoints": true
+    },
+    {
+      "idx": 72,
+      "version": "7",
+      "when": 1791040499081,
+      "tag": "0072_failure_watches",
+      "breakpoints": true
     }
   ]
 }

@@ -1,9 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
+  combineReadings,
   failedOpsReading,
+  markerOf,
   type ProfilerSettings,
+  planWatch,
   profilerBlindSpot,
   profilerSettings,
+  type WatchMarker,
+  watchFilter,
 } from "./profiler";
 
 const at = (settings: Partial<ProfilerSettings>): ProfilerSettings => ({
@@ -82,7 +87,9 @@ describe("failedOpsReading", () => {
   const read = (overrides: Partial<Parameters<typeof failedOpsReading>[0]>) =>
     failedOpsReading({
       database: "app",
+      collection: "orders",
       failed: 0,
+      sinceMs: 0,
       oldest: OLDEST,
       settings: at({ was: 2 }),
       throughMongos: false,
@@ -153,5 +160,304 @@ describe("failedOpsReading", () => {
       reachMs: OLDEST.getTime(),
       blindSpot: "only app's primary shard is read, and mongos cannot say how its profiler is set",
     });
+  });
+});
+
+const NOW = Date.parse("2026-10-03T12:00:00Z");
+const OWNER = "cluster-1";
+const wants = (entries: Record<string, string[]>) => new Map(Object.entries(entries));
+// What `profile: -1` would answer once a step's filter is in place — the marker is
+// all the planning reads back, and normalisation keeps it (probed on 6.0 to 9.0).
+const armedWith = (marker: WatchMarker, level = 1): ProfilerSettings =>
+  at({ was: level, filter: watchFilter(marker) });
+const plan = (settings: ProfilerSettings, wanted: Map<string, string[]>, now = NOW) =>
+  planWatch({ database: "app", owner: OWNER, settings, wanted, now });
+const armed = (settings: ProfilerSettings, wanted: Map<string, string[]>): WatchMarker => {
+  const step = plan(settings, wanted);
+  if (step.kind !== "SET") throw new Error(`expected SET, got ${step.kind}`);
+  return step.marker;
+};
+
+describe("watchFilter and markerOf", () => {
+  // The marker rides in the filter as an `ns` no database can have, and comes
+  // back from `profile: -1` normalised to `{ns: {$eq: …}}`.
+  it("carries the marker in a clause and finds it again in the normalised form", () => {
+    const marker = armed(at({ was: 0 }), wants({ "app.orders": ["a_1"] }));
+    const filter = watchFilter(marker);
+    expect(markerOf(filter)).toEqual(marker);
+    // As `profile: -1` hands it back: the clause normalised to an explicit $eq.
+    const normalised = {
+      $or: [{ millis: { $gte: 100 } }, { ns: { $eq: `indexterity$${JSON.stringify(marker)}` } }],
+    };
+    expect(markerOf(normalised)).toEqual(marker);
+    expect(markerOf({ millis: { $gte: 100 } })).toBeNull();
+    expect(markerOf(undefined)).toBeNull();
+  });
+
+  // A filter replaces slowms for the slow-query log too, so the database's own
+  // threshold and sample are copied in — the log is unchanged by the watch.
+  it("keeps the slow-query threshold the database had", () => {
+    const filter = watchFilter(armed(at({ was: 0, slowms: 250 }), wants({ "app.orders": [] })));
+    expect(filter.$or[0]).toEqual({ millis: { $gte: 250 } });
+    const sampled = watchFilter(
+      armed(at({ was: 0, slowms: 250, sampleRate: 0.5 }), wants({ "app.orders": [] })),
+    );
+    expect(sampled.$or[0]).toEqual({ $and: [{ millis: { $gte: 250 } }, { $sampleRate: 0.5 }] });
+  });
+
+  // And a filter the database already had is kept as it was, regex and date and all.
+  it("keeps a filter the database already had", () => {
+    const theirs = {
+      $and: [{ ns: { $regex: "^app\\." } }, { ts: { $gte: new Date("2026-01-01T00:00:00Z") } }],
+    };
+    const filter = watchFilter(armed(at({ was: 1, filter: theirs }), wants({ "app.orders": [] })));
+    expect(filter.$or[0]).toEqual(theirs);
+  });
+
+  it("records failures on the watched collections only", () => {
+    const filter = watchFilter(armed(at({ was: 0 }), wants({ "app.orders": [], "app.users": [] })));
+    expect(filter.$or[1]).toEqual({
+      ns: { $in: ["app.orders", "app.users"] },
+      $or: [{ ok: 0 }, { errCode: { $exists: true } }],
+    });
+  });
+
+  // Find keeps the name, an update or delete wraps it, and a pattern stays a
+  // pattern — all three probed on 6.0 and 9.0.
+  it("records every shape a hint at a candidate index is kept in", () => {
+    const marker = armed(at({ was: 0 }), wants({ "app.orders": ["a_1"] }));
+    const filter = watchFilter(marker, new Map([["app.orders\u0000a_1", { a: 1 }]]));
+    expect(filter.$or[2]).toEqual({
+      ns: "app.orders",
+      $or: [
+        { "command.hint": { $eq: "a_1" } },
+        { "command.hint": { $eq: { $hint: "a_1" } } },
+        { "command.hint": { $eq: { a: 1 } } },
+      ],
+    });
+  });
+});
+
+describe("planWatch", () => {
+  it("turns the profiler on where it is off, remembering that it was", () => {
+    const step = plan(at({ was: 0 }), wants({ "app.orders": ["a_1"] }));
+    expect(step).toEqual({
+      kind: "SET",
+      marker: {
+        v: 1,
+        owner: OWNER,
+        prior: { level: 0, filter: null },
+        slow: { ms: 100, rate: 1 },
+        watch: { "app.orders": NOW },
+        hints: { "app.orders": ["a_1"] },
+      },
+    });
+  });
+
+  // Level 2 records every operation already, and level 1 at slowms 0 too.
+  it("leaves a profiler alone that records everything already", () => {
+    expect(plan(at({ was: 2 }), wants({ "app.orders": [] }))).toEqual({ kind: "KEEP" });
+    expect(plan(at({ was: 1, slowms: 0 }), wants({ "app.orders": [] }))).toEqual({ kind: "KEEP" });
+  });
+
+  it("adds to a slow-only profiler, and remembers it to put back", () => {
+    const step = plan(at({ was: 1, slowms: 50 }), wants({ "app.orders": [] }));
+    expect(step).toMatchObject({
+      kind: "SET",
+      marker: { prior: { level: 1, filter: null }, slow: { ms: 50, rate: 1 } },
+    });
+  });
+
+  it("keeps a profiler that is already as wanted", () => {
+    const marker = armed(at({ was: 0 }), wants({ "app.orders": ["a_1"] }));
+    expect(plan(armedWith(marker), wants({ "app.orders": ["a_1"] }), NOW + 3_600_000)).toEqual({
+      kind: "KEEP",
+    });
+  });
+
+  // Adding a neighbour must not restart anybody's baseline.
+  it("keeps each collection's start when the watched set changes", () => {
+    const marker = armed(at({ was: 0 }), wants({ "app.orders": ["a_1"] }));
+    const later = NOW + 3_600_000;
+    const step = plan(armedWith(marker), wants({ "app.orders": [], "app.users": ["b_1"] }), later);
+    expect(step).toMatchObject({
+      kind: "SET",
+      marker: {
+        watch: { "app.orders": NOW, "app.users": later },
+        hints: { "app.orders": [], "app.users": ["b_1"] },
+      },
+    });
+  });
+
+  // slowms is server-wide and can move under a watch; the kept clause follows it.
+  it("follows a changed slowms", () => {
+    const marker = armed(at({ was: 0 }), wants({ "app.orders": [] }));
+    expect(
+      plan(at({ was: 1, slowms: 300, filter: watchFilter(marker) }), wants({ "app.orders": [] })),
+    ).toMatchObject({
+      kind: "SET",
+      marker: { slow: { ms: 300, rate: 1 }, watch: { "app.orders": NOW } },
+    });
+  });
+
+  it("puts back exactly what was there when nothing is wanted", () => {
+    const off = armed(at({ was: 0 }), wants({ "app.orders": [] }));
+    expect(plan(armedWith(off), new Map())).toEqual({ kind: "RESTORE", level: 0, filter: "unset" });
+    const theirs = { millis: { $gte: 20 } };
+    const custom = armed(at({ was: 1, filter: theirs }), wants({ "app.orders": [] }));
+    expect(plan(armedWith(custom), new Map())).toEqual({
+      kind: "RESTORE",
+      level: 1,
+      filter: theirs,
+    });
+  });
+
+  // setProfilingLevel(0) keeps the filter; a restart clears it. Level 0 with the
+  // marker still there was a person, and is not overridden — but our filter still
+  // goes when nothing is wanted, under the level they chose.
+  it("does not fight a person who turned it off", () => {
+    const marker = armed(at({ was: 0 }), wants({ "app.orders": [] }));
+    expect(plan(armedWith(marker, 0), wants({ "app.orders": [] }))).toEqual({
+      kind: "DECLINE",
+      reason: "the profiler on app was turned off after Indexterity turned it on",
+    });
+    expect(plan(armedWith(marker, 0), new Map())).toEqual({
+      kind: "RESTORE",
+      level: 0,
+      filter: "unset",
+    });
+    expect(plan(armedWith(marker, 2), new Map())).toEqual({
+      kind: "RESTORE",
+      level: 2,
+      filter: "unset",
+    });
+  });
+
+  it("leaves another registration's watch alone", () => {
+    const theirs = planWatch({
+      database: "app",
+      owner: "cluster-2",
+      settings: at({ was: 0 }),
+      wanted: wants({ "app.orders": [] }),
+      now: NOW,
+    });
+    if (theirs.kind !== "SET") throw new Error("expected SET");
+    expect(plan(armedWith(theirs.marker), wants({ "app.orders": [] }))).toMatchObject({
+      kind: "DECLINE",
+    });
+    expect(plan(armedWith(theirs.marker), new Map())).toEqual({ kind: "KEEP" });
+  });
+
+  it("does nothing where nothing is wanted and nothing is ours", () => {
+    expect(plan(at({ was: 0 }), new Map())).toEqual({ kind: "KEEP" });
+    expect(plan(at({ was: 1, filter: { millis: { $gte: 5 } } }), new Map())).toEqual({
+      kind: "KEEP",
+    });
+  });
+
+  // A zero threshold copied into the kept clause would profile every operation.
+  it("declines rather than profile everything", () => {
+    expect(plan(at({ was: 0, slowms: 0 }), wants({ "app.orders": [] }))).toMatchObject({
+      kind: "DECLINE",
+    });
+  });
+});
+
+describe("failedOpsReading under a watch", () => {
+  const marker = armed(at({ was: 0 }), wants({ "app.orders": [] }));
+  const read = (overrides: Partial<Parameters<typeof failedOpsReading>[0]>) =>
+    failedOpsReading({
+      database: "app",
+      collection: "orders",
+      failed: 0,
+      sinceMs: NOW,
+      oldest: null,
+      settings: armedWith(marker),
+      throughMongos: false,
+      ...overrides,
+    });
+
+  // A failures-only ring is empty on a healthy database; the watch's start is
+  // the reach.
+  it("is a complete window from the watch's start, empty ring and all", () => {
+    expect(read({})).toEqual({ kind: "WINDOW", failed: 0, reachMs: NOW, blindSpot: null });
+  });
+
+  it("takes the ring's reach once it has turned over", () => {
+    const turned = new Date(NOW + 60_000);
+    expect(read({ oldest: turned, sinceMs: NOW + 120_000 })).toMatchObject({
+      reachMs: turned.getTime(),
+      blindSpot: null,
+    });
+  });
+
+  // Turned on after the hide — re-armed after a restart, or an index hidden before
+  // the watch existed: what failed in between was not seen.
+  it("says when the watch began after the instant asked about", () => {
+    expect(read({ sinceMs: NOW - 3_600_000 })).toMatchObject({
+      kind: "WINDOW",
+      blindSpot:
+        "the profiler on app has recorded failures only since 2026-10-03 12:00 UTC, after the hide",
+    });
+  });
+
+  it("says a person turned it off, and still counts what it recorded", () => {
+    expect(read({ settings: armedWith(marker, 0) })).toEqual({
+      kind: "NO_SOURCE",
+      reason: "the profiler on app was turned off after Indexterity turned it on",
+    });
+    expect(
+      read({ settings: armedWith(marker, 0), failed: 4, oldest: new Date(NOW) }),
+    ).toMatchObject({
+      kind: "WINDOW",
+      failed: 4,
+    });
+  });
+
+  // Another collection in the same database is not watched by this filter.
+  it("does not vouch for a collection the watch does not cover", () => {
+    expect(read({ collection: "users", oldest: new Date(NOW) })).toMatchObject({
+      kind: "WINDOW",
+      blindSpot: "the profiler on app keeps only what its filter selects",
+    });
+  });
+});
+
+describe("combineReadings", () => {
+  const window = (failed: number, reachMs: number, blindSpot: string | null = null) =>
+    ({ kind: "WINDOW", failed, reachMs, blindSpot }) as const;
+
+  it("adds failures up and takes the reach every member can vouch for", () => {
+    expect(
+      combineReadings([
+        { host: "a:27017", reading: window(2, 100) },
+        { host: "b:27017", reading: window(3, 300) },
+      ]),
+    ).toEqual({ kind: "WINDOW", failed: 5, reachMs: 300, blindSpot: null });
+  });
+
+  it("says a shared caveat once, and names a member that differs", () => {
+    const off = { kind: "NO_SOURCE", reason: "the profiler is off on app" } as const;
+    expect(
+      combineReadings([
+        { host: "a:27017", reading: off },
+        { host: "b:27017", reading: off },
+      ]),
+    ).toEqual(off);
+    expect(
+      combineReadings([
+        { host: "a:27017", reading: window(0, 100) },
+        { host: "b:27017", reading: off },
+      ]),
+    ).toEqual({
+      kind: "WINDOW",
+      failed: 0,
+      reachMs: 100,
+      blindSpot: "on b:27017, the profiler is off on app",
+    });
+  });
+
+  it("is the one member's reading when there is one", () => {
+    expect(combineReadings([{ host: "a:27017", reading: window(1, 5) }])).toEqual(window(1, 5));
   });
 });

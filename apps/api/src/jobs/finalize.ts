@@ -19,6 +19,7 @@ import {
   and,
   clusterNamespaces,
   eq,
+  failureWatches,
   gte,
   inArray,
   latencyReadingColumns,
@@ -36,6 +37,7 @@ import type { TunnelRegistry } from "../tunnel/tunnel.registry";
 import { effectiveChangeWindow } from "./change-window";
 import { openClusterSession } from "./cluster-connection";
 import { recordRegression, WHOLE_COLLECTION } from "./cooldowns";
+import { keepFailureWatchesOrNone, releaseFailureWatches, withdrawHinted } from "./failure-watch";
 import { preflightDrop } from "./preflight";
 
 const DAY_MS = 86_400_000;
@@ -165,7 +167,15 @@ export async function finalizeCluster(
         inArray(recommendations.type, ["CREATE", "UPDATE", "MERGE", "REORDER"]),
       ),
     );
-  if (due.length === 0 && watched.length === 0) return 0;
+  // And a profiler Indexterity turned on (#596) is kept, re-armed after a restart,
+  // or given back here, hourly, whether or not anything else is due — the last
+  // drop in a database graduating is exactly when nothing else is.
+  const [listed] = await db
+    .select({ database: failureWatches.database })
+    .from(failureWatches)
+    .where(eq(failureWatches.clusterId, clusterId))
+    .limit(1);
+  if (due.length === 0 && watched.length === 0 && listed === undefined) return 0;
 
   const { session, readOnly, observedDatabases, canHide, release } = await openClusterSession(
     db,
@@ -173,12 +183,27 @@ export async function finalizeCluster(
     { tunnels },
   );
   try {
-    // Read-only clusters never execute writes.
-    if (readOnly) return 0;
+    // Read-only clusters never execute writes — beyond giving back a profiler we
+    // turned on before the cluster was made read-only.
+    if (readOnly) {
+      await releaseFailureWatches(db, clusterId, session).catch((error: unknown) => {
+        console.warn(
+          `failure watch: cluster ${clusterId} could not be released — ${messageOf(error)}`,
+        );
+      });
+      return 0;
+    }
     const collector = session.collector;
     const executor = session.executor(readOnly);
     let dropped = 0;
     let freedBytes = 0;
+
+    // Before the readings below, so a watch a restart cleared is back on first
+    // and a hidden index's reading says when it resumed rather than that the
+    // profiler is off. A database whose last drop this pass settles is given
+    // back on the next one.
+    const watches = await keepFailureWatchesOrNone(db, clusterId, session, observedDatabases);
+    await withdrawHinted(db, clusterId, collector, watches);
 
     // Databases the owner has told us to stop looking at (#541, #244).
     //

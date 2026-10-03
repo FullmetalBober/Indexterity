@@ -75,6 +75,7 @@ describe("evaluatePrivileges", () => {
           "find",
           "queryStatsRead",
           "queryStatsReadTransformed",
+          "enableProfiler",
         ],
       },
     ];

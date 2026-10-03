@@ -134,6 +134,19 @@ export const REQUIRED_PRIVILEGES: readonly RequiredPrivilege[] = [
     scope: { kind: "anyDb", collection: "system.profile" },
   },
   {
+    key: "enableProfiler",
+    label: "Turn the profiler on",
+    // Optional, like the read above: without it the check is skipped and says so,
+    // and nothing else changes (#596).
+    enables:
+      "the failed-operations check on clusters whose profiler is off — for a hidden " +
+      "index's observe window, Indexterity records failed operations and hint() on " +
+      "that collection, keeps the slow-query log as it was, and gives the settings back after",
+    tier: "WORKLOAD",
+    actions: ["enableProfiler"],
+    scope: { kind: "anyDb" },
+  },
+  {
     key: "shardConfig",
     label: "Read config.collections",
     enables: "shard-key detection on sharded clusters",
