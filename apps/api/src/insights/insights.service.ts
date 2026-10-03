@@ -40,7 +40,7 @@ import { explainOutcome, outcomeOf } from "../analysis/workload-outcome";
 import { workerEnv } from "../config/env";
 import { TenancyService } from "../http/tenancy.service";
 import { isWholeCollection } from "../jobs/cooldowns";
-import { collectBudgetMs, collectEveryHours } from "../jobs/pacing";
+import { isPaced, pacedBudgetMs, pacedEveryHours } from "../jobs/pacing";
 import { severityOf, storedShapeSchema } from "../jobs/workload-shapes";
 import { InsightsRepository } from "./insights.repository";
 
@@ -582,10 +582,10 @@ export class InsightsService {
         // proves nothing about its shape.
         phases: z.array(passPhase).parse(row.phases),
         pace:
-          row.task === "collect" && row.tier > 0
+          isPaced(row.task) && row.tier > 0
             ? {
-                everyHours: collectEveryHours(row.tier),
-                budgetMs: collectBudgetMs(row.tier, workerEnv().CLUSTER_PASS_BUDGET_MS),
+                everyHours: pacedEveryHours(row.tier),
+                budgetMs: pacedBudgetMs(row.tier),
               }
             : null,
       })),

@@ -1,6 +1,6 @@
 import { Inject, Injectable } from "@nestjs/common";
-import { workerEnv } from "../config/env";
 import { DatabaseService } from "../db/database.service";
+import { timePhase } from "../engine/phases";
 import { emitPassFinished, pgNotifier } from "../events/emit";
 import { raiseAlert } from "../mail/notify";
 import { NotifyService } from "../mail/notify.service";
@@ -15,7 +15,17 @@ import { collectCluster } from "./collect";
 import { applyCreatesForCluster } from "./create";
 import { enqueueClusterPass, type JobQueue, runningPasses } from "./dispatch";
 import { finalizeCluster } from "./finalize";
-import { collectBudgetMs, collectPaceOf, nextCollectTier } from "./pacing";
+import {
+  isDue,
+  isPaced,
+  nextTier,
+  PASS_BUDGET_MS,
+  type Pace,
+  pacedBudgetMs,
+  pacedEveryHours,
+  paceOf,
+  UNPACED,
+} from "./pacing";
 import { clusterIdFromPayload } from "./payload";
 import { probeCluster } from "./probe";
 import { suggestForCluster } from "./suggest";
@@ -63,6 +73,17 @@ export interface PassDatabase {
 /** The one thing the passes ask of the mailer. */
 export interface OwnerAlerts {
   notifyClusterOwners: NotifyService["notifyClusterOwners"];
+}
+
+/** What a pass is handed besides its cluster. */
+interface PassRun {
+  /**
+   * Run `work` against this pass's budget — paced, where the pass is — and
+   * remember how long it took. Only `suggest` calls it: it is the one pass that
+   * budgets part of itself (see `suggest`), and every other budget is applied
+   * by `runClusterTask` to the whole run.
+   */
+  budgeted<T>(work: Promise<T>): Promise<T>;
 }
 
 @Injectable()
@@ -131,12 +152,14 @@ export class ClusterTasksService {
   // recording it, taking its write-latency baseline and moving it to ACTIVE.
   //
   // So the budget wraps the analysis explicitly and `suggest` stays out of
-  // BUDGETED_PASSES, rather than the pass-level budget covering both.
+  // BUDGETED_PASSES, rather than the pass-level budget covering both. It is the
+  // paced budget (#588): a cluster whose analysis does not fit an hour gets
+  // longer and runs less often, and the tier is decided by how long the
+  // ANALYSIS took — `pass.budgeted` measures exactly the part the budget covers,
+  // so a long instant build cannot pace a cluster whose analysis fits.
   async suggest(payload: unknown, helpers: JobQueue): Promise<void> {
-    await this.onCluster("suggest", payload, helpers, async (clusterId) => {
-      const { instantApproved } = await withPassBudget(
-        "suggest",
-        workerEnv().CLUSTER_PASS_BUDGET_MS,
+    await this.onCluster("suggest", payload, helpers, async (clusterId, pass) => {
+      const { instantApproved } = await pass.budgeted(
         suggestForCluster(this.database.db, clusterId, this.tunnels),
       );
       // Immediately, as before — the scheduler is not waited for. Deliberately
@@ -146,7 +169,9 @@ export class ClusterTasksService {
       // bug and is not this one's to change — enabling instant builds on
       // tunnelled clusters is a behaviour change, and it is filed separately.
       if (instantApproved > 0) {
-        await applyCreatesForCluster(this.database.db, clusterId);
+        // A phase of its own, so a suggest that ran long because it BUILT says
+        // so in the Passes panel rather than reading as a slow analysis.
+        await timePhase("instantBuild", () => applyCreatesForCluster(this.database.db, clusterId));
       }
     });
   }
@@ -171,7 +196,12 @@ export class ClusterTasksService {
   // look for the missing index now rather than at the next hourly pass.
   async probe(payload: unknown, helpers: JobQueue): Promise<void> {
     await this.onCluster("probe", payload, helpers, async (clusterId) => {
-      const findings = await probeCluster(this.database.db, clusterId, this.tunnels);
+      const findings = await probeCluster(this.database.db, clusterId, this.tunnels, (database) =>
+        helpers.logger.info(
+          `probe: cluster ${clusterId} — ${database}'s query plans are not all attributed yet, ` +
+            `so its read pressure waits for the next collect`,
+        ),
+      );
       if (findings.length === 0) return;
       for (const finding of findings) {
         helpers.logger.info(
@@ -188,47 +218,88 @@ export class ClusterTasksService {
     task: string,
     payload: unknown,
     helpers: JobQueue,
-    run: (clusterId: string) => Promise<unknown>,
+    run: (clusterId: string, pass: PassRun) => Promise<unknown>,
   ): Promise<void> {
     const clusterId = clusterIdFromPayload(payload);
     // The budget applies to the read-only passes only — see BUDGETED_PASSES for
-    // why `apply` and `finalize` are not among them. Resolved per call rather
-    // than cached, so an operator raising it does not need a restart to mean it.
-    const base = workerEnv().CLUSTER_PASS_BUDGET_MS;
-    // Except that `collect` is paced per cluster (#571): one that does not fit
-    // runs less often with proportionally longer, by the tier its last run left.
-    const tier = task === "collect" ? await this.paceOf(clusterId, helpers) : null;
-    const budgetMs =
-      tier !== null ? collectBudgetMs(tier, base) : BUDGETED_PASSES.has(task) ? base : null;
-    return runClusterTask(task, clusterId, this.depsFor(helpers, tier, base), run, budgetMs);
+    // why `apply` and `finalize` are not among them. And `collect` and `suggest`
+    // are paced per cluster (#571, #588): one that does not fit runs less often
+    // with proportionally longer, by the tier its last run left.
+    const pace = isPaced(task) ? await this.paceOf(task, clusterId, helpers) : null;
+    // A suggest that is paced and not due stands down HERE, not only at the
+    // dispatcher. It has two other triggers — the end of every collect, and any
+    // probe that finds read pressure — and its share of the worker slot is only
+    // bounded if the pace holds for all three. Nothing is recorded: the timing
+    // row's start is what the next due check counts from.
+    //
+    // A collect is not gated here. Its only triggers besides the dispatcher are
+    // a cluster being connected and its string being rotated, and whoever did
+    // either is waiting on that collect.
+    if (task === "suggest" && pace !== null && !isDue(pace.tier, pace.lastStartedAt, new Date())) {
+      helpers.logger.info(
+        `suggest: cluster ${clusterId} is paced to every ${pacedEveryHours(pace.tier)} hours ` +
+          `and is not due — this one stands down`,
+      );
+      return;
+    }
+    const passBudgetMs =
+      pace !== null ? pacedBudgetMs(pace.tier) : BUDGETED_PASSES.has(task) ? PASS_BUDGET_MS : null;
+    // How long the part under the budget took, when the pass applies its budget
+    // itself (`suggest`) — the evidence its next tier is decided on. Null for
+    // every other pass, whose budget covers the whole run.
+    let budgetedMs: number | null = null;
+    const pass: PassRun = {
+      budgeted: async (work) => {
+        const started = Date.now();
+        const result = await withPassBudget(task, passBudgetMs ?? PASS_BUDGET_MS, work);
+        budgetedMs = Date.now() - started;
+        return result;
+      },
+    };
+    return runClusterTask(
+      task,
+      clusterId,
+      this.depsFor(helpers, pace?.tier ?? null, () => budgetedMs),
+      (id) => run(id, pass),
+      // `suggest` budgets itself (above), so the runner gives it no wall clock —
+      // and reports the one it applied.
+      task === "suggest" ? null : passBudgetMs,
+      passBudgetMs,
+    );
   }
 
   // The database is CLOSED OVER here, not exposed: these three functions need it
   // and `runClusterTask` does not. Keeping it out of ClusterTaskDeps is what keeps
   // that interface three functions wide and testable with no database at all.
-  // The pace a collect runs at, or the unpaced one when it cannot be read.
+  // The pace a paced pass runs at, or the unpaced one when it cannot be read.
   //
-  // Advisory, so it must never be what stops a collect: a pace that cannot be
-  // read is the hourly collect at the base budget, which is exactly what every
-  // cluster had before pacing existed. The case that matters is a deploy that
-  // lands before its migration — on a host with no pre-deploy hook the table may
-  // be a few minutes behind the code, and every collect failing for it would be
-  // a regression bought by an optimisation. Logged as an error, because it is
-  // one, rather than swallowed.
-  private async paceOf(clusterId: string, helpers: JobQueue): Promise<number> {
+  // Advisory, so it must never be what stops a pass: a pace that cannot be read
+  // is the hourly pass at the base budget, which is exactly what every cluster
+  // had before pacing existed. The case that matters is a deploy that lands
+  // before its migration — on a host with no pre-deploy hook the table may be a
+  // few minutes behind the code, and every collect failing for it would be a
+  // regression bought by an optimisation. Logged as an error, because it is one,
+  // rather than swallowed.
+  private async paceOf(task: string, clusterId: string, helpers: JobQueue): Promise<Pace> {
     try {
-      return (await collectPaceOf(this.database.db, clusterId)).tier;
+      return await paceOf(this.database.db, clusterId, task);
     } catch (error) {
       helpers.logger.error(
-        `collect: reading the pace for cluster ${clusterId} failed, running it unpaced: ${String(error)}`,
+        `${task}: reading the pace for cluster ${clusterId} failed, running it unpaced: ${String(error)}`,
       );
-      return 0;
+      return UNPACED;
     }
   }
 
   // `tier` is the pace the pass was run at, or null for a pass that is not
-  // paced; the timing records the tier the NEXT run gets, decided from this one.
-  private depsFor(helpers: JobQueue, tier: number | null, baseMs: number): ClusterTaskDeps {
+  // paced; the timing records the tier the NEXT run gets, decided from this one
+  // — from the time the budget covered, which `budgetedMs` reports when the pass
+  // applied its budget to only part of itself.
+  private depsFor(
+    helpers: JobQueue,
+    tier: number | null,
+    budgetedMs: () => number | null,
+  ): ClusterTaskDeps {
     const db = this.database.db;
     return {
       logger: helpers.logger,
@@ -264,7 +335,7 @@ export class ClusterTasksService {
       // write that fails leaves a gap on a screen, not a pass to retry.
       recordTiming: async (clusterId, task, timing) => {
         const next =
-          tier === null ? 0 : nextCollectTier(tier, timing.outcome, timing.durationMs, baseMs);
+          tier === null ? 0 : nextTier(tier, timing.outcome, budgetedMs() ?? timing.durationMs);
         if (tier !== null && next !== tier) {
           helpers.logger.info(
             `${task}: cluster ${clusterId} took ${Math.round(timing.durationMs / 1000)}s ` +

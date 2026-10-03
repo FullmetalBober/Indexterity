@@ -9,6 +9,7 @@ import {
 } from "../src/engine/ports";
 import { ProvisionDeniedError, SCOPED_USERNAME } from "../src/engine/provision";
 import { detectEngine } from "../src/engine/registry";
+import type { QueryShape } from "../src/engine/types";
 import { present } from "../src/errors/at";
 import { collectSnapshots, serializeSpec } from "../src/mongo/snapshots";
 import { mssqlAdapter } from "../src/mssql/adapter";
@@ -659,6 +660,88 @@ describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", 
       remembered?.size ?? 0,
     );
     expect(warm.phases().filter((phase) => phase.running)).toEqual([]);
+  });
+
+  // #588. The probe's form of the read: the same answer for the price of a warm
+  // cache, or null when the store would have to be attributed first — and then
+  // it ships nothing it cannot afford.
+  it("answers within the probe's allowance, and defers a store it cannot afford", async () => {
+    // A fresh collector over a store with plans in it: the cold store the probe
+    // leaves to the collect.
+    const fresh = new MssqlIndexCollector(seed);
+    const cold = new PassPhases();
+    expect(await withPhases(cold, () => fresh.latencyByCollectionWithin(DB, 0))).toBeNull();
+    expect(cold.phases().map((phase) => phase.name)).not.toContain("queryStore:planXml");
+
+    // Warmed the way the collect warms it, the probe's read answers what the
+    // full read answers — inside an allowance that covers the few plans the
+    // suite's own reads add to the store (QUERY_CAPTURE_MODE = ALL, above). Those
+    // plans are over Query Store's own tables, and can surface between the two
+    // reads, so the comparison is the fixture's table rather than every key.
+    const full = await fresh.latencyByCollection(DB);
+    const within = await fresh.latencyByCollectionWithin(DB, 200);
+    expect(within).not.toBeNull();
+    expect(full.get("dbo.orders")).toBeDefined();
+    expect(within?.get("dbo.orders")).toEqual(full.get("dbo.orders"));
+  });
+
+  // #588. What suggest reads off a plan is kept with the plan, so a second read
+  // of the same workload ships none of the XML the first one shipped: every
+  // plan the first read parsed is the SAME entry afterwards, not a new one.
+  it("reads a workload's plans once, and answers the next read from what it kept", async () => {
+    const fingerprint = connectionFingerprint(present(MSSQL_URL, "MSSQL_URL"));
+    forgetAttributions();
+    const targets = [{ database: DB, collection: "dbo.orders" }];
+    const first = await session.collector.collectWorkload(targets);
+    const kept = new Map(sharedAttributions(fingerprint).get(DB) ?? []);
+    const parsed = [...kept].filter(([, entry]) => entry.workload !== undefined);
+    expect(parsed.length).toBeGreaterThan(0);
+
+    // A rebuilt session's collector, as the next pass would have.
+    const rebuilt = new MssqlIndexCollector(seed, undefined, seed, sharedAttributions(fingerprint));
+    const second = await rebuilt.collectWorkload(targets);
+    const after = sharedAttributions(fingerprint).get(DB);
+    for (const [planId, entry] of parsed) expect(after?.get(planId)).toBe(entry);
+    // The same shapes. How long each has been observed is measured against the
+    // read's own clock, so it moves between two reads and is left out — and so
+    // is their ORDER: plans are folded in last-executed order, and plans that
+    // last ran in the same instant come back in either order (seen on 2025).
+    const timeless = (shapes: readonly QueryShape[] | undefined) =>
+      shapes?.map(({ observedForHours: _observed, ...shape }) => JSON.stringify(shape)).sort();
+    expect(timeless(second.get(workloadKey(DB, "dbo.orders")))).toEqual(
+      timeless(first.get(workloadKey(DB, "dbo.orders"))),
+    );
+  });
+
+  // #588. A database's purges in one read, answered per table — where the read
+  // used to cast and scan every plan's XML once per table.
+  it("reads every table's purge patterns in one read of the database", async () => {
+    await seed.execute(
+      `CREATE TABLE [${DB}].dbo.events(
+         id int IDENTITY CONSTRAINT pk_events PRIMARY KEY,
+         created_at datetime2 NOT NULL DEFAULT SYSUTCDATETIME())`,
+    );
+    try {
+      for (let run = 0; run < 3; run++) {
+        await seed.execute(
+          `USE [${DB}]; DELETE FROM dbo.events WHERE created_at < DATEADD(DAY, -90, SYSUTCDATETIME())`,
+        );
+      }
+      const collector = new MssqlIndexCollector(seed);
+      let patterns = await collector.collectDeletePatterns(DB, "dbo.events");
+      // Captured as it runs, but read back through views that can lag a beat.
+      for (let attempt = 0; attempt < 20 && (patterns[0]?.count ?? 0) < 3; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        patterns = await collector.collectDeletePatterns(DB, "dbo.events");
+      }
+      expect(patterns).toEqual([
+        { field: "created_at", count: 3, medianRetentionSeconds: 7_776_000 },
+      ]);
+      // A table nothing purges has nothing, from the same read.
+      expect(await collector.collectDeletePatterns(DB, "dbo.orders")).toEqual([]);
+    } finally {
+      await seed.execute(`DROP TABLE [${DB}].dbo.events`);
+    }
   });
 
   it("collects query shapes from Query Store plans (#201)", async () => {

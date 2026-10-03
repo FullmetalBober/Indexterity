@@ -222,10 +222,6 @@ test and the port-forward in NOTES.txt all read the same number they did before.
 # case multiplies by the fleet — and they are spent on the customer's mongod.
 - name: MONGO_MAX_POOL_SIZE
   value: {{ .Values.config.mongoMaxPoolSize | quote }}
-# Wall clock for ONE read-only pass. Applying a change is not bounded by it —
-# a long index build runs to completion.
-- name: CLUSTER_PASS_BUDGET_MS
-  value: {{ .Values.config.clusterPassBudgetMs | quote }}
 # How stale a recommendation may be: the floor between two classify passes on one
 # cluster when the collect that triggered it learned something, and the ceiling
 # when it did not. `int64` before `quote` for the same reason as the build

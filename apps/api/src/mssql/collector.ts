@@ -1,3 +1,4 @@
+import { passCached } from "../engine/pass-cache";
 import { beginPhase, timePhase } from "../engine/phases";
 import type {
   ClusterNode,
@@ -22,15 +23,17 @@ import {
   quoteIdent,
   splitCollectionName,
 } from "./connection";
-import { deletePatternsFromPlans } from "./delete-patterns";
+import { deletePatternsFromFacts } from "./delete-patterns";
 import { collectMssqlServerHealth } from "./health";
 import type { MssqlRoster, MssqlUsageMember } from "./members";
-import { type PlanRow, shapesFromPlans, unbracket } from "./workload";
+import { internNames, type PlanWorkload, workloadOfPlan } from "./plan-facts";
+import { type FactRow, shapesFromFacts, unbracket } from "./workload";
 
-// Plans read per database and collect. Query Store defaults to a 1GB store —
-// a few thousand plans — so the cap is headroom, not a working truncation;
-// when it does bind, the ORDER BY keeps the most recently executed plans and
-// drops the stalest, which is the end the recurrence gates ignore anyway.
+// Plans suggest reads per database, for its workload and for its purges each.
+// Query Store defaults to a 1GB store — a few thousand plans — so the cap is
+// headroom, not a working truncation; when it does bind, the ORDER BY keeps the
+// most recently executed plans and drops the stalest, which is the end the
+// recurrence gates ignore anyway.
 const MAX_PLANS_PER_DATABASE = 5000;
 
 // The SQL Server implementation of the collector port, over the surfaces the
@@ -92,6 +95,20 @@ export interface PlanAttribution {
   readonly hash: string;
   readonly tables: readonly string[];
   readonly isSelect: boolean;
+  // What suggest reads off the same XML (#588, plan-facts.ts) — absent until a
+  // suggest has needed this plan, because the collect never parses that far.
+  readonly workload?: PlanWorkload;
+}
+
+// What the collect and the probe keep of a shipped plan: the attribution alone,
+// read off the XML as text. The table list is shared with every other plan that
+// names the same tables, which is most of them.
+function attributionOf(row: PlanXmlRow): PlanAttribution {
+  return {
+    hash: row.hash,
+    tables: internNames(tablesOfPlan(row.xml)),
+    isSelect: isReadPlan(row.xml),
+  };
 }
 
 // Every schema.table a plan names, once each, in the collection form the rest
@@ -160,12 +177,17 @@ export interface PlanXmlRow {
  *
  * The failure is RETHROWN after remembering. The caller's pass is over either
  * way; what this changes is how much of it has to be done again.
+ *
+ * `describe` is what is kept of each plan: the attribution for the collect and
+ * the probe, and the attribution with suggest's facts for suggest (#588) — the
+ * same shipping, the same durability, whichever pass is paying for it.
  */
 export async function shipPlanXml(
   unread: readonly number[],
   kept: Map<number, PlanAttribution>,
   fetch: (ids: readonly number[]) => Promise<readonly PlanXmlRow[]>,
   remember: (attributed: Map<number, PlanAttribution>) => void,
+  describe: (row: PlanXmlRow) => PlanAttribution = attributionOf,
 ): Promise<void> {
   for (let start = 0; start < unread.length; start += PLAN_FETCH_CHUNK) {
     const ids = unread.slice(start, start + PLAN_FETCH_CHUNK);
@@ -177,11 +199,7 @@ export async function shipPlanXml(
     try {
       const rows = await fetch(ids);
       for (const [i, row] of rows.entries()) {
-        kept.set(row.planId, {
-          hash: row.hash,
-          tables: tablesOfPlan(row.xml),
-          isSelect: isReadPlan(row.xml),
-        });
+        kept.set(row.planId, describe(row));
         // The same breathing the plan parsers take (./chunk.ts): this runs in
         // the process that is also answering HTTP.
         if (i % PLAN_PARSE_CHUNK === PLAN_PARSE_CHUNK - 1) await yieldToEventLoop();
@@ -914,7 +932,14 @@ export class MssqlIndexCollector implements IndexCollector {
   // the catalog of ids and hashes (a few bytes a plan), nothing, and the runtime
   // totals the caller asks for. The per-table read this replaces cast and
   // scanned every plan's XML once per table.
-  private async planAttributions(database: string): Promise<Map<number, PlanAttribution>> {
+  //
+  // `shipAtMost` is the probe's allowance (#588): past it, what was shipped is
+  // remembered and the answer is null — the database could not be attributed
+  // for that price. Unbounded for the collect, which attributes whatever it must.
+  private async planAttributions(
+    database: string,
+    shipAtMost = Number.POSITIVE_INFINITY,
+  ): Promise<Map<number, PlanAttribution> | null> {
     const known = this.attributions.get(database) ?? new Map<number, PlanAttribution>();
     // Two phases, split on purpose (#466). This read is two numeric columns per
     // plan; the one below ships each unseen plan's XML, which on a 2,000-plan
@@ -939,33 +964,17 @@ export class MssqlIndexCollector implements IndexCollector {
         .map((row) => ({ planId: asNumber(row.planId), hash: String(row.hash) }))
         .filter((row) => Number.isInteger(row.planId)),
     );
+    const shipping = unread.length > shipAtMost ? unread.slice(0, shipAtMost) : unread;
     await shipPlanXml(
-      unread,
+      shipping,
       kept,
-      (ids) =>
-        // Interpolated, not bound: these are integers the server itself just
-        // answered with, kept to integers above, and a parameter per id would
-        // meet the driver's 2,100-parameter ceiling long before this list did.
-        this.conn
-          .query<{ planId: unknown; hash: unknown; xml: string }>(
-            `SELECT p.plan_id AS planId, CONVERT(varchar(20), p.query_plan_hash, 1) AS hash,
-                CAST(p.query_plan AS nvarchar(max)) AS xml
-         FROM ${quoteIdent(database)}.sys.query_store_plan p
-         WHERE p.plan_id IN (${ids.join(", ")})`,
-          )
-          .then((rows) =>
-            rows.map((row) => ({
-              planId: asNumber(row.planId),
-              hash: String(row.hash),
-              xml: row.xml,
-            })),
-          ),
+      (ids) => this.planXml(database, ids),
       (attributed) => this.attributions.set(database, attributed),
     );
     // Set once more for the database whose store had nothing unread: the loop
     // above never ran, so nothing has written the pruned map back.
     this.attributions.set(database, kept);
-    return kept;
+    return shipping.length < unread.length ? null : kept;
   }
 
   // Every table's read/write ops and duration in one read of the database (#454).
@@ -974,8 +983,25 @@ export class MssqlIndexCollector implements IndexCollector {
   // table by the same marker and split reads from writes by the same test, so
   // they agree — the live suite holds them to it.
   async latencyByCollection(database: string): Promise<ReadonlyMap<string, CollectionLatency>> {
+    return (await this.latencyFromStore(database, Number.POSITIVE_INFINITY)) ?? new Map();
+  }
+
+  // The probe's read (#588): null when the database's plans cannot be
+  // attributed without shipping more than `shipAtMost` of them. See the port.
+  async latencyByCollectionWithin(
+    database: string,
+    shipAtMost: number,
+  ): Promise<ReadonlyMap<string, CollectionLatency> | null> {
+    return this.latencyFromStore(database, shipAtMost);
+  }
+
+  private async latencyFromStore(
+    database: string,
+    shipAtMost: number,
+  ): Promise<ReadonlyMap<string, CollectionLatency> | null> {
     if (!(await this.queryStoreEnabled(database))) return new Map();
-    const plans = await this.planAttributions(database);
+    const plans = await this.planAttributions(database, shipAtMost);
+    if (plans === null) return null;
     const stats = await this.conn.query<{ planId: unknown; execs: unknown; micros: unknown }>(
       `SELECT rs.plan_id AS planId,
               SUM(rs.count_executions) AS execs,
@@ -1026,11 +1052,17 @@ export class MssqlIndexCollector implements IndexCollector {
   }
 
   // Query shapes per namespace, from Query Store plans (#201): one pass per
-  // database, every plan's XML parsed once and bucketed to the targets it
-  // touches — see mssql/workload.ts for the anatomy. Capped at the most
-  // recently executed plans; a store larger than the cap contributes its
-  // busiest recent shapes rather than everything, which is what the
-  // recurrence gates read anyway.
+  // database, bucketed to the targets each plan touches — see mssql/workload.ts
+  // for the anatomy. Capped at the most recently executed plans; a store larger
+  // than the cap contributes its busiest recent shapes rather than everything,
+  // which is what the recurrence gates read anyway.
+  //
+  // Since #588 the plans arrive WITHOUT their XML: the read below is ids,
+  // hashes and runtime totals, and what each plan says comes from the entry the
+  // collect keeps for it, or is shipped and parsed once if no pass has asked
+  // that of this plan before. It used to ship and parse up to 5,000 plans' XML
+  // per database on every suggest — on the production 12-database SQL Server,
+  // more than a five-minute budget could hold however it was paced.
   async collectWorkload(
     targets: readonly WorkloadTarget[],
   ): Promise<Map<string, readonly QueryShape[]>> {
@@ -1044,82 +1076,181 @@ export class MssqlIndexCollector implements IndexCollector {
     const now = new Date();
     for (const [database, databaseTargets] of byDatabase) {
       if (!(await this.queryStoreEnabled(database))) continue;
-      const rows = await this.conn.query<{
-        planXml: string;
-        execs: unknown;
-        totalIo: unknown;
-        firstSeen: Date | string | null;
-        lastSeen: Date | string | null;
-      }>(
-        // is_internal_query = 0 keeps the server's own work out of the
-        // workload: an index build is recorded as an internal
-        // "insert … select * from …" plan — StatementType INSERT, full scan
-        // plus a sort — which would otherwise hand the suggest engine a
-        // phantom missing-index shape every time an index is BUILT, ours
-        // included (observed live on 2022).
-        `SELECT TOP ${MAX_PLANS_PER_DATABASE}
-           CAST(p.query_plan AS nvarchar(max)) AS planXml,
-           agg.execs, agg.totalIo, agg.firstSeen, agg.lastSeen
-         FROM (
-           SELECT plan_id,
-             SUM(count_executions) AS execs,
-             SUM(count_executions * avg_logical_io_reads) AS totalIo,
-             MIN(first_execution_time) AS firstSeen,
-             MAX(last_execution_time) AS lastSeen
-           FROM ${quoteIdent(database)}.sys.query_store_runtime_stats
-           GROUP BY plan_id
-         ) agg
-         JOIN ${quoteIdent(database)}.sys.query_store_plan p ON p.plan_id = agg.plan_id
-         JOIN ${quoteIdent(database)}.sys.query_store_query q ON q.query_id = p.query_id
-         WHERE q.is_internal_query = 0
-         ORDER BY agg.lastSeen DESC`,
+      const rows = await timePhase("queryStore:workload", () =>
+        this.conn.query<{
+          planId: unknown;
+          hash: unknown;
+          execs: unknown;
+          totalIo: unknown;
+          firstSeen: Date | string | null;
+        }>(
+          // is_internal_query = 0 keeps the server's own work out of the
+          // workload: an index build is recorded as an internal
+          // "insert … select * from …" plan — StatementType INSERT, full scan
+          // plus a sort — which would otherwise hand the suggest engine a
+          // phantom missing-index shape every time an index is BUILT, ours
+          // included (observed live on 2022).
+          `SELECT TOP ${MAX_PLANS_PER_DATABASE}
+             agg.plan_id AS planId, CONVERT(varchar(20), p.query_plan_hash, 1) AS hash,
+             agg.execs, agg.totalIo, agg.firstSeen
+           FROM (
+             SELECT plan_id,
+               SUM(count_executions) AS execs,
+               SUM(count_executions * avg_logical_io_reads) AS totalIo,
+               MIN(first_execution_time) AS firstSeen,
+               MAX(last_execution_time) AS lastSeen
+             FROM ${quoteIdent(database)}.sys.query_store_runtime_stats
+             GROUP BY plan_id
+           ) agg
+           JOIN ${quoteIdent(database)}.sys.query_store_plan p ON p.plan_id = agg.plan_id
+           JOIN ${quoteIdent(database)}.sys.query_store_query q ON q.query_id = p.query_id
+           WHERE q.is_internal_query = 0
+           ORDER BY agg.lastSeen DESC`,
+        ),
       );
-      const planRows: PlanRow[] = rows.map((row) => ({
-        planXml: row.planXml,
-        execs: asNumber(row.execs),
-        totalIo: asNumber(row.totalIo),
-        firstSeen: row.firstSeen,
-        lastSeen: row.lastSeen,
-      }));
-      for (const [key, shapes] of await shapesFromPlans(databaseTargets, database, planRows, now)) {
+      const plans = rows
+        .map((row) => ({
+          planId: asNumber(row.planId),
+          hash: String(row.hash),
+          execs: asNumber(row.execs),
+          totalIo: asNumber(row.totalIo),
+          firstSeen: row.firstSeen,
+        }))
+        .filter((plan) => Number.isInteger(plan.planId));
+      const facts = await this.workloadFacts(database, plans);
+      const factRows: FactRow[] = [];
+      for (const plan of plans) {
+        const workload = facts.get(plan.planId);
+        if (workload !== undefined) factRows.push({ ...plan, facts: workload });
+      }
+      for (const [key, shapes] of await shapesFromFacts(databaseTargets, database, factRows, now)) {
         result.set(key, shapes);
       }
     }
     return result;
   }
 
+  // What each of `plans` says, from the entries already kept where the hash
+  // still matches and suggest has read the plan before, and by shipping the
+  // rest's XML in the collect's chunks — remembered as each lands, so an
+  // abandoned suggest leaves its progress for the next (#470, #588).
+  //
+  // Read into a COPY of the database's entries and stored back: the stored map
+  // may be one a pass holds, and suggest only ever adds to it.
+  private async workloadFacts(
+    database: string,
+    plans: readonly { readonly planId: number; readonly hash: string }[],
+  ): Promise<Map<number, PlanWorkload>> {
+    const entries = new Map(this.attributions.get(database) ?? []);
+    const facts = new Map<number, PlanWorkload>();
+    const unread: number[] = [];
+    for (const { planId, hash } of plans) {
+      const have = entries.get(planId);
+      if (have?.workload !== undefined && have.hash === hash) facts.set(planId, have.workload);
+      else unread.push(planId);
+    }
+    if (unread.length === 0) return facts;
+    await shipPlanXml(
+      unread,
+      entries,
+      (ids) => this.planXml(database, ids),
+      (shipped) => this.attributions.set(database, shipped),
+      (row) => ({ ...attributionOf(row), workload: workloadOfPlan(row.xml, database) }),
+    );
+    for (const planId of unread) {
+      const workload = entries.get(planId)?.workload;
+      if (workload !== undefined) facts.set(planId, workload);
+    }
+    return facts;
+  }
+
+  // The XML of the plans named, one statement for a chunk of them.
+  //
+  // Interpolated, not bound: these are integers the server itself just
+  // answered with, kept to integers by the caller, and a parameter per id would
+  // meet the driver's 2,100-parameter ceiling long before a chunk did.
+  private async planXml(database: string, ids: readonly number[]): Promise<PlanXmlRow[]> {
+    const rows = await this.conn.query<{ planId: unknown; hash: unknown; xml: string }>(
+      `SELECT p.plan_id AS planId, CONVERT(varchar(20), p.query_plan_hash, 1) AS hash,
+              CAST(p.query_plan AS nvarchar(max)) AS xml
+       FROM ${quoteIdent(database)}.sys.query_store_plan p
+       WHERE p.plan_id IN (${ids.join(", ")})`,
+    );
+    return rows.map((row) => ({
+      planId: asNumber(row.planId),
+      hash: String(row.hash),
+      xml: row.xml,
+    }));
+  }
+
   // Recurring age-based DELETEs against this table, from Query Store (#206) —
-  // see mssql/delete-patterns.ts for the extraction. The plans are filtered
-  // server-side twice: to DELETE statements, and to plans whose XML names this
-  // table, so a database full of SELECT plans is not shipped to be discarded
-  // here.
+  // see mssql/delete-patterns.ts for the extraction.
+  //
+  // Read for the whole DATABASE and answered per table (#588), because suggest
+  // asks for every table of a database in turn and the read used to be a
+  // whole-store scan per table: CAST every plan's XML and LIKE it twice. The
+  // database's purges are read once per pass and the pass cache answers every
+  // table after the first.
   async collectDeletePatterns(database: string, collection: string): Promise<DeletePattern[]> {
     if (!(await this.queryStoreEnabled(database))) return [];
-    const rows = await this.conn.query<{ planXml: string; execs: unknown }>(
-      // is_internal_query = 0 for the same reason collectWorkload has it: the
-      // server's own maintenance runs DELETEs of its own, and none of them is
-      // this application purging by age.
-      `SELECT TOP ${MAX_PLANS_PER_DATABASE}
-         CAST(p.query_plan AS nvarchar(max)) AS planXml,
-         agg.execs
-       FROM (
-         SELECT plan_id, SUM(count_executions) AS execs, MAX(last_execution_time) AS lastSeen
-         FROM ${quoteIdent(database)}.sys.query_store_runtime_stats
-         GROUP BY plan_id
-       ) agg
-       JOIN ${quoteIdent(database)}.sys.query_store_plan p ON p.plan_id = agg.plan_id
-       JOIN ${quoteIdent(database)}.sys.query_store_query q ON q.query_id = p.query_id
-       WHERE q.is_internal_query = 0
-         AND CAST(p.query_plan AS nvarchar(max)) LIKE '%StatementType="DELETE"%'
-         AND CAST(p.query_plan AS nvarchar(max)) LIKE @pattern
-       ORDER BY agg.lastSeen DESC`,
-      { pattern: tablePlanPattern(collection) },
+    const byTable = await passCached(`mssql:deletePatterns\u0000${database}`, () =>
+      this.deletePatternsByTable(database),
     );
-    return await deletePatternsFromPlans(
-      rows.map((row) => ({ planXml: row.planXml, execs: asNumber(row.execs) })),
-      database,
-      collection,
+    return byTable.get(collection) ?? [];
+  }
+
+  // Every table's purge patterns in one read of the database.
+  //
+  // The candidates are filtered on the statement TEXT, not the plan XML: a
+  // DELETE's text says DELETE, and a query text is a fraction of its plan's
+  // size, so the server scans the small column instead of casting every plan.
+  // It is a superset — a SELECT naming a column `is_deleted` passes it — and
+  // the plan's own StatementType then decides, exactly as it did before.
+  // Collated explicitly so a case-sensitive database still matches `delete`.
+  private async deletePatternsByTable(database: string): Promise<Map<string, DeletePattern[]>> {
+    const rows = await timePhase("queryStore:deletes", () =>
+      this.conn.query<{ planId: unknown; hash: unknown; execs: unknown }>(
+        // is_internal_query = 0 for the same reason collectWorkload has it: the
+        // server's own maintenance runs DELETEs of its own, and none of them is
+        // this application purging by age.
+        `SELECT TOP ${MAX_PLANS_PER_DATABASE}
+           agg.plan_id AS planId, CONVERT(varchar(20), p.query_plan_hash, 1) AS hash, agg.execs
+         FROM (
+           SELECT plan_id, SUM(count_executions) AS execs, MAX(last_execution_time) AS lastSeen
+           FROM ${quoteIdent(database)}.sys.query_store_runtime_stats
+           GROUP BY plan_id
+         ) agg
+         JOIN ${quoteIdent(database)}.sys.query_store_plan p ON p.plan_id = agg.plan_id
+         JOIN ${quoteIdent(database)}.sys.query_store_query q ON q.query_id = p.query_id
+         JOIN ${quoteIdent(database)}.sys.query_store_query_text t
+           ON t.query_text_id = q.query_text_id
+         WHERE q.is_internal_query = 0
+           AND t.query_sql_text COLLATE Latin1_General_CI_AS LIKE '%DELETE%'
+         ORDER BY agg.lastSeen DESC`,
+      ),
     );
+    const plans = rows
+      .map((row) => ({
+        planId: asNumber(row.planId),
+        hash: String(row.hash),
+        execs: asNumber(row.execs),
+      }))
+      .filter((plan) => Number.isInteger(plan.planId));
+    const facts = await this.workloadFacts(database, plans);
+    const byTable = new Map<string, { purges: PlanWorkload["purges"]; execs: number }[]>();
+    for (const plan of plans) {
+      const purges = facts.get(plan.planId)?.purges ?? [];
+      for (const table of new Set(purges.map((purge) => purge.table))) {
+        const bucket = byTable.get(table) ?? [];
+        bucket.push({ purges, execs: plan.execs });
+        byTable.set(table, bucket);
+      }
+    }
+    const out = new Map<string, DeletePattern[]>();
+    for (const [table, tableRows] of byTable) {
+      out.set(table, await deletePatternsFromFacts(tableRows, table));
+    }
+    return out;
   }
 
   // Server-wide query-engine counters, from sys.dm_os_performance_counters and

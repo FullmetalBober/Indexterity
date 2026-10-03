@@ -223,6 +223,21 @@ export interface IndexCollector {
   // where they exist and the per-collection reads where they do not; a
   // collection absent from the map has no recorded activity.
   latencyByCollection?(database: string): Promise<ReadonlyMap<string, CollectionLatency>>;
+  // The probe's form of the read above (#588): the same answer, or null when
+  // answering would mean shipping more than `shipAtMost` plans' XML first.
+  //
+  // The probe is the five-minute signal, and on SQL Server the read above is
+  // only cheap while the plan cache is warm: a cold or churned store has to ship
+  // every unseen plan before a single table can be answered, which on the
+  // production cluster that prompted this was ~5,000 plans and the probe's whole
+  // budget, every fifteen minutes. So the probe ships an allowance — enough to
+  // absorb the plans a busy store gains between collects — and leaves a
+  // database it cannot finish to the collect, which is paced and whose shipping
+  // is remembered chunk by chunk (#470). What it shipped stays shipped.
+  latencyByCollectionWithin?(
+    database: string,
+    shipAtMost: number,
+  ): Promise<ReadonlyMap<string, CollectionLatency> | null>;
 
   // How many of the reads this engine reports for a collection were OURS.
   //

@@ -19,6 +19,7 @@ import {
   and,
   clusterIndexes,
   clusterNamespaces,
+  clusterPassTimings,
   clusterRosters,
   clusters,
   createDatabase,
@@ -56,7 +57,7 @@ import { activeCooldownKeys, cooldownKey } from "../src/jobs/cooldowns";
 import { applyCreatesForCluster } from "../src/jobs/create";
 import { finalizeCluster } from "../src/jobs/finalize";
 import { releaseStaleLocks } from "../src/jobs/locks";
-import { collectPaceOf, collectsDue } from "../src/jobs/pacing";
+import { paceOf, pacesDue } from "../src/jobs/pacing";
 import { planForCluster } from "../src/jobs/plan";
 import { latestBaselines } from "../src/jobs/probe";
 import { pruneDeadLetterJobs, pruneOldSamples } from "../src/jobs/retention";
@@ -385,13 +386,13 @@ describe("cluster lifecycle", () => {
       2,
     );
     try {
-      expect(await collectPaceOf(db, clusterId)).toEqual({ tier: 2, lastStartedAt: hourAgo });
+      expect(await paceOf(db, clusterId, "collect")).toEqual({ tier: 2, lastStartedAt: hourAgo });
       // Every fourth hour at the second pace: an hour on, it is not due; a
       // cluster with no collect on record always is.
       const fresh = "00000000-0000-4000-8000-000000000571";
-      expect([...(await collectsDue(db, [clusterId, fresh], new Date()))]).toEqual([fresh]);
+      expect([...(await pacesDue(db, "collect", [clusterId, fresh], new Date()))]).toEqual([fresh]);
       const later = new Date(hourAgo.getTime() + 4 * 3_600_000);
-      expect([...(await collectsDue(db, [clusterId], later))]).toEqual([clusterId]);
+      expect([...(await pacesDue(db, "collect", [clusterId], later))]).toEqual([clusterId]);
 
       const res = await api(`/clusters/${clusterId}/passes`, owner);
       const collect = asRecords(asRecord(await res.json()).passes, "body.passes").find(
@@ -406,6 +407,57 @@ describe("cluster lifecycle", () => {
         { startedAt: hourAgo, durationMs: 4_200, outcome: "ok", budgetMs: 300_000, phases: [] },
         0,
       );
+    }
+  });
+
+  // #588. A suggest is paced the same way, on a tier of its own: its row
+  // decides its pace and the collect's row decides the collect's. Whatever row
+  // was there before is put back, because every test below shares this cluster.
+  it("paces a suggest on a tier of its own", async () => {
+    const own = and(
+      eq(clusterPassTimings.clusterId, clusterId),
+      eq(clusterPassTimings.task, "suggest"),
+    );
+    const [before] = await db.select().from(clusterPassTimings).where(own);
+    const hourAgo = new Date(Date.now() - 3_600_000);
+    await recordPassTiming(
+      db,
+      clusterId,
+      "suggest",
+      {
+        startedAt: hourAgo,
+        durationMs: 300_000,
+        outcome: "timed-out",
+        budgetMs: 300_000,
+        phases: [],
+      },
+      1,
+    );
+    try {
+      expect(await paceOf(db, clusterId, "suggest")).toEqual({ tier: 1, lastStartedAt: hourAgo });
+      expect((await paceOf(db, clusterId, "collect")).tier).toBe(0);
+      // Every second hour at the first pace.
+      expect([...(await pacesDue(db, "suggest", [clusterId], new Date()))]).toEqual([]);
+      const later = new Date(hourAgo.getTime() + 2 * 3_600_000);
+      expect([...(await pacesDue(db, "suggest", [clusterId], later))]).toEqual([clusterId]);
+
+      const res = await api(`/clusters/${clusterId}/passes`, owner);
+      const suggest = asRecords(asRecord(await res.json()).passes, "body.passes").find(
+        (pass) => pass.task === "suggest",
+      );
+      expect(suggest?.pace).toEqual({ everyHours: 2, budgetMs: 600_000 });
+    } finally {
+      if (before === undefined) {
+        await db.delete(clusterPassTimings).where(own);
+      } else {
+        await db
+          .insert(clusterPassTimings)
+          .values(before)
+          .onConflictDoUpdate({
+            target: [clusterPassTimings.clusterId, clusterPassTimings.task],
+            set: before,
+          });
+      }
     }
   });
 

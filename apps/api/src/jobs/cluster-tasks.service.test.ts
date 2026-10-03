@@ -11,7 +11,7 @@ import { ClusterTasksService } from "./cluster-tasks.service";
 import { collectCluster } from "./collect";
 import { applyCreatesForCluster } from "./create";
 import type { JobQueue } from "./dispatch";
-import { collectPaceOf } from "./pacing";
+import { paceOf } from "./pacing";
 import { probeCluster } from "./probe";
 import { suggestForCluster } from "./suggest";
 import { recordPassTiming } from "./timings";
@@ -69,12 +69,12 @@ vi.mock("./blocked", (): typeof import("./blocked") => ({
 vi.mock("./timings", (): typeof import("./timings") => ({
   recordPassTiming: vi.fn(),
 }));
-// A collect reads its own pace before it runs (#571), and this suite's db never
-// opens a socket — so the read answers "not paced", and the policy beside it
-// stays real.
+// A paced pass reads its own pace before it runs (#571, #588), and this suite's
+// db never opens a socket — so the read answers "not paced", and the policy
+// beside it stays real.
 vi.mock("./pacing", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./pacing")>()),
-  collectPaceOf: vi.fn(async () => ({ tier: 0, lastStartedAt: null })),
+  paceOf: vi.fn(async () => ({ tier: 0, lastStartedAt: null })),
 }));
 vi.mock("../events/emit", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../events/emit")>()),
@@ -90,6 +90,8 @@ vi.mock("../mail/notify", async (importOriginal) => ({
 }));
 
 const CLUSTER = "11111111-1111-1111-1111-111111111111";
+const MINUTE = 60_000;
+const HOUR = 60 * MINUTE;
 
 // A REAL drizzle client, not `{} as DatabaseService["db"]`. It opens no
 // connection until something queries it — measured: `totalCount` 0 and no
@@ -172,12 +174,12 @@ describe("the per-cluster passes", () => {
   // the two travel together: a paced collect that came back in no time at all
   // has room to spare at the tier below, so it is recorded one tier down.
   it("records the pace the next collect gets, decided from this one", async () => {
-    vi.mocked(collectPaceOf).mockResolvedValueOnce({ tier: 1, lastStartedAt: null });
+    vi.mocked(paceOf).mockResolvedValueOnce({ tier: 1, lastStartedAt: null });
     const help = helpers();
 
     await service().collect({ clusterId: CLUSTER }, help);
 
-    expect(collectPaceOf).toHaveBeenCalledWith(db, CLUSTER);
+    expect(paceOf).toHaveBeenCalledWith(db, CLUSTER, "collect");
     expect(recordPassTiming).toHaveBeenCalledWith(
       db,
       CLUSTER,
@@ -191,7 +193,7 @@ describe("the per-cluster passes", () => {
   // Advisory: a pace that cannot be read — a deploy that landed before its
   // migration — is the unpaced collect, not a failed one.
   it("runs a collect unpaced when its pace cannot be read", async () => {
-    vi.mocked(collectPaceOf).mockRejectedValueOnce(
+    vi.mocked(paceOf).mockRejectedValueOnce(
       new Error('relation "cluster_pass_timings" does not exist'),
     );
     const help = helpers();
@@ -209,12 +211,12 @@ describe("the per-cluster passes", () => {
     expect(help.logger.error).toHaveBeenCalledWith(expect.stringContaining("running it unpaced"));
   });
 
-  // Only the collect is paced. Every other pass keeps the base budget, and its
-  // row keeps tier 0.
+  // Only collect and suggest are paced. Every other pass keeps the base budget,
+  // and its row keeps tier 0.
   it("does not read a pace for a pass that is not paced", async () => {
     await service().classify({ clusterId: CLUSTER }, helpers());
 
-    expect(collectPaceOf).not.toHaveBeenCalled();
+    expect(paceOf).not.toHaveBeenCalled();
     expect(recordPassTiming).toHaveBeenCalledWith(
       db,
       CLUSTER,
@@ -317,6 +319,101 @@ describe("the per-cluster passes", () => {
     await service().suggest({ clusterId: CLUSTER }, helpers());
 
     expect(applyCreatesForCluster).not.toHaveBeenCalled();
+  });
+
+  // #588. A suggest is paced like a collect, with a tier of its own: the
+  // analysis runs against the budget its pace gives it, and the timing reports
+  // that budget — a suggest that landed used to record none, because the runner
+  // never applied one to it.
+  it("runs a paced suggest against its paced budget, and reports it", async () => {
+    vi.mocked(paceOf).mockResolvedValueOnce({
+      tier: 1,
+      lastStartedAt: new Date(Date.now() - 3 * HOUR),
+    });
+    vi.mocked(suggestForCluster).mockResolvedValue({ created: 0, instantApproved: 0 });
+    const help = helpers();
+
+    await service().suggest({ clusterId: CLUSTER }, help);
+
+    expect(paceOf).toHaveBeenCalledWith(db, CLUSTER, "suggest");
+    expect(suggestForCluster).toHaveBeenCalled();
+    // Back in no time at all, so it has room to spare at the tier below.
+    expect(recordPassTiming).toHaveBeenCalledWith(
+      db,
+      CLUSTER,
+      "suggest",
+      expect.objectContaining({ outcome: "ok", budgetMs: 10 * MINUTE }),
+      0,
+    );
+    expect(help.logger.info).toHaveBeenCalledWith(expect.stringContaining("from tier 1 to 0"));
+  });
+
+  // The pace has to hold for every trigger, not only the hourly dispatch: a
+  // suggest is also chased by every collect and by any probe finding. One that is
+  // not due stands down and records nothing, so the next due check still counts
+  // from the run that set the pace.
+  it("stands a paced suggest down until it is due, and records nothing", async () => {
+    vi.mocked(paceOf).mockResolvedValueOnce({ tier: 1, lastStartedAt: new Date() });
+    const help = helpers();
+
+    await service().suggest({ clusterId: CLUSTER }, help);
+
+    expect(suggestForCluster).not.toHaveBeenCalled();
+    expect(recordPassTiming).not.toHaveBeenCalled();
+    expect(help.logger.info).toHaveBeenCalledWith(expect.stringContaining("is not due"));
+  });
+
+  // The tier is decided by the part the budget covers. A nine-minute instant
+  // build behind a quick analysis is a slow BUILD, and pacing the analysis for it
+  // would only make the cluster's recommendations arrive later. The build is
+  // still in the timing — as its own phase, so the panel says where it went.
+  it("decides a suggest's next tier from its analysis, not its build", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.mocked(suggestForCluster).mockResolvedValue({ created: 1, instantApproved: 1 });
+      vi.mocked(applyCreatesForCluster).mockImplementationOnce(async () => {
+        vi.setSystemTime(Date.now() + 9 * MINUTE);
+        return 1;
+      });
+
+      await service().suggest({ clusterId: CLUSTER }, helpers());
+
+      expect(recordPassTiming).toHaveBeenCalledWith(
+        db,
+        CLUSTER,
+        "suggest",
+        expect.objectContaining({ outcome: "ok" }),
+        0,
+      );
+      const timing = vi.mocked(recordPassTiming).mock.calls[0]?.[3];
+      expect(timing?.durationMs).toBeGreaterThanOrEqual(9 * MINUTE);
+      expect(timing?.phases.map((phase) => phase.name)).toContain("instantBuild");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // And one that runs out of its budget is stepped up, as a collect is.
+  it("steps up a suggest whose analysis runs out of its budget", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(suggestForCluster).mockImplementationOnce(() => new Promise(() => undefined));
+
+      const running = service().suggest({ clusterId: CLUSTER }, helpers());
+      await vi.advanceTimersByTimeAsync(5 * MINUTE + 1);
+      await running;
+
+      expect(recordPassTiming).toHaveBeenCalledWith(
+        db,
+        CLUSTER,
+        "suggest",
+        expect.objectContaining({ outcome: "timed-out", budgetMs: 5 * MINUTE }),
+        1,
+      );
+      expect(applyCreatesForCluster).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("asks for a suggest only when the probe found something", async () => {

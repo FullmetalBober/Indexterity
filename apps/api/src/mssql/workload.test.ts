@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { workloadKey } from "../engine/ports";
 import { PLAN_PARSE_CHUNK } from "./chunk";
-import { type PlanRow, parseConstValue, parseShowplanShapes, shapesFromPlans } from "./workload";
+import {
+  compactShapes,
+  type PlanRow,
+  parseConstValue,
+  parseShowplanShapes,
+  shapesFromFacts,
+  shapesFromPlans,
+} from "./workload";
 
 // Minimal but grammatically real showplan fragments — the element anatomy
 // (Prefix/StartRange, Compare/CompareOp, OrderByColumn, MissingIndex) was
@@ -272,5 +279,44 @@ describe("shapesFromPlans yields the event loop while it parses", () => {
     // its own reasons, and pinning the exact number would make this a test about
     // vitest's scheduling.
     expect(turns).toBeGreaterThanOrEqual(3);
+  });
+});
+
+// #588. What a plan says is kept per plan and folded on every pass without the
+// XML, so the fold over kept facts has to be the fold over the XML — the same
+// shapes, the same merges, the same order.
+describe("shapes kept per plan", () => {
+  const NOW = new Date("2026-08-14T12:00:00Z");
+  const targets = [
+    { database: "probe", collection: "dbo.orders" },
+    { database: "probe", collection: "dbo.customers" },
+  ];
+  const plans = [SEEK_PLAN, SCAN_SORT_PLAN, NONCLUSTERED_RANGE_SCAN, JOIN_PLAN];
+  const rows = plans.map((planXml, i) => ({
+    planXml,
+    execs: 3 + i,
+    totalIo: 30 + i,
+    firstSeen: "2026-08-13T12:00:00Z",
+    lastSeen: "2026-08-14T11:00:00Z",
+  }));
+
+  it("folds kept facts to exactly what the XML folds to", async () => {
+    const facts = rows.map((row) => ({
+      ...row,
+      facts: compactShapes(parseShowplanShapes(row.planXml, "probe")),
+    }));
+    expect(await shapesFromFacts(targets, "probe", facts, NOW)).toEqual(
+      await shapesFromPlans(targets, "probe", rows, NOW),
+    );
+  });
+
+  // A table the plan only reads — no predicate, no sort, no scan of its own
+  // storage — says nothing about an index, and is not carried per plan.
+  it("keeps only the shapes the fold would use", () => {
+    const bare = `<ShowPlanXML><StmtSimple StatementType="SELECT"><RelOp PhysicalOp="Index Scan">
+      <IndexScan><Object Database="[probe]" Schema="[dbo]" Table="[orders]" Index="[ix_status]" IndexKind="NonClustered" /></IndexScan>
+    </RelOp></StmtSimple></ShowPlanXML>`;
+    expect(parseShowplanShapes(bare, "probe").perTable.size).toBe(1);
+    expect(compactShapes(parseShowplanShapes(bare, "probe")).shapes).toEqual([]);
   });
 });

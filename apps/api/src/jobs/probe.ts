@@ -24,6 +24,15 @@ import { openClusterSession } from "./cluster-connection";
 // with hundreds of collections should not pay for all of them every five
 // minutes to answer a question about the ones carrying traffic.
 const PROBE_COLLECTIONS = 20;
+// Plans whose XML the probe may ship per database before it gives the database
+// up to the collect (#588) — five of the collector's 50-plan chunks.
+//
+// Sized to the link that prompted it, where a chunk took ~2.7 s: about 13
+// seconds a database, against a budget of five minutes. And sized to absorb
+// churn rather than a cold store: a database gaining up to 250 new plans
+// between probes stays answerable on every one of them, while a store that has
+// to be read from nothing — a restart, an eviction — is the collect's to warm.
+const PROBE_PLANS_SHIPPED = 250;
 // Gap between the two health readings. Long enough for the counters to move
 // under real traffic, short enough that the probe stays a quick job.
 //
@@ -118,6 +127,9 @@ export async function probeCluster(
   // #353 needs none; a cluster WITH a tunnel_id and no registry is
   // refused rather than dialled directly.
   tunnels?: TunnelRegistry,
+  // Told about a database whose read pressure waits for the next collect,
+  // because its plans could not be attributed within the probe's allowance.
+  onDeferred?: (database: string) => void,
 ): Promise<PressureFinding[]> {
   // The baseline is the most recent stored sample per collection, for the busiest
   // collections only — a collection nobody reads cannot be suffering from a
@@ -190,10 +202,26 @@ export async function probeCluster(
     // every five minutes was a third of the load the collect itself put on the
     // server. A database whose read fails is skipped whole, as a collection
     // whose read failed was.
+    //
+    // And within an allowance where the engine offers one (#588). Answering from
+    // a cold or churned SQL Server plan cache means shipping every unseen plan
+    // first, which on the cluster that prompted this was the probe's whole
+    // budget, every fifteen minutes. A database that cannot be answered for
+    // PROBE_PLANS_SHIPPED is skipped like one whose read failed, and the collect
+    // — paced, and remembering what it ships — attributes the rest.
     const collector = session.collector;
     const perDatabase = new Map<string, ReadonlyMap<string, CollectionLatency> | null>();
-    if (collector.latencyByCollection !== undefined) {
-      for (const database of new Set(busiest.map((baseline) => baseline.database))) {
+    const databases = new Set(busiest.map((baseline) => baseline.database));
+    if (collector.latencyByCollectionWithin !== undefined) {
+      for (const database of databases) {
+        const read = await collector
+          .latencyByCollectionWithin(database, PROBE_PLANS_SHIPPED)
+          .catch(() => undefined);
+        if (read === null) onDeferred?.(database);
+        perDatabase.set(database, read ?? null);
+      }
+    } else if (collector.latencyByCollection !== undefined) {
+      for (const database of databases) {
         perDatabase.set(database, await collector.latencyByCollection(database).catch(() => null));
       }
     }

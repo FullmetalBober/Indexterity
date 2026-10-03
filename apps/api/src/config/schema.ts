@@ -282,28 +282,6 @@ const workerShape = {
   // limit raised alongside. The name survives the worker process it was named
   // for (#232): it is how many jobs one drain runs at once.
   WORKER_CONCURRENCY: positiveInteger(1),
-  // How long one read-only pass may run before it is abandoned (#407).
-  //
-  // Five minutes because that is the tick interval: a pass that cannot outlive
-  // the schedule that dispatched it cannot let ticks pile up behind one cluster.
-  // Healthy passes finish in seconds, so this only ever bites the pathological
-  // case — which, measured in the hosted deployment, was a `suggest` against a
-  // tunnelled MSSQL cluster with 13 observed databases running for HOURS: the
-  // per-query budget is 15 minutes and there was no budget for the pass at all,
-  // so it could not finish inside the life of the process running it. It died
-  // mid-pass instead, orphaning its job lock for the ~4 hours graphile-worker
-  // waits before reclaiming one, and WORKER_CONCURRENCY is 1, so nothing else in
-  // the pipeline drained meanwhile.
-  //
-  // Raise it for a self-hosted install with genuinely large clusters and a host
-  // that will sit still for it. The failure it prevents is not slowness; it is a
-  // pass that can never finish holding the only slot while it fails to.
-  //
-  // It is the BASE for `collect`, which is paced per cluster (#571,
-  // jobs/pacing.ts): one that does not fit gets two of these every two hours,
-  // then four every four. So raising it is for a cluster past that ceiling, and
-  // it raises the ceiling with it.
-  CLUSTER_PASS_BUDGET_MS: positiveInteger(300_000),
   // How often the FAST passes recur: `apply`, the read-pressure `probe`, and the
   // stale-lock repair that shares their clock. The hourly and daily passes keep
   // their own schedules whatever this is.
@@ -322,9 +300,10 @@ const workerShape = {
   // The cost is exactly that cadence: apply and the probe run every fifteen
   // minutes.
   //
-  // Keep it at least CLUSTER_PASS_BUDGET_MS. Shorter is not unsafe — the
-  // dispatcher stands a pass down while the previous one still holds its lock
-  // (dispatch.ts) — but it spends dispatches that can only ever stand down.
+  // Keep it at least five, the pass budget (jobs/pacing.ts). Shorter is not
+  // unsafe — the dispatcher stands a pass down while the previous one still
+  // holds its lock (dispatch.ts) — but it spends dispatches that can only ever
+  // stand down.
   FAST_PASS_INTERVAL_MINUTES: minutesDividingAnHour(5),
   // How often `classify` may be chased for one cluster when the collect that
   // triggered it LEARNED something — a counter moved, an index appeared (#482).

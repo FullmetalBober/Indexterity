@@ -105,9 +105,9 @@ function whereTheTimeWent(timing: PassTiming): string | null {
     .join("; ");
 }
 
-// How a paced pass runs from now on (#571), said as the trade it is: the
-// collect here needs longer than an hourly one is given, so it gets longer and
-// runs less often, by the same factor.
+// How a paced pass runs from now on (#571, #588), said as the trade it is: the
+// collect or suggest here needs longer than an hourly one is given, so it gets
+// longer and runs less often, by the same factor.
 function paceNote(timing: PassTiming): string | null {
   if (timing.pace === null) return null;
   return (
