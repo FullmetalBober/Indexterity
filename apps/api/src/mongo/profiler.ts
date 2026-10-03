@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { FailedOpsReading } from "../engine/ports";
 
 // What `profile: -1` answers for one database. The level and the filter are the
 // database's own; `slowms` and `sampleRate` are server-wide and only reported
@@ -41,4 +42,50 @@ export function profilerBlindSpot(
   if (settings.slowms <= 0 && rate >= 1) return null;
   const which = rate >= 1 ? "operations" : `a ${Math.round(rate * 100)}% sample of operations`;
   return `the profiler on ${database} keeps only ${which} slower than ${settings.slowms} ms, and a failed one is fast`;
+}
+
+// What one database's ring and settings add up to for the failed-operations
+// check (#596). Pure over what the collector read, so every case is a unit test.
+export function failedOpsReading(read: {
+  readonly database: string;
+  // Failures on the namespace since the instant asked, counted on the server.
+  readonly failed: number;
+  // The ring's oldest entry, any namespace — its reach — or null when it is empty.
+  readonly oldest: Date | null;
+  readonly settings: ProfilerSettings | null;
+  readonly throughMongos: boolean;
+}): FailedOpsReading {
+  const { database, failed, oldest, settings } = read;
+  // Through mongos the ring read is the database's PRIMARY SHARD's — mongos routes
+  // it there — but `profile: -1` answers for mongos itself, which never profiles.
+  // Probed on 7.0 with the shard at level 2: mongos said `was: 0`, and the same
+  // read returned the shard's failure. So the settings are unknowable from here
+  // rather than off, and saying "off" would be wrong.
+  if (read.throughMongos) {
+    return oldest === null
+      ? {
+          kind: "NO_SOURCE",
+          reason: `${database}'s primary shard has profiled nothing, and mongos cannot say whether its profiler is on`,
+        }
+      : {
+          kind: "WINDOW",
+          failed,
+          reachMs: oldest.getTime(),
+          blindSpot: `only ${database}'s primary shard is read, and mongos cannot say how its profiler is set`,
+        };
+  }
+  // Off, and nothing from when it was on says otherwise. Failures recorded before
+  // somebody turned it off are still failures, so those still count.
+  if (settings?.was === 0 && failed === 0) {
+    return { kind: "NO_SOURCE", reason: `the profiler is off on ${database}` };
+  }
+  if (oldest === null) {
+    return { kind: "NO_SOURCE", reason: `the profiler on ${database} has recorded nothing yet` };
+  }
+  return {
+    kind: "WINDOW",
+    failed,
+    reachMs: oldest.getTime(),
+    blindSpot: profilerBlindSpot(database, settings),
+  };
 }

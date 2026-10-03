@@ -29,7 +29,7 @@ import { isRecord, messageOf } from "../errors/message";
 import type { MongoConnection } from "./connection";
 import { isAuthorizationError } from "./errors";
 import type { MemberConnections } from "./members";
-import { type ProfilerSettings, profilerBlindSpot, profilerSettings } from "./profiler";
+import { failedOpsReading, type ProfilerSettings, profilerSettings } from "./profiler";
 import {
   ownSelfReads,
   READS_PER_COLL_STATS_LATENCY,
@@ -1263,7 +1263,7 @@ export class MongoIndexCollector implements IndexCollector {
           : `system.profile on ${database} could not be read (${messageOf(error)})`,
       };
     }
-    const [settings, oldest] = await Promise.all([
+    const [settings, oldest, self] = await Promise.all([
       this.profilerSettings(database),
       ring
         .find({}, { projection: { _id: 0, ts: 1 } })
@@ -1272,21 +1272,15 @@ export class MongoIndexCollector implements IndexCollector {
         .toArray()
         .then((docs) => profileDoc.pick({ ts: true }).safeParse(docs[0]).data?.ts ?? null)
         .catch(() => null),
+      this.conn.helloNode(),
     ]);
-    // Off, and nothing from when it was on says otherwise. Failures recorded
-    // before somebody turned it off are still failures, so those still count.
-    if (settings?.was === 0 && failed === 0) {
-      return { kind: "NO_SOURCE", reason: `the profiler is off on ${database}` };
-    }
-    if (oldest === null) {
-      return { kind: "NO_SOURCE", reason: `the profiler on ${database} has recorded nothing yet` };
-    }
-    return {
-      kind: "WINDOW",
+    return failedOpsReading({
+      database,
       failed,
-      reachMs: oldest.getTime(),
-      blindSpot: profilerBlindSpot(database, settings),
-    };
+      oldest,
+      settings,
+      throughMongos: self?.role === "mongos",
+    });
   }
 
   // The profiler's settings on one database, or null when they cannot be read.
