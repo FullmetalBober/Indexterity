@@ -1,6 +1,6 @@
 import { workerEnv } from "../config/env";
 import { type Database, sql } from "../db";
-import { collectBudgetMs, MAX_COLLECT_TIER } from "./pacing";
+import { isPaced, MAX_TIER, pacedBudgetMs } from "./pacing";
 import { BUDGETED_PASSES } from "./tasks";
 
 // How long a lock has to have stood before it is read as abandoned rather than
@@ -43,9 +43,13 @@ const BUDGETED_STALE_MULTIPLE = 3;
 // instead, for every cluster: one interval is one statement, and the cost of
 // being late for a cluster that is not paced is a single missed hourly collect
 // after a worker died holding it, which is the cheap side of this trade.
+//
+// `suggest` is paced too (#588) and never reaches this: it is not a budgeted
+// pass, because its instant build must not be cut off, so its lock keeps the
+// library's four hours — longer than its longest budget already.
 function budgetedStaleInterval(task: string): string {
   const base = workerEnv().CLUSTER_PASS_BUDGET_MS;
-  const budget = task === "collect" ? collectBudgetMs(MAX_COLLECT_TIER, base) : base;
+  const budget = isPaced(task) ? pacedBudgetMs(MAX_TIER, base) : base;
   return `${Math.ceil((budget * BUDGETED_STALE_MULTIPLE) / 1000)} seconds`;
 }
 

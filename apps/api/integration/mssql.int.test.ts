@@ -661,6 +661,26 @@ describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", 
     expect(warm.phases().filter((phase) => phase.running)).toEqual([]);
   });
 
+  // #588. The probe's form of the read: the same answer for the price of a warm
+  // cache, or null when the store would have to be attributed first — and then
+  // it ships nothing it cannot afford.
+  it("answers within the probe's allowance, and defers a store it cannot afford", async () => {
+    // A fresh collector over a store with plans in it: the cold store the probe
+    // leaves to the collect.
+    const fresh = new MssqlIndexCollector(seed);
+    const cold = new PassPhases();
+    expect(await withPhases(cold, () => fresh.latencyByCollectionWithin(DB, 0))).toBeNull();
+    expect(cold.phases().map((phase) => phase.name)).not.toContain("queryStore:planXml");
+
+    // Warmed the way the collect warms it, the probe's read answers what the
+    // full read answers — inside an allowance that covers the few plans the
+    // suite's own reads add to the store (QUERY_CAPTURE_MODE = ALL, above).
+    const full = await fresh.latencyByCollection(DB);
+    const within = await fresh.latencyByCollectionWithin(DB, 200);
+    expect(within).not.toBeNull();
+    expect([...(within?.keys() ?? [])].sort()).toEqual([...full.keys()].sort());
+  });
+
   it("collects query shapes from Query Store plans (#201)", async () => {
     const workload = await session.collector.collectWorkload([
       { database: DB, collection: "dbo.orders" },

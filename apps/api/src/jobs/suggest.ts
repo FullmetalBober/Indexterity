@@ -29,6 +29,7 @@ import {
   policies,
   recommendations,
 } from "../db";
+import { timePhase } from "../engine/phases";
 import { DatabaseInaccessibleError, type WorkloadTarget, workloadKey } from "../engine/ports";
 import type { IndexSpec, SortKey } from "../engine/types";
 import type { TunnelRegistry } from "../tunnel/tunnel.registry";
@@ -169,7 +170,7 @@ export async function suggestForCluster(
   let instantApproved = 0;
   try {
     const collector = session.collector;
-    const databases = await session.listDatabaseNames();
+    const databases = await timePhase("listDatabaseNames", () => session.listDatabaseNames());
     // Index lists already fetched this run, keyed "db\0coll" — reused when
     // resolving $lookup wants against foreign collections. Across databases on
     // purpose: it is a cache, and nothing about it is per-pass evidence.
@@ -194,7 +195,9 @@ export async function suggestForCluster(
       // Same rule as the collect pass (mongo/snapshots.ts): a database these
       // credentials cannot reach is skipped, and every other failure still aborts.
       try {
-        const collections = await collector.listCollectionNames(database);
+        const collections = await timePhase("listCollectionNames", () =>
+          collector.listCollectionNames(database),
+        );
         byDatabase.set(
           database,
           collections.map((collection) => ({ database, collection })),
@@ -232,15 +235,19 @@ export async function suggestForCluster(
         // recommends instead is an ordinary supporting index plus, on a large
         // table, a partitioned sliding window, which is a schema change no index
         // tool should make on its own. analysis/purge.ts holds both wordings.
-        const deletePatterns = await collector.collectDeletePatterns(database, collection);
+        const deletePatterns = await timePhase("collectDeletePatterns", () =>
+          collector.collectDeletePatterns(database, collection),
+        );
         const purgeWorthy = deletePatterns.filter((pattern) => pattern.count >= TTL_MIN_DELETES);
         if (purgeWorthy.length > 0) {
-          const currentIndexes = await collector.listIndexes(database, collection);
+          const currentIndexes = await timePhase("listIndexes", () =>
+            collector.listIndexes(database, collection),
+          );
           // Only read for the partition threshold, and only when there is a
           // pattern to judge — this is inside the loop over every namespace.
-          const { docCount } = await collector
-            .collectionStorage(database, collection)
-            .catch(() => ({ docCount: 0, dataSizeBytes: 0 }));
+          const { docCount } = await timePhase("collectionStorage", () =>
+            collector.collectionStorage(database, collection),
+          ).catch(() => ({ docCount: 0, dataSizeBytes: 0 }));
           for (const pattern of purgeWorthy) {
             const advisory = purgeAdvisory(engine, pattern, collection, currentIndexes, docCount);
             if (advisory === null) continue;
@@ -273,7 +280,9 @@ export async function suggestForCluster(
       for (const { database, collection } of namespaces) {
         // Counts come from $collStats, not the count command — the scoped
         // least-privilege user has no `find` grant, which `count` requires.
-        const { dataSizeBytes, docCount } = await collector.collectionStorage(database, collection);
+        const { dataSizeBytes, docCount } = await timePhase("collectionStorage", () =>
+          collector.collectionStorage(database, collection),
+        );
         if (docCount < TRIVIAL_COLLECTION_DOCS) {
           belowDocFloor += 1;
           continue;
@@ -287,7 +296,9 @@ export async function suggestForCluster(
         }
         eligible.push({ database, collection, docCount });
       }
-      const workload = await collector.collectWorkload(eligible);
+      const workload = await timePhase("collectWorkload", () =>
+        collector.collectWorkload(eligible),
+      );
       for (const { database, collection, docCount } of eligible) {
         const shapes = workload.get(workloadKey(database, collection)) ?? [];
         // Record $lookup joins for the post-loop foreign-side pass. Ahead of the
@@ -338,8 +349,8 @@ export async function suggestForCluster(
           continue;
         }
         const [existing, sizes] = await Promise.all([
-          collector.listIndexes(database, collection),
-          collector.indexSizes(database, collection),
+          timePhase("listIndexes", () => collector.listIndexes(database, collection)),
+          timePhase("indexSizes", () => collector.indexSizes(database, collection)),
         ]);
         indexCache.set(`${database}\u0000${collection}`, existing);
         // A new index isn't free: estimate its size from this collection's
@@ -374,7 +385,11 @@ export async function suggestForCluster(
         // watch measures WRITE latency, and the queries in question would already
         // have stopped running.
         const hinted = existing.some((idx) => isReorderable(idx))
-          ? new Set(await collector.collectHintedIndexes(database, collection))
+          ? new Set(
+              await timePhase("collectHintedIndexes", () =>
+                collector.collectHintedIndexes(database, collection),
+              ),
+            )
           : new Set<string>();
         const reordering = new Set<string>();
         for (const candidate of recommendReorder(shapes, existing, WORKLOAD_OPTIONS, hinted)) {
@@ -705,7 +720,9 @@ export async function suggestForCluster(
         let foreignIndexes = indexCache.get(cacheKey);
         if (foreignIndexes === undefined) {
           try {
-            foreignIndexes = await collector.listIndexes(want.database, want.from);
+            foreignIndexes = await timePhase("listIndexes", () =>
+              collector.listIndexes(want.database, want.from),
+            );
           } catch {
             continue; // foreign collection gone — no signal
           }
@@ -716,9 +733,8 @@ export async function suggestForCluster(
         // walks the foreign collection at least once per execution — more, since
         // it repeats per input document — so size times join rate is the floor of
         // what it costs, and a floor is enough to decide by.
-        const { docCount: foreignDocs } = await collector.collectionStorage(
-          want.database,
-          want.from,
+        const { docCount: foreignDocs } = await timePhase("collectionStorage", () =>
+          collector.collectionStorage(want.database, want.from),
         );
         if (foreignDocs < TRIVIAL_COLLECTION_DOCS) continue;
         if (foreignDocs * want.perWeek < MIN_WEEKLY_DOCS_EXAMINED) continue;

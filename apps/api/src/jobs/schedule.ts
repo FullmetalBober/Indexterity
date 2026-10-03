@@ -99,10 +99,10 @@ function weeklyAt(weekday: number, hour: number, minute: number) {
 // hides promptly; finalize is hourly, retention daily at 03:00, and the
 // read-only digest mails Monday 09:00.
 //
-// Hourly is the DISPATCH, and the collect it sends is due hourly for every
-// cluster but a paced one (#571, jobs/pacing.ts): a cluster whose collect does
-// not fit its budget is sent one every two or four hours instead, which the
-// dispatcher decides per cluster on each occurrence.
+// Hourly is the DISPATCH, and the collect or suggest it sends is due hourly for
+// every cluster but a paced one (#571, #588, jobs/pacing.ts): a cluster whose
+// pass does not fit its budget is sent one every two or four hours instead,
+// which the dispatcher decides per cluster on each occurrence.
 //
 // The two five-minute passes carried offsets in the old resident crontab so
 // they would not contend for connections. A tick dispatches them in the same
