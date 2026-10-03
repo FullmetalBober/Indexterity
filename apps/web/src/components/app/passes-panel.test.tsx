@@ -148,6 +148,31 @@ describe("PassesPanel", () => {
     ).toBeInTheDocument();
   });
 
+  // #588. A suggest is paced on a tier of its own, and the panel says so in the
+  // same words — the pass's own name, not the collect's.
+  it("says how a paced suggest runs from now on", () => {
+    render(
+      <PassesPanel
+        passes={passes(
+          timing({
+            task: "suggest",
+            outcome: "ok",
+            durationMs: 900_000,
+            budgetMs: 1_200_000,
+            pace: { everyHours: 4, budgetMs: 1_200_000 },
+          }),
+        )}
+        loading={false}
+      />,
+    );
+    expect(screen.getByText("every 4 h")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Paced: runs every 4 hours with 20 min, because a suggest here needs longer than an hourly one is given.",
+      ),
+    ).toBeInTheDocument();
+  });
+
   it("says nothing about pace for a pass that is not paced", () => {
     render(<PassesPanel passes={passes(timing({}))} loading={false} />);
     expect(screen.queryByText(/^Paced:/)).not.toBeInTheDocument();

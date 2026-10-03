@@ -914,7 +914,14 @@ export class MssqlIndexCollector implements IndexCollector {
   // the catalog of ids and hashes (a few bytes a plan), nothing, and the runtime
   // totals the caller asks for. The per-table read this replaces cast and
   // scanned every plan's XML once per table.
-  private async planAttributions(database: string): Promise<Map<number, PlanAttribution>> {
+  //
+  // `shipAtMost` is the probe's allowance (#588): past it, what was shipped is
+  // remembered and the answer is null — the database could not be attributed
+  // for that price. Unbounded for the collect, which attributes whatever it must.
+  private async planAttributions(
+    database: string,
+    shipAtMost = Number.POSITIVE_INFINITY,
+  ): Promise<Map<number, PlanAttribution> | null> {
     const known = this.attributions.get(database) ?? new Map<number, PlanAttribution>();
     // Two phases, split on purpose (#466). This read is two numeric columns per
     // plan; the one below ships each unseen plan's XML, which on a 2,000-plan
@@ -939,8 +946,9 @@ export class MssqlIndexCollector implements IndexCollector {
         .map((row) => ({ planId: asNumber(row.planId), hash: String(row.hash) }))
         .filter((row) => Number.isInteger(row.planId)),
     );
+    const shipping = unread.length > shipAtMost ? unread.slice(0, shipAtMost) : unread;
     await shipPlanXml(
-      unread,
+      shipping,
       kept,
       (ids) =>
         // Interpolated, not bound: these are integers the server itself just
@@ -965,7 +973,7 @@ export class MssqlIndexCollector implements IndexCollector {
     // Set once more for the database whose store had nothing unread: the loop
     // above never ran, so nothing has written the pruned map back.
     this.attributions.set(database, kept);
-    return kept;
+    return shipping.length < unread.length ? null : kept;
   }
 
   // Every table's read/write ops and duration in one read of the database (#454).
@@ -974,8 +982,25 @@ export class MssqlIndexCollector implements IndexCollector {
   // table by the same marker and split reads from writes by the same test, so
   // they agree — the live suite holds them to it.
   async latencyByCollection(database: string): Promise<ReadonlyMap<string, CollectionLatency>> {
+    return (await this.latencyFromStore(database, Number.POSITIVE_INFINITY)) ?? new Map();
+  }
+
+  // The probe's read (#588): null when the database's plans cannot be
+  // attributed without shipping more than `shipAtMost` of them. See the port.
+  async latencyByCollectionWithin(
+    database: string,
+    shipAtMost: number,
+  ): Promise<ReadonlyMap<string, CollectionLatency> | null> {
+    return this.latencyFromStore(database, shipAtMost);
+  }
+
+  private async latencyFromStore(
+    database: string,
+    shipAtMost: number,
+  ): Promise<ReadonlyMap<string, CollectionLatency> | null> {
     if (!(await this.queryStoreEnabled(database))) return new Map();
-    const plans = await this.planAttributions(database);
+    const plans = await this.planAttributions(database, shipAtMost);
+    if (plans === null) return null;
     const stats = await this.conn.query<{ planId: unknown; execs: unknown; micros: unknown }>(
       `SELECT rs.plan_id AS planId,
               SUM(rs.count_executions) AS execs,

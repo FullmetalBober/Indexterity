@@ -299,10 +299,10 @@ const workerShape = {
   // that will sit still for it. The failure it prevents is not slowness; it is a
   // pass that can never finish holding the only slot while it fails to.
   //
-  // It is the BASE for `collect`, which is paced per cluster (#571,
-  // jobs/pacing.ts): one that does not fit gets two of these every two hours,
-  // then four every four. So raising it is for a cluster past that ceiling, and
-  // it raises the ceiling with it.
+  // It is the BASE for `collect` and `suggest`, which are paced per cluster
+  // (#571, #588, jobs/pacing.ts): one that does not fit gets two of these every
+  // two hours, then four every four. So raising it is for a cluster past that
+  // ceiling, and it raises the ceiling with it.
   CLUSTER_PASS_BUDGET_MS: positiveInteger(300_000),
   // How often the FAST passes recur: `apply`, the read-pressure `probe`, and the
   // stale-lock repair that shares their clock. The hourly and daily passes keep

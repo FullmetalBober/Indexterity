@@ -850,10 +850,10 @@ export const passTiming = z.object({
   budgetMs: z.number().int().positive().nullable(),
   // Most expensive first; empty for a pass that timed nothing.
   phases: z.array(passPhase),
-  // How this pass runs from now on when it is paced (#571): every `everyHours`
-  // hours against `budgetMs`. Null for a pass that is not — every pass but a
-  // `collect` that did not fit an hour. Decided by the run above, so it can
-  // differ from the budget that run had.
+  // How this pass runs from now on when it is paced (#571, #588): every
+  // `everyHours` hours against `budgetMs`. Null for a pass that is not — every
+  // pass but a `collect` or `suggest` that did not fit an hour. Decided by the
+  // run above, so it can differ from the budget that run had.
   pace: z
     .object({
       everyHours: z.number().int().positive(),
