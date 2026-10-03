@@ -86,9 +86,10 @@ const COPY: Record<string, Copy> = {
       "not a failure so much as a step that does not fit: usually a very large or very busy " +
       "cluster, or one reached over a slow link.",
     next:
-      "Nothing was executed and nothing was lost, and it tries again on the next tick. If this " +
-      "cluster genuinely needs longer, whoever runs this Indexterity can raise the budget — " +
-      "the setting is CLUSTER_PASS_BUDGET_MS. Applying a change is never cut off this way.",
+      "Nothing was executed and nothing was lost, and it tries again on the next tick. A " +
+      "collect or analysis that keeps not fitting is given longer and run less often, and the " +
+      "Passes panel on the cluster's overview shows where the time went. Applying a change is " +
+      "never cut off this way.",
   },
   // No ERROR entry: it is the one reason whose wording depends on WHICH pass
   // failed, and that is built below.

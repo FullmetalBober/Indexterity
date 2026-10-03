@@ -585,7 +585,7 @@ export class InsightsService {
           isPaced(row.task) && row.tier > 0
             ? {
                 everyHours: pacedEveryHours(row.tier),
-                budgetMs: pacedBudgetMs(row.tier, workerEnv().CLUSTER_PASS_BUDGET_MS),
+                budgetMs: pacedBudgetMs(row.tier),
               }
             : null,
       })),

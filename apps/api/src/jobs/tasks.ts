@@ -376,16 +376,14 @@ export async function runClusterTask(
           `executed and nothing was lost.\n\n` +
           `This usually means the cluster is very large, very busy, or reached over a slow ` +
           `link — the step is not failing so much as not fitting. ` +
-          // A paced pass paces itself (#571, #588, jobs/pacing.ts), so the first
-          // answer is already under way; the operator's is for a cluster past the
-          // cap.
+          // A paced pass paces itself (#571, #588, jobs/pacing.ts), so the answer
+          // is already under way. Any other is tried again on the next tick.
           (isPaced(task)
             ? `Indexterity now gives this cluster's ${task} longer and runs it less often, ` +
               `by the same factor, up to four times the budget every four hours — the ` +
-              `cluster's Passes panel shows where it stands. If even that does not fit, ` +
-              `whoever runs this Indexterity can raise the budget (CLUSTER_PASS_BUDGET_MS).`
-            : `Whoever runs this Indexterity can raise the budget (CLUSTER_PASS_BUDGET_MS) if ` +
-              `the cluster genuinely needs longer.`) +
+              `cluster's Passes panel shows where it stands.`
+            : `It is tried again on the next tick, and the cluster's Passes panel shows where ` +
+              `the time went.`) +
           (spent === "" ? "" : `\n\nWhere the time went: ${spent}.`),
       );
       return;
