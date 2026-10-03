@@ -1,3 +1,5 @@
+import type { FailedOpsReading } from "../engine/ports";
+
 // Did hiding this index start breaking its queries?
 //
 // The observe window's own gate measures LATENCY, and that gate cannot answer
@@ -56,20 +58,24 @@ export type FailureVerdict =
   // on: aborting here would let a collection with its own pre-existing errors
   // veto every drop on it forever.
   | { readonly kind: "INCONCLUSIVE"; readonly before: number; readonly after: number }
-  // Nothing seen since the hide. Which is NOT "nothing happened" — see reachMs.
-  | { readonly kind: "CLEAN" }
-  // No source, so no question was asked.
-  | { readonly kind: "UNAVAILABLE" };
+  // Nothing seen since the hide. Which is NOT "nothing happened" — see reachMs —
+  // and `blindSpot` is what the source was set up not to record, which the audit
+  // line has to say: a profiler keeping only slow operations sees no failures
+  // because a failure is fast, not because there were none.
+  | { readonly kind: "CLEAN"; readonly blindSpot: string | null }
+  // No source, so no question was asked — and why, because each cause has its own
+  // remedy (#596).
+  | { readonly kind: "UNAVAILABLE"; readonly reason: string };
 
 export function judgeFailures(
   // Sampled at hide time, over whatever window the source could then see.
   before: FailureSample | null,
-  // Sampled now, counting only what happened at or after the hide.
-  after: FailureSample | null,
+  // Read now, counting only what happened at or after the hide.
+  after: FailedOpsReading,
   // When the hide happened, so the baseline's reach can be stated as a span.
   hiddenAtMs: number,
 ): FailureVerdict {
-  if (after === null) return { kind: "UNAVAILABLE" };
+  if (after.kind === "NO_SOURCE") return { kind: "UNAVAILABLE", reason: after.reason };
   if (after.failed < MIN_INTRODUCED_FAILURES) {
     // Below the floor is not the same as clean when there IS a before that was
     // dirty, but it is the same decision, and calling it CLEAN would be the one
@@ -77,7 +83,7 @@ export function judgeFailures(
     // on either way.
     return before !== null && before.failed > 0
       ? { kind: "INCONCLUSIVE", before: before.failed, after: after.failed }
-      : { kind: "CLEAN" };
+      : { kind: "CLEAN", blindSpot: after.blindSpot };
   }
   if (before === null || before.failed > 0) {
     return { kind: "INCONCLUSIVE", before: before?.failed ?? 0, after: after.failed };
@@ -104,8 +110,23 @@ export function describeFailures(verdict: FailureVerdict): string {
         verdict.before === 0 ? "nothing to compare against" : `${verdict.before} before it`
       } — not attributed`;
     case "CLEAN":
-      return "no failed operations seen since the hide";
+      return verdict.blindSpot === null
+        ? "no failed operations seen since the hide"
+        : `no failed operations seen since the hide, but ${verdict.blindSpot}`;
+    // "Skipped", because that is what happened: the check is optional and asked
+    // nothing. It used to read "could not be read on this cluster", which sounds
+    // like an error and named none of the causes.
     case "UNAVAILABLE":
-      return "failed operations could not be read on this cluster";
+      return `failed-operations check skipped: ${verdict.reason}`;
   }
+}
+
+// The same reading at hide time, as a clause for the HIDE line — so an owner
+// learns that a hide is unwatched when it starts, not from the drop at the end
+// of the window. Empty when the source records everything.
+export function describeWatch(reading: FailedOpsReading): string {
+  if (reading.kind === "NO_SOURCE") return `failed operations not watched: ${reading.reason}`;
+  return reading.blindSpot === null
+    ? ""
+    : `failed operations only partly watched: ${reading.blindSpot}`;
 }

@@ -2,6 +2,7 @@ import type { SQL } from "drizzle-orm";
 import {
   AUTO_APPLY_HISTORY_DAYS,
   DEFAULT_OBSERVE_DAYS,
+  describeWatch,
   dynamicObserveDays,
   inChangeWindow,
   usageSeries,
@@ -23,6 +24,7 @@ import {
   recommendations,
   sql,
 } from "../db";
+import type { FailedOpsReading } from "../engine/ports";
 import { emitClusterEvent, pgNotifier } from "../events/emit";
 import { serializeSpec } from "../mongo";
 import type { TunnelRegistry } from "../tunnel/tunnel.registry";
@@ -98,11 +100,21 @@ export async function promoteByScore(
 // distinction is load-bearing rather than cosmetic: on an engine that cannot
 // hide, nothing about the index changed, so a line reading "ok; observing 30
 // days" beside an audit kind of HIDE would claim a write that never happened.
-function applyResult(canHide: boolean, window: { days: number; reason: string | null }): string {
+function applyResult(
+  canHide: boolean,
+  window: { days: number; reason: string | null },
+  // What the failed-operations check will be able to see, or null when nothing
+  // was hidden and so nothing can fail for want of the index.
+  failures: FailedOpsReading | null,
+): string {
   const what = canHide
     ? `ok; observing ${window.days} days`
     : `ok; not hidden (this engine has no reversible hide) — observing usage for ${window.days} days`;
-  return window.reason === null ? what : `${what} — ${window.reason}`;
+  const observing = window.reason === null ? what : `${what} — ${window.reason}`;
+  // Said at the hide, so an owner who wants the check can turn its source on
+  // while the window runs rather than learn it was skipped from the drop (#596).
+  const watch = failures === null ? "" : describeWatch(failures);
+  return watch === "" ? observing : `${observing}; ${watch}`;
 }
 
 // APPROVED drops -> pre-flight -> hide (collMod hidden:true) -> HIDDEN. Hiding is
@@ -226,8 +238,9 @@ export async function applyCluster(
       // And the failures, which the latency baseline above cannot stand in for: a
       // failed read lands in latencyStats as a FAST read, so the gate reading only
       // that would see a hide which broke the workload as a hide that improved it
-      // (#438). Null on an engine with no source, and null costs nothing — the signal
-      // is one-way and only ever rolls a hide back.
+      // (#438). A source that is missing stores no baseline, and that costs nothing —
+      // the signal is one-way and only ever rolls a hide back — but the HIDE line
+      // says why it is missing (#596). Null where nothing was hidden.
       //
       // Sampled over whatever window the source can see BACKWARDS from now, which is
       // the question worth asking here: "was this namespace already failing before we
@@ -282,8 +295,8 @@ export async function applyCluster(
           observeReason: window.reason,
           baselineReadOps: baseline.ops,
           baselineReadLatency: baseline.latencyMicros,
-          baselineFailedOps: failuresBefore?.failed ?? null,
-          baselineFailedReachMs: failuresBefore?.reachMs ?? null,
+          baselineFailedOps: failuresBefore?.kind === "WINDOW" ? failuresBefore.failed : null,
+          baselineFailedReachMs: failuresBefore?.kind === "WINDOW" ? failuresBefore.reachMs : null,
           updatedAt: new Date(),
         })
         .where(eq(recommendations.id, rec.id));
@@ -291,7 +304,7 @@ export async function applyCluster(
         recommendationId: rec.id,
         kind: "HIDE",
         actor: "system",
-        result: applyResult(canHide, window),
+        result: applyResult(canHide, window, failuresBefore),
         rollbackToken: check.spec === null ? null : { spec: serializeSpec(check.spec) },
       });
       // At the transition, not at the end of the pass: a pass hiding several

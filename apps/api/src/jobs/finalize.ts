@@ -365,8 +365,14 @@ export async function finalizeCluster(
       // really hidden, and an engine that cannot hide records neither. Only HOW
       // the measurement is taken has changed.
       // What the error side of the window saw, carried out of the block below so the
-      // graduating drop can record it. UNAVAILABLE until something asks (#438).
-      let failures: FailureVerdict = { kind: "UNAVAILABLE" };
+      // graduating drop can record it. UNAVAILABLE until something asks (#438), and
+      // the reason says which of the two ways the block below is skipped this was.
+      let failures: FailureVerdict = {
+        kind: "UNAVAILABLE",
+        reason: canHide
+          ? "no baseline was taken when the index was hidden"
+          : "nothing was hidden, so no query could fail for want of the index",
+      };
       if (
         rec.hiddenAt !== null &&
         rec.baselineReadOps !== null &&
