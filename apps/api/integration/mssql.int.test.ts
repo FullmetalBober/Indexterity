@@ -703,9 +703,11 @@ describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", 
     const after = sharedAttributions(fingerprint).get(DB);
     for (const [planId, entry] of parsed) expect(after?.get(planId)).toBe(entry);
     // The same shapes. How long each has been observed is measured against the
-    // read's own clock, so it moves between two reads and is left out.
+    // read's own clock, so it moves between two reads and is left out — and so
+    // is their ORDER: plans are folded in last-executed order, and plans that
+    // last ran in the same instant come back in either order (seen on 2025).
     const timeless = (shapes: readonly QueryShape[] | undefined) =>
-      shapes?.map(({ observedForHours: _observed, ...shape }) => shape);
+      shapes?.map(({ observedForHours: _observed, ...shape }) => JSON.stringify(shape)).sort();
     expect(timeless(second.get(workloadKey(DB, "dbo.orders")))).toEqual(
       timeless(first.get(workloadKey(DB, "dbo.orders"))),
     );
