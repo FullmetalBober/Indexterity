@@ -3,7 +3,7 @@ import type { Cluster, ClusterEngine, Recommendation } from "@repo/contracts";
 import { DEFAULT_OBSERVE_DAYS, proposedVetoDays } from "../analysis";
 import { clusterBlocks, clusters, recommendations } from "../db";
 import type { ConnectionDiagnosis as EngineConnectionDiagnosis } from "../engine/ports";
-import { revokeCommandFor } from "../engine/provision";
+import { newPrivilegesFor, revokeCommandFor } from "../engine/provision";
 import { isUnreachableError } from "../errors/unreachable";
 import { ClusterGoneError } from "../jobs/cluster-connection";
 
@@ -45,6 +45,18 @@ export function toDiagnosis(engine: ClusterEngine, diagnosis: EngineConnectionDi
   };
 }
 
+// What a release has added since this cluster's credentials were set up (#599),
+// as the dashboard draws it: the changes in their checks' own words, and the
+// statement and upgrade offered where the role is Indexterity's.
+function newPrivilegesView(row: typeof clusters.$inferSelect): Cluster["newPrivileges"] {
+  const { pending, command, canUpgrade } = newPrivilegesFor(row);
+  return {
+    pending: pending.map(({ key, label, enables, release }) => ({ key, label, enables, release })),
+    command,
+    canUpgrade,
+  };
+}
+
 export function toCluster(
   row: typeof clusters.$inferSelect,
   lastCollectedAt: Date | null = null,
@@ -68,6 +80,7 @@ export function toCluster(
     provisionedUsername: row.provisionedUsername,
     revokeCommand: revokeCommandFor(row.engine, row.provisionedUsername, row.provisionedDatabases),
     credentialPosture: row.credentialPosture,
+    newPrivileges: newPrivilegesView(row),
     lastCollectedAt: lastCollectedAt?.toISOString() ?? null,
     // One row per blocked pass (#462), longest-standing first — so a reader that
     // only has room for one condition shows the one that has been wrong longest

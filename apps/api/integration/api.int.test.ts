@@ -9,7 +9,7 @@ import {
 } from "@repo/contracts";
 import { makeWorkerUtils } from "graphile-worker";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { judgeFailures } from "../src/analysis";
+import { describeFailures, judgeFailures } from "../src/analysis";
 import { outcomeOf } from "../src/analysis/workload-outcome";
 import { entitledAutomation } from "../src/billing/plans";
 import {
@@ -25,6 +25,7 @@ import {
   createDatabase,
   desc,
   eq,
+  failureWatches,
   inArray,
   indexCooldowns,
   indexSnapshots,
@@ -40,6 +41,7 @@ import {
   sql,
   user,
   verification,
+  workerWatermarks,
   workloadShapes,
 } from "../src/db";
 import { workloadKey } from "../src/engine/ports";
@@ -55,6 +57,8 @@ import { pendingBuildsByCollection } from "../src/jobs/collection-budget";
 import { drainPool } from "../src/jobs/connection-pool";
 import { activeCooldownKeys, cooldownKey } from "../src/jobs/cooldowns";
 import { applyCreatesForCluster } from "../src/jobs/create";
+import { runPrivilegeNotices } from "../src/jobs/digest";
+import { FAILURE_BASELINE_MS } from "../src/jobs/failure-watch";
 import { finalizeCluster } from "../src/jobs/finalize";
 import { releaseStaleLocks } from "../src/jobs/locks";
 import { paceOf, pacesDue } from "../src/jobs/pacing";
@@ -65,6 +69,8 @@ import { suggestForCluster } from "../src/jobs/suggest";
 import { recordPassTiming } from "../src/jobs/timings";
 import { isScanning } from "../src/jobs/workload-shapes";
 import { MongoConnection, MongoIndexCollector } from "../src/mongo";
+import { markerOf, watchFilter } from "../src/mongo/profiler";
+import { ENGINE_PRIVILEGES } from "../src/mongo/role";
 import { hasQueryStatsPlanMetrics, parseServerVersion } from "../src/mongo/version";
 import {
   API_BASE,
@@ -1502,6 +1508,165 @@ describe("provisioning the same cluster twice", () => {
   });
 });
 
+// A release that adds a privilege, told to the clusters connected before it and
+// granted in one step (#599). The integration mongod runs without auth, so the
+// upgrade's verification sees every privilege granted — what is proved here is
+// the round trip: the role really changes, the revision really moves, and the
+// notice comes and goes for the reasons it should.
+//
+// Its own account: provisioning, upgrading and verifying all dial.
+describe("a role a release added to", () => {
+  let upgrader: Session;
+  let clusterIdOf: string;
+
+  beforeAll(async () => {
+    upgrader = await signUp("roleupgrade");
+    createdEmails.push(upgrader.email);
+    createdOrgIds.push(await giveRoom(upgrader));
+  });
+
+  afterAll(async () => {
+    await mongo
+      .db("admin")
+      .command({ dropUser: SCOPED_USERNAME })
+      .catch(() => {});
+  });
+
+  const newPrivilegesOf = async (): Promise<Record<string, unknown>> => {
+    const list = await (await api("/clusters", upgrader)).json();
+    const found = (Array.isArray(list) ? list : [])
+      .map((entry) => asRecord(entry))
+      .find((entry) => entry.id === clusterIdOf);
+    return asRecord(found?.newPrivileges);
+  };
+  // What a cluster provisioned by 0.28.0 has: the role without enableProfiler,
+  // and a revision from before the change.
+  const asIfProvisionedBefore = async () => {
+    await mongo.db("admin").command({
+      updateRole: "indexterityEngine",
+      privileges: ENGINE_PRIVILEGES.map((privilege) => ({
+        resource: privilege.resource,
+        actions: privilege.actions.filter((action) => action !== "enableProfiler"),
+      })),
+    });
+    await db.update(clusters).set({ privilegesRevision: 0 }).where(eq(clusters.id, clusterIdOf));
+  };
+  const roleActions = async (): Promise<string[]> => {
+    const info = asRecord(
+      await mongo.db("admin").command({ rolesInfo: "indexterityEngine", showPrivileges: true }),
+    );
+    const roles = Array.isArray(info.roles) ? info.roles : [];
+    const privileges = asRecord(roles[0]).privileges;
+    return (Array.isArray(privileges) ? privileges : []).flatMap((privilege) => {
+      const actions = asRecord(privilege).actions;
+      return Array.isArray(actions) ? actions.filter((action) => typeof action === "string") : [];
+    });
+  };
+
+  it("is current when provisioned today", async () => {
+    const res = await api("/clusters/provision", upgrader, {
+      method: "POST",
+      body: JSON.stringify({ name: "Role Upgrade", adminConnectionString: MONGO_URL }),
+    });
+    expect(res.status).toBe(200);
+    clusterIdOf = asString(asRecord(asRecord(await res.json()).cluster).id);
+    createdClusterIds.push(clusterIdOf);
+    expect(await newPrivilegesOf()).toEqual({ pending: [], command: null, canUpgrade: false });
+    expect(await roleActions()).toContain("enableProfiler");
+  });
+
+  it("tells a cluster provisioned before the change, and upgrades its role", async () => {
+    await asIfProvisionedBefore();
+    expect(await roleActions()).not.toContain("enableProfiler");
+    const told = await newPrivilegesOf();
+    expect(told.canUpgrade).toBe(true);
+    expect(asString(told.command)).toContain('grantPrivilegesToRole("indexterityEngine"');
+    expect(Array.isArray(told.pending) && asRecord(told.pending[0]).key).toBe("enableProfiler");
+
+    // An admin string for other hosts is refused before anything is dialled.
+    const elsewhere = await api(`/clusters/${clusterIdOf}/role/upgrade`, upgrader, {
+      method: "POST",
+      body: JSON.stringify({ adminConnectionString: "mongodb://other.example:27017" }),
+    });
+    expect(elsewhere.status).toBe(400);
+    expect(await roleActions()).not.toContain("enableProfiler");
+
+    const res = await api(`/clusters/${clusterIdOf}/role/upgrade`, upgrader, {
+      method: "POST",
+      body: JSON.stringify({ adminConnectionString: MONGO_URL }),
+    });
+    expect(res.status).toBe(200);
+    expect(asRecord(asRecord(await res.json()).newPrivileges).pending).toEqual([]);
+    expect(await roleActions()).toContain("enableProfiler");
+
+    const [event] = await db
+      .select()
+      .from(securityEvents)
+      .where(
+        and(
+          eq(securityEvents.clusterId, clusterIdOf),
+          eq(securityEvents.event, "CLUSTER_ROLE_UPGRADED"),
+        ),
+      );
+    expect(event?.metadata).toMatchObject({ granted: ["enableProfiler"], from: 0, verified: 1 });
+  });
+
+  it("goes when the owner has seen it, and nothing on the cluster changes", async () => {
+    await asIfProvisionedBefore();
+    const res = await api(`/clusters/${clusterIdOf}/privileges/review`, upgrader, {
+      method: "POST",
+    });
+    expect(res.status).toBe(200);
+    expect(asRecord(asRecord(await res.json()).newPrivileges).pending).toEqual([]);
+    expect(await roleActions()).not.toContain("enableProfiler");
+  });
+
+  // The owner who ran the grant by hand: checking the credentials clears it — and
+  // only then, because the check reads what the role really holds.
+  it("clears itself when the credentials turn out to hold it", async () => {
+    await asIfProvisionedBefore();
+    expect((await api(`/clusters/${clusterIdOf}/privileges`, upgrader)).status).toBe(200);
+    expect(asRecord(await newPrivilegesOf()).pending).not.toEqual([]);
+
+    // The statement the notice hands over, as the driver spells it.
+    await mongo.db("admin").command({
+      grantPrivilegesToRole: "indexterityEngine",
+      privileges: [{ resource: { db: "", collection: "" }, actions: ["enableProfiler"] }],
+    });
+    expect((await api(`/clusters/${clusterIdOf}/privileges`, upgrader)).status).toBe(200);
+    expect(asRecord(await newPrivilegesOf()).pending).toEqual([]);
+  });
+
+  // Once per cluster per revision, however many weekly runs see it.
+  it("is mailed once", async () => {
+    await asIfProvisionedBefore();
+    await runPrivilegeNotices(db);
+    const key = `privileges:${clusterIdOf}:1`;
+    const [claimed] = await db.select().from(workerWatermarks).where(eq(workerWatermarks.key, key));
+    expect(claimed).toBeDefined();
+    const at = claimed?.at.getTime();
+    await runPrivilegeNotices(db);
+    const [again] = await db.select().from(workerWatermarks).where(eq(workerWatermarks.key, key));
+    expect(again?.at.getTime()).toBe(at);
+    await db.delete(workerWatermarks).where(eq(workerWatermarks.key, key));
+  });
+
+  // A pasted string's role is somebody else's to change.
+  it("is not upgraded where the role is not ours", async () => {
+    await db
+      .update(clusters)
+      .set({ provisionedUsername: null, credentialPosture: "SCOPED", privilegesRevision: 0 })
+      .where(eq(clusters.id, clusterIdOf));
+    const told = await newPrivilegesOf();
+    expect(told).toMatchObject({ command: null, canUpgrade: false });
+    const res = await api(`/clusters/${clusterIdOf}/role/upgrade`, upgrader, {
+      method: "POST",
+      body: JSON.stringify({ adminConnectionString: MONGO_URL }),
+    });
+    expect(res.status).toBe(400);
+  });
+});
+
 describe("cluster offboarding", () => {
   it("offboards a provisioned cluster and returns the revoke command", async () => {
     const res = await api("/clusters/provision", owner, {
@@ -1900,7 +2065,15 @@ describe("dynamic observe window", () => {
       .returning();
     if (rec === undefined) throw new Error("failed to insert recommendation");
 
-    expect(await applyCluster(db, clusterId)).toBe(1);
+    // A profiler that already records every operation, so the hide has its
+    // failure baseline already and does not wait a day for one (#596) — the
+    // wait has its own coverage in failure-watch.int.test.ts.
+    await mongo.db("inttest").command({ profile: 2 });
+    try {
+      expect(await applyCluster(db, clusterId)).toBe(1);
+    } finally {
+      await mongo.db("inttest").command({ profile: 0 });
+    }
     const [hidden] = await db.select().from(recommendations).where(eq(recommendations.id, rec.id));
     expect(hidden?.state).toBe("HIDDEN");
     expect(hidden?.observeDays).toBe(40);
@@ -1910,6 +2083,103 @@ describe("dynamic observe window", () => {
       .db("inttest")
       .command({ collMod: "orders", index: { name: "dyn_1", hidden: false } });
     await mongo.db("inttest").collection("orders").dropIndex("dyn_1");
+  });
+});
+
+// The hide that waits for its failure baseline (#596, D183). The server here
+// runs without auth, so the watch may set the profiler, as a role holding
+// enableProfiler may.
+describe("a drop waits for a day of failures before it is hidden", () => {
+  it("turns the profiler on, waits, then hides with the baseline in", async () => {
+    process.env.MASTER_KEY =
+      process.env.MASTER_KEY ?? Buffer.from("0123456789abcdef0123456789abcdef").toString("base64");
+    const inttest = mongo.db("inttest");
+    await inttest.command({ profile: 0, filter: "unset" });
+    await inttest.collection("orders").createIndex({ waits: 1 }, { name: "waits_1" });
+    const [rec] = await db
+      .insert(recommendations)
+      .values({
+        clusterId,
+        type: "DROP_UNUSED",
+        state: "APPROVED",
+        database: "inttest",
+        collection: "orders",
+        indexName: "waits_1",
+        rationale: "failure baseline test",
+        estimatedBytesSaved: 0,
+      })
+      .returning();
+    if (rec === undefined) throw new Error("failed to insert recommendation");
+    const trail = async () =>
+      (
+        await db
+          .select({ result: actions.result })
+          .from(actions)
+          .where(eq(actions.recommendationId, rec.id))
+          .orderBy(actions.createdAt)
+      ).map((row) => row.result);
+    try {
+      // The first pass turns the watch on and hides nothing.
+      expect(await applyCluster(db, clusterId)).toBe(0);
+      const [waiting] = await db
+        .select()
+        .from(recommendations)
+        .where(eq(recommendations.id, rec.id));
+      expect(waiting?.state).toBe("APPROVED");
+      expect(await trail()).toEqual([
+        expect.stringMatching(/^waiting: recording failed operations on inttest\.orders until /),
+      ]);
+      const settings = await inttest.command({ profile: -1 });
+      expect(settings.was).toBe(1);
+      const marker = markerOf(settings.filter);
+      expect(marker?.hints).toEqual({ "inttest.orders": ["waits_1"] });
+      const listed = await db
+        .select()
+        .from(failureWatches)
+        .where(eq(failureWatches.clusterId, clusterId));
+      expect(listed.map((row) => row.database)).toEqual(["inttest"]);
+
+      // A second pass the same day still waits, and says nothing new.
+      expect(await applyCluster(db, clusterId)).toBe(0);
+      expect(await trail()).toHaveLength(1);
+
+      // A day on: the watch as the next pass would find it, begun a day ago.
+      if (marker === null) throw new Error("expected a marker");
+      const dayAgo = Date.now() - FAILURE_BASELINE_MS - 60_000;
+      await inttest.command({
+        profile: 1,
+        filter: watchFilter({
+          ...marker,
+          watch: Object.fromEntries(Object.keys(marker.watch).map((ns) => [ns, dayAgo])),
+        }),
+      });
+      expect(await applyCluster(db, clusterId)).toBe(1);
+      const [hidden] = await db
+        .select()
+        .from(recommendations)
+        .where(eq(recommendations.id, rec.id));
+      expect(hidden?.state).toBe("HIDDEN");
+      // Counted from the watch's start, never further back: before it a fast
+      // failure was recorded nowhere. The reach is the start or, where the ring's
+      // oldest entry is younger — it may have turned over — that entry, which
+      // claims less rather than more.
+      expect(hidden?.baselineFailedOps).toBe(0);
+      expect(hidden?.baselineFailedReachMs).toBeGreaterThanOrEqual(dayAgo);
+      expect((await trail()).at(-1)).toMatch(
+        /^ok; observing \d+ days.*; failed operations watched since .* UTC, by the profiler Indexterity turned on$/,
+      );
+    } finally {
+      await inttest
+        .command({ collMod: "orders", index: { name: "waits_1", hidden: false } })
+        .catch(() => undefined);
+      await inttest
+        .collection("orders")
+        .dropIndex("waits_1")
+        .catch(() => undefined);
+      await db.delete(recommendations).where(eq(recommendations.id, rec.id));
+      await inttest.command({ profile: 0, filter: "unset" });
+      await db.delete(failureWatches).where(eq(failureWatches.clusterId, clusterId));
+    }
   });
 });
 
@@ -3146,6 +3416,7 @@ describe("the observe window can see a query that fails", () => {
   // `ok: 0` on a profiler document, and nothing about $collStats records it.
   const DB = "intfail";
   const QUIET_DB = "intfail_quiet";
+  const SLOW_DB = "intfail_slow";
   const COLL = "fail_probe";
 
   // Its own databases, because system.profile is per-database and inttest's ring
@@ -3159,6 +3430,10 @@ describe("the observe window can see a query that fails", () => {
       .catch(() => undefined);
     await mongo
       .db(QUIET_DB)
+      .dropDatabase()
+      .catch(() => undefined);
+    await mongo
+      .db(SLOW_DB)
       .dropDatabase()
       .catch(() => undefined);
   });
@@ -3177,8 +3452,9 @@ describe("the observe window can see a query that fails", () => {
       // empty ring.
       expect(await db_.collection(COLL).countDocuments({ $text: { $search: "beans" } })).toBe(1);
       const before = await collector.collectFailedOps(DB, COLL, 0);
-      expect(before).not.toBeNull();
-      expect(before?.failed).toBe(0);
+      // Level 2 records every operation, so this window has no blind spot.
+      expect(before).toMatchObject({ kind: "WINDOW", failed: 0, blindSpot: null });
+      if (before.kind !== "WINDOW") throw new Error("expected a window");
 
       // Hide the text index and the same query stops working. Not slows —
       // NoQueryExecutionPlans (291), "need exactly one text index for $text query".
@@ -3191,22 +3467,23 @@ describe("the observe window can see a query that fails", () => {
       }
 
       const after = await collector.collectFailedOps(DB, COLL, hiddenAt - 1000);
-      expect(after?.failed).toBeGreaterThanOrEqual(3);
+      if (after.kind !== "WINDOW") throw new Error(`expected a window: ${after.reason}`);
+      expect(after.failed).toBeGreaterThanOrEqual(3);
       // The ring reaches back at least to the working query, so its zero above was
       // an observation rather than a blind spot.
-      expect(after?.reachMs).toBeLessThanOrEqual(hiddenAt);
+      expect(after.reachMs).toBeLessThanOrEqual(hiddenAt);
 
       // And the `since` filter is real: nothing failed after the future.
       const later = await collector.collectFailedOps(DB, COLL, Date.now() + 60_000);
-      expect(later?.failed).toBe(0);
+      expect(later).toMatchObject({ kind: "WINDOW", failed: 0 });
 
       // The verdict the pipeline actually acts on.
       const verdict = judgeFailures(
-        { failed: before?.failed ?? 0, reachMs: before?.reachMs ?? 0 },
+        { failed: before.failed, reachMs: before.reachMs },
         after,
         hiddenAt,
       );
-      expect(verdict).toMatchObject({ kind: "INTRODUCED", failed: after?.failed });
+      expect(verdict).toMatchObject({ kind: "INTRODUCED", failed: after.failed });
     } finally {
       await db_.command({ profile: 0 }).catch(() => undefined);
       await db_
@@ -3216,11 +3493,57 @@ describe("the observe window can see a query that fails", () => {
   });
 
   // Nothing turned the profiler on, which is the state most clusters are in — and
-  // it must read as "no source", never as "no failures" (D19).
+  // it must read as "no source", never as "no failures" (D19), and say so in words
+  // an owner can act on (#596).
   it("reports no source rather than a clean window when the profiler is off", async () => {
     const collector = new MongoIndexCollector(mongo);
     await mongo.db(QUIET_DB).collection("untouched").insertOne({ n: 1 });
-    expect(await collector.collectFailedOps(QUIET_DB, "untouched", 0)).toBeNull();
+    expect(await collector.collectFailedOps(QUIET_DB, "untouched", 0)).toEqual({
+      kind: "NO_SOURCE",
+      reason: `the profiler is off on ${QUIET_DB}`,
+    });
+  });
+
+  // The window that used to read as clean (#596). Level 1 keeps operations slower
+  // than slowms, a hint at a hidden index fails in 0 ms, and so the ring holds the
+  // slow query and not one of the failures.
+  it("names what a slow-only profiler cannot see", async () => {
+    const collector = new MongoIndexCollector(mongo);
+    const db_ = mongo.db(SLOW_DB);
+    await db_.collection(COLL).insertMany([{ n: 1 }, { n: 2 }]);
+    await db_.collection(COLL).createIndex({ n: 1 }, { name: "n_1" });
+    await db_.command({ profile: 1 });
+    try {
+      const slowms = Number((await db_.command({ profile: -1 })).slowms);
+      // Slow enough to be kept, so the ring is not empty and the reading is a window.
+      await db_
+        .collection(COLL)
+        .find({ $where: `sleep(${slowms + 50}) || true`, n: 1 })
+        .toArray();
+      await db_.command({ collMod: COLL, index: { name: "n_1", hidden: true } });
+      const hiddenAt = Date.now() - 1000;
+      for (let i = 0; i < 3; i += 1) {
+        await expect(db_.collection(COLL).find({ n: 1 }).hint("n_1").toArray()).rejects.toThrow();
+      }
+      const reading = await collector.collectFailedOps(SLOW_DB, COLL, hiddenAt);
+      expect(reading).toMatchObject({
+        kind: "WINDOW",
+        failed: 0,
+        blindSpot: `the profiler on ${SLOW_DB} keeps only operations slower than ${slowms} ms, and a failed one is fast`,
+      });
+      // So the drop line says the window was blind, not that it was clean.
+      expect(
+        describeFailures(judgeFailures({ failed: 0, reachMs: 0 }, reading, hiddenAt)),
+      ).toContain(`slower than ${slowms} ms`);
+      // And a collection with nothing in the ring is read against the whole ring's
+      // reach rather than reported as having no source.
+      expect(await collector.collectFailedOps(SLOW_DB, "never_queried", 0)).toMatchObject({
+        kind: "WINDOW",
+        failed: 0,
+      });
+    } finally {
+      await db_.command({ profile: 0 }).catch(() => undefined);
+    }
   });
 });
 

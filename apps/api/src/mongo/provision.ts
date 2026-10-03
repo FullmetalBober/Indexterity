@@ -10,43 +10,7 @@ import {
 } from "../engine/provision";
 import { mongoClient } from "./client";
 import { isAuthorizationError } from "./errors";
-
-export const ENGINE_ROLE = "indexterityEngine";
-
-interface RolePrivilege {
-  readonly resource:
-    | { readonly cluster: true }
-    | { readonly db: string; readonly collection: string };
-  readonly actions: readonly string[];
-}
-
-// Everything the engine ever runs, and nothing else. Notably absent: `find` on
-// customer collections ({db:"",collection:""}), so the scoped user CANNOT read
-// documents — the server enforces it. The only find grants are metadata
-// namespaces: system.profile (query shapes for workload analysis) and
-// config.collections (shard-key detection).
-export const ENGINE_PRIVILEGES: readonly RolePrivilege[] = [
-  // Un-transformed $queryStats needs BOTH queryStats actions (verified live on
-  // mongo 8: queryStatsRead alone is Unauthorized).
-  {
-    resource: { cluster: true },
-    actions: ["listDatabases", "serverStatus", "queryStatsRead", "queryStatsReadTransformed"],
-  },
-  {
-    resource: { db: "", collection: "" },
-    actions: [
-      "listCollections",
-      "listIndexes",
-      "indexStats",
-      "collStats",
-      "createIndex",
-      "dropIndex",
-      "collMod",
-    ],
-  },
-  { resource: { db: "", collection: "system.profile" }, actions: ["find"] },
-  { resource: { db: "config", collection: "collections" }, actions: ["find"] },
-];
+import { ENGINE_PRIVILEGES, ENGINE_ROLE, type RolePrivilege } from "./role";
 
 // The scoped user is already on the cluster. Distinct from the authorization
 // refusal in ./errors because the remedy is the opposite one: nothing needs
@@ -204,6 +168,55 @@ export async function provisionScopedUser(
       await probe.close();
     }
     return { connectionString, username, databases: [] };
+  } finally {
+    await adminClient.close();
+  }
+}
+
+// Bring the role Indexterity provisioned up to today's definition, with an admin
+// string used ONCE and never stored — the same terms provisioning runs on (#599).
+//
+// `updateRole` rather than a grant of what changed: it REPLACES the privileges,
+// so the role ends exactly as a cluster provisioned today would have it — every
+// action a release added, and none a release dropped. Anything an owner granted
+// to this role by hand goes with it; the role is ours, and documented as this
+// set and nothing else.
+//
+// What it takes, measured on 7.0.39 against today's role: userAdminAnyDatabase,
+// or viewRole, grantRole and revokeRole on `anyResource`. The same three on
+// `{db: "", collection: ""}` are refused — that resource leaves out `config`, and
+// the role reads `config.collections` — and userAdmin on `admin` is refused too.
+//
+// Refuses a cluster with no such role rather than creating one: a role nobody
+// holds would be a grant with no purpose, and the cluster in front of the owner
+// is connected some other way.
+export async function upgradeEngineRole(
+  adminUri: string,
+  overrides?: TlsOverrides,
+  proxy?: DialProxy,
+): Promise<void> {
+  const adminClient = mongoClient(adminUri, overrides, proxy);
+  try {
+    const admin = adminClient.db("admin");
+    try {
+      const info = rolesInfoResult.parse(await admin.command({ rolesInfo: ENGINE_ROLE }));
+      if (info.roles.length === 0) {
+        throw new ProvisionDeniedError(
+          `there is no ${ENGINE_ROLE} role on this cluster to upgrade — the admin string ` +
+            "may point at a different cluster than the one Indexterity provisioned",
+        );
+      }
+      await upsertEngineRole(admin);
+    } catch (error) {
+      if (isAuthorizationError(error)) {
+        throw new ProvisionDeniedError(
+          `these credentials cannot change roles on the cluster — upgrading ${ENGINE_ROLE} ` +
+            "needs userAdminAnyDatabase, or viewRole, grantRole and revokeRole on every " +
+            "database including config, because the role's privileges reach all of them",
+        );
+      }
+      throw error;
+    }
   } finally {
     await adminClient.close();
   }

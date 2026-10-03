@@ -9,8 +9,12 @@ freed bytes and latency.
 gated behind an observe window, a pre-flight check, a read-latency regression
 test, and a check that the workload did not start FAILING while the index was
 hidden — which is a separate question, because a query that fails returns faster
-than one that works and a latency test reads it as an improvement. Everything
-before the drop is reversible, and the dashboard says which is which.
+than one that works and a latency test reads it as an improvement. That check
+needs a record of failed operations: on MongoDB, Indexterity turns the profiler
+on itself for the window — failures and hints only, the slow-query log kept as it
+was, the settings given back — and on SQL Server it reads Query Store. Where
+there is no record, the audit trail says the check was skipped and why.
+Everything before the drop is reversible, and the dashboard says which is which.
 
 **Some indexes are never dropped automatically, whatever they score.** That gate
 is a measurement, and a measurement needs the experiment to be survivable. A
@@ -30,6 +34,10 @@ mentioning one is an empty screen.
 to provision its own least-privilege one instead — `indexterity`, holding index
 metadata and statistics and no read privilege at all. The server enforces that;
 it is not a promise we make. The admin string is used once and never stored.
+When a later release can use one more privilege, it is optional — that one
+feature stays off, with its reason, until it is granted — and each cluster is
+told once, with the statement that grants it or an upgrade that takes an admin
+string the same way, once.
 
 **It shows you what it looked at, not only what it proposes.** Every index a
 cluster has, with its size, its flags and which replica-set member is actually

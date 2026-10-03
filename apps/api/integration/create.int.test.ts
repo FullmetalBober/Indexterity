@@ -68,6 +68,7 @@ const collector = stub<IndexCollector>({
 const session: EngineSession = {
   collector,
   executor: () => executor,
+  failureWatch: null,
   listDatabaseNames: async () => ["PlatformPlan"],
   ping: async () => undefined,
   close: async () => undefined,

@@ -289,22 +289,40 @@ export interface IndexCollector {
   // A ONE-WAY signal, exactly like collectHintedIndexes above: failures seen are
   // evidence, failures unseen are nothing. `reachMs` is how far back the source
   // can see at all, so absence is only a claim within it.
+  //
+  // And when there is no window, the reading says WHY (#596). The causes differ
+  // per engine and have different remedies — a privilege to grant, a profiler to
+  // turn on, a Query Store holding nothing for the table — and the audit line
+  // used to collapse all of them into "could not be read", which reads like an
+  // error and names none of them.
   collectFailedOps(
     database: string,
     collection: string,
     sinceMs: number,
-  ): Promise<FailedOpsWindow | null>;
+  ): Promise<FailedOpsReading>;
 }
 
-// Failed operations on one namespace, over the window the source can see.
+// Failed operations on one namespace, over the window the source can see — or the
+// reason there is no such window, in words the audit line can carry.
+export type FailedOpsReading =
+  | ({ readonly kind: "WINDOW" } & FailedOpsWindow)
+  | { readonly kind: "NO_SOURCE"; readonly reason: string };
+
 export interface FailedOpsWindow {
   // Operations that returned an error at or after the requested instant.
   readonly failed: number;
   // The oldest observation the source can still produce, epoch ms. On MongoDB this
-  // is the profiler ring's reach — a busy collection fills it in minutes and a
+  // is the profiler ring's reach — a busy database fills it in minutes and a
   // quiet one holds weeks — so a count of zero means "nothing seen since here",
   // never "nothing happened".
   readonly reachMs: number;
+  // What the source is set up NOT to record, as a clause, or null when it records
+  // every operation. A window can be real and still blind to the very thing this
+  // asks about: a MongoDB profiler at level 1 keeps operations slower than
+  // `slowms`, and a failed operation is fast — measured on mongod 6.0 to 9.0, a
+  // hint at a hidden index fails in 0 ms and the level-1 profiler records nothing
+  // of it. Zero failures read through that is not a clean window.
+  readonly blindSpot: string | null;
 }
 
 export interface CreateIndexOptions {
@@ -495,10 +513,56 @@ export interface EngineCapabilities {
   readonly partialIndexFromConstants: boolean;
 }
 
+// One drop in flight whose failures the engine should watch (#596).
+export interface WatchTarget {
+  readonly database: string;
+  readonly collection: string;
+  readonly indexName: string;
+  // Not hidden yet, so hint() at it is recorded too. A hint at a HIDDEN index
+  // fails and is caught as a failure — but by then it is an outage, and a hint
+  // seen before the hide stops the hide instead.
+  readonly beforeHide: boolean;
+}
+
+// What one database's watch came to on every node that serves it.
+export type DatabaseWatch =
+  // Failures on each namespace are recorded on every node, from the instant given
+  // (epoch ms) — the latest of the nodes', since that is when all of them were.
+  | {
+      readonly kind: "WATCHED";
+      readonly since: ReadonlyMap<string, number>;
+      // Whether Indexterity's own filter is in place on any node, which is what a
+      // later pass has to give back.
+      readonly ours: boolean;
+    }
+  | { readonly kind: "UNWATCHED"; readonly reason: string; readonly ours: boolean }
+  // Nothing is wanted here any more, and what was ours has been given back — or,
+  // with `ours` still true, could not be on some node, for a later pass to retry.
+  | { readonly kind: "RELEASED"; readonly ours: boolean };
+
+// Keeping a profiler on for the drops in flight (#596) — optional, and MongoDB
+// only. Its profiler is the one failure source a role can be granted the right to
+// turn on: SQL Server's Query Store is a database option that needs ALTER on the
+// database, and PostgreSQL has no source at all.
+export interface FailureWatch {
+  // Bring every node in line: watch the databases `targets` are in, and give back
+  // those in `release` that no target needs any more. `owner` is the cluster
+  // registration asking, so two registrations of one cluster never take each
+  // other's watch for their own.
+  reconcile(
+    owner: string,
+    targets: readonly WatchTarget[],
+    release: readonly string[],
+  ): Promise<ReadonlyMap<string, DatabaseWatch>>;
+}
+
 // One live, pooled connection to a customer cluster.
 export interface EngineSession {
   readonly collector: IndexCollector;
   executor(readOnly: boolean): IndexExecutor;
+  // Where the engine can keep a failure source on for an observe window; null on
+  // the engines that cannot.
+  readonly failureWatch: FailureWatch | null;
   // User databases only. The rule, which "its own system namespaces" was too
   // vague to keep the three adapters honest about (#347):
   //
@@ -606,6 +670,38 @@ export interface EngineAdapter {
   // The username a string authenticates as, so rotation can tell whether the
   // stored "this is a provisioned user" marker still describes the new one.
   connStringUsername(value: string): string | null;
+  // Every privilege a release has added to this engine's provisioned role since
+  // the first, oldest first (#599). A cluster records how far along this list its
+  // credentials are, which is how one connected before a change is told about
+  // it. Empty on an engine whose role has never changed — both SQL engines, so far.
+  readonly privilegeChanges: readonly PrivilegeChange[];
+  // The statement granting the provisioned role every change after `revision`,
+  // for an owner to run as an admin, or null when there is none. Only for the
+  // role Indexterity created: its name is known, so nothing in it is left blank.
+  grantChangesStatement(revision: number): string | null;
+  // Bring the provisioned role up to today's definition with an admin string used
+  // once and never stored — provisioning's terms (#599). Required of any engine
+  // whose `privilegeChanges` is not empty (registry.test.ts holds them to it), so
+  // an owner who is told about a change can always be offered the upgrade.
+  // Throws ProvisionDeniedError when the credentials cannot.
+  upgradeScopedUser?(
+    adminConnectionString: string,
+    overrides?: TlsOverrides,
+    proxy?: DialProxy,
+  ): Promise<void>;
+}
+
+// A privilege a release added to an engine's provisioned role (#599).
+export interface PrivilegeChange {
+  // 1, 2, 3 … per engine: how far along the list a cluster's credentials are.
+  readonly revision: number;
+  // The release that first asked for it.
+  readonly release: string;
+  // The diagnose check that reports it, and that check's own words for what it
+  // is and what it enables.
+  readonly key: string;
+  readonly label: string;
+  readonly enables: string;
 }
 
 export interface ProvisionedUser {

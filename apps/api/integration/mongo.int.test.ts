@@ -4,7 +4,8 @@ import { DatabaseInaccessibleError } from "../src/engine/ports";
 import { present } from "../src/errors/at";
 import { MongoIndexCollector } from "../src/mongo/collector";
 import { MongoConnection } from "../src/mongo/connection";
-import { scopedConnString } from "../src/mongo/provision";
+import { scopedConnString, upgradeEngineRole } from "../src/mongo/provision";
+import { ENGINE_PRIVILEGES, ENGINE_ROLE } from "../src/mongo/role";
 
 // Adapter-level integration against a mongod with AUTHENTICATION ON, which is
 // the state the rest of the mongo integration coverage cannot reach: the server
@@ -108,3 +109,82 @@ describe.skipIf(MONGO_ADMIN_URL === undefined)(
     }, 60_000);
   },
 );
+
+// Upgrading the role Indexterity provisioned with an admin string used once
+// (#599), against a server that enforces who may change a role. What it takes is
+// measured, not assumed: userAdminAnyDatabase does it, and the role actions on
+// `admin` alone do not, because the role's privileges reach every database.
+describe.skipIf(MONGO_ADMIN_URL === undefined)("upgrading the provisioned role", () => {
+  let admin: MongoClient;
+  const ROLE_ADMIN_ONLY = "indexterityIntRoleAdminOnly";
+  const ADMIN_ONLY = "indexterity_int_role_admin_only";
+  const ANY_DB = "indexterity_int_role_any_db";
+  const ACTIONS = ["viewRole", "grantRole", "revokeRole"];
+
+  const asUser = (user: string) =>
+    scopedConnString(present(MONGO_ADMIN_URL, "MONGO_ADMIN_URL"), user, "probe");
+  const actionsOfEngineRole = async (): Promise<string[]> => {
+    const info = await admin.db("admin").command({ rolesInfo: ENGINE_ROLE, showPrivileges: true });
+    const roles: unknown = info.roles;
+    const first: unknown = Array.isArray(roles) ? roles[0] : undefined;
+    const privileges: unknown =
+      typeof first === "object" && first !== null ? Reflect.get(first, "privileges") : [];
+    return (Array.isArray(privileges) ? privileges : []).flatMap((privilege: unknown) => {
+      const actions: unknown =
+        typeof privilege === "object" && privilege !== null
+          ? Reflect.get(privilege, "actions")
+          : [];
+      return Array.isArray(actions)
+        ? actions.filter((a): a is string => typeof a === "string")
+        : [];
+    });
+  };
+  const cleanup = async () => {
+    const adminDb = admin.db("admin");
+    for (const user of [ADMIN_ONLY, ANY_DB])
+      await adminDb.command({ dropUser: user }).catch(() => {});
+    for (const role of [ROLE_ADMIN_ONLY, ENGINE_ROLE]) {
+      await adminDb.command({ dropRole: role }).catch(() => {});
+    }
+  };
+
+  beforeAll(async () => {
+    admin = new MongoClient(present(MONGO_ADMIN_URL, "MONGO_ADMIN_URL"));
+    await admin.connect();
+    await cleanup();
+    const adminDb = admin.db("admin");
+    // The role as 0.28.0 provisioned it: without enableProfiler.
+    await adminDb.command({
+      createRole: ENGINE_ROLE,
+      privileges: ENGINE_PRIVILEGES.map((privilege) => ({
+        resource: privilege.resource,
+        actions: privilege.actions.filter((action) => action !== "enableProfiler"),
+      })),
+      roles: [],
+    });
+    await adminDb.command({
+      createRole: ROLE_ADMIN_ONLY,
+      privileges: [{ resource: { db: "admin", collection: "" }, actions: ACTIONS }],
+      roles: [],
+    });
+    await adminDb.command({ createUser: ADMIN_ONLY, pwd: "probe", roles: [ROLE_ADMIN_ONLY] });
+    await adminDb.command({ createUser: ANY_DB, pwd: "probe", roles: ["userAdminAnyDatabase"] });
+  });
+
+  afterAll(async () => {
+    await cleanup();
+    await admin.close();
+  });
+
+  it("is refused, with what it takes, to an admin whose role rights stop at admin", async () => {
+    await expect(upgradeEngineRole(asUser(ADMIN_ONLY))).rejects.toThrow(
+      /needs userAdminAnyDatabase/,
+    );
+    expect(await actionsOfEngineRole()).not.toContain("enableProfiler");
+  }, 60_000);
+
+  it("brings the role to today's privileges with userAdminAnyDatabase", async () => {
+    await upgradeEngineRole(asUser(ANY_DB));
+    expect(await actionsOfEngineRole()).toContain("enableProfiler");
+  }, 60_000);
+});

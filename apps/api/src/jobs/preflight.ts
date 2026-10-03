@@ -60,11 +60,12 @@ export function enforcesTheSame(original: IndexSpec, replacement: IndexSpec): bo
 // Architecture page, Apply pipeline) — the world may have changed since the
 // recommendation was proposed.
 /**
- * Two of `IndexCollector`'s thirteen members — what a pre-flight actually reads.
+ * Three of `IndexCollector`'s members — what a pre-flight actually reads.
  */
 export interface PreflightSource {
   listIndexes: IndexCollector["listIndexes"];
   collectUsage: IndexCollector["collectUsage"];
+  collectHintedIndexes: IndexCollector["collectHintedIndexes"];
 }
 
 export async function preflightDrop(
@@ -121,6 +122,20 @@ export async function preflightDrop(
     if (ops > 0) {
       return { safe: false, reason: `index now has ${ops} recent ops`, spec };
     }
+  }
+  // Named by hint() since it was proposed. Hiding such an index does not slow
+  // those queries, it fails them — mongod answers BadValue, SQL Server Msg 315 —
+  // and classify only withholds NEW proposals for a hinted index, so one already
+  // approved reaches here. Last, because it is the most expensive read: on SQL
+  // Server it scans the database's Query Store (#596).
+  const hinted = await collector.collectHintedIndexes(target.database, target.collection);
+  if (hinted.includes(spec.name)) {
+    return {
+      safe: false,
+      reason:
+        "the workload names this index with hint(), so hiding it would make those queries fail",
+      spec,
+    };
   }
   return { safe: true, reason: "ok", spec };
 }

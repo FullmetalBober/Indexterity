@@ -16,6 +16,8 @@ import { dropRoleStatements, provisionPostgresScopedUser } from "./provision";
 
 class PostgresEngineSession implements EngineSession {
   readonly collector: IndexCollector;
+  // PostgreSQL records failed statements nowhere a role can read (#438).
+  readonly failureWatch = null;
 
   constructor(private readonly conn: PostgresConnection) {
     this.collector = new PostgresIndexCollector(conn);
@@ -88,4 +90,8 @@ export const postgresAdapter: EngineAdapter = {
   provisionScopedUser: provisionPostgresScopedUser,
   revokeStatements: dropRoleStatements,
   connStringUsername: pgConnStringUsername,
+  // The role this engine provisions has not changed since it was first written
+  // (#599): nothing to tell a connected cluster, and nothing to upgrade.
+  privilegeChanges: [],
+  grantChangesStatement: () => null,
 };

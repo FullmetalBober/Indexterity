@@ -74,6 +74,13 @@ export class ObservedSession implements EngineSession {
     return this.inner.executor(readOnly);
   }
 
+  // Not narrowed: the caller passes only targets in scope, and RELEASING has to
+  // reach a database that has just left the selection — it is the one way the
+  // profiler there gets back what it had.
+  get failureWatch(): EngineSession["failureWatch"] {
+    return this.inner.failureWatch;
+  }
+
   // Strict intersection, in the cluster's own order, with no fallback — see
   // scopeForDiagnosis above for why the diagnosis rule differs. A selected
   // database that no longer exists drops out silently: a drop or a rename is a

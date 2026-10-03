@@ -36,11 +36,12 @@ const DESC = index(
   { unique: true },
 );
 
-// A complete PreflightSource: both members implemented, nothing asserted away.
-function collector(specs: IndexSpec[]): PreflightSource {
+// A complete PreflightSource: every member implemented, nothing asserted away.
+function collector(specs: IndexSpec[], hinted: string[] = []): PreflightSource {
   return {
     listIndexes: () => Promise.resolve(specs),
     collectUsage: () => Promise.resolve([]),
+    collectHintedIndexes: () => Promise.resolve(hinted),
   };
 }
 
@@ -184,5 +185,37 @@ describe("preflightDrop and the protected index", () => {
     });
     expect(result.safe).toBe(false);
     expect(result.reason).toContain("protected");
+  });
+});
+
+describe("preflightDrop and hint()", () => {
+  const PLAIN = index("a_1_b_1", [
+    { field: "a", direction: 1 },
+    { field: "b", direction: 1 },
+  ]);
+
+  // Classify withholds only NEW proposals for a hinted index, so a drop approved
+  // before the workload started hinting reaches the hide — where hiding would
+  // fail those queries rather than slow them (#596).
+  it("refuses an index the workload names with hint()", async () => {
+    const result = await preflightDrop(collector([PLAIN], ["a_1_b_1"]), {
+      type: "DROP_UNUSED",
+      database: "shop",
+      collection: "orders",
+      indexName: "a_1_b_1",
+      targetSpec: null,
+    });
+    expect(result).toMatchObject({ safe: false, reason: expect.stringContaining("hint()") });
+  });
+
+  it("is not refused by a hint at another index", async () => {
+    const result = await preflightDrop(collector([PLAIN], ["a_1_b_-1"]), {
+      type: "DROP_UNUSED",
+      database: "shop",
+      collection: "orders",
+      indexName: "a_1_b_1",
+      targetSpec: null,
+    });
+    expect(result.safe).toBe(true);
   });
 });

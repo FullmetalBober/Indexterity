@@ -165,6 +165,17 @@ describe("DropsOn", () => {
     expect(screen.queryByText(/drops/)).not.toBeInTheDocument();
   });
 
+  // It sits under the score in a 104px column, inside a table that sets
+  // `whitespace-nowrap` and clips fixed columns — so it has to wrap, or the
+  // sentence reads "due — waiting or" and stops.
+  it("wraps rather than being clipped by its narrow column", async () => {
+    renderInApp(<DropsOn rec={{ state: "HIDDEN", hiddenAt, observeDays: 1 }} />);
+
+    expect(await screen.findByText(/waiting on the change window/)).toHaveClass(
+      "whitespace-normal",
+    );
+  });
+
   // #269. The window is per-index and the number alone reads as arbitrary next
   // to a neighbour with a different one; the engine already wrote the sentence
   // that explains it.

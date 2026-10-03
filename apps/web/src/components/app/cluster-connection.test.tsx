@@ -84,6 +84,7 @@ const cluster = {
   provisionedUsername: null,
   revokeCommand: null,
   credentialPosture: "SCOPED",
+  newPrivileges: { pending: [], command: null, canUpgrade: false },
 } as const;
 
 // One re-check of the stored credentials (#313). Reachable and clean by default,

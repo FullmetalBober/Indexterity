@@ -10,7 +10,7 @@ import type {
 } from "../engine/ports";
 import { mongoClient } from "./client";
 import { withoutSystemDatabases } from "./connection";
-import { ENGINE_ROLE } from "./provision";
+import { ENGINE_ROLE } from "./role";
 import {
   hasQueryStatsPlanMetrics,
   parseServerVersion,
@@ -19,7 +19,7 @@ import {
 } from "./version";
 
 // What the engine needs, expressed as (actions, where) pairs. Mirrors
-// ENGINE_PRIVILEGES in provision.ts — the role we CREATE is exactly the set we
+// ENGINE_PRIVILEGES in role.ts — the role we CREATE is exactly the set we
 // CHECK for, so a provisioned cluster always diagnoses clean.
 interface RequiredPrivilege {
   readonly key: string;
@@ -121,10 +121,30 @@ export const REQUIRED_PRIVILEGES: readonly RequiredPrivilege[] = [
   {
     key: "profiler",
     label: "Read system.profile",
-    enables: "workload analysis fallback, partial-index and TTL detection",
+    // The two drop safeguards are the half that matters most and was not said
+    // (#596): only the profiler records a hint() or a failed operation, so without
+    // it a hide that breaks queries is caught by neither — and only while the
+    // profiler is on, which reading it does not do.
+    enables:
+      "workload analysis fallback, partial-index and TTL detection, and two drop safeguards — " +
+      "spotting indexes named by hint() and rolling back a hide that makes queries fail — " +
+      "while the profiler is on",
     tier: "WORKLOAD",
     actions: ["find"],
     scope: { kind: "anyDb", collection: "system.profile" },
+  },
+  {
+    key: "enableProfiler",
+    label: "Turn the profiler on",
+    // Optional, like the read above: without it the check is skipped and says so,
+    // and nothing else changes (#596).
+    enables:
+      "the failed-operations check on clusters whose profiler is off — for a hidden " +
+      "index's observe window, Indexterity records failed operations and hint() on " +
+      "that collection, keeps the slow-query log as it was, and gives the settings back after",
+    tier: "WORKLOAD",
+    actions: ["enableProfiler"],
+    scope: { kind: "anyDb" },
   },
   {
     key: "shardConfig",

@@ -23,6 +23,9 @@ import {
 
 class MssqlEngineSession implements EngineSession {
   readonly collector: IndexCollector;
+  // Query Store is the failure source here, and turning it on is ALTER DATABASE —
+  // not a right the scoped user has, or should (#596).
+  readonly failureWatch = null;
   private readonly members: MssqlMemberConnections;
 
   constructor(
@@ -110,4 +113,8 @@ export const mssqlAdapter: EngineAdapter = {
   provisionScopedUser: provisionMssqlScopedUser,
   revokeStatements: dropLoginStatements,
   connStringUsername: mssqlConnStringUsername,
+  // The login this engine provisions has not changed since it was first written
+  // (#599): nothing to tell a connected cluster, and nothing to upgrade.
+  privilegeChanges: [],
+  grantChangesStatement: () => null,
 };

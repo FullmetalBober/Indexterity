@@ -51,6 +51,10 @@ const BODIES: Record<string, unknown> = {
   rotateConnection: {
     connectionString: "mongodb://user:pass@127.0.0.1:27017/?directConnection=true",
   },
+  upgradeClusterRole: {
+    adminConnectionString: "mongodb://user:pass@127.0.0.1:27017/?directConnection=true",
+  },
+  reviewClusterPrivileges: {},
   updatePolicy: {
     workloadAnalysis: false,
     instantCreate: false,

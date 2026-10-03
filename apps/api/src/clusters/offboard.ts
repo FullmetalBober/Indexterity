@@ -1,7 +1,8 @@
-import { and, clusters, type Database, eq, inArray, recommendations } from "../db";
+import { and, clusters, type Database, eq, failureWatches, inArray, recommendations } from "../db";
 import { revokeCommandFor } from "../engine/provision";
 import { openClusterSession } from "../jobs/cluster-connection";
 import { evictCluster } from "../jobs/connection-pool";
+import { releaseFailureWatches } from "../jobs/failure-watch";
 
 // Leaving a customer's cluster as we found it.
 //
@@ -28,11 +29,19 @@ export async function restoreHiddenIndexes(db: Database, clusterId: string): Pro
         inArray(recommendations.state, ["HIDDEN", "OBSERVE"]),
       ),
     );
+  // And a profiler Indexterity turned on for those drops (#596): the cascade
+  // deletes the row that says where, and nothing on the server.
+  const [watching] = await db
+    .select({ database: failureWatches.database })
+    .from(failureWatches)
+    .where(eq(failureWatches.clusterId, clusterId))
+    .limit(1);
   let unhidden = 0;
-  if (inFlight.length > 0) {
+  if (inFlight.length > 0 || watching !== undefined) {
     try {
       const { session, canHide, release } = await openClusterSession(db, clusterId);
       try {
+        await releaseFailureWatches(db, clusterId, session).catch(() => undefined);
         const executor = session.executor(false);
         // An engine with no reversible hide left every one of these indexes
         // serving traffic, so there is nothing to put back — and calling unhide

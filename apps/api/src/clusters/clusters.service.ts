@@ -14,7 +14,7 @@ import {
   TunnelTargetError,
 } from "../engine/net-guard";
 import { DatabaseInaccessibleError, NO_TLS_OVERRIDES, type TlsOverrides } from "../engine/ports";
-import { revokeCommandFor } from "../engine/provision";
+import { currentPrivilegesRevision, revokeCommandFor } from "../engine/provision";
 import { adapterFor, engineSupported, supportedEngines } from "../engine/registry";
 import { InsecureConnectionError } from "../engine/tls";
 import { DialBudgetService } from "../errors/dial-budget.service";
@@ -128,6 +128,7 @@ export class ClustersService {
       provisionedUsername: string | null;
       provisionedDatabases: string[] | null;
       credentialPosture: typeof clusters.$inferSelect.credentialPosture;
+      privilegesRevision: number;
     },
     errors: NotFound,
   ): Promise<ClusterRow> {
@@ -148,6 +149,16 @@ export class ClustersService {
       .returning();
     if (updated === undefined) throw errors.NOT_FOUND({ message: "cluster not found" });
     return updated;
+  }
+
+  // Raise how far along its engine's privilege changes a cluster is known to be
+  // (#599). GREATEST in the statement rather than a read and a write, so two
+  // passes that learn different things cannot lower it between them.
+  async raisePrivilegesRevision(clusterId: string, revision: number): Promise<void> {
+    await this.database.db
+      .update(clusters)
+      .set({ privilegesRevision: sql`greatest(${clusters.privilegesRevision}, ${revision})` })
+      .where(eq(clusters.id, clusterId));
   }
 
   async storeCluster(
@@ -199,6 +210,10 @@ export class ClustersService {
           provisionedUsername: provisioned?.username ?? null,
           provisionedDatabases: provisioned === null ? null : [...provisioned.databases],
           credentialPosture,
+          // Current at connect, by either road (#599): a pasted string's owner has
+          // just been shown every privilege there is, optional ones included, and a
+          // provisioned role holds them all. Only what a LATER release adds is news.
+          privilegesRevision: currentPrivilegesRevision(engine),
           tlsOverrides,
           observedDatabases,
           tunnelId,

@@ -23,15 +23,22 @@ import {
   recommendations,
   sql,
 } from "../db";
+import type { DatabaseWatch, FailedOpsReading } from "../engine/ports";
 import { emitClusterEvent, pgNotifier } from "../events/emit";
 import { serializeSpec } from "../mongo";
 import type { TunnelRegistry } from "../tunnel/tunnel.registry";
 import { effectiveChangeWindow } from "./change-window";
 import { openClusterSession } from "./cluster-connection";
+import {
+  FAILURE_BASELINE_MS,
+  HIDE_TYPES,
+  keepFailureWatchesOrNone,
+  waitingLine,
+  watchLine,
+  withdrawHinted,
+} from "./failure-watch";
 import { historyWindow, planForCluster } from "./plan";
 import { preflightDrop } from "./preflight";
-
-const DROP_TYPES = new Set(["DROP_UNUSED", "DROP_REDUNDANT", "MERGE"]);
 
 // Auto-approval, the whole of it. One threshold, no companion switch: null
 // means nothing is promoted and a human clicks, 0 means everything is,
@@ -98,11 +105,22 @@ export async function promoteByScore(
 // distinction is load-bearing rather than cosmetic: on an engine that cannot
 // hide, nothing about the index changed, so a line reading "ok; observing 30
 // days" beside an audit kind of HIDE would claim a write that never happened.
-function applyResult(canHide: boolean, window: { days: number; reason: string | null }): string {
+function applyResult(
+  canHide: boolean,
+  window: { days: number; reason: string | null },
+  // What the failed-operations check will be able to see, and what became of
+  // turning its source on — or null when nothing was hidden, so nothing can fail
+  // for want of the index.
+  failures: { reading: FailedOpsReading; watch: DatabaseWatch | undefined } | null,
+): string {
   const what = canHide
     ? `ok; observing ${window.days} days`
     : `ok; not hidden (this engine has no reversible hide) — observing usage for ${window.days} days`;
-  return window.reason === null ? what : `${what} — ${window.reason}`;
+  const observing = window.reason === null ? what : `${what} — ${window.reason}`;
+  // Said at the hide, so an owner who wants the check can turn its source on
+  // while the window runs rather than learn it was skipped from the drop (#596).
+  const watch = failures === null ? "" : watchLine(failures.reading, failures.watch);
+  return watch === "" ? observing : `${observing}; ${watch}`;
 }
 
 // APPROVED drops -> pre-flight -> hide (collMod hidden:true) -> HIDDEN. Hiding is
@@ -185,8 +203,14 @@ export async function applyCluster(
     if (readOnly) return 0;
     const collector = session.collector;
     const executor = session.executor(readOnly);
+    // The failure source turned on where the engine can, before anything is
+    // hidden: the check after a hide needs a day of before (#596).
+    const passStarted = Date.now();
+    const watches = await keepFailureWatchesOrNone(db, clusterId, session, observedDatabases);
+    const withdrawn = await withdrawHinted(db, clusterId, collector, watches);
     let hidden = 0;
     for (const rec of approved) {
+      if (withdrawn.has(rec.id)) continue;
       // The last gate before a write lands on somebody's cluster: never touch a
       // database that is not being observed (#244).
       //
@@ -198,7 +222,29 @@ export async function applyCluster(
       // the check costs an array lookup and covers the auto-approved and the
       // hand-approved alike.
       if (observedDatabases !== null && !observedDatabases.includes(rec.database)) continue;
-      if (!DROP_TYPES.has(rec.type)) continue;
+      if (!HIDE_TYPES.has(rec.type)) continue;
+      // Watched by the profiler Indexterity turned on: hidden only once a day of
+      // failures has been recorded, so a failure after the hide has a before to
+      // be compared against. Zero where the database's own profiler already
+      // recorded everything, which needs no wait.
+      const watch = watches.get(rec.database);
+      const watchedSince =
+        watch?.kind === "WATCHED"
+          ? (watch.since.get(`${rec.database}.${rec.collection}`) ?? 0)
+          : null;
+      if (watchedSince !== null && Date.now() - watchedSince < FAILURE_BASELINE_MS) {
+        // Said once, when the watch begins — this pass or a re-arm after a reset —
+        // rather than on every pass that finds it still waiting.
+        if (watchedSince >= passStarted) {
+          await db.insert(actions).values({
+            recommendationId: rec.id,
+            kind: "HIDE",
+            actor: "system",
+            result: waitingLine(rec.database, rec.collection, watchedSince),
+          });
+        }
+        continue;
+      }
       const check = await preflightDrop(collector, rec);
       if (!check.safe) {
         await db
@@ -226,15 +272,19 @@ export async function applyCluster(
       // And the failures, which the latency baseline above cannot stand in for: a
       // failed read lands in latencyStats as a FAST read, so the gate reading only
       // that would see a hide which broke the workload as a hide that improved it
-      // (#438). Null on an engine with no source, and null costs nothing — the signal
-      // is one-way and only ever rolls a hide back.
+      // (#438). A source that is missing stores no baseline, and that costs nothing —
+      // the signal is one-way and only ever rolls a hide back — but the HIDE line
+      // says why it is missing (#596). Null where nothing was hidden.
       //
       // Sampled over whatever window the source can see BACKWARDS from now, which is
       // the question worth asking here: "was this namespace already failing before we
       // touched it". Zero here is what makes a failure after the hide attributable to
       // the hide.
+      //
+      // From the watch's start where there is one: before it, a fast failure was
+      // recorded nowhere, and a count reaching further back would claim more.
       const failuresBefore = canHide
-        ? await collector.collectFailedOps(rec.database, rec.collection, 0)
+        ? await collector.collectFailedOps(rec.database, rec.collection, watchedSince ?? 0)
         : null;
       // The observe window this index actually deserves, from its own usage
       // history: periodic usage extends it (a monthly job must get a chance to
@@ -282,8 +332,8 @@ export async function applyCluster(
           observeReason: window.reason,
           baselineReadOps: baseline.ops,
           baselineReadLatency: baseline.latencyMicros,
-          baselineFailedOps: failuresBefore?.failed ?? null,
-          baselineFailedReachMs: failuresBefore?.reachMs ?? null,
+          baselineFailedOps: failuresBefore?.kind === "WINDOW" ? failuresBefore.failed : null,
+          baselineFailedReachMs: failuresBefore?.kind === "WINDOW" ? failuresBefore.reachMs : null,
           updatedAt: new Date(),
         })
         .where(eq(recommendations.id, rec.id));
@@ -291,7 +341,11 @@ export async function applyCluster(
         recommendationId: rec.id,
         kind: "HIDE",
         actor: "system",
-        result: applyResult(canHide, window),
+        result: applyResult(
+          canHide,
+          window,
+          failuresBefore === null ? null : { reading: failuresBefore, watch },
+        ),
         rollbackToken: check.spec === null ? null : { spec: serializeSpec(check.spec) },
       });
       // At the transition, not at the end of the pass: a pass hiding several

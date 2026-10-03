@@ -1,5 +1,8 @@
 import { canHideIndexes, engineFromScheme } from "@repo/contracts";
 import { describe, expect, it } from "vitest";
+import { REQUIRED_PRIVILEGES } from "../mongo/diagnose";
+import { MSSQL_REQUIRED_PRIVILEGES } from "../mssql/diagnose";
+import { POSTGRES_PRIVILEGE_TIERS } from "../postgres/diagnose";
 import { adapterFor, detectEngine, supportedEngineOptions, supportedEngines } from "./registry";
 
 // The pair that would otherwise drift silently (#239).
@@ -148,5 +151,56 @@ describe("partialIndexFromConstants", () => {
     expect(adapterFor("MONGODB").capabilities.partialIndexFromConstants).toBe(true);
     expect(adapterFor("MSSQL").capabilities.partialIndexFromConstants).toBe(false);
     expect(adapterFor("POSTGRESQL").capabilities.partialIndexFromConstants).toBe(false);
+  });
+});
+
+// A privilege a release adds is never required (#599).
+//
+// A role is created once from an admin string that is never stored, so every
+// cluster connected before a release has the role that release's predecessor
+// created. A new CORE or APPLY check would stop each of them analysing or applying
+// until its owner granted something — a release breaking every existing cluster as
+// a side effect. A new privilege is WORKLOAD instead: the one feature it serves is
+// skipped with a reason, and its owner is told (engine/provision.ts). This freezes
+// what IS required, per engine, so making a privilege required is a deliberate
+// edit here with its own migration story, never an accident in a diagnose list.
+describe("what each engine requires", () => {
+  const required = (checks: readonly { key: string; tier: string }[]) =>
+    checks
+      .filter((check) => check.tier === "CORE" || check.tier === "APPLY")
+      .map((check) => check.key);
+
+  it("has not grown since clusters could be connected", () => {
+    expect({
+      MONGODB: required(REQUIRED_PRIVILEGES),
+      MSSQL: required(MSSQL_REQUIRED_PRIVILEGES),
+      POSTGRESQL: required(
+        Object.entries(POSTGRES_PRIVILEGE_TIERS).map(([key, tier]) => ({ key, tier })),
+      ),
+    }).toEqual({
+      MONGODB: [
+        "listDatabases",
+        "listCollections",
+        "listIndexes",
+        "indexStats",
+        "collStats",
+        "collMod",
+        "dropIndex",
+        "createIndex",
+      ],
+      MSSQL: ["viewServerState", "viewDatabaseState", "alterOnDatabase"],
+      POSTGRESQL: ["connect", "pg_monitor", "table_owner", "cron_apply"],
+    });
+  });
+
+  // An owner told about a privilege can always be offered the upgrade, so an
+  // engine that lists a change has to be able to make it.
+  it("can upgrade the provisioned role wherever that role has changed", () => {
+    for (const engine of ["MONGODB", "MSSQL", "POSTGRESQL"] as const) {
+      const adapter = adapterFor(engine);
+      if (adapter.privilegeChanges.length === 0) continue;
+      expect(adapter.upgradeScopedUser, engine).toBeDefined();
+      expect(adapter.grantChangesStatement(0), engine).not.toBeNull();
+    }
   });
 });
