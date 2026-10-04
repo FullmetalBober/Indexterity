@@ -1,6 +1,7 @@
 import { actions, and, type Database, eq, recommendations } from "../db";
 import type { TunnelRegistry } from "../tunnel/tunnel.registry";
 import { openClusterSession } from "./cluster-connection";
+import { servedShapes } from "./served-shapes";
 
 // BUILDING -> ACTIVE, once the cluster says the index is really there (#332).
 //
@@ -88,13 +89,17 @@ export async function settleBuildsForCluster(
       // post-build regression watch compares against, so a wrong one does not
       // fail loudly, it silently mis-decides every later comparison.
       const { writes } = await collector.collectionLatency(rec.database, rec.collection);
+      const builtAt = new Date();
       await db
         .update(recommendations)
         .set({
           state: "ACTIVE",
-          builtAt: new Date(),
+          builtAt,
           baselineWriteOps: writes.ops,
           baselineWriteLatency: writes.latencyMicros,
+          // The scanning it was for, read where the build is finished — the
+          // moment the overview later compares against (#608).
+          ...(await servedShapes(db, rec, builtAt)),
           updatedAt: new Date(),
         })
         .where(eq(recommendations.id, rec.id));

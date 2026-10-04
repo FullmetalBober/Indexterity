@@ -460,16 +460,77 @@ export const roiContribution = z.object({
   collection: z.string(),
   indexName: z.string(),
   freedBytes: z.number().int().positive(),
-  estimatedMonthlyUsd: z.number().nonnegative(),
 });
 export type RoiContribution = z.infer<typeof roiContribution>;
+
+// How far either side of a build its collection's reads are compared (#608). A
+// week, because traffic has a weekly shape: a weekend inside one window and not
+// the other would be the difference being measured.
+export const BUILD_READ_WINDOW_DAYS = 7;
+
+// Below this many reads on either side, the two averages are mostly noise. A dev
+// cluster measured 157 reads in the week before a build and 29 after, and the
+// averages moved by half for reasons that had nothing to do with the index.
+export const MIN_READS_TO_COMPARE = 1000;
+
+// The reads on one collection over a window: how many, and their mean latency.
+export const readWindow = z.object({
+  ops: z.number().int().positive(),
+  avgMicros: z.number().nonnegative(),
+});
+export type ReadWindow = z.infer<typeof readWindow>;
+
+// The scanning a build was for (#608), read when the index was built.
+export const buildScans = z.object({
+  // The scanning query shapes the index answers, and the documents they examined
+  // a week, as the last workload read before the build saw them.
+  shapes: z.number().int().positive(),
+  weeklyDocsExamined: z.number().int().nonnegative(),
+  // Those of the same shapes seen scanning since, with their latest weekly
+  // figure. Null until the workload has been read a day after the build: before
+  // that, not having seen a shape is not having looked.
+  since: z
+    .object({
+      shapes: z.number().int().nonnegative(),
+      weeklyDocsExamined: z.number().int().nonnegative(),
+    })
+    .nullable(),
+});
+export type BuildScans = z.infer<typeof buildScans>;
+
+// One index Indexterity built, and what it changed (#608).
+export const buildImpact = z.object({
+  recommendationId: z.uuid(),
+  type: recommendationType,
+  database: z.string(),
+  collection: z.string(),
+  indexName: z.string(),
+  builtAt: instant,
+  // Reads on the index's collection in the BUILD_READ_WINDOW_DAYS before the
+  // build and after it. The whole collection, not this index's queries: the
+  // latency source is per collection, so a build that fixed one query of many
+  // moves the average by that query's share. Null for a window with no reads.
+  readsBefore: readWindow.nullable(),
+  readsAfter: readWindow.nullable(),
+  // How much of the window after has passed, in days: under
+  // BUILD_READ_WINDOW_DAYS while the build is younger than that.
+  afterDays: z.number().nonnegative(),
+  // Null for a build no scanning shape was recorded for: one made before this
+  // was recorded, or one that answered no shape the workload had seen.
+  scans: buildScans.nullable(),
+});
+export type BuildImpact = z.infer<typeof buildImpact>;
 
 export const clusterRoi = z.object({
   clusterId: z.uuid(),
   freedBytes: z.number().int().nonnegative(),
   indexesDropped: z.number().int().nonnegative(),
-  estimatedMonthlyUsd: z.number().nonnegative(),
   attribution: z.array(roiContribution),
+  // Indexes Indexterity built and has not rolled back, the ones still inside
+  // their post-build watch included.
+  indexesBuilt: z.number().int().nonnegative(),
+  // The most recent of them, newest first.
+  builds: z.array(buildImpact),
 });
 export type ClusterRoi = z.infer<typeof clusterRoi>;
 
@@ -779,7 +840,9 @@ export const workloadShape = z.object({
   // The engine's own sentence for that outcome. Null when the outcome is not one
   // this build knows how to explain.
   explanation: z.string().nullable(),
-  // The index that WAS proposed, when one was. Null for every declined outcome.
+  // The index that answers this shape: the one proposed, or for `standing` the
+  // live recommendation it was not proposed twice for. Null for every other
+  // outcome.
   proposedIndex: z.string().nullable(),
   // When this shape was first seen scanning, and when that was last true. The
   // pair is the whole answer to "is this new": a scan that started on Tuesday
@@ -1176,10 +1239,41 @@ export const analysisNote = z.object({
 });
 export type AnalysisNote = z.infer<typeof analysisNote>;
 
+// The open recommendations added up (#608) — over every one of them, which the
+// list below cannot be: it is capped, so a sum of the rows that arrived would be
+// a sum of the highest-scoring 500.
+//
+// "To review" is PROPOSED. "Under way" is everything after it and before
+// settling: approved, hidden, observing, scheduled, building.
+export const openSummary = z.object({
+  drops: z.object({
+    toReview: z.int().nonnegative(),
+    underWay: z.int().nonnegative(),
+    // What the open drops would free: each index's size when it was proposed.
+    reclaimableBytes: z.number().int().nonnegative(),
+  }),
+  builds: z.object({
+    toReview: z.int().nonnegative(),
+    underWay: z.int().nonnegative(),
+    // The scanning query shapes an open build answers, seen in the last
+    // OPEN_SCANS_WINDOW_DAYS, and the documents they examine a week — the work
+    // those builds are there to take off the cluster.
+    scanningShapes: z.int().nonnegative(),
+    weeklyDocsExamined: z.number().int().nonnegative(),
+  }),
+});
+export type OpenSummary = z.infer<typeof openSummary>;
+
+// How recently a scanning shape must have been seen to count as scanning now. A
+// shape is written on every pass that sees it, so one older than this has
+// stopped — or the query has.
+export const OPEN_SCANS_WINDOW_DAYS = 7;
+
 export const clusterRecommendations = z.object({
   clusterId: z.uuid(),
   total: z.int().nonnegative(),
   recommendations: z.array(recommendation),
+  summary: openSummary,
   // Beside the rows rather than on them (#161), and that is not a style choice:
   // `recommendation` is also what approve, undo and un-hide return, and those
   // answer about a ROW. A usage field on that shape would come back null from
@@ -1199,6 +1293,8 @@ export type ClusterRecommendations = z.infer<typeof clusterRecommendations>;
 // One executed operation from the immutable audit trail.
 export const auditAction = z.object({
   id: z.uuid(),
+  // What the operation was done for, which is what undo acts on.
+  recommendationId: z.uuid(),
   kind: z.string(),
   actor: z.string(),
   result: z.string(),
@@ -1206,6 +1302,10 @@ export const auditAction = z.object({
   collection: z.string(),
   indexName: z.string(),
   createdAt: instant,
+  // A drop that can still be undone: it recorded the spec to rebuild from, and
+  // its recommendation is still DROPPED. The open list no longer carries dropped
+  // indexes (#606), so the trail is where one is found again.
+  undoable: z.boolean(),
 });
 export type AuditAction = z.infer<typeof auditAction>;
 

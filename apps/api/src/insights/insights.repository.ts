@@ -12,7 +12,9 @@ import {
   analysisNotes,
   and,
   asc,
+  BUILD_TYPES,
   clusterIndexes,
+  clusterNamespaces,
   clusterPassTimings,
   clusterRosters,
   type Database,
@@ -22,9 +24,11 @@ import {
   inArray,
   indexCooldowns,
   indexSnapshots,
+  isNotNull,
   LIVE_STATES,
   latencyReadingColumns,
   latencySamples,
+  lte,
   ne,
   or,
   policies,
@@ -226,6 +230,115 @@ export class InsightsRepository {
 
   async roiRows(clusterId: string) {
     return this.database.db.select().from(roiMetrics).where(eq(roiMetrics.clusterId, clusterId));
+  }
+
+  // Builds Indexterity made that are still in place (#608): ACTIVE, which a
+  // rollback moves out of. How many, and the most recent of them.
+  async builtCount(clusterId: string): Promise<number> {
+    const [counted] = await this.database.db
+      .select({ total: sql<number>`count(*)::int` })
+      .from(recommendations)
+      .where(
+        and(
+          eq(recommendations.clusterId, clusterId),
+          eq(recommendations.state, "ACTIVE"),
+          inArray(recommendations.type, [...BUILD_TYPES]),
+        ),
+      );
+    return counted?.total ?? 0;
+  }
+
+  async recentBuilds(clusterId: string, limit: number) {
+    return this.database.db
+      .select({
+        id: recommendations.id,
+        type: recommendations.type,
+        database: recommendations.database,
+        collection: recommendations.collection,
+        indexName: recommendations.indexName,
+        builtAt: recommendations.builtAt,
+        servedShapeDigests: recommendations.servedShapeDigests,
+        baselineWeeklyDocsExamined: recommendations.baselineWeeklyDocsExamined,
+      })
+      .from(recommendations)
+      .where(
+        and(
+          eq(recommendations.clusterId, clusterId),
+          eq(recommendations.state, "ACTIVE"),
+          inArray(recommendations.type, [...BUILD_TYPES]),
+          isNotNull(recommendations.builtAt),
+        ),
+      )
+      .orderBy(desc(recommendations.builtAt), desc(recommendations.id))
+      .limit(limit);
+  }
+
+  // One collection's latency readings over one span — a build's two windows,
+  // rather than every namespace the cluster has the way `latencyReadings` reads
+  // them for the charts. Per collection, because builds months apart would
+  // otherwise read every sample in between to use a fortnight at each end.
+  async collectionReadings(
+    clusterId: string,
+    database: string,
+    collection: string,
+    from: Date,
+    to: Date,
+  ): Promise<LatencyReading[]> {
+    const rows = await this.database.db
+      .select(latencyReadingColumns)
+      .from(latencySamples)
+      .innerJoin(clusterNamespaces, eq(latencySamples.namespaceId, clusterNamespaces.id))
+      .where(
+        and(
+          eq(latencySamples.clusterId, clusterId),
+          eq(clusterNamespaces.database, database),
+          eq(clusterNamespaces.collection, collection),
+          // Every run that overlaps the span: one that began before `from` and
+          // was still true after it is the reading the span starts from.
+          gte(latencySamples.lastSeenAt, from),
+          lte(latencySamples.capturedAt, to),
+        ),
+      );
+    return rows.map((row) => ({
+      ...runFrom(row),
+      readOps: row.readOps,
+      readLatencyMicros: row.readLatencyMicros,
+      writeOps: row.writeOps,
+      writeLatencyMicros: row.writeLatencyMicros,
+    }));
+  }
+
+  // The shapes with these digests, wherever they are on the cluster — the
+  // caller matches each to its build's own collection, since a digest is of
+  // the shape alone and two collections can scan the same way.
+  async shapesByDigest(clusterId: string, digests: readonly string[]) {
+    if (digests.length === 0) return [];
+    return this.database.db
+      .select({
+        database: workloadShapes.database,
+        collection: workloadShapes.collection,
+        digest: workloadShapes.shapeDigest,
+        weeklyDocsExamined: workloadShapes.weeklyDocsExamined,
+        lastSeenAt: workloadShapes.lastSeenAt,
+      })
+      .from(workloadShapes)
+      .where(
+        and(
+          eq(workloadShapes.clusterId, clusterId),
+          inArray(workloadShapes.shapeDigest, [...new Set(digests)]),
+        ),
+      );
+  }
+
+  // When the workload was last read from end to end: suggest writes its note
+  // only after every database succeeded (jobs/suggest.ts).
+  async workloadReadAt(clusterId: string): Promise<Date | null> {
+    const [note] = await this.database.db
+      .select({ decidedAt: analysisNotes.decidedAt })
+      .from(analysisNotes)
+      .where(and(eq(analysisNotes.clusterId, clusterId), eq(analysisNotes.source, "WORKLOAD")))
+      .limit(1);
+    return note?.decidedAt ?? null;
   }
 
   async recommendationsByIds(ids: readonly string[]) {
@@ -700,6 +813,7 @@ export class InsightsRepository {
     return this.database.db
       .select({
         id: actions.id,
+        recommendationId: actions.recommendationId,
         kind: actions.kind,
         actor: actions.actor,
         result: actions.result,
@@ -707,6 +821,10 @@ export class InsightsRepository {
         collection: recommendations.collection,
         indexName: recommendations.indexName,
         createdAt: actions.createdAt,
+        // The same two conditions rollback checks before it acts: the drop
+        // recorded a spec to rebuild from, and nothing has undone it since. In SQL
+        // so the trail does not ship every dropped index's spec to answer a yes/no.
+        undoable: sql<boolean>`(${actions.kind} = 'DROP' and ${recommendations.state} = 'DROPPED' and coalesce(${actions.rollbackToken} ? 'spec', false))`,
       })
       .from(actions)
       .innerJoin(recommendations, eq(actions.recommendationId, recommendations.id))

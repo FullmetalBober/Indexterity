@@ -8,7 +8,6 @@ import { RecommendationsTable } from "./recommendations-table";
 
 const approveRecommendation = vi.hoisted(() => vi.fn());
 const unhideRecommendation = vi.hoisted(() => vi.fn());
-const rollbackRecommendation = vi.hoisted(() => vi.fn());
 const shortenObserveWindow = vi.hoisted(() => vi.fn());
 
 // The real client with these calls replaced, through a forwarding Proxy: the
@@ -23,7 +22,6 @@ vi.mock("~/lib/api", async (importOriginal) => {
       overriding(actual.api(), {
         approveRecommendation,
         unhideRecommendation,
-        rollbackRecommendation,
         shortenObserveWindow,
       }),
   };
@@ -79,7 +77,6 @@ function indexesInOrder(): string[] {
 beforeEach(() => {
   approveRecommendation.mockResolvedValue(rec());
   unhideRecommendation.mockResolvedValue(rec());
-  rollbackRecommendation.mockResolvedValue(rec());
 });
 
 describe("RecommendationsTable", () => {
@@ -256,7 +253,6 @@ describe("RecommendationsTable", () => {
   it.each([
     ["PROPOSED", "Approve"],
     ["HIDDEN", "Keep it"],
-    ["DROPPED", "Undo"],
   ] as const)("offers %s the %s action", (state, label) => {
     renderInApp(
       <RecommendationsTable
@@ -328,7 +324,7 @@ describe("RecommendationsTable", () => {
       <RecommendationsTable clusterId="c1" recommendations={[]} total={0} loading={false} />,
     );
 
-    expect(screen.getByText("No recommendations yet")).toBeInTheDocument();
+    expect(screen.getByText("No open recommendations")).toBeInTheDocument();
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
   });
 

@@ -43,8 +43,8 @@ function positive(fallback: number): z.ZodType<number, string | undefined> {
 }
 
 // The same, without a default: unset means "the caller decides", which is not
-// the same as zero (STORAGE_USD_PER_GB_MONTH unset hides the dollar figure; it
-// does not price storage at nothing).
+// the same as zero (TUNNEL_PORT unset turns the VPN feature off; it does not
+// listen on port 0).
 function optionalPositive(): z.ZodType<number | undefined, string | undefined> {
   return z
     .string()
@@ -252,7 +252,6 @@ const workerShape = {
   // rotation's one unrecoverable mistake.
   MASTER_KEY_VERSION: positiveInteger(1),
   DEFAULT_ORG_PLAN: z.enum(PLANS).default("FREE"),
-  STORAGE_USD_PER_GB_MONTH: optionalPositive(),
   // The LOOPBACK port the tunnel service listens on (#353, D113). The same
   // variable the service itself reads, so the two cannot be configured into
   // disagreement — there is no host, because there is no deployment where the

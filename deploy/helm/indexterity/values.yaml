@@ -540,8 +540,6 @@ config:
   # the software from quietly inviting you past the grant. Hold a commercial
   # licence for more clusters? Set the plan with set-plan.js.
   defaultOrgPlan: SELF_HOSTED
-  # Storage price used for the $/month ROI headline.
-  storageUsdPerGbMonth: ""
   # The origin better-auth signs sessions for. Defaults to the dashboard's own
   # public origin (web.publicUrl, or the ingress host), which is where the
   # session cookie actually lives — the browser never reaches the api directly.

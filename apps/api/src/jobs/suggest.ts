@@ -398,7 +398,16 @@ export async function suggestForCluster(
           // candidate carries — attribution, not a second reading of the rules
           // (#432).
           const declined = (outcome: "cooldown" | "standing" | "index-exists"): void => {
-            ledger.resolve(database, collection, docCount, candidate.sourceShapes, outcome);
+            // A standing one is named, as on the create side: the live
+            // recommendation is this shape's answer (#608).
+            ledger.resolve(
+              database,
+              collection,
+              docCount,
+              candidate.sourceShapes,
+              outcome,
+              outcome === "standing" ? indexName : null,
+            );
           };
           if (cooled.has(cooldownKey(database, collection, indexName))) {
             declined("cooldown");
@@ -554,8 +563,18 @@ export async function suggestForCluster(
             ledger.resolve(database, collection, docCount, candidate.sourceShapes, "cooldown");
             continue;
           }
+          // Named, like a proposal: the live recommendation IS this shape's
+          // answer, and the name is how its build finds the shapes it was for
+          // (#608) once approval has moved it out of PROPOSED.
           if (standing.has(watchKey(database, collection, indexName))) {
-            ledger.resolve(database, collection, docCount, candidate.sourceShapes, "standing");
+            ledger.resolve(
+              database,
+              collection,
+              docCount,
+              candidate.sourceShapes,
+              "standing",
+              indexName,
+            );
             continue;
           }
           ledger.resolve(

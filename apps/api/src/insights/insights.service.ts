@@ -1,6 +1,7 @@
 import { Injectable } from "@nestjs/common";
 import type {
   AuditAction,
+  BuildImpact,
   ClusterCollections,
   ClusterCooldowns,
   ClusterIndexes,
@@ -15,6 +16,7 @@ import type {
   RoiContribution,
 } from "@repo/contracts";
 import {
+  BUILD_READ_WINDOW_DAYS,
   CLUSTER_INDEXES_PAGE,
   clusterNode,
   type IndexSortKey,
@@ -31,13 +33,13 @@ import {
   chartableCollections,
   latencyGaps,
   latencyPoints,
-  monthlySavingsUsd,
+  readsAround,
+  scansFor,
   summarizeFootprint,
   summarizeLatency,
 } from "../analysis";
 import { parseStoredSpec } from "../analysis/recommend";
 import { explainOutcome, outcomeOf } from "../analysis/workload-outcome";
-import { workerEnv } from "../config/env";
 import { TenancyService } from "../http/tenancy.service";
 import { isWholeCollection } from "../jobs/cooldowns";
 import { isPaced, pacedBudgetMs, pacedEveryHours } from "../jobs/pacing";
@@ -46,6 +48,9 @@ import { InsightsRepository } from "./insights.repository";
 
 const RECENT_ACTIONS = 50;
 const TOP_CONTRIBUTORS = 10;
+// The builds the overview lists, newest first; the count beside it is all of them.
+const RECENT_BUILDS = 10;
+const DAY_MS = 86_400_000;
 
 // What the inventory page was asked for: an optional namespace scope, and the
 // cursor of the page before this one. Mirrors the contract's input rather than
@@ -102,8 +107,9 @@ export class InsightsService {
         clusterId,
         freedBytes: 0,
         indexesDropped: 0,
-        estimatedMonthlyUsd: 0,
         attribution: [],
+        indexesBuilt: 0,
+        builds: [],
       };
     }
     const rows = await this.repo.roiRows(clusterId);
@@ -116,7 +122,6 @@ export class InsightsService {
       0,
       rows.reduce((sum, row) => sum + row.indexCountDelta, 0),
     );
-    const rate = workerEnv().STORAGE_USD_PER_GB_MONTH;
     // Attribution: net freed bytes per recommendation (drop rows minus undo
     // rows), positive contributors only, biggest first.
     const net = new Map<string, number>();
@@ -140,7 +145,6 @@ export class InsightsService {
           collection: rec.collection,
           indexName: rec.indexName,
           freedBytes: bytes,
-          estimatedMonthlyUsd: monthlySavingsUsd(bytes, rate),
         },
       ];
     });
@@ -148,9 +152,61 @@ export class InsightsService {
       clusterId,
       freedBytes,
       indexesDropped,
-      estimatedMonthlyUsd: monthlySavingsUsd(freedBytes, rate),
       attribution,
+      indexesBuilt: await this.repo.builtCount(clusterId),
+      builds: await this.buildImpacts(clusterId),
     };
+  }
+
+  // What each recent build changed (#608), in the two measurements there are.
+  //
+  // Reads on its collection either side of the build, from the latency samples
+  // every collect writes — the plan's window applies to them as to every other
+  // read of history. And the scanning it was for, recorded at the build, against
+  // which of the same shapes are still seen scanning: a shape the index serves
+  // stops being a scanning shape, so it stops being written. "Still seen" waits
+  // until the workload has been read end to end a day after the build, which
+  // gives a profiler's ring time to turn over the scans from before it; until
+  // then it is null, because not having looked is not finding nothing.
+  private async buildImpacts(clusterId: string): Promise<BuildImpact[]> {
+    const builds = await this.repo.recentBuilds(clusterId, RECENT_BUILDS);
+    if (builds.length === 0) return [];
+    const now = Date.now();
+    const windowMs = BUILD_READ_WINDOW_DAYS * DAY_MS;
+    const readable = await this.repo.readableSince(clusterId);
+    const shapes = await this.repo.shapesByDigest(
+      clusterId,
+      builds.flatMap((build) => build.servedShapeDigests ?? []),
+    );
+    const workloadReadAt = await this.repo.workloadReadAt(clusterId);
+    const impacts: BuildImpact[] = [];
+    for (const build of builds) {
+      // recentBuilds asks for a builtAt; the narrowing is for the type.
+      if (build.builtAt === null) continue;
+      const builtAt = build.builtAt.getTime();
+      const from = new Date(Math.max(builtAt - windowMs, readable.getTime()));
+      const readings = await this.repo.collectionReadings(
+        clusterId,
+        build.database,
+        build.collection,
+        from,
+        new Date(builtAt + windowMs),
+      );
+      const reads = readsAround(readings, builtAt, windowMs, now);
+      impacts.push({
+        recommendationId: build.id,
+        type: build.type,
+        database: build.database,
+        collection: build.collection,
+        indexName: build.indexName,
+        builtAt: build.builtAt.toISOString(),
+        readsBefore: reads.before,
+        readsAfter: reads.after,
+        afterDays: reads.afterMs / DAY_MS,
+        scans: scansFor({ ...build, builtAt: build.builtAt }, shapes, workloadReadAt),
+      });
+    }
+    return impacts;
   }
 
   async latency(clusterId: string, orgId: string): Promise<ClusterLatency> {

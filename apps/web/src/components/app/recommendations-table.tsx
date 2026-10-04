@@ -13,7 +13,6 @@ import { Label } from "~/components/ui/label";
 import { millisOf } from "~/lib/instant";
 import {
   useApproveRecommendation,
-  useRollbackRecommendation,
   useShortenObserveWindow,
   useUnhideRecommendation,
 } from "~/lib/queries/mutations/recommendations";
@@ -29,7 +28,6 @@ interface Actions {
   // for never (D136). It used to be a flat 90 the reader was told about in the
   // description and never asked about.
   readonly unhide: (input: { id: string; cooldownDays: number | null }) => void;
-  readonly undo: (id: string) => void;
   readonly shorten: (id: string) => void;
 }
 
@@ -82,21 +80,6 @@ function action(rec: Recommendation, actions: Actions, readOnly: boolean) {
         }
         confirmLabel="Approve"
         onConfirm={() => actions.approve(rec.id)}
-      />
-    );
-  }
-  if (rec.state === "DROPPED") {
-    return (
-      <ConfirmButton
-        trigger={
-          <Button size="sm" variant="outline">
-            Undo
-          </Button>
-        }
-        title={`Rebuild ${rec.indexName}?`}
-        description="The index is recreated from the spec recorded at drop time, and the ROI headline is corrected back down."
-        confirmLabel="Rebuild"
-        onConfirm={() => actions.undo(rec.id)}
       />
     );
   }
@@ -393,7 +376,6 @@ export function RecommendationsTable({
 }) {
   const approve = useApproveRecommendation(clusterId);
   const unhide = useUnhideRecommendation(clusterId);
-  const undo = useRollbackRecommendation(clusterId);
   const shorten = useShortenObserveWindow(clusterId);
 
   const splits = useMemo(() => {
@@ -415,13 +397,12 @@ export function RecommendationsTable({
         {
           approve: approve.mutate,
           unhide: unhide.mutate,
-          undo: undo.mutate,
           shorten: shorten.mutate,
         },
         splits,
         readOnly,
       ),
-    [approve.mutate, unhide.mutate, undo.mutate, shorten.mutate, splits, readOnly],
+    [approve.mutate, unhide.mutate, shorten.mutate, splits, readOnly],
   );
 
   const truncated = total > recommendations.length;
@@ -429,14 +410,14 @@ export function RecommendationsTable({
   return (
     <>
       {truncated ? (
-        <p className="mt-6 text-muted-foreground text-sm">
+        <p className="mt-3 text-muted-foreground text-sm">
           Showing the {recommendations.length} highest-scoring of {total.toLocaleString()}{" "}
           recommendations. The filter searches these; the rest surface as they are resolved.
         </p>
       ) : null}
       <DataTable
-        className="mt-6"
-        caption="Index recommendations for this cluster"
+        className="mt-3"
+        caption="Open index recommendations for this cluster"
         columns={columns}
         data={recommendations}
         loading={loading}
@@ -469,7 +450,7 @@ export function RecommendationsTable({
         // the length of the line is no longer what decides whether it is readable.
         flexColumn={{ index: 5 }}
         empty={{
-          title: "No recommendations yet",
+          title: "No open recommendations",
           description:
             "The engine proposes changes once it has a week of index usage to reason about. Nothing to review means nothing is obviously wrong.",
         }}

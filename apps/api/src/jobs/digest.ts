@@ -1,4 +1,3 @@
-import { monthlySavingsUsd } from "../analysis";
 import type { Database } from "../db";
 import { and, clusters, desc, eq, recommendations } from "../db";
 import type { PrivilegeChange } from "../engine/ports";
@@ -23,7 +22,6 @@ export async function runDigest(db: Database): Promise<number> {
     const creates = proposed.filter((rec) => rec.type === "CREATE" || rec.type === "UPDATE");
     const advisories = proposed.filter((rec) => rec.type === "ADVISORY_REVIEW");
     const freedBytes = drops.reduce((sum, rec) => sum + rec.estimatedBytesSaved, 0);
-    const monthly = monthlySavingsUsd(freedBytes);
 
     const top = proposed
       .slice(0, 5)
@@ -36,7 +34,7 @@ export async function runDigest(db: Database): Promise<number> {
     const lines = [
       `This cluster is in read-only mode, so nothing was executed. Standing by:`,
       ``,
-      `  ${drops.length} drop/merge recommendations (~${Math.round(freedBytes / 1024)} KB, ≈ $${monthly.toFixed(2)}/mo)`,
+      `  ${drops.length} drop/merge recommendations (~${Math.round(freedBytes / 1024)} KB)`,
       `  ${creates.length} create/update recommendations`,
       `  ${advisories.length} advisories to review`,
       ``,

@@ -971,7 +971,6 @@ describe("collect, audit trail and undo", () => {
     const attribution = Array.isArray(roi.attribution) ? roi.attribution.map(asRecord) : [];
     const entry = attribution.find((item) => item.indexName === "attr_test_1");
     expect(entry?.freedBytes).toBe(8192);
-    expect(typeof entry?.estimatedMonthlyUsd).toBe("number");
     // The undone drop from the previous test netted to zero — never listed.
     expect(attribution.some((item) => item.indexName === "old_1")).toBe(false);
   });
@@ -6514,6 +6513,297 @@ describe("bounded per-cluster reads", () => {
     expect(sent).toHaveLength(RECOMMENDATIONS_CAP);
     // The cut is by score, not by whatever order postgres felt like.
     expect(sent.every((rec) => rec.score === 50)).toBe(true);
+  });
+
+  // A built index is not a proposal to build one. The open list used to carry
+  // every state under one cap, so a long history could push new proposals past it;
+  // what is settled is now the audit trail's to show, and a drop is undone there.
+  it("keeps what is settled out of the open list, and offers undo from the trail", async () => {
+    const splitStatesId = await bareCluster("Open And Settled");
+    const base = {
+      clusterId: splitStatesId,
+      database: "app",
+      collection: "orders",
+      rationale: "fixture",
+      estimatedBytesSaved: 1_000,
+    };
+    const rows = await db
+      .insert(recommendations)
+      .values([
+        { ...base, type: "DROP_UNUSED", state: "PROPOSED", indexName: "open_1", score: 10 },
+        { ...base, type: "DROP_UNUSED", state: "HIDDEN", indexName: "hidden_1", score: 20 },
+        // Settled, scoring higher than anything open: the cut used to be by score.
+        { ...base, type: "CREATE", state: "ACTIVE", indexName: "built_1", score: 99 },
+        { ...base, type: "DROP_UNUSED", state: "DROPPED", indexName: "dropped_1", score: 98 },
+        { ...base, type: "DROP_UNUSED", state: "ROLLED_BACK", indexName: "undone_1", score: 97 },
+        { ...base, type: "DROP_UNUSED", state: "REJECTED", indexName: "rejected_1", score: 96 },
+      ])
+      .returning({ id: recommendations.id, indexName: recommendations.indexName });
+    const idOf = (name: string) => at(rows.filter((row) => row.indexName === name)).id;
+
+    const open = asRecord(
+      await (await api(`/clusters/${splitStatesId}/recommendations`, owner)).json(),
+    );
+    expect(
+      asRecords(open.recommendations, "open")
+        .map((rec) => rec.indexName)
+        .sort(),
+    ).toEqual(["hidden_1", "open_1"]);
+    expect(open.total).toBe(2);
+
+    const spec = { spec: { v: 2, key: { a: 1 }, name: "fixture" } };
+    await db.insert(actions).values([
+      { recommendationId: idOf("built_1"), kind: "CREATE", actor: "system", result: "ok" },
+      // A failed attempt before the drop that happened: no spec, nothing to undo.
+      {
+        recommendationId: idOf("dropped_1"),
+        kind: "DROP",
+        actor: "system",
+        result: "failed: fixture",
+      },
+      {
+        recommendationId: idOf("dropped_1"),
+        kind: "DROP",
+        actor: "system",
+        result: "ok",
+        rollbackToken: spec,
+      },
+      // Dropped and undone since: the spec is still on the row, the drop is not.
+      {
+        recommendationId: idOf("undone_1"),
+        kind: "DROP",
+        actor: "system",
+        result: "ok",
+        rollbackToken: spec,
+      },
+    ]);
+
+    const res = await api(`/clusters/${splitStatesId}/actions`, owner);
+    expect(res.status).toBe(200);
+    const trail = asRecords(await res.json(), "actions");
+    const undoable = trail
+      .filter((entry) => entry.undoable === true)
+      .map((entry) => [entry.indexName, entry.result, entry.recommendationId]);
+    expect(undoable).toEqual([["dropped_1", "ok", idOf("dropped_1")]]);
+    // A boolean on every row, not just where it is true.
+    expect(trail).toHaveLength(4);
+    expect(trail.every((entry) => typeof entry.undoable === "boolean")).toBe(true);
+  });
+
+  // #608. The overview's "Proposed reclaimable" summed the PROPOSED rows the
+  // page had, which on every production cluster were builds: 0 KB, with the
+  // approved drops waiting in APPROVED and HIDDEN unseen. The figures now come
+  // from the api, over every open recommendation.
+  it("adds up every open recommendation for the overview's cards", async () => {
+    const summaryId = await bareCluster("Open Summary");
+    const now = Date.now();
+    const day = 86_400_000;
+    const base = {
+      clusterId: summaryId,
+      database: "app",
+      collection: "orders",
+      rationale: "fixture",
+    };
+    await db.insert(recommendations).values([
+      {
+        ...base,
+        type: "DROP_UNUSED",
+        state: "PROPOSED",
+        indexName: "a_1",
+        estimatedBytesSaved: 1_000,
+      },
+      {
+        ...base,
+        type: "DROP_REDUNDANT",
+        state: "APPROVED",
+        indexName: "b_1",
+        estimatedBytesSaved: 2_000,
+      },
+      {
+        ...base,
+        type: "DROP_UNUSED",
+        state: "HIDDEN",
+        indexName: "c_1",
+        estimatedBytesSaved: 4_000,
+      },
+      // Settled: freed already, or never to be.
+      {
+        ...base,
+        type: "DROP_UNUSED",
+        state: "DROPPED",
+        indexName: "d_1",
+        estimatedBytesSaved: 8_000,
+      },
+      {
+        ...base,
+        type: "DROP_UNUSED",
+        state: "REJECTED",
+        indexName: "e_1",
+        estimatedBytesSaved: 16_000,
+      },
+      // The engine will not act on an advisory, so it reclaims nothing here.
+      {
+        ...base,
+        type: "ADVISORY_REVIEW",
+        state: "PROPOSED",
+        indexName: "f_1",
+        estimatedBytesSaved: 32_000,
+      },
+      { ...base, type: "CREATE", state: "PROPOSED", indexName: "status_1" },
+      { ...base, type: "CREATE", state: "APPROVED", indexName: "kind_1" },
+      { ...base, type: "CREATE", state: "ACTIVE", indexName: "built_1" },
+    ]);
+    const shape = (field: string) => ({
+      equality: [field],
+      sort: [],
+      range: [],
+      collscan: true,
+      sortedInMemory: false,
+    });
+    const shapeRow = (field: string, proposedIndex: string, weekly: number, seenDaysAgo = 0) => ({
+      clusterId: summaryId,
+      database: "app",
+      collection: "orders",
+      shape: shape(field),
+      executions: 100,
+      docsExamined: weekly,
+      observedForHours: 168,
+      clients: [],
+      weeklyDocsExamined: weekly,
+      severity: "ROUTINE",
+      outcome: "proposed",
+      proposedIndex,
+      lastSeenAt: new Date(now - seenDaysAgo * day),
+    });
+    await db.insert(workloadShapes).values([
+      shapeRow("status", "status_1", 1_000_000),
+      // Approved, so the ledger names it as the standing answer.
+      { ...shapeRow("kind", "kind_1", 500_000), outcome: "standing" },
+      // Answered by a build that is done: not open work.
+      shapeRow("owner", "built_1", 9_000_000),
+      // Not seen for a fortnight: not scanning now.
+      shapeRow("region", "status_1", 7_000_000, 14),
+    ]);
+
+    const body = asRecord(
+      await (await api(`/clusters/${summaryId}/recommendations`, owner)).json(),
+    );
+
+    expect(body.summary).toEqual({
+      drops: { toReview: 1, underWay: 2, reclaimableBytes: 7_000 },
+      builds: { toReview: 1, underWay: 1, scanningShapes: 2, weeklyDocsExamined: 1_500_000 },
+    });
+  });
+
+  // #608: what a build changed, in the two measurements the api has.
+  it("measures each build: reads either side of it, and the scanning it was for", async () => {
+    const buildsId = await bareCluster("Build Impact");
+    const now = Date.now();
+    const hour = 3_600_000;
+    const day = 24 * hour;
+    const builtAt = new Date(now - 10 * day);
+    const shape = (field: string) => ({
+      equality: [field],
+      sort: [],
+      range: [],
+      collscan: true,
+      sortedInMemory: false,
+    });
+    const shapes = await db
+      .insert(workloadShapes)
+      .values(
+        [
+          // Not written since the build: the index took it over.
+          { field: "userId", weekly: 18_000_000, seen: new Date(builtAt.getTime() - hour) },
+          // Still written nine days on: the build did not fix it.
+          { field: "status", weekly: 3_000_000, seen: new Date(now - hour) },
+        ].map(({ field, weekly, seen }) => ({
+          clusterId: buildsId,
+          database: "app",
+          collection: "settings",
+          shape: shape(field),
+          executions: 100,
+          docsExamined: weekly,
+          observedForHours: 168,
+          clients: [],
+          weeklyDocsExamined: weekly,
+          severity: "ROUTINE",
+          outcome: "index-exists",
+          proposedIndex: null,
+          lastSeenAt: seen,
+        })),
+      )
+      .returning({ digest: workloadShapes.shapeDigest });
+    await db.insert(analysisNotes).values({
+      clusterId: buildsId,
+      source: "WORKLOAD",
+      decidedAt: new Date(now - hour),
+      suppressed: {},
+    });
+    await db.insert(recommendations).values([
+      {
+        clusterId: buildsId,
+        type: "CREATE",
+        state: "ACTIVE",
+        database: "app",
+        collection: "settings",
+        indexName: "userId_1",
+        rationale: "fixture",
+        builtAt,
+        servedShapeDigests: shapes.map((row) => row.digest),
+        baselineWeeklyDocsExamined: 20_000_000,
+      },
+      // Rolled back: not a build that is in place.
+      {
+        clusterId: buildsId,
+        type: "CREATE",
+        state: "ROLLED_BACK",
+        database: "app",
+        collection: "settings",
+        indexName: "gone_1",
+        rationale: "fixture",
+        builtAt,
+      },
+    ]);
+    // Hourly cumulative readings across the fortnight either side: 1,000 reads
+    // an hour at 900 µs before the build, at 300 µs after it.
+    const readings = [];
+    let ops = 0;
+    let micros = 0;
+    for (let h = -7 * 24; h <= 9 * 24; h++) {
+      const at = new Date(builtAt.getTime() + h * hour);
+      readings.push({
+        clusterId: buildsId,
+        database: "app",
+        collection: "settings",
+        readOps: ops,
+        readLatencyMicros: micros,
+        writeOps: 0,
+        writeLatencyMicros: 0,
+        capturedAt: at,
+        lastSeenAt: at,
+      });
+      ops += 1_000;
+      micros += 1_000 * (h < 0 ? 900 : 300);
+    }
+    await insertLatency(db, readings);
+
+    const roi = asRecord(await (await api(`/clusters/${buildsId}/roi`, owner)).json());
+
+    expect(roi.indexesBuilt).toBe(1);
+    const [build, ...rest] = asRecords(roi.builds, "roi.builds");
+    expect(rest).toEqual([]);
+    expect(build?.indexName).toBe("userId_1");
+    expect(build?.builtAt).toBe(builtAt.toISOString());
+    // A full week each side: 168 hourly intervals before, 168 after.
+    expect(build?.readsBefore).toEqual({ ops: 168_000, avgMicros: 900 });
+    expect(build?.readsAfter).toEqual({ ops: 168_000, avgMicros: 300 });
+    expect(build?.afterDays).toBe(7);
+    expect(build?.scans).toEqual({
+      shapes: 2,
+      weeklyDocsExamined: 20_000_000,
+      since: { shapes: 1, weeklyDocsExamined: 3_000_000 },
+    });
   });
 
   it("windows the latency series in time and caps the collections it charts", async () => {

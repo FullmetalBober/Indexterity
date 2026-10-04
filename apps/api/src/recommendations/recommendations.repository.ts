@@ -3,15 +3,22 @@ import {
   actions,
   analysisNotes,
   and,
+  BUILD_TYPES,
   clusterIndexes,
   clusters,
+  DROP_TYPES,
   desc,
   eq,
+  exists,
+  gte,
+  inArray,
   indexSnapshots,
+  LIVE_STATES,
   policies,
   recommendations,
   roiMetrics,
   sql,
+  workloadShapes,
 } from "../db";
 import { DatabaseService } from "../db/database.service";
 
@@ -42,12 +49,86 @@ export interface OwnedForApproval {
 export class RecommendationsRepository {
   constructor(private readonly database: DatabaseService) {}
 
+  // The open recommendations only: proposed, or on their way through the pipeline.
+  // Applied and closed ones are the audit trail's to show (#606) — sharing one
+  // capped list let a long history push new proposals past the cap.
   async countFor(clusterId: string): Promise<number | undefined> {
     const [counted] = await this.database.db
       .select({ total: sql<number>`count(*)::int` })
       .from(recommendations)
-      .where(eq(recommendations.clusterId, clusterId));
+      .where(
+        and(
+          eq(recommendations.clusterId, clusterId),
+          inArray(recommendations.state, [...LIVE_STATES]),
+        ),
+      );
     return counted?.total;
+  }
+
+  // Every open recommendation added up (#608), in SQL because the list beside it
+  // is capped: drops and builds, each split into waiting for review and under
+  // way, and the bytes the open drops would free. `sum` over bigint is numeric,
+  // which node-pg hands over as a string.
+  async openTotals(clusterId: string) {
+    const drop = inArray(recommendations.type, [...DROP_TYPES]);
+    const build = inArray(recommendations.type, [...BUILD_TYPES]);
+    const proposed = eq(recommendations.state, "PROPOSED");
+    const [totals] = await this.database.db
+      .select({
+        dropsToReview: sql<number>`count(*) filter (where ${drop} and ${proposed})::int`,
+        dropsUnderWay: sql<number>`count(*) filter (where ${drop} and not ${proposed})::int`,
+        reclaimableBytes:
+          sql`coalesce(sum(${recommendations.estimatedBytesSaved}) filter (where ${drop}), 0)`.mapWith(
+            Number,
+          ),
+        buildsToReview: sql<number>`count(*) filter (where ${build} and ${proposed})::int`,
+        buildsUnderWay: sql<number>`count(*) filter (where ${build} and not ${proposed})::int`,
+      })
+      .from(recommendations)
+      .where(
+        and(
+          eq(recommendations.clusterId, clusterId),
+          inArray(recommendations.state, [...LIVE_STATES]),
+        ),
+      );
+    return totals;
+  }
+
+  // The scanning shapes an open build answers, seen since `since`, and the
+  // documents they examine a week (#608). Joined on the name the ledger gives
+  // each shape's answer, which an approved build keeps (`standing`), so "under
+  // way" counts as well as "to review".
+  async openBuildScans(clusterId: string, since: Date) {
+    const [scans] = await this.database.db
+      .select({
+        shapes: sql<number>`count(*)::int`,
+        weeklyDocsExamined: sql`coalesce(sum(${workloadShapes.weeklyDocsExamined}), 0)`.mapWith(
+          Number,
+        ),
+      })
+      .from(workloadShapes)
+      .where(
+        and(
+          eq(workloadShapes.clusterId, clusterId),
+          gte(workloadShapes.lastSeenAt, since),
+          exists(
+            this.database.db
+              .select({ one: sql`1` })
+              .from(recommendations)
+              .where(
+                and(
+                  eq(recommendations.clusterId, workloadShapes.clusterId),
+                  eq(recommendations.database, workloadShapes.database),
+                  eq(recommendations.collection, workloadShapes.collection),
+                  eq(recommendations.indexName, workloadShapes.proposedIndex),
+                  inArray(recommendations.state, [...LIVE_STATES]),
+                  inArray(recommendations.type, [...BUILD_TYPES]),
+                ),
+              ),
+          ),
+        ),
+      );
+    return scans;
   }
 
   // D33's default sort — score descending, size as the tiebreak — applied in SQL
@@ -57,7 +138,12 @@ export class RecommendationsRepository {
     return this.database.db
       .select()
       .from(recommendations)
-      .where(eq(recommendations.clusterId, clusterId))
+      .where(
+        and(
+          eq(recommendations.clusterId, clusterId),
+          inArray(recommendations.state, [...LIVE_STATES]),
+        ),
+      )
       .orderBy(desc(recommendations.score), desc(recommendations.estimatedBytesSaved))
       .limit(limit);
   }

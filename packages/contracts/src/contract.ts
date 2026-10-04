@@ -63,11 +63,16 @@ export const contract = {
   // beside them (#64). Nobody has asked to page through 20k proposals — they
   // want the top ones, which is what the default sort already gives — so the
   // cap carries an honest count rather than a cursor.
+  //
+  // OPEN recommendations only: proposed, or still on their way through the
+  // pipeline. What was applied or closed is in the audit trail (`listActions`).
+  // They shared this list until a built index sat in the same table as a proposal
+  // to build one, and a long history could push new proposals past the cap.
   listRecommendations: oc
     .route({
       method: "GET",
       path: "/clusters/{clusterId}/recommendations",
-      summary: "The cluster's recommendations: the highest-scoring, and how many exist",
+      summary: "The cluster's open recommendations: the highest-scoring, and how many exist",
     })
     .input(clusterId)
     .output(clusterRecommendations),
@@ -76,7 +81,8 @@ export const contract = {
     .route({
       method: "GET",
       path: "/clusters/{clusterId}/roi",
-      summary: "Realized ROI for a cluster (freed bytes, indexes dropped, $/mo)",
+      summary:
+        "Realized ROI for a cluster: bytes freed by drops, and the indexes built with what each changed",
     })
     .input(clusterId)
     .output(clusterRoi),

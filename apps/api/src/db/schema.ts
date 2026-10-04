@@ -850,6 +850,13 @@ export const LIVE_STATES = [
   "BUILDING",
 ] as const;
 
+// The other half: what the open recommendations list leaves out (#606), because
+// the work happened or it will not. Named so a new state has to be put in one
+// list or the other — one in neither would vanish from the dashboard without
+// anybody deciding it should. Together the two lists are every state there is,
+// each once, and schema.test.ts holds them to it.
+export const SETTLED_STATES = ["ACTIVE", "DROPPED", "ROLLED_BACK", "REJECTED"] as const;
+
 // The enum literals as a SQL list, for the DDL below. `sql.raw` because
 // drizzle-kit renders an index's expression into the migration verbatim, so a
 // bound parameter would land in the file as a placeholder; the values are TS
@@ -920,6 +927,16 @@ export const recommendations = pgTable(
     builtAt: timestamp("built_at", { withTimezone: true }),
     baselineWriteOps: bigint("baseline_write_ops", { mode: "number" }),
     baselineWriteLatency: bigint("baseline_write_latency", { mode: "number" }),
+    // The scanning a build was for (#608), read from the workload ledger when the
+    // index was built: the shapes whose answer it was (`workload_shapes`
+    // `proposed_index`), by digest, and the documents they examined a week
+    // between them. The overview holds the same shapes against what is seen
+    // scanning afterwards. NULL for a build no shape was recorded for — one made
+    // before this existed, or one that answered none the workload had seen. Never
+    // cleared: unlike the write baseline above, which a watch consumes, this is
+    // the record of what the build was for.
+    servedShapeDigests: text("served_shape_digests").array(),
+    baselineWeeklyDocsExamined: bigint("baseline_weekly_docs_examined", { mode: "number" }),
     // A CRITICAL missing index (analysis/severity.ts): the scan is costing on
     // every execution, so the build skips the change window rather than waiting
     // most of a day for the quiet slot.
@@ -1290,8 +1307,10 @@ export const workloadShapes = pgTable(
     // not a migration, and an outcome written by a newer worker than the api
     // reading it must render as itself rather than fail the whole page.
     outcome: text("outcome").notNull(),
-    // The index that WAS proposed, when one was. Null for every declined
-    // outcome. Not a foreign key: `suggest.ts` deletes and re-inserts every
+    // The index that answers this shape: the one proposed, or for `standing` the
+    // live recommendation it was not proposed twice for — which is how a build
+    // finds the shapes it was for once it is approved (#608). Null for every
+    // other outcome. Not a foreign key: `suggest.ts` deletes and re-inserts every
     // PROPOSED row it owns on each pass, so a reference would dangle by design
     // — and the name is what the reader wants to see anyway.
     proposedIndex: text("proposed_index"),

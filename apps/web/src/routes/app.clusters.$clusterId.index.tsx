@@ -12,14 +12,14 @@ import { AnalysisNotePanel } from "~/components/app/analysis-note";
 import { CollectionsTable, toCollectionRows } from "~/components/app/collections-table";
 import { FootprintPanel } from "~/components/app/footprint-panel";
 import { fmtBytes } from "~/components/app/format";
+import { BuiltByIndex, ImpactCards } from "~/components/app/impact";
 import { latencyCharts } from "~/components/app/latency-series";
 import { NodesPanel } from "~/components/app/nodes-panel";
 import { ParkedPanel } from "~/components/app/parked-panel";
 import { PassesPanel } from "~/components/app/passes-panel";
 import { RecommendationsTable } from "~/components/app/recommendations-table";
-import { Unavailable, UnavailableFigure } from "~/components/app/unavailable";
+import { Unavailable } from "~/components/app/unavailable";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
-import { Skeleton } from "~/components/ui/skeleton";
 import { useClearCooldown } from "~/lib/queries/mutations/recommendations";
 import {
   activityQuery,
@@ -137,9 +137,6 @@ function ClusterOverview() {
   const cooldowns = useCooldowns(id);
   const clearCooldown = useClearCooldown(id);
 
-  const proposed = recommendations.data.recommendations.filter((rec) => rec.state === "PROPOSED");
-  const totalSaved = proposed.reduce((sum, rec) => sum + rec.estimatedBytesSaved, 0);
-
   // Ranked per metric, not once for both charts — see latency-series.ts for the bug
   // that made this its own module rather than four lines here.
   const { readSeries, writeSeries, readNote, writeNote, chartedCount } = latencyCharts(
@@ -167,59 +164,7 @@ function ClusterOverview() {
 
   return (
     <>
-      <div className="grid gap-4 sm:grid-cols-2">
-        <Card>
-          <CardHeader>
-            <CardDescription>Proposed reclaimable</CardDescription>
-            {/* A measured zero and an unknown look identical as a figure — "0 KB"
-                reads as "we looked, there is nothing", which is the same lie the
-                empty states were telling (#72). The number waits — and since
-                #289 it also declines to appear at all when the read failed,
-                which is the same argument for the third time: a figure is a
-                measurement, and a failed read took none. */}
-            {recommendations.pending ? (
-              <Skeleton className="h-9 w-32" />
-            ) : recommendations.failed ? (
-              <UnavailableFigure onRetry={recommendations.retry} />
-            ) : (
-              <CardTitle className="text-3xl tabular-nums">{fmtBytes(totalSaved)}</CardTitle>
-            )}
-          </CardHeader>
-          <CardContent className="text-muted-foreground text-sm">
-            {recommendations.pending ? (
-              <Skeleton className="h-4 w-52" />
-            ) : recommendations.failed ? null : (
-              <>
-                {proposed.length} recommendation{proposed.length === 1 ? "" : "s"} awaiting review
-              </>
-            )}
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader>
-            <CardDescription>Reclaimed</CardDescription>
-            {roi.pending ? (
-              <Skeleton className="h-9 w-32" />
-            ) : roi.failed ? (
-              <UnavailableFigure onRetry={roi.retry} />
-            ) : (
-              <CardTitle className="text-3xl tabular-nums">
-                {fmtBytes(roi.data.freedBytes)}
-              </CardTitle>
-            )}
-          </CardHeader>
-          <CardContent className="text-muted-foreground text-sm">
-            {roi.pending ? (
-              <Skeleton className="h-4 w-52" />
-            ) : roi.failed ? null : (
-              <>
-                {roi.data.indexesDropped} index{roi.data.indexesDropped === 1 ? "" : "es"} dropped ·
-                ${roi.data.estimatedMonthlyUsd.toFixed(2)}/mo
-              </>
-            )}
-          </CardContent>
-        </Card>
-      </div>
+      <ImpactCards recommendations={recommendations} roi={roi} />
 
       {/* No skeleton: a cluster with nothing dropped yet has no such card at
           all, so drawing an outline for it would promise a panel that may never
@@ -241,10 +186,7 @@ function ClusterOverview() {
                     {entry.database}.{entry.collection} · {entry.indexName}
                   </span>
                   <span className="whitespace-nowrap tabular-nums">
-                    {fmtBytes(entry.freedBytes)}{" "}
-                    <span className="text-muted-foreground text-xs">
-                      ~${entry.estimatedMonthlyUsd.toFixed(2)}/mo
-                    </span>
+                    {fmtBytes(entry.freedBytes)}
                   </span>
                 </li>
               ))}
@@ -252,8 +194,9 @@ function ClusterOverview() {
           </CardContent>
         </Card>
       ) : null}
+      <BuiltByIndex builds={roi.data.builds} total={roi.data.indexesBuilt} />
 
-      {/* Directly under the two cumulative cards, because it is the number that
+      {/* Directly under the cumulative cards, because it is the number that
           corrects them (#160). "Reclaimed 4 GB" is true and is not an answer to
           "is my index footprint smaller than it was" — a cluster whose
           application added 6 GB in the same month has a triumphant ROI card and
@@ -286,6 +229,14 @@ function ClusterOverview() {
               them: an empty list means "all fine" unless something says otherwise,
               and on a cluster whose counters keep resetting nothing ever did (#277). */}
           <AnalysisNotePanel analysis={recommendations.data.analysis} />
+
+          <section className="mt-8">
+            <h2 className="font-semibold text-lg">Recommendations</h2>
+            <p className="text-muted-foreground text-sm">
+              What the engine proposes, and what is on its way through hide, observe and build. What
+              it has already done is under Activity, where a drop can be undone.
+            </p>
+          </section>
 
           {/* The roster comes from the read the Nodes panel below already makes, not
               from a second copy in the recommendations payload: the members are a
@@ -418,12 +369,13 @@ function ClusterOverview() {
       <section className="mt-8">
         <h2 className="font-semibold text-lg">Activity</h2>
         <p className="text-muted-foreground text-sm">
-          Every executed operation, with its outcome — the immutable audit trail.
+          Every executed operation, with its outcome — the immutable audit trail. A drop is undone
+          from its row here.
         </p>
         {activity.failed ? (
           <Unavailable what="the activity trail" onRetry={activity.retry} />
         ) : (
-          <ActivityTable activity={activity.data} loading={activity.pending} />
+          <ActivityTable clusterId={id} activity={activity.data} loading={activity.pending} />
         )}
       </section>
     </>

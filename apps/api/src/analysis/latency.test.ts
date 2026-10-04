@@ -5,6 +5,7 @@ import {
   type LatencyReading,
   latencyGaps,
   latencyPoints,
+  readsAround,
   summarizeLatency,
 } from "./latency";
 
@@ -266,5 +267,105 @@ describe("chartableCollections", () => {
   it("never sends more than the cap", () => {
     const many = Array.from({ length: 40 }, (_, i) => series(`c${i}`, [point(i, i)]));
     expect(chartableCollections(many, 8)).toHaveLength(8);
+  });
+});
+
+// #608: what a build changed, read off the collection's own counters.
+describe("readsAround", () => {
+  const HOUR = 3_600_000;
+  const at = Date.parse("2026-09-04T12:00:00Z");
+  // Cumulative read counters, one reading an hour from `fromHour` hours after
+  // the build (negative for before it).
+  function hourly(fromHour: number, steps: readonly [ops: number, micros: number][]) {
+    let ops = 1000;
+    let micros = 1_000_000;
+    return steps.map(([dOps, dMicros], i) => {
+      ops += dOps;
+      micros += dMicros;
+      return {
+        readOps: ops,
+        readLatencyMicros: micros,
+        writeOps: 0,
+        writeLatencyMicros: 0,
+        capturedAt: new Date(at + (fromHour + i) * HOUR).toISOString(),
+      };
+    });
+  }
+
+  it("adds up each side and divides once, so a busy hour outweighs a quiet one", () => {
+    // Before: 1 read at 900 µs, then 99 at 100 µs — 100 reads, 10,800 µs.
+    // After: 50 reads at 30 µs each.
+    const readings = [
+      ...hourly(-3, [
+        [0, 0],
+        [1, 900],
+        [99, 9_900],
+      ]),
+    ];
+    const last = readings[readings.length - 1];
+    if (last === undefined) throw new Error("fixture");
+    readings.push(
+      { ...last, capturedAt: new Date(at + 1 * HOUR).toISOString() },
+      {
+        ...last,
+        readOps: last.readOps + 50,
+        readLatencyMicros: last.readLatencyMicros + 1_500,
+        capturedAt: new Date(at + 2 * HOUR).toISOString(),
+      },
+    );
+
+    const { before, after } = readsAround(readings, at, 7 * 24 * HOUR, at + 3 * HOUR);
+
+    expect(before).toEqual({ ops: 100, avgMicros: 108 });
+    expect(after).toEqual({ ops: 50, avgMicros: 30 });
+  });
+
+  // Part of that interval ran without the index and part with it, so it is
+  // evidence for neither side.
+  it("counts an interval that straddles the build on neither side", () => {
+    // Readings on the hour; the build lands at half past, inside the one
+    // interval that carried any reads.
+    const readings = hourly(-1, [
+      [0, 0],
+      [0, 0],
+      [500, 50_000],
+    ]);
+
+    const { before, after } = readsAround(readings, at + 30 * 60_000, 7 * 24 * HOUR, at + HOUR);
+
+    expect(before).toBeNull();
+    expect(after).toBeNull();
+  });
+
+  it("skips an interval a counter reset spans rather than reading it as fast", () => {
+    const readings = hourly(1, [
+      [0, 0],
+      [100, 10_000],
+    ]);
+    const reset = {
+      ...readings[1],
+      readOps: 10,
+      readLatencyMicros: 500,
+      writeOps: 0,
+      writeLatencyMicros: 0,
+      capturedAt: new Date(at + 3 * HOUR).toISOString(),
+    };
+
+    const { after } = readsAround([...readings, reset], at, 7 * 24 * HOUR, at + 4 * HOUR);
+
+    expect(after).toEqual({ ops: 100, avgMicros: 100 });
+  });
+
+  it("leaves out what falls past the window, and says how much of it has passed", () => {
+    const readings = hourly(-200, [
+      [0, 0],
+      [10, 1_000],
+    ]);
+
+    const outside = readsAround(readings, at, 7 * 24 * HOUR, at + 2 * 24 * HOUR);
+
+    expect(outside.before).toBeNull();
+    expect(outside.afterMs).toBe(2 * 24 * HOUR);
+    expect(readsAround([], at, 7 * 24 * HOUR, at + 30 * 24 * HOUR).afterMs).toBe(7 * 24 * HOUR);
   });
 });

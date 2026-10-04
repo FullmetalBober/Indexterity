@@ -3,10 +3,11 @@ import type {
   AnalysisNote,
   ClusterRecommendations,
   IndexUsage,
+  OpenSummary,
   Recommendation,
   SuppressionGuard,
 } from "@repo/contracts";
-import { RECOMMENDATIONS_CAP } from "@repo/contracts";
+import { OPEN_SCANS_WINDOW_DAYS, RECOMMENDATIONS_CAP } from "@repo/contracts";
 import {
   DEFAULT_OBSERVE_DAYS,
   dominantRefusal,
@@ -44,6 +45,15 @@ type WindowRefusals = Refusals & {
   BAD_REQUEST: (options: { message: string }) => Error;
 };
 
+const DAY_MS = 86_400_000;
+
+// A cluster the caller does not own: nothing open, which is what it looks like
+// from where they stand.
+const NO_OPEN_SUMMARY: OpenSummary = {
+  drops: { toReview: 0, underWay: 0, reclaimableBytes: 0 },
+  builds: { toReview: 0, underWay: 0, scanningShapes: 0, weeklyDocsExamined: 0 },
+};
+
 // The recommendations themselves and the three things a human can do to one:
 // approve it, cancel it while it is hidden, or undo it after the drop.
 //
@@ -67,7 +77,14 @@ export class RecommendationsService {
     // dashboard asks for a cluster it has just been told about, and a refusal
     // there renders as a broken api rather than as an empty panel.
     if (!(await this.tenancy.ownsCluster(clusterId, orgId))) {
-      return { clusterId, total: 0, recommendations: [], usage: [], analysis: null };
+      return {
+        clusterId,
+        total: 0,
+        recommendations: [],
+        summary: NO_OPEN_SUMMARY,
+        usage: [],
+        analysis: null,
+      };
     }
     const total = await this.repo.countFor(clusterId);
     const rows = await this.repo.topFor(clusterId, RECOMMENDATIONS_CAP);
@@ -75,8 +92,32 @@ export class RecommendationsService {
       clusterId,
       total: total ?? rows.length,
       recommendations: rows.map(toRecommendation),
+      summary: await this.summaryFor(clusterId),
       usage: await this.usageFor(clusterId, rows),
       analysis: await this.analysisFor(clusterId),
+    };
+  }
+
+  // The figures the overview's cards draw (#608), over every open
+  // recommendation rather than the capped rows.
+  private async summaryFor(clusterId: string): Promise<OpenSummary> {
+    const totals = await this.repo.openTotals(clusterId);
+    const scans = await this.repo.openBuildScans(
+      clusterId,
+      new Date(Date.now() - OPEN_SCANS_WINDOW_DAYS * DAY_MS),
+    );
+    return {
+      drops: {
+        toReview: totals?.dropsToReview ?? 0,
+        underWay: totals?.dropsUnderWay ?? 0,
+        reclaimableBytes: totals?.reclaimableBytes ?? 0,
+      },
+      builds: {
+        toReview: totals?.buildsToReview ?? 0,
+        underWay: totals?.buildsUnderWay ?? 0,
+        scanningShapes: scans?.shapes ?? 0,
+        weeklyDocsExamined: scans?.weeklyDocsExamined ?? 0,
+      },
     };
   }
 
