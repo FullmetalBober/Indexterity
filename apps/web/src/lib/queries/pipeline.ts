@@ -27,6 +27,10 @@ export const NO_RECOMMENDATIONS: ClusterRecommendations = {
   clusterId: "",
   total: 0,
   recommendations: [],
+  summary: {
+    drops: { toReview: 0, underWay: 0, reclaimableBytes: 0 },
+    builds: { toReview: 0, underWay: 0, scanningShapes: 0, weeklyDocsExamined: 0 },
+  },
   usage: [],
   // Null, not an empty note: "no classify pass has explained itself yet" and
   // "the pass ran and had nothing to explain" are different states, and drawing
@@ -36,15 +40,16 @@ export const NO_RECOMMENDATIONS: ClusterRecommendations = {
 export const NO_ACTIVITY: AuditAction[] = [];
 // A cluster with nothing dropped yet shows zeroes, which is honest: nothing has
 // been proven. A cluster whose ROI read FAILED used to show the same zeroes,
-// which was not — "$0.00/mo reclaimed" is a measurement, and none was taken
-// (#289). The figure is now withheld instead; this stays the shape for the
+// which was not — "0 KB reclaimed" is a measurement, and none was taken (#289).
+// The figure is now withheld instead; this stays the shape for the
 // genuinely-empty case.
 export const NO_ROI: ClusterRoi = {
   clusterId: "",
   freedBytes: 0,
   indexesDropped: 0,
-  estimatedMonthlyUsd: 0,
   attribution: [],
+  indexesBuilt: 0,
+  builds: [],
 };
 
 // A cluster nobody has parked anything on. The failed read no longer shares this

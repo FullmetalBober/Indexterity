@@ -73,7 +73,7 @@ const FEATURES = [
   },
   {
     title: "Proof, not promises",
-    body: "Freed bytes and their $/month, index-count deltas, and per-collection read/write latency charts — before and after. New indexes are watched too: if writes regress, the build rolls back automatically.",
+    body: "Freed bytes, index-count deltas, and per-collection read/write latency charts — before and after. Every index it builds is measured against the week before it: the reads on its collection, and the scanning it was built to stop. If writes regress, the build rolls back automatically.",
   },
   {
     title: "Built for teams",
@@ -96,7 +96,7 @@ const STEPS = [
   ],
   [
     "Watch the ROI",
-    "Latency trends, freed storage and dollars saved accumulate on the dashboard, attributed per index, with undo one click away.",
+    "Latency trends, freed storage and the scans removed accumulate on the dashboard, attributed per index, with undo one click away.",
   ],
 ];
 

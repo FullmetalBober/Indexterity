@@ -196,6 +196,62 @@ export function summarizeLatency(readings: readonly LatencyReading[]): LatencyTr
   };
 }
 
+// The reads on one collection over a window, added up.
+export interface ReadsWindow {
+  readonly ops: number;
+  readonly avgMicros: number;
+}
+
+// The reads on a collection either side of a moment — a build (#608).
+//
+// Every interval between two consecutive readings that lies wholly inside the
+// window before `atMs` is added to `before`, and every one wholly inside the
+// window after it to `after`. One that straddles the moment belongs to neither:
+// part of it ran without the index and part with it. One a counter reset spans
+// is skipped by the same test the chart and the trend use (windowAvg), because
+// it is unmeasurable here for the same reason.
+//
+// Ops and latency are summed and divided once, rather than averaging the
+// per-interval averages: an hour with one read and an hour with ten thousand
+// are not equal evidence.
+//
+// `afterMs` is how much of the window after has passed, which is the whole of it
+// only once the build is a window old.
+export function readsAround(
+  readings: readonly LatencyReading[],
+  atMs: number,
+  windowMs: number,
+  nowMs: number,
+): { before: ReadsWindow | null; after: ReadsWindow | null; afterMs: number } {
+  const sorted = sortedRuns(readings);
+  let beforeOps = 0;
+  let beforeMicros = 0;
+  let afterOps = 0;
+  let afterMicros = 0;
+  for (let i = 1; i < sorted.length; i++) {
+    const prev = sorted[i - 1];
+    const next = sorted[i];
+    if (prev === undefined || next === undefined) continue;
+    const ops = next.readOps - prev.readOps;
+    const micros = next.readLatencyMicros - prev.readLatencyMicros;
+    if (windowAvg(micros, ops) === null) continue;
+    const from = spanEnd(prev);
+    const to = spanStart(next);
+    if (from >= atMs - windowMs && to <= atMs) {
+      beforeOps += ops;
+      beforeMicros += micros;
+    } else if (from >= atMs && to <= atMs + windowMs) {
+      afterOps += ops;
+      afterMicros += micros;
+    }
+  }
+  return {
+    before: beforeOps > 0 ? { ops: beforeOps, avgMicros: beforeMicros / beforeOps } : null,
+    after: afterOps > 0 ? { ops: afterOps, avgMicros: afterMicros / afterOps } : null,
+    afterMs: Math.max(0, Math.min(windowMs, nowMs - atMs)),
+  };
+}
+
 export interface ChartableSeries {
   readonly database: string;
   readonly collection: string;

@@ -7,6 +7,7 @@ import {
   inArray,
   organizations,
   recommendations,
+  workloadShapes,
 } from "../src/db";
 import type {
   CreateIndexOptions,
@@ -80,6 +81,7 @@ let orgId: string;
 let clusterId: string;
 let refusedId: string;
 let plainId: string;
+let servedDigests: string[];
 
 beforeAll(async () => {
   db = createDatabase(databaseUrl(), 2);
@@ -156,6 +158,46 @@ beforeAll(async () => {
   if (refused === undefined || plain === undefined) throw new Error("fixture rows missing");
   refusedId = refused.id;
   plainId = plain.id;
+
+  // What the workload ledger says the plain build answers (#608): two shapes
+  // seen this week naming it, one naming it a month ago, and one naming another
+  // index on the same collection.
+  const shape = (field: string) => ({
+    equality: [field],
+    sort: [],
+    range: [],
+    collscan: true,
+    sortedInMemory: false,
+  });
+  const shapeRow = (field: string, proposedIndex: string, weekly: number, seenDaysAgo: number) => ({
+    clusterId,
+    database: "PlatformPlan",
+    collection: "dbo.Invoices",
+    shape: shape(field),
+    executions: 100,
+    docsExamined: weekly,
+    observedForHours: 168,
+    clients: [],
+    weeklyDocsExamined: weekly,
+    severity: "ROUTINE",
+    outcome: "standing",
+    proposedIndex,
+    lastSeenAt: new Date(Date.now() - seenDaysAgo * 86_400_000),
+  });
+  const served = await db
+    .insert(workloadShapes)
+    .values([
+      shapeRow("ClientID", "ClientID_1_IssuedAt_-1", 5_000_000, 0),
+      shapeRow("IssuedAt", "ClientID_1_IssuedAt_-1", 1_000_000, 1),
+    ])
+    .returning({ digest: workloadShapes.shapeDigest });
+  servedDigests = served.map((row) => row.digest);
+  await db
+    .insert(workloadShapes)
+    .values([
+      shapeRow("Status", "ClientID_1_IssuedAt_-1", 9_000_000, 30),
+      shapeRow("Amount", "Amount_1", 7_000_000, 0),
+    ]);
 });
 
 afterAll(async () => {
@@ -201,6 +243,26 @@ describe("a build the adapter refuses", () => {
       ]),
     );
     expect(history).toHaveLength(2);
+  });
+
+  // #608: the overview later holds these same shapes against what is still seen
+  // scanning, so the build records which ones they were and what they cost.
+  it("records the scanning the landed build was for, and nothing for the refused one", async () => {
+    const rows = await db
+      .select({
+        id: recommendations.id,
+        digests: recommendations.servedShapeDigests,
+        weekly: recommendations.baselineWeeklyDocsExamined,
+      })
+      .from(recommendations)
+      .where(inArray(recommendations.id, [refusedId, plainId]));
+    const plain = rows.find((row) => row.id === plainId);
+    const refused = rows.find((row) => row.id === refusedId);
+
+    expect([...(plain?.digests ?? [])].sort()).toEqual([...servedDigests].sort());
+    expect(plain?.weekly).toBe(6_000_000);
+    expect(refused?.digests).toBeNull();
+    expect(refused?.weekly).toBeNull();
   });
 
   it("leaves nothing approved behind, so the next tick has nothing to refuse again", async () => {

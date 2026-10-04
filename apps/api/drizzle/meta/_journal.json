@@ -526,6 +526,13 @@
       "when": 1791051661870,
       "tag": "0074_privileges_checked",
       "breakpoints": true
+    },
+    {
+      "idx": 75,
+      "version": "7",
+      "when": 1791113941083,
+      "tag": "0075_served_shapes",
+      "breakpoints": true
     }
   ]
 }
