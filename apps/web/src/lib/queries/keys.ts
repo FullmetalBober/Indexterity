@@ -63,6 +63,11 @@ export const queryKeys = {
 
   // Per cluster.
   recommendations: (clusterId: string | null) => ["recommendations", clusterId] as const,
+  // Under the open list's key rather than beside it, so everything that moves the
+  // open list — a pass, an event, an approval — moves the history by prefix too: a
+  // recommendation leaves one list exactly when it joins the other.
+  recommendationHistory: (clusterId: string | null) =>
+    ["recommendations", clusterId, "history"] as const,
   roi: (clusterId: string | null) => ["roi", clusterId] as const,
   activity: (clusterId: string | null) => ["activity", clusterId] as const,
   latency: (clusterId: string | null) => ["latency", clusterId] as const,

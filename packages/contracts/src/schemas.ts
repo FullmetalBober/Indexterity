@@ -449,6 +449,9 @@ export const recommendation = z.object({
   // the sentence the engine already wrote to explain it.
   observeReason: z.string().nullable(),
   createdAt: instant,
+  // When the row last moved. For a settled one — built, dropped, rolled back,
+  // turned down — that is when it settled, which is the date history is read by.
+  updatedAt: instant,
 });
 export type Recommendation = z.infer<typeof recommendation>;
 
@@ -1195,6 +1198,24 @@ export const clusterRecommendations = z.object({
   analysis: analysisNote.nullable(),
 });
 export type ClusterRecommendations = z.infer<typeof clusterRecommendations>;
+
+// How much history one read carries: the most recently settled, newest first.
+// History is read for "what happened lately", so the newest are the answer, and
+// `total` keeps the cut honest the way the open list's does.
+export const RECOMMENDATION_HISTORY_CAP = 200;
+
+// What the engine is done with on a cluster — applied, rolled back or turned
+// down — apart from what is still open (see `listRecommendationHistory`).
+export const clusterRecommendationHistory = z.object({
+  clusterId: z.uuid(),
+  total: z.int().nonnegative(),
+  recommendations: z.array(recommendation),
+  // The same per-node usage the open list carries, for the same reason it is
+  // beside the rows: for an index a build put there, whether anything uses it is
+  // the question its history row is asked.
+  usage: z.array(indexUsage),
+});
+export type ClusterRecommendationHistory = z.infer<typeof clusterRecommendationHistory>;
 
 // One executed operation from the immutable audit trail.
 export const auditAction = z.object({

@@ -24,6 +24,13 @@ export class RecommendationsController {
     );
   }
 
+  @Implement(contract.listRecommendationHistory)
+  listRecommendationHistory(@Req() req: FastifyRequest) {
+    return route(this.tenancy, contract.listRecommendationHistory, req, "member").handler(
+      ({ input, context }) => this.recommendations.history(input.clusterId, context.member.orgId),
+    );
+  }
+
   @Implement(contract.approveRecommendation)
   approveRecommendation(@Req() req: FastifyRequest) {
     return route(this.tenancy, contract.approveRecommendation, req, "owner").handler(

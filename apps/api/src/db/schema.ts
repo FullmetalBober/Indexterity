@@ -850,6 +850,12 @@ export const LIVE_STATES = [
   "BUILDING",
 ] as const;
 
+// The other half, named so it can be asked for: what the dashboard lists as
+// history rather than as recommendations. Applied (a build that is live, a drop
+// that happened) or closed (rolled back, turned down). Together the two lists are
+// every state there is, each once — schema.test.ts holds them to it.
+export const SETTLED_STATES = ["ACTIVE", "DROPPED", "ROLLED_BACK", "REJECTED"] as const;
+
 // The enum literals as a SQL list, for the DDL below. `sql.raw` because
 // drizzle-kit renders an index's expression into the migration verbatim, so a
 // bound parameter would land in the file as a placeholder; the values are TS

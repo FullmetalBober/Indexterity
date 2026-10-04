@@ -7,10 +7,13 @@ import {
   clusters,
   desc,
   eq,
+  inArray,
   indexSnapshots,
+  LIVE_STATES,
   policies,
   recommendations,
   roiMetrics,
+  SETTLED_STATES,
   sql,
 } from "../db";
 import { DatabaseService } from "../db/database.service";
@@ -42,11 +45,19 @@ export interface OwnedForApproval {
 export class RecommendationsRepository {
   constructor(private readonly database: DatabaseService) {}
 
+  // The open recommendations only: proposed, or on their way through the pipeline.
+  // Applied and closed ones are history and have their own read below — sharing
+  // one capped list let a long history push new proposals past the cap.
   async countFor(clusterId: string): Promise<number | undefined> {
     const [counted] = await this.database.db
       .select({ total: sql<number>`count(*)::int` })
       .from(recommendations)
-      .where(eq(recommendations.clusterId, clusterId));
+      .where(
+        and(
+          eq(recommendations.clusterId, clusterId),
+          inArray(recommendations.state, [...LIVE_STATES]),
+        ),
+      );
     return counted?.total;
   }
 
@@ -57,8 +68,43 @@ export class RecommendationsRepository {
     return this.database.db
       .select()
       .from(recommendations)
-      .where(eq(recommendations.clusterId, clusterId))
+      .where(
+        and(
+          eq(recommendations.clusterId, clusterId),
+          inArray(recommendations.state, [...LIVE_STATES]),
+        ),
+      )
       .orderBy(desc(recommendations.score), desc(recommendations.estimatedBytesSaved))
+      .limit(limit);
+  }
+
+  // What the engine is done with — applied, rolled back or turned down — newest
+  // first, because the question history answers is "what happened lately", and a
+  // score says nothing about that once the work is over.
+  async historyCountFor(clusterId: string): Promise<number | undefined> {
+    const [counted] = await this.database.db
+      .select({ total: sql<number>`count(*)::int` })
+      .from(recommendations)
+      .where(
+        and(
+          eq(recommendations.clusterId, clusterId),
+          inArray(recommendations.state, [...SETTLED_STATES]),
+        ),
+      );
+    return counted?.total;
+  }
+
+  async historyFor(clusterId: string, limit: number): Promise<RecommendationRow[]> {
+    return this.database.db
+      .select()
+      .from(recommendations)
+      .where(
+        and(
+          eq(recommendations.clusterId, clusterId),
+          inArray(recommendations.state, [...SETTLED_STATES]),
+        ),
+      )
+      .orderBy(desc(recommendations.updatedAt), desc(recommendations.id))
       .limit(limit);
   }
 

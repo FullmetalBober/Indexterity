@@ -9,6 +9,7 @@
 import type {
   AuditAction,
   ClusterCooldowns,
+  ClusterRecommendationHistory,
   ClusterRecommendations,
   ClusterRoi,
 } from "@repo/contracts";
@@ -32,6 +33,13 @@ export const NO_RECOMMENDATIONS: ClusterRecommendations = {
   // "the pass ran and had nothing to explain" are different states, and drawing
   // the second on a failed read would be inventing a reassurance (#277).
   analysis: null,
+};
+// A cluster the engine has finished nothing on yet.
+export const NO_RECOMMENDATION_HISTORY: ClusterRecommendationHistory = {
+  clusterId: "",
+  total: 0,
+  recommendations: [],
+  usage: [],
 };
 export const NO_ACTIVITY: AuditAction[] = [];
 // A cluster with nothing dropped yet shows zeroes, which is honest: nothing has
@@ -63,6 +71,16 @@ export function recommendationsQuery(clusterId: string | null) {
     queryKey: queryKeys.recommendations(clusterId),
     queryFn: () =>
       clusterId === null ? NO_RECOMMENDATIONS : api().listRecommendations({ clusterId }),
+  });
+}
+
+export function recommendationHistoryQuery(clusterId: string | null) {
+  return queryOptions({
+    queryKey: queryKeys.recommendationHistory(clusterId),
+    queryFn: () =>
+      clusterId === null
+        ? NO_RECOMMENDATION_HISTORY
+        : api().listRecommendationHistory({ clusterId }),
   });
 }
 
@@ -98,6 +116,18 @@ export function useRecommendations(clusterId: string | null): Read<ClusterRecomm
     isError,
     refetch,
   } = useQuery(recommendationsQuery(clusterId));
+  return { data, pending: isPending, failed: isError, retry: () => void refetch() };
+}
+
+export function useRecommendationHistory(
+  clusterId: string | null,
+): Read<ClusterRecommendationHistory> {
+  const {
+    data = NO_RECOMMENDATION_HISTORY,
+    isPending,
+    isError,
+    refetch,
+  } = useQuery(recommendationHistoryQuery(clusterId));
   return { data, pending: isPending, failed: isError, retry: () => void refetch() };
 }
 

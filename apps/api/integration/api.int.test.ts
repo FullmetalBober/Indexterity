@@ -6516,6 +6516,79 @@ describe("bounded per-cluster reads", () => {
     expect(sent.every((rec) => rec.score === 50)).toBe(true);
   });
 
+  // A built index is not a proposal to build one. The open list used to carry
+  // every state under one cap, so a long history could push new proposals past it;
+  // now the open and the settled are two reads.
+  it("keeps what is settled out of the open list, and lists it as history", async () => {
+    const splitStatesId = await bareCluster("Open And Settled");
+    const base = {
+      clusterId: splitStatesId,
+      database: "app",
+      collection: "orders",
+      rationale: "fixture",
+      estimatedBytesSaved: 1_000,
+    };
+    const day = 86_400_000;
+    await db.insert(recommendations).values([
+      { ...base, type: "DROP_UNUSED", state: "PROPOSED", indexName: "open_1", score: 10 },
+      { ...base, type: "DROP_UNUSED", state: "HIDDEN", indexName: "hidden_1", score: 20 },
+      // Settled, scoring higher than anything open: the cut used to be by score.
+      {
+        ...base,
+        type: "CREATE",
+        state: "ACTIVE",
+        indexName: "built_1",
+        score: 99,
+        updatedAt: new Date(Date.now() - 2 * day),
+      },
+      {
+        ...base,
+        type: "DROP_UNUSED",
+        state: "DROPPED",
+        indexName: "dropped_1",
+        score: 98,
+        updatedAt: new Date(Date.now() - day),
+      },
+      {
+        ...base,
+        type: "DROP_UNUSED",
+        state: "REJECTED",
+        indexName: "rejected_1",
+        score: 97,
+        updatedAt: new Date(Date.now() - 3 * day),
+      },
+    ]);
+
+    const open = asRecord(
+      await (await api(`/clusters/${splitStatesId}/recommendations`, owner)).json(),
+    );
+    expect(
+      asRecords(open.recommendations, "open")
+        .map((rec) => rec.indexName)
+        .sort(),
+    ).toEqual(["hidden_1", "open_1"]);
+    expect(open.total).toBe(2);
+
+    const res = await api(`/clusters/${splitStatesId}/recommendations/history`, owner);
+    expect(res.status).toBe(200);
+    const history = asRecord(await res.json());
+    // Newest first: the question history answers is what happened lately.
+    expect(asRecords(history.recommendations, "history").map((rec) => rec.indexName)).toEqual([
+      "dropped_1",
+      "built_1",
+      "rejected_1",
+    ]);
+    expect(history.total).toBe(3);
+
+    const outsider = await signUp("history-stranger");
+    createdEmails.push(outsider.email);
+    const foreign = asRecord(
+      await (await api(`/clusters/${splitStatesId}/recommendations/history`, outsider)).json(),
+    );
+    expect(foreign.recommendations).toEqual([]);
+    expect(foreign.total).toBe(0);
+  });
+
   it("windows the latency series in time and caps the collections it charts", async () => {
     const seriesId = await bareCluster("Bounded Series");
     const now = Date.now();

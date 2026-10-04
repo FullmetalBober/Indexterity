@@ -123,5 +123,6 @@ export function toRecommendation(row: typeof recommendations.$inferSelect): Reco
     proposedCooldownDays: proposedVetoDays(row.observeDays ?? DEFAULT_OBSERVE_DAYS),
     observeReason: row.observeReason,
     createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
   };
 }

@@ -11,6 +11,7 @@ import { Checkbox } from "~/components/ui/checkbox";
 import { Input } from "~/components/ui/input";
 import { Label } from "~/components/ui/label";
 import { millisOf } from "~/lib/instant";
+import { LocalTime } from "~/lib/local-time";
 import {
   useApproveRecommendation,
   useRollbackRecommendation,
@@ -19,6 +20,10 @@ import {
 } from "~/lib/queries/mutations/recommendations";
 
 const column = dashboardColumns<Recommendation>();
+
+// Day and month, like the drop date beside a hidden index: history is read for
+// "lately", and a year on every row would be noise.
+const SETTLED_ON: Intl.DateTimeFormatOptions = { day: "numeric", month: "short" };
 
 // Taken by id rather than as mutation objects: react-query's `mutate` keeps the
 // same reference across renders, so the column list built from these stays stable
@@ -260,6 +265,10 @@ function buildColumns(
   actions: Actions,
   splits: Map<string, SplitEntry>,
   readOnly: boolean,
+  // The settled list rather than the open one: when it settled replaces how
+  // strongly it was proposed, because once the work is done the score is history
+  // and the date is the question.
+  history: boolean,
 ): DashboardColumns<Recommendation> {
   // column.columns() rather than a bare array: it threads each column's own
   // value type out through a variadic tuple, so a string column and a number
@@ -296,25 +305,38 @@ function buildColumns(
       // reader carries to mongosh. Same treatment as the rationale.
       cell: (info) => <Truncated className="font-mono text-xs">{info.getValue()}</Truncated>,
     }),
-    column.accessor("score", {
-      header: "Score",
-      sortFn: "basic",
-      // Descending first: the reason to sort by confidence is to see the
-      // strongest proposals, and a list of the weakest is nobody's first question.
-      sortDescFirst: true,
-      cell: (info) => {
-        return (
-          <span className="text-xs tabular-nums">
-            {info.getValue()}
-            {/* Once a drop is hidden the score is history — it decided whether to
+    history
+      ? column.accessor("updatedAt", {
+          id: "settled",
+          header: "Settled",
+          // ISO instants order as text, so this is chronological.
+          sortFn: "text",
+          sortDescFirst: true,
+          cell: (info) => (
+            <span className="text-muted-foreground text-xs">
+              <LocalTime iso={info.getValue()} options={SETTLED_ON} dateOnly />
+            </span>
+          ),
+        })
+      : column.accessor("score", {
+          header: "Score",
+          sortFn: "basic",
+          // Descending first: the reason to sort by confidence is to see the
+          // strongest proposals, and a list of the weakest is nobody's first question.
+          sortDescFirst: true,
+          cell: (info) => {
+            return (
+              <span className="text-xs tabular-nums">
+                {info.getValue()}
+                {/* Once a drop is hidden the score is history — it decided whether to
                 start, and the only open question is when this ends. The window is
                 per-index, so it is not something a reader can work out from the
                 policy setting. */}
-            <DropsOn rec={info.row.original} />
-          </span>
-        );
-      },
-    }),
+                <DropsOn rec={info.row.original} />
+              </span>
+            );
+          },
+        }),
     // The class, and under it the split the class cannot express (#161). Sorted
     // by the class still: it is the categorical answer, and "which of these is
     // concentrated on one node" is a question you scan for rather than sort by.
@@ -367,6 +389,7 @@ export function RecommendationsTable({
   total,
   loading,
   readOnly = false,
+  history = false,
 }: {
   clusterId: string | null;
   recommendations: Recommendation[];
@@ -390,6 +413,10 @@ export function RecommendationsTable({
   // action is honoured, so a caller that forgets it gets the old behaviour and
   // the api's refusal, not a table that silently withholds approvals (#257).
   readOnly?: boolean;
+  // The settled list — built, dropped, rolled back, turned down — rather than the
+  // open one. Same rows and the same controls (a drop can still be undone from
+  // here), read by date instead of by score.
+  history?: boolean;
 }) {
   const approve = useApproveRecommendation(clusterId);
   const unhide = useUnhideRecommendation(clusterId);
@@ -420,8 +447,9 @@ export function RecommendationsTable({
         },
         splits,
         readOnly,
+        history,
       ),
-    [approve.mutate, unhide.mutate, undo.mutate, shorten.mutate, splits, readOnly],
+    [approve.mutate, unhide.mutate, undo.mutate, shorten.mutate, splits, readOnly, history],
   );
 
   const truncated = total > recommendations.length;
@@ -429,21 +457,27 @@ export function RecommendationsTable({
   return (
     <>
       {truncated ? (
-        <p className="mt-6 text-muted-foreground text-sm">
-          Showing the {recommendations.length} highest-scoring of {total.toLocaleString()}{" "}
-          recommendations. The filter searches these; the rest surface as they are resolved.
+        <p className="mt-3 text-muted-foreground text-sm">
+          {history
+            ? `Showing the ${recommendations.length} most recent of ${total.toLocaleString()}. The filter searches these.`
+            : `Showing the ${recommendations.length} highest-scoring of ${total.toLocaleString()} recommendations. The filter searches these; the rest surface as they are resolved.`}
         </p>
       ) : null}
       <DataTable
-        className="mt-6"
-        caption="Index recommendations for this cluster"
+        className="mt-3"
+        caption={
+          history
+            ? "Applied and closed recommendations for this cluster"
+            : "Open index recommendations for this cluster"
+        }
         columns={columns}
         data={recommendations}
         loading={loading}
         getRowId={(rec) => rec.id}
-        // Highest confidence first — the ordering a reader would apply by hand.
-        initialSorting={[{ id: "score", desc: true }]}
-        filterLabel="Filter recommendations"
+        // Highest confidence first for what is open — the ordering a reader would
+        // apply by hand — and newest first for what is done.
+        initialSorting={[history ? { id: "settled", desc: true } : { id: "score", desc: true }]}
+        filterLabel={history ? "Filter history" : "Filter recommendations"}
         // Unbounded by nature: one row per index worth touching, across every
         // collection. Sixty-odd is a normal cluster and thousands is a big one.
         virtualize={{ maxHeight: 640, estimateRowHeight: 64 }}
@@ -468,11 +502,19 @@ export function RecommendationsTable({
         // column's width the cell truncates and the tooltip carries the rest, so
         // the length of the line is no longer what decides whether it is readable.
         flexColumn={{ index: 5 }}
-        empty={{
-          title: "No recommendations yet",
-          description:
-            "The engine proposes changes once it has a week of index usage to reason about. Nothing to review means nothing is obviously wrong.",
-        }}
+        empty={
+          history
+            ? {
+                title: "Nothing applied yet",
+                description:
+                  "Indexes the engine builds or drops, and recommendations rolled back or turned down, are listed here once they are settled.",
+              }
+            : {
+                title: "No open recommendations",
+                description:
+                  "The engine proposes changes once it has a week of index usage to reason about. Nothing to review means nothing is obviously wrong.",
+              }
+        }
       />
     </>
   );
