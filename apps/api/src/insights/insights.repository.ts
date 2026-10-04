@@ -700,6 +700,7 @@ export class InsightsRepository {
     return this.database.db
       .select({
         id: actions.id,
+        recommendationId: actions.recommendationId,
         kind: actions.kind,
         actor: actions.actor,
         result: actions.result,
@@ -707,6 +708,10 @@ export class InsightsRepository {
         collection: recommendations.collection,
         indexName: recommendations.indexName,
         createdAt: actions.createdAt,
+        // The same two conditions rollback checks before it acts: the drop
+        // recorded a spec to rebuild from, and nothing has undone it since. In SQL
+        // so the trail does not ship every dropped index's spec to answer a yes/no.
+        undoable: sql<boolean>`(${actions.kind} = 'DROP' and ${recommendations.state} = 'DROPPED' and coalesce(${actions.rollbackToken} ? 'spec', false))`,
       })
       .from(actions)
       .innerJoin(recommendations, eq(actions.recommendationId, recommendations.id))

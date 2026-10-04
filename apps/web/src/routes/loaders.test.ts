@@ -36,7 +36,7 @@ describe("cluster route loaders", () => {
     await runLoader(OverviewRoute, { params: { clusterId: "c1" }, context: { queryClient } });
     // Returning early is only half of it — a loader that warmed nothing would
     // also return early, and every panel would then fetch on mount instead.
-    expect(queryClient.ensureQueryData).toHaveBeenCalledTimes(11);
+    expect(queryClient.ensureQueryData).toHaveBeenCalledTimes(10);
   });
 
   // The one that mattered most: the second read here dials the customer's

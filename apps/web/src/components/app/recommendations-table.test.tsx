@@ -8,7 +8,6 @@ import { RecommendationsTable } from "./recommendations-table";
 
 const approveRecommendation = vi.hoisted(() => vi.fn());
 const unhideRecommendation = vi.hoisted(() => vi.fn());
-const rollbackRecommendation = vi.hoisted(() => vi.fn());
 const shortenObserveWindow = vi.hoisted(() => vi.fn());
 
 // The real client with these calls replaced, through a forwarding Proxy: the
@@ -23,7 +22,6 @@ vi.mock("~/lib/api", async (importOriginal) => {
       overriding(actual.api(), {
         approveRecommendation,
         unhideRecommendation,
-        rollbackRecommendation,
         shortenObserveWindow,
       }),
   };
@@ -64,7 +62,6 @@ function rec(over: Partial<Recommendation> = {}): Recommendation {
     proposedCooldownDays: 30,
     observeReason: null,
     createdAt: "2026-08-01T00:00:00.000Z",
-    updatedAt: "2026-09-01T00:00:00.000Z",
     ...over,
   };
 }
@@ -80,7 +77,6 @@ function indexesInOrder(): string[] {
 beforeEach(() => {
   approveRecommendation.mockResolvedValue(rec());
   unhideRecommendation.mockResolvedValue(rec());
-  rollbackRecommendation.mockResolvedValue(rec());
 });
 
 describe("RecommendationsTable", () => {
@@ -257,7 +253,6 @@ describe("RecommendationsTable", () => {
   it.each([
     ["PROPOSED", "Approve"],
     ["HIDDEN", "Keep it"],
-    ["DROPPED", "Undo"],
   ] as const)("offers %s the %s action", (state, label) => {
     renderInApp(
       <RecommendationsTable
@@ -331,67 +326,6 @@ describe("RecommendationsTable", () => {
 
     expect(screen.getByText("No open recommendations")).toBeInTheDocument();
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
-  });
-
-  // What the engine is done with, apart from what is open: a built index is not a
-  // proposal to build one, so the two no longer share a table.
-  describe("as history", () => {
-    it("reads by when it settled instead of by score", () => {
-      renderInApp(
-        <RecommendationsTable
-          clusterId="c1"
-          recommendations={[rec({ state: "ACTIVE", type: "CREATE" })]}
-          total={1}
-          loading={false}
-          history
-        />,
-      );
-      expect(screen.getByRole("columnheader", { name: /Settled/ })).toBeInTheDocument();
-      expect(screen.queryByRole("columnheader", { name: /Score/ })).not.toBeInTheDocument();
-      expect(
-        screen.getByText("Applied and closed recommendations for this cluster"),
-      ).toBeInTheDocument();
-    });
-
-    it("says so when nothing is settled yet", () => {
-      renderInApp(
-        <RecommendationsTable
-          clusterId="c1"
-          recommendations={[]}
-          total={0}
-          loading={false}
-          history
-        />,
-      );
-      expect(screen.getByText("Nothing applied yet")).toBeInTheDocument();
-    });
-
-    // History is where a dropped index is found again, so its undo stays here.
-    it("still offers to rebuild a dropped index", () => {
-      renderInApp(
-        <RecommendationsTable
-          clusterId="c1"
-          recommendations={[rec({ state: "DROPPED" })]}
-          total={1}
-          loading={false}
-          history
-        />,
-      );
-      expect(screen.getByRole("button", { name: "Undo" })).toBeInTheDocument();
-    });
-
-    it("counts the most recent when it is only showing some", () => {
-      renderInApp(
-        <RecommendationsTable
-          clusterId="c1"
-          recommendations={[rec({ state: "DROPPED" })]}
-          total={250}
-          loading={false}
-          history
-        />,
-      );
-      expect(screen.getByText(/Showing the 1 most recent of 250/)).toBeInTheDocument();
-    });
   });
 
   // The api sends the highest-scoring 500 and says how many exist (#64). A

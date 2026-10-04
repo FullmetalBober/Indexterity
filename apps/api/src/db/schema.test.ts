@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { LIVE_STATES, recommendationState, SETTLED_STATES } from "./schema";
 
-// The dashboard lists a recommendation either as open or as history, by these two
-// lists. A state in neither would vanish from both tables; a state in both would
-// be drawn twice.
+// The open recommendations list is LIVE_STATES. A state in neither list would
+// vanish from it with nobody having decided that; a state in both would be open
+// and settled at once.
 describe("recommendation states", () => {
   it("are each live or settled, and never both", () => {
     const live = new Set<string>(LIVE_STATES);

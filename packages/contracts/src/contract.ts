@@ -31,7 +31,6 @@ import {
   clusterPasses,
   clusterPolicyView,
   clusterPrivileges,
-  clusterRecommendationHistory,
   clusterRecommendations,
   clusterRoi,
   clusterWorkload,
@@ -66,7 +65,7 @@ export const contract = {
   // cap carries an honest count rather than a cursor.
   //
   // OPEN recommendations only: proposed, or still on their way through the
-  // pipeline. Applied and closed ones are history and come from the route below.
+  // pipeline. What was applied or closed is in the audit trail (`listActions`).
   // They shared this list until a built index sat in the same table as a proposal
   // to build one, and a long history could push new proposals past the cap.
   listRecommendations: oc
@@ -77,18 +76,6 @@ export const contract = {
     })
     .input(clusterId)
     .output(clusterRecommendations),
-
-  // What the engine is done with: indexes it built or dropped, and recommendations
-  // rolled back or turned down. The RECOMMENDATION_HISTORY_CAP most recently
-  // settled, newest first, with the true total.
-  listRecommendationHistory: oc
-    .route({
-      method: "GET",
-      path: "/clusters/{clusterId}/recommendations/history",
-      summary: "The cluster's applied and closed recommendations, newest first",
-    })
-    .input(clusterId)
-    .output(clusterRecommendationHistory),
 
   getRoi: oc
     .route({

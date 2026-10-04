@@ -1,13 +1,12 @@
 import { Injectable } from "@nestjs/common";
 import type {
   AnalysisNote,
-  ClusterRecommendationHistory,
   ClusterRecommendations,
   IndexUsage,
   Recommendation,
   SuppressionGuard,
 } from "@repo/contracts";
-import { RECOMMENDATION_HISTORY_CAP, RECOMMENDATIONS_CAP } from "@repo/contracts";
+import { RECOMMENDATIONS_CAP } from "@repo/contracts";
 import {
   DEFAULT_OBSERVE_DAYS,
   dominantRefusal,
@@ -78,23 +77,6 @@ export class RecommendationsService {
       recommendations: rows.map(toRecommendation),
       usage: await this.usageFor(clusterId, rows),
       analysis: await this.analysisFor(clusterId),
-    };
-  }
-
-  // What the engine is done with on this cluster, newest first (#606): built,
-  // dropped, rolled back or turned down. The open list above no longer carries
-  // these, so a built index stops sitting beside a proposal to build one.
-  async history(clusterId: string, orgId: string): Promise<ClusterRecommendationHistory> {
-    if (!(await this.tenancy.ownsCluster(clusterId, orgId))) {
-      return { clusterId, total: 0, recommendations: [], usage: [] };
-    }
-    const total = await this.repo.historyCountFor(clusterId);
-    const rows = await this.repo.historyFor(clusterId, RECOMMENDATION_HISTORY_CAP);
-    return {
-      clusterId,
-      total: total ?? rows.length,
-      recommendations: rows.map(toRecommendation),
-      usage: await this.usageFor(clusterId, rows),
     };
   }
 

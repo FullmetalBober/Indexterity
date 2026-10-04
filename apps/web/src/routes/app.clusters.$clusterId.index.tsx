@@ -24,12 +24,10 @@ import { useClearCooldown } from "~/lib/queries/mutations/recommendations";
 import {
   activityQuery,
   cooldownsQuery,
-  recommendationHistoryQuery,
   recommendationsQuery,
   roiQuery,
   useActivity,
   useCooldowns,
-  useRecommendationHistory,
   useRecommendations,
   useRoi,
 } from "~/lib/queries/pipeline";
@@ -77,7 +75,6 @@ export const Route = createFileRoute("/app/clusters/$clusterId/")({
     const id = params.clusterId;
     const warm = Promise.allSettled([
       context.queryClient.ensureQueryData(recommendationsQuery(id)),
-      context.queryClient.ensureQueryData(recommendationHistoryQuery(id)),
       context.queryClient.ensureQueryData(roiQuery(id)),
       context.queryClient.ensureQueryData(activityQuery(id)),
       context.queryClient.ensureQueryData(latencyQuery(id)),
@@ -129,7 +126,6 @@ function ClusterOverview() {
   // that is unmounting this page. Each answers with its own pending flag, so one
   // dead read costs its own panel and nothing else on the page.
   const recommendations = useRecommendations(id);
-  const history = useRecommendationHistory(id);
   const roi = useRoi(id);
   const activity = useActivity(id);
   const latency = useLatency(id);
@@ -295,7 +291,7 @@ function ClusterOverview() {
             <h2 className="font-semibold text-lg">Recommendations</h2>
             <p className="text-muted-foreground text-sm">
               What the engine proposes, and what is on its way through hide, observe and build. What
-              it has built, dropped, rolled back or been told no about is under History.
+              it has already done is under Activity, where a drop can be undone.
             </p>
           </section>
 
@@ -346,34 +342,6 @@ function ClusterOverview() {
             />
           )}
         </div>
-      </section>
-
-      {/* Apart from the open list, because a built index is not a proposal to build
-          one: the two used to share one table, and one capped list — so a long
-          history could push new proposals past the cap. Newest first; a drop can
-          still be undone from here. */}
-      <section className="mt-8">
-        <h2 className="font-semibold text-lg">History</h2>
-        <p className="text-muted-foreground text-sm">
-          Indexes the engine built or dropped, and recommendations rolled back or turned down,
-          newest first.
-        </p>
-        {history.failed ? (
-          <div className="mt-3">
-            <Unavailable what="the history" onRetry={history.retry} />
-          </div>
-        ) : (
-          <RecommendationsTable
-            clusterId={id}
-            recommendations={history.data.recommendations}
-            usage={history.data.usage}
-            roster={nodes.data}
-            total={history.data.total}
-            loading={history.pending}
-            readOnly={cluster?.readOnly ?? false}
-            history
-          />
-        )}
       </section>
 
       {/* Drawn while the series read is out, because two charts appearing under
@@ -458,12 +426,13 @@ function ClusterOverview() {
       <section className="mt-8">
         <h2 className="font-semibold text-lg">Activity</h2>
         <p className="text-muted-foreground text-sm">
-          Every executed operation, with its outcome — the immutable audit trail.
+          Every executed operation, with its outcome — the immutable audit trail. A drop is undone
+          from its row here.
         </p>
         {activity.failed ? (
           <Unavailable what="the activity trail" onRetry={activity.retry} />
         ) : (
-          <ActivityTable activity={activity.data} loading={activity.pending} />
+          <ActivityTable clusterId={id} activity={activity.data} loading={activity.pending} />
         )}
       </section>
     </>

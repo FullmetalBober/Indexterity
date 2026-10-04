@@ -6518,8 +6518,8 @@ describe("bounded per-cluster reads", () => {
 
   // A built index is not a proposal to build one. The open list used to carry
   // every state under one cap, so a long history could push new proposals past it;
-  // now the open and the settled are two reads.
-  it("keeps what is settled out of the open list, and lists it as history", async () => {
+  // what is settled is now the audit trail's to show, and a drop is undone there.
+  it("keeps what is settled out of the open list, and offers undo from the trail", async () => {
     const splitStatesId = await bareCluster("Open And Settled");
     const base = {
       clusterId: splitStatesId,
@@ -6528,36 +6528,19 @@ describe("bounded per-cluster reads", () => {
       rationale: "fixture",
       estimatedBytesSaved: 1_000,
     };
-    const day = 86_400_000;
-    await db.insert(recommendations).values([
-      { ...base, type: "DROP_UNUSED", state: "PROPOSED", indexName: "open_1", score: 10 },
-      { ...base, type: "DROP_UNUSED", state: "HIDDEN", indexName: "hidden_1", score: 20 },
-      // Settled, scoring higher than anything open: the cut used to be by score.
-      {
-        ...base,
-        type: "CREATE",
-        state: "ACTIVE",
-        indexName: "built_1",
-        score: 99,
-        updatedAt: new Date(Date.now() - 2 * day),
-      },
-      {
-        ...base,
-        type: "DROP_UNUSED",
-        state: "DROPPED",
-        indexName: "dropped_1",
-        score: 98,
-        updatedAt: new Date(Date.now() - day),
-      },
-      {
-        ...base,
-        type: "DROP_UNUSED",
-        state: "REJECTED",
-        indexName: "rejected_1",
-        score: 97,
-        updatedAt: new Date(Date.now() - 3 * day),
-      },
-    ]);
+    const rows = await db
+      .insert(recommendations)
+      .values([
+        { ...base, type: "DROP_UNUSED", state: "PROPOSED", indexName: "open_1", score: 10 },
+        { ...base, type: "DROP_UNUSED", state: "HIDDEN", indexName: "hidden_1", score: 20 },
+        // Settled, scoring higher than anything open: the cut used to be by score.
+        { ...base, type: "CREATE", state: "ACTIVE", indexName: "built_1", score: 99 },
+        { ...base, type: "DROP_UNUSED", state: "DROPPED", indexName: "dropped_1", score: 98 },
+        { ...base, type: "DROP_UNUSED", state: "ROLLED_BACK", indexName: "undone_1", score: 97 },
+        { ...base, type: "DROP_UNUSED", state: "REJECTED", indexName: "rejected_1", score: 96 },
+      ])
+      .returning({ id: recommendations.id, indexName: recommendations.indexName });
+    const idOf = (name: string) => at(rows.filter((row) => row.indexName === name)).id;
 
     const open = asRecord(
       await (await api(`/clusters/${splitStatesId}/recommendations`, owner)).json(),
@@ -6569,24 +6552,43 @@ describe("bounded per-cluster reads", () => {
     ).toEqual(["hidden_1", "open_1"]);
     expect(open.total).toBe(2);
 
-    const res = await api(`/clusters/${splitStatesId}/recommendations/history`, owner);
-    expect(res.status).toBe(200);
-    const history = asRecord(await res.json());
-    // Newest first: the question history answers is what happened lately.
-    expect(asRecords(history.recommendations, "history").map((rec) => rec.indexName)).toEqual([
-      "dropped_1",
-      "built_1",
-      "rejected_1",
+    const spec = { spec: { v: 2, key: { a: 1 }, name: "fixture" } };
+    await db.insert(actions).values([
+      { recommendationId: idOf("built_1"), kind: "CREATE", actor: "system", result: "ok" },
+      // A failed attempt before the drop that happened: no spec, nothing to undo.
+      {
+        recommendationId: idOf("dropped_1"),
+        kind: "DROP",
+        actor: "system",
+        result: "failed: fixture",
+      },
+      {
+        recommendationId: idOf("dropped_1"),
+        kind: "DROP",
+        actor: "system",
+        result: "ok",
+        rollbackToken: spec,
+      },
+      // Dropped and undone since: the spec is still on the row, the drop is not.
+      {
+        recommendationId: idOf("undone_1"),
+        kind: "DROP",
+        actor: "system",
+        result: "ok",
+        rollbackToken: spec,
+      },
     ]);
-    expect(history.total).toBe(3);
 
-    const outsider = await signUp("history-stranger");
-    createdEmails.push(outsider.email);
-    const foreign = asRecord(
-      await (await api(`/clusters/${splitStatesId}/recommendations/history`, outsider)).json(),
-    );
-    expect(foreign.recommendations).toEqual([]);
-    expect(foreign.total).toBe(0);
+    const res = await api(`/clusters/${splitStatesId}/actions`, owner);
+    expect(res.status).toBe(200);
+    const trail = asRecords(await res.json(), "actions");
+    const undoable = trail
+      .filter((entry) => entry.undoable === true)
+      .map((entry) => [entry.indexName, entry.result, entry.recommendationId]);
+    expect(undoable).toEqual([["dropped_1", "ok", idOf("dropped_1")]]);
+    // A boolean on every row, not just where it is true.
+    expect(trail).toHaveLength(4);
+    expect(trail.every((entry) => typeof entry.undoable === "boolean")).toBe(true);
   });
 
   it("windows the latency series in time and caps the collections it charts", async () => {
