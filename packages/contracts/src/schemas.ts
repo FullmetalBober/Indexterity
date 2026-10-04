@@ -1199,6 +1199,8 @@ export type ClusterRecommendations = z.infer<typeof clusterRecommendations>;
 // One executed operation from the immutable audit trail.
 export const auditAction = z.object({
   id: z.uuid(),
+  // What the operation was done for, which is what undo acts on.
+  recommendationId: z.uuid(),
   kind: z.string(),
   actor: z.string(),
   result: z.string(),
@@ -1206,6 +1208,10 @@ export const auditAction = z.object({
   collection: z.string(),
   indexName: z.string(),
   createdAt: instant,
+  // A drop that can still be undone: it recorded the spec to rebuild from, and
+  // its recommendation is still DROPPED. The open list no longer carries dropped
+  // indexes (#606), so the trail is where one is found again.
+  undoable: z.boolean(),
 });
 export type AuditAction = z.infer<typeof auditAction>;
 

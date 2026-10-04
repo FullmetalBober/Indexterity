@@ -287,6 +287,14 @@ function ClusterOverview() {
               and on a cluster whose counters keep resetting nothing ever did (#277). */}
           <AnalysisNotePanel analysis={recommendations.data.analysis} />
 
+          <section className="mt-8">
+            <h2 className="font-semibold text-lg">Recommendations</h2>
+            <p className="text-muted-foreground text-sm">
+              What the engine proposes, and what is on its way through hide, observe and build. What
+              it has already done is under Activity, where a drop can be undone.
+            </p>
+          </section>
+
           {/* The roster comes from the read the Nodes panel below already makes, not
               from a second copy in the recommendations payload: the members are a
               fact about the cluster's last collect, identical for every row, and
@@ -418,12 +426,13 @@ function ClusterOverview() {
       <section className="mt-8">
         <h2 className="font-semibold text-lg">Activity</h2>
         <p className="text-muted-foreground text-sm">
-          Every executed operation, with its outcome — the immutable audit trail.
+          Every executed operation, with its outcome — the immutable audit trail. A drop is undone
+          from its row here.
         </p>
         {activity.failed ? (
           <Unavailable what="the activity trail" onRetry={activity.retry} />
         ) : (
-          <ActivityTable activity={activity.data} loading={activity.pending} />
+          <ActivityTable clusterId={id} activity={activity.data} loading={activity.pending} />
         )}
       </section>
     </>

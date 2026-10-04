@@ -6516,6 +6516,81 @@ describe("bounded per-cluster reads", () => {
     expect(sent.every((rec) => rec.score === 50)).toBe(true);
   });
 
+  // A built index is not a proposal to build one. The open list used to carry
+  // every state under one cap, so a long history could push new proposals past it;
+  // what is settled is now the audit trail's to show, and a drop is undone there.
+  it("keeps what is settled out of the open list, and offers undo from the trail", async () => {
+    const splitStatesId = await bareCluster("Open And Settled");
+    const base = {
+      clusterId: splitStatesId,
+      database: "app",
+      collection: "orders",
+      rationale: "fixture",
+      estimatedBytesSaved: 1_000,
+    };
+    const rows = await db
+      .insert(recommendations)
+      .values([
+        { ...base, type: "DROP_UNUSED", state: "PROPOSED", indexName: "open_1", score: 10 },
+        { ...base, type: "DROP_UNUSED", state: "HIDDEN", indexName: "hidden_1", score: 20 },
+        // Settled, scoring higher than anything open: the cut used to be by score.
+        { ...base, type: "CREATE", state: "ACTIVE", indexName: "built_1", score: 99 },
+        { ...base, type: "DROP_UNUSED", state: "DROPPED", indexName: "dropped_1", score: 98 },
+        { ...base, type: "DROP_UNUSED", state: "ROLLED_BACK", indexName: "undone_1", score: 97 },
+        { ...base, type: "DROP_UNUSED", state: "REJECTED", indexName: "rejected_1", score: 96 },
+      ])
+      .returning({ id: recommendations.id, indexName: recommendations.indexName });
+    const idOf = (name: string) => at(rows.filter((row) => row.indexName === name)).id;
+
+    const open = asRecord(
+      await (await api(`/clusters/${splitStatesId}/recommendations`, owner)).json(),
+    );
+    expect(
+      asRecords(open.recommendations, "open")
+        .map((rec) => rec.indexName)
+        .sort(),
+    ).toEqual(["hidden_1", "open_1"]);
+    expect(open.total).toBe(2);
+
+    const spec = { spec: { v: 2, key: { a: 1 }, name: "fixture" } };
+    await db.insert(actions).values([
+      { recommendationId: idOf("built_1"), kind: "CREATE", actor: "system", result: "ok" },
+      // A failed attempt before the drop that happened: no spec, nothing to undo.
+      {
+        recommendationId: idOf("dropped_1"),
+        kind: "DROP",
+        actor: "system",
+        result: "failed: fixture",
+      },
+      {
+        recommendationId: idOf("dropped_1"),
+        kind: "DROP",
+        actor: "system",
+        result: "ok",
+        rollbackToken: spec,
+      },
+      // Dropped and undone since: the spec is still on the row, the drop is not.
+      {
+        recommendationId: idOf("undone_1"),
+        kind: "DROP",
+        actor: "system",
+        result: "ok",
+        rollbackToken: spec,
+      },
+    ]);
+
+    const res = await api(`/clusters/${splitStatesId}/actions`, owner);
+    expect(res.status).toBe(200);
+    const trail = asRecords(await res.json(), "actions");
+    const undoable = trail
+      .filter((entry) => entry.undoable === true)
+      .map((entry) => [entry.indexName, entry.result, entry.recommendationId]);
+    expect(undoable).toEqual([["dropped_1", "ok", idOf("dropped_1")]]);
+    // A boolean on every row, not just where it is true.
+    expect(trail).toHaveLength(4);
+    expect(trail.every((entry) => typeof entry.undoable === "boolean")).toBe(true);
+  });
+
   it("windows the latency series in time and caps the collections it charts", async () => {
     const seriesId = await bareCluster("Bounded Series");
     const now = Date.now();

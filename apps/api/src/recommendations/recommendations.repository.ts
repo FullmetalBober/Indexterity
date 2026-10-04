@@ -7,7 +7,9 @@ import {
   clusters,
   desc,
   eq,
+  inArray,
   indexSnapshots,
+  LIVE_STATES,
   policies,
   recommendations,
   roiMetrics,
@@ -42,11 +44,19 @@ export interface OwnedForApproval {
 export class RecommendationsRepository {
   constructor(private readonly database: DatabaseService) {}
 
+  // The open recommendations only: proposed, or on their way through the pipeline.
+  // Applied and closed ones are the audit trail's to show (#606) — sharing one
+  // capped list let a long history push new proposals past the cap.
   async countFor(clusterId: string): Promise<number | undefined> {
     const [counted] = await this.database.db
       .select({ total: sql<number>`count(*)::int` })
       .from(recommendations)
-      .where(eq(recommendations.clusterId, clusterId));
+      .where(
+        and(
+          eq(recommendations.clusterId, clusterId),
+          inArray(recommendations.state, [...LIVE_STATES]),
+        ),
+      );
     return counted?.total;
   }
 
@@ -57,7 +67,12 @@ export class RecommendationsRepository {
     return this.database.db
       .select()
       .from(recommendations)
-      .where(eq(recommendations.clusterId, clusterId))
+      .where(
+        and(
+          eq(recommendations.clusterId, clusterId),
+          inArray(recommendations.state, [...LIVE_STATES]),
+        ),
+      )
       .orderBy(desc(recommendations.score), desc(recommendations.estimatedBytesSaved))
       .limit(limit);
   }
