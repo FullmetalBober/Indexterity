@@ -81,7 +81,8 @@ export const contract = {
     .route({
       method: "GET",
       path: "/clusters/{clusterId}/roi",
-      summary: "Realized ROI for a cluster (freed bytes, indexes dropped, $/mo)",
+      summary:
+        "Realized ROI for a cluster: bytes freed by drops, and the indexes built with what each changed",
     })
     .input(clusterId)
     .output(clusterRoi),

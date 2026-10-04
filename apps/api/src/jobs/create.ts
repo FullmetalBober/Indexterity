@@ -5,6 +5,7 @@ import { type IndexBuildOutcome, IndexBuildRefusedError } from "../engine/ports"
 import type { TunnelRegistry } from "../tunnel/tunnel.registry";
 import { effectiveChangeWindow } from "./change-window";
 import { openClusterSession } from "./cluster-connection";
+import { servedShapes } from "./served-shapes";
 
 // APPROVED CREATE/UPDATE/MERGE -> build the index (executor.create) -> ACTIVE.
 // Retiring superseded indexes is left to the next classify pass, which sees them
@@ -152,13 +153,15 @@ export async function applyCreatesForCluster(
       }
       // Write-latency baseline at build time — the reference for the post-build watch.
       const { writes } = await collector.collectionLatency(rec.database, rec.collection);
+      const builtAt = new Date();
       await db
         .update(recommendations)
         .set({
           state: "ACTIVE",
-          builtAt: new Date(),
+          builtAt,
           baselineWriteOps: writes.ops,
           baselineWriteLatency: writes.latencyMicros,
+          ...(await servedShapes(db, rec, builtAt)),
           updatedAt: new Date(),
         })
         .where(eq(recommendations.id, rec.id));

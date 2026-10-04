@@ -51,6 +51,14 @@ export function fmtMicros(value: number | null): string {
   return value === null ? "—" : `${Math.round(value)}`;
 }
 
+// A latency with its unit, for a sentence rather than a µs column (#608):
+// `310 µs`, `13.4 ms`, `577 ms`.
+export function fmtLatency(micros: number): string {
+  if (micros < 1000) return `${Math.round(micros)} µs`;
+  if (micros < 100_000) return `${(micros / 1000).toFixed(1)} ms`;
+  return `${Math.round(micros / 1000)} ms`;
+}
+
 // A plain count, compacted (#432).
 //
 // The workload table's two numbers are executions and documents walked, and both
@@ -61,6 +69,7 @@ export function fmtMicros(value: number | null): string {
 // carries, so the table and the rationale beside it do not describe the same
 // scan in two different orders of magnitude.
 export function fmtCount(value: number): string {
+  if (value >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(1)}B`;
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
   if (value >= 1000) return `${Math.round(value / 1000)}k`;
   return String(Math.round(value));

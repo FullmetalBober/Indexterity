@@ -400,10 +400,6 @@ entries of one name in one container is a value that depends on ordering.
 - name: MAIL_FROM
   value: {{ default .Values.smtp.user .Values.smtp.from | quote }}
 {{- end }}
-{{- if .Values.config.storageUsdPerGbMonth }}
-- name: STORAGE_USD_PER_GB_MONTH
-  value: {{ .Values.config.storageUsdPerGbMonth | quote }}
-{{- end }}
 {{- end -}}
 
 {{/* Fail early with an actionable message when a required secret is absent. */}}
