@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  chartableCollections,
+  chartableNamespaces,
+  chartEvidence,
   type LatencyPoint,
   type LatencyReading,
   latencyGaps,
@@ -204,16 +205,18 @@ describe("latencyGaps", () => {
   });
 });
 
-describe("chartableCollections", () => {
+describe("chartableNamespaces", () => {
   const point = (read: number | null, write: number | null): LatencyPoint => ({
     capturedAt: "2026-08-28T00:00:00.000Z",
     readMicros: read,
     writeMicros: write,
   });
+  // Counted off the points, which is what the overview's fold counts off the
+  // rows (#614) — the integration suite holds the two to each other.
   const series = (collection: string, points: LatencyPoint[]) => ({
     database: "app",
     collection,
-    points,
+    ...chartEvidence(points),
   });
   const names = (chosen: readonly { collection: string }[]) =>
     chosen.map((entry) => entry.collection).sort();
@@ -226,7 +229,7 @@ describe("chartableCollections", () => {
       series(`reader-${i}`, [point(1, null), point(2, null)]),
     );
     const writer = series("writer", [point(null, 1), point(null, 2)]);
-    expect(names(chartableCollections([...readers, writer], 8))).toContain("writer");
+    expect(names(chartableNamespaces([...readers, writer], 8))).toContain("writer");
   });
 
   it("splits the budget so neither metric can crowd the other out", () => {
@@ -236,7 +239,7 @@ describe("chartableCollections", () => {
     const writers = Array.from({ length: 6 }, (_, i) =>
       series(`writer-${i}`, [point(null, i + 1)]),
     );
-    const chosen = chartableCollections([...readers, ...writers], 8);
+    const chosen = chartableNamespaces([...readers, ...writers], 8);
     expect(chosen).toHaveLength(8);
     expect(chosen.filter((entry) => entry.collection.startsWith("writer"))).toHaveLength(4);
     expect(chosen.filter((entry) => entry.collection.startsWith("reader"))).toHaveLength(4);
@@ -245,15 +248,15 @@ describe("chartableCollections", () => {
   it("ranks on drawable points, not on how long the collection has been watched", () => {
     const watched = series("watched-longest", [point(null, null), point(null, null), point(1, 1)]);
     const busy = series("busiest", [point(1, 1), point(2, 2)]);
-    expect(names(chartableCollections([watched, busy], 2))).toEqual(["busiest", "watched-longest"]);
+    expect(names(chartableNamespaces([watched, busy], 2))).toEqual(["busiest", "watched-longest"]);
     // ...and with only one slot per metric, the one with more drawable points wins.
-    expect(names(chartableCollections([watched, busy], 2).slice(0, 1))).toEqual(["busiest"]);
+    expect(names(chartableNamespaces([watched, busy], 2).slice(0, 1))).toEqual(["busiest"]);
   });
 
   it("breaks ties on namespace so the same cluster charts the same collections", () => {
     const tied = ["zeta", "alpha", "mu"].map((name) => series(name, [point(1, 1)]));
-    expect(names(chartableCollections(tied, 2))).toEqual(["alpha", "mu"]);
-    expect(names(chartableCollections([...tied].reverse(), 2))).toEqual(["alpha", "mu"]);
+    expect(names(chartableNamespaces(tied, 2))).toEqual(["alpha", "mu"]);
+    expect(names(chartableNamespaces([...tied].reverse(), 2))).toEqual(["alpha", "mu"]);
   });
 
   it("still sends collections when neither metric is drawable, so the gap can be explained", () => {
@@ -261,12 +264,12 @@ describe("chartableCollections", () => {
     // An empty payload here leaves the panel with no readGap to read and it
     // falls back to "not enough samples yet", which is the #85 wording.
     const fresh = Array.from({ length: 3 }, (_, i) => series(`c${i}`, [point(null, null)]));
-    expect(chartableCollections(fresh, 8)).toHaveLength(3);
+    expect(chartableNamespaces(fresh, 8)).toHaveLength(3);
   });
 
   it("never sends more than the cap", () => {
     const many = Array.from({ length: 40 }, (_, i) => series(`c${i}`, [point(i, i)]));
-    expect(chartableCollections(many, 8)).toHaveLength(8);
+    expect(chartableNamespaces(many, 8)).toHaveLength(8);
   });
 });
 

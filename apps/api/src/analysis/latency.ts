@@ -151,6 +151,26 @@ export function latencyGaps(readings: readonly LatencyReading[]): LatencyGaps {
   };
 }
 
+// A trend from its four readings, which is how the overview's fold hands them
+// over (#614): the first and last measurable window of each metric, already
+// picked out in postgres. `summarizeLatency` below is the same answer from the
+// rows themselves, and the integration suite holds the two to each other.
+export function trendFrom(
+  samples: number,
+  read: { readonly baseline: number | null; readonly current: number | null },
+  write: { readonly baseline: number | null; readonly current: number | null },
+): LatencyTrend {
+  return {
+    samples,
+    currentReadMicros: read.current,
+    baselineReadMicros: read.baseline,
+    readDeltaPct: deltaPct(read.baseline, read.current),
+    currentWriteMicros: write.current,
+    baselineWriteMicros: write.baseline,
+    writeDeltaPct: deltaPct(write.baseline, write.current),
+  };
+}
+
 function deltaPct(baseline: number | null, current: number | null): number | null {
   if (baseline === null || current === null || baseline <= 0) return null;
   return ((current - baseline) / baseline) * 100;
@@ -252,14 +272,33 @@ export function readsAround(
   };
 }
 
-export interface ChartableSeries {
+// What the chart ranking reads of one collection: how many points each chart
+// could draw from it, and how many points it has in all, the gaps included.
+// Counts rather than the points themselves, so the ranking can run on a fold of
+// the rows instead of on the rows (#614): the overview shipped every reading of
+// every collection over the window to chart eight of them — 2 MB a load on a
+// MongoDB cluster of a hundred collections.
+export interface ChartEvidence {
   readonly database: string;
   readonly collection: string;
-  readonly points: readonly LatencyPoint[];
+  readonly readPoints: number;
+  readonly writePoints: number;
+  readonly points: number;
 }
 
-function namespaceOf(series: ChartableSeries): string {
-  return `${series.database}.${series.collection}`;
+/** A series' chart evidence, counted off its points the way the fold counts rows. */
+export function chartEvidence(
+  points: readonly LatencyPoint[],
+): Pick<ChartEvidence, "readPoints" | "writePoints" | "points"> {
+  return {
+    readPoints: points.filter((point) => point.readMicros !== null).length,
+    writePoints: points.filter((point) => point.writeMicros !== null).length,
+    points: points.length,
+  };
+}
+
+function namespaceOf(evidence: Pick<ChartEvidence, "database" | "collection">): string {
+  return `${evidence.database}.${evidence.collection}`;
 }
 
 // The collections the two latency charts are sent, ranked ONCE PER METRIC.
@@ -285,23 +324,15 @@ function namespaceOf(series: ChartableSeries): string {
 // many readings the collection has, which is what let "most evidence" mean
 // "collected for longest". Ties break on namespace, so a cluster charts the same
 // collections on every load instead of reshuffling with postgres's row order.
-function topByMetric<T extends ChartableSeries>(
-  collections: readonly T[],
-  metric: (point: LatencyPoint) => number | null,
+function topByMetric<T extends ChartEvidence>(
+  evidence: readonly T[],
+  drawable: (entry: T) => number,
   limit: number,
 ): T[] {
-  return [...collections]
-    .map((series) => ({
-      series,
-      drawable: series.points.filter((point) => metric(point) !== null).length,
-    }))
-    .filter((entry) => entry.drawable > 0)
-    .sort(
-      (a, b) =>
-        b.drawable - a.drawable || namespaceOf(a.series).localeCompare(namespaceOf(b.series)),
-    )
-    .slice(0, limit)
-    .map((entry) => entry.series);
+  return [...evidence]
+    .filter((entry) => drawable(entry) > 0)
+    .sort((a, b) => drawable(b) - drawable(a) || namespaceOf(a).localeCompare(namespaceOf(b)))
+    .slice(0, limit);
 }
 
 // Returns at most `limit` collections for any limit of 2 or more.
@@ -312,24 +343,24 @@ function topByMetric<T extends ChartableSeries>(
 // both rankings come back empty — would ship an empty array and leave the panel
 // with nothing to say but "not enough samples yet". That is #85's original
 // wording and the whole thing this pair of fields exists to replace.
-export function chartableCollections<T extends ChartableSeries>(
-  collections: readonly T[],
+export function chartableNamespaces<T extends ChartEvidence>(
+  evidence: readonly T[],
   limit: number,
 ): T[] {
   const perMetric = Math.max(1, Math.floor(limit / 2));
   const chosen = new Map<string, T>();
-  for (const series of topByMetric(collections, (point) => point.readMicros, perMetric)) {
-    chosen.set(namespaceOf(series), series);
+  for (const entry of topByMetric(evidence, (e) => e.readPoints, perMetric)) {
+    chosen.set(namespaceOf(entry), entry);
   }
-  for (const series of topByMetric(collections, (point) => point.writeMicros, perMetric)) {
-    chosen.set(namespaceOf(series), series);
+  for (const entry of topByMetric(evidence, (e) => e.writePoints, perMetric)) {
+    chosen.set(namespaceOf(entry), entry);
   }
-  const byEvidence = [...collections].sort(
-    (a, b) => b.points.length - a.points.length || namespaceOf(a).localeCompare(namespaceOf(b)),
+  const byEvidence = [...evidence].sort(
+    (a, b) => b.points - a.points || namespaceOf(a).localeCompare(namespaceOf(b)),
   );
-  for (const series of byEvidence) {
+  for (const entry of byEvidence) {
     if (chosen.size >= limit) break;
-    chosen.set(namespaceOf(series), series);
+    chosen.set(namespaceOf(entry), entry);
   }
   return [...chosen.values()];
 }

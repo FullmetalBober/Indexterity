@@ -11,6 +11,7 @@ import { errorReportingEnabled } from "@repo/errors";
 import { createStartHandler, defaultStreamHandler } from "@tanstack/react-start/server";
 import { createServerEntry } from "@tanstack/react-start/server-entry";
 import { isApiRequest, passThroughToApi } from "~/lib/api-passthrough";
+import { compressedResponse } from "~/lib/compression";
 import { startMetricsServer } from "~/lib/metrics/provider";
 import { measureRequest } from "~/lib/metrics/requests";
 import { isRecord } from "~/lib/narrow";
@@ -117,11 +118,18 @@ if (Reflect.get(globalThis, BOOTED) !== true) {
 const requestInit = (opts: unknown): Parameters<typeof fetch>[1] =>
   isRecord(opts) ? opts : undefined;
 
+//
+// Compressed last, so it is what leaves this process (#614): the host bills the
+// bytes it sends to the CDN in front of it, which compresses for the browser
+// but received them raw. lib/compression.ts says what is and is not compressed.
 const handleRequest = (request: Request, opts?: unknown): Response | Promise<Response> =>
   measureRequest(request, async () =>
-    isApiRequest(new URL(request.url).pathname)
-      ? passThroughToApi(request)
-      : withSecurityHeaders(await fetch(request, requestInit(opts))),
+    compressedResponse(
+      request,
+      isApiRequest(new URL(request.url).pathname)
+        ? await passThroughToApi(request)
+        : withSecurityHeaders(await fetch(request, requestInit(opts))),
+    ),
   );
 
 // The wrapper only when there is something to report to (#176). This was the

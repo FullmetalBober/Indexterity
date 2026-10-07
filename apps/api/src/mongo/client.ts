@@ -18,6 +18,17 @@ const SERVER_SELECTION_TIMEOUT_MS = 5000;
 // already budgets for.
 const MAX_IDLE_TIME_MS = 60_000;
 
+// How often the driver checks each server it knows about, and by polling rather
+// than streaming (#614). The default streams: a monitoring connection the server
+// answers every 10 s, plus a second connection per server pinging for round-trip
+// time on the same clock. A replica set is watched by its own client and by one
+// per member (the collectors fan out per member), so a three-member set holds
+// six monitors and twelve connections for as long as the session is pooled —
+// all of it traffic on the customer's network and our host's, for failover news
+// nothing here waits for. A pass is minutes long and a failed operation already
+// makes the driver check that server at once, so a minute is plenty.
+const HEARTBEAT_FREQUENCY_MS = 60_000;
+
 // The driver options that keep TLS switched on while turning off the part that
 // makes it worth having, each paired with the consent that permits it. A
 // connection nobody validates the certificate of is a connection anyone in the
@@ -186,5 +197,7 @@ export function mongoClient(
     // customer's mongod, whose connection budget is not ours to spend.
     maxPoolSize: maxPoolSize(),
     maxIdleTimeMS: MAX_IDLE_TIME_MS,
+    serverMonitoringMode: "poll",
+    heartbeatFrequencyMS: HEARTBEAT_FREQUENCY_MS,
   });
 }
