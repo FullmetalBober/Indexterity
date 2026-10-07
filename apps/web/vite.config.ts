@@ -34,8 +34,14 @@ export default defineConfig({
     // covered by having been added. The header values are imported rather than
     // written again here — two copies of a security header is one copy and one
     // stale copy.
+    //
+    // compressPublicAssets writes a brotli and a gzip copy of every built asset
+    // over 1 KB, which that same static handler serves to a request that takes
+    // them (#614). The host bills what it sends to the CDN in front of it, and
+    // the main bundle went out at 256 KB where brotli makes it 83.
     nitroV2Plugin({
       compatibilityDate: "2026-07-31",
+      compressPublicAssets: true,
       routeRules: {
         "/**": { headers: { ...EDGE_HEADERS } },
         "/assets/**": { headers: { "cache-control": ASSET_CACHE_CONTROL } },

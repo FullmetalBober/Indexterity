@@ -1,8 +1,10 @@
-import type {
-  CreateIndexOptions,
-  IndexBuildOutcome,
-  IndexBuildSettlement,
-  IndexExecutor,
+import { createHash } from "node:crypto";
+import {
+  type CreateIndexOptions,
+  type IndexBuildOutcome,
+  IndexBuildRefusedError,
+  type IndexBuildSettlement,
+  type IndexExecutor,
 } from "../engine/ports";
 import { allowUntestedVersions, UnsupportedServerError } from "../engine/version";
 import { field } from "../errors/message";
@@ -289,6 +291,19 @@ export class PostgresIndexExecutor implements IndexExecutor {
     const name = options.name ?? derivedName(table, keys);
     this.assertWritable(`create index ${name}`);
     await this.assertSupported();
+    // An index name is unique per SCHEMA here, not per table, and both routes
+    // below build IF NOT EXISTS — which on a name taken anywhere in the schema
+    // does nothing and reports success (#612). The row would be recorded as a
+    // build that happened, and a rollback would then drop whatever holds the
+    // name: another table's index. The create pass closes a row whose name is
+    // taken on its own table before this, so what is caught here is the rest of
+    // the schema, and it is refused for this row only.
+    const holder = await this.nameHolder(database, schema, name);
+    if (holder !== null) {
+      throw new IndexBuildRefusedError(
+        `the name ${name} is already taken in schema ${schema} by ${holder}`,
+      );
+    }
     const columns = Object.entries(keys)
       .map(([field, direction]) => `${quoteIdent(field)}${direction === -1 ? " DESC" : ""}`)
       .join(", ");
@@ -355,6 +370,25 @@ export class PostgresIndexExecutor implements IndexExecutor {
     return "BUILT";
   }
 
+  // What holds a relation name in a schema, in words, or null when nothing does.
+  // pg_class and pg_index are readable by any role, so this asks nothing of the
+  // scoped one it does not already have.
+  private async nameHolder(database: string, schema: string, name: string): Promise<string | null> {
+    const rows = await this.conn.query<{ kind: string; table: string | null }>(
+      `SELECT c.relkind::text AS kind, t.relname AS "table"
+         FROM pg_catalog.pg_class c
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+         LEFT JOIN pg_catalog.pg_index ix ON ix.indexrelid = c.oid
+         LEFT JOIN pg_catalog.pg_class t ON t.oid = ix.indrelid
+        WHERE n.nspname = $1 AND c.relname = $2`,
+      [schema, name],
+      database,
+    );
+    const row = rows[0];
+    if (row === undefined) return null;
+    return row.table === null ? "another relation" : `an index on ${schema}.${row.table}`;
+  }
+
   // Remove the invalid index a failed CREATE INDEX CONCURRENTLY leaves behind,
   // and ONLY that: the guard on `indisvalid = false AND indisready = false` is
   // what stops this from touching a healthy index of the same name that already
@@ -396,15 +430,46 @@ function partialPredicate(options: CreateIndexOptions): string {
   return typeof sql === "string" && sql.trim().length > 0 ? ` WHERE ${sql}` : "";
 }
 
-// A name in postgres's own style when the caller did not choose one:
-// table_col1_col2_idx, which is what CREATE INDEX generates itself. Truncated to
-// 63 bytes because that is the identifier limit, and an over-long name is
-// silently truncated by the server — after which the name we recorded and the
-// name on the cluster differ, and undo cannot find the index.
-export function derivedName(table: string, keys: Record<string, 1 | -1>): string {
-  const parts = [table, ...Object.keys(keys), "idx"];
+// The identifier limit: NAMEDATALEN - 1.
+const IDENTIFIER_BYTES = 63;
+
+// The name an index is built under here: table_col1_col2_idx, postgres's own
+// style, which CREATE INDEX generates itself.
+//
+// The TABLE is in it because an index is a relation, and relation names are
+// unique per schema, not per table (#617): named by its keys alone, the way
+// MongoDB and SQL Server name one, two tables wanting the same keys wanted the
+// same name, and the second could never be built. A descending key says so,
+// which postgres's own default does not, so that a re-order's replacement does
+// not take the name of the index it replaces.
+//
+// Kept within 63 bytes because an over-long name is silently truncated by the
+// server, after which the name recorded and the name on the cluster differ and
+// nothing can find the index by it — and cut with a hash of the whole, because
+// two long names sharing their first 63 bytes would otherwise be one.
+export function postgresIndexName(
+  table: string,
+  keys: readonly { readonly field: string; readonly direction: 1 | -1 }[],
+  options: { readonly partial?: boolean } = {},
+): string {
+  const parts = [
+    table,
+    ...keys.map((key) => (key.direction === -1 ? `${key.field}_desc` : key.field)),
+    ...(options.partial === true ? ["partial"] : []),
+    "idx",
+  ];
   const name = parts.join("_").replace(/[^\w$]/g, "_");
-  return Buffer.byteLength(name) <= 63 ? name : truncateToBytes(name, 63);
+  if (Buffer.byteLength(name) <= IDENTIFIER_BYTES) return name;
+  const hash = createHash("sha256").update(name).digest("hex").slice(0, 8);
+  return `${truncateToBytes(name, IDENTIFIER_BYTES - hash.length - 1)}_${hash}`;
+}
+
+// The same rule, for a build that arrives without a name.
+export function derivedName(table: string, keys: Record<string, 1 | -1>): string {
+  return postgresIndexName(
+    table,
+    Object.entries(keys).map(([field, direction]) => ({ field, direction })),
+  );
 }
 
 function truncateToBytes(value: string, limit: number): string {

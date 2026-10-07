@@ -172,6 +172,59 @@ function describe(keys: readonly SortKey[]): string {
   return keys.map((key) => (key.direction === -1 ? `${key.field}: -1` : key.field)).join(", ");
 }
 
+// Does an existing index already serve what a want asks for?
+//
+// On exactly its fields, in its order — the test this started as, kept as it
+// was, directions and filter aside.
+//
+// Or block for block, which is what an index has to match to serve the query:
+// the want's equality fields first, in ANY order (a query that binds them all
+// seeks the same whichever way round they are — see `absorbs`), then its sort
+// keys in sequence — each in its own direction, or every one reversed, which a
+// backward walk serves (redundancy.ts measured it on both engines) — then its
+// range fields as a set, and anything after them. Trailing keys cost a query
+// nothing. That half asks for an index that covers the want's documents —
+// unfiltered or on the same filter, and not sparse — and for keys that order: a
+// text, hashed or 2dsphere key in the span serves none of it.
+function servesWant(
+  index: IndexSpec,
+  wantedKeys: readonly SortKey[],
+  blocks: KeyBlocks,
+  partialFilter: Readonly<Record<string, ConstantValue>> | undefined,
+): boolean {
+  const wanted = wantedKeys.map((key) => key.field);
+  if (equalFields(fieldsOf(index), wanted)) return true;
+  if (
+    index.sparse ||
+    !(index.partialFilter === null || sameFilter(index.partialFilter, partialFilter))
+  ) {
+    return false;
+  }
+  const span = index.keys.slice(0, wanted.length);
+  if (span.length < wanted.length) return false;
+  if (span.some((key) => key.direction !== 1 && key.direction !== -1)) return false;
+  const equality = blocks.equality.length;
+  const sortEnd = equality + blocks.sort.length;
+  const sameSet = (a: readonly string[], b: readonly string[]) =>
+    a.length === b.length && a.every((field) => b.includes(field));
+  const sorted = span.slice(equality, sortEnd);
+  const sortServed =
+    sorted.every((key, i) => key.field === blocks.sort[i]?.field) &&
+    (sorted.every((key, i) => key.direction === blocks.sort[i]?.direction) ||
+      sorted.every((key, i) => key.direction === -(blocks.sort[i]?.direction ?? 0)));
+  return (
+    sameSet(
+      span.slice(0, equality).map((key) => key.field),
+      blocks.equality,
+    ) &&
+    sortServed &&
+    sameSet(
+      span.slice(sortEnd).map((key) => key.field),
+      blocks.range,
+    )
+  );
+}
+
 // True when a's directed keys are a prefix of b's, equal lengths included — an
 // index on b serves, in order, every key an index on a would.
 function directedPrefixOrEqual(a: readonly SortKey[], b: readonly SortKey[]): boolean {
@@ -475,20 +528,22 @@ export function recommendCreates(
       already.sourceShapes.push(shape);
       continue;
     }
-    // An index on exactly these fields already exists. For a scanning shape
-    // that means the planner chose not to use it, which an extra index would
-    // not fix. For a sorting shape it means the directions cannot serve the
-    // sort — a real finding, but the fix is a second index differing only in
-    // direction, and proposing that automatically is a bigger call than this
-    // engine should make unasked.
-    if (
-      existing.some((idx) =>
-        equalFields(
-          fieldsOf(idx),
-          wantedKeys.map((key) => key.field),
-        ),
-      )
-    ) {
+    // An index that already serves this want. On exactly these fields, for a
+    // scanning shape, it means the planner chose not to use it, which an extra
+    // index would not fix; for a sorting shape it means the directions cannot
+    // serve the sort — a real finding, but the fix is a second index differing
+    // only in direction, and proposing that automatically is a bigger call than
+    // this engine should make unasked.
+    //
+    // Or the scans were recorded before the index was built. A workload source
+    // reports a shape for as long as it remembers it scanning — Query Store for
+    // its whole retention — so for days after a build the shape it was built for
+    // still reads as a scan. Matched only on exactly these fields, in this
+    // order, the same equality fields in another order read as a missing index,
+    // and the hosted deployment's SQL Server was auto-approved a build of an
+    // index it had built two hours earlier, whose name was then taken (#612).
+    const blocks = keyBlocks(shape, wantedKeys);
+    if (existing.some((idx) => servesWant(idx, wantedKeys, blocks, partialFilter))) {
       onDecline(shape, "index-exists");
       continue;
     }
@@ -496,7 +551,7 @@ export function recommendCreates(
       shape,
       wantedKeys,
       partialFilter,
-      blocks: keyBlocks(shape, wantedKeys),
+      blocks,
       lead: [],
       scanning: shape.collscan,
       absorbedCount: 0,
@@ -544,6 +599,20 @@ export function recommendCreates(
 
   const candidates: CreateCandidate[] = [];
   for (const want of survivors) {
+    // Once more on the FINAL keys. Leading with what was folded in reorders the
+    // equality block, and a candidate whose keys an index already has, in this
+    // order, is that index — whatever each shape behind it asked for on its own.
+    if (
+      existing.some((idx) =>
+        equalFields(
+          fieldsOf(idx),
+          want.wantedKeys.map((key) => key.field),
+        ),
+      )
+    ) {
+      for (const shape of want.sourceShapes) onDecline(shape, "index-exists");
+      continue;
+    }
     const { shape, wantedKeys, partialFilter } = want;
     const wanted = wantedKeys.map((key) => key.field);
     const count = shape.count + want.absorbedCount;

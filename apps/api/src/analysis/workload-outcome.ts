@@ -37,7 +37,7 @@ const EXPLANATIONS: Readonly<Record<WorkloadOutcome, string>> = {
   standing:
     "The index this needs is already the subject of a live recommendation, so it was not proposed twice. It may be waiting for your approval.",
   "index-exists":
-    "An index on exactly these fields already exists. For a scan that means the planner chose not to use it, which another index would not fix; for an in-memory sort it means the existing index's key DIRECTIONS cannot serve the sort, and a second index differing only in direction doubles this collection's write cost — so it is raised for review rather than built.",
+    "An existing index already serves this shape: the same fields, or more of them with these leading, the equality fields in any order. For a scan, either it ran before that index was built — the workload source keeps reporting a scan for as long as it remembers it — or the planner chose not to use the index, which another index would not fix. For an in-memory sort on exactly these fields, it means the existing index's key DIRECTIONS cannot serve the sort, and a second index differing only in direction doubles this collection's write cost — so it is raised for review rather than built.",
   "no-candidate":
     "This shape was read and no index could be derived from it — usually a query with no field that could lead an index's key.",
 };

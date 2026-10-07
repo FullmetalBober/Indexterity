@@ -78,3 +78,12 @@ export function passCached(key: string, load: () => Promise<unknown>): Promise<u
   const store = passes.getStore();
   return store === undefined ? load() : store.read(key, load);
 }
+
+/**
+ * Whether a pass is running. For a reader that answers one item from a read of
+ * the whole set, which is only worth it when the rest of the set is about to be
+ * asked for too — inside a pass, and not for a lone caller outside one.
+ */
+export function inPass(): boolean {
+  return passes.getStore() !== undefined;
+}

@@ -1,38 +1,30 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import {
-  clusters,
-  createDatabase,
-  eq,
-  organizations,
-  recommendations,
-  workloadShapes,
-} from "../src/db";
+import { clusters, createDatabase, eq, organizations, recommendations } from "../src/db";
 import type { EngineSession, IndexCollector } from "../src/engine/ports";
 import { workloadKey } from "../src/engine/ports";
 import type { IndexSpec, QueryShape } from "../src/engine/types";
 import { openClusterSession } from "../src/jobs/cluster-connection";
 import { suggestForCluster } from "../src/jobs/suggest";
-import { mongoAdapter } from "../src/mongo/adapter";
+import { postgresAdapter } from "../src/postgres/adapter";
 import { stub } from "../src/test-utils";
 import { databaseUrl } from "./helpers";
 
-// A shape whose index is already approved is recorded as `standing` — and since
-// #608 with the index's name, the way a proposal is. That name is how the build
-// finds the shapes it was for once approval has taken it out of PROPOSED: the
-// ledger is rewritten every pass, so a shape that read `proposed` while the row
-// waited reads `standing` by the time the change window comes round.
+// #617. PostgreSQL index names are unique per SCHEMA, and the recommender named
+// a build after its keys alone — so two tables in one schema that both wanted an
+// index on customer_id were both proposed `customer_id_1`, and the second could
+// never be built. The pass now names through the engine.
 //
-// Against a real postgres and a session that stands in for a MongoDB, because
-// what is under test is what the pass writes, not what a server reports.
+// Against a real postgres for the recommendations and a session that stands in
+// for a PostgreSQL cluster, because what is under test is what the pass writes.
 
 vi.mock("../src/jobs/cluster-connection", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../src/jobs/cluster-connection")>()),
   openClusterSession: vi.fn(),
 }));
 
-const idIndex: IndexSpec = {
-  name: "_id_",
-  keys: [{ field: "_id", direction: 1 }],
+const pkey = (table: string): IndexSpec => ({
+  name: `${table}_pkey`,
+  keys: [{ field: "id", direction: 1 }],
   unique: true,
   ttl: false,
   partial: false,
@@ -41,27 +33,29 @@ const idIndex: IndexSpec = {
   hidden: false,
   isShardKey: false,
   collation: null,
-};
+});
 
-// A recurring collection scan on `status` from an application: well over every
-// floor, so the create side derives `status_1` for it.
+// The same recurring scan on both tables: equality on customer_id, from an
+// application, well over every floor.
 const scan: QueryShape = {
-  equality: ["status"],
+  equality: ["customer_id"],
   sort: [],
   range: [],
   collscan: true,
   count: 1000,
   docsExamined: 1_000_000_000,
   observedForHours: 168,
-  clients: [{ application: "checkout-api", driver: "nodejs" }],
+  clients: [{ application: "billing", driver: "node-postgres" }],
 };
 
+const TABLES = ["public.orders", "public.invoices"];
+
 const collector = stub<IndexCollector>({
-  listCollectionNames: async () => ["orders"],
-  listIndexes: async () => [idIndex],
-  indexSizes: async () => ({ _id_: 1024 }),
+  listCollectionNames: async () => TABLES,
+  listIndexes: async (_database: string, table: string) => [pkey(table.split(".")[1] ?? table)],
+  indexSizes: async () => ({}),
   collectionStorage: async () => ({ dataSizeBytes: 1024 ** 3, docCount: 1_000_000 }),
-  collectWorkload: async () => new Map([[workloadKey("app", "orders"), [scan]]]),
+  collectWorkload: async () => new Map(TABLES.map((table) => [workloadKey("app", table), [scan]])),
   collectDeletePatterns: async () => [],
   collectHintedIndexes: async () => [],
 });
@@ -85,7 +79,7 @@ beforeAll(async () => {
   db = createDatabase(databaseUrl(), 2);
   const [org] = await db
     .insert(organizations)
-    .values({ name: "suggest-standing", slug: `suggest-standing-${Date.now()}`, plan: "FREE" })
+    .values({ name: "postgres-names", slug: `postgres-names-${Date.now()}`, plan: "FREE" })
     .returning();
   if (org === undefined) throw new Error("could not create the fixture org");
   orgId = org.id;
@@ -93,8 +87,8 @@ beforeAll(async () => {
     .insert(clusters)
     .values({
       orgId,
-      name: "suggest-standing-fixture",
-      engine: "MONGODB",
+      name: "postgres-names-fixture",
+      engine: "POSTGRESQL",
       readOnly: false,
       // Never dialled: openClusterSession is the fake above.
       sealedDek: Buffer.from("dek"),
@@ -105,26 +99,13 @@ beforeAll(async () => {
   clusterId = cluster.id;
   vi.mocked(openClusterSession).mockResolvedValue({
     session,
-    engine: "MONGODB",
+    engine: "POSTGRESQL",
     readOnly: false,
-    canHide: true,
-    canPartial: true,
-    nameIndex: mongoAdapter.indexName,
+    canHide: false,
+    canPartial: false,
+    nameIndex: postgresAdapter.indexName,
     observedDatabases: null,
     release: () => undefined,
-  });
-  // The owner approved it on an earlier pass; it waits for the change window.
-  await db.insert(recommendations).values({
-    clusterId,
-    type: "CREATE",
-    state: "APPROVED",
-    source: "WORKLOAD",
-    database: "app",
-    collection: "orders",
-    indexName: "status_1",
-    rationale: "approved on an earlier pass",
-    score: 70,
-    targetSpec: { keys: ["status"], retire: [] },
   });
 });
 
@@ -136,21 +117,17 @@ afterAll(async () => {
   await db.$client.end();
 });
 
-describe("a shape whose index is already approved", () => {
-  it("is recorded as standing, naming the index that answers it", async () => {
+describe("two tables in one PostgreSQL schema wanting the same index", () => {
+  it("are proposed under two names, each carrying its table", async () => {
     await suggestForCluster(db, clusterId);
 
-    const rows = await db
-      .select({ outcome: workloadShapes.outcome, proposedIndex: workloadShapes.proposedIndex })
-      .from(workloadShapes)
-      .where(eq(workloadShapes.clusterId, clusterId));
-    expect(rows).toEqual([{ outcome: "standing", proposedIndex: "status_1" }]);
-
-    // And it was not proposed a second time.
-    const proposals = await db
-      .select({ state: recommendations.state })
+    const proposed = await db
+      .select({ collection: recommendations.collection, indexName: recommendations.indexName })
       .from(recommendations)
       .where(eq(recommendations.clusterId, clusterId));
-    expect(proposals).toEqual([{ state: "APPROVED" }]);
+    expect(proposed.sort((a, b) => a.collection.localeCompare(b.collection))).toEqual([
+      { collection: "public.invoices", indexName: "invoices_customer_id_idx" },
+      { collection: "public.orders", indexName: "orders_customer_id_idx" },
+    ]);
   });
 });

@@ -1,7 +1,7 @@
 import { masterKeyBytesFor } from "../config/env";
 import { clusters, type Database, envKeyProvider, eq, open } from "../db";
 import { ObservedSession } from "../engine/observe";
-import type { ClusterEngine, EngineSession } from "../engine/ports";
+import type { ClusterEngine, EngineAdapter, EngineSession } from "../engine/ports";
 import { adapterFor } from "../engine/registry";
 import { routeForCluster } from "../tunnel/resolve";
 import type { TunnelRegistry } from "../tunnel/tunnel.registry";
@@ -55,6 +55,10 @@ export interface ClusterSession {
   // Read here for the reason `canHide` is: the suggest pass branches on it, and
   // no pipeline site reaches for the registry itself (#452).
   readonly canPartial: boolean;
+  // What a proposed index on a collection is named (`EngineAdapter.indexName`),
+  // for the same reason again: the suggest pass names every candidate it
+  // proposes, and where a name must be unique is the engine's to say (#617).
+  readonly nameIndex: EngineAdapter["indexName"];
   // Which databases the owner asked us to observe, or null for all of them
   // (#244). Carried for the callers that need to SAY what was in scope — the
   // filtering itself is already done by the session above, and no caller has to
@@ -147,6 +151,7 @@ export async function openClusterSession(
     readOnly: cluster.readOnly,
     canHide: adapterFor(cluster.engine).capabilities.hideIndexes,
     canPartial: adapterFor(cluster.engine).capabilities.partialIndexFromConstants,
+    nameIndex: adapterFor(cluster.engine).indexName,
     observedDatabases: observed,
     release,
   };

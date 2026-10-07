@@ -1,5 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { DatabaseInaccessibleError, type EngineSession, workloadKey } from "../src/engine/ports";
+import {
+  DatabaseInaccessibleError,
+  type EngineSession,
+  IndexBuildRefusedError,
+  workloadKey,
+} from "../src/engine/ports";
 import { ProvisionDeniedError, SCOPED_USERNAME } from "../src/engine/provision";
 import { detectEngine } from "../src/engine/registry";
 import { present } from "../src/errors/at";
@@ -354,6 +359,48 @@ describe.skipIf(POSTGRES_URL === undefined)("postgres adapter against a live ser
         [SCHEMA],
       );
       expect(Number(left[0]?.n ?? -1)).toBe(0);
+    }, 60_000);
+
+    // #612. An index name is unique per SCHEMA, and the build says IF NOT
+    // EXISTS: on a name another table's index holds, it did nothing and reported
+    // a build — which the pipeline recorded as its own, and a rollback would have
+    // dropped.
+    it("refuses a name another table's index in the schema already holds", async () => {
+      await seed.query(`CREATE TABLE ${SCHEMA}.invoices (id int PRIMARY KEY, customer_id int)`);
+      const build = session
+        .executor(false)
+        .create("postgres", `${SCHEMA}.invoices`, { customer_id: 1 }, { name: "orders_cover" });
+      await expect(build).rejects.toBeInstanceOf(IndexBuildRefusedError);
+      await expect(build).rejects.toThrow(
+        `the name orders_cover is already taken in schema ${SCHEMA} by an index on ${SCHEMA}.orders`,
+      );
+      const onInvoices = await session.collector.listIndexes("postgres", `${SCHEMA}.invoices`);
+      expect(onInvoices.map((spec) => spec.name)).toEqual(["invoices_pkey"]);
+    }, 60_000);
+
+    // #617: the other half of the test above. Named through the engine, the same
+    // keys on two tables of one schema are two names, and both are built.
+    it("builds the same keys on two tables of one schema, under two names", async () => {
+      const executor = session.executor(false);
+      const keys = [{ field: "customer_id", direction: 1 as const }];
+      for (const table of ["ledger_a", "ledger_b"]) {
+        await seed.query(`CREATE TABLE ${SCHEMA}.${table} (id int PRIMARY KEY, customer_id int)`);
+        const collection = `${SCHEMA}.${table}`;
+        await executor.create(
+          "postgres",
+          collection,
+          { customer_id: 1 },
+          {
+            name: postgresAdapter.indexName(collection, keys),
+          },
+        );
+      }
+      for (const table of ["ledger_a", "ledger_b"]) {
+        const names = (await session.collector.listIndexes("postgres", `${SCHEMA}.${table}`)).map(
+          (spec) => spec.name,
+        );
+        expect(names).toContain(`${table}_customer_id_idx`);
+      }
     }, 60_000);
 
     // The server's own refusal, which is a better message than anything the

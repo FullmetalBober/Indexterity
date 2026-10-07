@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { IndexKey, IndexSpec } from "../engine/types";
-import { coversIncludes, isRedundantPrefix, servedByBackwardWalk } from "./redundancy";
+import {
+  coversIncludes,
+  isCoveredBy,
+  isRedundantPrefix,
+  notWorthBuilding,
+  servedByBackwardWalk,
+} from "./redundancy";
 
 function spec(name: string, keys: IndexKey[], overrides: Partial<IndexSpec> = {}): IndexSpec {
   return {
@@ -158,5 +164,59 @@ describe("coversIncludes", () => {
     expect(coversIncludes(candidate, spec("b", [x1, y1], { include: ["total", "email"] }))).toBe(
       true,
     );
+  });
+});
+
+// #612: asked of a build before it happens, so the engine does not build an
+// index classify would propose dropping the moment it existed.
+describe("isCoveredBy", () => {
+  it("covers a proper prefix, as the redundancy rule does", () => {
+    expect(isCoveredBy(spec("x_1", [x1]), spec("x_1_y_1", [x1, y1]))).toBe(true);
+  });
+
+  // The same index under a second name — legal on SQL Server, wasted on every write.
+  it("covers exactly the same keys under another name", () => {
+    expect(isCoveredBy(spec("x_1_y_1", [x1, y1]), spec("ix_custom", [x1, y1]))).toBe(true);
+  });
+
+  it("does not cover a constraint, a narrower document set, or an index on its way out", () => {
+    expect(isCoveredBy(spec("x_1", [x1], { unique: true }), spec("x_1_y_1", [x1, y1]))).toBe(false);
+    expect(
+      isCoveredBy(
+        spec("x_1", [x1]),
+        spec("x_1_y_1", [x1, y1], { partial: true, partialFilter: { y: 1 } }),
+      ),
+    ).toBe(false);
+    // Hidden is our own drop pipeline's observe window: it may be gone next.
+    expect(isCoveredBy(spec("x_1", [x1]), spec("x_1_y_1", [x1, y1], { hidden: true }))).toBe(false);
+  });
+
+  // A re-order builds the same fields in directions the original cannot serve,
+  // and an UPDATE builds wider than what it retires: neither is covered by it.
+  it("does not cover a re-order of the original, or a wider build", () => {
+    const yDesc: IndexKey = { field: "y", direction: -1 };
+    expect(isCoveredBy(spec("x_1_y_-1", [x1, yDesc]), spec("x_1_y_1", [x1, y1]))).toBe(false);
+    expect(isCoveredBy(spec("x_1_y_1", [x1, y1]), spec("x_1", [x1]))).toBe(false);
+  });
+});
+
+describe("notWorthBuilding", () => {
+  const candidate = spec("x_1_y_1", [x1, y1]);
+
+  it("names a taken name first, whatever the keys", () => {
+    expect(notWorthBuilding(candidate, [spec("x_1_y_1", [y1])])).toBe(
+      "an index named x_1_y_1 already exists on this table",
+    );
+  });
+
+  it("names the index that already serves it", () => {
+    const z1: IndexKey = { field: "z", direction: 1 };
+    expect(notWorthBuilding(candidate, [spec("x_1_y_1_z_1", [x1, y1, z1])])).toBe(
+      "x_1_y_1_z_1 already serves every query this index would",
+    );
+  });
+
+  it("is null when the build adds something", () => {
+    expect(notWorthBuilding(candidate, [spec("x_1", [x1]), spec("y_1", [y1])])).toBeNull();
   });
 });

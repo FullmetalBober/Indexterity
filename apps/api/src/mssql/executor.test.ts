@@ -106,6 +106,36 @@ describe("MssqlIndexExecutor structural guards", () => {
     ]);
   });
 
+  // Msg 1913, the wording the hosted deployment's SQL Server answered for days
+  // (#612). A refusal of the row, so the create pass closes it and carries on
+  // with the next build instead of failing the whole pass on it.
+  it("refuses a build whose name is taken, rather than failing the pass", async () => {
+    const { conn } = stubConnection(plain);
+    const taken = Object.assign(
+      new Error(
+        "The operation failed because an index or statistics with name 'ix_c' already exists on table 'db.dbo.orders'.",
+      ),
+      { number: 1913 },
+    );
+    const refusing = { ...conn, execute: () => Promise.reject(taken) };
+    const build = new MssqlIndexExecutor(refusing, false).create(
+      "db",
+      "dbo.orders",
+      { customer_id: 1 },
+      { name: "ix_c" },
+    );
+    await expect(build).rejects.toBeInstanceOf(IndexBuildRefusedError);
+    await expect(build).rejects.toThrow(
+      "an index or statistics object named ix_c already exists on dbo.orders",
+    );
+    // Anything else is the error it was.
+    const other = Object.assign(new Error("Login failed"), { number: 18456 });
+    const failing = { ...conn, execute: () => Promise.reject(other) };
+    await expect(
+      new MssqlIndexExecutor(failing, false).create("db", "dbo.orders", { a: 1 }, { name: "a_1" }),
+    ).rejects.toBe(other);
+  });
+
   it("restores covering columns, INCLUDE before WHERE", async () => {
     const { conn, executed } = stubConnection(plain);
     await new MssqlIndexExecutor(conn, false).create(

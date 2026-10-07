@@ -1,7 +1,8 @@
-import { inChangeWindow } from "../analysis";
+import { inChangeWindow, notWorthBuilding } from "../analysis";
 import type { Database } from "../db";
 import { actions, and, eq, inArray, policies, recommendations } from "../db";
 import { type IndexBuildOutcome, IndexBuildRefusedError } from "../engine/ports";
+import type { IndexSpec } from "../engine/types";
 import type { TunnelRegistry } from "../tunnel/tunnel.registry";
 import { effectiveChangeWindow } from "./change-window";
 import { openClusterSession } from "./cluster-connection";
@@ -82,6 +83,23 @@ export async function applyCreatesForCluster(
         continue;
       }
       const carried = target.options;
+      // What the table carries NOW, read before the build rather than learned
+      // from its failure (#612). A build whose name is taken fails on every
+      // engine but MongoDB, where an identical index is a silent success that
+      // would then be recorded as ours — and a failure here is not one this pass
+      // handles per row, so on the hosted deployment's SQL Server it stopped
+      // every approved build on the cluster behind it for days. And an index an
+      // existing one already serves is one classify would propose dropping the
+      // moment it existed. Either way there is nothing to build, so the row
+      // closes with the reason and the next build goes ahead.
+      const unbuilt = notWorthBuilding(
+        specOf(rec.indexName, keys, target),
+        await collector.listIndexes(rec.database, rec.collection),
+      );
+      if (unbuilt !== null) {
+        await closeUnbuilt(db, rec, `not built: ${unbuilt}`, `not built: ${unbuilt}`);
+        continue;
+      }
       let outcome: IndexBuildOutcome;
       try {
         outcome = await executor.create(rec.database, rec.collection, keys, {
@@ -114,20 +132,12 @@ export async function applyCreatesForCluster(
         // the engine's capabilities before deriving a partial candidate.
         // Anything else thrown here still fails the pass, as before.
         if (!(error instanceof IndexBuildRefusedError)) throw error;
-        await db
-          .update(recommendations)
-          .set({
-            state: "REJECTED",
-            rationale: `${rec.rationale} — refused by the engine: ${error.message}`,
-            updatedAt: new Date(),
-          })
-          .where(eq(recommendations.id, rec.id));
-        await db.insert(actions).values({
-          recommendationId: rec.id,
-          kind: "CREATE",
-          actor: "system",
-          result: `refused: ${error.message}`,
-        });
+        await closeUnbuilt(
+          db,
+          rec,
+          `refused by the engine: ${error.message}`,
+          `refused: ${error.message}`,
+        );
         continue;
       }
       // A scheduled build does not exist yet (#332). PostgreSQL's pg_cron route
@@ -178,4 +188,58 @@ export async function applyCreatesForCluster(
   } finally {
     release();
   }
+}
+
+// The index a build would create, as the collector would read it back, so the
+// redundancy rules can hold it against what the table already carries.
+function specOf(
+  name: string,
+  keys: Record<string, 1 | -1>,
+  target: { partial?: Record<string, unknown>; options?: BuildOptions },
+): IndexSpec {
+  const carried = target.options;
+  const filter = target.partial ?? carried?.partialFilter;
+  return {
+    name,
+    keys: Object.entries(keys).map(([field, direction]) => ({ field, direction })),
+    unique: carried?.unique ?? false,
+    ttl: false,
+    partial: filter !== undefined,
+    partialFilter: filter ?? null,
+    sparse: carried?.sparse ?? false,
+    hidden: false,
+    isShardKey: false,
+    collation: carried?.collation ?? null,
+    ...(carried?.include === undefined ? {} : { include: carried.include }),
+  };
+}
+
+type BuildOptions = {
+  unique: boolean;
+  sparse: boolean;
+  collation: string | null;
+  partialFilter?: Record<string, unknown>;
+  include?: string[];
+};
+
+// A build that will not happen, closed with the reason where the owner reads the
+// row and in its history. REJECTED, as #452 settled for a refusal: left APPROVED
+// it is a retry that can only end the same way, and PROPOSED an approve button
+// that leads nowhere.
+async function closeUnbuilt(
+  db: Database,
+  rec: { readonly id: string; readonly rationale: string },
+  why: string,
+  result: string,
+): Promise<void> {
+  await db
+    .update(recommendations)
+    .set({ state: "REJECTED", rationale: `${rec.rationale} — ${why}`, updatedAt: new Date() })
+    .where(eq(recommendations.id, rec.id));
+  await db.insert(actions).values({
+    recommendationId: rec.id,
+    kind: "CREATE",
+    actor: "system",
+    result,
+  });
 }

@@ -17,8 +17,11 @@ import type {
   IndexExecutor,
 } from "../src/engine/ports";
 import { IndexBuildRefusedError } from "../src/engine/ports";
+import type { IndexSpec } from "../src/engine/types";
+import { at } from "../src/errors/at";
 import { openClusterSession } from "../src/jobs/cluster-connection";
 import { applyCreatesForCluster } from "../src/jobs/create";
+import { mssqlAdapter } from "../src/mssql/adapter";
 import { stub } from "../src/test-utils";
 import { databaseUrl } from "./helpers";
 
@@ -62,8 +65,12 @@ const executor = stub<IndexExecutor>({
     },
   ),
 });
-// Only the write-latency baseline a landed build records is ever read.
+// The table's indexes as the create pass reads them before each build (#612),
+// per table — empty until a test puts something there — and the write-latency
+// baseline a landed build records.
+const live = new Map<string, IndexSpec[]>();
 const collector = stub<IndexCollector>({
+  listIndexes: async (_database: string, collection: string) => live.get(collection) ?? [],
   collectionLatency: async () => ({ reads: idle, writes: idle }),
 });
 const session: EngineSession = {
@@ -113,6 +120,7 @@ beforeAll(async () => {
     readOnly: false,
     canHide: true,
     canPartial: false,
+    nameIndex: mssqlAdapter.indexName,
     observedDatabases: null,
     release: () => undefined,
   });
@@ -268,5 +276,113 @@ describe("a build the adapter refuses", () => {
   it("leaves nothing approved behind, so the next tick has nothing to refuse again", async () => {
     expect(await applyCreatesForCluster(db, clusterId)).toBe(0);
     expect(executor.create).toHaveBeenCalledTimes(2);
+  });
+});
+
+// #612. The hosted deployment's SQL Server had an APPROVED build of an index it
+// had built itself two hours earlier, and every pass failed on the name — so
+// every other approved build on the cluster waited behind it, for days.
+describe("a build the table already has", () => {
+  const index = (name: string, fields: string[]): IndexSpec => ({
+    name,
+    keys: fields.map((field) => ({ field, direction: 1 })),
+    unique: false,
+    ttl: false,
+    partial: false,
+    partialFilter: null,
+    sparse: false,
+    hidden: false,
+    isShardKey: false,
+    collation: null,
+  });
+  let takenId: string;
+  let coveredId: string;
+  let freshId: string;
+
+  beforeAll(async () => {
+    live.set("dbo.Parts", [
+      index("invoiceNumber_1_totalTax_1", ["invoiceNumber", "totalTax"]),
+      index("invoiceNumber_1_partsFullRawId_1", ["invoiceNumber", "partsFullRawId"]),
+    ]);
+    const base = {
+      clusterId,
+      type: "CREATE" as const,
+      state: "APPROVED" as const,
+      source: "WORKLOAD" as const,
+      database: "PlatformFeed",
+      collection: "dbo.Parts",
+      rationale: "Add an index.",
+      score: 70,
+      urgent: true,
+    };
+    const rows = await db
+      .insert(recommendations)
+      .values([
+        {
+          ...base,
+          indexName: "invoiceNumber_1_partsFullRawId_1",
+          targetSpec: { keys: ["invoiceNumber", "partsFullRawId"], retire: [] },
+        },
+        {
+          ...base,
+          indexName: "invoiceNumber_1",
+          targetSpec: { keys: ["invoiceNumber"], retire: [] },
+        },
+        {
+          ...base,
+          indexName: "totalTax_1",
+          targetSpec: { keys: ["totalTax"], retire: [] },
+        },
+      ])
+      .returning({ id: recommendations.id, indexName: recommendations.indexName });
+    const idOf = (name: string) => at(rows.filter((row) => row.indexName === name)).id;
+    takenId = idOf("invoiceNumber_1_partsFullRawId_1");
+    coveredId = idOf("invoiceNumber_1");
+    freshId = idOf("totalTax_1");
+  });
+
+  it("closes what is already there with the reason, and builds the rest in the same pass", async () => {
+    const before = built.length;
+    expect(await applyCreatesForCluster(db, clusterId)).toBe(1);
+    expect(built.slice(before)).toEqual(["totalTax_1"]);
+
+    const rows = await db
+      .select({
+        id: recommendations.id,
+        state: recommendations.state,
+        rationale: recommendations.rationale,
+      })
+      .from(recommendations)
+      .where(inArray(recommendations.id, [takenId, coveredId, freshId]));
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    expect(byId.get(takenId)?.state).toBe("REJECTED");
+    expect(byId.get(takenId)?.rationale).toContain(
+      "not built: an index named invoiceNumber_1_partsFullRawId_1 already exists on this table",
+    );
+    expect(byId.get(coveredId)?.state).toBe("REJECTED");
+    expect(byId.get(coveredId)?.rationale).toContain(
+      "not built: invoiceNumber_1_totalTax_1 already serves every query this index would",
+    );
+    expect(byId.get(freshId)?.state).toBe("ACTIVE");
+
+    const history = await db
+      .select({ recommendationId: actions.recommendationId, result: actions.result })
+      .from(actions)
+      .where(inArray(actions.recommendationId, [takenId, coveredId]));
+    expect(history).toEqual(
+      expect.arrayContaining([
+        {
+          recommendationId: takenId,
+          result:
+            "not built: an index named invoiceNumber_1_partsFullRawId_1 already exists on this table",
+        },
+        {
+          recommendationId: coveredId,
+          result:
+            "not built: invoiceNumber_1_totalTax_1 already serves every query this index would",
+        },
+      ]),
+    );
+    expect(history).toHaveLength(2);
   });
 });

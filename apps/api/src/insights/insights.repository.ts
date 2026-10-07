@@ -39,15 +39,13 @@ import {
 } from "../db";
 import { DatabaseService } from "../db/database.service";
 import { clearCooldown } from "../jobs/cooldowns";
-import { namespaceNames } from "../jobs/namespaces";
 import { historyWindow } from "../jobs/plan";
-
-// One collection's latency counters over the window, grouped by namespace.
-export interface LatencyGroup {
-  readonly database: string;
-  readonly collection: string;
-  readonly readings: LatencyReading[];
-}
+import {
+  type ChartEvidenceRow,
+  type LatencySummary,
+  latencyChartEvidence,
+  latencySummaries,
+} from "./latency-folds";
 
 // The sort key an unmeasured weekly cost stands in for (#432). Negative because
 // a real one never is, so the ordering below stays total and the page's cursor
@@ -193,20 +191,39 @@ export class InsightsRepository {
     return notBefore !== undefined && notBefore > planSince ? notBefore : planSince;
   }
 
-  async latencyReadings(clusterId: string, since: Date): Promise<Map<string, LatencyGroup>> {
+  // The overview's latency, folded where the rows are (#614) — see
+  // latency-folds.ts for what each answers and why.
+  async latencySummaries(clusterId: string, since: Date): Promise<LatencySummary[]> {
+    return latencySummaries(this.database.db, clusterId, since);
+  }
+
+  async latencyChartEvidence(clusterId: string, since: Date): Promise<ChartEvidenceRow[]> {
+    return latencyChartEvidence(this.database.db, clusterId, since);
+  }
+
+  // The readings of the collections the chart was given, and only those.
+  async latencyReadingsOf(
+    clusterId: string,
+    since: Date,
+    namespaceIds: readonly number[],
+  ): Promise<Map<number, LatencyReading[]>> {
+    const byNamespace = new Map<number, LatencyReading[]>();
+    if (namespaceIds.length === 0) return byNamespace;
     const rows = await this.database.db
       .select(latencyReadingColumns)
       .from(latencySamples)
-      .where(and(eq(latencySamples.clusterId, clusterId), gte(latencySamples.lastSeenAt, since)));
-    // Grouped by the namespace's id, and named once per group afterwards. The
-    // names are not on the sample rows any more (#551), and joining them back
-    // per row would ship them once per sample, which is the D145 mistake.
-    const byNamespace = new Map<number, LatencyReading[]>();
+      .where(
+        and(
+          eq(latencySamples.clusterId, clusterId),
+          inArray(latencySamples.namespaceId, [...namespaceIds]),
+          gte(latencySamples.lastSeenAt, since),
+        ),
+      );
     for (const row of rows) {
       const readings = byNamespace.get(row.namespaceId) ?? [];
       // A row stands for every collect that read these same four counters, so
-      // the trend and the chart get the interval and the count rather than
-      // inferring a single look from a single row.
+      // the chart gets the interval and the count rather than inferring a single
+      // look from a single row.
       readings.push({
         ...runFrom(row),
         readOps: row.readOps,
@@ -216,16 +233,7 @@ export class InsightsRepository {
       });
       byNamespace.set(row.namespaceId, readings);
     }
-    const names = await namespaceNames(this.database.db, byNamespace.keys());
-    const groups = new Map<string, LatencyGroup>();
-    for (const [namespaceId, readings] of byNamespace) {
-      const name = names.get(namespaceId);
-      // A namespace deleted between the two reads, which only the retention
-      // sweep does, and only once nothing references it.
-      if (name === undefined) continue;
-      groups.set(`${name.database} ${name.collection}`, { ...name, readings });
-    }
-    return groups;
+    return byNamespace;
   }
 
   async roiRows(clusterId: string) {
