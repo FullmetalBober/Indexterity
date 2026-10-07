@@ -1,6 +1,11 @@
 import { brotliDecompressSync, gunzipSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
-import { compressedResponse, negotiateEncoding } from "./compression";
+import {
+  compressedEntry,
+  compressedResponse,
+  type FetchEntry,
+  negotiateEncoding,
+} from "./compression";
 
 const json = JSON.stringify({
   rows: Array.from({ length: 200 }, (_, i) => ({ i, name: `row-${i}` })),
@@ -93,5 +98,58 @@ describe("compressedResponse", () => {
     expect(out.headers.get("set-cookie")).toBe("a=1");
     expect(out.headers.get("x-request-id")).toBe("abc");
     expect(brotliDecompressSync(await bytes(out)).toString()).toBe(json);
+  });
+});
+
+// #621. Sentry's fetch wrapper reads every HTML response as UTF-8 text to put its
+// trace tags in the head, and keeps the headers. This is that wrapper, reduced to
+// what it does to a body, so the order can be held without a DSN.
+function rewritesHtmlAsText(entry: FetchEntry): FetchEntry {
+  return {
+    fetch: async (request, opts) => {
+      const response = await entry.fetch(request, opts);
+      if (!(response.headers.get("content-type") ?? "").startsWith("text/html")) return response;
+      const html = new TextDecoder().decode(await response.arrayBuffer());
+      return new Response(html.replace("<head>", '<head><meta name="sentry-trace" content="t"/>'), {
+        status: response.status,
+        headers: new Headers(response.headers),
+      });
+    },
+  };
+}
+
+describe("compressedEntry", () => {
+  const page = `<!DOCTYPE html><html><head></head><body>${"x".repeat(4000)}</body></html>`;
+  const app: FetchEntry = {
+    fetch: () => new Response(page, { headers: { "content-type": "text/html; charset=utf-8" } }),
+  };
+
+  it("compresses after a wrapper that rewrites HTML, so the page survives it", async () => {
+    const entry = compressedEntry(rewritesHtmlAsText(app));
+    const out = await entry.fetch(request("br"));
+    expect(out.headers.get("content-encoding")).toBe("br");
+    const html = brotliDecompressSync(await bytes(out)).toString();
+    expect(html).toContain('<head><meta name="sentry-trace" content="t"/>');
+    expect(html.endsWith("</html>")).toBe(true);
+  });
+
+  // The order 0.30.1 shipped, kept as the reason for the one above: compressed
+  // beneath the rewriter, the body is decoded as text and no longer brotli.
+  it("is what a body compressed beneath that wrapper would have lost", async () => {
+    const inside: FetchEntry = {
+      fetch: async (req, opts) => compressedResponse(req, await app.fetch(req, opts)),
+    };
+    const out = await rewritesHtmlAsText(inside).fetch(request("br"));
+    expect(out.headers.get("content-encoding")).toBe("br");
+    const body = await bytes(out);
+    let html: string | null;
+    try {
+      html = brotliDecompressSync(body).toString();
+    } catch {
+      html = null;
+    }
+    expect(html?.includes("</html>") ?? false).toBe(false);
+    // The tell that gave it away on the hosted deployment: U+FFFD in the stream.
+    expect(body.includes(Buffer.from([0xef, 0xbf, 0xbd]))).toBe(true);
   });
 });
