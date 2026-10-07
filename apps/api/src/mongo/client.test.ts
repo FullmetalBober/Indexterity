@@ -197,6 +197,14 @@ describe("connection pool bounds", () => {
     expect(client.options.maxIdleTimeMS).toBe(60_000);
   });
 
+  // #614. Streamed monitoring holds two connections per server and hears from
+  // each every 10 s; polled once a minute it is one check a minute.
+  it("polls each server once a minute rather than streaming", () => {
+    const client = mongoClient("mongodb://h:27017/app?tls=true");
+    expect(client.options.serverMonitoringMode).toBe("poll");
+    expect(client.options.heartbeatFrequencyMS).toBe(60_000);
+  });
+
   it("takes the operator's bound when the environment sets one", () => {
     process.env.MONGO_MAX_POOL_SIZE = "3";
     loadEnv("api");
