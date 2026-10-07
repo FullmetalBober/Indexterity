@@ -30,13 +30,13 @@ import {
 } from "@repo/contracts";
 import { z } from "zod";
 import {
-  chartableCollections,
+  chartableNamespaces,
   latencyGaps,
   latencyPoints,
   readsAround,
   scansFor,
   summarizeFootprint,
-  summarizeLatency,
+  trendFrom,
 } from "../analysis";
 import { parseStoredSpec } from "../analysis/recommend";
 import { explainOutcome, outcomeOf } from "../analysis/workload-outcome";
@@ -209,51 +209,72 @@ export class InsightsService {
     return impacts;
   }
 
+  // Folded in postgres to one row per collection (#614): the first and the last
+  // measurable window of each metric over the plan's history, which is all the
+  // before/after table draws — rather than that history itself, which on a
+  // MongoDB cluster of a hundred collections was 2.8 MB a load.
   async latency(clusterId: string, orgId: string): Promise<ClusterLatency> {
     if (!(await this.tenancy.ownsCluster(clusterId, orgId))) return { clusterId, collections: [] };
-    const groups = await this.repo.latencyReadings(
+    const summaries = await this.repo.latencySummaries(
       clusterId,
       await this.repo.readableSince(clusterId),
     );
-    const collections = [...groups.values()].map((group) => ({
-      database: group.database,
-      collection: group.collection,
-      ...summarizeLatency(group.readings),
-    }));
-    return { clusterId, collections };
+    return {
+      clusterId,
+      collections: summaries.map((summary) => ({
+        database: summary.database,
+        collection: summary.collection,
+        ...trendFrom(
+          summary.samples,
+          { baseline: summary.baselineRead, current: summary.currentRead },
+          { baseline: summary.baselineWrite, current: summary.currentWrite },
+        ),
+      })),
+    };
   }
 
   // Bounded on both axes (#64), because this was the read that grew with *every
   // collect, forever*: measured at 200 collections × 90 days of hourly readings,
   // the full payload was 30.9 MB per dashboard load — of which the chart drew
   // four collections. A 30-day window bounds time (the trend chart is about
-  // recently, the before/after table covers the long term), `chartableCollections`
+  // recently, the before/after table covers the long term), `chartableNamespaces`
   // bounds collections, and totalCollections keeps the cut honest on screen.
   //
   // That cut is ranked PER METRIC and not once for both charts. Ranking it once
   // is what sent the write chart eight collections nobody writes to and let it
   // report the ranking's blind spot as an absence of writes — see the comment on
-  // chartableCollections, which owns the rule and the measurement behind it.
+  // chartableNamespaces, which owns the rule and the measurement behind it.
+  //
+  // And it is ranked BEFORE the rows are read (#614). The ranking needs counts,
+  // which postgres folds; the points are then read for the collections chosen
+  // and nothing else. Reading every collection's thirty days to keep eight was
+  // 2.0 MB a load on the hosted deployment's busiest cluster.
   async latencySeries(clusterId: string, orgId: string): Promise<ClusterLatencySeries> {
     if (!(await this.tenancy.ownsCluster(clusterId, orgId))) {
       return { clusterId, totalCollections: 0, collections: [] };
     }
     const since = await this.repo.readableSince(clusterId, InsightsService.trendWindow());
-    const groups = await this.repo.latencyReadings(clusterId, since);
-    const collections = [...groups.values()].map((group) => {
-      const gaps = latencyGaps(group.readings);
-      return {
-        database: group.database,
-        collection: group.collection,
-        points: latencyPoints(group.readings),
-        readGap: gaps.read,
-        writeGap: gaps.write,
-      };
-    });
+    const evidence = await this.repo.latencyChartEvidence(clusterId, since);
+    const chosen = chartableNamespaces(evidence, LATENCY_SERIES_MAX_COLLECTIONS);
+    const readings = await this.repo.latencyReadingsOf(
+      clusterId,
+      since,
+      chosen.map((entry) => entry.namespaceId),
+    );
     return {
       clusterId,
-      totalCollections: collections.length,
-      collections: chartableCollections(collections, LATENCY_SERIES_MAX_COLLECTIONS),
+      totalCollections: evidence.length,
+      collections: chosen.map((entry) => {
+        const series = readings.get(entry.namespaceId) ?? [];
+        const gaps = latencyGaps(series);
+        return {
+          database: entry.database,
+          collection: entry.collection,
+          points: latencyPoints(series),
+          readGap: gaps.read,
+          writeGap: gaps.write,
+        };
+      }),
     };
   }
 
