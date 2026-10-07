@@ -7,11 +7,11 @@ import type {
   TlsOverrides,
 } from "../engine/ports";
 import { assertPgTlsEnforced } from "./client";
-import { PostgresIndexCollector } from "./collector";
+import { PostgresIndexCollector, splitTableRef } from "./collector";
 import { applyPgTlsOverrides, isPgConnString, pgConnStringUsername, pgHosts } from "./conn-string";
 import { PostgresConnection } from "./connection";
 import { diagnosePostgresConnection } from "./diagnose";
-import { PostgresIndexExecutor } from "./executor";
+import { PostgresIndexExecutor, postgresIndexName } from "./executor";
 import { dropRoleStatements, provisionPostgresScopedUser } from "./provision";
 
 class PostgresEngineSession implements EngineSession {
@@ -78,6 +78,9 @@ export const postgresAdapter: EngineAdapter = {
   },
   connStringHint:
     "postgresql://user:password@host:5432/dbname?sslmode=verify-full or host=… port=5432 dbname=… user=…",
+  // Per SCHEMA, unlike the other two (#617): the table goes into the name.
+  indexName: (collection, keys, options) =>
+    postgresIndexName(splitTableRef(collection).table, keys, options),
   isConnString: isPgConnString,
   hostsOf: pgHosts,
   assertSecureTransport: assertPgTlsEnforced,

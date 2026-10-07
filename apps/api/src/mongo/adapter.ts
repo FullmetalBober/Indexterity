@@ -1,3 +1,4 @@
+import { keyedIndexName } from "../engine/index-names";
 import type { TunnelRoute } from "../engine/net-guard";
 import type {
   DialProxy,
@@ -104,6 +105,7 @@ export const mongoAdapter: EngineAdapter = {
   // a partialFilterExpression, so createIndexes takes it as it stands.
   capabilities: { hideIndexes: true, provisionScopedUsers: true, partialIndexFromConstants: true },
   connStringHint: "mongodb:// or mongodb+srv://",
+  indexName: (_collection, keys, options) => keyedIndexName(keys, options),
   isConnString: isMongoConnString,
   hostsOf: mongoHosts,
   assertSecureTransport: assertTlsEnforced,

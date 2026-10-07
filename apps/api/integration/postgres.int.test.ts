@@ -378,6 +378,31 @@ describe.skipIf(POSTGRES_URL === undefined)("postgres adapter against a live ser
       expect(onInvoices.map((spec) => spec.name)).toEqual(["invoices_pkey"]);
     }, 60_000);
 
+    // #617: the other half of the test above. Named through the engine, the same
+    // keys on two tables of one schema are two names, and both are built.
+    it("builds the same keys on two tables of one schema, under two names", async () => {
+      const executor = session.executor(false);
+      const keys = [{ field: "customer_id", direction: 1 as const }];
+      for (const table of ["ledger_a", "ledger_b"]) {
+        await seed.query(`CREATE TABLE ${SCHEMA}.${table} (id int PRIMARY KEY, customer_id int)`);
+        const collection = `${SCHEMA}.${table}`;
+        await executor.create(
+          "postgres",
+          collection,
+          { customer_id: 1 },
+          {
+            name: postgresAdapter.indexName(collection, keys),
+          },
+        );
+      }
+      for (const table of ["ledger_a", "ledger_b"]) {
+        const names = (await session.collector.listIndexes("postgres", `${SCHEMA}.${table}`)).map(
+          (spec) => spec.name,
+        );
+        expect(names).toContain(`${table}_customer_id_idx`);
+      }
+    }, 60_000);
+
     // The server's own refusal, which is a better message than anything the
     // executor would invent.
     it("cannot drop the index a constraint requires", async () => {

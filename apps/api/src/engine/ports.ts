@@ -1,5 +1,5 @@
 import type { TunnelRoute } from "./net-guard";
-import type { IndexSpec, QueryShape, ServerHealth } from "./types";
+import type { IndexSpec, QueryShape, ServerHealth, SortKey } from "./types";
 
 // The engine-neutral boundary. Everything above this file — the analysis core,
 // the job pipeline, the API — speaks these ports; everything below implements
@@ -625,6 +625,20 @@ export interface EngineAdapter {
     proxy?: DialProxy,
     route?: TunnelRoute,
   ): Promise<EngineSession>;
+  // The name a proposed index on `collection` is built under (#617). The
+  // engine's, because where a name has to be unique is the engine's: MongoDB and
+  // SQL Server scope index names to the collection or table, so the keys alone
+  // name one; PostgreSQL scopes them to the schema, so two tables wanting the
+  // same keys would want the same name, and the second could never be built.
+  // Deterministic, because the name is part of a recommendation's identity —
+  // the live-claim index, cooldowns and the workload ledger all match on it
+  // from one pass to the next. `partial` is a candidate built from a shape's
+  // constants, told apart from the full index on the same keys.
+  indexName(
+    collection: string,
+    keys: readonly SortKey[],
+    options?: { readonly partial?: boolean },
+  ): string;
   // Report what these credentials may do, without writing anything.
   //
   // `observedDatabases` narrows what the answer is ABOUT (#244): both adapters
