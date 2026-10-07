@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { isRedundantPrefix, parseStoredSpec, rebuildKeys, rebuildOptions } from "../src/analysis";
+import { PassCache, withPassCache } from "../src/engine/pass-cache";
 import { PassPhases, withPhases } from "../src/engine/phases";
 import {
   type CollectionLatency,
@@ -561,6 +562,29 @@ describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", 
     // and one of them has been read.
     expect((specs.get("dbo.orders") ?? []).length).toBeGreaterThan(0);
     expect(Object.keys(sizes.get("dbo.orders") ?? {}).length).toBeGreaterThan(0);
+  });
+
+  // #614: storage on the same terms. Suggest asks for every table's in turn, and
+  // inside a pass the first ask reads the whole database once; outside one, a
+  // lone caller reads its own table. Both have to give the same answer.
+  it("reads storage once per database inside a pass and agrees with the per-table read", async () => {
+    const collector = session.collector;
+    const tables = await collector.listCollectionNames(DB);
+    const perTable = await Promise.all(
+      tables.map((table) => collector.collectionStorage(DB, table)),
+    );
+    const phases = new PassPhases();
+    const batched = await withPhases(phases, () =>
+      withPassCache(new PassCache(), () =>
+        Promise.all(tables.map((table) => collector.collectionStorage(DB, table))),
+      ),
+    );
+    expect(batched).toEqual(perTable);
+    expect(phases.phases().filter((phase) => phase.name === "storageByTable")).toEqual([
+      expect.objectContaining({ calls: 1 }),
+    ]);
+    // Not two empty answers agreeing: the fixture table holds rows.
+    expect(batched[tables.indexOf("dbo.orders")]?.docCount).toBeGreaterThan(0);
   });
 
   // #466. A unit test with a fake collector cannot show that the phase names in

@@ -1,4 +1,4 @@
-import { passCached } from "../engine/pass-cache";
+import { inPass, passCached } from "../engine/pass-cache";
 import { beginPhase, timePhase } from "../engine/phases";
 import type {
   ClusterNode,
@@ -602,7 +602,19 @@ export class MssqlIndexCollector implements IndexCollector {
     }));
   }
 
+  // Inside a pass, the whole database's in one read, and each table answered
+  // from it (#614): suggest asks for every table's storage in turn, and one
+  // statement per table was 105–150 s of a production suggest at 416 tables.
+  // Same rows, grouped — `sys.tables` joined in for the key, the way the other
+  // per-database catalog reads build theirs. A lone caller outside a pass reads
+  // its one table.
   async collectionStorage(database: string, collection: string): Promise<CollectionStorage> {
+    if (inPass()) {
+      const byTable = await passCached(`mssql:storage\u0000${database}`, () =>
+        this.storageByTable(database),
+      );
+      return byTable.get(collection) ?? { dataSizeBytes: 0, docCount: 0 };
+    }
     const rows = await this.conn.query<{ dataSizeBytes: number; docCount: number }>(
       // Index ids 0 and 1 are the heap or the clustered index — the table
       // itself. Partitions sum; row_count is per partition of the data.
@@ -615,6 +627,29 @@ export class MssqlIndexCollector implements IndexCollector {
     );
     const row = rows[0];
     return { dataSizeBytes: asNumber(row?.dataSizeBytes), docCount: asNumber(row?.docCount) };
+  }
+
+  private async storageByTable(database: string): Promise<ReadonlyMap<string, CollectionStorage>> {
+    const rows = await timePhase("storageByTable", () =>
+      this.conn.query<{ table: string; dataSizeBytes: number; docCount: number }>(
+        `SELECT
+           s.name + '.' + t.name AS [table],
+           COALESCE(SUM(p.used_page_count), 0) * 8192 AS dataSizeBytes,
+           COALESCE(SUM(p.row_count), 0) AS docCount
+         FROM ${quoteIdent(database)}.sys.tables t
+         JOIN ${quoteIdent(database)}.sys.schemas s ON s.schema_id = t.schema_id
+         LEFT JOIN ${quoteIdent(database)}.sys.dm_db_partition_stats p
+           ON p.object_id = t.object_id AND p.index_id IN (0, 1)
+         WHERE t.is_ms_shipped = 0
+         GROUP BY s.name, t.name`,
+      ),
+    );
+    return new Map(
+      rows.map((row) => [
+        row.table,
+        { dataSizeBytes: asNumber(row.dataSizeBytes), docCount: asNumber(row.docCount) },
+      ]),
+    );
   }
 
   async indexSizes(database: string, collection: string): Promise<Record<string, number>> {
