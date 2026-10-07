@@ -577,6 +577,13 @@ export async function suggestForCluster(
             );
             continue;
           }
+          // The name is taken, which the re-order and narrowing passes below
+          // already check and this one did not (#612): a build put it there, and
+          // the recommendation that did is settled, so it is not standing.
+          if (existing.some((idx) => idx.name === indexName)) {
+            ledger.resolve(database, collection, docCount, candidate.sourceShapes, "index-exists");
+            continue;
+          }
           ledger.resolve(
             database,
             collection,

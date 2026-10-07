@@ -1,8 +1,9 @@
-import type {
-  CreateIndexOptions,
-  IndexBuildOutcome,
-  IndexBuildSettlement,
-  IndexExecutor,
+import {
+  type CreateIndexOptions,
+  type IndexBuildOutcome,
+  IndexBuildRefusedError,
+  type IndexBuildSettlement,
+  type IndexExecutor,
 } from "../engine/ports";
 import { allowUntestedVersions, UnsupportedServerError } from "../engine/version";
 import { field } from "../errors/message";
@@ -289,6 +290,19 @@ export class PostgresIndexExecutor implements IndexExecutor {
     const name = options.name ?? derivedName(table, keys);
     this.assertWritable(`create index ${name}`);
     await this.assertSupported();
+    // An index name is unique per SCHEMA here, not per table, and both routes
+    // below build IF NOT EXISTS — which on a name taken anywhere in the schema
+    // does nothing and reports success (#612). The row would be recorded as a
+    // build that happened, and a rollback would then drop whatever holds the
+    // name: another table's index. The create pass closes a row whose name is
+    // taken on its own table before this, so what is caught here is the rest of
+    // the schema, and it is refused for this row only.
+    const holder = await this.nameHolder(database, schema, name);
+    if (holder !== null) {
+      throw new IndexBuildRefusedError(
+        `the name ${name} is already taken in schema ${schema} by ${holder}`,
+      );
+    }
     const columns = Object.entries(keys)
       .map(([field, direction]) => `${quoteIdent(field)}${direction === -1 ? " DESC" : ""}`)
       .join(", ");
@@ -353,6 +367,25 @@ export class PostgresIndexExecutor implements IndexExecutor {
       throw error;
     }
     return "BUILT";
+  }
+
+  // What holds a relation name in a schema, in words, or null when nothing does.
+  // pg_class and pg_index are readable by any role, so this asks nothing of the
+  // scoped one it does not already have.
+  private async nameHolder(database: string, schema: string, name: string): Promise<string | null> {
+    const rows = await this.conn.query<{ kind: string; table: string | null }>(
+      `SELECT c.relkind::text AS kind, t.relname AS "table"
+         FROM pg_catalog.pg_class c
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+         LEFT JOIN pg_catalog.pg_index ix ON ix.indexrelid = c.oid
+         LEFT JOIN pg_catalog.pg_class t ON t.oid = ix.indrelid
+        WHERE n.nspname = $1 AND c.relname = $2`,
+      [schema, name],
+      database,
+    );
+    const row = rows[0];
+    if (row === undefined) return null;
+    return row.table === null ? "another relation" : `an index on ${schema}.${row.table}`;
   }
 
   // Remove the invalid index a failed CREATE INDEX CONCURRENTLY leaves behind,

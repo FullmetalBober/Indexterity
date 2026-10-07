@@ -123,6 +123,33 @@ export function isRedundantPrefix(candidate: IndexSpec, other: IndexSpec): boole
   return isKeyPrefix(candidate, other);
 }
 
+// Would building `candidate` add nothing `other` does not already do?
+//
+// Asked before a build rather than after it (#612): an index classify would
+// propose dropping as redundant the moment it exists is not worth building, and
+// one with exactly `other`'s keys is the same index under a second name. So:
+// `candidate` is a redundant prefix of `other`, or it has exactly `other`'s keys
+// in an order `other` produces, on options and columns `other` covers.
+export function isCoveredBy(candidate: IndexSpec, other: IndexSpec): boolean {
+  if (isRedundantPrefix(candidate, other)) return true;
+  if (!optionsCompatible(candidate, other) || !coversIncludes(candidate, other)) return false;
+  return candidate.keys.length === other.keys.length && coversKeyOrder(candidate, other);
+}
+
+// Why building this would add nothing to the table, or null when it would. The
+// name first: it is what the build would collide on, whatever the keys. Then an
+// index that already serves every query this one would — the rule classify
+// drops a redundant prefix by, or exactly the same keys under another name.
+export function notWorthBuilding(candidate: IndexSpec, live: readonly IndexSpec[]): string | null {
+  if (live.some((index) => index.name === candidate.name)) {
+    return `an index named ${candidate.name} already exists on this table`;
+  }
+  const covering = live.find((index) => isCoveredBy(candidate, index));
+  return covering === undefined
+    ? null
+    : `${covering.name} already serves every query this index would`;
+}
+
 // NOTE: an "exact duplicate" rule (same keys, different name) was built and then
 // removed — mongod itself rejects that create (IndexKeySpecsConflict), so true
 // duplicates cannot exist. The real-world twin is same-keys-different-COLLATION,
