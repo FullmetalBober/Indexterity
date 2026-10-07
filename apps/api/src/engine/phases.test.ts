@@ -68,9 +68,11 @@ describe("recording where a pass spent its time", () => {
     expect(at(phases, started + 210_000)).toBe("per-collection 210s/1 (still running)");
   });
 
+  // Pinned like the rest: unpinned, the clock could tick between reading
+  // `started` and the second enter, and the open call then ran 59,999 ms.
   it("adds a finished pass of a phase to an unfinished one of the same name", () => {
     const phases = new PassPhases();
-    const started = Date.now();
+    const started = pinClock();
     // One database's loop finished; the next database's is still going.
     phases.enter("per-collection")();
     phases.enter("per-collection");
@@ -78,8 +80,8 @@ describe("recording where a pass spent its time", () => {
     const [only] = phases.phases(started + 60_000);
     expect(only?.calls).toBe(2);
     expect(only?.running).toBe(true);
-    // The finished one contributed ~0ms, the open one 60s.
-    expect(only?.totalMs).toBeGreaterThanOrEqual(60_000);
+    // The finished one contributed nothing, the open one 60s.
+    expect(only?.totalMs).toBe(60_000);
   });
 
   it("counts two overlapping calls of one phase separately", () => {
