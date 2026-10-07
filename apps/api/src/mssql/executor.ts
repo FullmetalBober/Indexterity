@@ -198,13 +198,41 @@ export class MssqlIndexExecutor implements IndexExecutor {
     const included = (options.include ?? []).filter((column) => !keyFields.has(column));
     const include =
       included.length === 0 ? "" : ` INCLUDE (${included.map(quoteIdent).join(", ")})`;
-    await this.conn.execute(
-      `CREATE ${options.unique === true ? "UNIQUE " : ""}NONCLUSTERED INDEX ${quoteIdent(name)} ` +
-        `ON ${qualifiedTable(database, collection)} (${keyList})${include}${where}`,
-      // A build, so it gets the build budget rather than the pool's read budget.
-      { build: true },
-    );
+    try {
+      await this.conn.execute(
+        `CREATE ${options.unique === true ? "UNIQUE " : ""}NONCLUSTERED INDEX ${quoteIdent(name)} ` +
+          `ON ${qualifiedTable(database, collection)} (${keyList})${include}${where}`,
+        // A build, so it gets the build budget rather than the pool's read budget.
+        { build: true },
+      );
+    } catch (error) {
+      // The name is taken on this table (#612). The create pass reads the
+      // table's indexes first and closes a row whose name is taken, so what still
+      // arrives here is a STATISTICS object of that name, which no index list
+      // shows, or an index made in between. A refusal of this row, not a reason
+      // to stop every other build on the cluster.
+      if (isNameTaken(error)) {
+        throw new IndexBuildRefusedError(
+          `an index or statistics object named ${name} already exists on ${collection}`,
+        );
+      }
+      throw error;
+    }
     // CREATE INDEX returns when the index exists — ONLINE builds included.
     return "BUILT";
   }
+}
+
+// Msg 1913 — an index or statistics object of that name already exists on the
+// table. Matched on the number where the driver reports one and on the wording
+// otherwise, the way the collector matches Msg 916: a statement run through
+// sp_executesql can surface it nested, without the number on the top object.
+function isNameTaken(error: unknown): boolean {
+  for (let current: unknown = error, depth = 0; depth < 5; depth += 1) {
+    if (typeof current !== "object" || current === null) break;
+    if (Reflect.get(current, "number") === 1913) return true;
+    current = Reflect.get(current, "cause") ?? Reflect.get(current, "originalError");
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return /an index or statistics with name .* already exists on table/i.test(message);
 }

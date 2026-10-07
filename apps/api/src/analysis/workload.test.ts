@@ -883,3 +883,80 @@ describe("recommendCreates consolidation", () => {
     expect(out[0]?.keys.map((key) => key.field)).toEqual(["a", "b"]);
   });
 });
+
+// #612. The hosted deployment's SQL Server was auto-approved a build of an index
+// it had built two hours earlier: the shape binds the same equality fields in the
+// other order, and the old test compared field lists in order.
+describe("recommendCreates and an index that already serves the want", () => {
+  const sortOn = (field: string, direction: 1 | -1 = 1): SortKey => ({ field, direction });
+  const built = idx("invoiceNumber_1_partsFullRawId_1_closedDate_1_totalTax_1", [
+    "invoiceNumber",
+    "partsFullRawId",
+    "closedDate",
+    "totalTax",
+  ]);
+
+  function declined(shapes: QueryShape[], existing: IndexSpec[]): string[] {
+    const reasons: string[] = [];
+    recommendCreates(shapes, existing, options, (_shape, reason) => reasons.push(reason));
+    return reasons;
+  }
+
+  it("does not propose the same equality fields in another order", () => {
+    const scan = shape(
+      ["partsFullRawId", "invoiceNumber"],
+      [sortOn("closedDate")],
+      ["totalTax"],
+      893,
+    );
+    expect(recommendCreates([scan], [built], options)).toEqual([]);
+    expect(declined([scan], [built])).toEqual(["index-exists"]);
+  });
+
+  // A sort on invoiceNumber is served by any index that leads with it; the second
+  // proposal on that table, invoiceNumber_1, was exactly this.
+  it("does not propose what an existing index carries as its prefix", () => {
+    const sorted = shape([], [sortOn("invoiceNumber")], [], 124);
+    const wider = idx("invoiceNumber_1_totalTax_1", ["invoiceNumber", "totalTax"]);
+    expect(recommendCreates([sorted], [wider], options)).toEqual([]);
+    expect(declined([sorted], [wider])).toEqual(["index-exists"]);
+  });
+
+  // A backward walk reverses every key, so a sort read the other way round is
+  // served too. A mixed requirement is not, and is still proposed.
+  it("counts a sort the index serves backwards, and not a mixed one", () => {
+    const reversed = shape(["a"], [sortOn("at", -1), sortOn("b", -1)], [], 5);
+    const forward = idx("a_1_at_1_b_1_c_1", ["a", "at", "b", "c"]);
+    expect(recommendCreates([reversed], [forward], options)).toEqual([]);
+    const mixed = shape(["a"], [sortOn("at", -1), sortOn("b")], [], 5);
+    expect(recommendCreates([mixed], [forward], options)).toHaveLength(1);
+  });
+
+  it("still proposes where the existing index leads with something else", () => {
+    const ranged = shape([], [], ["totalTax"], 62);
+    const [candidate] = recommendCreates([ranged], [built], options);
+    expect(candidate?.type).toBe("CREATE");
+    expect(candidate?.keys).toEqual([{ field: "totalTax", direction: 1 }]);
+  });
+
+  // Only an index that covers the same documents serves the want; a sparse one
+  // skips documents, and a partial one holds only its filter's.
+  it("does not count a wider index that covers fewer documents", () => {
+    const scan = shape(["a"], [], [], 5);
+    const sparse = { ...idx("a_1_b_1", ["a", "b"]), sparse: true };
+    const partial = { ...idx("a_1_b_1", ["a", "b"]), partial: true, partialFilter: { b: 1 } };
+    expect(recommendCreates([scan], [sparse], options)).toHaveLength(1);
+    expect(recommendCreates([scan], [partial], options)).toHaveLength(1);
+  });
+
+  // Leading with what was folded in reorders the equality block, so the final
+  // keys are checked once more: here neither shape alone is served — the index
+  // is sparse — but together they consolidate into exactly its keys.
+  it("does not propose a consolidated index whose keys an index already has", () => {
+    const both = shape(["b", "a"], [], [], 5);
+    const one = shape(["a"], [], [], 5);
+    const sparse = { ...idx("a_b_sparse", ["a", "b"]), sparse: true };
+    expect(recommendCreates([both, one], [sparse], options)).toEqual([]);
+    expect(declined([both, one], [sparse])).toEqual(["index-exists", "index-exists"]);
+  });
+});
