@@ -27,6 +27,28 @@ const MIN_BYTES = 1024;
 // percent. Gzip's default 6 for a client that does not take brotli.
 const BROTLI_QUALITY = 5;
 
+// What createServerEntry takes and wrapFetchWithSentry returns: one fetch.
+export interface FetchEntry {
+  fetch(request: Request, opts?: unknown): Response | Promise<Response>;
+}
+
+/**
+ * An entry whose every response leaves compressed — compression applied to
+ * what `entry` returns, so after anything `entry` does to a response.
+ *
+ * That order is the whole of it (#621). Sentry's fetch wrapper reads every HTML
+ * response as UTF-8 text to put its trace tags in the head, and keeps the
+ * headers. Compressed beneath it, a brotli body was decoded as text — every
+ * byte that was not valid UTF-8 became U+FFFD — re-encoded, and sent on as
+ * `br`, and the hosted dashboard served pages of garbage. Nothing that ran
+ * without a DSN could see it: not the unit tests, the built server, kind or CI.
+ */
+export function compressedEntry(entry: FetchEntry): FetchEntry {
+  return {
+    fetch: async (request, opts) => compressedResponse(request, await entry.fetch(request, opts)),
+  };
+}
+
 /** The encoding to answer with, from the request's Accept-Encoding: brotli first. */
 export function negotiateEncoding(acceptEncoding: string | null): "br" | "gzip" | null {
   if (acceptEncoding === null) return null;
