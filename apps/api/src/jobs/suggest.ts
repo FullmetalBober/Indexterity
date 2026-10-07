@@ -69,10 +69,6 @@ const INSTANT_MIN_COUNT = 5;
 // reasoning — the churn buys nothing.
 const NARROW_MIN_SAVING_BYTES = 32 * 1024 * 1024;
 
-function proposedName(keys: readonly SortKey[]): string {
-  return keys.map((key) => `${key.field}_${key.direction}`).join("_");
-}
-
 // targetSpec key encoding: plain = ascending, ":-1" suffix = descending.
 function encodeKeys(keys: readonly SortKey[]): string[] {
   return keys.map((key) => (key.direction === -1 ? `${key.field}:-1` : key.field));
@@ -161,7 +157,7 @@ export async function suggestForCluster(
     await planForCluster(db, clusterId),
   );
 
-  const { session, engine, readOnly, canPartial, release } = await openClusterSession(
+  const { session, engine, readOnly, canPartial, nameIndex, release } = await openClusterSession(
     db,
     clusterId,
     { tunnels },
@@ -393,7 +389,7 @@ export async function suggestForCluster(
           : new Set<string>();
         const reordering = new Set<string>();
         for (const candidate of recommendReorder(shapes, existing, WORKLOAD_OPTIONS, hinted)) {
-          const indexName = proposedName(candidate.keys);
+          const indexName = nameIndex(collection, candidate.keys);
           // Each guard says so on the shapes the candidate answers, which the
           // candidate carries — attribution, not a second reading of the rules
           // (#432).
@@ -554,11 +550,11 @@ export async function suggestForCluster(
         ].sort((a, b) => b.count - a.count);
         const budgetKey = `${database} ${collection}`;
         for (const candidate of creates) {
-          // Partial variants get a suffix so they never collide with the full
+          // Partial variants are named apart so they never collide with the full
           // index of the same keys.
-          const indexName =
-            proposedName(candidate.keys) +
-            (candidate.partialFilter === undefined ? "" : "_partial");
+          const indexName = nameIndex(collection, candidate.keys, {
+            partial: candidate.partialFilter !== undefined,
+          });
           if (cooled.has(cooldownKey(database, collection, indexName))) {
             ledger.resolve(database, collection, docCount, candidate.sourceShapes, "cooldown");
             continue;
@@ -696,7 +692,7 @@ export async function suggestForCluster(
         // its post-build watch, finalize.ts proposes retiring the long one
         // through the ordinary hide → observe → regression gate.
         for (const candidate of recommendNarrowing(shapes, existing, WORKLOAD_OPTIONS)) {
-          const indexName = proposedName(candidate.keys);
+          const indexName = nameIndex(collection, candidate.keys);
           if (cooled.has(cooldownKey(database, collection, indexName))) continue;
           if (standing.has(watchKey(database, collection, indexName))) continue;
           // An index on exactly these keys already exists, or another candidate
@@ -764,7 +760,7 @@ export async function suggestForCluster(
         );
         if (foreignDocs < TRIVIAL_COLLECTION_DOCS) continue;
         if (foreignDocs * want.perWeek < MIN_WEEKLY_DOCS_EXAMINED) continue;
-        const indexName = `${want.foreignField}_1`;
+        const indexName = nameIndex(want.from, [{ field: want.foreignField, direction: 1 }]);
         if (cooled.has(cooldownKey(want.database, want.from, indexName))) continue;
         if (standing.has(watchKey(want.database, want.from, indexName))) continue;
         if (

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   type CreateIndexOptions,
   type IndexBuildOutcome,
@@ -429,15 +430,46 @@ function partialPredicate(options: CreateIndexOptions): string {
   return typeof sql === "string" && sql.trim().length > 0 ? ` WHERE ${sql}` : "";
 }
 
-// A name in postgres's own style when the caller did not choose one:
-// table_col1_col2_idx, which is what CREATE INDEX generates itself. Truncated to
-// 63 bytes because that is the identifier limit, and an over-long name is
-// silently truncated by the server — after which the name we recorded and the
-// name on the cluster differ, and undo cannot find the index.
-export function derivedName(table: string, keys: Record<string, 1 | -1>): string {
-  const parts = [table, ...Object.keys(keys), "idx"];
+// The identifier limit: NAMEDATALEN - 1.
+const IDENTIFIER_BYTES = 63;
+
+// The name an index is built under here: table_col1_col2_idx, postgres's own
+// style, which CREATE INDEX generates itself.
+//
+// The TABLE is in it because an index is a relation, and relation names are
+// unique per schema, not per table (#617): named by its keys alone, the way
+// MongoDB and SQL Server name one, two tables wanting the same keys wanted the
+// same name, and the second could never be built. A descending key says so,
+// which postgres's own default does not, so that a re-order's replacement does
+// not take the name of the index it replaces.
+//
+// Kept within 63 bytes because an over-long name is silently truncated by the
+// server, after which the name recorded and the name on the cluster differ and
+// nothing can find the index by it — and cut with a hash of the whole, because
+// two long names sharing their first 63 bytes would otherwise be one.
+export function postgresIndexName(
+  table: string,
+  keys: readonly { readonly field: string; readonly direction: 1 | -1 }[],
+  options: { readonly partial?: boolean } = {},
+): string {
+  const parts = [
+    table,
+    ...keys.map((key) => (key.direction === -1 ? `${key.field}_desc` : key.field)),
+    ...(options.partial === true ? ["partial"] : []),
+    "idx",
+  ];
   const name = parts.join("_").replace(/[^\w$]/g, "_");
-  return Buffer.byteLength(name) <= 63 ? name : truncateToBytes(name, 63);
+  if (Buffer.byteLength(name) <= IDENTIFIER_BYTES) return name;
+  const hash = createHash("sha256").update(name).digest("hex").slice(0, 8);
+  return `${truncateToBytes(name, IDENTIFIER_BYTES - hash.length - 1)}_${hash}`;
+}
+
+// The same rule, for a build that arrives without a name.
+export function derivedName(table: string, keys: Record<string, 1 | -1>): string {
+  return postgresIndexName(
+    table,
+    Object.entries(keys).map(([field, direction]) => ({ field, direction })),
+  );
 }
 
 function truncateToBytes(value: string, limit: number): string {

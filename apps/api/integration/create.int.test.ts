@@ -21,6 +21,7 @@ import type { IndexSpec } from "../src/engine/types";
 import { at } from "../src/errors/at";
 import { openClusterSession } from "../src/jobs/cluster-connection";
 import { applyCreatesForCluster } from "../src/jobs/create";
+import { mssqlAdapter } from "../src/mssql/adapter";
 import { stub } from "../src/test-utils";
 import { databaseUrl } from "./helpers";
 
@@ -119,6 +120,7 @@ beforeAll(async () => {
     readOnly: false,
     canHide: true,
     canPartial: false,
+    nameIndex: mssqlAdapter.indexName,
     observedDatabases: null,
     release: () => undefined,
   });

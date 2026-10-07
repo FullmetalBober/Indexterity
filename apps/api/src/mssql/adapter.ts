@@ -1,3 +1,4 @@
+import { keyedIndexName } from "../engine/index-names";
 import type { TunnelRoute } from "../engine/net-guard";
 import type {
   DialProxy,
@@ -94,6 +95,7 @@ export const mssqlAdapter: EngineAdapter = {
   engine: "MSSQL",
   capabilities: { hideIndexes: true, provisionScopedUsers: true, partialIndexFromConstants: false },
   connStringHint: "mssql://user:password@host:1433 or Server=host;User Id=…;Password=…",
+  indexName: (_collection, keys, options) => keyedIndexName(keys, options),
   isConnString: isMssqlConnString,
   hostsOf: mssqlHosts,
   assertSecureTransport: assertMssqlTlsEnforced,
