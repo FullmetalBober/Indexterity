@@ -175,11 +175,14 @@ describe.skipIf(MONGO_ADMIN_URL === undefined)("a failure watch on a real mongod
       );
     expect(slowLogged).toBe(true);
 
-    // What the check reads: every failure, complete since the watch began.
+    // What the check reads: every failure, complete since the watch began — and
+    // these three named the index in a hint, so they are the hide's (#625).
     const collector = new MongoIndexCollector(conn);
-    expect(await collector.collectFailedOps(DB, COLL, since)).toMatchObject({
+    expect(await collector.collectFailedOps(DB, COLL, since, "status_1")).toMatchObject({
       kind: "WINDOW",
-      failed: 3,
+      hinted: 3,
+      suspect: 0,
+      unrelated: [],
       blindSpot: null,
     });
     // And the hints, including the update's `{$hint: name}`.

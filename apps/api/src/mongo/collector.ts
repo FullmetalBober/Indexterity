@@ -29,7 +29,14 @@ import { isRecord, messageOf } from "../errors/message";
 import type { MongoConnection } from "./connection";
 import { isAuthorizationError } from "./errors";
 import { type MemberConnections, profiledNodes } from "./members";
-import { combineReadings, failedOpsReading, profilerSettingsOn } from "./profiler";
+import {
+  combineReadings,
+  type FailureGroup,
+  failedOpsReading,
+  profilerSettingsOn,
+  type RingFill,
+  sortFailures,
+} from "./profiler";
 import {
   ownSelfReads,
   READS_PER_COLL_STATS_LATENCY,
@@ -364,6 +371,55 @@ const profileDoc = z.object({
     })
     .optional(),
 });
+
+// One row of the failed-operations $group (collectFailedOps). A field the
+// operation's profile entry did not have is absent from the group's _id.
+const failureGroupRow = z.object({
+  _id: z.object({
+    code: z.number().optional(),
+    name: z.string().optional(),
+    hint: z.unknown().optional(),
+  }),
+  failed: z.number(),
+});
+
+// The ring's listCollections entry, and what `dataSize` answers for it.
+const ringOptions = z.object({
+  options: z.object({
+    capped: z.boolean().optional(),
+    size: z.coerce.number().optional(),
+    max: z.coerce.number().optional(),
+  }),
+});
+const dataSizeReply = z.object({ size: z.coerce.number(), numObjects: z.coerce.number() });
+
+// How full one node's profiler ring is (#625), or null when it cannot be read.
+// `dataSize` with no bounds answers from the collection's own counts, and needs
+// only `find` on it; the cap is in the ring's listCollections options. Both are
+// readable with the engine role — probed on 7.0, where $collStats on
+// system.profile was refused.
+async function ringFillOn(conn: MongoConnection, database: string): Promise<RingFill | null> {
+  try {
+    const db = conn.db(database);
+    const [listed, size] = await Promise.all([
+      db.listCollections({ name: "system.profile" }).toArray(),
+      db.command({ dataSize: `${database}.system.profile` }),
+    ]);
+    const ring = ringOptions.safeParse(listed[0]).data;
+    const used = dataSizeReply.safeParse(size).data;
+    if (ring?.options.capped !== true || ring.options.size === undefined || used === undefined) {
+      return null;
+    }
+    return {
+      bytes: used.size,
+      entries: used.numObjects,
+      capBytes: ring.options.size,
+      capEntries: ring.options.max ?? null,
+    };
+  } catch {
+    return null;
+  }
+}
 
 // The single date-range predicate of a delete filter, or null when the filter
 // is anything else — only clean {field: {$lt/$lte: Date}} deletes count.
@@ -1242,17 +1298,32 @@ export class MongoIndexCollector implements IndexCollector {
   // than `slowms`, and a failed one is fast: on mongod 6.0 to 9.0 a hint at a
   // hidden index fails in 0 ms, and a level-1 profiler with no filter recorded
   // nothing of it. That window used to read as clean.
+  //
+  // And it SORTS the failures by what could have caused them (#625), because most
+  // of what fails on a collection is the application's own — a duplicate key, a
+  // document its validator refuses — and counting every failure against a hide
+  // parked a redundant index in production on three failures nobody could name.
+  // `indexName` is the index being judged: a hint at it fails only while it is
+  // hidden, and a hint at any other index fails the same way for its own reasons.
   async collectFailedOps(
     database: string,
     collection: string,
     sinceMs: number,
+    indexName: string,
   ): Promise<FailedOpsReading> {
     const nodes = await profiledNodes(this.conn, this.members);
+    // The index's key pattern, for a hint naming it by its pattern: read once for
+    // every member, and only if some failure carried such a hint.
+    let key: Promise<Readonly<Record<string, unknown>> | null> | undefined;
+    const keyOf = () => {
+      key ??= this.keyPatternOf(database, collection, indexName);
+      return key;
+    };
     return combineReadings(
       await Promise.all(
         nodes.map(async ({ host, conn }) => ({
           host,
-          reading: await this.failedOpsOn(conn, database, collection, sinceMs),
+          reading: await this.failedOpsOn(conn, database, collection, sinceMs, indexName, keyOf),
         })),
       ),
     );
@@ -1264,15 +1335,40 @@ export class MongoIndexCollector implements IndexCollector {
     database: string,
     collection: string,
     sinceMs: number,
+    indexName: string,
+    keyOf: () => Promise<Readonly<Record<string, unknown>> | null>,
   ): Promise<FailedOpsReading> {
     const ring = conn.db(database).collection("system.profile");
-    let failed: number;
+    let groups: FailureGroup[];
     try {
-      failed = await ring.countDocuments({
-        ns: `${database}.${collection}`,
-        ts: { $gte: new Date(sinceMs) },
-        $or: [{ ok: 0 }, { errCode: { $exists: true } }],
-      });
+      const rows = await ring
+        .aggregate([
+          {
+            $match: {
+              ns: `${database}.${collection}`,
+              ts: { $gte: new Date(sinceMs) },
+              $or: [{ ok: 0 }, { errCode: { $exists: true } }],
+            },
+          },
+          // Grouped on the server, so a ring full of one failure ships one row. All
+          // three hint shapes come back intact on mongod 6.0 to 9.0.
+          {
+            $group: {
+              _id: { code: "$errCode", name: "$errName", hint: "$command.hint" },
+              failed: { $sum: 1 },
+            },
+          },
+        ])
+        .toArray();
+      groups = failureGroupRow
+        .array()
+        .parse(rows)
+        .map(({ _id, failed }) => ({
+          code: _id.code ?? null,
+          name: _id.name ?? null,
+          hint: typeof _id.hint === "string" || isRecord(_id.hint) ? _id.hint : null,
+          failed,
+        }));
     } catch (error) {
       return {
         kind: "NO_SOURCE",
@@ -1281,7 +1377,8 @@ export class MongoIndexCollector implements IndexCollector {
           : `system.profile on ${database} could not be read (${messageOf(error)})`,
       };
     }
-    const [settings, oldest, self] = await Promise.all([
+    const byPattern = groups.some(({ hint }) => isRecord(hint) && typeof hint.$hint !== "string");
+    const [settings, oldest, fill, self, key] = await Promise.all([
       profilerSettingsOn(conn, database),
       ring
         .find({}, { projection: { _id: 0, ts: 1 } })
@@ -1290,17 +1387,36 @@ export class MongoIndexCollector implements IndexCollector {
         .toArray()
         .then((docs) => profileDoc.pick({ ts: true }).safeParse(docs[0]).data?.ts ?? null)
         .catch(() => null),
+      ringFillOn(conn, database),
       conn.helloNode(),
+      byPattern ? keyOf() : null,
     ]);
     return failedOpsReading({
       database,
       collection,
-      failed,
+      failures: sortFailures(groups, { name: indexName, key }),
       sinceMs,
       oldest,
+      fill,
       settings,
       throughMongos: self?.role === "mongos",
     });
+  }
+
+  // One index's key pattern as listIndexes keeps it — hidden or not — or null
+  // when it cannot be read. On the base connection: index definitions replicate.
+  private async keyPatternOf(
+    database: string,
+    collection: string,
+    indexName: string,
+  ): Promise<Readonly<Record<string, unknown>> | null> {
+    try {
+      const specs = await this.conn.db(database).collection(collection).listIndexes().toArray();
+      const key: unknown = specs.find((spec) => spec.name === indexName)?.key;
+      return isRecord(key) ? key : null;
+    } catch {
+      return null;
+    }
   }
 
   // Indexes the application names explicitly with hint().

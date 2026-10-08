@@ -9,7 +9,7 @@ import {
 } from "@repo/contracts";
 import { makeWorkerUtils } from "graphile-worker";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { describeFailures, judgeFailures } from "../src/analysis";
+import { describeFailures, FAILURE_BASELINE_MS, judgeFailures } from "../src/analysis";
 import { outcomeOf } from "../src/analysis/workload-outcome";
 import { entitledAutomation } from "../src/billing/plans";
 import {
@@ -58,7 +58,6 @@ import { drainPool } from "../src/jobs/connection-pool";
 import { activeCooldownKeys, cooldownKey } from "../src/jobs/cooldowns";
 import { applyCreatesForCluster } from "../src/jobs/create";
 import { runPrivilegeNotices } from "../src/jobs/digest";
-import { FAILURE_BASELINE_MS } from "../src/jobs/failure-watch";
 import { finalizeCluster } from "../src/jobs/finalize";
 import { releaseStaleLocks } from "../src/jobs/locks";
 import { paceOf, pacesDue } from "../src/jobs/pacing";
@@ -3477,56 +3476,99 @@ describe("the observe window can see a query that fails", () => {
       .catch(() => undefined);
   });
 
-  it("counts failed operations for a namespace, and only since the instant asked", async () => {
+  // #625: what fails on a collection is mostly the application's own, and only a
+  // failure the hide could have caused is evidence against it. Each shape here is
+  // one mongod 6.0 to 9.0 recorded with the index hidden.
+  it("sorts failures by what could have caused them, and only since the instant asked", async () => {
     const collector = new MongoIndexCollector(mongo);
     const db_ = mongo.db(DB);
-    await db_.collection(COLL).deleteMany({});
-    await db_.collection(COLL).insertMany([{ name: "beans and rice" }, { name: "spicy noodle" }]);
-    await db_.collection(COLL).createIndex({ name: "text" }, { name: "name_text" });
+    const coll = db_.collection(COLL);
+    await coll.deleteMany({});
+    await coll.insertMany([
+      { n: 1, u: 1 },
+      { n: 2, u: 2 },
+    ]);
+    await coll.createIndex({ n: 1 }, { name: "n_1" });
+    await coll.createIndex({ u: 1 }, { name: "u_1", unique: true });
     // Its own database, so the capped profiler ring is this test's alone —
     // system.profile is per-database, and inttest is shared by everything above.
     await db_.command({ profile: 2 });
     try {
-      // A working $text query first, so "no failures" is a reading and not an
-      // empty ring.
-      expect(await db_.collection(COLL).countDocuments({ $text: { $search: "beans" } })).toBe(1);
-      const before = await collector.collectFailedOps(DB, COLL, 0);
+      // A working query first, so "no failures" is a reading and not an empty ring.
+      expect(await coll.find({ n: 1 }).hint("n_1").toArray()).toHaveLength(1);
+      const before = await collector.collectFailedOps(DB, COLL, 0, "n_1");
       // Level 2 records every operation, so this window has no blind spot.
-      expect(before).toMatchObject({ kind: "WINDOW", failed: 0, blindSpot: null });
+      expect(before).toMatchObject({
+        kind: "WINDOW",
+        hinted: 0,
+        suspect: 0,
+        unrelated: [],
+        blindSpot: null,
+      });
       if (before.kind !== "WINDOW") throw new Error("expected a window");
 
-      // Hide the text index and the same query stops working. Not slows —
-      // NoQueryExecutionPlans (291), "need exactly one text index for $text query".
-      await db_.command({ collMod: COLL, index: { name: "name_text", hidden: true } });
+      await db_.command({ collMod: COLL, index: { name: "n_1", hidden: true } });
       const hiddenAt = Date.now();
-      for (let i = 0; i < 3; i += 1) {
-        await expect(
-          db_.collection(COLL).countDocuments({ $text: { $search: "beans" } }),
-        ).rejects.toThrow();
-      }
+      // A hint at the hidden index, in the three shapes the profiler keeps: a
+      // find's name, an update's `{$hint: name}`, a key pattern.
+      await expect(coll.find({ n: 1 }).hint("n_1").toArray()).rejects.toThrow();
+      await expect(
+        coll.updateOne({ n: 1 }, { $set: { touched: true } }, { hint: "n_1" }),
+      ).rejects.toThrow();
+      await expect(coll.find({ n: 2 }).hint({ n: 1 }).toArray()).rejects.toThrow();
+      // Suspect: a query run past its maxTimeMS.
+      await expect(
+        coll.find({ $where: "sleep(50) || true" }).maxTimeMS(10).toArray(),
+      ).rejects.toThrow();
+      // The application's own: the same BadValue for an index that never existed,
+      // and a duplicate key.
+      await expect(coll.find({ n: 1 }).hint("never_1").toArray()).rejects.toThrow();
+      await expect(coll.updateOne({ u: 2 }, { $set: { u: 1 } })).rejects.toThrow();
 
-      const after = await collector.collectFailedOps(DB, COLL, hiddenAt - 1000);
+      const after = await collector.collectFailedOps(DB, COLL, hiddenAt - 1000, "n_1");
+      expect(after).toMatchObject({
+        kind: "WINDOW",
+        hinted: 3,
+        suspect: 1,
+        suspectKinds: [{ kind: "MaxTimeMSExpired", failed: 1 }],
+        unrelated: [
+          { kind: "BadValue", failed: 1 },
+          { kind: "DuplicateKey", failed: 1 },
+        ],
+      });
       if (after.kind !== "WINDOW") throw new Error(`expected a window: ${after.reason}`);
-      expect(after.failed).toBeGreaterThanOrEqual(3);
       // The ring reaches back at least to the working query, so its zero above was
       // an observation rather than a blind spot.
       expect(after.reachMs).toBeLessThanOrEqual(hiddenAt);
 
-      // And the `since` filter is real: nothing failed after the future.
-      const later = await collector.collectFailedOps(DB, COLL, Date.now() + 60_000);
-      expect(later).toMatchObject({ kind: "WINDOW", failed: 0 });
+      // Judged for another index, the same hints are somebody else's failures.
+      expect(await collector.collectFailedOps(DB, COLL, hiddenAt - 1000, "u_1")).toMatchObject({
+        hinted: 0,
+        unrelated: [
+          { kind: "BadValue", failed: 4 },
+          { kind: "DuplicateKey", failed: 1 },
+        ],
+      });
 
-      // The verdict the pipeline actually acts on.
+      // And the `since` filter is real: nothing failed after the future.
+      expect(await collector.collectFailedOps(DB, COLL, Date.now() + 60_000, "n_1")).toMatchObject({
+        kind: "WINDOW",
+        hinted: 0,
+        suspect: 0,
+        unrelated: [],
+      });
+
+      // The verdict the pipeline actually acts on: a hint needs no day of baseline.
       const verdict = judgeFailures(
-        { failed: before.failed, reachMs: before.reachMs },
+        { failed: before.suspect, reachMs: before.reachMs },
         after,
         hiddenAt,
       );
-      expect(verdict).toMatchObject({ kind: "INTRODUCED", failed: after.failed });
+      expect(verdict).toMatchObject({ kind: "INTRODUCED", cause: "HINTED", failed: 3 });
     } finally {
       await db_.command({ profile: 0 }).catch(() => undefined);
       await db_
-        .command({ collMod: COLL, index: { name: "name_text", hidden: false } })
+        .command({ collMod: COLL, index: { name: "n_1", hidden: false } })
         .catch(() => undefined);
     }
   });
@@ -3537,7 +3579,7 @@ describe("the observe window can see a query that fails", () => {
   it("reports no source rather than a clean window when the profiler is off", async () => {
     const collector = new MongoIndexCollector(mongo);
     await mongo.db(QUIET_DB).collection("untouched").insertOne({ n: 1 });
-    expect(await collector.collectFailedOps(QUIET_DB, "untouched", 0)).toEqual({
+    expect(await collector.collectFailedOps(QUIET_DB, "untouched", 0, "n_1")).toEqual({
       kind: "NO_SOURCE",
       reason: `the profiler is off on ${QUIET_DB}`,
     });
@@ -3564,10 +3606,11 @@ describe("the observe window can see a query that fails", () => {
       for (let i = 0; i < 3; i += 1) {
         await expect(db_.collection(COLL).find({ n: 1 }).hint("n_1").toArray()).rejects.toThrow();
       }
-      const reading = await collector.collectFailedOps(SLOW_DB, COLL, hiddenAt);
+      const reading = await collector.collectFailedOps(SLOW_DB, COLL, hiddenAt, "n_1");
       expect(reading).toMatchObject({
         kind: "WINDOW",
-        failed: 0,
+        hinted: 0,
+        suspect: 0,
         blindSpot: `the profiler on ${SLOW_DB} keeps only operations slower than ${slowms} ms, and a failed one is fast`,
       });
       // So the drop line says the window was blind, not that it was clean.
@@ -3576,9 +3619,9 @@ describe("the observe window can see a query that fails", () => {
       ).toContain(`slower than ${slowms} ms`);
       // And a collection with nothing in the ring is read against the whole ring's
       // reach rather than reported as having no source.
-      expect(await collector.collectFailedOps(SLOW_DB, "never_queried", 0)).toMatchObject({
+      expect(await collector.collectFailedOps(SLOW_DB, "never_queried", 0, "n_1")).toMatchObject({
         kind: "WINDOW",
-        failed: 0,
+        hinted: 0,
       });
     } finally {
       await db_.command({ profile: 0 }).catch(() => undefined);

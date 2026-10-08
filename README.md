@@ -9,7 +9,9 @@ freed bytes and latency.
 gated behind an observe window, a pre-flight check, a read-latency regression
 test, and a check that the workload did not start FAILING while the index was
 hidden — which is a separate question, because a query that fails returns faster
-than one that works and a latency test reads it as an improvement. That check
+than one that works and a latency test reads it as an improvement. Only failures
+a hidden index can cause count, such as a hint at it or a query run past its time
+limit, so the application's own errors do not hold a drop back. That check
 needs a record of failed operations: on MongoDB, Indexterity turns the profiler
 on itself for the window — failures and hints only, the slow-query log kept as it
 was, the settings given back — and on SQL Server it reads Query Store. Where
