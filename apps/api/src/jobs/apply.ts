@@ -3,6 +3,7 @@ import {
   AUTO_APPLY_HISTORY_DAYS,
   DEFAULT_OBSERVE_DAYS,
   dynamicObserveDays,
+  FAILURE_BASELINE_MS,
   inChangeWindow,
   usageSeries,
 } from "../analysis";
@@ -30,7 +31,6 @@ import type { TunnelRegistry } from "../tunnel/tunnel.registry";
 import { effectiveChangeWindow } from "./change-window";
 import { openClusterSession } from "./cluster-connection";
 import {
-  FAILURE_BASELINE_MS,
   HIDE_TYPES,
   keepFailureWatchesOrNone,
   waitingLine,
@@ -111,7 +111,11 @@ function applyResult(
   // What the failed-operations check will be able to see, and what became of
   // turning its source on — or null when nothing was hidden, so nothing can fail
   // for want of the index.
-  failures: { reading: FailedOpsReading; watch: DatabaseWatch | undefined } | null,
+  failures: {
+    reading: FailedOpsReading;
+    watch: DatabaseWatch | undefined;
+    hiddenAtMs: number;
+  } | null,
 ): string {
   const what = canHide
     ? `ok; observing ${window.days} days`
@@ -119,7 +123,8 @@ function applyResult(
   const observing = window.reason === null ? what : `${what} — ${window.reason}`;
   // Said at the hide, so an owner who wants the check can turn its source on
   // while the window runs rather than learn it was skipped from the drop (#596).
-  const watch = failures === null ? "" : watchLine(failures.reading, failures.watch);
+  const watch =
+    failures === null ? "" : watchLine(failures.reading, failures.watch, failures.hiddenAtMs);
   return watch === "" ? observing : `${observing}; ${watch}`;
 }
 
@@ -260,6 +265,7 @@ export async function applyCluster(
         continue;
       }
       if (canHide) await executor.hide(rec.database, rec.collection, rec.indexName);
+      const hiddenAt = new Date();
       // Baseline read latency at hide time — the reference for regression checks.
       // Null where nothing was hidden: the gate asks "did hiding this index slow
       // reads?", and an index still serving every query cannot answer it. Left
@@ -283,8 +289,17 @@ export async function applyCluster(
       //
       // From the watch's start where there is one: before it, a fast failure was
       // recorded nowhere, and a count reaching further back would claim more.
+      //
+      // Only the suspect kinds are kept (#625). A hint at the index cannot fail
+      // while it is visible, and a failure no hidden index causes says nothing
+      // about this one.
       const failuresBefore = canHide
-        ? await collector.collectFailedOps(rec.database, rec.collection, watchedSince ?? 0)
+        ? await collector.collectFailedOps(
+            rec.database,
+            rec.collection,
+            watchedSince ?? 0,
+            rec.indexName,
+          )
         : null;
       // The observe window this index actually deserves, from its own usage
       // history: periodic usage extends it (a monthly job must get a chance to
@@ -327,12 +342,12 @@ export async function applyCluster(
         .update(recommendations)
         .set({
           state: "HIDDEN",
-          hiddenAt: new Date(),
+          hiddenAt,
           observeDays: window.days,
           observeReason: window.reason,
           baselineReadOps: baseline.ops,
           baselineReadLatency: baseline.latencyMicros,
-          baselineFailedOps: failuresBefore?.kind === "WINDOW" ? failuresBefore.failed : null,
+          baselineFailedOps: failuresBefore?.kind === "WINDOW" ? failuresBefore.suspect : null,
           baselineFailedReachMs: failuresBefore?.kind === "WINDOW" ? failuresBefore.reachMs : null,
           updatedAt: new Date(),
         })
@@ -344,7 +359,9 @@ export async function applyCluster(
         result: applyResult(
           canHide,
           window,
-          failuresBefore === null ? null : { reading: failuresBefore, watch },
+          failuresBefore === null
+            ? null
+            : { reading: failuresBefore, watch, hiddenAtMs: hiddenAt.getTime() },
         ),
         rollbackToken: check.spec === null ? null : { spec: serializeSpec(check.spec) },
       });

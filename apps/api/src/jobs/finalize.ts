@@ -11,7 +11,9 @@ import {
   observedWindow,
   oldestLiveBaseline,
   outstayedWindow,
+  regressionReason,
   runFrom,
+  tallyText,
 } from "../analysis";
 import type { Database } from "../db";
 import {
@@ -417,7 +419,7 @@ export async function finalizeCluster(
           rec.baselineFailedOps === null
             ? null
             : { failed: rec.baselineFailedOps, reachMs: rec.baselineFailedReachMs ?? 0 },
-          await collector.collectFailedOps(rec.database, rec.collection, hiddenAtMs),
+          await collector.collectFailedOps(rec.database, rec.collection, hiddenAtMs, rec.indexName),
           hiddenAtMs,
         );
         if (failures.kind === "INTRODUCED") {
@@ -427,7 +429,7 @@ export async function finalizeCluster(
             clusterId,
             { database: rec.database, collection: rec.collection, indexName: rec.indexName },
             observeDays,
-            "failed operations during observe",
+            regressionReason(failures),
           );
           const day = until.toISOString().slice(0, 10);
           await db
@@ -435,7 +437,11 @@ export async function finalizeCluster(
             .set({
               state: "REJECTED",
               hiddenAt: null,
-              rationale: `${rec.rationale} — auto-rejected: queries began failing while it was hidden; cooling down until ${day}`,
+              rationale: `${rec.rationale} — auto-rejected: ${
+                failures.cause === "HINTED"
+                  ? "queries naming it in a hint failed while it was hidden"
+                  : "queries began failing while it was hidden"
+              }; cooling down until ${day}`,
               updatedAt: new Date(),
             })
             .where(eq(recommendations.id, rec.id));
@@ -448,7 +454,9 @@ export async function finalizeCluster(
           await new NotifyService(db).notifyClusterOwners(
             clusterId,
             `kept ${rec.indexName} (queries failing)`,
-            `Queries on ${rec.database}.${rec.collection} started FAILING while ${rec.indexName} was hidden — ${failures.failed} of them, where none were failing before. The index has been un-hidden and the drop aborted; it is cooling down until ${day}. This is the case a latency check cannot catch, because a query that fails returns faster than one that works.`,
+            failures.cause === "HINTED"
+              ? `Queries on ${rec.database}.${rec.collection} name ${rec.indexName} in a hint, and ${failures.failed} of them FAILED while it was hidden: a hidden index refuses every hint at it. The index has been un-hidden and the drop aborted; it is cooling down until ${day}. Dropping it would break those queries for good.`
+              : `Queries on ${rec.database}.${rec.collection} started FAILING while ${rec.indexName} was hidden — ${failures.failed} of them${failures.kinds.length === 0 ? "" : ` (${tallyText(failures.kinds)})`}, where none were failing in the day before. The index has been un-hidden and the drop aborted; it is cooling down until ${day}. This is the case a latency check cannot catch, because a query that fails returns faster than one that works.`,
             "alert",
           );
           await emitClusterEvent(pgNotifier(db), {

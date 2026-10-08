@@ -295,10 +295,14 @@ export interface IndexCollector {
   // turn on, a Query Store holding nothing for the table — and the audit line
   // used to collapse all of them into "could not be read", which reads like an
   // error and names none of them.
+  //
+  // `indexName` is the index whose hide is being judged, because a failure is
+  // only evidence against it if the index's absence could have caused it (#625).
   collectFailedOps(
     database: string,
     collection: string,
     sinceMs: number,
+    indexName: string,
   ): Promise<FailedOpsReading>;
 }
 
@@ -308,9 +312,30 @@ export type FailedOpsReading =
   | ({ readonly kind: "WINDOW" } & FailedOpsWindow)
   | { readonly kind: "NO_SOURCE"; readonly reason: string };
 
+// Failed operations by kind, largest first: the engine's name for the error, and
+// how many there were.
+export type FailureTally = readonly { readonly kind: string; readonly failed: number }[];
+
+// The operations that returned an error at or after the requested instant, sorted
+// by what could have caused them (#625). Applications fail on their own all the
+// time — a duplicate key, a document its validator refuses, a client that hangs up
+// — and counting all of it against a hide parked a redundant index in production
+// on three failures nobody could name.
 export interface FailedOpsWindow {
-  // Operations that returned an error at or after the requested instant.
-  readonly failed: number;
+  // Those that named the index in a hint. A hidden index refuses every hint at it
+  // (BadValue on mongod 6.0 to 9.0) and a visible one serves them, so each of
+  // these is the hide's doing. Null where the source cannot tell what a query
+  // hinted: SQL Server's Query Store marks an execution failed and no more.
+  readonly hinted: number | null;
+  // Those of a kind a missing index can cause and ordinary traffic also has: a
+  // query run past its maxTimeMS, a blocking sort over its memory limit, no plan
+  // at all. Every failure, where the source does not say what failed.
+  readonly suspect: number;
+  // `suspect` by kind, or empty where the source does not name kinds.
+  readonly suspectKinds: FailureTally;
+  // Everything else, by kind — counted against nothing, and reported so that a
+  // reader who sees failures on the collection is told why they did not count.
+  readonly unrelated: FailureTally;
   // The oldest observation the source can still produce, epoch ms. On MongoDB this
   // is the profiler ring's reach — a busy database fills it in minutes and a
   // quiet one holds weeks — so a count of zero means "nothing seen since here",

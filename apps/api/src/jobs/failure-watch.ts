@@ -1,4 +1,4 @@
-import { describeWatch, utcMinute } from "../analysis";
+import { describeShortBaseline, describeWatch, FAILURE_BASELINE_MS, utcMinute } from "../analysis";
 import { actions, and, type Database, eq, failureWatches, inArray, recommendations } from "../db";
 import type {
   DatabaseWatch,
@@ -11,23 +11,6 @@ import { messageOf } from "../errors/message";
 
 // The recommendation types apply.ts hides before it drops anything.
 export const HIDE_TYPES: ReadonlySet<string> = new Set(["DROP_UNUSED", "DROP_REDUNDANT", "MERGE"]);
-
-// How long failures are recorded before a hide, where Indexterity turned the
-// profiler on itself (#596).
-//
-// The verdict that acts needs a clean BEFORE: nothing failing on the collection,
-// then failures once the index is hidden. A profiler turned on at the hide has no
-// before at all, and every failure after it would be "nothing to compare
-// against" and never acted on — the check running and deciding nothing. So the
-// watch starts first and the hide waits for it.
-//
-// A day, because the before is a claim about the collection's ordinary traffic,
-// and ordinary traffic has a daily shape: a nightly job that fails on its own
-// would be missed by an hour of baseline and then read as the hide's doing — a
-// rollback and a cooldown of a whole observe window for a drop that was fine.
-// It costs no time in practice: hides only happen inside the change window, which
-// comes round once a day, and the watch starts at the first pass after approval.
-export const FAILURE_BASELINE_MS = 24 * 3_600_000;
 
 // Bring the cluster's failure watches in line with its drops in flight, and keep
 // the list of watched databases in step with what the cluster says (#596).
@@ -190,12 +173,20 @@ export function waitingLine(database: string, collection: string, since: number)
 
 // The failed-operations clause of a HIDE line: what the check will see, and —
 // where Indexterity could not turn the source on — why not, which is the part an
-// owner can do something about.
-export function watchLine(reading: FailedOpsReading, watch: DatabaseWatch | undefined): string {
+// owner can do something about. And when what can be read before the hide is
+// short of a day, what that leaves the check able to act on (#625).
+export function watchLine(
+  reading: FailedOpsReading,
+  watch: DatabaseWatch | undefined,
+  hiddenAtMs: number,
+): string {
   const seen = describeWatch(reading);
-  if (watch?.kind === "UNWATCHED" && seen !== "") return `${seen}; ${watch.reason}`;
-  if (watch?.kind === "WATCHED" && watch.ours && seen === "" && reading.kind === "WINDOW") {
-    return `failed operations watched since ${utcMinute(reading.reachMs)}, by the profiler Indexterity turned on`;
+  const short = describeShortBaseline(reading, hiddenAtMs);
+  let line = seen;
+  if (watch?.kind === "UNWATCHED" && seen !== "") line = `${seen}; ${watch.reason}`;
+  else if (watch?.kind === "WATCHED" && watch.ours && seen === "" && reading.kind === "WINDOW") {
+    line = `failed operations watched since ${utcMinute(reading.reachMs)}, by the profiler Indexterity turned on`;
   }
-  return seen;
+  if (short === "") return line;
+  return line === "" ? short : `${line} — ${short}`;
 }

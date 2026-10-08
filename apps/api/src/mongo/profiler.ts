@@ -1,7 +1,7 @@
 import { BSON, type Document } from "mongodb";
 import { z } from "zod";
-import { utcMinute } from "../analysis/failures";
-import type { FailedOpsReading } from "../engine/ports";
+import { mergeTallies, utcMinute } from "../analysis/failures";
+import type { FailedOpsReading, FailedOpsWindow } from "../engine/ports";
 import { isRecord } from "../errors/message";
 import type { MongoConnection } from "./connection";
 
@@ -305,20 +305,163 @@ function canonical(value: unknown): string {
   return JSON.stringify(value) ?? "null";
 }
 
+// One row of the failed-operations `$group`: a kind of failure, the hint the
+// operation carried, and how many there were. A field the profiler did not record
+// is null.
+export interface FailureGroup {
+  readonly code: number | null;
+  readonly name: string | null;
+  readonly hint: string | Readonly<Record<string, unknown>> | null;
+  readonly failed: number;
+}
+
+// A window's failures, sorted, before the ring's reach and settings are added.
+export type SortedFailures = Pick<
+  FailedOpsWindow,
+  "hinted" | "suspect" | "suspectKinds" | "unrelated"
+>;
+
+// What a hint at a hidden index fails with — and a hint at an index that never
+// existed, with the same message, which is why a hint failure is only evidence
+// when the hint names THIS index. Probed on mongod 6.0.28, 7.0.39, 8.2.9 and
+// 9.0.2 for find, aggregate, count, findAndModify, update and delete, by name and
+// by key pattern (#625).
+const BAD_VALUE = 2;
+
+// The other kinds a missing index can cause, each probed on the same four servers
+// with the index hidden (#625):
+//   - MaxTimeMSExpired (50): a plan slow enough to run out its maxTimeMS — or a
+//     driver's `timeoutMS`, which it sends as one.
+//   - QueryExceededMemoryLimitNoDiskUseAllowed (292): a sort the index served,
+//     done in memory instead, over the limit with `allowDiskUse: false`.
+//   - NoQueryExecutionPlans (291): `$text` or `$near` without their index, or a
+//     server running `notablescan`.
+//   - IndexNotFound (27): `$geoNear` without its index, on 9.0 (291 before).
+// Ordinary traffic has all of these too, which is what makes them suspect rather
+// than proof. Everything else is the application's own: a duplicate key, a
+// document its validator refuses, a malformed query, a client that hung up
+// mid-query (237 CursorKilled or 279 ClientDisconnect, by where it had got to).
+// A deploy hangs up on its own, and a query slow enough to make a client give up
+// reaches the latency gate as a slow one anyway.
+const SUSPECT: ReadonlyMap<number, string> = new Map([
+  [50, "MaxTimeMSExpired"],
+  [292, "QueryExceededMemoryLimitNoDiskUseAllowed"],
+  [291, "NoQueryExecutionPlans"],
+  [27, "IndexNotFound"],
+]);
+
+// The profiler's failures on one namespace, sorted by what could have caused them
+// (#625). `index.key` is the index's key pattern, for a hint that names it by its
+// pattern — or null when it could not be read, and then any pattern hint counts as
+// one at the index: the unknown takes the side that keeps the index.
+export function sortFailures(
+  groups: readonly FailureGroup[],
+  index: { readonly name: string; readonly key: Readonly<Record<string, unknown>> | null },
+): SortedFailures {
+  let hinted = 0;
+  const suspect: { kind: string; failed: number }[] = [];
+  const unrelated: { kind: string; failed: number }[] = [];
+  for (const group of groups) {
+    if (group.code === BAD_VALUE && hintsAt(group.hint, index)) {
+      hinted += group.failed;
+      continue;
+    }
+    const known = group.code === null ? undefined : SUSPECT.get(group.code);
+    const kind =
+      group.name ?? known ?? (group.code === null ? "unnamed errors" : `error ${group.code}`);
+    (known === undefined ? unrelated : suspect).push({ kind, failed: group.failed });
+  }
+  const suspectKinds = mergeTallies([suspect]);
+  return {
+    hinted,
+    suspect: suspectKinds.reduce((sum, { failed }) => sum + failed, 0),
+    suspectKinds,
+    unrelated: mergeTallies([unrelated]),
+  };
+}
+
+// Whether a recorded hint names the index. Three shapes, all probed: a find or an
+// aggregate keeps the name, an update or a delete keeps it wrapped as
+// `{$hint: name}`, and a key-pattern hint stays the pattern — the index's, field
+// for field and in order, as mongod itself matches one.
+function hintsAt(
+  hint: FailureGroup["hint"],
+  index: { readonly name: string; readonly key: Readonly<Record<string, unknown>> | null },
+): boolean {
+  if (hint === null) return false;
+  if (typeof hint === "string") return hint === index.name;
+  const wrapped = hint.$hint;
+  if (typeof wrapped === "string") return wrapped === index.name;
+  if (index.key === null) return true;
+  const fields = Object.entries(hint);
+  const keys = Object.entries(index.key);
+  return (
+    fields.length === keys.length &&
+    fields.every(([field, direction], i) => {
+      const key = keys[i];
+      return key !== undefined && key[0] === field && key[1] === direction;
+    })
+  );
+}
+
+// Every failure one node's ring recorded, of any kind: what says the profiler was
+// on at some point, whatever the failures were.
+function recorded(failures: SortedFailures): number {
+  return (
+    (failures.hinted ?? 0) +
+    failures.suspect +
+    failures.unrelated.reduce((sum, { failed }) => sum + failed, 0)
+  );
+}
+
+// How full one node's profiler ring is: its size and entries against its cap.
+// `system.profile` is a capped collection, 1 MB unless somebody made it bigger.
+export interface RingFill {
+  readonly bytes: number;
+  readonly entries: number;
+  readonly capBytes: number;
+  // A cap on the entry count as well, where the ring was created with one.
+  readonly capEntries: number | null;
+}
+
+// Whether a ring has turned over — deleted its oldest entries to make room — or
+// null when its fill could not be read (#625).
+//
+// Its oldest entry alone cannot say. A ring that has kept everything since the
+// watch began also has an oldest entry later than the watch: the first operation
+// worth keeping, on a quiet database, may come hours in. Read as the reach, that
+// shortened the baseline of a database that had lost nothing.
+//
+// A ring that has turned over stays within one entry of its cap, probed on mongod
+// 6.0.28 and 9.0.2: a 1 MB ring held 1,048,430 and 1,046,791 bytes once it had,
+// and 910,751 at a thousand entries before it did. A tenth of the cap is the
+// margin, on the side that says it has turned over: a reach claimed further back
+// than the ring can see is what rolled a drop back in #625.
+export function ringTurnedOver(fill: RingFill | null): boolean | null {
+  if (fill === null || fill.capBytes <= 0) return null;
+  const full = (count: number, cap: number) => count >= cap * 0.9;
+  return (
+    full(fill.bytes, fill.capBytes) ||
+    (fill.capEntries !== null && full(fill.entries, fill.capEntries))
+  );
+}
+
 // What one node's ring and settings add up to for the failed-operations check
 // (#596). Pure over what the collector read, so every case is a unit test.
 export function failedOpsReading(read: {
   readonly database: string;
   readonly collection: string;
-  // Failures on the namespace since `sinceMs`, counted on the server.
-  readonly failed: number;
+  // Failures on the namespace since `sinceMs`, sorted (sortFailures).
+  readonly failures: SortedFailures;
   readonly sinceMs: number;
   // The ring's oldest entry, any namespace — its reach — or null when it is empty.
   readonly oldest: Date | null;
+  // How full the ring is, or null when that could not be read.
+  readonly fill: RingFill | null;
   readonly settings: ProfilerSettings | null;
   readonly throughMongos: boolean;
 }): FailedOpsReading {
-  const { database, failed, oldest, settings } = read;
+  const { database, failures, oldest, settings } = read;
   // Through mongos the ring read is the database's PRIMARY SHARD's — mongos routes
   // it there — but `profile: -1` answers for mongos itself, which never profiles.
   // Probed on 7.0 with the shard at level 2: mongos said `was: 0`, and the same
@@ -332,7 +475,7 @@ export function failedOpsReading(read: {
         }
       : {
           kind: "WINDOW",
-          failed,
+          ...failures,
           reachMs: oldest.getTime(),
           blindSpot: `only ${database}'s primary shard is read, and mongos cannot say how its profiler is set`,
         };
@@ -341,12 +484,14 @@ export function failedOpsReading(read: {
   // Ours, still on, and watching this collection: complete since the watch began.
   // An empty ring is normal here — a filter that keeps only failures and slow
   // operations keeps nothing on a healthy database — so the reach is the watch's
-  // start, not the oldest entry, unless the ring has since turned over.
+  // start, not the oldest entry, unless the ring has since turned over. Where its
+  // fill cannot be read, the oldest entry stands in, which can only understate it.
   if (since !== undefined && settings?.was === 1) {
     return {
       kind: "WINDOW",
-      failed,
-      reachMs: Math.max(since, oldest?.getTime() ?? since),
+      ...failures,
+      reachMs:
+        ringTurnedOver(read.fill) === false ? since : Math.max(since, oldest?.getTime() ?? since),
       // Later than asked about: the watch began after the hide — a restart cleared
       // it and it was turned back on, or the index was hidden before Indexterity
       // watched at all — and what failed in between went unrecorded.
@@ -359,13 +504,18 @@ export function failedOpsReading(read: {
   // Ours, and turned off by somebody since: what it recorded until then counts.
   if (since !== undefined && settings?.was === 0) {
     const off = `the profiler on ${database} was turned off after Indexterity turned it on`;
-    return failed === 0 || oldest === null
+    return recorded(failures) === 0 || oldest === null
       ? { kind: "NO_SOURCE", reason: off }
-      : { kind: "WINDOW", failed, reachMs: Math.max(since, oldest.getTime()), blindSpot: off };
+      : {
+          kind: "WINDOW",
+          ...failures,
+          reachMs: Math.max(since, oldest.getTime()),
+          blindSpot: off,
+        };
   }
   // Off, and nothing from when it was on says otherwise. Failures recorded before
   // somebody turned it off are still failures, so those still count.
-  if (settings?.was === 0 && failed === 0) {
+  if (settings?.was === 0 && recorded(failures) === 0) {
     return { kind: "NO_SOURCE", reason: `the profiler is off on ${database}` };
   }
   if (oldest === null) {
@@ -373,7 +523,7 @@ export function failedOpsReading(read: {
   }
   return {
     kind: "WINDOW",
-    failed,
+    ...failures,
     reachMs: oldest.getTime(),
     blindSpot: profilerBlindSpot(database, settings),
   };
@@ -411,7 +561,13 @@ export function combineReadings(
   }
   return {
     kind: "WINDOW",
-    failed: windows.reduce((sum, window) => sum + window.failed, 0),
+    hinted: windows.reduce<number | null>(
+      (sum, window) => (sum === null || window.hinted === null ? null : sum + window.hinted),
+      0,
+    ),
+    suspect: windows.reduce((sum, window) => sum + window.suspect, 0),
+    suspectKinds: mergeTallies(windows.map((window) => window.suspectKinds)),
+    unrelated: mergeTallies(windows.map((window) => window.unrelated)),
     reachMs: Math.max(...windows.map((window) => window.reachMs)),
     blindSpot: said(caveats),
   };
