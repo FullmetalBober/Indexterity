@@ -7,9 +7,17 @@ import {
   planWatch,
   profilerBlindSpot,
   profilerSettings,
+  ringTurnedOver,
+  type SortedFailures,
+  sortFailures,
   type WatchMarker,
   watchFilter,
 } from "./profiler";
+
+// A node's failures as sortFailures hands them on: none, or `n` suspect ones.
+const NONE: SortedFailures = { hinted: 0, suspect: 0, suspectKinds: [], unrelated: [] };
+const failing = (n: number): SortedFailures =>
+  n === 0 ? NONE : { ...NONE, suspect: n, suspectKinds: [{ kind: "MaxTimeMSExpired", failed: n }] };
 
 const at = (settings: Partial<ProfilerSettings>): ProfilerSettings => ({
   was: 1,
@@ -88,9 +96,10 @@ describe("failedOpsReading", () => {
     failedOpsReading({
       database: "app",
       collection: "orders",
-      failed: 0,
+      failures: NONE,
       sinceMs: 0,
       oldest: OLDEST,
+      fill: null,
       settings: at({ was: 2 }),
       throughMongos: false,
       ...overrides,
@@ -113,9 +122,9 @@ describe("failedOpsReading", () => {
   // One-way: failures recorded before somebody turned the profiler off are still
   // failures.
   it("still counts failures a profiler recorded before it was turned off", () => {
-    expect(read({ settings: at({ was: 0 }), failed: 4 })).toEqual({
+    expect(read({ settings: at({ was: 0 }), failures: failing(4) })).toEqual({
       kind: "WINDOW",
-      failed: 4,
+      ...failing(4),
       reachMs: OLDEST.getTime(),
       blindSpot: "the profiler on app has since been turned off",
     });
@@ -132,7 +141,7 @@ describe("failedOpsReading", () => {
   it("reads a complete source as a window with no blind spot", () => {
     expect(read({})).toEqual({
       kind: "WINDOW",
-      failed: 0,
+      ...NONE,
       reachMs: OLDEST.getTime(),
       blindSpot: null,
     });
@@ -154,9 +163,9 @@ describe("failedOpsReading", () => {
       reason:
         "app's primary shard has profiled nothing, and mongos cannot say whether its profiler is on",
     });
-    expect(read({ throughMongos: true, settings: at({ was: 0 }), failed: 2 })).toEqual({
+    expect(read({ throughMongos: true, settings: at({ was: 0 }), failures: failing(2) })).toEqual({
       kind: "WINDOW",
-      failed: 2,
+      ...failing(2),
       reachMs: OLDEST.getTime(),
       blindSpot: "only app's primary shard is read, and mongos cannot say how its profiler is set",
     });
@@ -369,26 +378,44 @@ describe("failedOpsReading under a watch", () => {
     failedOpsReading({
       database: "app",
       collection: "orders",
-      failed: 0,
+      failures: NONE,
       sinceMs: NOW,
       oldest: null,
+      fill: null,
       settings: armedWith(marker),
       throughMongos: false,
       ...overrides,
     });
+  const MB = 1_048_576;
+  const filled = (bytes: number) => ({ bytes, entries: 900, capBytes: MB, capEntries: null });
 
   // A failures-only ring is empty on a healthy database; the watch's start is
   // the reach.
   it("is a complete window from the watch's start, empty ring and all", () => {
-    expect(read({})).toEqual({ kind: "WINDOW", failed: 0, reachMs: NOW, blindSpot: null });
+    expect(read({})).toEqual({ kind: "WINDOW", ...NONE, reachMs: NOW, blindSpot: null });
   });
 
   it("takes the ring's reach once it has turned over", () => {
     const turned = new Date(NOW + 60_000);
-    expect(read({ oldest: turned, sinceMs: NOW + 120_000 })).toMatchObject({
+    expect(
+      read({ oldest: turned, sinceMs: NOW + 120_000, fill: filled(MB - 1_000) }),
+    ).toMatchObject({
       reachMs: turned.getTime(),
       blindSpot: null,
     });
+    // And where its fill cannot be read, which can only understate the reach.
+    expect(read({ oldest: turned, sinceMs: NOW + 120_000 })).toMatchObject({
+      reachMs: turned.getTime(),
+    });
+  });
+
+  // #625: on a quiet database the first operation worth keeping can come hours
+  // into the watch. The ring lost nothing, so the reach is still the watch's start.
+  it("keeps the watch's start while the ring has not turned over", () => {
+    const firstKept = new Date(NOW + 20 * 3_600_000);
+    expect(
+      read({ oldest: firstKept, sinceMs: NOW + 24 * 3_600_000, fill: filled(40_000) }),
+    ).toMatchObject({ reachMs: NOW, blindSpot: null });
   });
 
   // Turned on after the hide — re-armed after a restart, or an index hidden before
@@ -407,10 +434,10 @@ describe("failedOpsReading under a watch", () => {
       reason: "the profiler on app was turned off after Indexterity turned it on",
     });
     expect(
-      read({ settings: armedWith(marker, 0), failed: 4, oldest: new Date(NOW) }),
+      read({ settings: armedWith(marker, 0), failures: failing(4), oldest: new Date(NOW) }),
     ).toMatchObject({
       kind: "WINDOW",
-      failed: 4,
+      ...failing(4),
     });
   });
 
@@ -425,7 +452,7 @@ describe("failedOpsReading under a watch", () => {
 
 describe("combineReadings", () => {
   const window = (failed: number, reachMs: number, blindSpot: string | null = null) =>
-    ({ kind: "WINDOW", failed, reachMs, blindSpot }) as const;
+    ({ kind: "WINDOW", ...failing(failed), reachMs, blindSpot }) as const;
 
   it("adds failures up and takes the reach every member can vouch for", () => {
     expect(
@@ -433,7 +460,7 @@ describe("combineReadings", () => {
         { host: "a:27017", reading: window(2, 100) },
         { host: "b:27017", reading: window(3, 300) },
       ]),
-    ).toEqual({ kind: "WINDOW", failed: 5, reachMs: 300, blindSpot: null });
+    ).toEqual({ kind: "WINDOW", ...failing(5), reachMs: 300, blindSpot: null });
   });
 
   it("says a shared caveat once, and names a member that differs", () => {
@@ -451,7 +478,7 @@ describe("combineReadings", () => {
       ]),
     ).toEqual({
       kind: "WINDOW",
-      failed: 0,
+      ...failing(0),
       reachMs: 100,
       blindSpot: "on b:27017, the profiler is off on app",
     });
@@ -459,5 +486,177 @@ describe("combineReadings", () => {
 
   it("is the one member's reading when there is one", () => {
     expect(combineReadings([{ host: "a:27017", reading: window(1, 5) }])).toEqual(window(1, 5));
+  });
+});
+
+describe("combineReadings, sorted", () => {
+  it("adds every class up across members, kinds merged", () => {
+    const member = (failures: SortedFailures) =>
+      ({ kind: "WINDOW", ...failures, reachMs: 0, blindSpot: null }) as const;
+    expect(
+      combineReadings([
+        {
+          host: "a:27017",
+          reading: member({
+            ...failing(2),
+            hinted: 1,
+            unrelated: [{ kind: "DuplicateKey", failed: 1 }],
+          }),
+        },
+        {
+          host: "b:27017",
+          reading: member({ ...failing(1), unrelated: [{ kind: "DuplicateKey", failed: 2 }] }),
+        },
+      ]),
+    ).toMatchObject({
+      hinted: 1,
+      suspect: 3,
+      suspectKinds: [{ kind: "MaxTimeMSExpired", failed: 3 }],
+      unrelated: [{ kind: "DuplicateKey", failed: 3 }],
+    });
+  });
+});
+
+// #625. What the profiler kept, grouped on the server by error and hint, sorted
+// by what could have caused it. Every shape here was recorded by mongod 6.0.28,
+// 7.0.39, 8.2.9 and 9.0.2 with the index hidden.
+describe("sortFailures", () => {
+  const INDEX = { name: "cycle.id_1", key: { "cycle.id": 1 } };
+  const bad = (hint: string | Record<string, unknown> | null, failed = 1) => ({
+    code: 2,
+    name: "BadValue",
+    hint,
+    failed,
+  });
+
+  // A find or an aggregate keeps the name, an update or a delete keeps it
+  // wrapped, and a key-pattern hint stays the pattern.
+  it("counts a failed hint at the index in every shape the profiler keeps", () => {
+    expect(
+      sortFailures(
+        [bad("cycle.id_1", 2), bad({ $hint: "cycle.id_1" }), bad({ "cycle.id": 1 })],
+        INDEX,
+      ),
+    ).toEqual({ hinted: 4, suspect: 0, suspectKinds: [], unrelated: [] });
+  });
+
+  // A hint at an index that never existed fails with the same BadValue, so a hint
+  // failure is the hide's doing only when it names THIS index.
+  it("does not count a failed hint at another index, or a pattern that is not this one", () => {
+    expect(
+      sortFailures(
+        [
+          bad("cycle.id_1"),
+          bad({ $hint: "date_1" }),
+          // A prefix of the pattern, its direction turned, its order changed.
+          bad({ "cycle.id": 1 }),
+          bad({ "cycle.id": 1, date: -1 }),
+          bad({ date: 1, "cycle.id": 1 }),
+          // And the pattern itself.
+          bad({ "cycle.id": 1, date: 1 }),
+        ],
+        { name: "cycle.id_1_date_1", key: { "cycle.id": 1, date: 1 } },
+      ),
+    ).toMatchObject({ hinted: 1, unrelated: [{ kind: "BadValue", failed: 5 }] });
+  });
+
+  // Unknown takes the side that keeps the index.
+  it("counts a pattern hint as the index's when its key could not be read", () => {
+    expect(sortFailures([bad({ anything: 1 })], { name: "cycle.id_1", key: null })).toMatchObject({
+      hinted: 1,
+    });
+  });
+
+  it("calls a timeout, a sort over its limit and a missing plan suspect", () => {
+    expect(
+      sortFailures(
+        [
+          { code: 50, name: "MaxTimeMSExpired", hint: null, failed: 2 },
+          { code: 292, name: "QueryExceededMemoryLimitNoDiskUseAllowed", hint: null, failed: 1 },
+          { code: 291, name: "NoQueryExecutionPlans", hint: null, failed: 1 },
+          { code: 27, name: "IndexNotFound", hint: null, failed: 1 },
+        ],
+        INDEX,
+      ),
+    ).toEqual({
+      hinted: 0,
+      suspect: 5,
+      suspectKinds: [
+        { kind: "MaxTimeMSExpired", failed: 2 },
+        { kind: "IndexNotFound", failed: 1 },
+        { kind: "NoQueryExecutionPlans", failed: 1 },
+        { kind: "QueryExceededMemoryLimitNoDiskUseAllowed", failed: 1 },
+      ],
+      unrelated: [],
+    });
+  });
+
+  // The application's own: none of these is a missing index's doing.
+  it("counts nothing else, and keeps it by kind", () => {
+    expect(
+      sortFailures(
+        [
+          { code: 11000, name: "DuplicateKey", hint: null, failed: 2 },
+          { code: 121, name: "DocumentValidationFailure", hint: null, failed: 1 },
+          { code: 2, name: "BadValue", hint: null, failed: 1 },
+          { code: 279, name: "ClientDisconnect", hint: null, failed: 1 },
+          { code: 999, name: null, hint: null, failed: 1 },
+          { code: null, name: null, hint: null, failed: 1 },
+        ],
+        INDEX,
+      ),
+    ).toEqual({
+      hinted: 0,
+      suspect: 0,
+      suspectKinds: [],
+      unrelated: [
+        { kind: "DuplicateKey", failed: 2 },
+        { kind: "BadValue", failed: 1 },
+        { kind: "ClientDisconnect", failed: 1 },
+        { kind: "DocumentValidationFailure", failed: 1 },
+        { kind: "error 999", failed: 1 },
+        { kind: "unnamed errors", failed: 1 },
+      ],
+    });
+  });
+
+  it("names a suspect kind the profiler did not name", () => {
+    expect(
+      sortFailures([{ code: 50, name: null, hint: null, failed: 1 }], INDEX).suspectKinds,
+    ).toEqual([{ kind: "MaxTimeMSExpired", failed: 1 }]);
+  });
+});
+
+// #625. Probed on 6.0.28 and 9.0.2: a 1 MB ring held 910,751 bytes at a thousand
+// entries before it turned over, and stayed within one entry of its cap after.
+describe("ringTurnedOver", () => {
+  const MB = 1_048_576;
+  const fill = (bytes: number, entries = 1_000, capEntries: number | null = null) => ({
+    bytes,
+    entries,
+    capBytes: MB,
+    capEntries,
+  });
+
+  it("says a ring within a tenth of its cap has turned over", () => {
+    expect(ringTurnedOver(fill(1_048_430))).toBe(true);
+    expect(ringTurnedOver(fill(1_046_791))).toBe(true);
+    expect(ringTurnedOver(fill(MB * 0.9))).toBe(true);
+  });
+
+  it("says a ring further from its cap has not", () => {
+    expect(ringTurnedOver(fill(910_751 - 50_000))).toBe(false);
+    expect(ringTurnedOver(fill(0, 0))).toBe(false);
+  });
+
+  // A ring created with `max` turns over on its entry count as well.
+  it("counts entries against an entry cap", () => {
+    expect(ringTurnedOver(fill(10_000, 995, 1_000))).toBe(true);
+    expect(ringTurnedOver(fill(10_000, 100, 1_000))).toBe(false);
+  });
+
+  it("does not know when the fill could not be read", () => {
+    expect(ringTurnedOver(null)).toBeNull();
+    expect(ringTurnedOver({ bytes: 0, entries: 0, capBytes: 0, capEntries: null })).toBeNull();
   });
 });

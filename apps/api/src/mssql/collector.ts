@@ -949,9 +949,15 @@ export class MssqlIndexCollector implements IndexCollector {
         reason: `Query Store on ${database} holds no plan that reads ${collection}`,
       };
     }
+    // Query Store keeps no error number and nothing of what a failed execution
+    // hinted, so every failure is suspect and none is known to be a hint's (#625).
+    const failed = asNumber(row.failed) ?? 0;
     return {
       kind: "WINDOW",
-      failed: asNumber(row.failed) ?? 0,
+      hinted: null,
+      suspect: failed,
+      suspectKinds: [],
+      unrelated: [],
       reachMs: row.reach.getTime(),
       // The capture-mode limit above, said in the audit line rather than only here.
       blindSpot:
