@@ -9,7 +9,7 @@ import {
 } from "@repo/contracts";
 import { makeWorkerUtils } from "graphile-worker";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { describeFailures, FAILURE_BASELINE_MS, judgeFailures } from "../src/analysis";
+import { describeFailures, FAILURE_BASELINE_MS, judgeFailures, utcMinute } from "../src/analysis";
 import { outcomeOf } from "../src/analysis/workload-outcome";
 import { entitledAutomation } from "../src/billing/plans";
 import {
@@ -2215,6 +2215,165 @@ describe("a drop waits for a day of failures before it is hidden", () => {
         .dropIndex("waits_1")
         .catch(() => undefined);
       await db.delete(recommendations).where(eq(recommendations.id, rec.id));
+      await inttest.command({ profile: 0, filter: "unset" });
+      await db.delete(failureWatches).where(eq(failureWatches.clusterId, clusterId));
+    }
+  });
+  // #630. On production, drops waited with empty trails: apply wrote the waiting
+  // line only when the watch began in the same apply pass, and the hourly finalize
+  // starts most of them — and re-arms them after a restart, which starts the day
+  // over. Five drops lost a night's window to a rolling restart, and nothing said so.
+  it("says why a drop waits whichever pass keeps the watch, and again when a restart starts it over", async () => {
+    process.env.MASTER_KEY =
+      process.env.MASTER_KEY ?? Buffer.from("0123456789abcdef0123456789abcdef").toString("base64");
+    const inttest = mongo.db("inttest");
+    await inttest.collection("orders").createIndex({ restarts: 1 }, { name: "restarts_1" });
+    const [rec] = await db
+      .insert(recommendations)
+      .values({
+        clusterId,
+        type: "DROP_UNUSED",
+        state: "APPROVED",
+        database: "inttest",
+        collection: "orders",
+        indexName: "restarts_1",
+        rationale: "restart test",
+        estimatedBytesSaved: 0,
+      })
+      .returning();
+    if (rec === undefined) throw new Error("failed to insert recommendation");
+    const trail = async () =>
+      (
+        await db
+          .select({ result: actions.result })
+          .from(actions)
+          .where(eq(actions.recommendationId, rec.id))
+          .orderBy(actions.createdAt)
+      ).map((row) => row.result);
+    try {
+      // A watch begun two hours ago, as the hourly pass keeps it: the drop has never
+      // been through an apply that started it.
+      const began = Date.now() - 2 * 3_600_000;
+      await db
+        .insert(failureWatches)
+        .values({ clusterId, database: "inttest" })
+        .onConflictDoNothing();
+      await inttest.command({
+        profile: 1,
+        filter: watchFilter({
+          v: 1,
+          owner: clusterId,
+          prior: { level: 0, filter: null },
+          slow: { ms: 100, rate: 1 },
+          watch: { "inttest.orders": began },
+          hints: { "inttest.orders": ["restarts_1"] },
+        }),
+      });
+      await finalizeCluster(db, clusterId);
+      expect(await trail()).toEqual([
+        expect.stringMatching(
+          new RegExp(
+            `^waiting: recording failed operations on inttest\\.orders until ${utcMinute(began + FAILURE_BASELINE_MS)}`,
+          ),
+        ),
+      ]);
+      // Said once: the next pass finds the trail already naming that instant.
+      await finalizeCluster(db, clusterId);
+      expect(await trail()).toHaveLength(1);
+
+      // A restart clears the profiler's level and filter both; the next pass arms
+      // it again, from then, and the drop says so.
+      await inttest.command({ profile: 0, filter: "unset" });
+      await finalizeCluster(db, clusterId);
+      const lines = await trail();
+      expect(lines).toHaveLength(2);
+      expect(lines[1]).toMatch(
+        /^waiting again: the record of failed operations on inttest\.orders started over at .* UTC, as it does when a server restarts/,
+      );
+      const rearmed = markerOf((await inttest.command({ profile: -1 })).filter);
+      expect(rearmed?.watch["inttest.orders"]).toBeGreaterThan(began);
+    } finally {
+      await inttest
+        .collection("orders")
+        .dropIndex("restarts_1")
+        .catch(() => undefined);
+      await db.delete(recommendations).where(eq(recommendations.id, rec.id));
+      await inttest.command({ profile: 0, filter: "unset" });
+      await db.delete(failureWatches).where(eq(failureWatches.clusterId, clusterId));
+    }
+  });
+
+  // #630. One drop that cannot be hidden used to end the pass, and the next pass
+  // in the window met the same drop first and ended the same way — every drop
+  // behind it waited, with nothing in any trail.
+  it("hides the drops it can when one cannot be hidden, and says why in that one's trail", async () => {
+    process.env.MASTER_KEY =
+      process.env.MASTER_KEY ?? Buffer.from("0123456789abcdef0123456789abcdef").toString("base64");
+    const inttest = mongo.db("inttest");
+    // Level 2 records everything, so there is no day to wait out.
+    await inttest.command({ profile: 2 });
+    await inttest.collection("orders").createIndex({ isolated: 1 }, { name: "isolated_1" });
+    // First in line, and its pre-flight throws: the collection is gone.
+    const [broken] = await db
+      .insert(recommendations)
+      .values({
+        clusterId,
+        type: "DROP_UNUSED",
+        state: "APPROVED",
+        database: "inttest",
+        collection: "vanished_since_approval",
+        indexName: "gone_1",
+        rationale: "isolation test: unhideable",
+        estimatedBytesSaved: 0,
+      })
+      .returning();
+    const [fine] = await db
+      .insert(recommendations)
+      .values({
+        clusterId,
+        type: "DROP_UNUSED",
+        state: "APPROVED",
+        database: "inttest",
+        collection: "orders",
+        indexName: "isolated_1",
+        rationale: "isolation test: hideable",
+        estimatedBytesSaved: 0,
+      })
+      .returning();
+    if (broken === undefined || fine === undefined) throw new Error("failed to insert");
+    const results = async (id: string) =>
+      (
+        await db
+          .select({ result: actions.result })
+          .from(actions)
+          .where(eq(actions.recommendationId, id))
+          .orderBy(actions.createdAt)
+      ).map((row) => row.result);
+    const state = async (id: string) =>
+      (await db.select().from(recommendations).where(eq(recommendations.id, id)))[0]?.state;
+    try {
+      // The pass still fails, so the cluster's blocked state says so —
+      await expect(applyCluster(db, clusterId)).rejects.toThrow();
+      // — but the drop behind the broken one was hidden,
+      expect(await state(fine.id)).toBe("HIDDEN");
+      // and the broken one stays APPROVED, with the reason in its trail.
+      expect(await state(broken.id)).toBe("APPROVED");
+      expect(await results(broken.id)).toEqual([
+        expect.stringMatching(/^hide failed, retried next pass: /),
+      ]);
+      // A failure that repeats is one fact, not one line per pass.
+      await expect(applyCluster(db, clusterId)).rejects.toThrow();
+      expect(await results(broken.id)).toHaveLength(1);
+    } finally {
+      await inttest
+        .command({ collMod: "orders", index: { name: "isolated_1", hidden: false } })
+        .catch(() => undefined);
+      await inttest
+        .collection("orders")
+        .dropIndex("isolated_1")
+        .catch(() => undefined);
+      await db.delete(recommendations).where(eq(recommendations.id, broken.id));
+      await db.delete(recommendations).where(eq(recommendations.id, fine.id));
       await inttest.command({ profile: 0, filter: "unset" });
       await db.delete(failureWatches).where(eq(failureWatches.clusterId, clusterId));
     }
