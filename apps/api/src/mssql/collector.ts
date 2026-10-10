@@ -250,6 +250,36 @@ export function latencyFromPlans(
   return out;
 }
 
+// One table's failed executions and reach, from the runtime totals of the plans
+// attributed to it (#629): the failures at or after the instant asked, and the
+// earliest execution any of those plans retains. Null when none of them has a
+// retained row — Query Store holding nothing about the table.
+export function failuresFromPlans(
+  planIds: ReadonlySet<number>,
+  rows: readonly {
+    readonly planId: number;
+    readonly failed: number;
+    readonly reach: Date | null;
+  }[],
+): { readonly failed: number; readonly reachMs: number } | null {
+  let failed = 0;
+  let reachMs: number | null = null;
+  for (const row of rows) {
+    if (!planIds.has(row.planId) || row.reach === null) continue;
+    failed += Number.isFinite(row.failed) ? row.failed : 0;
+    const at = row.reach.getTime();
+    if (reachMs === null || at < reachMs) reachMs = at;
+  }
+  return reachMs === null ? null : { failed, reachMs };
+}
+
+// `schema.table`, as plan attribution names a table, for a collection named with
+// or without its schema.
+function qualifiedCollection(collection: string): string {
+  const { schema, table } = splitCollectionName(collection);
+  return `${schema}.${table}`;
+}
+
 // Hinted index names per collection, from the statement texts that mention a
 // hint at all and the plans that are forced — each read once for the database.
 // `LIKE '%table%'` under SQL Server's default collation is case-insensitive, and
@@ -925,25 +955,44 @@ export class MssqlIndexCollector implements IndexCollector {
     if (!store.enabled) {
       return { kind: "NO_SOURCE", reason: `Query Store is off on ${database}` };
     }
-    const rows = await this.conn.query<{ failed: number | null; reach: Date | null }>(
-      `SELECT
-         COALESCE(SUM(CASE WHEN rs.execution_type = 4
-                            AND rs.last_execution_time >= CAST(@since AS datetimeoffset)
-                           THEN rs.count_executions ELSE 0 END), 0) AS failed,
-         MIN(rs.first_execution_time) AS reach
-       FROM ${quoteIdent(database)}.sys.query_store_runtime_stats rs
-       JOIN ${quoteIdent(database)}.sys.query_store_plan p ON p.plan_id = rs.plan_id
-       WHERE CAST(p.query_plan AS nvarchar(max)) LIKE @pattern`,
-      // ISO 8601 with an offset, and CAST rather than compared as a string: the
-      // parameter type this connection takes is string | number, and an implicit
-      // conversion against a datetimeoffset column is the kind of thing that works
-      // until somebody's server has a different default language.
-      { since: new Date(sinceMs).toISOString(), pattern: tablePlanPattern(collection) },
+    // The plans that read this table, from the attribution cache the collect keeps
+    // warm (#454, #478), then one read of the runtime totals per plan — numbers
+    // only. This used to cast every plan's XML in the store and LIKE-match it, once
+    // per hidden index on every hourly finalize: twelve of the forty-three
+    // whole-store scans that made production's finalize a seventy-minute pass
+    // through its tunnel (#629). The two attribute a plan to a table by the same
+    // marker (tablesOfPlan, tablePlanMarker).
+    const plans = await this.planAttributions(database);
+    const target = qualifiedCollection(collection);
+    const ids = new Set<number>();
+    for (const [planId, plan] of plans ?? []) {
+      if (plan.tables.includes(target)) ids.add(planId);
+    }
+    const rows =
+      ids.size === 0
+        ? []
+        : await this.conn.query<{ planId: unknown; failed: unknown; reach: Date | null }>(
+            `SELECT rs.plan_id AS planId,
+                    SUM(CASE WHEN rs.execution_type = 4
+                              AND rs.last_execution_time >= CAST(@since AS datetimeoffset)
+                             THEN rs.count_executions ELSE 0 END) AS failed,
+                    MIN(rs.first_execution_time) AS reach
+               FROM ${quoteIdent(database)}.sys.query_store_runtime_stats rs
+              GROUP BY rs.plan_id`,
+            // ISO 8601 with an offset, and CAST rather than compared as a string: the
+            // parameter type this connection takes is string | number, and an
+            // implicit conversion against a datetimeoffset column is the kind of
+            // thing that works until somebody's server has a different default
+            // language.
+            { since: new Date(sinceMs).toISOString() },
+          );
+    const row = failuresFromPlans(
+      ids,
+      rows.map((r) => ({ planId: asNumber(r.planId), failed: asNumber(r.failed), reach: r.reach })),
     );
-    const row = rows[0];
     // No retained row for this table is not a clean table — it is Query Store
     // holding nothing about it, which says nothing either way.
-    if (row === undefined || row.reach === null) {
+    if (row === null) {
       return {
         kind: "NO_SOURCE",
         reason: `Query Store on ${database} holds no plan that reads ${collection}`,
@@ -951,14 +1000,13 @@ export class MssqlIndexCollector implements IndexCollector {
     }
     // Query Store keeps no error number and nothing of what a failed execution
     // hinted, so every failure is suspect and none is known to be a hint's (#625).
-    const failed = asNumber(row.failed) ?? 0;
     return {
       kind: "WINDOW",
       hinted: null,
-      suspect: failed,
+      suspect: row.failed,
       suspectKinds: [],
       unrelated: [],
-      reachMs: row.reach.getTime(),
+      reachMs: row.reachMs,
       // The capture-mode limit above, said in the audit line rather than only here.
       blindSpot:
         store.captureMode === "ALL"
