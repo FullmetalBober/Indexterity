@@ -1,4 +1,9 @@
-import { AUTO_APPLY_HISTORY_DAYS, type ClassifyOptions, type UsageTrustRefusal } from "./classify";
+import {
+  AUTO_APPLY_HISTORY_DAYS,
+  BLIND_RECOVERY_DAYS,
+  type ClassifyOptions,
+  type UsageTrustRefusal,
+} from "./classify";
 
 // Why a pass had nothing to say, in the words the customer gets (#277).
 //
@@ -145,11 +150,20 @@ export function explainRefusal(
         unaffected
       );
     case "gap-inside-run":
-    case "gap-between-runs":
       return (
         `There is a gap of more than ${options.maxGapHours} hours in this cluster's usage ` +
         `history. During a gap a busy index is indistinguishable from a dead one, so the ` +
         `period is not counted as observation. This clears as uninterrupted history accumulates.` +
+        unaffected
+      );
+    // #631. It used to share the sentence above, which promised to clear as history
+    // accumulated, while the rule kept refusing until the gap left the plan's window.
+    case "gap-between-runs":
+      return (
+        `This cluster's usage counters restarted while it was not being watched, leaving more ` +
+        `than ${options.maxGapHours} hours in which an index's use was counted by a counter that ` +
+        `no longer exists. A busy index in that stretch is indistinguishable from a dead one, so ` +
+        `this clears once ${BLIND_RECOVERY_DAYS} days of uninterrupted history follow it.` +
         unaffected
       );
     case "collection-idle":

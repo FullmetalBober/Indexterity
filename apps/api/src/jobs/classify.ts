@@ -232,7 +232,7 @@ export async function classifyCluster(db: Database, clusterId: string): Promise<
   // truncated history cannot see a cadence (D96). What changed is that the
   // arithmetic happens where the rows are. On the busiest production cluster
   // that read was 29,892 rows for 190 indexes.
-  const usage = await usageEvidence(db, clusterId, since);
+  const usage = await usageEvidence(db, clusterId, since, CLASSIFY_OPTIONS.maxGapHours * 3_600_000);
   // Distinct by construction now — the fold returns one entry per index — so the
   // dimension read is one row per index and no longer needs a Set to say so.
   const referenced = [...usage.keys()];

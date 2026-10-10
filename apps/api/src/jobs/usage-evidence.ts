@@ -1,4 +1,4 @@
-import type { UsageFold } from "../analysis";
+import type { BlindWindow, UsageFold } from "../analysis";
 import { type Database, sql } from "../db";
 
 // Everything `classify` asks of `index_snapshots`, folded in postgres (#534).
@@ -72,13 +72,14 @@ interface EvidenceRow extends Record<string, unknown> {
   readonly newest_end_ms: number | string | null;
   readonly latest_activity_ms: number | string | null;
   readonly max_interior_gap_ms: number | string | null;
-  readonly max_between_gap_ms: number | string | null;
+  // jsonb: [[startMs, endMs], …], oldest first.
+  readonly blind_windows: unknown;
   readonly size_bytes: number | string | null;
   readonly member_count: number | string | null;
   readonly hinted: boolean | null;
 }
 
-function evidenceQuery(clusterId: string, since: Date) {
+function evidenceQuery(clusterId: string, since: Date, minBlindMs: number) {
   return sql`
     -- Every run in the window with its neighbour alongside it, sorted once.
     --
@@ -221,6 +222,17 @@ function evidenceQuery(clusterId: string, since: Date) {
       from epochs
       group by index_id
     )
+    , blinded as (
+      select
+        *,
+        case
+          when ordinal = 1 or captured_at <= previous_end then null
+          when counters_started_at is not null and counters_started_at > previous_end
+            then least(captured_at, counters_started_at)
+          when counters_started_at is null or restarted then captured_at
+        end as blind_end
+      from priced
+    )
     select
       p.index_id,
       count(*)::int as runs,
@@ -235,8 +247,23 @@ function evidenceQuery(clusterId: string, since: Date) {
       (extract(epoch from max(p.captured_at) filter (where p.ops > 0)) * 1000)::double precision
         as latest_activity_ms,
       coalesce(max(p.max_gap_ms), 0)::double precision as max_interior_gap_ms,
-      coalesce(max(extract(epoch from (p.captured_at - p.previous_end)) * 1000), 0)::double precision
-        as max_between_gap_ms,
+      -- Every stretch of a hole between runs that went unrecorded (#631), longer
+      -- than the cutoff asked for: foldUsage's blindWindow, pair for pair. Blind
+      -- from the last reading to a counter's start inside the hole; the whole hole
+      -- where a reset has no later start, or nothing dates the counters at all.
+      coalesce(
+        jsonb_agg(
+          jsonb_build_array(
+            extract(epoch from p.previous_end) * 1000,
+            extract(epoch from p.blind_end) * 1000
+          )
+          order by p.captured_at
+        ) filter (
+          where p.blind_end is not null
+            and extract(epoch from (p.blind_end - p.previous_end)) * 1000 > ${minBlindMs}
+        ),
+        '[]'::jsonb
+      ) as blind_windows,
       -- The newest run's size and member count, which are facts about the index
       -- now rather than about its history.
       (array_agg(p.size_bytes order by p.captured_at desc))[1]::bigint as size_bytes,
@@ -244,7 +271,7 @@ function evidenceQuery(clusterId: string, since: Date) {
       -- Sticky across the whole window, not the newest run's flag: one sighting
       -- anywhere protects the index and a quiet collect must not erase it.
       bool_or(p.hinted) as hinted
-    from priced p
+    from blinded p
     join watched w on w.index_id = p.index_id
     group by p.index_id, w.trusted_watch_ms
   `;
@@ -262,12 +289,28 @@ function count(value: unknown): number {
   return 0;
 }
 
+// The blind windows as postgres sent them, read as defensively as the counts.
+function blindWindowsOf(value: unknown): BlindWindow[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((pair: unknown) => {
+    if (!Array.isArray(pair)) return [];
+    const [start, end]: unknown[] = pair;
+    const startMs = count(start);
+    const endMs = count(end);
+    return endMs > startMs ? [{ startMs, endMs }] : [];
+  });
+}
+
+// `minBlindMs`: only blind windows longer than this come back (#631) — the trust
+// gate's own maxGap, so everything that could refuse is here and the restarts of a
+// cluster that restarts several times a day are not shipped to say nothing.
 export async function usageEvidence(
   db: Database,
   clusterId: string,
   since: Date,
+  minBlindMs: number,
 ): Promise<UsageEvidence> {
-  const result = await db.execute<EvidenceRow>(evidenceQuery(clusterId, since));
+  const result = await db.execute<EvidenceRow>(evidenceQuery(clusterId, since, minBlindMs));
   const folds = new Map<string, IndexEvidence>();
   for (const row of result.rows) {
     if (typeof row.index_id !== "string") continue;
@@ -284,7 +327,7 @@ export async function usageEvidence(
         newestEndMs: count(row.newest_end_ms),
         latestActivityMs: latest === null || latest === undefined ? null : count(latest),
         maxInteriorGapMs: count(row.max_interior_gap_ms),
-        maxBetweenGapMs: count(row.max_between_gap_ms),
+        blindWindows: blindWindowsOf(row.blind_windows),
       },
       sizeBytes: count(row.size_bytes),
       memberCount: count(row.member_count),
