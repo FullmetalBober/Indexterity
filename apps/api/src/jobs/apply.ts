@@ -14,6 +14,7 @@ import {
   and,
   clusterIndexes,
   type Database,
+  desc,
   eq,
   gte,
   indexSnapshots,
@@ -25,6 +26,7 @@ import {
   sql,
 } from "../db";
 import type { DatabaseWatch, FailedOpsReading } from "../engine/ports";
+import { messageOf } from "../errors/message";
 import { emitClusterEvent, pgNotifier } from "../events/emit";
 import { serializeSpec } from "../mongo";
 import type { TunnelRegistry } from "../tunnel/tunnel.registry";
@@ -33,7 +35,7 @@ import { openClusterSession } from "./cluster-connection";
 import {
   HIDE_TYPES,
   keepFailureWatchesOrNone,
-  waitingLine,
+  noteWaitingDrops,
   watchLine,
   withdrawHinted,
 } from "./failure-watch";
@@ -128,6 +130,23 @@ function applyResult(
   return watch === "" ? observing : `${observing}; ${watch}`;
 }
 
+// A drop that could not be hidden this pass, in its trail (#630). Once per
+// distinct error, not once per pass: the window holds a dozen passes, and a
+// failure that repeats is one fact.
+async function noteHideFailure(db: Database, recommendationId: string, error: unknown) {
+  const line = `hide failed, retried next pass: ${messageOf(error)}`;
+  const [last] = await db
+    .select({ result: actions.result })
+    .from(actions)
+    .where(and(eq(actions.recommendationId, recommendationId), eq(actions.kind, "HIDE")))
+    .orderBy(desc(actions.createdAt))
+    .limit(1);
+  if (last?.result === line) return;
+  await db
+    .insert(actions)
+    .values({ recommendationId, kind: "HIDE", actor: "system", result: line });
+}
+
 // APPROVED drops -> pre-flight -> hide (collMod hidden:true) -> HIDDEN. Hiding is
 // instant and reversible; it starts the observe window. Records an audit action
 // with a rollback token. A failed pre-flight re-proposes instead of hiding.
@@ -210,10 +229,22 @@ export async function applyCluster(
     const executor = session.executor(readOnly);
     // The failure source turned on where the engine can, before anything is
     // hidden: the check after a hide needs a day of before (#596).
-    const passStarted = Date.now();
     const watches = await keepFailureWatchesOrNone(db, clusterId, session, observedDatabases);
     const withdrawn = await withdrawHinted(db, clusterId, collector, watches);
+    await noteWaitingDrops(
+      db,
+      approved.filter(
+        (rec) =>
+          !withdrawn.has(rec.id) &&
+          (observedDatabases === null || observedDatabases.includes(rec.database)),
+      ),
+      watches,
+      Date.now(),
+    );
     let hidden = 0;
+    // What went wrong with any one drop, kept to report once the others have had
+    // their turn (#630).
+    const failed: unknown[] = [];
     for (const rec of approved) {
       if (withdrawn.has(rec.id)) continue;
       // The last gate before a write lands on somebody's cluster: never touch a
@@ -237,139 +268,159 @@ export async function applyCluster(
         watch?.kind === "WATCHED"
           ? (watch.since.get(`${rec.database}.${rec.collection}`) ?? 0)
           : null;
-      if (watchedSince !== null && Date.now() - watchedSince < FAILURE_BASELINE_MS) {
-        // Said once, when the watch begins — this pass or a re-arm after a reset —
-        // rather than on every pass that finds it still waiting.
-        if (watchedSince >= passStarted) {
+      // Said in the trail by noteWaitingDrops above, once per start of the watch.
+      if (watchedSince !== null && Date.now() - watchedSince < FAILURE_BASELINE_MS) continue;
+      // One drop at a time, so that one which cannot be hidden is not every drop that
+      // cannot (#630). Before, an exception here ended the pass, and the next pass in
+      // the window met the same drop first and ended the same way. The block it left
+      // was then cleared by an apply outside the window, which does nothing and
+      // succeeds, so the drops behind it waited with no trace at all.
+      let hiddenOnCluster = false;
+      let recorded = false;
+      try {
+        const check = await preflightDrop(collector, rec);
+        if (!check.safe) {
+          await db
+            .update(recommendations)
+            .set({ state: "PROPOSED", updatedAt: new Date() })
+            .where(eq(recommendations.id, rec.id));
           await db.insert(actions).values({
             recommendationId: rec.id,
             kind: "HIDE",
             actor: "system",
-            result: waitingLine(rec.database, rec.collection, watchedSince),
+            result: `aborted: ${check.reason}`,
           });
+          continue;
         }
-        continue;
-      }
-      const check = await preflightDrop(collector, rec);
-      if (!check.safe) {
+        if (canHide) {
+          await executor.hide(rec.database, rec.collection, rec.indexName);
+          hiddenOnCluster = true;
+        }
+        const hiddenAt = new Date();
+        // Baseline read latency at hide time — the reference for regression checks.
+        // Null where nothing was hidden: the gate asks "did hiding this index slow
+        // reads?", and an index still serving every query cannot answer it. Left
+        // null rather than measured-and-ignored, because that is what makes the
+        // gate in finalize.ts skip itself instead of comparing two readings of an
+        // unchanged cluster and calling the noise a regression.
+        const baseline = canHide
+          ? await collector.readLatency(rec.database, rec.collection)
+          : { ops: null, latencyMicros: null };
+        // And the failures, which the latency baseline above cannot stand in for: a
+        // failed read lands in latencyStats as a FAST read, so the gate reading only
+        // that would see a hide which broke the workload as a hide that improved it
+        // (#438). A source that is missing stores no baseline, and that costs nothing —
+        // the signal is one-way and only ever rolls a hide back — but the HIDE line
+        // says why it is missing (#596). Null where nothing was hidden.
+        //
+        // Sampled over whatever window the source can see BACKWARDS from now, which is
+        // the question worth asking here: "was this namespace already failing before we
+        // touched it". Zero here is what makes a failure after the hide attributable to
+        // the hide.
+        //
+        // From the watch's start where there is one: before it, a fast failure was
+        // recorded nowhere, and a count reaching further back would claim more.
+        //
+        // Only the suspect kinds are kept (#625). A hint at the index cannot fail
+        // while it is visible, and a failure no hidden index causes says nothing
+        // about this one.
+        const failuresBefore = canHide
+          ? await collector.collectFailedOps(
+              rec.database,
+              rec.collection,
+              watchedSince ?? 0,
+              rec.indexName,
+            )
+          : null;
+        // The observe window this index actually deserves, from its own usage
+        // history: periodic usage extends it (a monthly job must get a chance to
+        // run inside the window), long-proven idleness shortens it.
+        const historyRows = await db
+          .select({
+            capturedAt: indexSnapshots.capturedAt,
+            lastSeenAt: indexSnapshots.lastSeenAt,
+            observations: indexSnapshots.observations,
+            maxGapMs: indexSnapshots.maxGapMs,
+            perMember: indexSnapshots.perMember,
+          })
+          .from(indexSnapshots)
+          .innerJoin(clusterIndexes, eq(indexSnapshots.indexId, clusterIndexes.id))
+          .where(
+            and(
+              eq(indexSnapshots.clusterId, clusterId),
+              // Every cluster_indexes index leads with cluster_id, so without this
+              // the namespace predicates cannot use one and each recommendation in
+              // the loop costs a scan of the whole dimension table.
+              eq(clusterIndexes.clusterId, clusterId),
+              eq(clusterIndexes.database, rec.database),
+              eq(clusterIndexes.collection, rec.collection),
+              eq(clusterIndexes.indexName, rec.indexName),
+              // The plan's window, applied here rather than by deletion — the observe
+              // length is derived from this history, so an org must not get a window
+              // sized on evidence it is not entitled to.
+              gte(indexSnapshots.lastSeenAt, since),
+            ),
+          );
+        // Through usageSeries, never by summing the counters: `perMember[].ops` is
+        // cumulative, and dynamicObserveDays reads `ops > 0` as "queried during
+        // this span" — a reading only a difference supports (#263).
+        const window = dynamicObserveDays(
+          usageSeries(historyRows.map((row) => ({ ...runFrom(row), perMember: row.perMember }))),
+          policy?.observeWindowDays ?? DEFAULT_OBSERVE_DAYS,
+          { watchingSince, now: new Date() },
+        );
         await db
           .update(recommendations)
-          .set({ state: "PROPOSED", updatedAt: new Date() })
+          .set({
+            state: "HIDDEN",
+            hiddenAt,
+            observeDays: window.days,
+            observeReason: window.reason,
+            baselineReadOps: baseline.ops,
+            baselineReadLatency: baseline.latencyMicros,
+            baselineFailedOps: failuresBefore?.kind === "WINDOW" ? failuresBefore.suspect : null,
+            baselineFailedReachMs:
+              failuresBefore?.kind === "WINDOW" ? failuresBefore.reachMs : null,
+            updatedAt: new Date(),
+          })
           .where(eq(recommendations.id, rec.id));
+        recorded = true;
         await db.insert(actions).values({
           recommendationId: rec.id,
           kind: "HIDE",
           actor: "system",
-          result: `aborted: ${check.reason}`,
-        });
-        continue;
-      }
-      if (canHide) await executor.hide(rec.database, rec.collection, rec.indexName);
-      const hiddenAt = new Date();
-      // Baseline read latency at hide time — the reference for regression checks.
-      // Null where nothing was hidden: the gate asks "did hiding this index slow
-      // reads?", and an index still serving every query cannot answer it. Left
-      // null rather than measured-and-ignored, because that is what makes the
-      // gate in finalize.ts skip itself instead of comparing two readings of an
-      // unchanged cluster and calling the noise a regression.
-      const baseline = canHide
-        ? await collector.readLatency(rec.database, rec.collection)
-        : { ops: null, latencyMicros: null };
-      // And the failures, which the latency baseline above cannot stand in for: a
-      // failed read lands in latencyStats as a FAST read, so the gate reading only
-      // that would see a hide which broke the workload as a hide that improved it
-      // (#438). A source that is missing stores no baseline, and that costs nothing —
-      // the signal is one-way and only ever rolls a hide back — but the HIDE line
-      // says why it is missing (#596). Null where nothing was hidden.
-      //
-      // Sampled over whatever window the source can see BACKWARDS from now, which is
-      // the question worth asking here: "was this namespace already failing before we
-      // touched it". Zero here is what makes a failure after the hide attributable to
-      // the hide.
-      //
-      // From the watch's start where there is one: before it, a fast failure was
-      // recorded nowhere, and a count reaching further back would claim more.
-      //
-      // Only the suspect kinds are kept (#625). A hint at the index cannot fail
-      // while it is visible, and a failure no hidden index causes says nothing
-      // about this one.
-      const failuresBefore = canHide
-        ? await collector.collectFailedOps(
-            rec.database,
-            rec.collection,
-            watchedSince ?? 0,
-            rec.indexName,
-          )
-        : null;
-      // The observe window this index actually deserves, from its own usage
-      // history: periodic usage extends it (a monthly job must get a chance to
-      // run inside the window), long-proven idleness shortens it.
-      const historyRows = await db
-        .select({
-          capturedAt: indexSnapshots.capturedAt,
-          lastSeenAt: indexSnapshots.lastSeenAt,
-          observations: indexSnapshots.observations,
-          maxGapMs: indexSnapshots.maxGapMs,
-          perMember: indexSnapshots.perMember,
-        })
-        .from(indexSnapshots)
-        .innerJoin(clusterIndexes, eq(indexSnapshots.indexId, clusterIndexes.id))
-        .where(
-          and(
-            eq(indexSnapshots.clusterId, clusterId),
-            // Every cluster_indexes index leads with cluster_id, so without this
-            // the namespace predicates cannot use one and each recommendation in
-            // the loop costs a scan of the whole dimension table.
-            eq(clusterIndexes.clusterId, clusterId),
-            eq(clusterIndexes.database, rec.database),
-            eq(clusterIndexes.collection, rec.collection),
-            eq(clusterIndexes.indexName, rec.indexName),
-            // The plan's window, applied here rather than by deletion — the observe
-            // length is derived from this history, so an org must not get a window
-            // sized on evidence it is not entitled to.
-            gte(indexSnapshots.lastSeenAt, since),
+          result: applyResult(
+            canHide,
+            window,
+            failuresBefore === null
+              ? null
+              : { reading: failuresBefore, watch, hiddenAtMs: hiddenAt.getTime() },
           ),
-        );
-      // Through usageSeries, never by summing the counters: `perMember[].ops` is
-      // cumulative, and dynamicObserveDays reads `ops > 0` as "queried during
-      // this span" — a reading only a difference supports (#263).
-      const window = dynamicObserveDays(
-        usageSeries(historyRows.map((row) => ({ ...runFrom(row), perMember: row.perMember }))),
-        policy?.observeWindowDays ?? DEFAULT_OBSERVE_DAYS,
-        { watchingSince, now: new Date() },
-      );
-      await db
-        .update(recommendations)
-        .set({
-          state: "HIDDEN",
-          hiddenAt,
-          observeDays: window.days,
-          observeReason: window.reason,
-          baselineReadOps: baseline.ops,
-          baselineReadLatency: baseline.latencyMicros,
-          baselineFailedOps: failuresBefore?.kind === "WINDOW" ? failuresBefore.suspect : null,
-          baselineFailedReachMs: failuresBefore?.kind === "WINDOW" ? failuresBefore.reachMs : null,
-          updatedAt: new Date(),
-        })
-        .where(eq(recommendations.id, rec.id));
-      await db.insert(actions).values({
-        recommendationId: rec.id,
-        kind: "HIDE",
-        actor: "system",
-        result: applyResult(
-          canHide,
-          window,
-          failuresBefore === null
-            ? null
-            : { reading: failuresBefore, watch, hiddenAtMs: hiddenAt.getTime() },
-        ),
-        rollbackToken: check.spec === null ? null : { spec: serializeSpec(check.spec) },
-      });
-      // At the transition, not at the end of the pass: a pass hiding several
-      // indexes can hold a dashboard's stale row for the length of the loop.
-      await emitClusterEvent(pgNotifier(db), { clusterId, kind: "DROP_HIDDEN", task: null });
-      hidden += 1;
+          rollbackToken: check.spec === null ? null : { spec: serializeSpec(check.spec) },
+        });
+        // At the transition, not at the end of the pass: a pass hiding several
+        // indexes can hold a dashboard's stale row for the length of the loop.
+        await emitClusterEvent(pgNotifier(db), { clusterId, kind: "DROP_HIDDEN", task: null });
+        hidden += 1;
+      } catch (error) {
+        failed.push(error);
+        // Past the row's move to HIDDEN the hide stands: finalize observes it from
+        // there, and the error is only reported. Before it, an index this pass hid
+        // would sit hidden with its row still APPROVED — nothing observing it and
+        // nothing to give it back — so it is put back first.
+        if (!recorded) {
+          if (hiddenOnCluster) {
+            await executor
+              .unhide(rec.database, rec.collection, rec.indexName)
+              .catch(() => undefined);
+          }
+          await noteHideFailure(db, rec.id, error);
+        }
+      }
     }
+    // Every drop has had its turn. The pass still fails, so that the cluster's
+    // blocked state says something went wrong where an owner looks first.
+    if (failed.length > 0) throw failed[0];
     return hidden;
   } finally {
     release();

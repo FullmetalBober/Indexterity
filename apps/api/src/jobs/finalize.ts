@@ -40,7 +40,12 @@ import type { TunnelRegistry } from "../tunnel/tunnel.registry";
 import { effectiveChangeWindow } from "./change-window";
 import { openClusterSession } from "./cluster-connection";
 import { recordRegression, WHOLE_COLLECTION } from "./cooldowns";
-import { keepFailureWatchesOrNone, releaseFailureWatches, withdrawHinted } from "./failure-watch";
+import {
+  keepFailureWatchesOrNone,
+  noteWaitingDrops,
+  releaseFailureWatches,
+  withdrawHinted,
+} from "./failure-watch";
 import { preflightDrop } from "./preflight";
 
 const DAY_MS = 86_400_000;
@@ -206,7 +211,30 @@ export async function finalizeCluster(
     // profiler is off. A database whose last drop this pass settles is given
     // back on the next one.
     const watches = await keepFailureWatchesOrNone(db, clusterId, session, observedDatabases);
-    await withdrawHinted(db, clusterId, collector, watches);
+    const withdrawn = await withdrawHinted(db, clusterId, collector, watches);
+    // And why each approved drop is still waiting, every hour, rather than only in
+    // the window apply runs in (#630): a watch this pass started or re-armed after
+    // a restart would otherwise leave the drop waiting with an empty trail until
+    // the window came round.
+    const approved = await db
+      .select({
+        id: recommendations.id,
+        type: recommendations.type,
+        database: recommendations.database,
+        collection: recommendations.collection,
+      })
+      .from(recommendations)
+      .where(and(eq(recommendations.clusterId, clusterId), eq(recommendations.state, "APPROVED")));
+    await noteWaitingDrops(
+      db,
+      approved.filter(
+        (rec) =>
+          !withdrawn.has(rec.id) &&
+          (observedDatabases === null || observedDatabases.includes(rec.database)),
+      ),
+      watches,
+      Date.now(),
+    );
 
     // Databases the owner has told us to stop looking at (#541, #244).
     //
