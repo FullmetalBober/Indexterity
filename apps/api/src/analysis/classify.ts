@@ -224,22 +224,84 @@ export interface UsageFold {
   readonly newestEndMs: number;
   /** When the newest run that moved BEGAN — the instant its burst is dated to. */
   readonly latestActivityMs: number | null;
-  /** The worst hole inside any one run, and the worst between two. */
+  /** The worst hole inside any one run. */
   readonly maxInteriorGapMs: number;
-  readonly maxBetweenGapMs: number;
+  /**
+   * Every stretch whose use went unrecorded: from the last reading before a
+   * counter restart to the restart itself (#631). Empty where the counters ran
+   * through every hole between runs, which a cumulative counter makes harmless.
+   */
+  readonly blindWindows: readonly BlindWindow[];
+}
+
+// From our last reading before a counter restarted to the instant it restarted:
+// use in between was counted by a counter that no longer exists, and nobody else
+// recorded it.
+export interface BlindWindow {
+  readonly startMs: number;
+  readonly endMs: number;
+}
+
+// How long a blind window longer than `maxGapHours` keeps refusing an index's
+// usage history (#631): until this many days of history lie after it.
+//
+// It used to refuse until it left the plan's window — 90, 183 or 365 days by
+// plan, which made how long the evidence stayed unusable a matter of what the
+// organisation paid. A month because that is the cadence the observe window
+// itself is sized for (DEFAULT_OBSERVE_DAYS): a monthly job's index runs at least
+// once in the history after the hole, and the whole window — the blind stretch
+// included — is still read for its cadence, so nothing D96 warned about is lost.
+// A slower job that ran only inside the hole is the residual, and the hide's
+// observe window is there for it.
+export const BLIND_RECOVERY_DAYS = 30;
+
+// What of the hole between two runs went unrecorded (#631), or null for none.
+//
+// A hole the counters ran through hides nothing: they are cumulative, so any use
+// inside it shows as a difference at the first reading after it. What a hole can
+// hide is a counter that STARTED inside it — a restart, a rebuild, a member that
+// came back — whose count of the time before its start is gone. So:
+//
+//   - a counter that started after our last reading: blind from that reading to
+//     its start;
+//   - a reset with no later start to date it (a counter that went backwards, which
+//     is how SQL Server's rebuild shows): blind for the whole hole;
+//   - nothing to date the counters by at all: the whole hole, as before #631.
+//
+// Read off when the counters started, not off the stored restart flag alone. The
+// flag is decided by matching each member against the previous reading, and on
+// production's MongoDB cluster, whose members restart several times a day and do
+// not all answer every collect, it missed every restart across the 22-day outage
+// while the counters' start moved from 09-09 to 10-01. The start moved all the
+// same.
+function blindWindow(previous: UsageSnapshot, next: UsageSnapshot): BlindWindow | null {
+  const from = spanEnd(previous);
+  const until = spanStart(next);
+  if (until <= from) return null;
+  const started = countersStartedAt(next);
+  if (started !== null && started > from) {
+    return { startMs: from, endMs: Math.min(until, started) };
+  }
+  if (started === null || restartedBetween(previous, next)) return { startMs: from, endMs: until };
+  return null;
 }
 
 // The reference implementation, and the shape the SQL twin is held to.
-export function foldUsage(history: readonly UsageSnapshot[]): UsageFold {
+//
+// `minBlindMs` keeps only blind windows longer than it, which is how the twin
+// keeps its answer small: a cluster restarting several times a day leaves a
+// short window at each restart, and only long ones can refuse anything.
+export function foldUsage(history: readonly UsageSnapshot[], minBlindMs = 0): UsageFold {
   const sorted = sortedRuns(history);
   const series = usageSeries(sorted);
   let maxInteriorGapMs = 0;
-  let maxBetweenGapMs = 0;
+  const blindWindows: BlindWindow[] = [];
   for (const [i, run] of sorted.entries()) {
     maxInteriorGapMs = Math.max(maxInteriorGapMs, interiorGap(run));
     const next = sorted[i + 1];
     if (next === undefined) continue;
-    maxBetweenGapMs = Math.max(maxBetweenGapMs, spanStart(next) - spanEnd(run));
+    const blind = blindWindow(run, next);
+    if (blind !== null && blind.endMs - blind.startMs > minBlindMs) blindWindows.push(blind);
   }
   // Read off the SERIES and not the runs, because that is what the gate did: a
   // run that moved contributes one active look and its tail is idle time, and the
@@ -260,7 +322,7 @@ export function foldUsage(history: readonly UsageSnapshot[]): UsageFold {
     newestEndMs: sorted.length === 0 ? Number.NaN : Math.max(...sorted.map(spanEnd)),
     latestActivityMs,
     maxInteriorGapMs,
-    maxBetweenGapMs,
+    blindWindows,
   };
 }
 
@@ -356,9 +418,10 @@ export function usageTrustRefusalFrom(
   // read the length of a quiet run as an outage and throw away every idle index —
   // the exact inversion of the bug this guard exists for.
   //
-  // A restart's blind window needs no check of its own: it runs from our last
-  // reading to the instant the counter restarted, a sub-interval of the gap to
-  // the next run, so anything long enough to matter trips `gap-between-runs`.
+  // And of that hole, only the part a restart left unrecorded (#631). This used
+  // to say a restart's blind window needed no check of its own, being inside the
+  // hole, so the whole hole was the check. That made every hole blind, counters
+  // carried across it or not, and blind for as long as the plan kept history.
   //
   // WHICH KIND is reported when a history has both is the one thing that changed
   // when these became maxima rather than a walk. The walk reported whichever came
@@ -367,7 +430,17 @@ export function usageTrustRefusalFrom(
   // same refusal, which is why it was not worth carrying two ordinals through the
   // fold to preserve an order nothing had chosen on purpose.
   if (fold.maxInteriorGapMs > maxGap) return { kind: "gap-inside-run" };
-  if (fold.maxBetweenGapMs > maxGap) return { kind: "gap-between-runs" };
+  // Between runs, only what a restart left unrecorded (#631) — and only for a
+  // month after it. Until then a slow cadence that ran inside it may not have
+  // come round again; after it, the history behind the blind stretch speaks for
+  // itself. It used to be every hole longer than maxGap, for as long as it stayed
+  // in the plan's window: on the hosted deployment, a 22-day outage refused two
+  // thirds of a production cluster's indexes until March of the next year,
+  // counter carried across it or not.
+  const recovered = now.getTime() - BLIND_RECOVERY_DAYS * 24 * HOUR_MS;
+  if (fold.blindWindows.some((w) => w.endMs - w.startMs > maxGap && w.endMs > recovered)) {
+    return { kind: "gap-between-runs" };
+  }
   // And the newest confirmation must itself be recent, or we are reasoning about
   // a cluster we have not seen in a while.
   if (now.getTime() - fold.newestEndMs > maxGap) return { kind: "history-stale" };

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AUTO_APPLY_HISTORY_DAYS } from "./classify";
+import { AUTO_APPLY_HISTORY_DAYS, BLIND_RECOVERY_DAYS } from "./classify";
 import {
   type AnalysisSilence,
   dominantRefusal,
@@ -131,6 +131,14 @@ describe("explainRefusal", () => {
     expect(explainRefusal("span-too-short", OPTIONS)).toContain("warm-up, not a fault");
   });
 
+  // #631: the sentence used to promise this clears as history accumulates, while
+  // the rule refused until the gap left the plan's window.
+  it("says when a blind stretch between runs stops counting, and why it counts at all", () => {
+    const line = explainRefusal("gap-between-runs", OPTIONS);
+    expect(line).toContain("counters restarted while it was not being watched");
+    expect(line).toContain(`once ${BLIND_RECOVERY_DAYS} days of uninterrupted history follow it`);
+  });
+
   it("says what is still working, whichever reason it gives", () => {
     for (const kind of [
       "no-history",
@@ -149,6 +157,7 @@ describe("explainRefusal", () => {
     expect(explainRefusal("gap-between-runs", { ...OPTIONS, maxGapHours: 36 })).toContain(
       "36 hours",
     );
+    expect(explainRefusal("gap-inside-run", { ...OPTIONS, maxGapHours: 36 })).toContain("36 hours");
     expect(explainRefusal("collection-idle", { ...OPTIONS, minActiveHours: 96 })).toContain(
       "96 hours",
     );
