@@ -46,7 +46,10 @@ vi.mock("./apply", async (importOriginal) => ({
 }));
 vi.mock("./building", (): typeof import("./building") => ({ settleBuildsForCluster: vi.fn() }));
 vi.mock("./create", (): typeof import("./create") => ({ applyCreatesForCluster: vi.fn() }));
-vi.mock("./finalize", (): typeof import("./finalize") => ({ finalizeCluster: vi.fn() }));
+vi.mock("./finalize", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./finalize")>()),
+  finalizeCluster: vi.fn(),
+}));
 vi.mock("./probe", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./probe")>()),
   probeCluster: vi.fn(async () => []),

@@ -3,6 +3,7 @@ import { at } from "../errors/at";
 import {
   classifyUsage,
   counterEpochs,
+  foldUsage,
   trustedWatchMs,
   usageHistoryIsTrustworthy,
   usageTrustRefusal,
@@ -218,15 +219,42 @@ describe("usageHistoryIsTrustworthy", () => {
     expect(usageHistoryIsTrustworthy([at("2026-03-03T00:00:00Z")], opts, now)).toBe(false);
   });
 
-  it("rejects a series with a hole in it — the outage case", () => {
-    // Collected, went dark for three weeks, came back: an index that was busy
-    // through the gap looks identical to a dead one.
+  it("rejects a series with a blind hole in it — the outage case", () => {
+    // Collected, went dark for four weeks, came back to counters that had
+    // restarted inside the gap: an index busy in the gap looks identical to a
+    // dead one, because the counter that saw it is gone.
     const history = [
+      at("2026-02-01T00:00:00Z"),
+      at("2026-02-02T00:00:00Z"),
+      {
+        ...at("2026-03-03T00:00:00Z"),
+        countersRestarted: true,
+        countersStartedAt: "2026-03-02T00:00:00Z",
+      },
+    ];
+    expect(usageHistoryIsTrustworthy(history, opts, now)).toBe(false);
+  });
+
+  // #631. The same hole with the counter running through it hides nothing: any
+  // use inside it would show at the first reading after it. The counter's start
+  // is what says it ran through — undated, the hole is blind, as it always was.
+  it("accepts a hole the counters ran through", () => {
+    const dated = (iso: string): UsageSnapshot => ({
+      capturedAt: iso,
+      perMember: [{ member: "m", ops: 0, since: "2026-01-01T00:00:00Z" }],
+    });
+    const history = [
+      dated("2026-02-01T00:00:00Z"),
+      dated("2026-02-02T00:00:00Z"),
+      dated("2026-03-03T00:00:00Z"),
+    ];
+    expect(usageHistoryIsTrustworthy(history, opts, now)).toBe(true);
+    const undated = [
       at("2026-02-01T00:00:00Z"),
       at("2026-02-02T00:00:00Z"),
       at("2026-03-03T00:00:00Z"),
     ];
-    expect(usageHistoryIsTrustworthy(history, opts, now)).toBe(false);
+    expect(usageHistoryIsTrustworthy(undated, opts, now)).toBe(false);
   });
 
   it("rejects a series that stopped long ago, even if it was dense", () => {
@@ -615,11 +643,32 @@ describe("an idle index and an unwatched index", () => {
     expect(usageHistoryIsTrustworthy(unwatched, opts, now)).toBe(false);
   });
 
-  it("refuses a series whose hole falls between two runs", () => {
-    // Watched, lost for three weeks, watched again. Each half is a clean run and
-    // the gap between them is the outage — differencing run STARTS would have
+  it("refuses a series whose hole a restart fell into, between two runs", () => {
+    // Watched, lost for three weeks, watched again — and the counters restarted
+    // late in the gap. Each half is a clean run; the hole between them is blind
+    // from the last reading to the restart. Differencing run STARTS would have
     // missed it, since the first run's own start is recent enough.
     const interrupted: UsageSnapshot[] = [
+      {
+        capturedAt: new Date(Date.UTC(2026, 0, 1)).toISOString(),
+        lastSeenAt: new Date(Date.UTC(2026, 0, 5)).toISOString(),
+        observations: 16,
+        perMember: [member],
+      },
+      {
+        capturedAt: new Date(Date.UTC(2026, 0, 26)).toISOString(),
+        lastSeenAt: new Date(Date.UTC(2026, 1, 1)).toISOString(),
+        observations: 24,
+        perMember: [{ ...member, ops: 1, since: new Date(Date.UTC(2026, 0, 25)).toISOString() }],
+      },
+    ];
+    expect(usageHistoryIsTrustworthy(interrupted, opts, now)).toBe(false);
+  });
+
+  // #631. A hole the counter ran through: the one use inside it shows as the
+  // difference at the first reading after it, so the index reads as used.
+  it("trusts a hole the counter ran through, and sees the use inside it", () => {
+    const carried: UsageSnapshot[] = [
       {
         capturedAt: new Date(Date.UTC(2026, 0, 1)).toISOString(),
         lastSeenAt: new Date(Date.UTC(2026, 0, 5)).toISOString(),
@@ -633,7 +682,8 @@ describe("an idle index and an unwatched index", () => {
         perMember: [{ ...member, ops: 1 }],
       },
     ];
-    expect(usageHistoryIsTrustworthy(interrupted, opts, now)).toBe(false);
+    expect(usageHistoryIsTrustworthy(carried, opts, now)).toBe(true);
+    expect(classifyUsage(carried, opts)).not.toBe("FLAT_ZERO");
   });
 
   it("does not read the length of a quiet run as a hole", () => {
@@ -709,13 +759,70 @@ describe("usageTrustRefusal", () => {
     });
   });
 
-  it("names a hole between runs", () => {
+  it("names a blind hole between runs", () => {
     const holed = [
-      at("2026-02-01T00:00:00Z"),
-      at("2026-02-02T00:00:00Z"),
-      at("2026-03-03T00:00:00Z"),
+      at("2026-02-01T00:00:00Z", 0, "2026-01-01T00:00:00Z"),
+      at("2026-02-02T00:00:00Z", 0, "2026-01-01T00:00:00Z"),
+      at("2026-03-03T00:00:00Z", 0, "2026-03-02T00:00:00Z"),
     ];
     expect(usageTrustRefusal(holed, opts, now)).toEqual({ kind: "gap-between-runs" });
+  });
+
+  // #631. Production's outage: 22 days dark, counters restarted near its end.
+  describe("a blind hole, over time", () => {
+    const outage = [
+      at("2026-01-01T00:00:00Z", 0, "2025-12-01T00:00:00Z"),
+      at("2026-01-02T00:00:00Z", 0, "2025-12-01T00:00:00Z"),
+      at("2026-01-24T00:00:00Z", 0, "2026-01-23T12:00:00Z"),
+      at("2026-01-25T00:00:00Z", 0, "2026-01-23T12:00:00Z"),
+    ];
+    const blindEnd = Date.parse("2026-01-23T12:00:00Z");
+    const day = 24 * 3_600_000;
+
+    it("refuses for a month after the restart, then lets the history speak", () => {
+      const fresh = [
+        ...outage,
+        at(new Date(blindEnd + 29 * day).toISOString(), 0, "2026-01-23T12:00:00Z"),
+      ];
+      expect(usageTrustRefusal(fresh, opts, new Date(blindEnd + 29 * day + 3_600_000))).toEqual({
+        kind: "gap-between-runs",
+      });
+      const settled = [
+        ...outage,
+        at(new Date(blindEnd + 31 * day).toISOString(), 0, "2026-01-23T12:00:00Z"),
+      ];
+      expect(
+        usageTrustRefusal(settled, opts, new Date(blindEnd + 31 * day + 3_600_000)),
+      ).toBeNull();
+    });
+
+    // The restart came right after our last reading: the hole was blind for an
+    // hour, which is no more than a nightly restart's window.
+    it("does not count the hole where the restart came at its start", () => {
+      const early = [
+        at("2026-02-01T00:00:00Z", 0, "2026-01-01T00:00:00Z"),
+        at("2026-02-02T00:00:00Z", 0, "2026-01-01T00:00:00Z"),
+        at("2026-03-03T00:00:00Z", 0, "2026-02-02T01:00:00Z"),
+      ];
+      expect(foldUsage(early).blindWindows).toEqual([
+        { startMs: Date.parse("2026-02-02T00:00:00Z"), endMs: Date.parse("2026-02-02T01:00:00Z") },
+      ]);
+      expect(usageTrustRefusal(early, opts, now)).toBeNull();
+    });
+
+    // A restart caught by a counter going backwards, with no start to date it:
+    // the whole hole is blind.
+    it("counts the whole hole where the restart cannot be dated", () => {
+      const undated = [
+        at("2026-02-01T00:00:00Z", 900),
+        at("2026-02-02T00:00:00Z", 900),
+        at("2026-03-03T00:00:00Z", 5),
+      ];
+      expect(foldUsage(undated, 48 * 3_600_000).blindWindows).toEqual([
+        { startMs: Date.parse("2026-02-02T00:00:00Z"), endMs: Date.parse("2026-03-03T00:00:00Z") },
+      ]);
+      expect(usageTrustRefusal(undated, opts, now)).toEqual({ kind: "gap-between-runs" });
+    });
   });
 
   it("names a hole inside a run, which the between-runs check cannot see", () => {

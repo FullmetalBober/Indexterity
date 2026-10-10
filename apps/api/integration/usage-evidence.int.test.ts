@@ -139,6 +139,32 @@ const SHAPES: readonly Shape[] = [
     ],
   },
   {
+    name: "gap_with_restart_inside",
+    why: "a hole a restart fell into (#631): blind from our last reading to the counter's own start",
+    runs: [
+      { startMs: BASE, endMs: BASE + DAY, observations: 24, members: one(10, SINCE_A) },
+      {
+        startMs: BASE + 22 * DAY,
+        endMs: BASE + 23 * DAY,
+        observations: 24,
+        members: one(3, "2026-01-20T00:00:00.000Z"),
+      },
+    ],
+  },
+  {
+    name: "gap_with_restart_unknown_start",
+    why: "a hole with a restart and no counter start to date it — the whole hole is blind",
+    runs: [
+      { startMs: BASE, endMs: BASE + DAY, observations: 24, members: one(900) },
+      {
+        startMs: BASE + 9 * DAY,
+        endMs: BASE + 10 * DAY,
+        observations: 24,
+        members: one(5),
+      },
+    ],
+  },
+  {
     name: "gap_inside_run",
     why: "a run that asserts a span it did not observe evenly — asked rather than believed",
     runs: [
@@ -293,8 +319,12 @@ const FOLD_FIELDS: readonly (keyof UsageFold)[] = [
   "newestEndMs",
   "latestActivityMs",
   "maxInteriorGapMs",
-  "maxBetweenGapMs",
+  "blindWindows",
 ];
+
+// Two fold fields compared: equal values, or the same windows in the same order.
+const same = (a: UsageFold[keyof UsageFold], b: UsageFold[keyof UsageFold]): boolean =>
+  JSON.stringify(a) === JSON.stringify(b);
 
 let db: ReturnType<typeof createDatabase>;
 const indexIdByShape = new Map<string, string>();
@@ -395,7 +425,9 @@ describe("the usage fold, in postgres and in JS", () => {
   });
 
   it("agrees exactly, shape by shape", async () => {
-    const folded = await usageEvidence(db, CLUSTER, new Date(BASE - DAY));
+    // Every blind window, however short: the cutoff is the twin's to apply, and
+    // the comparison is held at the strictest one.
+    const folded = await usageEvidence(db, CLUSTER, new Date(BASE - DAY), 0);
     const disagreements: string[] = [];
     for (const shape of SHAPES) {
       const indexId = indexIdByShape.get(shape.name);
@@ -412,18 +444,42 @@ describe("the usage fold, in postgres and in JS", () => {
       // otherwise be a field the twin silently stops holding.
       expect(FOLD_FIELDS.length).toBe(Object.keys(jsFold).length);
       for (const key of FOLD_FIELDS) {
-        if (sqlFold[key] !== jsFold[key]) {
+        if (!same(sqlFold[key], jsFold[key])) {
           disagreements.push(
-            `${shape.name} (${shape.why}) — ${key}: js ${String(jsFold[key])} vs sql ${String(sqlFold[key])}`,
+            `${shape.name} (${shape.why}) — ${key}: js ${JSON.stringify(jsFold[key])} vs sql ${JSON.stringify(sqlFold[key])}`,
           );
         }
       }
     }
     expect(disagreements).toEqual([]);
+    // A guard on the fixtures: what is compared above includes real windows, not
+    // only empty lists.
+    const holed = SHAPES.find((shape) => shape.name === "gap_with_restart_inside");
+    if (holed === undefined) throw new Error("fixture missing");
+    expect(foldUsage(historyOf(holed.runs)).blindWindows).toEqual([
+      { startMs: BASE + DAY, endMs: Date.parse("2026-01-20T00:00:00.000Z") },
+    ]);
+  }, 60_000);
+
+  // The cutoff the classify pass asks with: only what could refuse comes back,
+  // and it is what foldUsage keeps at the same cutoff.
+  it("ships only the blind windows longer than the cutoff, the same ones on both sides", async () => {
+    const cutoff = 48 * HOUR;
+    const folded = await usageEvidence(db, CLUSTER, new Date(BASE - DAY), cutoff);
+    for (const shape of SHAPES) {
+      const indexId = indexIdByShape.get(shape.name);
+      if (indexId === undefined) throw new Error(`no index id for ${shape.name}`);
+      expect(folded.get(indexId)?.usage.blindWindows, shape.name).toEqual(
+        foldUsage(historyOf(shape.runs), cutoff).blindWindows,
+      );
+    }
+    const holed = indexIdByShape.get("gap_with_restart_inside");
+    if (holed === undefined) throw new Error("fixture missing");
+    expect(folded.get(holed)?.usage.blindWindows).toHaveLength(1);
   }, 60_000);
 
   it("folds one row per index, however many runs each has", async () => {
-    const folded = await usageEvidence(db, CLUSTER, new Date(BASE - DAY));
+    const folded = await usageEvidence(db, CLUSTER, new Date(BASE - DAY), 0);
     expect(folded.size).toBe(SHAPES.length);
     // The saving, stated as the thing it is: the answer is O(indexes), and the
     // run count is what used to cross the wire.
@@ -439,13 +495,13 @@ describe("the usage fold, in postgres and in JS", () => {
   // under test is the one that shipped rather than a copy of it.
   it("folds identically after migration 0067 trims the superseded runs", async () => {
     const window = new Date(BASE - DAY);
-    const before = await usageEvidence(db, CLUSTER, window);
+    const before = await usageEvidence(db, CLUSTER, window, 0);
     const migration = readFileSync(
       path.resolve(__dirname, "../drizzle/0067_trim_superseded_per_member.sql"),
       "utf8",
     );
     await db.execute(sql.raw(migration));
-    expect(await usageEvidence(db, CLUSTER, window)).toEqual(before);
+    expect(await usageEvidence(db, CLUSTER, window, 0)).toEqual(before);
 
     const rows = await db
       .select()
@@ -484,9 +540,9 @@ describe("the usage fold, in postgres and in JS", () => {
       const untrimmed = foldUsage(historyOf(shape.runs));
       const now = foldUsage(fromRows);
       for (const key of FOLD_FIELDS) {
-        if (now[key] !== untrimmed[key]) {
+        if (!same(now[key], untrimmed[key])) {
           disagreements.push(
-            `${shape.name} — ${key}: untrimmed ${String(untrimmed[key])} vs trimmed ${String(now[key])}`,
+            `${shape.name} — ${key}: untrimmed ${JSON.stringify(untrimmed[key])} vs trimmed ${JSON.stringify(now[key])}`,
           );
         }
       }
