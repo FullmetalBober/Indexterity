@@ -19,7 +19,7 @@ import {
   forgetAttributions,
   sharedAttributions,
 } from "../src/mssql/attributions";
-import { MssqlIndexCollector } from "../src/mssql/collector";
+import { MssqlIndexCollector, tablePlanMarker } from "../src/mssql/collector";
 import { withMssqlCredentials } from "../src/mssql/conn-string";
 import { asNumber, MssqlConnection } from "../src/mssql/connection";
 import { dropLoginStatements } from "../src/mssql/provision";
@@ -520,6 +520,56 @@ describe.skipIf(MSSQL_URL === undefined)("mssql adapter against a live server", 
     const ours = (from: ReadonlyMap<string, CollectionLatency>) =>
       new Map(tables.flatMap((table) => (from.has(table) ? [[table, from.get(table)]] : [])));
     expect(ours(await collector.latencyByCollection(DB))).toEqual(ours(latencies));
+  });
+
+  // #629: the failed-operations read moved off a whole-store scan of plan XML per
+  // table, once per hidden index on every hourly finalize, onto the attribution
+  // cache. On a live store it has to say exactly what the scan said: the same
+  // failures since the instant asked, and the same reach.
+  it("counts a table's failed executions from its attributed plans, as the plan-XML scan did", async () => {
+    const collector = session.collector;
+    const since = Date.now() - 1000;
+    // The read this replaced, kept here as the reference.
+    const scanned = async (): Promise<{ failed: number; reachMs: number | null }> => {
+      const [row] = await seed.query<{ failed: unknown; reach: Date | null }>(
+        `SELECT COALESCE(SUM(CASE WHEN rs.execution_type = 4
+                                   AND rs.last_execution_time >= CAST(@since AS datetimeoffset)
+                                  THEN rs.count_executions ELSE 0 END), 0) AS failed,
+                MIN(rs.first_execution_time) AS reach
+           FROM [${DB}].sys.query_store_runtime_stats rs
+           JOIN [${DB}].sys.query_store_plan p ON p.plan_id = rs.plan_id
+          WHERE CAST(p.query_plan AS nvarchar(max)) LIKE @pattern`,
+        {
+          since: new Date(since).toISOString(),
+          pattern: `%${tablePlanMarker("dbo.orders").replace(/[[%_]/g, (match) => `[${match}]`)}%`,
+        },
+      );
+      return { failed: asNumber(row?.failed), reachMs: row?.reach?.getTime() ?? null };
+    };
+    // A SELECT that fails as it executes — divide by zero, which Query Store keeps
+    // as an `Exception` execution (type 4) of a plan reading dbo.orders. Repeated
+    // until the store has captured it, for the reason the seed above is.
+    for (let attempt = 0; attempt < 5 && (await scanned()).failed === 0; attempt += 1) {
+      for (let i = 0; i < 3; i += 1) {
+        await expect(
+          seed.query(
+            `USE [${DB}]; SELECT COUNT(*) / (COUNT(*) - COUNT(*)) AS n FROM dbo.orders WHERE customer_id = 11`,
+          ),
+        ).rejects.toThrow();
+      }
+    }
+    const expected = await scanned();
+    expect(expected.failed).toBeGreaterThan(0);
+    expect(await collector.collectFailedOps(DB, "dbo.orders", since, "ix_customer")).toMatchObject({
+      kind: "WINDOW",
+      hinted: null,
+      suspect: expected.failed,
+      reachMs: expected.reachMs,
+    });
+    // And the instant asked is honoured: nothing failed after the future.
+    expect(
+      await collector.collectFailedOps(DB, "dbo.orders", Date.now() + 60_000, "ix_customer"),
+    ).toMatchObject({ kind: "WINDOW", suspect: 0 });
   });
 
   // #461, and the same claim as the test above about a different source: these

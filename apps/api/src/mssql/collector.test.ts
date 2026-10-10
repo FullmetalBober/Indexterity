@@ -3,6 +3,7 @@ import { DatabaseInaccessibleError } from "../engine/ports";
 import { at } from "../errors/at";
 import {
   attributionsToRead,
+  failuresFromPlans,
   hintsFromStore,
   indexNamesFromForcedPlan,
   indexNamesFromHintText,
@@ -487,6 +488,32 @@ describe("shipping plan XML so an abandoned read leaves progress behind", () => 
     // No chunk, so no write — `planAttributions` writes the pruned map itself on
     // this path, which is the one case the loop cannot cover.
     expect(remembers).toBe(0);
+  });
+});
+
+// #629: a table's failed executions from the plans attributed to it, instead of a
+// whole-store scan of plan XML per hidden index.
+describe("failuresFromPlans", () => {
+  const utc = (iso: string) => new Date(iso);
+  const rows = [
+    { planId: 1, failed: 2, reach: utc("2026-10-01T00:00:00Z") },
+    { planId: 2, failed: 0, reach: utc("2026-09-20T00:00:00Z") },
+    // Another table's plan: neither its failures nor its reach are this table's.
+    { planId: 3, failed: 9, reach: utc("2026-08-01T00:00:00Z") },
+  ];
+
+  it("adds up the table's plans and takes the earliest execution any retains", () => {
+    expect(failuresFromPlans(new Set([1, 2]), rows)).toEqual({
+      failed: 2,
+      reachMs: utc("2026-09-20T00:00:00Z").getTime(),
+    });
+  });
+
+  // Query Store holding nothing about the table says nothing either way.
+  it("is null when none of the table's plans has a retained row", () => {
+    expect(failuresFromPlans(new Set([7]), rows)).toBeNull();
+    expect(failuresFromPlans(new Set(), rows)).toBeNull();
+    expect(failuresFromPlans(new Set([1]), [{ planId: 1, failed: 4, reach: null }])).toBeNull();
   });
 });
 

@@ -30,6 +30,7 @@ import {
   recommendations,
   roiMetrics,
 } from "../db";
+import type { CollectionLatency, IndexCollector, LatencyPair } from "../engine/ports";
 import { messageOf } from "../errors/message";
 import { emitClusterEvent, pgNotifier } from "../events/emit";
 import { NotifyService } from "../mail/notify.service";
@@ -228,6 +229,9 @@ export async function finalizeCluster(
     // the collection had regressed twice.
     const reportedCumulative = new Set<string>();
 
+    // The collection's live write totals, for the cumulative check alone.
+    const liveWrites = liveWritesOf(collector);
+
     // Post-build watch: a freshly built index that slows the collection's writes
     // gets dropped and cooled down; one that survives the window graduates.
     for (const rec of watched) {
@@ -243,7 +247,6 @@ export async function finalizeCluster(
       ) {
         continue;
       }
-      const { writes } = await collector.collectionLatency(rec.database, rec.collection);
       const builtAtMs = rec.builtAt.getTime();
       // Measured the same way the drop side measures its window (#394): summed
       // over the stretches of stored history a restart did not eat, rather than
@@ -297,7 +300,15 @@ export async function finalizeCluster(
         // did not? (#282) The oldest baseline still live for the collection is
         // "before the run started", and clearing them below is what ends the
         // chain — so this is the last moment it can be asked.
-        await judgeCumulative(db, clusterId, rec, watched, writes, observeDays, reportedCumulative);
+        await judgeCumulative(
+          db,
+          clusterId,
+          rec,
+          watched,
+          () => liveWrites(rec.database, rec.collection),
+          observeDays,
+          reportedCumulative,
+        );
         await db
           .update(recommendations)
           .set({ baselineWriteOps: null, baselineWriteLatency: null, updatedAt: new Date() })
@@ -755,6 +766,32 @@ async function retireSuperseded(
   }
 }
 
+// A collection's live write totals, read when the cumulative check needs them
+// and not before (#629). The write watch used to read them for every build on
+// every hourly pass and use them only when one graduated; on SQL Server each read
+// was a whole-store scan of Query Store's plan XML, thirty-one of them per pass on
+// production, through a tunnel. Through the engine's per-database read where it
+// has one — the attribution cache the collect keeps warm — once per database per
+// pass, and the per-collection read elsewhere. A collection absent from the
+// batched map has no recorded activity (the port's contract).
+export function liveWritesOf(
+  collector: Pick<IndexCollector, "collectionLatency" | "latencyByCollection">,
+): (database: string, collection: string) => Promise<LatencyPair> {
+  const tablesOf = collector.latencyByCollection?.bind(collector);
+  const read = new Map<string, Promise<ReadonlyMap<string, CollectionLatency>>>();
+  return async (database, collection) => {
+    if (tablesOf === undefined) {
+      return (await collector.collectionLatency(database, collection)).writes;
+    }
+    let tables = read.get(database);
+    if (tables === undefined) {
+      tables = tablesOf(database);
+      read.set(database, tables);
+    }
+    return (await tables).get(collection)?.writes ?? { ops: 0, latencyMicros: 0 };
+  };
+}
+
 // Did the whole RUN of builds slow this collection, even though the one just
 // graduating did not? (#282)
 //
@@ -788,7 +825,8 @@ async function judgeCumulative(
   clusterId: string,
   rec: typeof recommendations.$inferSelect,
   watched: readonly (typeof recommendations.$inferSelect)[],
-  current: { ops: number; latencyMicros: number },
+  // Read only when the comparison is made, which most graduations never reach.
+  current: () => Promise<LatencyPair>,
   observeDays: number,
   // Collections already reported in this pass — see the call site.
   reported: Set<string>,
@@ -818,7 +856,8 @@ async function judgeCumulative(
   // then the individual one, which has already been made and reported.
   if (oldest === null || oldest.builtAt.getTime() >= (rec.builtAt?.getTime() ?? 0)) return;
 
-  const verdict = evaluateRegression(oldest.baseline, current, CUMULATIVE_REGRESSION_OPTIONS);
+  const live = await current();
+  const verdict = evaluateRegression(oldest.baseline, live, CUMULATIVE_REGRESSION_OPTIONS);
   recordRegressionVerdict("cumulative", verdict);
   // Marked whatever the verdict: the reading is the collection's, so a second row
   // graduating in this pass would ask the identical question of the identical
@@ -839,7 +878,7 @@ async function judgeCumulative(
   // worth a second mechanism until somebody is missing the finding.
   if (verdict !== "REGRESSED") return;
 
-  const ratio = latencyRatio(oldest.baseline, current, CUMULATIVE_REGRESSION_OPTIONS.minWindowOps);
+  const ratio = latencyRatio(oldest.baseline, live, CUMULATIVE_REGRESSION_OPTIONS.minWindowOps);
   const slower = ratio === null ? "measurably" : `${Math.round((ratio - 1) * 100)}%`;
   const since = oldest.builtAt.toISOString().slice(0, 10);
   const reason = `writes ${slower} slower than before the run of builds that began ${since}`;
