@@ -1467,6 +1467,35 @@ export interface PassPhaseRecord {
 }
 
 /**
+ * Every run of the hourly passes against one cluster, kept for two weeks (#639).
+ *
+ * `cluster_pass_timings` below holds the last run only, on the reasoning that a
+ * history would answer a question nobody had asked. Production asked it: SQL
+ * Server's finalize ran 26 minutes and failed on 2026-10-08, then 69 minutes on
+ * 10-10 (#629), and each was visible only to whoever opened the Passes panel in
+ * that hour. A pace stepping up and down (#571, #588) left no trend either.
+ *
+ * The hourly passes only — `collect`, `suggest`, `classify`, `finalize` — and no
+ * phases: those are what can run long, at a few rows a cluster an hour. Probe and
+ * apply run every five minutes, finish in seconds, and keep their last run in the
+ * table below. Pruned by the daily retention sweep.
+ */
+export const clusterPassRuns = pgTable(
+  "cluster_pass_runs",
+  {
+    clusterId: uuid("cluster_id")
+      .notNull()
+      .references(() => clusters.id, { onDelete: "cascade" }),
+    task: text("task").notNull(),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+    durationMs: integer("duration_ms").notNull(),
+    // The pipeline metric's vocabulary, as `cluster_pass_timings.outcome`.
+    outcome: text("outcome").notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.clusterId, table.task, table.startedAt] })],
+);
+
+/**
  * How long one PASS last took against one cluster, and how it ended (#571).
  *
  * Nothing recorded this before. A cluster whose collect needs longer than its

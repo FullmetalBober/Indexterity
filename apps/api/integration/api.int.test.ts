@@ -19,6 +19,7 @@ import {
   and,
   clusterIndexes,
   clusterNamespaces,
+  clusterPassRuns,
   clusterPassTimings,
   clusterRosters,
   clusters,
@@ -63,7 +64,7 @@ import { releaseStaleLocks } from "../src/jobs/locks";
 import { paceOf, pacesDue } from "../src/jobs/pacing";
 import { planForCluster } from "../src/jobs/plan";
 import { latestBaselines } from "../src/jobs/probe";
-import { pruneDeadLetterJobs, pruneOldSamples } from "../src/jobs/retention";
+import { pruneDeadLetterJobs, pruneOldSamples, prunePassRuns } from "../src/jobs/retention";
 import { suggestForCluster } from "../src/jobs/suggest";
 import { recordPassTiming } from "../src/jobs/timings";
 import { isScanning } from "../src/jobs/workload-shapes";
@@ -369,6 +370,60 @@ describe("cluster lifecycle", () => {
     createdOrgIds.push(asString(asRecord(await (await api("/org", stranger)).json()).id));
     const foreign = asRecord(await (await api(`/clusters/${clusterId}/passes`, stranger)).json());
     expect(foreign.passes).toEqual([]);
+  });
+
+  // #639. Every run of the hourly passes, folded to the longest per hour for the
+  // week the chart draws — on a cluster of its own, so the pass rows every test
+  // below reads are untouched. Probe and apply keep their last run only.
+  it("serves a week of the hourly passes' durations, and keeps no probe", async () => {
+    const bare = await bareCluster("pass-history");
+    const hour = (back: number) =>
+      new Date((Math.floor(Date.now() / 3_600_000) - back) * 3_600_000);
+    const run = (startedAt: Date, durationMs: number) => ({
+      startedAt,
+      durationMs,
+      outcome: "ok" as const,
+      budgetMs: null,
+      phases: [],
+    });
+    // Two finalizes in one hour, of which the chart shows the longer.
+    await recordPassTiming(db, bare, "finalize", run(new Date(hour(3).getTime() + 60_000), 27_000));
+    await recordPassTiming(
+      db,
+      bare,
+      "finalize",
+      run(new Date(hour(3).getTime() + 30 * 60_000), 4_150_000),
+    );
+    await recordPassTiming(db, bare, "collect", run(hour(2), 41_000));
+    await recordPassTiming(db, bare, "probe", run(hour(1), 9_000));
+    // Older than the week the chart draws, younger than the two weeks kept.
+    await recordPassTiming(db, bare, "suggest", run(new Date(Date.now() - 8 * 86_400_000), 1_000));
+
+    const body = asRecord(await (await api(`/clusters/${bare}/pass-history`, owner)).json());
+    const series = asRecords(body.series, "body.series");
+    expect(series.map((one) => one.task).sort()).toEqual(["collect", "finalize"]);
+    expect(series.find((one) => one.task === "finalize")?.points).toEqual([
+      { hour: hour(3).toISOString(), maxMs: 4_150_000 },
+    ]);
+
+    // Two weeks on, the sweep takes it.
+    await recordPassTiming(db, bare, "collect", run(new Date(Date.now() - 15 * 86_400_000), 1));
+    const before = await db
+      .select()
+      .from(clusterPassRuns)
+      .where(eq(clusterPassRuns.clusterId, bare));
+    await prunePassRuns(db);
+    const after = await db
+      .select()
+      .from(clusterPassRuns)
+      .where(eq(clusterPassRuns.clusterId, bare));
+    expect(before.length - after.length).toBe(1);
+    expect(after.map((row) => row.task).sort()).toEqual([
+      "collect",
+      "finalize",
+      "finalize",
+      "suggest",
+    ]);
   });
 
   // #571. A collect that did not fit is paced, and the pace is written with the

@@ -86,6 +86,7 @@ describe("invalidationKeys", () => {
       queryKeys.nodes(CLUSTER),
       queryKeys.clusters(),
       queryKeys.passes(CLUSTER),
+      queryKeys.passHistory(CLUSTER),
     ]);
   });
 
@@ -99,6 +100,7 @@ describe("invalidationKeys", () => {
         queryKeys.clusterIndexesAll(CLUSTER),
         queryKeys.clusterWorkloadAll(CLUSTER),
         queryKeys.passes(CLUSTER),
+        queryKeys.passHistory(CLUSTER),
       ]);
     }
   });
@@ -114,6 +116,8 @@ describe("invalidationKeys", () => {
         queryKeys.cooldowns(CLUSTER),
         queryKeys.clusterIndexesAll(CLUSTER),
         queryKeys.passes(CLUSTER),
+        // The week's chart draws the hourly passes only (#639).
+        ...(task === "finalize" ? [queryKeys.passHistory(CLUSTER)] : []),
       ]);
     }
   });
@@ -173,6 +177,7 @@ describe("resumeKeys", () => {
           queryKeys.roi(CLUSTER),
           queryKeys.cooldowns(CLUSTER),
           queryKeys.passes(CLUSTER),
+          queryKeys.passHistory(CLUSTER),
         ].map((key) => JSON.stringify(key)),
       ),
     );

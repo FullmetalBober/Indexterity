@@ -77,6 +77,9 @@ export const queryKeys = {
   // How long each pass last took (#571). Its own key because every pass moves
   // it, including the probe, which moves nothing else on the page.
   passes: (clusterId: string | null) => ["passes", clusterId] as const,
+  // A week of the hourly passes' durations (#639). Its own key so the probe,
+  // which moves `passes` every five minutes, does not refetch a week each time.
+  passHistory: (clusterId: string | null) => ["pass-history", clusterId] as const,
   // One page of the cluster's index inventory (#431). The WHOLE request is in the
   // key — namespace scope, offset, limit, sort, direction and filter — for the
   // reason the security trail's filter and cursor are: they are what the api was

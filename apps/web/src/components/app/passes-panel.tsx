@@ -1,4 +1,5 @@
-import type { ClusterPasses, PassTiming } from "@repo/contracts";
+import type { ClusterPasses, ClusterPassHistory, PassTiming } from "@repo/contracts";
+import { LineChart, SERIES_PALETTE } from "~/components/latency-chart";
 import { Badge } from "~/components/ui/badge";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "~/components/ui/empty";
 import { LocalTime } from "~/lib/local-time";
@@ -165,5 +166,55 @@ export function PassesPanel({
         );
       })}
     </ul>
+  );
+}
+
+// The passes the week's chart draws, in the pipeline's order and the palette's.
+const HISTORY_ORDER = ["collect", "classify", "suggest", "finalize"];
+
+/** Minutes to one decimal under ten, whole above: "0.4", "4.2", "69". */
+function minutes(value: number): string {
+  return value < 10 ? value.toFixed(1) : String(Math.round(value));
+}
+
+/**
+ * The longest run of each hourly pass in each hour of the last week (#639).
+ *
+ * The panel above holds each pass's LAST run, which is what made production's
+ * 69-minute finalize (#629) visible only to whoever looked in that hour. A null
+ * point is a stretch longer than the slowest pace with no run at all, where the
+ * line breaks rather than drawing a level nothing measured.
+ */
+export function PassHistoryChart({
+  history,
+  loading,
+}: {
+  history: ClusterPassHistory | null;
+  loading: boolean;
+}) {
+  const series = HISTORY_ORDER.flatMap((task, i) => {
+    const one = history?.series.find((candidate) => candidate.task === task);
+    if (one === undefined || one.points.length === 0) return [];
+    return [
+      {
+        label: task,
+        color: SERIES_PALETTE[i % SERIES_PALETTE.length] ?? "#016BF8",
+        points: one.points.map((point) => ({
+          t: point.hour,
+          v: point.maxMs === null ? null : point.maxMs / 60_000,
+        })),
+      },
+    ];
+  });
+  return (
+    <LineChart
+      title="Longest run per hour, last 7 days"
+      unit="min"
+      series={series}
+      pending={loading}
+      format={minutes}
+      emptyNote="No hourly pass has a week of history yet — runs are kept from this release on."
+      ariaLabel="Longest run of each hourly pass in each hour of the last week, in minutes"
+    />
   );
 }

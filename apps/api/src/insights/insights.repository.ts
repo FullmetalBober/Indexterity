@@ -15,6 +15,7 @@ import {
   BUILD_TYPES,
   clusterIndexes,
   clusterNamespaces,
+  clusterPassRuns,
   clusterPassTimings,
   clusterRosters,
   type Database,
@@ -46,6 +47,7 @@ import {
   latencyChartEvidence,
   latencySummaries,
 } from "./latency-folds";
+import type { PassHour } from "./pass-history";
 
 // The sort key an unmeasured weekly cost stands in for (#432). Negative because
 // a real one never is, so the ordering below stays total and the page's cursor
@@ -815,6 +817,27 @@ export class InsightsRepository {
       .from(clusterPassTimings)
       .where(eq(clusterPassTimings.clusterId, clusterId))
       .orderBy(asc(clusterPassTimings.task));
+  }
+
+  // The hourly passes' runs since `since`, folded to the longest per pass per
+  // hour (#639): a week is a few hundred rows, and what the chart draws is that
+  // many points rather than every run.
+  async passRunsByHour(clusterId: string, since: Date): Promise<PassHour[]> {
+    const rows = await this.database.db.execute<{
+      task: string;
+      hour: Date;
+      max_ms: number | string;
+    }>(sql`
+      select task, date_trunc('hour', started_at) as hour, max(duration_ms) as max_ms
+        from ${clusterPassRuns}
+       where cluster_id = ${clusterId} and started_at >= ${since}
+       group by task, date_trunc('hour', started_at)
+    `);
+    return rows.rows.map((row) => ({
+      task: row.task,
+      hour: new Date(row.hour),
+      maxMs: Number(row.max_ms),
+    }));
   }
 
   async recentActions(clusterId: string, limit: number) {
