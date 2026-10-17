@@ -274,8 +274,8 @@ export function LineChart({
       // Every point in a group shares the timestamp, so the first one names it.
       formatGroup: (points) => tooltipTime(points[0], timeFormat),
     },
-    // The data moves once every six hours. An animation here is decoration on a
-    // number nobody is watching change.
+    // The data moves at most once an hour, with the collect. An animation here is
+    // decoration on a number nobody is watching change.
     animate: false,
   });
 

@@ -3,6 +3,7 @@ import { entitlementsFor, type Plan, planFrom } from "../billing/plans";
 import { coreEnv } from "../config/env";
 import {
   and,
+  clusterFootprintDays,
   clusterIndexes,
   clusterNamespaces,
   clusterPassRuns,
@@ -236,7 +237,25 @@ async function pruneHistory(db: Database, clusterIds: string[], cutoff: Date): P
       and(inArray(workloadShapes.clusterId, clusterIds), lt(workloadShapes.lastSeenAt, cutoff)),
     )
     .returning({ id: workloadShapes.id });
-  return samples.length + snapshots.length + dimensions.length + namespaces.length + shapes.length;
+  // The footprint's days (#640), on the plan's window like the runs they replace
+  // on the chart.
+  const days = await db
+    .delete(clusterFootprintDays)
+    .where(
+      and(
+        inArray(clusterFootprintDays.clusterId, clusterIds),
+        lt(clusterFootprintDays.day, cutoff),
+      ),
+    )
+    .returning({ clusterId: clusterFootprintDays.clusterId });
+  return (
+    samples.length +
+    snapshots.length +
+    dimensions.length +
+    namespaces.length +
+    shapes.length +
+    days.length
+  );
 }
 
 // Finished decisions, on the same clock as the history they were made from.
