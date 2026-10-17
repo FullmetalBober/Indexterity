@@ -15,7 +15,7 @@ import { ClusterCredentialsError, ClusterGoneError } from "./cluster-connection"
 import type { ClusterPasses } from "./cluster-tasks.service";
 import { runDigest, runPrivilegeNotices } from "./digest";
 import { clusterRoster, dispatchToAllClusters, runningPasses } from "./dispatch";
-import { isPaced, pacesDue } from "./pacing";
+import { isPaced, MAX_TIER, pacedBudgetMs, pacedEveryHours, pacesDue } from "./pacing";
 import { pruneOldSamples } from "./retention";
 import type { PassTiming } from "./timings";
 
@@ -179,6 +179,9 @@ export async function runClusterTask(
   // build. Without it a suggest that landed would record no budget at all, and
   // the Passes panel could not say how close it came.
   reportedBudgetMs: number | null = budgetMs,
+  // The pace a paced pass ran at (jobs/pacing.ts), or null for one that is not
+  // paced. A timeout below the top tier is answered by pacing, not by mail (#637).
+  pacedTier: number | null = null,
 ): Promise<void> {
   // Every statement the pass issues registers here (engine/inflight.ts), so a
   // pass that ends badly can take its statements down with it.
@@ -361,8 +364,22 @@ export async function runClusterTask(
       // as it did before this existed.
       const spent = phases.summary();
       const breakdown = spent === "" ? "" : ` — ${spent}`;
-      await deps.markBlocked(clusterId, task, "TIMED_OUT", `${error.message}${breakdown}`);
-      deps.logger.warn(`${task}: cluster ${clusterId} — ${error.message}${breakdown}`);
+      // A paced pass below the top tier is answered already (#637): the timing
+      // settled above has stepped it up, so its next run gets twice the budget at
+      // half the cadence (jobs/pacing.ts). That goes in the block, where the
+      // dashboard shows it, and in the log — and not in a mail, which used to go
+      // out at the first timeout and tell the owner about a problem the pacing
+      // was already solving. What is worth a mail is the pass that does not fit
+      // even at its slowest pace, which is the one an owner has to act on.
+      const pacing = isPaced(task) && pacedTier !== null;
+      const paced = pacing && pacedTier < MAX_TIER;
+      const next = paced
+        ? ` — paced: the next run gets ${Math.round(pacedBudgetMs(pacedTier + 1) / 60_000)} minutes, ` +
+          `every ${pacedEveryHours(pacedTier + 1)} hours`
+        : "";
+      await deps.markBlocked(clusterId, task, "TIMED_OUT", `${error.message}${breakdown}${next}`);
+      deps.logger.warn(`${task}: cluster ${clusterId} — ${error.message}${breakdown}${next}`);
+      if (paced) return;
       const how =
         error instanceof PoolExhaustedError
           ? `waited for a connection to this cluster for longer than a statement is allowed ` +
@@ -371,16 +388,20 @@ export async function runClusterTask(
       await deps.alert(
         `${clusterId}:timed-out`,
         clusterId,
-        `${task} is taking longer than Indexterity will wait`,
+        pacing
+          ? `${task} does not fit even at its slowest pace`
+          : `${task} is taking longer than Indexterity will wait`,
         `The ${task} step against this cluster ${how}, so it did nothing. Nothing was ` +
           `executed and nothing was lost.\n\n` +
           `This usually means the cluster is very large, very busy, or reached over a slow ` +
           `link — the step is not failing so much as not fitting. ` +
-          // A paced pass paces itself (#571, #588, jobs/pacing.ts), so the answer
-          // is already under way. Any other is tried again on the next tick.
-          (isPaced(task)
-            ? `Indexterity now gives this cluster's ${task} longer and runs it less often, ` +
-              `by the same factor, up to four times the budget every four hours — the ` +
+          // At the top tier, pacing has given all it can; anything unpaced is tried
+          // again on the next tick.
+          (pacing
+            ? `Indexterity already gives this cluster's ${task} its slowest pace — four times ` +
+              `the budget, every four hours — and it still did not finish. It keeps trying at ` +
+              `that pace and keeps what each attempt read, so it may still get through; if this ` +
+              `mail comes again tomorrow, the cluster or the link to it needs looking at. The ` +
               `cluster's Passes panel shows where it stands.`
             : `It is tried again on the next tick, and the cluster's Passes panel shows where ` +
               `the time went.`) +
