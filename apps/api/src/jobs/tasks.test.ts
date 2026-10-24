@@ -8,6 +8,7 @@ import { at } from "../errors/at";
 import { asClusterUnreachable } from "../errors/unreachable";
 import { TunnelUnavailableError } from "../tunnel/resolve";
 import { ClusterCredentialsError, ClusterGoneError } from "./cluster-connection";
+import { MAX_TIER } from "./pacing";
 import { type ClusterTaskDeps, PassBudgetExceededError, runClusterTask } from "./tasks";
 import type { PassTiming } from "./timings";
 
@@ -713,18 +714,43 @@ describe("runClusterTask's timing", () => {
     ]);
   });
 
-  // #571. A collect that does not fit is paced, so the mail says the answer is
-  // already under way. A pass that is not paced is tried again on the next tick,
-  // and its mail says that instead.
-  it("tells the owners a timed-out collect is now paced, and only a paced pass", async () => {
+  // #637. A paced pass below the top tier is answered by pacing — the timing just
+  // recorded steps it up — so the owners are not mailed about it; the block says
+  // what the next run gets. It used to mail at the first timeout.
+  it("mails nothing about a paced pass that pacing can still absorb, and says so in the block", async () => {
     const collect = recorder();
+    const never = () => new Promise<void>(() => {});
+
+    await runClusterTask("collect", CLUSTER, collect.deps, never, 20, 20, 0);
+
+    expect(collect.alerts).toEqual([]);
+    expect(at(collect.blocked)).toContain("paced: the next run gets 10 minutes, every 2 hours");
+    expect(at(collect.timings).timing.outcome).toBe("timed-out");
+  });
+
+  // At the top tier pacing has given all it can, and that is the case an owner
+  // has to act on.
+  it("mails the owners once a paced pass does not fit even at its slowest pace", async () => {
+    const suggest = recorder();
+    await runClusterTask(
+      "suggest",
+      CLUSTER,
+      suggest.deps,
+      () => new Promise<void>(() => {}),
+      20,
+      20,
+      MAX_TIER,
+    );
+    expect(suggest.alerts).toEqual([`${CLUSTER}:suggest does not fit even at its slowest pace`]);
+    expect(at(suggest.alertBodies)).toContain("four times the budget, every four hours");
+    expect(at(suggest.blocked)).not.toContain("paced:");
+  });
+
+  // A pass that is not paced is tried again on the next tick, and mails as it did.
+  it("mails about an unpaced pass's timeout, as before", async () => {
     const probe = recorder();
-
-    await runClusterTask("collect", CLUSTER, collect.deps, () => new Promise<void>(() => {}), 20);
     await runClusterTask("probe", CLUSTER, probe.deps, () => new Promise<void>(() => {}), 20);
-
-    expect(at(collect.alertBodies)).toContain("runs it less often");
-    expect(at(probe.alertBodies)).not.toContain("less often");
+    expect(probe.alerts).toEqual([`${CLUSTER}:probe is taking longer than Indexterity will wait`]);
     expect(at(probe.alertBodies)).toContain("tried again on the next tick");
   });
 
