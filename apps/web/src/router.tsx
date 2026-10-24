@@ -2,18 +2,24 @@
 // any particular module — see the file for what it hands over and why it is read
 // from the DOM instead of embedded in it.
 import "./lib/style-nonce";
-import { createRouter, Link } from "@tanstack/react-router";
+import { createRouter, type ErrorComponentProps, Link } from "@tanstack/react-router";
 import { setupRouterSsrQueryIntegration } from "@tanstack/react-router-ssr-query";
 import { Skeleton } from "./components/ui/skeleton";
+import { newNonce } from "./lib/nonce";
 import { createAppQueryClient } from "./lib/queries/client";
 import { routeTree } from "./routeTree.gen";
 
 // Friendly fallbacks instead of the framework's developer screens.
-function AppError({ error }: { error: Error }) {
+//
+// The router types the error as `unknown`, because anything can be thrown. A
+// thrown non-Error used to render an empty line here.
+function AppError({ error }: ErrorComponentProps) {
   return (
     <main className="mx-auto mt-24 max-w-md p-8 text-center">
       <h1 className="font-semibold text-2xl">Something broke</h1>
-      <p className="mt-2 text-muted-foreground text-sm">{error.message}</p>
+      <p className="mt-2 text-muted-foreground text-sm">
+        {error instanceof Error ? error.message : "An unexpected error occurred."}
+      </p>
       <button
         type="button"
         onClick={() => window.location.reload()}
@@ -71,6 +77,13 @@ export function getRouter() {
   const router = createRouter({
     routeTree,
     context: { queryClient },
+    // On the server, this response's script nonce, minted as the router is made
+    // for it (see lib/security-headers.ts). Here and not in the handler that sets
+    // the header (server.ts): the framework writes its hydration scripts with
+    // whatever nonce the router has when it starts the render, and since Start
+    // 1.169 that is before the handler is called. In the browser the framework
+    // reads the nonce back off the page.
+    ...(import.meta.env.SSR ? { ssr: { nonce: newNonce() } } : {}),
     scrollRestoration: true,
     // Run a link's loader when the pointer settles on it, so the click lands on
     // data that is already there. The cluster page is the one this is for: its

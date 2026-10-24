@@ -958,6 +958,36 @@ export const clusterPasses = z.object({
 });
 export type ClusterPasses = z.infer<typeof clusterPasses>;
 
+// The longest run of one pass in each hour it ran, over the last week (#639).
+//
+// Production's SQL Server finalize ran 26 minutes and failed one day and 69
+// minutes two days later (#629), and the Passes panel above, which holds only the
+// last run, showed either only to whoever looked in that hour.
+//
+// `maxMs` is null where nothing ran for longer than the slowest pace allows —
+// four hours, and an hour of slack — so the line breaks across an outage rather
+// than drawing a level nobody measured. An hour with nothing in it otherwise is
+// simply absent: a pass paced to every two hours has a point every two hours.
+export const passHistoryPoint = z.object({
+  hour: instant,
+  maxMs: z.number().int().nonnegative().nullable(),
+});
+export type PassHistoryPoint = z.infer<typeof passHistoryPoint>;
+
+export const passHistorySeries = z.object({
+  task: z.string(),
+  points: z.array(passHistoryPoint),
+});
+export type PassHistorySeries = z.infer<typeof passHistorySeries>;
+
+// The hourly passes that have run since `since`, one series each.
+export const clusterPassHistory = z.object({
+  clusterId: z.uuid(),
+  since: instant,
+  series: z.array(passHistorySeries),
+});
+export type ClusterPassHistory = z.infer<typeof clusterPassHistory>;
+
 // One index the engine has agreed not to touch, and until when (#159).
 //
 // Written from three places — the regression gate when reads got worse after a
@@ -1269,10 +1299,45 @@ export type OpenSummary = z.infer<typeof openSummary>;
 // stopped — or the query has.
 export const OPEN_SCANS_WINDOW_DAYS = 7;
 
+// An approved drop that waits for its day of failure records before it is hidden
+// (#642). The hide happens in the first change window after `hideableAt`, so the
+// two together are the whole answer to "why is this not hidden yet".
+//
+// Beside the rows rather than on them, for the reason `usage` below is: the
+// mutations return a row, and none of them reads the watch.
+export const hideWait = z.object({
+  recommendationId: z.uuid(),
+  hideableAt: instant,
+});
+export type HideWait = z.infer<typeof hideWait>;
+
+// A database whose profiler Indexterity keeps on for the drops in flight, and how
+// much of it the profiler's ring holds (#642). The failure check behind a hide
+// compares against a day of records, and a ring that turns over in less is a
+// check that can act only on a failed hint.
+export const watchedDatabase = z.object({
+  database: z.string(),
+  // When the last pass read the rings, and the instant from which every node's
+  // ring still held what it recorded. `ringReachAt` is null until some ring has
+  // turned over: until then a ring holds everything since the watch began.
+  ringCheckedAt: instant.nullable(),
+  ringReachAt: instant.nullable(),
+});
+export type WatchedDatabase = z.infer<typeof watchedDatabase>;
+
+// How long failures are recorded before a hide, and how far back a ring has to
+// reach for the check after it to have its day. Why a day is argued where the api
+// uses it, in analysis/failures.ts.
+export const FAILURE_BASELINE_MS = 24 * 3_600_000;
+
 export const clusterRecommendations = z.object({
   clusterId: z.uuid(),
   total: z.int().nonnegative(),
   recommendations: z.array(recommendation),
+  // Approved drops waiting out their day of failure records (#642).
+  waits: z.array(hideWait),
+  // The databases watched for the drops in flight, with their rings (#642).
+  watched: z.array(watchedDatabase),
   summary: openSummary,
   // Beside the rows rather than on them (#161), and that is not a style choice:
   // `recommendation` is also what approve, undo and un-hide return, and those

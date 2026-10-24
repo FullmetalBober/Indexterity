@@ -13,8 +13,10 @@ import {
   and,
   asc,
   BUILD_TYPES,
+  clusterFootprintDays,
   clusterIndexes,
   clusterNamespaces,
+  clusterPassRuns,
   clusterPassTimings,
   clusterRosters,
   type Database,
@@ -46,6 +48,7 @@ import {
   latencyChartEvidence,
   latencySummaries,
 } from "./latency-folds";
+import type { PassHour } from "./pass-history";
 
 // The sort key an unmeasured weekly cost stands in for (#432). Negative because
 // a real one never is, so the ordering below stays total and the page's cursor
@@ -357,18 +360,27 @@ export class InsightsRepository {
       .where(inArray(recommendations.id, [...ids]));
   }
 
-  // Total index bytes per day, bucketed in SQL rather than shipped one point per
-  // snapshot run. Runs are run-length encoded (#67), so the row count is a
-  // function of how much the cluster CHANGES — a busy 200-index cluster writes
-  // roughly four runs per index per day, which is 24,000 rows for a 30-day
-  // window and a chart that draws 31 points.
+  // Total index bytes per day.
   //
-  // A day counts an index once, at the newest run that overlapped it, and a day
-  // no run overlapped comes back null rather than zero — the difference between
-  // "this cluster had no indexes" and "nobody looked". Overlap is the right test
-  // and an instant is not: a busy index's runs end and restart around each
-  // collect, so "the run covering midnight" would drop exactly the indexes whose
-  // counters move.
+  // A day a collect wrote a row for (#640) is that row: the total as the day's
+  // last collect measured it. Every collect writes one, so this is every day
+  // since the table existed.
+  //
+  // A day without one is derived from the snapshot runs, as it was before the
+  // table, and is only as good as they are: a run's size rides along at its
+  // newest value (db/schema.ts, index_snapshots), so an idle index on a
+  // write-heavy collection reads its latest size into every day of a long run.
+  // The derivation is bucketed in SQL rather than shipped one point per run,
+  // because the row count is a function of how much the cluster CHANGES — a busy
+  // 200-index cluster writes roughly four runs per index per day, which is
+  // 24,000 rows for a 30-day window and a chart that draws 31 points.
+  //
+  // A derived day counts an index once, at the newest run that overlapped it,
+  // and a day nothing covers comes back null rather than zero — the difference
+  // between "this cluster had no indexes" and "nobody looked". Overlap is the
+  // right test and an instant is not: a busy index's runs end and restart around
+  // each collect, so "the run covering midnight" would drop exactly the indexes
+  // whose counters move.
   async indexSizeByDay(clusterId: string, since: Date): Promise<IndexSizeDay[]> {
     const rows = await this.database.db.execute<{
       day: Date;
@@ -396,16 +408,28 @@ export class InsightsRepository {
          and s.captured_at < d.day + interval '1 day'
          and s.last_seen_at >= d.day
         order by d.day, s.index_id, s.captured_at desc
+      ),
+      derived as (
+        select
+          d.day,
+          -- sum over no rows is null, which is the gap marker, so this is
+          -- deliberately NOT coalesced to zero.
+          sum(p.size_bytes)::bigint as total_bytes,
+          count(p.size_bytes)::int as index_count
+        from days d
+        left join picked p on p.day = d.day
+        group by d.day
       )
       select
         d.day,
-        -- sum over no rows is null, which is the gap marker, so this is
-        -- deliberately NOT coalesced to zero.
-        sum(p.size_bytes)::bigint as total_bytes,
-        count(p.size_bytes)::int as index_count
-      from days d
-      left join picked p on p.day = d.day
-      group by d.day
+        -- Both columns from one source: a stored day's count beside a derived
+        -- day's total would describe two different sets of indexes.
+        case when f.day is null then d.total_bytes else f.total_bytes end as total_bytes,
+        case when f.day is null then d.index_count else f.index_count end as index_count
+      from derived d
+      left join ${clusterFootprintDays} f
+        on f.cluster_id = ${clusterId}
+       and f.day = d.day
       order by d.day
     `);
     // bigint arrives as a string from node-postgres — Number is exact to 9
@@ -815,6 +839,27 @@ export class InsightsRepository {
       .from(clusterPassTimings)
       .where(eq(clusterPassTimings.clusterId, clusterId))
       .orderBy(asc(clusterPassTimings.task));
+  }
+
+  // The hourly passes' runs since `since`, folded to the longest per pass per
+  // hour (#639): a week is a few hundred rows, and what the chart draws is that
+  // many points rather than every run.
+  async passRunsByHour(clusterId: string, since: Date): Promise<PassHour[]> {
+    const rows = await this.database.db.execute<{
+      task: string;
+      hour: Date;
+      max_ms: number | string;
+    }>(sql`
+      select task, date_trunc('hour', started_at) as hour, max(duration_ms) as max_ms
+        from ${clusterPassRuns}
+       where cluster_id = ${clusterId} and started_at >= ${since}
+       group by task, date_trunc('hour', started_at)
+    `);
+    return rows.rows.map((row) => ({
+      task: row.task,
+      hour: new Date(row.hour),
+      maxMs: Number(row.max_ms),
+    }));
   }
 
   async recentActions(clusterId: string, limit: number) {

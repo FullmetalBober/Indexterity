@@ -16,7 +16,8 @@ import { BuiltByIndex, ImpactCards } from "~/components/app/impact";
 import { latencyCharts } from "~/components/app/latency-series";
 import { NodesPanel } from "~/components/app/nodes-panel";
 import { ParkedPanel } from "~/components/app/parked-panel";
-import { PassesPanel } from "~/components/app/passes-panel";
+import { PassesPanel, PassHistoryChart } from "~/components/app/passes-panel";
+import { ShortProfilerNotice } from "~/components/app/profiler-notice";
 import { RecommendationsTable } from "~/components/app/recommendations-table";
 import { Unavailable } from "~/components/app/unavailable";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
@@ -39,12 +40,14 @@ import {
   latencySeriesQuery,
   nodesQuery,
   passesQuery,
+  passHistoryQuery,
   useCollections,
   useIndexSizeSeries,
   useLatency,
   useLatencySeries,
   useNodes,
   usePasses,
+  usePassHistory,
 } from "~/lib/queries/telemetry";
 import { LineChart, SERIES_PALETTE } from "../components/latency-chart";
 
@@ -83,6 +86,7 @@ export const Route = createFileRoute("/app/clusters/$clusterId/")({
       context.queryClient.ensureQueryData(indexSizeSeriesQuery(id)),
       context.queryClient.ensureQueryData(nodesQuery(id)),
       context.queryClient.ensureQueryData(passesQuery(id)),
+      context.queryClient.ensureQueryData(passHistoryQuery(id)),
       context.queryClient.ensureQueryData(cooldownsQuery(id)),
     ]);
     // Awaited on the server, deliberately not in the browser.
@@ -134,6 +138,7 @@ function ClusterOverview() {
   const footprint = useIndexSizeSeries(id);
   const nodes = useNodes(id);
   const passes = usePasses(id);
+  const passHistory = usePassHistory(id);
   const cooldowns = useCooldowns(id);
   const clearCooldown = useClearCooldown(id);
 
@@ -229,6 +234,7 @@ function ClusterOverview() {
               them: an empty list means "all fine" unless something says otherwise,
               and on a cluster whose counters keep resetting nothing ever did (#277). */}
           <AnalysisNotePanel analysis={recommendations.data.analysis} />
+          <ShortProfilerNotice watched={recommendations.data.watched} />
 
           <section className="mt-8">
             <h2 className="font-semibold text-lg">Recommendations</h2>
@@ -246,6 +252,7 @@ function ClusterOverview() {
             clusterId={id}
             recommendations={recommendations.data.recommendations}
             usage={recommendations.data.usage}
+            waits={recommendations.data.waits}
             roster={nodes.data}
             total={recommendations.data.total}
             loading={recommendations.pending}
@@ -351,6 +358,13 @@ function ClusterOverview() {
             <Unavailable what="the pass timings" onRetry={passes.retry} />
           ) : (
             <PassesPanel passes={passes.data} loading={passes.pending} />
+          )}
+        </div>
+        <div className="mt-6">
+          {passHistory.failed ? (
+            <Unavailable what="the pass history" onRetry={passHistory.retry} />
+          ) : (
+            <PassHistoryChart history={passHistory.data} loading={passHistory.pending} />
           )}
         </div>
       </section>

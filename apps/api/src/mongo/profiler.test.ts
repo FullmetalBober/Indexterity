@@ -7,6 +7,7 @@ import {
   planWatch,
   profilerBlindSpot,
   profilerSettings,
+  ringReach,
   ringTurnedOver,
   type SortedFailures,
   sortFailures,
@@ -203,6 +204,15 @@ describe("watchFilter and markerOf", () => {
     expect(markerOf(undefined)).toBeNull();
   });
 
+  // #641: the stretches a node missed travel in the marker, and a marker written
+  // before they existed still reads.
+  it("carries the stretches a node missed, and reads a marker that has none", () => {
+    const marker = armed(at({ was: 0 }), wants({ "app.orders": ["a_1"] }));
+    const missed: WatchMarker = { ...marker, gaps: [[NOW + 60_000, NOW + 120_000]] };
+    expect(markerOf(watchFilter(missed))).toEqual(missed);
+    expect(markerOf(watchFilter(marker))).not.toHaveProperty("gaps");
+  });
+
   // A filter replaces slowms for the slow-query log too, so the database's own
   // threshold and sample are copied in — the log is unchanged by the watch.
   it("keeps the slow-query threshold the database had", () => {
@@ -372,6 +382,100 @@ describe("planWatch", () => {
   });
 });
 
+// #641. A restart clears a node's profiler settings, marker and all, and nothing
+// else: its ring keeps what it recorded. A node seen watching recently is put back
+// with its starts as they were, and the stretch it missed goes into its marker.
+describe("planWatch putting a watch back after a restart", () => {
+  const seenAt = NOW + 23 * 3_600_000;
+  const later = NOW + 24 * 3_600_000;
+  const back = (
+    settings: ProfilerSettings,
+    wanted: Map<string, string[]>,
+    resume: { starts: Record<string, number>; gaps: [number, number][] },
+    now = later,
+  ) =>
+    planWatch({
+      database: "app",
+      owner: OWNER,
+      settings,
+      wanted,
+      now,
+      resume: { ...resume, seenAt },
+    });
+
+  it("puts the starts back, and records the stretch the node missed", () => {
+    expect(
+      back(at({ was: 0 }), wants({ "app.orders": ["a_1"] }), {
+        starts: { "app.orders": NOW },
+        gaps: [],
+      }),
+    ).toEqual({
+      kind: "SET",
+      marker: {
+        v: 1,
+        owner: OWNER,
+        prior: { level: 0, filter: null },
+        slow: { ms: 100, rate: 1 },
+        watch: { "app.orders": NOW },
+        hints: { "app.orders": ["a_1"] },
+        gaps: [[seenAt, later]],
+      },
+    });
+  });
+
+  // Its marker went with the restart, so what it had missed before comes from
+  // the memory, and is kept beside the new stretch.
+  it("keeps the stretches the node had missed before", () => {
+    const earlier: [number, number] = [NOW + 3_600_000, NOW + 2 * 3_600_000];
+    expect(
+      back(at({ was: 0 }), wants({ "app.orders": [] }), {
+        starts: { "app.orders": NOW },
+        gaps: [earlier],
+      }),
+    ).toMatchObject({ kind: "SET", marker: { gaps: [earlier, [seenAt, later]] } });
+  });
+
+  // A namespace the memory has no start for begins now, and a stretch over before
+  // every start is in no reading, so it is not kept.
+  it("starts what it does not remember from now", () => {
+    const step = back(at({ was: 0 }), wants({ "app.users": [] }), { starts: {}, gaps: [] });
+    expect(step).toMatchObject({ kind: "SET", marker: { watch: { "app.users": later } } });
+    if (step.kind !== "SET") throw new Error("expected SET");
+    expect(step.marker).not.toHaveProperty("gaps");
+  });
+
+  // The memory is for a watch that is gone. One still in place is kept as it is.
+  it("leaves a watch that is still in place alone", () => {
+    const marker = armed(at({ was: 0 }), wants({ "app.orders": ["a_1"] }));
+    expect(
+      back(armedWith(marker), wants({ "app.orders": ["a_1"] }), {
+        starts: { "app.orders": NOW - 3_600_000 },
+        gaps: [],
+      }),
+    ).toEqual({ kind: "KEEP" });
+  });
+
+  // Once back, the marker is as wanted: the next pass keeps it, and one that adds
+  // a neighbour carries the stretch over.
+  it("keeps the stretch on the passes after", () => {
+    const step = back(at({ was: 0 }), wants({ "app.orders": ["a_1"] }), {
+      starts: { "app.orders": NOW },
+      gaps: [],
+    });
+    if (step.kind !== "SET") throw new Error("expected SET");
+    const again = later + 3_600_000;
+    expect(plan(armedWith(step.marker), wants({ "app.orders": ["a_1"] }), again)).toEqual({
+      kind: "KEEP",
+    });
+    expect(
+      plan(armedWith(step.marker), wants({ "app.orders": ["a_1"], "app.users": [] }), again),
+    ).toMatchObject({
+      kind: "SET",
+      marker: { watch: { "app.orders": NOW, "app.users": again }, gaps: [[seenAt, later]] },
+    });
+  });
+});
+
 describe("failedOpsReading under a watch", () => {
   const marker = armed(at({ was: 0 }), wants({ "app.orders": [] }));
   const read = (overrides: Partial<Parameters<typeof failedOpsReading>[0]>) =>
@@ -425,6 +529,39 @@ describe("failedOpsReading under a watch", () => {
       kind: "WINDOW",
       blindSpot:
         "the profiler on app has recorded failures only since 2026-10-03 12:00 UTC, after the hide",
+    });
+  });
+
+  // #641: a watch put back across a restart keeps its start, so the reading says
+  // what the node missed, where that falls after the instant asked about.
+  it("names a stretch a restart cost, and not one over before the instant asked about", () => {
+    const missed: WatchMarker = { ...marker, gaps: [[NOW + 2 * 3_600_000, NOW + 3 * 3_600_000]] };
+    expect(read({ settings: armedWith(missed), sinceMs: NOW + 3_600_000 })).toMatchObject({
+      kind: "WINDOW",
+      reachMs: NOW,
+      blindSpot:
+        "a restart cleared the profiler on app between 2026-10-03 14:00 UTC and 2026-10-03 15:00 UTC, " +
+        "so failures from the restart until 2026-10-03 15:00 UTC were not recorded",
+    });
+    expect(read({ settings: armedWith(missed), sinceMs: NOW + 4 * 3_600_000 })).toMatchObject({
+      blindSpot: null,
+    });
+  });
+
+  it("counts several stretches rather than listing them", () => {
+    const hour = 3_600_000;
+    const missed: WatchMarker = {
+      ...marker,
+      gaps: [
+        [NOW + hour, NOW + 2 * hour],
+        [NOW + 25 * hour, NOW + 26 * hour],
+        [NOW + 49 * hour, NOW + 50 * hour],
+      ],
+    };
+    expect(read({ settings: armedWith(missed) })).toMatchObject({
+      blindSpot:
+        "restarts cleared the profiler on app 3 times between 2026-10-03 13:00 UTC and " +
+        "2026-10-05 14:00 UTC, so failures in up to 3 hours of that were not recorded",
     });
   });
 
@@ -658,5 +795,31 @@ describe("ringTurnedOver", () => {
   it("does not know when the fill could not be read", () => {
     expect(ringTurnedOver(null)).toBeNull();
     expect(ringTurnedOver({ bytes: 0, entries: 0, capBytes: 0, capEntries: null })).toBeNull();
+  });
+});
+
+// #642. How far back every node's ring still holds what it recorded.
+describe("ringReach", () => {
+  const MB = 1_048_576;
+  const full = { bytes: MB, entries: 4_000, capBytes: MB, capEntries: null };
+  const roomy = { bytes: 10_000, entries: 40, capBytes: MB, capEntries: null };
+  const at = (ms: number) => new Date(NOW + ms);
+
+  it("is the latest oldest entry among the rings that have turned over", () => {
+    expect(
+      ringReach([
+        { fill: full, oldest: at(-47 * 60_000) },
+        { fill: full, oldest: at(-30 * 60_000) },
+        // Holds everything since its watch began, so it limits nothing.
+        { fill: roomy, oldest: at(-3_600_000) },
+      ]),
+    ).toBe(NOW - 30 * 60_000);
+  });
+
+  it("is unknown while no ring has turned over, or none could be read", () => {
+    expect(ringReach([{ fill: roomy, oldest: at(-60_000) }])).toBeNull();
+    expect(ringReach([{ fill: null, oldest: at(-60_000) }])).toBeNull();
+    expect(ringReach([{ fill: full, oldest: null }])).toBeNull();
+    expect(ringReach([])).toBeNull();
   });
 });

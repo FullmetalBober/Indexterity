@@ -2,6 +2,7 @@ import { Injectable } from "@nestjs/common";
 import type {
   AnalysisNote,
   ClusterRecommendations,
+  HideWait,
   IndexUsage,
   OpenSummary,
   Recommendation,
@@ -13,6 +14,7 @@ import {
   dominantRefusal,
   explainRefusal,
   explainSuppression,
+  FAILURE_BASELINE_MS,
   parseStoredSpec,
   proposedVetoDays,
   rebuildKeys,
@@ -27,6 +29,7 @@ import { TenancyService } from "../http/tenancy.service";
 import { CLASSIFY_OPTIONS } from "../jobs/classify";
 import { openClusterSession } from "../jobs/cluster-connection";
 import { recordManualVeto } from "../jobs/cooldowns";
+import { HIDE_TYPES } from "../jobs/failure-watch";
 import { type RecommendationRow, RecommendationsRepository } from "./recommendations.repository";
 
 // How long a cancelled drop stays off the table before the engine may propose
@@ -53,6 +56,35 @@ const NO_OPEN_SUMMARY: OpenSummary = {
   drops: { toReview: 0, underWay: 0, reclaimableBytes: 0 },
   builds: { toReview: 0, underWay: 0, scanningShapes: 0, weeklyDocsExamined: 0 },
 };
+
+// When each approved drop may be hidden, where it waits out a day of failure
+// records (#642): its watch's start plus the day, as apply's own gate reads it
+// (jobs/apply.ts). Only from a watch the last pass found in place on every node —
+// one that was not is a drop apply does not hold back for it.
+export function hideWaits(
+  rows: readonly Pick<RecommendationRow, "id" | "type" | "state" | "database" | "collection">[],
+  watches: readonly {
+    readonly database: string;
+    readonly starts: Readonly<Record<string, number>>;
+    readonly watching: boolean;
+  }[],
+): HideWait[] {
+  const byDatabase = new Map(watches.map((watch) => [watch.database, watch]));
+  return rows.flatMap((row) => {
+    if (row.state !== "APPROVED" || !HIDE_TYPES.has(row.type)) return [];
+    const watch = byDatabase.get(row.database);
+    const start =
+      watch?.watching === true ? watch.starts[`${row.database}.${row.collection}`] : undefined;
+    return start === undefined
+      ? []
+      : [
+          {
+            recommendationId: row.id,
+            hideableAt: new Date(start + FAILURE_BASELINE_MS).toISOString(),
+          },
+        ];
+  });
+}
 
 // The recommendations themselves and the three things a human can do to one:
 // approve it, cancel it while it is hidden, or undo it after the drop.
@@ -81,6 +113,8 @@ export class RecommendationsService {
         clusterId,
         total: 0,
         recommendations: [],
+        waits: [],
+        watched: [],
         summary: NO_OPEN_SUMMARY,
         usage: [],
         analysis: null,
@@ -88,10 +122,17 @@ export class RecommendationsService {
     }
     const total = await this.repo.countFor(clusterId);
     const rows = await this.repo.topFor(clusterId, RECOMMENDATIONS_CAP);
+    const watches = await this.repo.watchesFor(clusterId);
     return {
       clusterId,
       total: total ?? rows.length,
       recommendations: rows.map(toRecommendation),
+      waits: hideWaits(rows, watches),
+      watched: watches.map((watch) => ({
+        database: watch.database,
+        ringCheckedAt: watch.ringCheckedAt?.toISOString() ?? null,
+        ringReachAt: watch.ringReachAt?.toISOString() ?? null,
+      })),
       summary: await this.summaryFor(clusterId),
       usage: await this.usageFor(clusterId, rows),
       analysis: await this.analysisFor(clusterId),

@@ -2,7 +2,7 @@ import type { ClusterNodes, IndexUsage, Recommendation } from "@repo/contracts";
 import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { at } from "~/lib/at";
+import { at, present } from "~/lib/at";
 import { renderInApp } from "~/test-utils";
 import { RecommendationsTable } from "./recommendations-table";
 
@@ -317,6 +317,45 @@ describe("RecommendationsTable", () => {
     );
 
     expect(screen.getByText(/^drops /)).toBeInTheDocument();
+  });
+
+  // #642. An approved drop showed APPROVED and nothing else, and why it was not
+  // hidden yet was a line in Activity.
+  it("says when an approved drop may be hidden, and what it waits on after that", () => {
+    const later = new Date(Date.now() + 5 * 3_600_000).toISOString();
+    renderInApp(
+      <RecommendationsTable
+        total={3}
+        clusterId="c1"
+        recommendations={[
+          rec({ id: "waits", state: "APPROVED", indexName: "idx_waits" }),
+          rec({ id: "due", state: "APPROVED", indexName: "idx_due" }),
+          rec({ id: "build", type: "CREATE", state: "APPROVED", indexName: "idx_build" }),
+        ]}
+        waits={[{ recommendationId: "waits", hideableAt: later }]}
+        loading={false}
+      />,
+    );
+
+    const row = (name: string) => present(screen.getByText(name).closest("tr"), `row ${name}`);
+    expect(within(row("idx_waits")).getByText(/^hides after /)).toBeInTheDocument();
+    expect(within(row("idx_due")).getByText("waiting on the change window")).toBeInTheDocument();
+    // A build is not hidden, so there is no hide to wait for.
+    expect(within(row("idx_build")).queryByText(/hides after|change window/)).toBeNull();
+  });
+
+  it("promises no hide on a read-only cluster", () => {
+    renderInApp(
+      <RecommendationsTable
+        total={1}
+        clusterId="c1"
+        recommendations={[rec({ state: "APPROVED" })]}
+        loading={false}
+        readOnly
+      />,
+    );
+
+    expect(screen.queryByText(/hides after|change window/)).toBeNull();
   });
 
   it("explains an empty table rather than drawing headers over nothing", () => {

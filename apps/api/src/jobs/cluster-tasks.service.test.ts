@@ -69,7 +69,8 @@ vi.mock("./blocked", (): typeof import("./blocked") => ({
 }));
 // The same for how long each pass took (#571): tasks.test.ts owns what is
 // recorded, and against this suite's empty db the write could only fail.
-vi.mock("./timings", (): typeof import("./timings") => ({
+vi.mock("./timings", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./timings")>()),
   recordPassTiming: vi.fn(),
 }));
 // A paced pass reads its own pace before it runs (#571, #588), and this suite's

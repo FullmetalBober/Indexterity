@@ -686,8 +686,9 @@ export const indexSnapshots = pgTable(
     // As of `lastSeenAt`, not `capturedAt`. Size is not part of what makes a run
     // — an unused index on a write-heavy collection grows on every insert, and
     // keying runs on size would collapse nothing in exactly the case worth
-    // collapsing — so it rides along at its newest value. Nothing reads the size
-    // series; every caller wants the current number.
+    // collapsing — so it rides along at its newest value, and a run's past days
+    // read today's size. The footprint chart, which once read it day by day,
+    // keeps its own total per day in `cluster_footprint_days` (#640).
     sizeBytes: bigint("size_bytes", { mode: "number" }).notNull(),
     // `since` is the member's $indexStats counter start — the restart marker.
     // jsonb, so adding it needed no DDL; older rows simply omit the key.
@@ -1393,9 +1394,15 @@ export const analysisNotes = pgTable(
  * what was there before, and since when each collection has been watched
  * (mongo/profiler.ts). What the cluster cannot say is where to LOOK once
  * nothing needs the watch — the last drop in a database graduates or is rolled
- * back, and the next pass has no recommendation pointing there. This is that
- * list, and nothing more: a row is written while any node carries our filter
- * and deleted once every node has been given back what it had.
+ * back, and the next pass has no recommendation pointing there. That is what a
+ * row is first: it is written while any node carries our filter and deleted
+ * once every node has been given back what it had.
+ *
+ * And what a restart takes with it (#641). A restart clears a node's profiler
+ * settings, marker and all, so the node cannot say what its watch was. The
+ * columns below remember it, which is how the next pass puts the watch back as
+ * it was instead of starting the day over. Each is written by the pass that
+ * keeps the watch, from what the cluster said on that pass.
  */
 export const failureWatches = pgTable(
   "failure_watches",
@@ -1405,9 +1412,32 @@ export const failureWatches = pgTable(
       .references(() => clusters.id, { onDelete: "cascade" }),
     database: text("database").notNull(),
     since: timestamp("since", { withTimezone: true }).notNull().defaultNow(),
+    // Namespace -> since when it has been watched, epoch ms, as the last pass that
+    // found every node watching combined it.
+    starts: jsonb("starts").$type<Record<string, number>>().notNull().default({}),
+    // Host -> when a pass last saw that node watching, epoch ms.
+    confirmed: jsonb("confirmed").$type<Record<string, number>>().notNull().default({}),
+    // The stretches each node missed, as its marker carried them, for when a
+    // restart clears that marker too.
+    gaps: jsonb("gaps").$type<WatchGapRecord[]>().notNull().default([]),
+    // Whether the last pass found every node watching, which is when `starts`
+    // says when an approved drop may be hidden (#642).
+    watching: boolean("watching").notNull().default(false),
+    // How far back the database's profiler rings reached when the last pass read
+    // them (#642): the instant from which every node's ring still held what it
+    // recorded, once one had turned over. Null while none has.
+    ringReachAt: timestamp("ring_reach_at", { withTimezone: true }),
+    ringCheckedAt: timestamp("ring_checked_at", { withTimezone: true }),
   },
   (table) => [primaryKey({ columns: [table.clusterId, table.database] })],
 );
+
+// One missed stretch of one node's watch, epoch ms (#641).
+export interface WatchGapRecord {
+  readonly host: string;
+  readonly from: number;
+  readonly to: number;
+}
 
 /**
  * Why one PASS is not running against one cluster — one row per pass (#462).
@@ -1465,6 +1495,60 @@ export interface PassPhaseRecord {
   // is a floor rather than a measurement.
   readonly running: boolean;
 }
+
+/**
+ * The cluster's total index bytes per day, as the last collect of that day
+ * measured them (#640).
+ *
+ * The footprint chart read `index_snapshots.size_bytes` day by day, but a run's
+ * size rides along at its newest value, so a run spanning a month drew today's
+ * size into every day of it: an idle index growing on a write-heavy collection
+ * drew flat. One row per cluster per day, written by every collect, is what the
+ * chart was always asking. `day` is `date_trunc('day', …)` in the database's own
+ * zone, the value the chart's day buckets are, so the two join on equality.
+ * Pruned with the time series at the plan's window.
+ */
+export const clusterFootprintDays = pgTable(
+  "cluster_footprint_days",
+  {
+    clusterId: uuid("cluster_id")
+      .notNull()
+      .references(() => clusters.id, { onDelete: "cascade" }),
+    day: timestamp("day", { withTimezone: true }).notNull(),
+    totalBytes: bigint("total_bytes", { mode: "number" }).notNull(),
+    indexCount: integer("index_count").notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.clusterId, table.day] })],
+);
+
+/**
+ * Every run of the hourly passes against one cluster, kept for two weeks (#639).
+ *
+ * `cluster_pass_timings` below holds the last run only, on the reasoning that a
+ * history would answer a question nobody had asked. Production asked it: SQL
+ * Server's finalize ran 26 minutes and failed on 2026-10-08, then 69 minutes on
+ * 10-10 (#629), and each was visible only to whoever opened the Passes panel in
+ * that hour. A pace stepping up and down (#571, #588) left no trend either.
+ *
+ * The hourly passes only — `collect`, `suggest`, `classify`, `finalize` — and no
+ * phases: those are what can run long, at a few rows a cluster an hour. Probe and
+ * apply run every five minutes, finish in seconds, and keep their last run in the
+ * table below. Pruned by the daily retention sweep.
+ */
+export const clusterPassRuns = pgTable(
+  "cluster_pass_runs",
+  {
+    clusterId: uuid("cluster_id")
+      .notNull()
+      .references(() => clusters.id, { onDelete: "cascade" }),
+    task: text("task").notNull(),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+    durationMs: integer("duration_ms").notNull(),
+    // The pipeline metric's vocabulary, as `cluster_pass_timings.outcome`.
+    outcome: text("outcome").notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.clusterId, table.task, table.startedAt] })],
+);
 
 /**
  * How long one PASS last took against one cluster, and how it ended (#571).

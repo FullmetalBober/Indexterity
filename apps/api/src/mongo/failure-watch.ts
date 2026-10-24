@@ -1,10 +1,27 @@
 import { type Document, MongoServerError } from "mongodb";
-import type { DatabaseWatch, FailureWatch, WatchTarget } from "../engine/ports";
+import type {
+  DatabaseWatch,
+  FailureWatch,
+  WatchGap,
+  WatchMemory,
+  WatchTarget,
+} from "../engine/ports";
 import { messageOf } from "../errors/message";
 import type { MongoConnection } from "./connection";
 import { isAuthorizationError } from "./errors";
 import { type MemberConnections, profiledNodes } from "./members";
-import { markerOf, planWatch, profilerSettingsOn, type WatchMarker, watchFilter } from "./profiler";
+import {
+  markerOf,
+  oldestProfiledOn,
+  planWatch,
+  profilerSettingsOn,
+  type Resume,
+  type RingFill,
+  ringFillOn,
+  ringReach,
+  type WatchMarker,
+  watchFilter,
+} from "./profiler";
 
 // One node's part in one database's watch.
 type NodeOutcome =
@@ -12,6 +29,10 @@ type NodeOutcome =
       readonly kind: "WATCHED";
       readonly since: ReadonlyMap<string, number>;
       readonly ours: boolean;
+      // The stretches its marker says it missed (#641).
+      readonly gaps: readonly (readonly [number, number])[];
+      // Its ring, for how far back the database's rings reach (#642).
+      readonly ring: { readonly fill: RingFill | null; readonly oldest: Date | null };
     }
   | { readonly kind: "UNWATCHED"; readonly reason: string; readonly ours: boolean };
 
@@ -34,6 +55,7 @@ export class MongoFailureWatch implements FailureWatch {
     owner: string,
     targets: readonly WatchTarget[],
     release: readonly string[],
+    memory: ReadonlyMap<string, WatchMemory> = new Map(),
   ): Promise<ReadonlyMap<string, DatabaseWatch>> {
     const wanted = byDatabase(targets);
     const databases = [...new Set([...wanted.keys(), ...release])];
@@ -72,7 +94,7 @@ export class MongoFailureWatch implements FailureWatch {
       for (const node of nodes) {
         outcomes.push({
           host: node.host,
-          outcome: await this.step(node, owner, database, want, patterns),
+          outcome: await this.step(node, owner, database, want, patterns, memory.get(database)),
         });
       }
       out.set(database, combine(want, outcomes));
@@ -86,6 +108,7 @@ export class MongoFailureWatch implements FailureWatch {
     database: string,
     wanted: ReadonlyMap<string, readonly string[]>,
     patterns: () => Promise<ReadonlyMap<string, Document>>,
+    remembered: WatchMemory | undefined,
   ): Promise<NodeOutcome> {
     const settings = await profilerSettingsOn(node.conn, database);
     if (settings === null) {
@@ -97,7 +120,14 @@ export class MongoFailureWatch implements FailureWatch {
     }
     const marker = markerOf(settings.filter);
     const ours = marker !== null && marker.owner === owner;
-    const step = planWatch({ database, owner, settings, wanted, now: this.now() });
+    const step = planWatch({
+      database,
+      owner,
+      settings,
+      wanted,
+      now: this.now(),
+      resume: resumeOn(node.host, remembered),
+    });
     switch (step.kind) {
       case "KEEP":
         // Kept as ours means up to date; kept otherwise, with something wanted,
@@ -110,13 +140,21 @@ export class MongoFailureWatch implements FailureWatch {
               ? sinceOf(marker)
               : new Map([...wanted.keys()].map((ns) => [ns, 0])),
           ours,
+          gaps: ours ? (marker?.gaps ?? []) : [],
+          ring: await ringOf(node.conn, database),
         };
       case "SET":
         try {
           await node.conn
             .db(database)
             .command({ profile: 1, filter: watchFilter(step.marker, await patterns()) });
-          return { kind: "WATCHED", since: sinceOf(step.marker), ours: true };
+          return {
+            kind: "WATCHED",
+            since: sinceOf(step.marker),
+            ours: true,
+            gaps: step.marker.gaps ?? [],
+            ring: await ringOf(node.conn, database),
+          };
         } catch (error) {
           return { kind: "UNWATCHED", reason: refusal(database, error), ours };
         }
@@ -185,6 +223,36 @@ function sinceOf(marker: WatchMarker): ReadonlyMap<string, number> {
   return new Map(Object.entries(marker.watch));
 }
 
+// What to put back on one node, where the passes before saw it watching recently
+// enough (#641) — the memory holds only such nodes. planWatch uses it only where
+// the node's watch is gone.
+function resumeOn(host: string, remembered: WatchMemory | undefined): Resume | null {
+  const seenAt = remembered?.confirmed.get(host);
+  if (remembered === undefined || seenAt === undefined) return null;
+  return {
+    // A start of zero is a node that recorded everything already, not a watch
+    // that began: nothing of ours to put back.
+    starts: Object.fromEntries([...remembered.starts].filter(([, start]) => start > 0)),
+    seenAt,
+    gaps: remembered.gaps
+      .filter((gap) => gap.host === host)
+      .map((gap): readonly [number, number] => [gap.from, gap.to]),
+  };
+}
+
+// One node's ring, read for its reach (#642). Neither read fails the watch: a
+// ring that cannot be read is one whose reach is not known.
+async function ringOf(
+  conn: MongoConnection,
+  database: string,
+): Promise<{ fill: RingFill | null; oldest: Date | null }> {
+  const [fill, oldest] = await Promise.all([
+    ringFillOn(conn, database),
+    oldestProfiledOn(conn, database),
+  ]);
+  return { fill, oldest };
+}
+
 // Why turning the profiler on was refused, in the words an owner acts on.
 function refusal(database: string, error: unknown): string {
   if (isAuthorizationError(error)) {
@@ -225,11 +293,17 @@ function combine(
     };
   }
   const since = new Map<string, number>();
-  for (const { outcome } of outcomes) {
+  const confirmed: string[] = [];
+  const gaps: WatchGap[] = [];
+  const rings: { fill: RingFill | null; oldest: Date | null }[] = [];
+  for (const { host, outcome } of outcomes) {
     if (outcome.kind !== "WATCHED") continue;
     for (const ns of wanted.keys()) {
       since.set(ns, Math.max(since.get(ns) ?? 0, outcome.since.get(ns) ?? 0));
     }
+    confirmed.push(host);
+    gaps.push(...outcome.gaps.map(([from, to]) => ({ host, from, to })));
+    rings.push(outcome.ring);
   }
-  return { kind: "WATCHED", since, ours };
+  return { kind: "WATCHED", since, ours, confirmed, gaps, ringReachMs: ringReach(rings) };
 }

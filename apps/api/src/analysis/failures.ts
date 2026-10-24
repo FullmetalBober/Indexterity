@@ -1,3 +1,4 @@
+import { FAILURE_BASELINE_MS } from "@repo/contracts";
 import type { FailedOpsReading, FailureTally } from "../engine/ports";
 
 // Did hiding this index start breaking its queries?
@@ -64,7 +65,10 @@ export interface FailureSample {
 // in under an hour. In production a hide that had waited its day read a baseline
 // of 54 minutes, and a drop was rolled back on it. So the verdict checks the
 // reach, and the wait stays: it is what gives a quiet database its day.
-export const FAILURE_BASELINE_MS = 24 * 3_600_000;
+//
+// Defined in @repo/contracts, because the dashboard says when a waiting drop may
+// be hidden and whether a profiler holds a day (#642).
+export { FAILURE_BASELINE_MS };
 
 // Judgement, not a measurement, and named as one — there is no honest way to
 // measure "how many errors mean the hide did it" without the application in

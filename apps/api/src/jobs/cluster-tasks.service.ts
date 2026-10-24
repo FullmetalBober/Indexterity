@@ -265,6 +265,8 @@ export class ClusterTasksService {
       // and reports the one it applied.
       task === "suggest" ? null : passBudgetMs,
       passBudgetMs,
+      // So a timeout that pacing will absorb is not mailed (#637).
+      pace?.tier ?? null,
     );
   }
 

@@ -38,7 +38,14 @@ export function invalidationKeys(
 ): readonly (readonly unknown[])[] {
   switch (event.kind) {
     case "PASS_FINISHED":
-      return [...passKeys(clusterId, event.task), queryKeys.passes(clusterId)];
+      return [
+        ...passKeys(clusterId, event.task),
+        queryKeys.passes(clusterId),
+        // The hourly passes add a run to the week's chart; probe and apply do not.
+        ...(event.task !== null && HISTORY_PASSES.has(event.task)
+          ? [queryKeys.passHistory(clusterId)]
+          : []),
+      ];
     case "DROP_HIDDEN":
     case "BUILD_GRADUATED":
       return [
@@ -65,6 +72,9 @@ export function invalidationKeys(
       ];
   }
 }
+
+// The passes the week's chart draws (#639), as the api keeps them.
+const HISTORY_PASSES: ReadonlySet<string> = new Set(["collect", "suggest", "classify", "finalize"]);
 
 // What one landed pass moved besides its own timing, which every pass moves.
 function passKeys(clusterId: string, task: ClusterEvent["task"]): readonly (readonly unknown[])[] {

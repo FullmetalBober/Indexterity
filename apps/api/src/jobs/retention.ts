@@ -3,8 +3,10 @@ import { entitlementsFor, type Plan, planFrom } from "../billing/plans";
 import { coreEnv } from "../config/env";
 import {
   and,
+  clusterFootprintDays,
   clusterIndexes,
   clusterNamespaces,
+  clusterPassRuns,
   clusters,
   type Database,
   eq,
@@ -19,6 +21,7 @@ import {
   verification,
   workloadShapes,
 } from "../db";
+import { PASS_HISTORY_DAYS } from "./timings";
 
 const DAY_MS = 86_400_000;
 // One batch per run. A backlog drains over consecutive days rather than holding
@@ -128,7 +131,9 @@ export async function pruneOldSamples(db: Database): Promise<number> {
   // A deployment with no clusters still signs people in, so the auth sweep is on
   // both paths out of here rather than only the one that had work to do.
   if (owned.length === 0) {
-    return (await pruneDeadLetterJobs(db)) + (await pruneExpiredAuthRows(db));
+    return (
+      (await pruneDeadLetterJobs(db)) + (await pruneExpiredAuthRows(db)) + (await prunePassRuns(db))
+    );
   }
 
   // One pass per plan rather than per cluster: every cluster on a plan shares its
@@ -146,7 +151,23 @@ export async function pruneOldSamples(db: Database): Promise<number> {
     pruned += await pruneHistory(db, clusterIds, cutoff);
     pruned += await pruneDecisions(db, clusterIds, cutoff);
   }
-  return pruned + (await pruneDeadLetterJobs(db)) + (await pruneExpiredAuthRows(db));
+  return (
+    pruned +
+    (await pruneDeadLetterJobs(db)) +
+    (await pruneExpiredAuthRows(db)) +
+    (await prunePassRuns(db))
+  );
+}
+
+// Pass runs past their two weeks (#639). Not per plan: a pass's duration is about
+// the deployment's own behaviour against the cluster, not the customer's data,
+// and every plan gets the same week on the chart.
+export async function prunePassRuns(db: Database): Promise<number> {
+  const deleted = await db
+    .delete(clusterPassRuns)
+    .where(lt(clusterPassRuns.startedAt, new Date(Date.now() - PASS_HISTORY_DAYS * DAY_MS)))
+    .returning({ clusterId: clusterPassRuns.clusterId });
+  return deleted.length;
 }
 
 // The time series and what hangs off them, for clusters that share one cutoff.
@@ -216,7 +237,25 @@ async function pruneHistory(db: Database, clusterIds: string[], cutoff: Date): P
       and(inArray(workloadShapes.clusterId, clusterIds), lt(workloadShapes.lastSeenAt, cutoff)),
     )
     .returning({ id: workloadShapes.id });
-  return samples.length + snapshots.length + dimensions.length + namespaces.length + shapes.length;
+  // The footprint's days (#640), on the plan's window like the runs they replace
+  // on the chart.
+  const days = await db
+    .delete(clusterFootprintDays)
+    .where(
+      and(
+        inArray(clusterFootprintDays.clusterId, clusterIds),
+        lt(clusterFootprintDays.day, cutoff),
+      ),
+    )
+    .returning({ clusterId: clusterFootprintDays.clusterId });
+  return (
+    samples.length +
+    snapshots.length +
+    dimensions.length +
+    namespaces.length +
+    shapes.length +
+    days.length
+  );
 }
 
 // Finished decisions, on the same clock as the history they were made from.

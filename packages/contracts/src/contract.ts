@@ -29,6 +29,7 @@ import {
   clusterLatencySeries,
   clusterNodes,
   clusterPasses,
+  clusterPassHistory,
   clusterPolicyView,
   clusterPrivileges,
   clusterRecommendations,
@@ -229,6 +230,17 @@ export const contract = {
     })
     .input(clusterId)
     .output(clusterPasses),
+
+  // A week of the hourly passes' durations (#639), apart from getPasses so the
+  // five-minute passes that refresh that one do not resend a week each time.
+  getPassHistory: oc
+    .route({
+      method: "GET",
+      path: "/clusters/{clusterId}/pass-history",
+      summary: "The longest run of each hourly pass in each hour of the last week",
+    })
+    .input(clusterId)
+    .output(clusterPassHistory),
 
   listActions: oc
     .route({

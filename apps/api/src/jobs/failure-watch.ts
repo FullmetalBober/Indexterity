@@ -8,18 +8,85 @@ import {
   failureWatches,
   inArray,
   recommendations,
+  type WatchGapRecord,
 } from "../db";
 import type {
   DatabaseWatch,
   EngineSession,
   FailedOpsReading,
   IndexCollector,
+  WatchMemory,
   WatchTarget,
 } from "../engine/ports";
 import { messageOf } from "../errors/message";
 
 // The recommendation types apply.ts hides before it drops anything.
 export const HIDE_TYPES: ReadonlySet<string> = new Set(["DROP_UNUSED", "DROP_REDUNDANT", "MERGE"]);
+
+// How recently a node must have been seen watching for a restart that cleared its
+// profiler to be put back across, rather than start its day over (#641).
+//
+// The hourly finalize sees every node, and this is that hour and one more, for a
+// pass that is late or fails once. What a restart costs a watch put back across
+// it is the stretch from the last sighting to the pass that puts it back, said
+// in every reading that spans it — so the bound is on how much of a day's
+// baseline may go unrecorded and still be called a day. Two hours of twenty-four
+// is the trade #641 made, the same one D114 made for usage counters: segment the
+// record, don't void it. Past the bound the watch starts over, as it always did.
+export const WATCH_RESUME_MS = 2 * 3_600_000;
+
+// What the passes before remember of one database's watch, as the engine is
+// handed it: only the nodes seen recently enough to be put back.
+export function memoryOf(
+  row: {
+    readonly starts: Readonly<Record<string, number>>;
+    readonly confirmed: Readonly<Record<string, number>>;
+    readonly gaps: readonly WatchGapRecord[];
+  },
+  now: number,
+): WatchMemory {
+  return {
+    starts: new Map(Object.entries(row.starts)),
+    confirmed: new Map(
+      Object.entries(row.confirmed).filter(([, at]) => now - at <= WATCH_RESUME_MS),
+    ),
+    gaps: row.gaps,
+  };
+}
+
+// What a pass that found every node watching leaves for the next one (#641,
+// #642). The nodes it saw are confirmed as of now, and their gaps are what their
+// markers say; a node it did not see keeps what was remembered of it, while that
+// is recent enough to matter.
+export function rememberWatch(
+  previous:
+    | {
+        readonly confirmed: Readonly<Record<string, number>>;
+        readonly gaps: readonly WatchGapRecord[];
+      }
+    | undefined,
+  watch: DatabaseWatch & { readonly kind: "WATCHED" },
+  now: number,
+) {
+  const seen = new Set(watch.confirmed);
+  // A stretch over before every watch here began is in no reading any more.
+  const earliest = Math.min(...watch.since.values());
+  return {
+    starts: Object.fromEntries(watch.since),
+    confirmed: Object.fromEntries([
+      ...Object.entries(previous?.confirmed ?? {}).filter(
+        ([host, at]) => !seen.has(host) && now - at <= WATCH_RESUME_MS,
+      ),
+      ...watch.confirmed.map((host) => [host, now] as const),
+    ]),
+    gaps: [...(previous?.gaps ?? []).filter((gap) => !seen.has(gap.host)), ...watch.gaps].filter(
+      (gap) => gap.to > earliest,
+    ),
+    watching: true,
+    ringReachAt: watch.ringReachMs === null ? null : new Date(watch.ringReachMs),
+    ringCheckedAt: new Date(now),
+  };
+}
 
 // Bring the cluster's failure watches in line with its drops in flight, and keep
 // the list of watched databases in step with what the cluster says (#596).
@@ -62,20 +129,46 @@ export async function keepFailureWatches(
       beforeHide: rec.state === "APPROVED",
     }));
   const listed = await db
-    .select({ database: failureWatches.database })
+    .select({
+      database: failureWatches.database,
+      starts: failureWatches.starts,
+      confirmed: failureWatches.confirmed,
+      gaps: failureWatches.gaps,
+    })
     .from(failureWatches)
     .where(eq(failureWatches.clusterId, clusterId));
   const wanted = new Set(targets.map((target) => target.database));
   const release = listed.map((row) => row.database).filter((name) => !wanted.has(name));
-  const watches = await watch.reconcile(clusterId, targets, release);
+  const now = Date.now();
+  const watches = await watch.reconcile(
+    clusterId,
+    targets,
+    release,
+    new Map(listed.map((row) => [row.database, memoryOf(row, now)])),
+  );
   for (const [database, state] of watches) {
-    if (state.ours) {
-      await db.insert(failureWatches).values({ clusterId, database }).onConflictDoNothing();
-    } else {
-      await db
-        .delete(failureWatches)
-        .where(and(eq(failureWatches.clusterId, clusterId), eq(failureWatches.database, database)));
+    const key = and(eq(failureWatches.clusterId, clusterId), eq(failureWatches.database, database));
+    if (!state.ours) {
+      await db.delete(failureWatches).where(key);
+      continue;
     }
+    // Remembered only from a pass on which every node watched. One that did not
+    // leaves the memory as it was, ageing, and says the drop is not waiting on it.
+    const remembered =
+      state.kind === "WATCHED"
+        ? rememberWatch(
+            listed.find((row) => row.database === database),
+            state,
+            now,
+          )
+        : { watching: false };
+    await db
+      .insert(failureWatches)
+      .values({ clusterId, database, ...remembered })
+      .onConflictDoUpdate({
+        target: [failureWatches.clusterId, failureWatches.database],
+        set: remembered,
+      });
   }
   return watches;
 }

@@ -10,6 +10,7 @@ import {
   desc,
   eq,
   exists,
+  failureWatches,
   gte,
   inArray,
   indexSnapshots,
@@ -157,6 +158,22 @@ export class RecommendationsRepository {
       .select()
       .from(analysisNotes)
       .where(eq(analysisNotes.clusterId, clusterId));
+  }
+
+  // The databases watched for the drops in flight, as the last pass that kept each
+  // watch left them (#642).
+  async watchesFor(clusterId: string) {
+    return this.database.db
+      .select({
+        database: failureWatches.database,
+        starts: failureWatches.starts,
+        watching: failureWatches.watching,
+        ringReachAt: failureWatches.ringReachAt,
+        ringCheckedAt: failureWatches.ringCheckedAt,
+      })
+      .from(failureWatches)
+      .where(eq(failureWatches.clusterId, clusterId))
+      .orderBy(failureWatches.database);
   }
 
   // The last collect's batch of index snapshots, with their namespaces.

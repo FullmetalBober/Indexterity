@@ -11,11 +11,12 @@ import { errorReportingEnabled } from "@repo/errors";
 import { createStartHandler, defaultStreamHandler } from "@tanstack/react-start/server";
 import { createServerEntry } from "@tanstack/react-start/server-entry";
 import { isApiRequest, passThroughToApi } from "~/lib/api-passthrough";
+import { present } from "~/lib/at";
 import { compressedEntry } from "~/lib/compression";
 import { startMetricsServer } from "~/lib/metrics/provider";
 import { measureRequest } from "~/lib/metrics/requests";
 import { isRecord } from "~/lib/narrow";
-import { documentCsp, newNonce, withSecurityHeaders } from "~/lib/security-headers";
+import { documentCsp, withSecurityHeaders } from "~/lib/security-headers";
 
 // The dashboard's server entry. It replaces the framework's default (which is
 // exactly the two lines below) for two reasons, both of which need a module that
@@ -33,19 +34,23 @@ import { documentCsp, newNonce, withSecurityHeaders } from "~/lib/security-heade
 // environment alone.
 //
 // The stream handler is wrapped rather than passed through, for the one header
-// that cannot be a constant. A nonce is minted per response, given to the router
-// — `ssr.nonce` is what puts it on every script the framework emits, the
-// dehydration payload and the buffered `$tsr` block alike — and named in the
-// Content-Security-Policy built from the same value. Both halves come from one
-// variable on purpose: a header naming a nonce the scripts do not carry is a
-// page that renders and never hydrates.
+// that cannot be a constant. A nonce is minted per response with the router
+// (router.tsx) — `ssr.nonce` is what puts it on every script the framework
+// emits, the dehydration payload and the buffered `$tsr` block alike — and named
+// here in the Content-Security-Policy, read off the same router. Both halves come
+// from one value on purpose: a header naming a nonce the scripts do not carry is
+// a page that renders and never hydrates.
 //
-// Set HERE rather than in withSecurityHeaders, because this is the only point
-// that holds both the router and the response's headers, and it has to happen
-// BEFORE the render: the scripts read `ssr.nonce` as they are emitted.
+// It used to be minted here and handed to the router. Since Start 1.169 the
+// framework attaches its script writer, with whatever nonce the router then has,
+// and dehydrates before it calls this handler, so a nonce set here missed the
+// hydration scripts: every page rendered, nothing hydrated, and the e2e suite's
+// CSP guard named the two refused inline scripts.
+//
+// The header is set HERE rather than in withSecurityHeaders, because this is the
+// only point that holds both the router and the response's headers.
 const fetch = createStartHandler((ctx) => {
-  const nonce = newNonce();
-  ctx.router.update({ ssr: { ...ctx.router.options.ssr, nonce } });
+  const nonce = present(ctx.router.options.ssr?.nonce, "the router's script nonce");
   // `import.meta.env.DEV` rather than NODE_ENV: what needs the allowance is the
   // vite dev server injecting the stylesheet, not a mode anyone can set. Vite
   // replaces it with a literal, so the built output carries no branch at all.

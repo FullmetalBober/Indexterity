@@ -1,4 +1,4 @@
-import { clusterPassTimings, type Database, type PassPhaseRecord } from "../db";
+import { clusterPassRuns, clusterPassTimings, type Database, type PassPhaseRecord } from "../db";
 import type { Phase } from "../engine/phases";
 import type { ClusterTaskOutcome } from "../metrics/jobs";
 
@@ -19,6 +19,20 @@ export interface PassTiming {
   readonly budgetMs: number | null;
   readonly phases: readonly Phase[];
 }
+
+// The passes whose every run is also kept, for a week's history (#639): the
+// hourly ones, which are the ones that can run long. Probe and apply run every
+// five minutes and finish in seconds; their last run is enough.
+export const HISTORY_PASSES: ReadonlySet<string> = new Set([
+  "collect",
+  "suggest",
+  "classify",
+  "finalize",
+]);
+
+// How long a run is kept: twice the week the chart draws, so a week is always
+// whole whenever the daily sweep last ran.
+export const PASS_HISTORY_DAYS = 14;
 
 // The phases kept with the row. The report a person reads stops at four (the
 // alert mail's `summary`); the row keeps a few more, because a screen can lay
@@ -73,4 +87,17 @@ export async function recordPassTiming(
       target: [clusterPassTimings.clusterId, clusterPassTimings.task],
       set: row,
     });
+  if (HISTORY_PASSES.has(task)) {
+    // Nothing to conflict with but a retried write of the same run.
+    await db
+      .insert(clusterPassRuns)
+      .values({
+        clusterId,
+        task,
+        startedAt: row.startedAt,
+        durationMs: row.durationMs,
+        outcome: row.outcome,
+      })
+      .onConflictDoNothing();
+  }
 }
