@@ -27,6 +27,8 @@ export const NO_RECOMMENDATIONS: ClusterRecommendations = {
   clusterId: "",
   total: 0,
   recommendations: [],
+  waits: [],
+  watched: [],
   summary: {
     drops: { toReview: 0, underWay: 0, reclaimableBytes: 0 },
     builds: { toReview: 0, underWay: 0, scanningShapes: 0, weeklyDocsExamined: 0 },

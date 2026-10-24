@@ -1,13 +1,23 @@
 import { describe, expect, it } from "vitest";
 import { FAILURE_BASELINE_MS, utcMinute } from "../analysis";
 import type { DatabaseWatch } from "../engine/ports";
-import { hideableAt, waitingAgainLine, waitingLine } from "./failure-watch";
+import {
+  hideableAt,
+  memoryOf,
+  rememberWatch,
+  WATCH_RESUME_MS,
+  waitingAgainLine,
+  waitingLine,
+} from "./failure-watch";
 
 const NOW = Date.parse("2026-10-09T13:21:00Z");
-const watched = (since: number): DatabaseWatch => ({
+const watched = (since: number): DatabaseWatch & { kind: "WATCHED" } => ({
   kind: "WATCHED",
   since: new Map([["app.orders", since]]),
   ours: true,
+  confirmed: [],
+  gaps: [],
+  ringReachMs: null,
 });
 
 describe("hideableAt", () => {
@@ -44,5 +54,80 @@ describe("waitingAgainLine", () => {
     expect(waitingLine("app", "orders", NOW)).toContain(
       `until ${utcMinute(NOW + FAILURE_BASELINE_MS)}`,
     );
+  });
+});
+
+// #641. What a pass hands the engine, and what it leaves for the next one.
+describe("memoryOf", () => {
+  it("hands over only the nodes seen recently enough to put back", () => {
+    const memory = memoryOf(
+      {
+        starts: { "app.orders": NOW - 5 * 3_600_000 },
+        confirmed: { "a:27017": NOW - 3_600_000, "b:27017": NOW - WATCH_RESUME_MS - 60_000 },
+        gaps: [{ host: "a:27017", from: NOW - 4 * 3_600_000, to: NOW - 3 * 3_600_000 }],
+      },
+      NOW,
+    );
+    expect(memory.starts).toEqual(new Map([["app.orders", NOW - 5 * 3_600_000]]));
+    expect(memory.confirmed).toEqual(new Map([["a:27017", NOW - 3_600_000]]));
+    expect(memory.gaps).toHaveLength(1);
+  });
+});
+
+describe("rememberWatch", () => {
+  const start = NOW - 10 * 3_600_000;
+  const watch = {
+    ...watched(start),
+    confirmed: ["a:27017", "b:27017"],
+    gaps: [{ host: "a:27017", from: NOW - 2 * 3_600_000, to: NOW - 3_600_000 }],
+    ringReachMs: NOW - 47 * 60_000,
+  };
+
+  it("confirms the nodes it saw, and keeps a recent sighting of one it did not", () => {
+    const remembered = rememberWatch(
+      {
+        confirmed: {
+          "a:27017": NOW - 3_600_000,
+          "c:27017": NOW - 3_600_000,
+          "d:27017": NOW - 3 * 3_600_000,
+        },
+        gaps: [],
+      },
+      watch,
+      NOW,
+    );
+    expect(remembered.confirmed).toEqual({
+      "a:27017": NOW,
+      "b:27017": NOW,
+      "c:27017": NOW - 3_600_000,
+    });
+    expect(remembered).toMatchObject({
+      starts: { "app.orders": start },
+      watching: true,
+      ringReachAt: new Date(NOW - 47 * 60_000),
+      ringCheckedAt: new Date(NOW),
+    });
+  });
+
+  // A node it saw says its own gaps, in its marker. One it did not keeps what was
+  // remembered of it, for when a restart clears that marker too. A stretch over
+  // before every start is in no reading.
+  it("takes the gaps of the nodes it saw from them, and keeps the others'", () => {
+    const remembered = rememberWatch(
+      {
+        confirmed: {},
+        gaps: [
+          { host: "a:27017", from: NOW - 9 * 3_600_000, to: NOW - 8 * 3_600_000 },
+          { host: "c:27017", from: NOW - 6 * 3_600_000, to: NOW - 5 * 3_600_000 },
+          { host: "c:27017", from: NOW - 12 * 3_600_000, to: NOW - 11 * 3_600_000 },
+        ],
+      },
+      watch,
+      NOW,
+    );
+    expect(remembered.gaps).toEqual([
+      { host: "c:27017", from: NOW - 6 * 3_600_000, to: NOW - 5 * 3_600_000 },
+      { host: "a:27017", from: NOW - 2 * 3_600_000, to: NOW - 3_600_000 },
+    ]);
   });
 });

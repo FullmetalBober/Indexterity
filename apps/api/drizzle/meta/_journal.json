@@ -547,6 +547,13 @@
       "when": 1792241390304,
       "tag": "0077_footprint_days",
       "breakpoints": true
+    },
+    {
+      "idx": 78,
+      "version": "7",
+      "when": 1792837374970,
+      "tag": "0078_failure_watch_memory",
+      "breakpoints": true
     }
   ]
 }

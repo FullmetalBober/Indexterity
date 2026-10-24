@@ -33,8 +33,9 @@ import {
   combineReadings,
   type FailureGroup,
   failedOpsReading,
+  oldestProfiledOn,
   profilerSettingsOn,
-  type RingFill,
+  ringFillOn,
   sortFailures,
 } from "./profiler";
 import {
@@ -382,44 +383,6 @@ const failureGroupRow = z.object({
   }),
   failed: z.number(),
 });
-
-// The ring's listCollections entry, and what `dataSize` answers for it.
-const ringOptions = z.object({
-  options: z.object({
-    capped: z.boolean().optional(),
-    size: z.coerce.number().optional(),
-    max: z.coerce.number().optional(),
-  }),
-});
-const dataSizeReply = z.object({ size: z.coerce.number(), numObjects: z.coerce.number() });
-
-// How full one node's profiler ring is (#625), or null when it cannot be read.
-// `dataSize` with no bounds answers from the collection's own counts, and needs
-// only `find` on it; the cap is in the ring's listCollections options. Both are
-// readable with the engine role — probed on 7.0, where $collStats on
-// system.profile was refused.
-async function ringFillOn(conn: MongoConnection, database: string): Promise<RingFill | null> {
-  try {
-    const db = conn.db(database);
-    const [listed, size] = await Promise.all([
-      db.listCollections({ name: "system.profile" }).toArray(),
-      db.command({ dataSize: `${database}.system.profile` }),
-    ]);
-    const ring = ringOptions.safeParse(listed[0]).data;
-    const used = dataSizeReply.safeParse(size).data;
-    if (ring?.options.capped !== true || ring.options.size === undefined || used === undefined) {
-      return null;
-    }
-    return {
-      bytes: used.size,
-      entries: used.numObjects,
-      capBytes: ring.options.size,
-      capEntries: ring.options.max ?? null,
-    };
-  } catch {
-    return null;
-  }
-}
 
 // The single date-range predicate of a delete filter, or null when the filter
 // is anything else — only clean {field: {$lt/$lte: Date}} deletes count.
@@ -1380,13 +1343,7 @@ export class MongoIndexCollector implements IndexCollector {
     const byPattern = groups.some(({ hint }) => isRecord(hint) && typeof hint.$hint !== "string");
     const [settings, oldest, fill, self, key] = await Promise.all([
       profilerSettingsOn(conn, database),
-      ring
-        .find({}, { projection: { _id: 0, ts: 1 } })
-        .sort({ $natural: 1 })
-        .limit(1)
-        .toArray()
-        .then((docs) => profileDoc.pick({ ts: true }).safeParse(docs[0]).data?.ts ?? null)
-        .catch(() => null),
+      oldestProfiledOn(conn, database),
       ringFillOn(conn, database),
       conn.helloNode(),
       byPattern ? keyOf() : null,

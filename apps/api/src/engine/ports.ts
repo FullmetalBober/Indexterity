@@ -549,6 +549,27 @@ export interface WatchTarget {
   readonly beforeHide: boolean;
 }
 
+// A stretch one node recorded nothing although its database was watched (#641): a
+// restart cleared the node's profiler some time after `from`, when the watch was
+// last seen in place there, and it was put back at `to`. Epoch ms.
+export interface WatchGap {
+  readonly host: string;
+  readonly from: number;
+  readonly to: number;
+}
+
+// What the passes before remember of one database's watch (#641), so a node whose
+// profiler a restart cleared is put back as it was rather than started over.
+export interface WatchMemory {
+  // Namespace -> since when it has been watched, as the last pass combined it.
+  readonly starts: ReadonlyMap<string, number>;
+  // Host -> when that node was last seen with the watch in place. Only the
+  // nodes recent enough to be put back: the caller decides how recent.
+  readonly confirmed: ReadonlyMap<string, number>;
+  // Every stretch since the watch began that a node recorded nothing.
+  readonly gaps: readonly WatchGap[];
+}
+
 // What one database's watch came to on every node that serves it.
 export type DatabaseWatch =
   // Failures on each namespace are recorded on every node, from the instant given
@@ -559,6 +580,16 @@ export type DatabaseWatch =
       // Whether Indexterity's own filter is in place on any node, which is what a
       // later pass has to give back.
       readonly ours: boolean;
+      // The nodes found watching, or put back to watching, by this pass (#641).
+      readonly confirmed: readonly string[];
+      // Every stretch since the watch began that a node recorded nothing, this
+      // pass's included (#641). `since` does not move for one, so a reading has to
+      // be told about it.
+      readonly gaps: readonly WatchGap[];
+      // The instant from which every node's profiler ring still holds what it
+      // recorded, once some node's ring has turned over (#642). Null while none
+      // has, or where none could be read.
+      readonly ringReachMs: number | null;
     }
   | { readonly kind: "UNWATCHED"; readonly reason: string; readonly ours: boolean }
   // Nothing is wanted here any more, and what was ours has been given back — or,
@@ -573,11 +604,13 @@ export interface FailureWatch {
   // Bring every node in line: watch the databases `targets` are in, and give back
   // those in `release` that no target needs any more. `owner` is the cluster
   // registration asking, so two registrations of one cluster never take each
-  // other's watch for their own.
+  // other's watch for their own. `memory` is what earlier passes remember of each
+  // database's watch, by database (#641).
   reconcile(
     owner: string,
     targets: readonly WatchTarget[],
     release: readonly string[],
+    memory?: ReadonlyMap<string, WatchMemory>,
   ): Promise<ReadonlyMap<string, DatabaseWatch>>;
 }
 

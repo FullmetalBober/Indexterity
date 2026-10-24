@@ -1394,9 +1394,15 @@ export const analysisNotes = pgTable(
  * what was there before, and since when each collection has been watched
  * (mongo/profiler.ts). What the cluster cannot say is where to LOOK once
  * nothing needs the watch — the last drop in a database graduates or is rolled
- * back, and the next pass has no recommendation pointing there. This is that
- * list, and nothing more: a row is written while any node carries our filter
- * and deleted once every node has been given back what it had.
+ * back, and the next pass has no recommendation pointing there. That is what a
+ * row is first: it is written while any node carries our filter and deleted
+ * once every node has been given back what it had.
+ *
+ * And what a restart takes with it (#641). A restart clears a node's profiler
+ * settings, marker and all, so the node cannot say what its watch was. The
+ * columns below remember it, which is how the next pass puts the watch back as
+ * it was instead of starting the day over. Each is written by the pass that
+ * keeps the watch, from what the cluster said on that pass.
  */
 export const failureWatches = pgTable(
   "failure_watches",
@@ -1406,9 +1412,32 @@ export const failureWatches = pgTable(
       .references(() => clusters.id, { onDelete: "cascade" }),
     database: text("database").notNull(),
     since: timestamp("since", { withTimezone: true }).notNull().defaultNow(),
+    // Namespace -> since when it has been watched, epoch ms, as the last pass that
+    // found every node watching combined it.
+    starts: jsonb("starts").$type<Record<string, number>>().notNull().default({}),
+    // Host -> when a pass last saw that node watching, epoch ms.
+    confirmed: jsonb("confirmed").$type<Record<string, number>>().notNull().default({}),
+    // The stretches each node missed, as its marker carried them, for when a
+    // restart clears that marker too.
+    gaps: jsonb("gaps").$type<WatchGapRecord[]>().notNull().default([]),
+    // Whether the last pass found every node watching, which is when `starts`
+    // says when an approved drop may be hidden (#642).
+    watching: boolean("watching").notNull().default(false),
+    // How far back the database's profiler rings reached when the last pass read
+    // them (#642): the instant from which every node's ring still held what it
+    // recorded, once one had turned over. Null while none has.
+    ringReachAt: timestamp("ring_reach_at", { withTimezone: true }),
+    ringCheckedAt: timestamp("ring_checked_at", { withTimezone: true }),
   },
   (table) => [primaryKey({ columns: [table.clusterId, table.database] })],
 );
+
+// One missed stretch of one node's watch, epoch ms (#641).
+export interface WatchGapRecord {
+  readonly host: string;
+  readonly from: number;
+  readonly to: number;
+}
 
 /**
  * Why one PASS is not running against one cluster — one row per pass (#462).

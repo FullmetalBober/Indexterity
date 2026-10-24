@@ -1,6 +1,6 @@
-import type { ClusterNodes, IndexUsage, Recommendation } from "@repo/contracts";
+import type { ClusterNodes, HideWait, IndexUsage, Recommendation } from "@repo/contracts";
 import { useMemo, useState } from "react";
-import { badgeVariant, DropsOn, dropsOn } from "~/components/app/format";
+import { badgeVariant, DropsOn, dropsOn, HidesAfter, hidesFirst } from "~/components/app/format";
 import { type UsageSplit, usageDetail, usageLine, usageSplit } from "~/components/app/index-usage";
 import { ConfirmButton } from "~/components/confirm-button";
 import { type DashboardColumns, DataTable, dashboardColumns } from "~/components/data-table";
@@ -69,7 +69,7 @@ function action(rec: Recommendation, actions: Actions, readOnly: boolean) {
                   // it says what is preserved and in what order — a reader
                   // deciding this is owed more than "the index is built".
                   "The replacement is built FIRST, with the same keys and the same options — including the unique constraint, which both indexes then enforce. Only once it has survived its post-build watch is retiring the original proposed, through the usual hide, observe and regression gates. There is no moment when the constraint is not being enforced."
-                : rec.type.startsWith("DROP") || rec.type === "MERGE"
+                : hidesFirst(rec.type)
                   ? "The index is hidden first and observed before anything is dropped — hiding is instant and reversible."
                   : "The index is built and then watched: if writes regress, the build rolls back automatically."}
             </p>
@@ -242,6 +242,7 @@ function UsageSplitLine({ split }: { split: SplitEntry | undefined }) {
 function buildColumns(
   actions: Actions,
   splits: Map<string, SplitEntry>,
+  waits: ReadonlyMap<string, string>,
   readOnly: boolean,
 ): DashboardColumns<Recommendation> {
   // column.columns() rather than a bare array: it threads each column's own
@@ -294,6 +295,15 @@ function buildColumns(
                 per-index, so it is not something a reader can work out from the
                 policy setting. */}
             <DropsOn rec={info.row.original} />
+            {/* And before the hide, what it is waiting for (#642). Not on a
+                read-only cluster, where an approval waits on nothing that will
+                come. */}
+            {readOnly ? null : (
+              <HidesAfter
+                rec={info.row.original}
+                hideableAt={waits.get(info.row.original.id) ?? null}
+              />
+            )}
           </span>
         );
       },
@@ -346,6 +356,7 @@ export function RecommendationsTable({
   // per-member usage was surfaced, has no split to draw and must not have one
   // invented for it.
   usage = [],
+  waits = [],
   roster = null,
   total,
   loading,
@@ -356,6 +367,9 @@ export function RecommendationsTable({
   // Per-node usage for the rows above, beside them rather than on them — see the
   // contract's note on why the row shape does not carry it (#161).
   usage?: IndexUsage[];
+  // When each approved drop may be hidden, beside the rows for the same reason
+  // (#642).
+  waits?: HideWait[];
   // The node roster from the same collect. It is what turns "3 members reported"
   // into "and these two did not", and the page has already fetched it for the
   // panel below. Null before it has answered: no roster is not evidence of full
@@ -391,6 +405,11 @@ export function RecommendationsTable({
     return built;
   }, [usage, roster]);
 
+  const hideAt = useMemo(
+    () => new Map(waits.map((wait) => [wait.recommendationId, wait.hideableAt])),
+    [waits],
+  );
+
   const columns = useMemo(
     () =>
       buildColumns(
@@ -400,9 +419,10 @@ export function RecommendationsTable({
           shorten: shorten.mutate,
         },
         splits,
+        hideAt,
         readOnly,
       ),
-    [approve.mutate, unhide.mutate, shorten.mutate, splits, readOnly],
+    [approve.mutate, unhide.mutate, shorten.mutate, splits, hideAt, readOnly],
   );
 
   const truncated = total > recommendations.length;
