@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"golang.zx2c4.com/wireguard/device"
 )
@@ -52,8 +53,18 @@ import (
 // listener a stranger could reach to need one.
 //
 // stderr carries wireguard-go's log and this service's own, and neither is ever
-// protocol. It exits 0 on SIGTERM, and 1 only when it could not start, having
+// protocol. It exits 0 after SIGTERM, and 1 only when it could not start, having
 // said why on stderr.
+//
+// SIGTERM DRAINS, it does not stop (#649). The service refuses new peerings and
+// keeps serving the open ones until the api closes them, which the api does at
+// the end of its own shutdown, after its in-flight passes. It used to exit at
+// once, and every deployment signals both processes together: the supervisor
+// forwards SIGTERM to every child, and Kubernetes signals every container of a
+// terminating pod. So a pass the api was still finishing dialled a SOCKS5
+// listener that had gone, failed with ECONNREFUSED, and was reported as an
+// unreachable cluster — a block and a mail to the owner on every deploy that
+// caught a tunnelled pass in flight. A second signal ends the service at once.
 //
 // Environment:
 //
@@ -80,6 +91,15 @@ type settings struct {
 }
 
 const (
+	// How long a drain waits for the api to close its peerings before the service
+	// exits anyway. Above every grace period a deployment of this product gives by
+	// default — the supervisor's 15 seconds, Kubernetes' 30, compose's 10 — so the
+	// orchestrator's kill always comes first where there is one; this bounds only a
+	// signal nobody follows with a kill.
+	drainLimit = 5 * time.Minute
+	// How often a drain looks at what is left.
+	drainPoll = 50 * time.Millisecond
+
 	defaultPort = 9411
 	// Not configurable, deliberately. A bindable address would be a way to put
 	// this service's control port — which accepts a peering, with a private key,
@@ -143,11 +163,15 @@ func run() error {
 		_ = control.close()
 	}()
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	signalled, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
+	// What the listeners and every peering run on. Not the signal's context: a
+	// signal starts the drain below, and ends nothing that is open (#649).
+	serving, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	go socks.serve(ctx)
-	go control.serve(ctx)
+	go socks.serve(serving)
+	go control.serve(serving)
 
 	log(fmt.Sprintf("control on %s, socks on %s", chosen.control, chosen.socks))
 
@@ -155,9 +179,31 @@ func run() error {
 	// condition of one connection and is handled there — which is the difference
 	// this refactor makes: one customer's gateway going away used to be a process
 	// exit, and an exiting process was the api's signal to give up on it.
-	<-ctx.Done()
-	log(fmt.Sprintf("shutting down, %d peerings were up", peerings.count()))
+	<-signalled.Done()
+	// The default handler back, so a second signal ends the process at once.
+	stop()
+	log(fmt.Sprintf("draining: refusing new peerings, %d still up", peerings.count()))
+	if left := drain(control, peerings, drainLimit); left > 0 {
+		log(fmt.Sprintf("shutting down after %s with %d peerings still up", drainLimit, left))
+	} else {
+		log("shutting down: every peering is closed")
+	}
 	return nil
+}
+
+// Refuses new peerings and waits for the open ones to close, or for `limit`.
+// Returns how many were still up when it stopped waiting.
+//
+// Only the control LISTENER closes. The open peerings keep their connections,
+// and the SOCKS5 listener keeps accepting, because a pass the api is finishing
+// opens a new connection through it for every dial it makes.
+func drain(control *controlServer, peerings *registry, limit time.Duration) int {
+	_ = control.close()
+	deadline := time.Now().Add(limit)
+	for peerings.count() > 0 && time.Now().Before(deadline) {
+		time.Sleep(drainPoll)
+	}
+	return peerings.count()
 }
 
 // A device logger that keeps stdout clean. Verbose output is dropped rather than
