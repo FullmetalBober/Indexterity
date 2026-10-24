@@ -958,6 +958,36 @@ export const clusterPasses = z.object({
 });
 export type ClusterPasses = z.infer<typeof clusterPasses>;
 
+// The longest run of one pass in each hour it ran, over the last week (#639).
+//
+// Production's SQL Server finalize ran 26 minutes and failed one day and 69
+// minutes two days later (#629), and the Passes panel above, which holds only the
+// last run, showed either only to whoever looked in that hour.
+//
+// `maxMs` is null where nothing ran for longer than the slowest pace allows —
+// four hours, and an hour of slack — so the line breaks across an outage rather
+// than drawing a level nobody measured. An hour with nothing in it otherwise is
+// simply absent: a pass paced to every two hours has a point every two hours.
+export const passHistoryPoint = z.object({
+  hour: instant,
+  maxMs: z.number().int().nonnegative().nullable(),
+});
+export type PassHistoryPoint = z.infer<typeof passHistoryPoint>;
+
+export const passHistorySeries = z.object({
+  task: z.string(),
+  points: z.array(passHistoryPoint),
+});
+export type PassHistorySeries = z.infer<typeof passHistorySeries>;
+
+// The hourly passes that have run since `since`, one series each.
+export const clusterPassHistory = z.object({
+  clusterId: z.uuid(),
+  since: instant,
+  series: z.array(passHistorySeries),
+});
+export type ClusterPassHistory = z.infer<typeof clusterPassHistory>;
+
 // One index the engine has agreed not to touch, and until when (#159).
 //
 // Written from three places — the regression gate when reads got worse after a

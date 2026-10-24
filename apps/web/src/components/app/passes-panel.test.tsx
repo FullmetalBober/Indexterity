@@ -1,7 +1,7 @@
-import type { ClusterPasses, PassTiming } from "@repo/contracts";
+import type { ClusterPasses, ClusterPassHistory, PassTiming } from "@repo/contracts";
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import { fmtDuration, PassesPanel } from "./passes-panel";
+import { fmtDuration, PassesPanel, PassHistoryChart } from "./passes-panel";
 
 function timing(overrides: Partial<PassTiming>): PassTiming {
   return {
@@ -186,5 +186,47 @@ describe("PassesPanel", () => {
   it("draws nothing while the first read is in flight", () => {
     const { container } = render(<PassesPanel passes={null} loading={true} />);
     expect(container).toBeEmptyDOMElement();
+  });
+});
+
+// #639. A week of the hourly passes, so a pass that ran long is visible after the
+// hour it ran in.
+describe("PassHistoryChart", () => {
+  const history = (series: ClusterPassHistory["series"]): ClusterPassHistory => ({
+    clusterId: "c1",
+    since: "2026-10-03T00:00:00.000Z",
+    series,
+  });
+
+  it("names each hourly pass it draws, in the pipeline's order", () => {
+    render(
+      <PassHistoryChart
+        history={history([
+          {
+            task: "finalize",
+            points: [
+              { hour: "2026-10-10T06:00:00.000Z", maxMs: 27_000 },
+              { hour: "2026-10-10T07:00:00.000Z", maxMs: 4_150_000 },
+            ],
+          },
+          {
+            task: "collect",
+            points: [
+              { hour: "2026-10-10T06:00:00.000Z", maxMs: 41_000 },
+              { hour: "2026-10-10T07:00:00.000Z", maxMs: 47_000 },
+            ],
+          },
+        ])}
+        loading={false}
+      />,
+    );
+    expect(screen.getByText("Longest run per hour, last 7 days")).toBeInTheDocument();
+    const labels = screen.getAllByText(/^(collect|finalize)$/).map((node) => node.textContent);
+    expect(labels).toEqual(["collect", "finalize"]);
+  });
+
+  it("says there is no history yet rather than drawing an empty frame", () => {
+    render(<PassHistoryChart history={history([])} loading={false} />);
+    expect(screen.getByText(/No hourly pass has a week of history yet/)).toBeInTheDocument();
   });
 });

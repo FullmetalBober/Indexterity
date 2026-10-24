@@ -10,6 +10,7 @@ import type {
   ClusterLatencySeries,
   ClusterNodes,
   ClusterPasses,
+  ClusterPassHistory,
   ClusterRoi,
   ClusterWorkload,
   IndexRecommendationLink,
@@ -45,6 +46,7 @@ import { isWholeCollection } from "../jobs/cooldowns";
 import { isPaced, pacedBudgetMs, pacedEveryHours } from "../jobs/pacing";
 import { severityOf, storedShapeSchema } from "../jobs/workload-shapes";
 import { InsightsRepository } from "./insights.repository";
+import { PASS_HISTORY_CHART_DAYS, passHistorySeries } from "./pass-history";
 
 const RECENT_ACTIONS = 50;
 const TOP_CONTRIBUTORS = 10;
@@ -666,6 +668,24 @@ export class InsightsService {
               }
             : null,
       })),
+    };
+  }
+
+  // A week of the hourly passes' durations (#639).
+  async passHistory(clusterId: string, orgId: string): Promise<ClusterPassHistory> {
+    // On the hour, which is the chart's grain — and the same answer for every
+    // call inside it, so a cluster that is not yours reads exactly like one that
+    // does not exist (tenancy.int.test.ts compares them byte for byte).
+    const since = new Date(
+      (Math.floor(Date.now() / 3_600_000) - PASS_HISTORY_CHART_DAYS * 24) * 3_600_000,
+    );
+    if (!(await this.tenancy.ownsCluster(clusterId, orgId))) {
+      return { clusterId, since: since.toISOString(), series: [] };
+    }
+    return {
+      clusterId,
+      since: since.toISOString(),
+      series: passHistorySeries(await this.repo.passRunsByHour(clusterId, since)),
     };
   }
 

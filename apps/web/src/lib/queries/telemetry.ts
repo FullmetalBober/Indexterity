@@ -14,6 +14,7 @@ import type {
   ClusterLatencySeries,
   ClusterNodes,
   ClusterPasses,
+  ClusterPassHistory,
   ClusterWorkload,
   ClusterWorkloadInput,
   CollectionStat,
@@ -190,6 +191,15 @@ export function passesQuery(clusterId: string | null) {
   });
 }
 
+// A week of the hourly passes' durations (#639).
+export function passHistoryQuery(clusterId: string | null) {
+  return queryOptions({
+    queryKey: queryKeys.passHistory(clusterId),
+    queryFn: async (): Promise<ClusterPassHistory | null> =>
+      clusterId === null ? null : api().getPassHistory({ clusterId }),
+  });
+}
+
 // Each returns the payload AND whether this is the first fetch — see read.ts for
 // why the bare payload was not enough.
 export function useLatency(clusterId: string | null): Read<LatencySummary[]> {
@@ -229,6 +239,11 @@ export function useNodes(clusterId: string | null): Read<ClusterNodes | null> {
 
 export function usePasses(clusterId: string | null): Read<ClusterPasses | null> {
   const { data = null, isPending, isError, refetch } = useQuery(passesQuery(clusterId));
+  return { data, pending: isPending, failed: isError, retry: () => void refetch() };
+}
+
+export function usePassHistory(clusterId: string | null): Read<ClusterPassHistory | null> {
+  const { data = null, isPending, isError, refetch } = useQuery(passHistoryQuery(clusterId));
   return { data, pending: isPending, failed: isError, retry: () => void refetch() };
 }
 
