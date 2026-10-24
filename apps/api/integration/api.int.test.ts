@@ -17,6 +17,7 @@ import {
   actions,
   analysisNotes,
   and,
+  clusterFootprintDays,
   clusterIndexes,
   clusterNamespaces,
   clusterPassRuns,
@@ -5943,6 +5944,39 @@ describe("collecting twice writes almost nothing the second time", () => {
     expect(counted).toBe(dimensions.length);
   });
 
+  // #640. The footprint chart's day is what the day's last collect measured,
+  // whatever the runs did: the collects above wrote it, the second over the first.
+  it("records the day's footprint as the total of the indexes the last collect saw", async () => {
+    const [newest] = await db
+      .select()
+      .from(clusterFootprintDays)
+      .where(eq(clusterFootprintDays.clusterId, runClusterId))
+      .orderBy(desc(clusterFootprintDays.day))
+      .limit(1);
+    if (newest === undefined) throw new Error("the collects wrote no footprint day");
+    // The indexes the last collect saw share its last_seen_at. Compared in SQL,
+    // because a Date round trip truncates the microseconds pg keeps.
+    const seen = await db.execute<{ total: string; count: number }>(sql`
+      select sum(size_bytes)::bigint as total, count(*)::int as count
+      from ${indexSnapshots}
+      where cluster_id = ${runClusterId}
+        and last_seen_at = (
+          select max(last_seen_at) from ${indexSnapshots} where cluster_id = ${runClusterId}
+        )
+    `);
+    expect(newest.totalBytes).toBe(Number(seen.rows[0]?.total));
+    expect(newest.indexCount).toBe(Number(seen.rows[0]?.count));
+
+    // And the chart draws today from it: the row's day is the bucket's own, cut
+    // in the same zone.
+    const body = asRecord(
+      await (await api(`/clusters/${runClusterId}/index-size-series`, runSession)).json(),
+    );
+    const today = asRecords(body.points, "body.points").at(-1);
+    expect(today).toMatchObject({ totalBytes: newest.totalBytes, indexCount: newest.indexCount });
+    expect(new Date(String(today?.day)).getTime()).toBe(newest.day.getTime());
+  });
+
   // Extending a run rewrites two columns that are NOT part of what makes the run,
   // and they behave in opposite directions. Both live in the raw UPDATE, so
   // nothing but a test holds them in place.
@@ -7271,6 +7305,59 @@ describe("bounded per-cluster reads", () => {
     expect(foreign.points).toEqual([]);
     expect(foreign.latestBytes).toBeNull();
     expect(foreign.changeBytes).toBeNull();
+  });
+
+  // #640. A run's size rides along at its newest value, so a long run read day by
+  // day drew today's size into every day of it: an idle index growing on a
+  // write-heavy collection drew a flat line. A day a collect recorded a total for
+  // is that total, and a day from before the table is still derived from the runs.
+  it("draws a day from the total its collect recorded, not a long run's newest size", async () => {
+    const daysId = await bareCluster("Footprint Days");
+    const now = new Date();
+    const ago = (days: number) => new Date(now.getTime() - days * 86_400_000);
+    // One run across the week: the index's counters never moved, so every
+    // collect extended it, and the run kept only the newest size.
+    await insertSnapshots(db, [
+      {
+        clusterId: daysId,
+        database: "app",
+        collection: "events",
+        indexName: "idle_1",
+        spec: { key: { idle: 1 } },
+        sizeBytes: 9_000,
+        perMember: [],
+        capturedAt: ago(6),
+        lastSeenAt: now,
+      },
+    ]);
+    // What two days' collects recorded, truncated by the database as the collect
+    // truncates it, so the rows land on the chart's buckets in any server zone.
+    const dayOf = (when: Date) => sql`date_trunc('day', ${when}::timestamptz)`;
+    await db.insert(clusterFootprintDays).values([
+      { clusterId: daysId, day: dayOf(ago(3)), totalBytes: 4_000, indexCount: 1 },
+      { clusterId: daysId, day: dayOf(now), totalBytes: 9_000, indexCount: 1 },
+      // Past every plan's window, for the sweep below.
+      { clusterId: daysId, day: dayOf(ago(400)), totalBytes: 1, indexCount: 1 },
+    ]);
+
+    const body = asRecord(await (await api(`/clusters/${daysId}/index-size-series`, owner)).json());
+    const points = asRecords(body.points, "body.points");
+    const bucketOf = (when: Date) =>
+      points.filter((point) => new Date(String(point.day)).getTime() <= when.getTime()).at(-1);
+    // The recorded day wins over the run that overlaps it.
+    expect(bucketOf(ago(3))).toMatchObject({ totalBytes: 4_000, indexCount: 1 });
+    expect(bucketOf(now)).toMatchObject({ totalBytes: 9_000, indexCount: 1 });
+    // A day nobody recorded is derived from the run, newest size and all: the
+    // flat line the table ends for every day after it exists.
+    expect(bucketOf(ago(5))).toMatchObject({ totalBytes: 9_000, indexCount: 1 });
+
+    // The sweep keeps the days inside the plan's window and drops the one past it.
+    await pruneOldSamples(db);
+    const kept = await db
+      .select({ totalBytes: clusterFootprintDays.totalBytes })
+      .from(clusterFootprintDays)
+      .where(eq(clusterFootprintDays.clusterId, daysId));
+    expect(kept.map((row) => row.totalBytes).sort((a, b) => a - b)).toEqual([4_000, 9_000]);
   });
 
   // #431. Every one of these numbers was already stored and none of them had

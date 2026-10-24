@@ -686,8 +686,9 @@ export const indexSnapshots = pgTable(
     // As of `lastSeenAt`, not `capturedAt`. Size is not part of what makes a run
     // — an unused index on a write-heavy collection grows on every insert, and
     // keying runs on size would collapse nothing in exactly the case worth
-    // collapsing — so it rides along at its newest value. Nothing reads the size
-    // series; every caller wants the current number.
+    // collapsing — so it rides along at its newest value, and a run's past days
+    // read today's size. The footprint chart, which once read it day by day,
+    // keeps its own total per day in `cluster_footprint_days` (#640).
     sizeBytes: bigint("size_bytes", { mode: "number" }).notNull(),
     // `since` is the member's $indexStats counter start — the restart marker.
     // jsonb, so adding it needed no DDL; older rows simply omit the key.
@@ -1465,6 +1466,31 @@ export interface PassPhaseRecord {
   // is a floor rather than a measurement.
   readonly running: boolean;
 }
+
+/**
+ * The cluster's total index bytes per day, as the last collect of that day
+ * measured them (#640).
+ *
+ * The footprint chart read `index_snapshots.size_bytes` day by day, but a run's
+ * size rides along at its newest value, so a run spanning a month drew today's
+ * size into every day of it: an idle index growing on a write-heavy collection
+ * drew flat. One row per cluster per day, written by every collect, is what the
+ * chart was always asking. `day` is `date_trunc('day', …)` in the database's own
+ * zone, the value the chart's day buckets are, so the two join on equality.
+ * Pruned with the time series at the plan's window.
+ */
+export const clusterFootprintDays = pgTable(
+  "cluster_footprint_days",
+  {
+    clusterId: uuid("cluster_id")
+      .notNull()
+      .references(() => clusters.id, { onDelete: "cascade" }),
+    day: timestamp("day", { withTimezone: true }).notNull(),
+    totalBytes: bigint("total_bytes", { mode: "number" }).notNull(),
+    indexCount: integer("index_count").notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.clusterId, table.day] })],
+);
 
 /**
  * Every run of the hourly passes against one cluster, kept for two weeks (#639).

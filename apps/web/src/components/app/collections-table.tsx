@@ -145,7 +145,7 @@ export function CollectionsTable({ rows, loading }: { rows: CollectionRow[]; loa
       empty={{
         title: "Nothing collected yet",
         description:
-          "The footprint appears after the first collect, which runs every six hours from the moment a cluster is connected.",
+          "The footprint appears after the first collect, which is queued as soon as a cluster is connected and then runs every hour.",
       }}
     />
   );

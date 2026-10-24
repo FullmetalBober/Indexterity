@@ -7,6 +7,7 @@ import {
 } from "../analysis/usage";
 import {
   and,
+  clusterFootprintDays,
   clusterIndexes,
   clusterNamespaces,
   clusterRosters,
@@ -364,10 +365,10 @@ async function recordSnapshots(
     // One statement for every extended run, and three parameters however many
     // that is — a values list would have needed three per row. Size and hinted
     // vary per index, so they travel as parallel arrays: size is replaced with
-    // the current reading (nothing reads the size series, and every caller wants
-    // the live number), while hinted is OR-ed, because one sighting of a hint
-    // anywhere in the retained history is what protects the index and the next
-    // quiet collect must not erase it.
+    // the current reading (every caller wants the live number, and the size per
+    // day lives in cluster_footprint_days), while hinted is OR-ed, because one
+    // sighting of a hint anywhere in the retained history is what protects the
+    // index and the next quiet collect must not erase it.
     await db.execute(sql`
       update ${indexSnapshots} as s
       set last_seen_at = ${now},
@@ -545,6 +546,36 @@ async function recordLatency(
   return { inserted: insert.length, extended: extend.length };
 }
 
+// Today's total index bytes, as of this collect (#640). Every collect rewrites
+// the day's row, so the last one of the day is what the footprint chart draws
+// for it. A collect that saw no index writes nothing, as recordSnapshots writes
+// nothing: the day stays a gap on the chart rather than a drop to zero.
+//
+// The day is truncated in SQL, in the database's own zone, because that is the
+// zone the chart's day buckets are cut in, and the two join on equality.
+async function recordFootprintDay(
+  db: Database,
+  clusterId: string,
+  snapshots: readonly CollectedSnapshot[],
+  now: Date,
+): Promise<void> {
+  if (snapshots.length === 0) return;
+  const totalBytes = snapshots.reduce((sum, snapshot) => sum + snapshot.sizeBytes, 0);
+  const indexCount = snapshots.length;
+  await db
+    .insert(clusterFootprintDays)
+    .values({
+      clusterId,
+      day: sql`date_trunc('day', ${now}::timestamptz)`,
+      totalBytes,
+      indexCount,
+    })
+    .onConflictDoUpdate({
+      target: [clusterFootprintDays.clusterId, clusterFootprintDays.day],
+      set: { totalBytes, indexCount },
+    });
+}
+
 // The roster is replaced whole, never merged: the members are one fact about
 // one moment. Null means the collect could not even establish that much — the
 // previous roster stays, still carrying its own collectedAt, which is the
@@ -595,6 +626,7 @@ export async function collectCluster(
       recordSnapshots(db, clusterId, snapshots, now),
       recordLatency(db, clusterId, latency, now),
       recordRoster(db, clusterId, nodes, now),
+      recordFootprintDay(db, clusterId, snapshots, now),
     ]);
     // Per TABLE, before the two are summed below, because that is where the
     // difference lives: on the hosted deployment `index_snapshots` folded at
@@ -603,8 +635,8 @@ export async function collectCluster(
     // metrics/instruments.ts, evidenceWrites.
     recordEvidenceWrites("index_snapshots", engine, written);
     recordEvidenceWrites("latency_samples", engine, latencyWritten);
-    // The roster is deliberately not counted. It is replaced whole on every
-    // collect and carries no history, so it is never evidence about an index.
+    // The roster and the day's footprint are deliberately not counted. Both are
+    // rewritten on every collect, and neither is evidence about an index.
     //
     // Last, and unable to fail the collect: whether these credentials already hold
     // what a release added, so its owner is told only about what is missing (#599).

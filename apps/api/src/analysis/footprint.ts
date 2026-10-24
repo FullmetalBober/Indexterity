@@ -2,7 +2,7 @@ import type { IndexSizePoint } from "@repo/contracts";
 
 // The cluster's total index footprint over time (#160), summarized.
 //
-// The bucketing itself is one SQL statement (insights.controller.ts) — this is
+// The bucketing itself is one SQL statement (insights.repository.ts) — this is
 // the part that has to read the result correctly, and the part worth testing,
 // because every mistake available here is a confident wrong number rather than a
 // crash.
