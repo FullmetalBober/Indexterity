@@ -74,12 +74,17 @@ export async function startTunnelService(): Promise<ChildProcess> {
   throw new Error("the tunnel service did not start");
 }
 
+// SIGTERM first, as a deployment stops it. The service drains on it (#649): it
+// stays up while any peering is open, so a peering the api left open would keep
+// the port bound into the next suite. A SIGKILL after the wait makes sure it does
+// not.
 export async function stopTunnelService(child: ChildProcess): Promise<void> {
   child.kill("SIGTERM");
-  await new Promise((resolve) => {
-    child.once("exit", resolve);
-    setTimeout(resolve, 3_000);
+  const exited = await new Promise<boolean>((resolve) => {
+    child.once("exit", () => resolve(true));
+    setTimeout(() => resolve(false), 3_000);
   });
+  if (!exited) child.kill("SIGKILL");
 }
 
 function accepts(port: number): Promise<boolean> {

@@ -38,6 +38,14 @@ func (c *logCapture) all() []string {
 
 func testControl(t *testing.T) (*controlServer, *registry, *logCapture) {
 	t.Helper()
+	control, _, peerings, logged := testService(t)
+	return control, peerings, logged
+}
+
+// Both listeners, served the way run() serves them, for a test that needs the
+// data path as well as the control plane.
+func testService(t *testing.T) (*controlServer, *socksServer, *registry, *logCapture) {
+	t.Helper()
 	logged := &logCapture{}
 	peerings := newRegistry()
 	socks, err := startSocks("127.0.0.1:0", peerings, func(message string) {
@@ -60,8 +68,9 @@ func testControl(t *testing.T) (*controlServer, *registry, *logCapture) {
 		t.Fatalf("startControl: %v", err)
 	}
 	t.Cleanup(func() { _ = control.close() })
+	go socks.serve(t.Context())
 	go control.serve(t.Context())
-	return control, peerings, logged
+	return control, socks, peerings, logged
 }
 
 func dialControl(t *testing.T, control *controlServer) net.Conn {
