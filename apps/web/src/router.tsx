@@ -2,18 +2,23 @@
 // any particular module — see the file for what it hands over and why it is read
 // from the DOM instead of embedded in it.
 import "./lib/style-nonce";
-import { createRouter, Link } from "@tanstack/react-router";
+import { createRouter, type ErrorComponentProps, Link } from "@tanstack/react-router";
 import { setupRouterSsrQueryIntegration } from "@tanstack/react-router-ssr-query";
 import { Skeleton } from "./components/ui/skeleton";
 import { createAppQueryClient } from "./lib/queries/client";
 import { routeTree } from "./routeTree.gen";
 
 // Friendly fallbacks instead of the framework's developer screens.
-function AppError({ error }: { error: Error }) {
+//
+// The router types the error as `unknown`, because anything can be thrown. A
+// thrown non-Error used to render an empty line here.
+function AppError({ error }: ErrorComponentProps) {
   return (
     <main className="mx-auto mt-24 max-w-md p-8 text-center">
       <h1 className="font-semibold text-2xl">Something broke</h1>
-      <p className="mt-2 text-muted-foreground text-sm">{error.message}</p>
+      <p className="mt-2 text-muted-foreground text-sm">
+        {error instanceof Error ? error.message : "An unexpected error occurred."}
+      </p>
       <button
         type="button"
         onClick={() => window.location.reload()}

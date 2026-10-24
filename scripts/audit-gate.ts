@@ -133,8 +133,8 @@ type Exception = {
 
 // Advisories we have looked at and are carrying on purpose.
 //
-// Empty, and that is the intended resting state rather than a sign nobody has
-// filled it in. An entry here is a high or critical advisory that a container
+// Empty is the intended resting state rather than a sign nobody has filled it
+// in. An entry here is a high or critical advisory that a container
 // runs and that we are shipping anyway, which should be rare enough to argue
 // about each time.
 //
@@ -150,7 +150,20 @@ type Exception = {
 // until @nestjs/platform-fastify@11.1.29 shipped find-my-way 9.7.0 — exactly the
 // `until` that was written down — and the gate failed on the stale entry rather
 // than carrying a note about a risk that no longer existed.
-const ACCEPTED: Exception[] = [];
+const ACCEPTED: Exception[] = [
+  {
+    id: "GHSA-xcx6-jx8p-x3h5",
+    package: "@azure/msal-node",
+    why:
+      "only MSAL's authorization code flow leaks, and nothing here runs MSAL at all: " +
+      "mssqlConfig (apps/api/src/mssql/client.ts) sets user and password and never " +
+      "`authentication`, so tedious authenticates to SQL Server itself and builds no " +
+      "@azure/identity credential, and none of the four it can build uses that flow",
+    until:
+      "@azure/identity ships a release on @azure/msal-node >= 7.1.0 that tedious's " +
+      "range admits (4.14.0 and 4.15.0-beta.1 are both on ^6); then a lockfile bump",
+  },
+];
 
 // ── The runtime half of the tree ────────────────────────────────────────────
 
