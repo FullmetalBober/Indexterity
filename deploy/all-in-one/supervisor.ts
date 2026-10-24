@@ -191,6 +191,12 @@ function spawnChild(
   return child;
 }
 
+// Every child is signalled at once, and that is safe because of what each does
+// with it. The api finishes its in-flight passes and closes its tunnels last. The
+// tunnel service drains: it refuses new peerings and keeps the open ones serving
+// until the api closes them (#649). Before that it exited at once, and a pass the
+// api was finishing dialled a tunnel that had gone and reported the cluster
+// unreachable.
 function shutdown(signal: NodeJS.Signals): void {
   if (stopping) return;
   stopping = true;

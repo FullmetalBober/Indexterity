@@ -175,6 +175,11 @@ nonroot and `drop: ALL` like everything else here.
 
 After the app container, so `kubectl logs` and `kubectl exec` keep defaulting to
 the one anybody asking for "the api" means.
+
+A plain container rather than a native sidecar, which is safe because the
+service drains on SIGTERM (#649). Kubernetes signals both containers of a
+terminating pod at once; the tunnel keeps the open peerings serving until the api
+has finished its passes and closed them.
 */}}
 {{- if .Values.tunnel.enabled }}
         - name: tunnel
