@@ -2277,9 +2277,10 @@ describe("a drop waits for a day of failures before it is hidden", () => {
   });
   // #630. On production, drops waited with empty trails: apply wrote the waiting
   // line only when the watch began in the same apply pass, and the hourly finalize
-  // starts most of them — and re-arms them after a restart, which starts the day
-  // over. Five drops lost a night's window to a rolling restart, and nothing said so.
-  it("says why a drop waits whichever pass keeps the watch, and again when a restart starts it over", async () => {
+  // starts most of them. And #641: a restart then started each watch's day over,
+  // and production's members restart daily. A node seen watching within the last
+  // two hours is put back as it was; only a longer outage starts the day over.
+  it("says why a drop waits, puts its watch back across a restart, and starts over after a long one", async () => {
     process.env.MASTER_KEY =
       process.env.MASTER_KEY ?? Buffer.from("0123456789abcdef0123456789abcdef").toString("base64");
     const inttest = mongo.db("inttest");
@@ -2306,6 +2307,18 @@ describe("a drop waits for a day of failures before it is hidden", () => {
           .where(eq(actions.recommendationId, rec.id))
           .orderBy(actions.createdAt)
       ).map((row) => row.result);
+    const remembered = async () => {
+      const [row] = await db
+        .select()
+        .from(failureWatches)
+        .where(
+          and(eq(failureWatches.clusterId, clusterId), eq(failureWatches.database, "inttest")),
+        );
+      if (row === undefined) throw new Error("expected the watch to be listed");
+      return row;
+    };
+    const watchStart = async () =>
+      markerOf((await inttest.command({ profile: -1 })).filter)?.watch["inttest.orders"];
     try {
       // A watch begun two hours ago, as the hourly pass keeps it: the drop has never
       // been through an apply that started it.
@@ -2337,8 +2350,50 @@ describe("a drop waits for a day of failures before it is hidden", () => {
       await finalizeCluster(db, clusterId);
       expect(await trail()).toHaveLength(1);
 
-      // A restart clears the profiler's level and filter both; the next pass arms
-      // it again, from then, and the drop says so.
+      // What the pass remembers, and what the dashboard is told (#642).
+      const kept = await remembered();
+      expect(kept).toMatchObject({ starts: { "inttest.orders": began }, watching: true });
+      expect(Object.keys(kept.confirmed)).toHaveLength(1);
+      const listed = asRecord(
+        await (await api(`/clusters/${clusterId}/recommendations`, owner)).json(),
+      );
+      expect(listed.waits).toEqual(
+        expect.arrayContaining([
+          {
+            recommendationId: rec.id,
+            hideableAt: new Date(began + FAILURE_BASELINE_MS).toISOString(),
+          },
+        ]),
+      );
+      expect(asRecords(listed.watched, "watched")).toEqual([
+        expect.objectContaining({ database: "inttest", ringCheckedAt: expect.any(String) }),
+      ]);
+
+      // A restart clears the profiler's level and filter both. The node was seen
+      // watching a moment ago, so the watch is put back as it was: the drop's day
+      // holds, the trail has nothing new to say, and the stretch the node missed is
+      // in its marker and remembered.
+      await inttest.command({ profile: 0, filter: "unset" });
+      await finalizeCluster(db, clusterId);
+      expect(await trail()).toHaveLength(1);
+      expect(await watchStart()).toBe(began);
+      const marker = markerOf((await inttest.command({ profile: -1 })).filter);
+      expect(marker?.gaps).toHaveLength(1);
+      expect((await remembered()).gaps).toHaveLength(1);
+
+      // After an outage longer than a node is put back across, the day starts over,
+      // and the drop says so.
+      const stale = await remembered();
+      await db
+        .update(failureWatches)
+        .set({
+          confirmed: Object.fromEntries(
+            Object.keys(stale.confirmed).map((host) => [host, Date.now() - 3 * 3_600_000]),
+          ),
+        })
+        .where(
+          and(eq(failureWatches.clusterId, clusterId), eq(failureWatches.database, "inttest")),
+        );
       await inttest.command({ profile: 0, filter: "unset" });
       await finalizeCluster(db, clusterId);
       const lines = await trail();
@@ -2346,8 +2401,7 @@ describe("a drop waits for a day of failures before it is hidden", () => {
       expect(lines[1]).toMatch(
         /^waiting again: the record of failed operations on inttest\.orders started over at .* UTC, as it does when a server restarts/,
       );
-      const rearmed = markerOf((await inttest.command({ profile: -1 })).filter);
-      expect(rearmed?.watch["inttest.orders"]).toBeGreaterThan(began);
+      expect(await watchStart()).toBeGreaterThan(began);
     } finally {
       await inttest
         .collection("orders")

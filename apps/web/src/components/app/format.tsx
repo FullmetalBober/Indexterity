@@ -186,6 +186,53 @@ export function DropsOn({
   );
 }
 
+// Drops are hidden before they are dropped, and a hide is what an approved one
+// waits for.
+export function hidesFirst(type: string): boolean {
+  return type.startsWith("DROP") || type === "MERGE";
+}
+
+// Day, month and time: a drop waits out one day of failure records, so the hour is
+// the part a reader is asking about.
+const HIDES_AFTER: Intl.DateTimeFormatOptions = {
+  day: "numeric",
+  month: "short",
+  hour: "2-digit",
+  minute: "2-digit",
+};
+
+// Why an approved drop is not hidden yet (#642). Where the engine watches the
+// database's failures it waits a day of records before hiding, and every hide
+// waits for the change window; the table used to show APPROVED and nothing more,
+// and the reason was a line in Activity.
+//
+// A component behind the hydration gate, like DropsOn above: the instant is drawn
+// in the reader's zone and compared with the reader's clock.
+export function HidesAfter({
+  rec,
+  hideableAt,
+}: {
+  rec: { state: string; type: string };
+  // When its day of failure records is complete, or null where it waits for none.
+  hideableAt: string | null;
+}) {
+  const mounted = useMounted();
+  if (rec.state !== "APPROVED" || !hidesFirst(rec.type) || !mounted) return null;
+  const at = millisOf(hideableAt);
+  if (hideableAt === null || at === null || at <= Date.now()) {
+    return (
+      <span className="block whitespace-normal text-muted-foreground">
+        waiting on the change window
+      </span>
+    );
+  }
+  return (
+    <span className="block whitespace-normal text-muted-foreground">
+      hides after <LocalTime iso={hideableAt} options={HIDES_AFTER} />
+    </span>
+  );
+}
+
 export function DeltaCell({ pct }: { pct: number | null }) {
   if (pct === null) return <span className="text-muted-foreground">—</span>;
   const tone = pct < 0 ? "text-green-600" : pct > 0 ? "text-red-600" : "text-muted-foreground";

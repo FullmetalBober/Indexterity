@@ -1,6 +1,6 @@
 import { BSON, type Document } from "mongodb";
 import { z } from "zod";
-import { mergeTallies, utcMinute } from "../analysis/failures";
+import { mergeTallies, span, utcMinute } from "../analysis/failures";
 import type { FailedOpsReading, FailedOpsWindow } from "../engine/ports";
 import { isRecord } from "../errors/message";
 import type { MongoConnection } from "./connection";
@@ -118,6 +118,12 @@ const watchMarker = z.object({
   // Namespace -> indexes whose hint() is recorded: the ones not hidden yet. A hint
   // at a hidden index fails outright and is caught as a failure.
   hints: z.record(z.string(), z.array(z.string())),
+  // Stretches this node recorded nothing although watched, [from, to] in epoch ms
+  // (#641): a restart cleared its settings some time after `from`, the last pass
+  // that saw them, and the watch was put back at `to` with its starts as they
+  // were. Kept here, in the same command that puts the watch back, so the
+  // stretch is said by every reading that spans it. Absent when there is none.
+  gaps: z.array(z.tuple([z.number(), z.number()])).optional(),
 });
 export type WatchMarker = z.infer<typeof watchMarker>;
 
@@ -207,6 +213,12 @@ export function planWatch(input: {
   // Namespace -> indexes whose hint() to record. Empty: nothing is wanted here.
   readonly wanted: ReadonlyMap<string, readonly string[]>;
   readonly now: number;
+  // What to put back where this node was watching recently and its watch is gone
+  // (#641). A restart clears the profiler's settings and nothing else:
+  // `system.profile` keeps what it recorded, so what the restart cost is the
+  // stretch from `seenAt`, the last pass that saw the watch here, until now — not
+  // the day before it. Null: start from now.
+  readonly resume?: Resume | null;
 }): WatchStep {
   const { database, owner, settings, wanted } = input;
   const marker = markerOf(settings.filter);
@@ -238,7 +250,15 @@ export function planWatch(input: {
     }
     // Somebody wants everything recorded, which records failures too.
     if (settings.was >= 2) return { kind: "KEEP" };
-    const next = markerFor(owner, marker.prior, settings, wanted, marker.watch, input.now);
+    const next = markerFor(
+      owner,
+      marker.prior,
+      settings,
+      wanted,
+      marker.watch,
+      marker.gaps ?? [],
+      input.now,
+    );
     return sameMarker(next, marker) ? { kind: "KEEP" } : { kind: "SET", marker: next };
   }
   // Records every operation already: nothing to add, and nothing to restore later.
@@ -260,7 +280,29 @@ export function planWatch(input: {
         ? null
         : Buffer.from(BSON.serialize(settings.filter)).toString("base64"),
   };
-  return { kind: "SET", marker: markerFor(owner, prior, settings, wanted, {}, input.now) };
+  const resume = input.resume ?? null;
+  return {
+    kind: "SET",
+    marker: markerFor(
+      owner,
+      prior,
+      settings,
+      wanted,
+      resume?.starts ?? {},
+      resume === null ? [] : [...resume.gaps, [resume.seenAt, input.now]],
+      input.now,
+    ),
+  };
+}
+
+// A node's watch to put back as it was (#641).
+export interface Resume {
+  // Namespace -> since when it has been watched.
+  readonly starts: Readonly<Record<string, number>>;
+  // When a pass last saw this node watching.
+  readonly seenAt: number;
+  // The stretches this node had already missed, as its marker carried them.
+  readonly gaps: readonly (readonly [number, number])[];
 }
 
 function fromStored(filter: string): Document {
@@ -273,20 +315,31 @@ function markerFor(
   settings: ProfilerSettings,
   wanted: ReadonlyMap<string, readonly string[]>,
   watched: Readonly<Record<string, number>>,
+  gaps: readonly (readonly [number, number])[],
   now: number,
 ): WatchMarker {
   const namespaces = [...wanted.keys()].sort();
+  // A namespace watched already keeps its start: re-setting the filter to add a
+  // neighbour does not restart anybody's baseline.
+  const watch = Object.fromEntries(namespaces.map((ns) => [ns, watched[ns] ?? now]));
+  // A stretch over before every watch here began is in no reading any more.
+  const earliest = Math.min(...Object.values(watch));
+  const kept = gaps
+    .filter(([, to]) => to > earliest)
+    .map(([from, to]): [number, number] => [from, to])
+    .sort(([a], [b]) => a - b);
   return {
     v: 1,
     owner,
     prior,
     slow: prior.filter === null ? { ms: settings.slowms, rate: settings.sampleRate ?? 1 } : null,
-    // A namespace watched already keeps its start: re-setting the filter to add a
-    // neighbour does not restart anybody's baseline.
-    watch: Object.fromEntries(namespaces.map((ns) => [ns, watched[ns] ?? now])),
+    watch,
     hints: Object.fromEntries(
       namespaces.map((ns) => [ns, [...new Set(wanted.get(ns) ?? [])].sort()]),
     ),
+    // Absent rather than empty, so a marker written before there were gaps reads
+    // as the same marker and is not set again for nothing.
+    ...(kept.length > 0 ? { gaps: kept } : {}),
   };
 }
 
@@ -446,6 +499,82 @@ export function ringTurnedOver(fill: RingFill | null): boolean | null {
   );
 }
 
+// The ring's listCollections entry, and what `dataSize` answers for it.
+const ringOptions = z.object({
+  options: z.object({
+    capped: z.boolean().optional(),
+    size: z.coerce.number().optional(),
+    max: z.coerce.number().optional(),
+  }),
+});
+const dataSizeReply = z.object({ size: z.coerce.number(), numObjects: z.coerce.number() });
+
+// How full one node's profiler ring is (#625), or null when it cannot be read.
+// `dataSize` with no bounds answers from the collection's own counts, and needs
+// only `find` on it; the cap is in the ring's listCollections options. Both are
+// readable with the engine role — probed on 7.0, where $collStats on
+// system.profile was refused.
+export async function ringFillOn(
+  conn: MongoConnection,
+  database: string,
+): Promise<RingFill | null> {
+  try {
+    const db = conn.db(database);
+    const [listed, size] = await Promise.all([
+      db.listCollections({ name: "system.profile" }).toArray(),
+      db.command({ dataSize: `${database}.system.profile` }),
+    ]);
+    const ring = ringOptions.safeParse(listed[0]).data;
+    const used = dataSizeReply.safeParse(size).data;
+    if (ring?.options.capped !== true || ring.options.size === undefined || used === undefined) {
+      return null;
+    }
+    return {
+      bytes: used.size,
+      entries: used.numObjects,
+      capBytes: ring.options.size,
+      capEntries: ring.options.max ?? null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+// The ring's oldest entry, any namespace — its reach — or null when it is empty
+// or cannot be read.
+export async function oldestProfiledOn(
+  conn: MongoConnection,
+  database: string,
+): Promise<Date | null> {
+  try {
+    const docs = await conn
+      .db(database)
+      .collection("system.profile")
+      .find({}, { projection: { _id: 0, ts: 1 } })
+      .sort({ $natural: 1 })
+      .limit(1)
+      .toArray();
+    return profiledAt.safeParse(docs[0]).data?.ts ?? null;
+  } catch {
+    return null;
+  }
+}
+const profiledAt = z.object({ ts: z.coerce.date() });
+
+// The instant from which every node's ring still holds what it recorded (#642):
+// the latest oldest entry among the rings that have turned over. A ring that has
+// not holds everything since its watch began, so it limits nothing; one whose fill
+// could not be read is left out rather than guessed at. Null when no ring is known
+// to have turned over.
+export function ringReach(
+  rings: readonly { readonly fill: RingFill | null; readonly oldest: Date | null }[],
+): number | null {
+  const reaches = rings.flatMap(({ fill, oldest }) =>
+    ringTurnedOver(fill) === true && oldest !== null ? [oldest.getTime()] : [],
+  );
+  return reaches.length === 0 ? null : Math.max(...reaches);
+}
+
 // What one node's ring and settings add up to for the failed-operations check
 // (#596). Pure over what the collector read, so every case is a unit test.
 export function failedOpsReading(read: {
@@ -480,25 +609,35 @@ export function failedOpsReading(read: {
           blindSpot: `only ${database}'s primary shard is read, and mongos cannot say how its profiler is set`,
         };
   }
-  const since = markerOf(settings?.filter)?.watch[`${database}.${read.collection}`];
+  const marker = markerOf(settings?.filter);
+  const since = marker?.watch[`${database}.${read.collection}`];
   // Ours, still on, and watching this collection: complete since the watch began.
   // An empty ring is normal here — a filter that keeps only failures and slow
   // operations keeps nothing on a healthy database — so the reach is the watch's
   // start, not the oldest entry, unless the ring has since turned over. Where its
   // fill cannot be read, the oldest entry stands in, which can only understate it.
   if (since !== undefined && settings?.was === 1) {
+    const caveats = [
+      // Later than asked about: the watch began after the hide — a restart cleared
+      // it longer ago than a watch is put back across, or the index was hidden
+      // before Indexterity watched at all — and what failed in between went
+      // unrecorded.
+      since > read.sinceMs
+        ? `the profiler on ${database} has recorded failures only since ${utcMinute(since)}, after the hide`
+        : null,
+      // A restart this node's watch was put back across (#641): its start held,
+      // and the stretch it missed is said instead.
+      missedClause(
+        database,
+        (marker?.gaps ?? []).filter(([, to]) => to > read.sinceMs),
+      ),
+    ].filter((caveat) => caveat !== null);
     return {
       kind: "WINDOW",
       ...failures,
       reachMs:
         ringTurnedOver(read.fill) === false ? since : Math.max(since, oldest?.getTime() ?? since),
-      // Later than asked about: the watch began after the hide — a restart cleared
-      // it and it was turned back on, or the index was hidden before Indexterity
-      // watched at all — and what failed in between went unrecorded.
-      blindSpot:
-        since > read.sinceMs
-          ? `the profiler on ${database} has recorded failures only since ${utcMinute(since)}, after the hide`
-          : null,
+      blindSpot: caveats.length === 0 ? null : caveats.join("; "),
     };
   }
   // Ours, and turned off by somebody since: what it recorded until then counts.
@@ -527,6 +666,32 @@ export function failedOpsReading(read: {
     reachMs: oldest.getTime(),
     blindSpot: profilerBlindSpot(database, settings),
   };
+}
+
+// What a node missed to restarts its watch was put back across (#641), as a
+// clause — or null when it missed nothing. The restart's own instant is unknown:
+// it came after the last pass that saw the watch and before the one that put it
+// back, so that is the stretch named, and the failures said to be missing are the
+// ones after the restart within it.
+export function missedClause(
+  database: string,
+  gaps: readonly (readonly [number, number])[],
+): string | null {
+  const [first] = gaps;
+  const last = gaps.at(-1);
+  if (first === undefined || last === undefined) return null;
+  if (gaps.length === 1) {
+    return (
+      `a restart cleared the profiler on ${database} between ${utcMinute(first[0])} and ` +
+      `${utcMinute(first[1])}, so failures from the restart until ${utcMinute(first[1])} were not recorded`
+    );
+  }
+  const most = gaps.reduce((sum, [from, to]) => sum + (to - from), 0);
+  return (
+    `restarts cleared the profiler on ${database} ${gaps.length} times between ` +
+    `${utcMinute(first[0])} and ${utcMinute(last[1])}, so failures in up to ${span(most)} of ` +
+    "that were not recorded"
+  );
 }
 
 // Every node's reading as one (#596). A replica set's profiler is per member — a

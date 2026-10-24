@@ -17,6 +17,7 @@ import { latencyCharts } from "~/components/app/latency-series";
 import { NodesPanel } from "~/components/app/nodes-panel";
 import { ParkedPanel } from "~/components/app/parked-panel";
 import { PassesPanel, PassHistoryChart } from "~/components/app/passes-panel";
+import { ShortProfilerNotice } from "~/components/app/profiler-notice";
 import { RecommendationsTable } from "~/components/app/recommendations-table";
 import { Unavailable } from "~/components/app/unavailable";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
@@ -233,6 +234,7 @@ function ClusterOverview() {
               them: an empty list means "all fine" unless something says otherwise,
               and on a cluster whose counters keep resetting nothing ever did (#277). */}
           <AnalysisNotePanel analysis={recommendations.data.analysis} />
+          <ShortProfilerNotice watched={recommendations.data.watched} />
 
           <section className="mt-8">
             <h2 className="font-semibold text-lg">Recommendations</h2>
@@ -250,6 +252,7 @@ function ClusterOverview() {
             clusterId={id}
             recommendations={recommendations.data.recommendations}
             usage={recommendations.data.usage}
+            waits={recommendations.data.waits}
             roster={nodes.data}
             total={recommendations.data.total}
             loading={recommendations.pending}

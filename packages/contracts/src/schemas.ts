@@ -1299,10 +1299,45 @@ export type OpenSummary = z.infer<typeof openSummary>;
 // stopped — or the query has.
 export const OPEN_SCANS_WINDOW_DAYS = 7;
 
+// An approved drop that waits for its day of failure records before it is hidden
+// (#642). The hide happens in the first change window after `hideableAt`, so the
+// two together are the whole answer to "why is this not hidden yet".
+//
+// Beside the rows rather than on them, for the reason `usage` below is: the
+// mutations return a row, and none of them reads the watch.
+export const hideWait = z.object({
+  recommendationId: z.uuid(),
+  hideableAt: instant,
+});
+export type HideWait = z.infer<typeof hideWait>;
+
+// A database whose profiler Indexterity keeps on for the drops in flight, and how
+// much of it the profiler's ring holds (#642). The failure check behind a hide
+// compares against a day of records, and a ring that turns over in less is a
+// check that can act only on a failed hint.
+export const watchedDatabase = z.object({
+  database: z.string(),
+  // When the last pass read the rings, and the instant from which every node's
+  // ring still held what it recorded. `ringReachAt` is null until some ring has
+  // turned over: until then a ring holds everything since the watch began.
+  ringCheckedAt: instant.nullable(),
+  ringReachAt: instant.nullable(),
+});
+export type WatchedDatabase = z.infer<typeof watchedDatabase>;
+
+// How long failures are recorded before a hide, and how far back a ring has to
+// reach for the check after it to have its day. Why a day is argued where the api
+// uses it, in analysis/failures.ts.
+export const FAILURE_BASELINE_MS = 24 * 3_600_000;
+
 export const clusterRecommendations = z.object({
   clusterId: z.uuid(),
   total: z.int().nonnegative(),
   recommendations: z.array(recommendation),
+  // Approved drops waiting out their day of failure records (#642).
+  waits: z.array(hideWait),
+  // The databases watched for the drops in flight, with their rings (#642).
+  watched: z.array(watchedDatabase),
   summary: openSummary,
   // Beside the rows rather than on them (#161), and that is not a style choice:
   // `recommendation` is also what approve, undo and un-hide return, and those

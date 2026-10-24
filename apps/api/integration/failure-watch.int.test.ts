@@ -102,6 +102,13 @@ describe.skipIf(MONGO_ADMIN_URL === undefined)("a failure watch on a real mongod
     await admin.close();
   });
 
+  // What the passes before would remember of a watch begun at `began`, with the
+  // one node last seen watching at `seenAt` (#641).
+  const memoryOf = (began: number, host: string, seenAt: number) =>
+    new Map([
+      [DB, { starts: new Map([[NS, began]]), confirmed: new Map([[host, seenAt]]), gaps: [] }],
+    ]);
+
   async function cleanup(): Promise<void> {
     const adminDb = admin.db("admin");
     for (const user of [WATCHER, READER]) {
@@ -237,13 +244,61 @@ describe.skipIf(MONGO_ADMIN_URL === undefined)("a failure watch on a real mongod
     });
     expect((await settings()).was).toBe(0);
 
-    // What a restart leaves: level 0, no filter — armed again, from now.
+    // What a restart leaves: level 0, no filter — armed again, from now, where
+    // nothing remembers the watch.
     await admin.db(DB).command({ profile: 0, filter: "unset" });
     const later = Date.now();
     const rearmed = await watch.reconcile(OWNER, [target(false)], []);
     const state = rearmed.get(DB);
     if (state?.kind !== "WATCHED") throw new Error("expected a watch");
     expect(state.since.get(NS)).toBeGreaterThanOrEqual(later);
+    await watch.reconcile(OWNER, [], [DB]);
+  });
+
+  // #641. Where the node was seen watching recently, a restart's blank profiler is
+  // put back as it was: the start holds, and the marker says what the node missed.
+  it("puts a watch back across a restart, and records the stretch the node missed", async () => {
+    await reset();
+    const { conn, watch } = await watchAs(WATCHER);
+    const armed = await watch.reconcile(OWNER, [target(true)], []);
+    const first = armed.get(DB);
+    if (first?.kind !== "WATCHED") throw new Error("expected a watch");
+    const began = first.since.get(NS) ?? 0;
+    const [host] = first.confirmed;
+    if (host === undefined) throw new Error("expected the node to be confirmed");
+    const seenAt = Date.now();
+
+    await admin.db(DB).command({ profile: 0, filter: "unset" });
+    const back = await watch.reconcile(OWNER, [target(true)], [], memoryOf(began, host, seenAt));
+    const state = back.get(DB);
+    if (state?.kind !== "WATCHED") throw new Error("expected a watch");
+    expect(state.since.get(NS)).toBe(began);
+    expect(state.confirmed).toEqual([host]);
+    expect(state.gaps).toEqual([{ host, from: seenAt, to: expect.any(Number) }]);
+    const marker = markerOf((await settings()).filter);
+    expect(marker?.watch[NS]).toBe(began);
+    expect(marker?.gaps).toEqual([[seenAt, state.gaps[0]?.to]]);
+
+    // A hide after it is read from the start that held, with the stretch named.
+    const collector = new MongoIndexCollector(conn);
+    expect(await collector.collectFailedOps(DB, COLL, began, "status_1")).toMatchObject({
+      kind: "WINDOW",
+      reachMs: began,
+      blindSpot: expect.stringMatching(
+        new RegExp(
+          `^a restart cleared the profiler on ${DB} between .* UTC and .* UTC, so failures from the restart until .* UTC were not recorded$`,
+        ),
+      ),
+    });
+
+    // Kept as it is on the pass after, stretch and all.
+    const kept = await watch.reconcile(
+      OWNER,
+      [target(true)],
+      [],
+      memoryOf(began, host, Date.now()),
+    );
+    expect(kept.get(DB)).toMatchObject({ kind: "WATCHED", gaps: state.gaps });
     await watch.reconcile(OWNER, [], [DB]);
   });
 
@@ -282,7 +337,9 @@ describe.skipIf(MONGO_ADMIN_URL === undefined)("a failure watch on a real mongod
     await admin.db(DB).command({ profile: 2 });
     const { watch } = await watchAs(WATCHER);
     const result = await watch.reconcile(OWNER, [target(true)], []);
-    expect(result.get(DB)).toEqual({ kind: "WATCHED", since: new Map([[NS, 0]]), ours: false });
+    expect(result.get(DB)).toMatchObject({ kind: "WATCHED", ours: false, gaps: [] });
+    const state = result.get(DB);
+    expect(state?.kind === "WATCHED" ? state.since : null).toEqual(new Map([[NS, 0]]));
     const now = await settings();
     expect(now.was).toBe(2);
     expect(now.filter).toBeUndefined();

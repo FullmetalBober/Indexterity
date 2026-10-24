@@ -26,3 +26,6 @@ export const REQUEST_ACCESS_HREF = `mailto:${CONTACT_EMAIL}?subject=${encodeURIC
 // repository the reader of that sentence has no reason to have open.
 export const CLUSTER_USER_DOCS_HREF =
   "https://github.com/FullmetalBober/Indexterity/wiki/Connecting-a-cluster";
+
+// The same page's recipe for a profiler ring that holds less than a day (#642).
+export const PROFILER_RING_DOCS_HREF = `${CLUSTER_USER_DOCS_HREF}#giving-the-failure-check-its-day`;
