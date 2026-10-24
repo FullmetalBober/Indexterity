@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { documentCsp, EDGE_HEADERS, newNonce, withSecurityHeaders } from "./security-headers";
+import { documentCsp, EDGE_HEADERS, withSecurityHeaders } from "./security-headers";
 
 function html(): Response {
   return new Response("<!doctype html>", { headers: { "content-type": "text/html" } });
@@ -69,19 +69,6 @@ describe("withSecurityHeaders", () => {
 
   it("writes no content-security-policy of its own", () => {
     expect(withSecurityHeaders(html()).headers.has("content-security-policy")).toBe(false);
-  });
-});
-
-describe("newNonce", () => {
-  // The length is the security property: a nonce an attacker can guess is a
-  // nonce they can put on their own script tag.
-  it("is 128 bits of base64", () => {
-    expect(Buffer.from(newNonce(), "base64")).toHaveLength(16);
-  });
-
-  it("is different every time", () => {
-    const seen = new Set(Array.from({ length: 64 }, () => newNonce()));
-    expect(seen.size).toBe(64);
   });
 });
 

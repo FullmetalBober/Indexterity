@@ -39,7 +39,5 @@ export const anchorLink: typeof Link = (props) =>
   createElement(
     "a",
     { href: String(props.to) },
-    typeof props.children === "function"
-      ? props.children({ isActive: false, isTransitioning: false })
-      : props.children,
+    typeof props.children === "function" ? props.children({ isActive: false }) : props.children,
   );

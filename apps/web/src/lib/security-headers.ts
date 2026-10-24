@@ -27,8 +27,6 @@
 // it is per-response (see below), and a second copy arriving from routeRules
 // would be INTERSECTED with the real one by every browser — two policies is not
 // the stricter of the two, it is neither.
-import { randomBytes } from "node:crypto";
-
 // Sent by both paths: the static handler (through routeRules) and this one.
 //
 // Nothing here is content-type specific, which is the test for belonging in this
@@ -79,22 +77,15 @@ const DOCUMENT_HEADERS: Readonly<Record<string, string>> = {
 // changes per response: TanStack Start streams inline scripts — the router's
 // dehydrated payload, and the buffered `$tsr` block that carries what resolved
 // after the shell — and the only way to allow exactly those without allowing
-// every inline script is a nonce minted for the response they belong to. So
-// src/server.ts mints one, hands it to the router (`ssr.nonce`, which is what
-// puts it on every script the framework emits) and sets the header from the same
-// value.
+// every inline script is a nonce minted for the response they belong to. So the
+// router mints one as it is made for the request (router.tsx, `ssr.nonce`, which
+// is what puts it on every script the framework emits), and src/server.ts sets
+// the header from the same value. See ./nonce.ts.
 //
 // A nonce rather than 'unsafe-inline', which would have been one line: an
 // injected `<script>` is the whole class of attack this header exists to stop,
 // and 'unsafe-inline' permits precisely that. A nonce rather than hashes,
 // because the payload is a tenant's data and is different on every response.
-
-// The nonce's length is the security property: a value an attacker can guess is
-// a value they can put on their own script tag. 128 bits, base64, per response
-// and never reused — the CSP specification's own floor.
-export function newNonce(): string {
-  return randomBytes(16).toString("base64");
-}
 
 // The style elements this origin writes from JavaScript that cannot be given a
 // nonce, allowed by their CONTENT instead.
