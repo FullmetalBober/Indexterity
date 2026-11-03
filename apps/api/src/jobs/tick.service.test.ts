@@ -107,6 +107,12 @@ vi.mock("./watermark", async (importOriginal) => ({
   claimWatermark: vi.fn(async () => true),
 }));
 vi.mock("./locks", (): typeof import("./locks") => ({ releaseStaleLocks: vi.fn(async () => []) }));
+// The ledger (#653) is one statement against a database this stub does not have,
+// and what it records is pinned by the integration suite.
+vi.mock("./observation-ledger", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./observation-ledger")>()),
+  recordObservation: vi.fn(async () => undefined),
+}));
 
 const BASE = {
   DATABASE_URL: "postgres://test:test@localhost:5432/test",

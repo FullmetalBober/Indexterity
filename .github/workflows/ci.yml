@@ -161,7 +161,13 @@ jobs:
         # and newer (a tcmalloc check), and ubuntu-latest moves past that kernel
         # on 2026-10-19 (#566). The official one runs there — `mongo:9.0` was
         # checked on 7.2.
-        mongo: ["6.0", "7.0", "8", "9.0"]
+        #
+        # 8.2, not the floating `8`. On 2026-11-03 `mongo:8` (8.3.13) refused to
+        # start on the ubuntu-24.04 runner image of 2026-10-25: "Linux kernel
+        # versions 6.19 and newer has a known incompatibility" (SERVER-121912),
+        # a check compiled into 8.3.13, 8.0.34 and 9.0.4 and absent from 8.2.12.
+        # 9.0.4 still starts on the runner, so its check passes there.
+        mongo: ["6.0", "7.0", "8.2", "9.0"]
     services:
       postgres:
         image: postgres:18-alpine
@@ -423,7 +429,7 @@ jobs:
           --health-timeout 5s
           --health-retries 10
       mongo:
-        image: mongo:8
+        image: mongo:8.2
         ports:
           - "27017:27017"
       # A second mongod, with authentication on and a user that can create users.
@@ -432,7 +438,7 @@ jobs:
       # path from D15 had no coverage anywhere (#86). The root user this creates
       # carries userAdminAnyDatabase, which is what the offer is gated on.
       mongo-auth:
-        image: mongo:8
+        image: mongo:8.2
         env:
           MONGO_INITDB_ROOT_USERNAME: root
           MONGO_INITDB_ROOT_PASSWORD: e2e-root

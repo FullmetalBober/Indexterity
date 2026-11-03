@@ -1,5 +1,5 @@
 {
-  "version": "0.31.1",
+  "version": "0.32.0",
   "name": "@repo/api",
   "private": true,
   "type": "commonjs",
@@ -29,7 +29,7 @@
     "@repo/errors": "*",
     "@repo/metrics": "*",
     "@sentry/nestjs": "^11.2.0",
-    "better-auth": "^1.6.24",
+    "better-auth": "^1.7.15",
     "drizzle-orm": "^0.45.2",
     "fast-xml-parser": "^5.10.1",
     "graphile-worker": "^0.17.3",

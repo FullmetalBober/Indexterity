@@ -1,4 +1,5 @@
 import type { LatencyReading } from "./latency";
+import { type OwnOutage, spansOwnOutage } from "./own-outage";
 import { sortedRuns, spanEnd, spanStart } from "./types";
 
 // How much of a hidden index's observe window actually HAPPENED, and whether
@@ -151,6 +152,11 @@ export interface ObservedOptions {
   // touch it. Stored windows are preferred when there are any, since they cover
   // the same length of history as the window being judged.
   readonly recordedBaselineMicrosPerOp?: number | undefined;
+  // Stretches Indexterity itself was not running (#653). A window across one is
+  // neither observation nor reference: its counters may have reset inside it with
+  // nothing to date the reset, and the time it covers was not watched by us. The
+  // caller moves the deadline out by the same stretch (outstayedWindow).
+  readonly ownOutages?: readonly OwnOutage[];
 }
 
 // `fromMs` is the moment the change landed — when the index was hidden, or when
@@ -169,7 +175,10 @@ export function observedWindow(
   observeDays: number,
   options: ObservedOptions,
 ): ObservedWindow {
-  const windows = windowsOf(readings, metric);
+  const outages = options.ownOutages ?? [];
+  const windows = windowsOf(readings, metric).filter(
+    (window) => !spansOwnOutage(outages, window.startMs, window.endMs),
+  );
   const observeMs = observeDays * DAY_MS;
   const since = windows.filter((window) => window.startMs >= fromMs);
   const before = windows.filter(
@@ -202,8 +211,17 @@ export function observedWindow(
 }
 
 // Has this drop been hidden longer than the observation is worth?
-export function outstayedWindow(hiddenAtMs: number, observeDays: number, nowMs: number): boolean {
-  return nowMs - hiddenAtMs > observeDays * OBSERVE_WALLCLOCK_MULTIPLE * DAY_MS;
+//
+// `ownOutageMs` is how much of that time Indexterity itself was not running
+// (#653), which is not charged to the drop: an outage of ours is not the cluster
+// being unobservable, and un-hiding an index for it would be our fault twice.
+export function outstayedWindow(
+  hiddenAtMs: number,
+  observeDays: number,
+  nowMs: number,
+  ownOutageMs = 0,
+): boolean {
+  return nowMs - hiddenAtMs - ownOutageMs > observeDays * OBSERVE_WALLCLOCK_MULTIPLE * DAY_MS;
 }
 
 // Would an observe window on this collection finish inside the wall clock the
