@@ -65,7 +65,7 @@ esac
 GHCR_OWNER=${GHCR_OWNER:-fullmetalbober}
 # Pinned so the preload and the manifests can never disagree about a tag.
 PG_IMAGE=${PG_IMAGE:-docker.io/library/postgres:18-alpine}
-MONGO_IMAGE=${MONGO_IMAGE:-docker.io/library/mongo:8}
+MONGO_IMAGE=${MONGO_IMAGE:-docker.io/library/mongo:8.2}
 CURL_IMAGE=${CURL_IMAGE:-docker.io/curlimages/curl:8.11.0}
 KEEP=${1:-}
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
