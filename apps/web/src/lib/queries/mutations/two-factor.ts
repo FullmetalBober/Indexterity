@@ -21,7 +21,16 @@ export interface IssuedTwoFactor {
 // closes the page here has enrolled nothing and lost nothing.
 export function useEnableTwoFactor({ onIssued }: { onIssued: (issued: IssuedTwoFactor) => void }) {
   return useMutation({
-    mutationFn: (password: string) => unwrap(authClient.twoFactor.enable({ password })),
+    // TOTP by name. Since better-auth 1.7 `enable` also takes `otp` (codes sent by
+    // email or SMS), which hands back no secret and which this deployment does
+    // not configure — so the answer is narrowed to the one shape that was asked
+    // for, rather than assumed.
+    mutationFn: async (password: string) => {
+      const issued = await unwrap(authClient.twoFactor.enable({ password, method: "totp" }));
+      if (issued.method !== "totp")
+        throw new Error("the server did not issue an authenticator secret");
+      return issued;
+    },
     onSuccess: (issued) => onIssued({ totpURI: issued.totpURI, backupCodes: issued.backupCodes }),
     // 400 is better-auth's own wording — a wrong password says so.
     onError: (error) => toast.error(apiMessage(error, "Could not start two-factor setup")),

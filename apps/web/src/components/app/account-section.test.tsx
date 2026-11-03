@@ -129,7 +129,9 @@ beforeEach(() => {
   changePassword.mockResolvedValue(authOk({ token: null, user: me.user }));
   revokeSession.mockResolvedValue(authOk({ status: true }));
   revokeOtherSessions.mockResolvedValue(authOk({ status: true }));
-  enableTwoFactor.mockResolvedValue(authOk({ totpURI: TOTP_URI, backupCodes: BACKUP_CODES }));
+  enableTwoFactor.mockResolvedValue(
+    authOk({ method: "totp", totpURI: TOTP_URI, backupCodes: BACKUP_CODES }),
+  );
   disableTwoFactor.mockResolvedValue(authOk({ status: true }));
   verifyTotp.mockResolvedValue(authOk({ status: true }));
   generateBackupCodes.mockResolvedValue(authOk({ backupCodes: BACKUP_CODES }));
@@ -282,7 +284,7 @@ describe("two-factor", () => {
 
     await user.type(screen.getByLabelText("Your password"), "hunter2-ok");
     await user.click(screen.getByRole("button", { name: "Enable two-factor" }));
-    expect(enableTwoFactor).toHaveBeenCalledWith({ password: "hunter2-ok" });
+    expect(enableTwoFactor).toHaveBeenCalledWith({ password: "hunter2-ok", method: "totp" });
 
     // The manual key, for the phone that cannot scan.
     expect(await screen.findByText("JBSWY3DPEHPK3PXP")).toBeInTheDocument();
