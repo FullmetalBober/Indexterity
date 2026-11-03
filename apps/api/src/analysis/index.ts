@@ -9,6 +9,7 @@ export * from "./health";
 export * from "./latency";
 export * from "./observe";
 export * from "./observed";
+export * from "./own-outage";
 export * from "./pressure";
 export * from "./purge";
 export * from "./recommend";

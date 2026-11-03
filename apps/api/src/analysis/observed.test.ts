@@ -136,7 +136,52 @@ describe("observedWindow", () => {
   });
 });
 
+// #653. Hours we were not running are not observation, whatever the counters say
+// across them: a window spanning our outage may hide a reset nothing dated.
+describe("observedWindow across an outage of ours", () => {
+  it("counts neither the window across the outage nor the time it covered", () => {
+    // 48 hourly readings after the hide, then a three-day hole of ours, then 24
+    // more. Without the ledger the hole is one 72-hour window of observation.
+    const { hiddenAt, all } = around(48, 100, 100);
+    const resumeAt = hiddenAt + 48 * HOUR + 3 * DAY;
+    const resumed = readings(25, 100, 100, resumeAt).map((reading) => ({
+      ...reading,
+      readOps: reading.readOps + 100 * 48,
+      readLatencyMicros: reading.readLatencyMicros + 100 * 48 * 100,
+    }));
+    const history = [...all, ...resumed];
+    const outage = { fromMs: hiddenAt + 48 * HOUR, toMs: resumeAt };
+
+    const blind = observedWindow(history, "read", hiddenAt, 4, OPTIONS);
+    const told = observedWindow(history, "read", hiddenAt, 4, {
+      ...OPTIONS,
+      ownOutages: [outage],
+    });
+    // The hole filled the window when nobody knew it was ours,
+    expect(blind.verdict).toBe("STABLE");
+    // and once it is known, only the 72 hours actually watched count.
+    expect(Math.round(told.observedMs / HOUR)).toBe(72);
+    expect(told.verdict).toBe("INCOMPLETE");
+  });
+
+  it("does not use a window across the outage as the reference either", () => {
+    const { hiddenAt, all } = around(48, 100, 100);
+    const outage = { fromMs: START, toMs: hiddenAt };
+    // Every pre-hide window touches the outage, so nothing stored is a reference
+    // and the recorded baseline is all there is.
+    expect(
+      observedWindow(all, "read", hiddenAt, 1, { ...OPTIONS, ownOutages: [outage] }).verdict,
+    ).toBe("NO_BASELINE");
+  });
+});
+
 describe("outstayedWindow", () => {
+  // Our outage is not the cluster being unobservable, so it is not charged.
+  it("does not charge the drop for an outage of ours", () => {
+    const now = START + (7 * OBSERVE_WALLCLOCK_MULTIPLE + 1) * DAY;
+    expect(outstayedWindow(START, 7, now, 3 * DAY)).toBe(false);
+  });
+
   it("tolerates a window taking longer than the calendar says", () => {
     expect(outstayedWindow(START, 7, START + 20 * DAY)).toBe(false);
   });

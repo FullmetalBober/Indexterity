@@ -8,6 +8,7 @@ import { captureError } from "../errors/reporting";
 import { type BurstResult, claimDuePasses, dbPassClaims } from "./burst";
 import { type ClusterPasses, ClusterTasksService } from "./cluster-tasks.service";
 import { releaseStaleLocks } from "./locks";
+import { recordObservation } from "./observation-ledger";
 import { clearQueuedWork, noteQueuedWork, queuedWorkPending } from "./queued";
 import { wireRunnerEvents } from "./runner";
 import { type Cadence, DEFAULT_CADENCE, everyMinutes, occurrenceMoved } from "./schedule";
@@ -226,6 +227,7 @@ export class TickService implements BeforeApplicationShutdown {
   private async repairThenClaim(now: Date): Promise<BurstResult> {
     await this.releaseLocks(now);
     const claim = await this.enqueueDue(now);
+    await this.recordObservation(now);
     // Only after the round completed: a claim that threw resolved nothing, and
     // the next ping must go back to the database rather than trust it.
     this.resolvedAt = now;
@@ -367,6 +369,22 @@ export class TickService implements BeforeApplicationShutdown {
     } catch (error) {
       this.log.error(`releasing stale locks failed: ${String(error)}`);
       captureError(error, { task: "releaseStaleLocks" });
+    }
+  }
+
+  // That the control plane was running at `now` (#653). Here, on every tick that
+  // reached the database, and NOT on one answered from memory: those are the
+  // pings a raised cadence leaves query-free so the database may sleep, and the
+  // next tick that does reach it extends the stretch across them.
+  //
+  // Not fatal: losing a record costs, at worst, a stretch read as an outage of
+  // ours, which only makes the analysis more careful.
+  private async recordObservation(now: Date): Promise<void> {
+    try {
+      await recordObservation(this.database.db, now);
+    } catch (error) {
+      this.log.error(`recording the observation ledger failed: ${String(error)}`);
+      captureError(error, { task: "recordObservation" });
     }
   }
 

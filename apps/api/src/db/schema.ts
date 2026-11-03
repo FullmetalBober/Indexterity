@@ -1119,6 +1119,30 @@ export const dialBudgets = pgTable("dial_budgets", {
   resetAt: timestamp("reset_at", { withTimezone: true }).notNull(),
 });
 
+/**
+ * When the control plane itself was running (#653): run-length intervals, one row
+ * per unbroken stretch of ticks that reached this database.
+ *
+ * Every other record here says what a CLUSTER did, and a stretch with none of
+ * them reads the same whether the cluster was quiet or we were not looking. The
+ * hosted deployment's Neon database ran out of compute on 2026-10-31 and nothing
+ * ran for three days, and the latency gate then judged hidden drops on windows
+ * spanning the hole. This table is what tells the two apart: a gap between two
+ * rows is an outage of ours — the app down, its clock stopped, or this database
+ * unreachable, since a tick that cannot reach it cannot record itself either.
+ *
+ * Deployment-wide, not per cluster: one control plane, one clock.
+ */
+export const observationRuns = pgTable(
+  "observation_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    since: timestamp("since", { withTimezone: true }).notNull(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull(),
+  },
+  (table) => [index("observation_runs_last_seen").on(table.lastSeenAt)],
+);
+
 // "The last time we did X", for the two things that must not forget it when a
 // process exits (#212).
 //
