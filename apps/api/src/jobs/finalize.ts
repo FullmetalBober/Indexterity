@@ -11,6 +11,7 @@ import {
   observedWindow,
   oldestLiveBaseline,
   outstayedWindow,
+  ownOutageMs,
   regressionReason,
   runFrom,
   tallyText,
@@ -46,6 +47,7 @@ import {
   releaseFailureWatches,
   withdrawHinted,
 } from "./failure-watch";
+import { noteOwnOutages, ownOutages } from "./observation-ledger";
 import { preflightDrop } from "./preflight";
 
 const DAY_MS = 86_400_000;
@@ -164,6 +166,11 @@ export async function finalizeCluster(
   // on wall clock here would have let a row become "due" with most of its window
   // unmeasured, which is the reading the gate below exists to refuse.
   const due = hiddenRecs.filter((rec) => rec.hiddenAt !== null);
+  // Stretches Indexterity itself was not running (#653). Their windows are not
+  // observation, and their time is not charged against a deadline; each hidden
+  // drop's trail says which ones it sat through.
+  const outages = await ownOutages(db);
+  await noteOwnOutages(db, due, outages, now);
   // Built indexes still under the post-build write watch.
   const watched = await db
     .select()
@@ -297,6 +304,7 @@ export async function finalizeCluster(
       );
       const observed = observedWindow(history, "write", builtAtMs, observeDays, {
         ...OBSERVED_OPTIONS,
+        ownOutages: outages,
         recordedBaselineMicrosPerOp:
           rec.baselineWriteOps > 0 ? rec.baselineWriteLatency / rec.baselineWriteOps : undefined,
       });
@@ -309,7 +317,12 @@ export async function finalizeCluster(
       // it withholds the retirement and suppresses the index indefinitely, on a
       // collection quiet enough that nothing could have been measured anyway.
       const undecided = verdict === "INCOMPLETE" || verdict === "NO_BASELINE";
-      if (undecided && !outstayedWindow(builtAtMs, observeDays, now)) continue;
+      if (
+        undecided &&
+        !outstayedWindow(builtAtMs, observeDays, now, ownOutageMs(outages, builtAtMs, now))
+      ) {
+        continue;
+      }
       if (undecided) {
         await db.insert(actions).values({
           recommendationId: rec.id,
@@ -517,6 +530,7 @@ export async function finalizeCluster(
         );
         const observed = observedWindow(readings, "read", hiddenAtMs, days, {
           ...OBSERVED_OPTIONS,
+          ownOutages: outages,
           // What the hide measured, as the reference of last resort.
           recordedBaselineMicrosPerOp:
             rec.baselineReadOps > 0 ? rec.baselineReadLatency / rec.baselineReadOps : undefined,
@@ -529,7 +543,10 @@ export async function finalizeCluster(
         // classify.ts declines to propose a drop it can already see hitting this,
         // so reaching it means the cluster got worse after the proposal was made.
         const undecided = observed.verdict === "INCOMPLETE" || observed.verdict === "NO_BASELINE";
-        if (undecided && outstayedWindow(hiddenAtMs, days, now)) {
+        if (
+          undecided &&
+          outstayedWindow(hiddenAtMs, days, now, ownOutageMs(outages, hiddenAtMs, now))
+        ) {
           await executor.unhide(rec.database, rec.collection, rec.indexName);
           await db
             .update(recommendations)
@@ -598,13 +615,15 @@ export async function finalizeCluster(
         }
       } else if (
         rec.hiddenAt !== null &&
-        now - rec.hiddenAt.getTime() < (rec.observeDays ?? observeDays) * DAY_MS
+        now - rec.hiddenAt.getTime() - ownOutageMs(outages, rec.hiddenAt.getTime(), now) <
+          (rec.observeDays ?? observeDays) * DAY_MS
       ) {
         // An engine with no reversible hide (cluster-connection.ts). Nothing was
         // hidden, so there is no read-latency question to ask and no observation
         // to accumulate — elapsed wall clock is the only clock this case ever
-        // had, and the evidence for the drop is the usage counters staying flat,
-        // which preflightDrop re-checks below.
+        // had, less any stretch Indexterity itself was not running (#653), and the
+        // evidence for the drop is the usage counters staying flat, which
+        // preflightDrop re-checks below.
         continue;
       }
       // The regression gate above ran (safety); the drop itself waits for the

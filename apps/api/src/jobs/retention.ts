@@ -1,5 +1,5 @@
 import { makeWorkerUtils } from "graphile-worker";
-import { entitlementsFor, type Plan, planFrom } from "../billing/plans";
+import { entitlementsFor, PLANS, type Plan, planFrom } from "../billing/plans";
 import { coreEnv } from "../config/env";
 import {
   and,
@@ -14,6 +14,7 @@ import {
   indexSnapshots,
   latencySamples,
   lt,
+  observationRuns,
   organizations,
   recommendations,
   session,
@@ -24,6 +25,8 @@ import {
 import { PASS_HISTORY_DAYS } from "./timings";
 
 const DAY_MS = 86_400_000;
+// The longest history any plan may read.
+const LONGEST_PLAN_DAYS = Math.max(...PLANS.map((plan) => entitlementsFor(plan).retentionDays));
 // One batch per run. A backlog drains over consecutive days rather than holding
 // a transaction open over a hundred thousand rows.
 const MAX_DEAD_LETTERS_PER_RUN = 5000;
@@ -132,7 +135,10 @@ export async function pruneOldSamples(db: Database): Promise<number> {
   // both paths out of here rather than only the one that had work to do.
   if (owned.length === 0) {
     return (
-      (await pruneDeadLetterJobs(db)) + (await pruneExpiredAuthRows(db)) + (await prunePassRuns(db))
+      (await pruneDeadLetterJobs(db)) +
+      (await pruneExpiredAuthRows(db)) +
+      (await prunePassRuns(db)) +
+      (await pruneObservationRuns(db))
     );
   }
 
@@ -155,8 +161,21 @@ export async function pruneOldSamples(db: Database): Promise<number> {
     pruned +
     (await pruneDeadLetterJobs(db)) +
     (await pruneExpiredAuthRows(db)) +
-    (await prunePassRuns(db))
+    (await prunePassRuns(db)) +
+    (await pruneObservationRuns(db))
   );
+}
+
+// The control plane's own stretches (#653), past the longest window any plan may
+// read: an outage of ours older than every retained reading qualifies nothing. Not
+// per plan, for the reason pass runs are not — it is the deployment's own record.
+// The current stretch is always recent, so it is never what goes.
+export async function pruneObservationRuns(db: Database): Promise<number> {
+  const deleted = await db
+    .delete(observationRuns)
+    .where(lt(observationRuns.lastSeenAt, new Date(Date.now() - LONGEST_PLAN_DAYS * DAY_MS)))
+    .returning({ id: observationRuns.id });
+  return deleted.length;
 }
 
 // Pass runs past their two weeks (#639). Not per plan: a pass's duration is about
